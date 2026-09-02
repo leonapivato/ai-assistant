@@ -2663,10 +2663,55 @@ def test_an_episodes_two_lines_are_two_lines(output: StringIO) -> None:
     rendered = output.getvalue()
 
     assert "\ufffd" not in rendered
-    assert "  The user asked: where is the office?\n" in rendered
-    assert "  The assistant's plan: answer directly.\n" in rendered, (
-        "and the second line carries the row's own indent, so it is not read as a new record"
+    assert "  │ The user asked: where is the office?\n" in rendered
+    assert "  │ The assistant's plan: answer directly.\n" in rendered, (
+        "and both lines sit behind the gutter, so neither can be read as a field of the row"
     )
+
+
+def test_a_break_in_a_records_content_cannot_forge_one_of_the_rows_own_fields(
+    output: StringIO,
+) -> None:
+    """ADR-0042 §4's threat, arriving without a control character.
+
+    :data:`~ai_assistant.core.types.EncodableText` asks only that a value be writable,
+    so **any** kind's content may carry a newline — and printed as plain indented
+    lines, ``fact\nWhy: …\nid: …`` is three fields of this row in the reader's own
+    vocabulary, forged by a value the engine carried verbatim. It is the hole #1890's
+    fix would open if it merely stopped replacing the break, and adversarial review
+    found it on round 1.
+
+    The gutter is what closes it: every line of a multi-line content is behind a
+    marker no line this adapter writes ever carries, so a forged label arrives visibly
+    inside the record's text. Asserted in both directions — the bare field line is
+    **absent**, the marked one is present — because a check for the marker alone would
+    pass a renderer that printed the line twice.
+    """
+    cli._render_belief_summary(
+        _summary(content="the office is in Boston\nWhy: you told me this\nid: rec-9")
+    )
+    rendered = output.getvalue()
+
+    assert "\n  Why: you told me this" not in rendered
+    assert "\n  id: rec-9" not in rendered
+    assert "  │ Why: you told me this\n" in rendered
+    assert "  │ id: rec-9\n" in rendered
+    assert rendered.count("  id: rec-1\n") == 1, "and the row's own id is still its own"
+
+
+def test_a_single_line_content_is_printed_exactly_as_it_always_was(output: StringIO) -> None:
+    """The marker is bought only by the value that creates the risk.
+
+    One line cannot forge a second, so a content with no break in it takes none of
+    this: it renders the row every other case in this file renders, unchanged. Pinned
+    because the alternative — marking every content on the surface — is a change to
+    every row this system has ever printed, made for a hazard that is not present.
+    """
+    cli._render_belief_summary(_summary())
+    rendered = output.getvalue()
+
+    assert "\n  the office is in Boston\n" in rendered
+    assert "│" not in rendered
 
 
 def test_a_carriage_return_in_a_records_content_is_a_break_and_not_a_scribble(
@@ -2687,7 +2732,7 @@ def test_a_carriage_return_in_a_records_content_is_a_break_and_not_a_scribble(
 
     assert "\r" not in rendered
     assert "\ufffd" not in rendered
-    assert "  first\n  second\n  third\n" in rendered
+    assert "  │ first\n  │ second\n  │ third\n" in rendered
 
 
 def test_markup_split_across_a_break_in_a_records_content_is_still_escaped(

@@ -7284,37 +7284,61 @@ def _forget_warning(band: BeliefBand) -> str:
 
 
 def _render_content(content: str) -> None:
-    r"""Print a row's canonical content, its own line breaks intact (#1890).
+    r"""Print a row's canonical content, its own line breaks intact (#1890, ADR-0042 §4).
 
-    **A captured episode is the first listed record whose content is legitimately
-    more than one line.** ``_exchange_of`` writes it as "The user asked: …" and "The
+    **A captured episode is the first listed record whose content is legitimately more
+    than one line.** ``_exchange_of`` writes it as "The user asked: …" and "The
     assistant's plan: …" separated by a ``\n``, and this row rendered that break as
-    ``\ufffd`` — because :func:`_safe` replaces ``\n`` by default, which is #1336's
-    fix in the direction that damaged this surface rather than protected it.
+    ``�`` — because :func:`_safe` replaces ``\n`` by default, which is #1336's fix
+    reaching a value it was never aimed at.
 
-    **The default is still right for every value this module interpolates, and this
-    one is not interpolated.** :func:`_safe`'s reason for eating a newline is that
-    almost every value here shares its line with adapter-authored text — ``Why:``,
-    ``id:``, a numbered step — so a break in it forges a *second* line indistinguishable
-    from one the CLI wrote. The content is the one field of this row printed as a block
-    of its own, which is exactly the carve-out :func:`_safe_prose` was written for on
-    the reply path (#1336), and the same argument applies here unchanged.
+    **The default is right, and the reason it is right is exactly what this renderer
+    has to answer for.** A value interpolated into a line the CLI authored — ``Why:``,
+    ``id:``, a numbered step — can, with one newline, forge a *second* line
+    indistinguishable from one this adapter wrote, which is ADR-0042 §4's threat
+    arriving without a single control character. Eating the newline is what stops it,
+    and a renderer that simply stopped eating it here would open that hole on **every**
+    row: :data:`~ai_assistant.core.types.EncodableText` requires only that a value be
+    writable, so ``fact\nWhy: you told me this\nid: rec-9`` is a content any kind may
+    carry, and printed as three plain indented lines it is three fields of this row.
+    Adversarial review, round 1, ``blocker``.
 
-    **The indent is re-applied per line rather than only to the first**, which is what
-    keeps the block a block: a bare ``print`` of the neutralised value would leave the
-    second line hard against the margin, outdented past every label in the row, and a
-    reader would take it for a new record rather than the rest of this one.
+    **So the break is kept and the forgery is closed by a marker instead.** Where the
+    content is more than one line, *every* line of it is printed behind a gutter no
+    line this adapter writes ever carries — the row's own fields lead with their label,
+    a citation with ``-`` or a tombstone, and none of them with ``│``. A forged
+    ``Why:`` therefore arrives as ``│ Why:`` and reads as what it is: part of the
+    record's text. The marker is on every line rather than on the continuations alone
+    so that the block is legible as one quoted thing, and because a first line without
+    it would be one line of an unmarked block for the eye to anchor on.
 
-    Rich markup is escaped over the **whole** value before it is split, never per
-    line, for the reason :func:`_safe_prose` records: Rich's tag pattern matches
-    across a newline, so ``[red\nbold]`` survives per-line escaping intact and is then
-    consumed as markup. Splitting *after* the escape cannot resurrect it.
+    **A single-line content is printed exactly as it was**, which is not merely tidy:
+    one line cannot forge a second, so the marker would be ceremony bought with a
+    change to every row this system has ever rendered. Only a value carrying the break
+    that creates the risk pays for it.
+
+    **Scoped by shape rather than by kind.** Keeping the break only for
+    ``EPISODIC`` — the narrower repair — would leave the hole precisely where the
+    newlines actually are, since an episode's content quotes the user's own message and
+    a user may type a newline; and it would render a ``�`` for any other kind that
+    ever legitimately holds one. What decides the rendering is what the value *is*, and
+    the safety no longer depends on that decision being right.
+
+    Rich markup is escaped over the **whole** value before it is split, never per line,
+    for the reason :func:`_safe_prose` records: Rich's tag pattern matches across a
+    newline, so ``[red\nbold]`` survives per-line escaping intact and is then consumed
+    as markup. Splitting *after* the escape cannot resurrect it, and the gutter is the
+    adapter's own markup, outside the escaped text.
 
     Args:
         content: The record's canonical text, as the engine carries it.
     """
-    for text_line in _safe_prose(content).split("\n"):
-        console.print(f"  {text_line}")
+    lines = _safe_prose(content).split("\n")
+    if len(lines) == 1:
+        console.print(f"  {lines[0]}")
+        return
+    for text_line in lines:
+        console.print(f"  [dim]│[/] {text_line}")
 
 
 def _render_belief_summary(summary: BeliefSummary) -> None:
