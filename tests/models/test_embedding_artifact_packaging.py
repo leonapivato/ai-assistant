@@ -54,10 +54,11 @@ import sys
 import tarfile
 import tempfile
 import tomllib
+import types
 import warnings
 import zipfile
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -1440,6 +1441,181 @@ def test_the_lock_on_a_build_in_use_is_shared_not_exclusive(tmp_path: Path) -> N
         fcntl.flock(other.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)  # another reader gets in
         with pytest.raises(BlockingIOError):  # a run that would replace it does not
             fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+# --- The sharing protocol itself (#1734) -------------------------------------
+#
+# Every other assertion in this module is about what a distribution *contains*,
+# so a regression back to a build per worker — a wrong root, a record that stops
+# being consulted, a build that runs in place instead of in staging — would leave
+# the whole module green while quietly restoring the multi-gigabyte behaviour
+# #1682 removed. What follows drives the protocol with the build itself mocked,
+# so it costs milliseconds rather than the 45 s a real one does.
+
+#: The build inputs these tests pretend to have digested. Any 64-hex string; it
+#: is compared against the record's own field, never against a real checkout.
+_INPUTS = "c" * 64
+
+#: Written by the mocked build into whatever directory it is given, so a test can
+#: tell a directory this run built from one it merely found and adopted.
+_MOCK_MARK = "built-by-this-run"
+
+
+def _mock_the_build(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Replace the 45 s build with a cheap one; return the directories it runs in.
+
+    The distributions it leaves are the small archives :func:`_cache_entry`
+    writes, so the record `_build_into_place` computes over them is a real one and
+    a reader verifies it exactly as it verifies a real build's.
+
+    Args:
+        monkeypatch: The patcher, which undoes this at the end of the test.
+
+    Returns:
+        A list appended to once per build, holding the directory each ran in —
+        which is both *how many* builds happened and *where*.
+    """
+    ran: list[Path] = []
+
+    def build(into: Path, digest: str) -> _Distributions:
+        ran.append(into)
+        into.mkdir(parents=True, exist_ok=True)
+        (into / _MOCK_MARK).write_text(digest)
+        record = _cache_entry(into, digest)
+        return _Distributions(
+            digest=digest, **{key: _distribution(into, record, key) for key in _RECORDED}
+        )
+
+    monkeypatch.setattr(sys.modules[__name__], "_build_the_distributions", build)
+    return ran
+
+
+def _run_root_as(run_root: Path, worker: str | None) -> Path:
+    """:func:`_run_root`'s answer for one session — a worker's, or a serial run's.
+
+    ``pytest-xdist`` gives a worker a basetemp of ``<run root>/popen-gw<n>`` and
+    sets ``workerinput`` on its config and on nothing else; a serial run's basetemp
+    already is the run root. Both are stood up here rather than spawned, because
+    what is under test is which of the two `_run_root` returns — and spawning a
+    distributed session to find out would cost more than the build being guarded.
+
+    Args:
+        run_root: The directory standing in for the run's basetemp.
+        worker: An xdist worker id, or ``None`` for a serial run.
+
+    Returns:
+        The root `_run_root` resolves for that session.
+    """
+    basetemp = run_root / f"popen-{worker}" if worker is not None else run_root
+    basetemp.mkdir(parents=True, exist_ok=True)
+    config = (
+        types.SimpleNamespace(workerinput={"workerid": worker})
+        if worker is not None
+        else types.SimpleNamespace()
+    )
+    return _run_root(
+        cast("pytest.FixtureRequest", types.SimpleNamespace(config=config)),
+        cast("pytest.TempPathFactory", types.SimpleNamespace(getbasetemp=lambda: basetemp)),
+    )
+
+
+def _resolve_the_shared_build(root: Path) -> _Distributions:
+    """The fallback branch of :func:`built_distributions`, verbatim.
+
+    The lock is taken here as the fixture takes it, so a regression that moved the
+    build out from under it — read first, lock second — is a regression this drives
+    rather than one it reasons around.
+    """
+    shared = root / _SHARED_BUILD
+    shared.mkdir(parents=True, exist_ok=True)
+    with _exclusively(root / f"{_SHARED_BUILD}.lock"):
+        return _read_or_build(shared, _INPUTS)
+
+
+def test_two_workers_of_one_run_share_a_single_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole point of the run-wide root: one build between every worker.
+
+    ``just test-fast`` runs a pytest session per worker, and each would otherwise
+    build its own set of three ~0.8 GiB distributions — the 5.0 GiB temp footprint
+    #1682 measured. A regression in which root is chosen leaves every assertion in
+    this module passing and restores that cost silently, which is why it is pinned
+    here and not inferred from a green module.
+    """
+    ran = _mock_the_build(monkeypatch)
+    run_root = tmp_path / "run"
+
+    first, second = _run_root_as(run_root, "gw0"), _run_root_as(run_root, "gw1")
+    resolved = [_resolve_the_shared_build(root) for root in (first, second)]
+
+    assert first == second == run_root, "two workers of one run must resolve one root"
+    assert len(ran) == 1, f"one build per run, not one per worker: built in {ran}"
+    assert resolved[0] == resolved[1], "both workers must read the same distributions"
+    assert resolved[0].sdist.is_relative_to(run_root / _SHARED_BUILD)
+
+
+def test_a_serial_runs_basetemp_is_already_its_run_root(tmp_path: Path) -> None:
+    """And no run shares with another, which taking the parent unconditionally would.
+
+    A serial run's basetemp *is* the run root, so climbing to its parent would put
+    the build in pytest's shared ``pytest-of-<user>`` directory — shared with every
+    other run on the machine, under a lock discipline written for one. The cache
+    (:func:`_cached`) is where cross-run sharing is decided, and it is keyed on a
+    digest of the build inputs; this fallback path is not.
+    """
+    assert _run_root_as(tmp_path / "run", None) == tmp_path / "run"
+
+
+def test_a_directory_without_a_record_is_rebuilt_rather_than_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record is written last, so its absence is what says "did not finish".
+
+    Distributions on their own prove nothing: a build interrupted partway leaves
+    some of them, and the largest is written first. Reading them because they are
+    there is how a half-built set becomes a green run over the wrong bytes.
+    """
+    ran = _mock_the_build(monkeypatch)
+    destination = tmp_path / _SHARED_BUILD
+    _cache_entry(destination, _INPUTS)  # the three archives, and no `built.json`
+    assert not (destination / _BUILT).exists()
+
+    resolved = _read_or_build(destination, _INPUTS)
+
+    assert len(ran) == 1, "an unfinished directory was read instead of rebuilt"
+    assert (destination / _BUILT).is_file()
+    assert resolved.digest == _INPUTS
+
+
+def test_an_abandoned_staging_directory_is_discarded_rather_than_adopted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A build that died mid-flight leaves staging behind; it is never a build.
+
+    The staging directory is where the record for an unfinished build lives, and
+    it can look complete: a build killed between writing `built.json` and the
+    rename that publishes it leaves exactly the entry a reader would accept. It is
+    accepted by nothing, because a reader only ever looks at the destination — and
+    the next build clears staging rather than continuing it, so nothing the dead
+    build left can reach the directory a reader ends up with.
+    """
+    destination = tmp_path / _SHARED_BUILD
+    staging = tmp_path / f".{_SHARED_BUILD}.building"
+    staging.mkdir(parents=True)
+    (staging / _BUILT).write_text(json.dumps(_cache_entry(staging, _INPUTS)))
+    # A file no build writes, so "restarted" and "continued" are told apart by
+    # whether it survives into the directory the reader is handed.
+    (staging / "left-behind-by-the-dead-build").write_text("")
+    ran = _mock_the_build(monkeypatch)
+
+    resolved = _read_or_build(destination, _INPUTS)
+
+    assert ran == [staging], "the build must run in staging, never in the destination"
+    assert (destination / _MOCK_MARK).read_text() == _INPUTS, "staging was adopted"
+    assert not (destination / "left-behind-by-the-dead-build").exists(), "staging was continued"
+    assert resolved.digest == _INPUTS
+    assert not staging.exists(), "staging is renamed into place, not left beside it"
 
 
 def test_a_cache_root_that_is_not_there_yet_is_made(
