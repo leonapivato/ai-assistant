@@ -395,6 +395,102 @@ async def test_the_origin_term_never_names_a_source_as_a_derived_records_author(
         assert "a connected source" in line
 
 
+# --- ADR-0223 §4: the episodic origin arm --------------------------------------
+
+
+def _captured_episode(*, marked: bool) -> EpisodicMemory:
+    """One captured episode, stamped or not, otherwise byte-for-byte identical.
+
+    ``OBSERVED`` because that is what ``ConversationLifecycle._episode`` writes and
+    what ADR-0074 §4 fixes, so ``band_of`` places it in ``DERIVED`` and a stamped one
+    would otherwise fall into the belief arm ADR-0223 §4 forbids for it.
+    """
+    return EpisodicMemory(
+        id="rec-9",
+        content="asked about the weekend",
+        occurred_at=AT - timedelta(days=1),
+        outcome=None,
+        disposition=ExchangeDisposition.NO_ACTION_NEEDED,
+        provenance=Provenance(
+            source=MemorySource.OBSERVED,
+            confidence=0.8,
+            last_updated=AT,
+            derived_from_external=marked,
+        ),
+    )
+
+
+async def test_a_stamped_episode_renders_neither_belief_phrase() -> None:
+    """ADR-0223 §10's test 7, first half: §4's three conditions, on the bullet.
+
+    A captured episode is ``OBSERVED``, which ``band_of`` maps to ``DERIVED``, so
+    before ADR-0223 a stamped one fell into the tainted **belief** arm and rendered
+    "resting on what a connected source reported". §4 forbids exactly that. An
+    episode's warrant is not a derivation at all — ADR-0074 §4 makes it "the terminal
+    citation: the thing other records cite", its ``evidence`` is empty by decision,
+    and its warrant is that it happened — so there is nothing for it to *rest on*, and
+    predicating the mark of its warrant asserts a derivation the record does not have.
+    The ``ATTESTED`` phrase is wrong in the opposite direction, attributing this
+    system's own record of an exchange to a source that authored none of it.
+
+    So the three conditions are asserted as properties rather than as one string: no
+    attribution of the content to a source, no claim of an external warrant, and the
+    fact the mark does record — that the exchange was conducted over material that
+    included a connected source's report — present and legible. A fix that simply
+    dropped the phrase would satisfy the first two and defeat ADR-0106 §2, which is
+    why the third is asserted beside them.
+    """
+    bullet = composing._render_record(_captured_episode(marked=True))
+
+    assert "resting on what a connected source reported" not in bullet, (
+        "§4: the belief phrase is not rendered for an episode"
+    )
+    assert "reported by a connected source" not in bullet, (
+        "§4: nothing attributes the episode's content to a source outside this system"
+    )
+    assert "a connected source" in bullet, (
+        "ADR-0106 §2: the caution survives the correction — the mark is still legible"
+    )
+    assert "recorded by this system" in bullet, (
+        "ADR-0074 §4: the authorship stays where the terminal citation puts it"
+    )
+
+
+async def test_an_unstamped_episodes_bullet_is_byte_identical_to_todays() -> None:
+    """ADR-0223 §10's test 7, second half: the population that must not move.
+
+    §4's third clause keeps the unstamped episodic phrase unchanged, and this is the
+    guard on it. Pinned against a **literal** rather than against another rendering of
+    the same code, because an implementation that moved both would satisfy any
+    self-referential comparison; the literal is what the renderer emitted before the
+    arm was added.
+    """
+    quoted = json.dumps("asked about the weekend")
+    occurred = (AT - timedelta(days=1)).isoformat()
+
+    assert composing._render_record(_captured_episode(marked=False)) == (
+        f"  - [episodic/observed] (derived, confidence 0.80, recorded by this system) "
+        f"the assistant recorded this exchange at {occurred}: {quoted}\n"
+        f'    how it turned out: "no action was needed"'
+    )
+
+
+async def test_a_stamped_belief_still_rests_on_what_a_connected_source_reported() -> None:
+    """ADR-0223 §4's third clause: the two belief arms are unchanged.
+
+    The split is on the record's *shape*, not on the mark, so the phrase #1466 chose
+    for a tainted derived **belief** stays exactly where it was. A lane that replaced
+    the arm rather than splitting it would pass the two cases above and silently move
+    every belief bullet in the corpus.
+    """
+    bullet = composing._render_record(
+        _belief("the user prefers hiking", source=MemorySource.OBSERVED, marked=True)
+    )
+
+    assert "resting on what a connected source reported" in bullet
+    assert "over material that included" not in bullet
+
+
 async def test_a_record_cannot_forge_the_assemblers_own_container_syntax() -> None:
     """ADR-0098 §9's marked test, for this assembler (ADR-0170 §5a).
 
