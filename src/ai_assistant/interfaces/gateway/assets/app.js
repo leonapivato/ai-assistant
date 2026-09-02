@@ -6470,7 +6470,49 @@ function whyHeld(belief) {
       "I changed my mind and not when the source spoke."
     );
   }
+  // Reached only after the asserted and attested arms have returned, so this is the
+  // derived arm — which is where ADR-0189 §4 binds the externality clause, and where
+  // a captured episode lands because its provenance is `OBSERVED` (ADR-0074 §4).
+  if (belief.kind === "episodic") {
+    return whyEpisodic(belief);
+  }
   return whyDerived(belief);
+}
+
+// Why a captured **episode** is held: because it happened (#1891, ADR-0075 §2).
+//
+// A captured turn is one of the rows this page lists, and it used to be explained by
+// `whyDerived`: "I worked it out, and no supporting evidence was recorded." Every
+// clause of that is false of a recorded exchange. Nothing worked it out; there is
+// nothing it was worked out *from*, because ADR-0074 §4 leaves an episode's evidence
+// empty by decision rather than by accident; and "no supporting evidence was recorded"
+// reads as a deficiency where there is none. ADR-0075 §2 is the doctrine: recording
+// that an exchange happened "is true because it happened, a policy has nothing to
+// weigh".
+//
+// **The heading above the line is deliberately unchanged.** ADR-0073 §4 requires every
+// row to convey its band — "never omitted, never implied by position alone" — and its
+// confidence, with no exemption for a kind, and on this surface the heading is also
+// what tells a user which of the three band checkboxes selected the row. So both stay
+// and this line says what they are: a filing, and a standing figure (ADR-0074 §4 sets
+// the confidence at capture and documents it as "standing rather than certainty").
+//
+// The sibling CLI renders the same sentence (`_why_episodic`), to the leading capital
+// this page gives every `Why:` line and the terminal gives none of them.
+//
+// ADR-0223 §5's clause is appended through the same `outsideWarrant` a belief's line
+// appends, so that arm survives this rewording unaltered: §5's first clause is that
+// the fact is never omitted for an episode, its second fixes the wording, and neither
+// is touched by giving the sentence in front of it an honest voice.
+function whyEpisodic(belief) {
+  return (
+    "This records an exchange that happened — I captured it at the time, so " +
+    "there was nothing to work out and nothing to weigh. The line above files it " +
+    "among my beliefs because that is where a captured turn sits, and the " +
+    "confidence there is a standing figure rather than a measure of doubt that " +
+    "it happened." +
+    outsideWarrant(belief)
+  );
 }
 
 // That a **derived** row's origin came from outside, or nothing (ADR-0189 §4).
