@@ -279,6 +279,25 @@ def test_a_trail_that_cannot_be_opened_reports_this_seams_error(tmp_path: Path) 
         SqliteSourceReadTrail(path=tmp_path / "no-such-directory" / "reads.db", max_rows=_ROOMY)
 
 
+def test_a_path_the_driver_refuses_outright_is_still_this_seams_error() -> None:
+    """A path with an embedded NUL leaves ``sqlite3.connect`` as a ``ValueError``.
+
+    Neither a ``sqlite3.Error`` nor an ``OSError``, so a clause catching only those
+    two lets a bare builtin escape the boundary this constructor documents — the
+    hole #1933 records across nine stores, closed here rather than reproduced.
+
+    **The confusion is worse on this trail than it was on the grant store**: the
+    constructor already raises ``ValueError`` for a ``max_rows`` it refuses, so a
+    caller who wrote ``except ValueError`` around the construction would read "that
+    path cannot be opened" as "you passed a bad cap".
+
+    No ``integration`` mark: ``connect`` refuses the path before any file is
+    touched, so this reaches no filesystem.
+    """
+    with pytest.raises(ReadTrailError, match="failed to open"):
+        SqliteSourceReadTrail(path="reads\x00.db", max_rows=_ROOMY)
+
+
 async def test_a_row_that_no_longer_validates_is_reported_rather_than_handed_on(
     ephemeral: SqliteSourceReadTrail,
 ) -> None:

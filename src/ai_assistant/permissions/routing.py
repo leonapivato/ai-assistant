@@ -327,8 +327,14 @@ class SqliteRoutingTrail:
         """Connect and create the schema, never leaking a half-open connection."""
         try:
             conn = sqlite3.connect(self._path, check_same_thread=False)
-        except (sqlite3.Error, OSError) as exc:
+        except (sqlite3.Error, OSError, ValueError) as exc:
             # e.g. the parent directory does not exist — no connection to close.
+            # ``ValueError`` is named because a path carrying an embedded NUL raises it
+            # out of the driver rather than a ``sqlite3.Error``, and a bad path is this
+            # layer's fault to report rather than a raw builtin escaping past the
+            # ``RoutingTrailError`` boundary this constructor documents. Doubly so here:
+            # the constructor already documents ``ValueError`` for the cap it refuses, so
+            # an untranslated one from the path reads as that instead (#1933).
             msg = f"failed to open the routing trail at {self._path!r}: {exc}"
             raise RoutingTrailError(msg) from exc
         try:
