@@ -511,9 +511,14 @@ class FakeTranscriptArchive:
         named = _check_named(conversation_id, name="conversation_id")
         _check_page(limit, offset)
         self._refuse("read a conversation's transcript")
+        # `(ordinal, address)` and not `ordinal` alone: §7's order is **total**, and
+        # nothing makes an ordinal unique within a conversation. Sorting on the
+        # ordinal alone would leave two entries sharing one in *insertion* order
+        # here and in query-plan order in the durable store — the divergence
+        # between two conforming implementations this suite exists to prevent.
         rows = sorted(
             (row for row in self._live() if row.conversation_id == named),
-            key=lambda row: row.ordinal,
+            key=lambda row: (row.ordinal, row.address),
         )
         return rows[offset : offset + limit]
 

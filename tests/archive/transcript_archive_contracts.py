@@ -438,6 +438,50 @@ class TranscriptArchiveContract:
 
         assert [one.ordinal for one in read] == [1, 2, 3]
 
+    async def test_a_conversation_breaks_a_shared_ordinal_by_address(
+        self, archive: TranscriptArchive
+    ) -> None:
+        """ADR-0225 §7's order is **total**, and the ordinal alone does not make it so.
+
+        Nothing in §1, §3 or any schema this decision obliges makes an ordinal unique
+        within a conversation, so two entries can share one. Ordering on it alone
+        leaves that pair to insertion order in one implementation and to the query
+        plan in another — the divergence between two conforming implementations §7's
+        totality clause is written to forbid. The pair is stored out of address
+        order, so an implementation returning it in the order it arrived fails.
+        """
+        await self.store(
+            archive,
+            entry("c1:b", at=NOW, ordinal=1),
+            entry("c1:a", at=NOW - DAY, ordinal=1),
+        )
+
+        read = await archive.conversation("c1")
+
+        assert [one.address for one in read] == ["c1:a", "c1:b"]
+
+    async def test_a_conversation_pages_through_a_shared_ordinal_without_loss(
+        self, archive: TranscriptArchive
+    ) -> None:
+        """What the tie-break is *for*: pages that compose into the whole transcript.
+
+        An order that is merely defined rather than total can reorder equal rows
+        between two reads, and a caller paging through a conversation then sees one
+        entry twice and never sees another. The two pages are asserted as one
+        sequence, which is the only assertion that catches it.
+        """
+        await self.store(
+            archive,
+            entry("c1:b", ordinal=1),
+            entry("c1:a", ordinal=1),
+            entry("c1:c", ordinal=2),
+        )
+
+        first = await archive.conversation("c1", limit=2)
+        second = await archive.conversation("c1", limit=2, offset=2)
+
+        assert [one.address for one in [*first, *second]] == ["c1:a", "c1:b", "c1:c"]
+
     async def test_a_conversation_reads_only_its_own_entries(
         self, archive: TranscriptArchive
     ) -> None:
