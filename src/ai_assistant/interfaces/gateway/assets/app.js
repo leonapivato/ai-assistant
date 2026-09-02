@@ -6519,9 +6519,9 @@ function outsideWarrant(belief) {
   }
   if (belief.kind === "episodic") {
     return (
-      " Some of the material this exchange was conducted over traces back to a " +
-      "connected source rather than to you — the record above is still my own " +
-      "account of what was said."
+      " Some of the material I had in front of me during this exchange traces " +
+      "back to a connected source rather than to you — the record above is " +
+      "still my own account of what was said."
     );
   }
   return (

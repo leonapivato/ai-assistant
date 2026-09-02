@@ -7027,9 +7027,9 @@ def _outside_warrant(belief: Belief | BeliefSummary) -> str:
         return ""
     if belief.kind is MemoryKind.EPISODIC:
         return (
-            " Some of the material this exchange was conducted over traces back to a "
-            "connected source rather than to you — the record above is still my own "
-            "account of what was said."
+            " Some of the material I had in front of me during this exchange traces "
+            "back to a connected source rather than to you — the record above is "
+            "still my own account of what was said."
         )
     return (
         " Some of what I worked it out from came from a connected source rather than "
