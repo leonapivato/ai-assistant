@@ -247,7 +247,8 @@ async def service_read_request(
     request: ReadRequest,
     *,
     supply: Sequence[MemoryRecord],
-) -> ServicedRead:
+    audit: TurnReadAudit,
+) -> None:
     """Service one emission, once, into the fourth group (ADR-0226 §§2, 6, 7).
 
     **The citation hop is serviced first and the sighted query fills what remains**
@@ -280,13 +281,24 @@ async def service_read_request(
 
     **A failure discards everything.** §5 makes the servicing all-or-nothing, so a
     ``MemoryStoreError`` from any read — the hop's ``get_many``, or any band of the
-    query's composition — leaves the supply as planning saw it and returns a record
-    whose counts are all zero. Only ``MemoryStoreError`` is caught, which is
+    query's composition — leaves the supply as planning saw it, and the record it
+    writes has every count zero. Only ``MemoryStoreError`` is *degraded*, which is
     deliberately the same net
     :meth:`~ai_assistant.orchestration.loop.LearningLoop._retrieve` and
     ``_supplement`` already use: it is the failure the ``MemoryStore`` contract
     states, and widening the net here alone would claim a robustness the turn's two
     older reads do not have.
+
+    **It writes its record rather than returning it, and that is what makes §9's
+    counts honest about a servicing that never finished.** A cancellation is not a
+    ``MemoryStoreError``: it passes through the degradation above and out of the
+    turn, where ADR-0226 §9's record is emitted from a ``finally`` regardless. A
+    function that reported by *returning* would leave that record saying a completed
+    servicing with a zero yield — a true fire with no read under it, in §8's novelty
+    denominator — and would lose the one fact §9 asks for in the same breath: whether
+    a read it had already performed had returned records. The ``finally`` below
+    writes the failure with the observer's own answer, so a hop that returned before
+    a cancellation landed in the query is recorded as the partial servicing it was.
 
     Args:
         store: The store this turn already reads. The same object the retrieval
@@ -299,12 +311,13 @@ async def service_read_request(
             :meth:`~ai_assistant.core.protocols.Planner.plan` **on this call**, in
             order. It is both §3's label space and §7's deduplication set, and it is
             the same sequence for both because §3's label *is* a position in it.
-
-    Returns:
-        The fourth group and §9's counts over it.
+        audit: This turn's record. Its :attr:`TurnReadAudit.read` is written on every
+            path out of this function, and :attr:`ServicedRead.records` is the fourth
+            group the caller appends.
     """
     reads = _Reads()
     union = _Union(held={record.id for record in supply}, budget=READ_BUDGET)
+    completed: ServicedRead | None = None
     hop = _ask_of(request, ReadKind.CITATION_HOP)
     query = _ask_of(request, ReadKind.SIGHTED_QUERY)
     # `ReadAsk`'s validator makes a `SIGHTED_QUERY` ask's query non-``None`` (§4),
@@ -335,21 +348,29 @@ async def service_read_request(
             # slot of it is the case §6 says the audit records.
             if allowed < READ_BUDGET and len(found) == allowed:
                 truncated.append(ReadKind.SIGHTED_QUERY)
+        completed = ServicedRead(
+            records=tuple(union.admitted),
+            returned=union.returned,
+            new=len(union.admitted),
+            deduplicated=union.deduplicated,
+            labels_unresolved=unresolved,
+            truncated_kinds=tuple(truncated),
+        )
     except MemoryStoreError:
         # §5's whole posture, and the archive's for the same reason ADR-0225 §2
         # gives: "a turn that answered from the supply it had is a worse turn, not
         # a broken one, and a mechanism whose whole purpose is a marginal
         # improvement in reach must never be able to take the reply down with it".
         _log.warning("read_request_degraded", stage="service_read_request", exc_info=True)
-        return ServicedRead(failed=True, failed_after_read_returned=reads.returned_any)
-    return ServicedRead(
-        records=tuple(union.admitted),
-        returned=union.returned,
-        new=len(union.admitted),
-        deduplicated=union.deduplicated,
-        labels_unresolved=unresolved,
-        truncated_kinds=tuple(truncated),
-    )
+    finally:
+        # One record, on every path out of this function — the completed servicing,
+        # the degraded one, and the one a cancellation carried away — and the
+        # failing ones carry the observer's own answer to §9's second failure
+        # field. Written here rather than returned, so no path can leave the turn
+        # with a record describing a servicing that did not happen.
+        audit.read = completed or ServicedRead(
+            failed=True, failed_after_read_returned=reads.returned_any
+        )
 
 
 def resolve_label(label: str, supply: Sequence[MemoryRecord]) -> MemoryRecord | None:
