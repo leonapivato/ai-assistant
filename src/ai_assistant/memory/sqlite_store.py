@@ -155,6 +155,15 @@ async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
     in for the cause rather than chained to it (#680). Which of the two waits below
     runs decides whether the caller sees that or the real failure, which is why it
     presented as an intermittent fault rather than a reproducible one.
+
+    **The completion wait is submitted at most once** (#697). Absorbing a
+    cancellation hands the loop a blocking ``done.wait`` job on the default
+    executor; a copy that submits a fresh one per cancellation leaves every earlier
+    one running, because nothing can interrupt a thread parked in ``Event.wait``
+    before the worker sets it. Repeated cancellation of one blocked call then
+    occupies the whole pool, which turns one stalled store operation into a process
+    that cannot run any thread work at all. Reusing the future costs a local and
+    bounds the helper at two executor jobs however many cancellations arrive.
     """
     done = threading.Event()
     outcome: list[T] = []
@@ -170,6 +179,7 @@ async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
 
     loop = asyncio.get_running_loop()
     pending: asyncio.Future[Any] = loop.run_in_executor(None, worker)
+    waiting: asyncio.Future[Any] | None = None
     cancellation: asyncio.CancelledError | None = None
     while not done.is_set():
         try:
@@ -177,8 +187,11 @@ async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
         except asyncio.CancelledError as exc:
             # Absorb the cancellation and keep waiting on the worker's physical
             # completion signal, so the lock outlives the still-running thread.
+            # The signal is one job, reused: see the docstring.
             cancellation = exc
-            pending = loop.run_in_executor(None, done.wait)
+            if waiting is None:
+                waiting = loop.run_in_executor(None, done.wait)
+            pending = waiting
     if cancellation is not None:
         raise cancellation
     if failure:
