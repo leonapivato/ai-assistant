@@ -1189,10 +1189,20 @@ are absent in that window because the events they describe have not happened.
     fired fact and the servicing counts — a turn rejected for capacity, which
     `AssistantEngine` decides **after** the loop has planned and serviced, and a turn
     whose `PlanStore.save_plan` raises — and neither suppresses the record, so neither
-    depresses the fire rate. The third is a turn whose `Planner.plan` **raises before
-    returning a plan**: its record says the trigger was **not reached** (§8), and the
-    assertion places that turn in neither the numerator nor the denominator. That arm
-    is what stops a planner outage from reading as a collapse in the fire rate.
+    depresses the fire rate. The other two never reach a plan at all: one where
+    `Planner.plan` **raises**, and one where the turn fails **before the planner is
+    called** — `ToolRegistry.capabilities()` raising is the injectable case, and the
+    loop reads it at `orchestration/loop.py`'s `capabilities = await
+    self._registry.capabilities()` immediately above the `plan` call, with `_retrieve`
+    and `_supplement` above that. Each emits exactly one record saying the trigger was
+    **not reached** (§8) while the original failure still propagates, and the assertion
+    places both turns in neither the numerator nor the denominator. Two arms and not
+    one, because §8's not-reached case is stated over turns that ended without a plan
+    rather than over the planner raising: an implementation that emitted the record
+    only from a handler around `Planner.plan` would pass the first and silently drop
+    the second, undercounting exactly the population the outcome exists to make
+    visible. Together they are what stops a planner or a pre-planning outage from
+    reading as a collapse in the fire rate.
 11. **Every condition §4 puts on the models is refused by the models**, arm for arm,
     and none of them is left to a caller: a `ReadRequest` whose `asks` is empty; one
     carrying two asks of one kind; a `SIGHTED_QUERY` ask with a blank or
