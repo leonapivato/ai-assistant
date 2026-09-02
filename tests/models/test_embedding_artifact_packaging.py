@@ -897,17 +897,22 @@ def test_the_notices_name_every_revision_that_ships() -> None:
     an accurate notice goes stale on its own. The *declared* commit is what a
     recipient reads, so this pins those rows rather than any mention of a SHA.
 
-    Compared as a set against every artifact this distribution redistributes —
-    the embedding model and, since ADR-0200, the two speech models — so that
-    adding a fourth without its notice fails here rather than shipping silently.
+    Compared as a **multiset** against every artifact this distribution
+    redistributes — the embedding model and, since ADR-0200, the two speech models
+    — so that adding a fourth without its notice fails here rather than shipping
+    silently, and a commit declared twice fails unless two artifacts carry it. A
+    set plus a uniqueness check said the second half more strictly than the
+    artifacts do: it rejected one repository at one revision vendored as two
+    directories, which is the configuration
+    :func:`test_the_notices_name_every_file_that_ships` is written to inventory
+    (adversarial round 2).
     """
     notices = _notices_in_the_checkout().decode()
     declared = re.findall(r"^\|\s*Pinned commit\s*\|\s*`([0-9a-f]+)`\s*\|$", notices, re.MULTILINE)
 
-    assert set(declared) == {ARTIFACT_REVISION} | {
-        artifact.revision for artifact in SPEECH_ARTIFACTS
-    }
-    assert len(declared) == len(set(declared))
+    expected = [ARTIFACT_REVISION, *(artifact.revision for artifact in SPEECH_ARTIFACTS)]
+
+    assert Counter(declared) == Counter(expected)
 
 
 def _declared_inventories(notices: str) -> list[tuple[str, frozenset[str]]]:
