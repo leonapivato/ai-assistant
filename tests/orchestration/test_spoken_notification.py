@@ -71,6 +71,13 @@ _NEAR_CEILING = 600
 #: rather than repeating a tuple literal.
 EVERYTHING = tuple(SpokenAudioFormat)
 
+#: The two shapes a malformed ``plays`` comes in, which reach the same refusal by
+#: different routes inside the enumeration: a string naming no member fails the value
+#: comparison, and an **unhashable** member fails the lookup that precedes it (#1762).
+#: Held together so §7's ordering is asserted over both rather than over the first.
+_MALFORMED_PLAYS: tuple[tuple[object, ...], ...] = (("audio/ogg;codecs=vorbis",), ([],))
+_MALFORMED_PLAYS_IDS = ("names-no-member", "unhashable")
+
 
 def _placed(  # noqa: PLR0913 — one parameter per field a case may move, and no more
     key: str = "k1",
@@ -1007,16 +1014,23 @@ class TestTheBudget:
 class TestTheOrdering:
     """§7: a malformed ``plays`` is refused before any outbox state changes."""
 
+    @pytest.mark.parametrize("malformed", _MALFORMED_PLAYS, ids=_MALFORMED_PLAYS_IDS)
     async def test_a_malformed_plays_retires_nothing_leases_nothing_and_mints_nothing(
-        self,
+        self, malformed: tuple[object, ...]
     ) -> None:
         """§7: ADR-0131 §4's ordering rule reaching this ADR's own argument.
 
-        The poll carries a valid ``acknowledging`` beside a ``plays`` that names a
-        string rather than a format. Without the ordering, the acknowledgement would
+        The poll carries a valid ``acknowledging`` beside a ``plays`` that is not a
+        format. Without the ordering, the acknowledgement would
         land and permanently retire a delivery while the call reported failure, so
         the device's retry would find the notification gone. The outbox records the
         order it was driven in, and the assertion is that it was not driven at all.
+
+        Both malformed shapes are here because they fail on **different lines inside
+        the enumeration**: a string naming no member fails the value comparison, and
+        an unhashable member fails the lookup that precedes it and used to escape as
+        an undeclared ``TypeError`` (#1762). The refusal a caller sees is one refusal
+        either way, and the ordering it is refused before is the same.
         """
         outbox = RecordingOutbox()
         engine, seam = _speaking(outbox)
@@ -1024,7 +1038,7 @@ class TestTheOrdering:
         with pytest.raises(ValueError, match="not one of them"):
             await engine.next_notification(
                 acknowledging="1.abcdef",
-                plays=("audio/ogg;codecs=vorbis",),  # type: ignore[arg-type]  # the malformed value is the subject
+                plays=malformed,  # type: ignore[arg-type]  # the malformed value is the subject
                 budget=timedelta(0),
             )
 
@@ -1032,17 +1046,21 @@ class TestTheOrdering:
         assert seam is not None
         assert seam.calls == []
 
-    async def test_the_canonical_fake_refuses_it_the_same_way(self) -> None:
+    @pytest.mark.parametrize("malformed", _MALFORMED_PLAYS, ids=_MALFORMED_PLAYS_IDS)
+    async def test_the_canonical_fake_refuses_it_the_same_way(
+        self, malformed: tuple[object, ...]
+    ) -> None:
         """Parity: the double a consumer tests against holds the same ordering.
 
         ADR-0084 §4's substitutability clause — a clause either binds both
-        implementations or binds neither — reaching this argument.
+        implementations or binds neither — reaching this argument, over both shapes
+        the concrete engine is held to above.
         """
         engine = FakeAssistantEngine()
 
         with pytest.raises(ValueError, match="not one of them"):
             await engine.next_notification(
-                plays=("audio/ogg;codecs=vorbis",),  # type: ignore[arg-type]  # the malformed value is the subject
+                plays=malformed,  # type: ignore[arg-type]  # the malformed value is the subject
                 budget=timedelta(0),
             )
 

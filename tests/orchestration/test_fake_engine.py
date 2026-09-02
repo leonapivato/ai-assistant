@@ -766,6 +766,27 @@ def test_the_retention_ceiling_is_guarded_exactly_as_the_concrete_engine_guards_
     assert FakeAssistantEngine(max_outstanding_confirmations=1) is not None
 
 
+def test_the_payload_limit_is_guarded_exactly_as_the_concrete_engine_guards_it() -> None:
+    """ADR-0085 §8c's limit, held to the same shape on the double (#1686).
+
+    The same both-directions argument as the ceiling above, over the argument with the
+    widest blast radius on this surface: *every* argument check and *every* result
+    check this double performs measures against this one number, so a value that
+    cannot bind does not weaken the contract limit, it removes it. ``float("nan")``
+    is the sharp case — it compares ``False`` against every ``>``, so nothing is ever
+    over the limit and the double reports health throughout.
+    """
+    for wrong_type in (True, 1.5, float("nan"), float("inf"), "1"):
+        with pytest.raises(TypeError, match="max_payload_bytes must be an integer"):
+            FakeAssistantEngine(max_payload_bytes=wrong_type)  # type: ignore[arg-type]
+
+    for not_positive in (0, -1):
+        with pytest.raises(ValueError, match="max_payload_bytes must be positive"):
+            FakeAssistantEngine(max_payload_bytes=not_positive)
+
+    assert FakeAssistantEngine(max_payload_bytes=1) is not None
+
+
 async def test_the_resume_clause_catches_an_outcome_with_no_step() -> None:
     """A resume that carries neither a turn nor a step leaves a client nothing.
 

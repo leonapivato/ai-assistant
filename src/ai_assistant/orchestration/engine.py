@@ -439,6 +439,38 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
+def _check_positive_int(value: int, *, name: str) -> None:
+    """Refuse a constructor knob that is not a positive integer.
+
+    Three of this façade's knobs are counts or byte bounds, and each fails *open and
+    silently* rather than loudly when it cannot bind: ``float("nan")`` compares
+    ``False`` against every ``>``, so a bound built from one admits everything while
+    the engine reports health, and a ``float`` count truncates somewhere later
+    instead. ``bool`` is excluded because it is an ``int`` subclass and a flag is not
+    a count — and as a byte bound it is a one-byte one, which nothing fits inside.
+
+    Written once so the three guards are identical **by construction** rather than by
+    copy. The canonical fake holds its own copies of these arguments to the same
+    words (ADR-0084 §4, which runs in both directions), and a guard that drifted in
+    class or in wording would make the two implementations disagree about what kind
+    of failure a bad deployment is.
+
+    Args:
+        value: The knob as the caller passed it.
+        name: The parameter's name, which is what the refusal names.
+
+    Raises:
+        TypeError: If it is not an integer, ``bool`` included.
+        ValueError: If it is not positive.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        msg = f"{name} must be an integer, got {value!r}"
+        raise TypeError(msg)
+    if value < 1:
+        msg = f"{name} must be positive, got {value}"
+        raise ValueError(msg)
+
+
 #: The oldest instant a horizon can name, and therefore one nothing predates.
 #: A valid ``UtcInstant`` — ``canonical_utc`` accepts it — though *not* a valid
 #: clock reading, which ADR-0026 §3 keeps a day clear of this boundary so a
@@ -2289,44 +2321,38 @@ class Engine:
                 belong.
 
         Raises:
-            TypeError: If ``max_outstanding_confirmations`` or
-                ``max_spoken_audio_bytes`` is not an integer. A ``bool`` is excluded
+            TypeError: If ``max_outstanding_confirmations``,
+                ``max_spoken_audio_bytes`` or ``max_payload_bytes`` is not an
+                integer. A ``bool`` is excluded
                 (it is an ``int`` subclass and a flag is not a count), and a
                 ``float`` like ``1.5`` is refused rather than compared — the same
-                guard shape ``LearningLoop`` uses for its own count. On the audio
-                bound the refusal is what keeps ADR-0200 §6's ceiling able to bind at
+                guard shape ``LearningLoop`` uses for its own count. On the two
+                *bounds* the refusal is what keeps them able to bind at
                 all: ``float("nan")`` compares ``False`` against every ``>``, so an
                 engine built with one would admit a recording of any length and
-                return a rendering of any length while reporting health.
-            ValueError: If either is not positive.
+                return a rendering of any length while reporting health, and one
+                built with it as the contract limit would measure every argument and
+                every result against a ceiling nothing can exceed.
+            ValueError: If any of the three is not positive.
         """
-        if isinstance(max_outstanding_confirmations, bool) or not isinstance(
-            max_outstanding_confirmations, int
-        ):
-            msg = (
-                "max_outstanding_confirmations must be an integer, got "
-                f"{max_outstanding_confirmations!r}"
-            )
-            raise TypeError(msg)
-        if max_outstanding_confirmations < 1:
-            msg = (
-                "max_outstanding_confirmations must be positive, got "
-                f"{max_outstanding_confirmations}"
-            )
-            raise ValueError(msg)
-        # ADR-0200 §6's ceiling, guarded in the shape above and for a sharper reason.
+        _check_positive_int(max_outstanding_confirmations, name="max_outstanding_confirmations")
+        # ADR-0200 §6's ceiling, guarded on the same terms and for a sharper reason.
         # ``Settings`` refuses a non-integer or a non-positive value at load, but this
         # is a *constructor* argument and a composition root is not the only caller —
         # and the failure mode here is silent rather than loud: ``nan`` compares
         # ``False`` against every ``>``, so an engine built with one would admit a
         # recording of any length and return a rendering of any length while reporting
         # health. A bound that cannot bind is not a weaker bound but an absent one.
-        if isinstance(max_spoken_audio_bytes, bool) or not isinstance(max_spoken_audio_bytes, int):
-            msg = f"max_spoken_audio_bytes must be an integer, got {max_spoken_audio_bytes!r}"
-            raise TypeError(msg)
-        if max_spoken_audio_bytes < 1:
-            msg = f"max_spoken_audio_bytes must be positive, got {max_spoken_audio_bytes}"
-            raise ValueError(msg)
+        _check_positive_int(max_spoken_audio_bytes, name="max_spoken_audio_bytes")
+        # ADR-0085 §8c's contract limit, guarded on the same terms and for the same
+        # reason, one surface wider. ``Settings`` refuses a bad ``hub_max_frame_bytes``
+        # at load and the composition root derives this from it, but no shipped path is
+        # the only path: this is a constructor argument on a class tests and future
+        # roots build directly. A limit that cannot bind fails *open* silently, and it
+        # fails open across the whole promoted surface — every argument check and every
+        # result check on this façade measures against this one number, so ``nan`` here
+        # is not a laxer contract limit but no contract limit at all (#1686).
+        _check_positive_int(max_payload_bytes, name="max_payload_bytes")
         self._loop = loop
         self._runner = runner
         self._plans = plans
@@ -5810,13 +5836,18 @@ class Engine:
             caller spelled it.
 
         Raises:
-            ValueError: If a member names no format this build declares.
+            ValueError: If a member names no format this build declares — including
+                an **unhashable** one, whose lookup raises ``TypeError`` inside the
+                enumeration before a value comparison is ever reached. That is a
+                malformed argument like any other, and the declared refusal is the
+                one both implementations and the Protocol document, so it is
+                translated rather than allowed to escape undeclared (#1762).
         """
         named: list[SpokenAudioFormat] = []
         for member in plays:
             try:
                 named.append(SpokenAudioFormat(member))
-            except ValueError:
+            except ValueError, TypeError:
                 readable = ", ".join(sorted(known.value for known in SpokenAudioFormat))
                 msg = (
                     f"plays names the formats the caller can render, and {member!r} is "
