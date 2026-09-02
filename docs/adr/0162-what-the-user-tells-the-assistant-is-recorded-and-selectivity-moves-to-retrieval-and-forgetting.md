@@ -1,6 +1,6 @@
 # 162. What the user tells the assistant is recorded, and selectivity moves to retrieval and forgetting
 
-- Status: Partially superseded by ADR-0220 (§7's window-overlap clauses, as they reach an observation walk paged by the observation watermark) and ADR-0221 (§8's first clause alone — the observation prompt states the phrase for an episode's recorded `disposition` where it records one, and its `outcome` where it does not; §8's four other clauses and every other section stand)
+- Status: Partially superseded by ADR-0220 (§7's window-overlap clauses, as they reach an observation walk paged by the observation watermark) and ADR-0221 (§8's first clause alone — the observation prompt states the phrase for an episode's recorded `disposition` where it records one, and its `outcome` where it does not; §8's four other clauses and every other section stand) and ADR-0224 (§9's episodic value clause and its ceiling-slack clause — the episodic bound becomes 30, at parity with the belief budget; §9's belief-budget, provisionality and evidence-widening clauses stand, as does every other section)
 - Date: 2026-08-19
 - Amended: 2026-08-19 (§7 — its progress-over-overlap sentence names one instance of
   a property that has two). §7 rules that consecutive windows overlap by *k* episodes
@@ -317,6 +317,52 @@
   its own — so ADR-0082 §2's move does not arise. Appended note per ADR-0070 §1; no
   text below is rewritten. This note lands in the same change as ADR-0221 itself, which
   is the existence condition ADR-0082 §7 states. Refs #1845, #1314, #1866.
+
+- **Partially superseded: 2026-09-02 by ADR-0224 — §9's episodic value clause and its
+  ceiling-slack clause, and no other clause of §9.** The offline replay recorded on
+  **#1844** on 2026-09-01 measured what the existing blind read recovers when only its
+  episodic budget is widened, over pilot-5's as-run stores: at 30 it holds the gold turn
+  for 42.1% of the `hop` population and 18.8% of the `miss` population, worth ≈ **+3.6
+  points** of projected LoCoMo accuracy for no additional model call. The owner accepted
+  the 30 arm on 2026-09-02. That evidence is admissible only because of §9's own
+  widening of the evidence clause to include measured retrieval reach, which is one of
+  the clauses that stands.
+
+  **Replaced, in two scopes.** First, §9's value clause — *"`app/composition.py`'s
+  `EPISODIC_SUPPLEMENT_LIMIT` is **10** and `orchestration/loop.py`'s
+  `_DEFAULT_EPISODIC_LIMIT` is held equal to it"* — which becomes 30, the two still held
+  equal. Second, §9's ceiling-slack clause — *"ADR-0158 §3's ceiling stands and is
+  satisfied with slack, 10 against 30. ADR-0160 §2's admission of parity is untouched
+  and is simply not exercised"* — which becomes: the ceiling is **met**, 30 against 30,
+  and ADR-0160 §2's parity admission is exercised, with its coupling consequence in
+  force. Both are rules a reader obeys rather than explanations of one — a reader
+  holding only this ADR would configure 10 and would check the ceiling against a
+  sentence asserting slack — so ADR-0070 §1's test lands on partial supersession, as it
+  did for §9's own replacement of ADR-0160 §1.
+
+  **The two move together for the reason §9 moved a value and an evidence rule
+  together.** Setting the number that meets the ceiling while leaving standing a clause
+  asserting the ceiling is slack would leave the corpus contradicting itself in the
+  direction hardest to notice.
+
+  **Not replaced, and it is three of §9's five clauses.** The belief-budget clause —
+  `RETRIEVAL_LIMIT` is 30, `_DEFAULT_RETRIEVAL_LIMIT` held equal — stands untouched, and
+  ADR-0224 §2's parity is stated against it. The provisionality clause stands and has
+  *worked*: the re-test it named has now happened over pilot-5's stores and is ADR-0224's
+  evidence, and the value at 30 is no less provisional than the value at 10 was. The
+  clause replacing ADR-0160 §1's value and widening the admissible evidence stands and is
+  relied on, including its remaining half that no separately registered ablation arm is
+  owed. §10's cost figures are measured statements about the 30+10 allocation and stay
+  true of it; ADR-0224 §4 restates the prompt cost at the new allocation rather than
+  rewriting them. Every other section of this ADR is untouched.
+
+  **The three pairs on the `Status` line name different scopes** and accumulate under
+  ADR-0070 §4: ADR-0220 reaches §7's window-overlap clauses, ADR-0221 reaches §8's first
+  clause, and this one reaches two clauses of §9. Each scope names clauses and carries no
+  `ADR-NNNN` token, so §4's extraction invariant holds. No amendment qualifier is on the
+  line — the `Amended` line is its own — so ADR-0082 §2's move does not arise. Appended
+  note per ADR-0070 §1; no text below is rewritten. This note lands in the same change as
+  ADR-0224 itself, which is the existence condition ADR-0082 §7 states. Refs #1844, #1294.
 
 ## Context
 
