@@ -57,6 +57,7 @@ import tomllib
 import types
 import warnings
 import zipfile
+from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -909,17 +910,22 @@ def test_the_notices_name_every_revision_that_ships() -> None:
     assert len(declared) == len(set(declared))
 
 
-def _declared_inventories(notices: str) -> dict[str, frozenset[str]]:
-    """Map each notice table's pinned commit to the file set that table declares.
+def _declared_inventories(notices: str) -> list[tuple[str, frozenset[str]]]:
+    """Every notice table's pinned commit paired with the file set that table declares.
 
-    The commit is the join key, not a second pin of the revisions —
-    ``test_the_notices_name_every_revision_that_ships`` owns those and fails first
-    — it is simply the one cell that says *which* artifact a ``Files`` row is
-    about. Both rows are read out of the same walk, in document order, so a table
-    that grew a second inventory or lost its own is a failure here rather than a
-    silently mis-attributed comparison.
+    A **list**, not a mapping keyed by the commit: two artifacts pinned to one
+    commit are two artifacts, and a mapping would collapse them into whichever the
+    dict built last — leaving the other's inventory unchecked while a single table
+    satisfied both (adversarial round 1). Compared as a multiset below, so the
+    count has to match as well as the content.
+
+    The commit is what says *which* artifact a ``Files`` row is about; it is not a
+    second pin of the revisions, which ``test_the_notices_name_every_revision_that_ships``
+    owns and which fails first. Both rows are read out of one walk in document
+    order, so a table that grew a second inventory or lost its own fails here
+    rather than being silently mis-attributed.
     """
-    inventories: dict[str, frozenset[str]] = {}
+    inventories: list[tuple[str, frozenset[str]]] = []
     pinned: str | None = None
     for row in re.finditer(
         r"^\|\s*(?P<label>Pinned commit|Files)\s*\|\s*(?P<cell>.+?)\s*\|$", notices, re.MULTILINE
@@ -931,8 +937,7 @@ def _declared_inventories(notices: str) -> dict[str, frozenset[str]]:
         assert pinned is not None, "a Files row precedes every Pinned commit row"
         names = re.findall(r"`([^`]+)`", row["cell"])
         assert len(names) == len(set(names)), f"{pinned} lists a file twice"
-        assert pinned not in inventories, f"two Files rows for {pinned}"
-        inventories[pinned] = frozenset(names)
+        inventories.append((pinned, frozenset(names)))
         pinned = None
     assert pinned is None, f"the table pinning {pinned} declares no Files row"
     return inventories
@@ -953,12 +958,19 @@ def test_the_notices_name_every_file_that_ships() -> None:
     model's ``ARTIFACT_MANIFEST`` and, since ADR-0200, each speech model's
     ``SpeechArtifact.manifest`` — in the artifact-independent shape its sibling uses,
     so a fourth artifact fails here rather than shipping with an unwritten inventory.
-    """
-    expected = {ARTIFACT_REVISION: frozenset(ARTIFACT_MANIFEST)} | {
-        artifact.revision: frozenset(artifact.manifest) for artifact in SPEECH_ARTIFACTS
-    }
 
-    assert _declared_inventories(_notices_in_the_checkout().decode()) == expected
+    As a **multiset**, so that "three artifacts, three tables" is part of the
+    assertion. Two artifacts pinned to one commit — the same repository at one
+    revision vendored as two directories — would otherwise need only one table
+    between them, and the one left out would ship uninventoried.
+    """
+    expected = [(ARTIFACT_REVISION, frozenset(ARTIFACT_MANIFEST))] + [
+        (artifact.revision, frozenset(artifact.manifest)) for artifact in SPEECH_ARTIFACTS
+    ]
+
+    declared = _declared_inventories(_notices_in_the_checkout().decode())
+
+    assert Counter(declared) == Counter(expected)
 
 
 def test_the_notices_are_declared_as_a_licence_file() -> None:
