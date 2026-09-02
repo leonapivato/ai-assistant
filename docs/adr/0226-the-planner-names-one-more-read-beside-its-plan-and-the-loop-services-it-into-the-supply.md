@@ -1163,9 +1163,16 @@ are absent in that window because the events they describe have not happened.
     `planning/planner.py`'s leading-`EPISODIC`-run split is unaffected by a group of
     episodes appended at the tail. On a turn that serviced nothing the two sequences
     are identical, which is ADR-0158 §5's clause where it still binds.
-14. **A failed servicing degrades and does not fail.** A store that raises during
-    servicing leaves the turn composing from the supply planning saw, reports the
-    degradation, records what was asked and that nothing returned, and parks nothing.
+14. **A failed servicing degrades and does not fail, and a partial one leaves nothing
+    behind.** A store that raises during servicing leaves the turn composing from the
+    supply planning saw, reports the degradation, records what was asked and that
+    nothing returned, and parks nothing. Asserted twice: once where the first store
+    call raises, and once where a request carrying **both** kinds has its hop return
+    records and its query then raise. The second is the arm that distinguishes §5's
+    *"failed **or partial** read leaves the supply as planning saw it"* from a
+    best-effort servicer — the successful hop's records do **not** reach the fourth
+    group, the supply is byte-for-byte the three groups planning saw, and the audit
+    records the degradation with no returned or new count rather than the hop's.
 15. **The plan is still frozen and still auditable.** A plan carrying a request
     refuses mutation; a plan carrying none is the default; and a `ReadAsk` is never
     selected, ruled on or driven — asserted by a turn whose request names a query that
