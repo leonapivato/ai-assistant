@@ -114,7 +114,11 @@ _CREATE_TABLE = (
 #: set closed: an index is not a second on-disk artifact, so every byte
 #: ``stored_bytes`` counts is a byte ADR-0225 §9's ``0600`` protects.
 _INDEXES = (
-    "CREATE INDEX IF NOT EXISTS entries_by_conversation ON entries(conversation_id, ordinal)",
+    "CREATE INDEX IF NOT EXISTS entries_by_conversation ON entries("
+    # Carries the tie-break column for the reason the instant index does: the
+    # conversation read's order is `(ordinal, address)`, and an index stopping at
+    # `ordinal` leaves the tie-break to a sort over the whole conversation.
+    "conversation_id, ordinal, address)",
     "CREATE INDEX IF NOT EXISTS entries_by_instant ON entries(occurred_at_us DESC, address)",
 )
 
@@ -706,7 +710,14 @@ class SqliteTranscriptArchive:
                 conn.execute(
                     f"SELECT {_COLUMNS} FROM entries "  # noqa: S608 — a module constant, no input
                     "WHERE conversation_id = ? AND occurred_at_us >= ? "
-                    "ORDER BY ordinal ASC LIMIT ? OFFSET ?",
+                    # `address` breaks the tie for the reason it breaks the other
+                    # two reads': §7's order is **total**, and the schema does not
+                    # make `(conversation_id, ordinal)` unique. Two entries at one
+                    # ordinal would otherwise come back in whatever order the query
+                    # plan happened to produce, so a paged read could repeat one and
+                    # lose the other — which for a transcript is a silently
+                    # incomplete one.
+                    "ORDER BY ordinal ASC, address ASC LIMIT ? OFFSET ?",
                     (conversation_id, floor, limit, offset),
                 )
             )
