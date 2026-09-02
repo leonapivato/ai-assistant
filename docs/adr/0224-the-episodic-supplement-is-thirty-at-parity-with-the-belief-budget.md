@@ -1,6 +1,6 @@
 # 224. The episodic supplement is thirty, at parity with the belief budget
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-09-02
 - **Partially supersedes:**
   [ADR-0162](0162-what-the-user-tells-the-assistant-is-recorded-and-selectivity-moves-to-retrieval-and-forgetting.md)
@@ -126,17 +126,30 @@ The corpus has taken this exact route twice for this exact constant already — 
 integers landed in a **separate later change** (`101b5210`, `07d42fa6`), neither of
 which touched `docs/adr/`.
 
-### The proof, in one line of a test
+### The proof, in two lines of two tests
 
-The clearest evidence that this is not a re-tuning is that a pinned assertion has to
-change its **operator**, not its literal. `tests/app/test_composition.py` asserts
-`EPISODIC_SUPPLEMENT_LIMIT < RETRIEVAL_LIMIT` — strictly less — under a docstring that
-says *"At 10 against 30 it is satisfied with slack again rather than at the parity
-ADR-0160 §2 admitted, so the second assertion records slack once more."* That test is
-the ceiling clause in checkable form, written to §9's reading. At 30 the literal moves
-**and the operator does too**, from `<` to `<=`, because the reading it encodes is the
-one this ADR replaces. A change that only re-tuned a number would leave the operator
-alone.
+The clearest evidence that this is not a re-tuning is that pinned assertions have to
+change their **operator**, not their literal. There are two, one per subsystem, and
+ADR-0160 §7 already identified the pair when it moved this constant before: *"Two
+existing tests pin the old value and both are the ceiling clause and the value clause in
+checkable form rather than incidental assertions — one in `tests/app/`, one in
+`tests/orchestration/`."*
+
+- `tests/app/test_composition.py`'s
+  `test_the_episodic_supplement_is_bounded_at_ten_and_never_above_the_beliefs` asserts
+  `EPISODIC_SUPPLEMENT_LIMIT < RETRIEVAL_LIMIT`, under a docstring saying *"At 10
+  against 30 it is satisfied with slack again rather than at the parity ADR-0160 §2
+  admitted, so the second assertion records slack once more."*
+- `tests/orchestration/test_loop.py`'s
+  `test_the_episodic_bound_is_ten_and_never_exceeds_the_belief_budget` asserts
+  `_DEFAULT_EPISODIC_LIMIT < _DEFAULT_RETRIEVAL_LIMIT`, under a docstring saying *"The
+  relation is back to holding with slack rather than at the parity ADR-0160 §2
+  admitted."*
+
+Both are strictly less-than, and at 30 against 30 both **fail** rather than merely
+reading oddly. In each the literal moves *and the operator does too*, from `<` to `<=`,
+because the reading they encode is the one this ADR replaces. A change that only
+re-tuned a number would leave both operators alone.
 
 ## Decision
 
@@ -304,9 +317,13 @@ accuracy gain the guard was costing.
 > `LearningLoop`'s construction-time refusal that a *stated* episodic bound may not
 > exceed the belief budget. At parity that refusal accepts 30 against 30 and refuses 31.
 
-> **Normative.** The lane changes `tests/app/test_composition.py`'s pinned ceiling
-> assertion from strictly-less-than to not-greater-than, and updates the test's name
-> and docstring, which are written to the slack reading §2 replaces.
+> **Normative.** The lane changes **both** pinned ceiling assertions from
+> strictly-less-than to not-greater-than — `tests/app/test_composition.py`'s
+> `test_the_episodic_supplement_is_bounded_at_ten_and_never_above_the_beliefs` and
+> `tests/orchestration/test_loop.py`'s
+> `test_the_episodic_bound_is_ten_and_never_exceeds_the_belief_budget` — and updates
+> each test's name and docstring, both of which are written to the slack reading §2
+> replaces. Neither assertion merely reads oddly at parity; both fail.
 
 It is one change under ADR-0137 §1 — two constants held equal by a stated contract plus
 the tests pinning them — and it is the same cut the two prior moves of this constant
@@ -315,11 +332,14 @@ took (`101b5210`, `07d42fa6`), each of which touched exactly `app/composition.py
 
 Three further notes for that lane, from reading the tree rather than from memory:
 
-- `tests/orchestration/test_loop.py` asserts the default **symbolically** —
-  `min(_DEFAULT_EPISODIC_LIMIT, retrieval_limit)` — so those cases stay correct without
-  edit. Their behaviour changes, though: the cap in `LearningLoop.__init__` was a no-op
-  for every construction stating a belief budget of 10 or more and now bites for every
-  one below 30, which is a wider band and worth a line in the constant's comment.
+- `tests/orchestration/test_loop.py` holds **both** shapes, and only one of them is
+  free. `test_the_episodic_bound_is_ten_and_never_exceeds_the_belief_budget` pins the
+  literal and the strict relation and must move, per the clause above. The
+  *default-resolution* cases beside it assert **symbolically** —
+  `min(_DEFAULT_EPISODIC_LIMIT, retrieval_limit)` — and stay correct without edit. Their
+  behaviour changes even so: the cap in `LearningLoop.__init__` was a no-op for every
+  construction stating a belief budget of 10 or more and now bites for every one below
+  30, which is a wider band and worth a line in the constant's comment.
 - `test_an_untuned_bound_at_the_belief_budget_is_the_default_itself` was named at
   parity, renamed away from it by ADR-0160 §7's lane, and describes the configuration
   again at 30 against 30. Its docstring's parenthetical about "ten against thirty" is
@@ -427,9 +447,12 @@ ADR should be re-read against if the gain is ever re-measured larger.
 captured episode's `derived_from_external` as the disjunction of
 `rests_on_recorded_external_content` over `turn.memories`, and the supplement's records
 are in that set — `LearningLoop` builds `memories = preceding + supplement`. Tripling
-the supplement can only widen that disjunction's domain, so the flag turns `True` on
-strictly more turns, and the `SelectionOrigin` the runner hands the tools egress seam
-tightens on strictly more of them. That is the field working as specified rather than a
+the supplement can only widen that disjunction's *domain*, never narrow it, so the
+effect on the flag is **non-decreasing**: it turns `True` on any turn where a newly
+selected episode rests on recorded external content, and is unchanged on every turn
+where the added episodes do not qualify or where the read and its tail deduplication
+return no extra episode at all. Where it does turn, the `SelectionOrigin` the runner
+hands the tools egress seam tightens with it. That is the field working as specified rather than a
 defect — it is a disjunction over what the turn actually selected, and the turn now
 selects more — but it is a live consequence of this integer that nothing here has
 priced, and a lane watching egress behaviour after this lands should expect the rate to
