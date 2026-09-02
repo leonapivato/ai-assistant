@@ -1592,6 +1592,21 @@ async def test_opening_in_a_missing_directory_fails_with_the_seams_own_error(
         SqliteConversationStore(path=tmp_path / "nope" / "conversations.db", now=_fixed_now)
 
 
+async def test_a_path_the_driver_refuses_outright_is_still_the_seams_own_error() -> None:
+    """A path with an embedded NUL leaves ``sqlite3.connect`` as a ``ValueError``.
+
+    Neither a ``sqlite3.Error`` nor an ``OSError``, so a constructor catching only
+    those lets a bare builtin escape the ``ConversationStoreError`` boundary this
+    constructor documents — and this one already raises ``ValueError`` for a
+    duration it refuses, so an untranslated one from the path would read as that
+    instead (#1933). No filesystem is touched, so unlike its neighbour above this
+    case is not an ``integration`` one: the driver refuses the argument before it
+    opens anything.
+    """
+    with pytest.raises(ConversationStoreError, match="failed to open"):
+        SqliteConversationStore(path="conversations\x00.db", now=_fixed_now)
+
+
 @pytest.mark.integration
 async def test_a_naive_clock_reading_is_refused_at_the_producer(tmp_path: Path) -> None:
     """ADR-0026 §7: this seam never reaches a `core` validator, so the guard is here."""

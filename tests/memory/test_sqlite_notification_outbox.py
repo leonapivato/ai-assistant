@@ -488,6 +488,19 @@ class TestTheSeamsFailures:
         with pytest.raises(NotificationOutboxError):
             build(directory)
 
+    def test_a_path_the_driver_refuses_outright_is_still_the_seams_own_error(self) -> None:
+        """A path with an embedded NUL leaves ``sqlite3.connect`` as a ``ValueError``.
+
+        Neither a ``sqlite3.Error`` nor an ``OSError``, so a constructor catching
+        only those lets a bare builtin escape the ``NotificationOutboxError``
+        boundary this constructor documents — and this one already raises
+        ``ValueError`` for a bound it refuses, so an untranslated one from the path
+        would read as that instead (#1933). No filesystem is touched: the driver
+        refuses the argument before it opens anything.
+        """
+        with pytest.raises(NotificationOutboxError, match="failed to open"):
+            build("outbox\x00.db")
+
     def test_a_naive_clock_reading_is_the_seams_own_error(self, tmp_path: Path) -> None:
         """ADR-0026 §4: the guard raises this seam's failure, not ``core``'s raw one."""
         outbox = build(tmp_path / "outbox.db", now=lambda: datetime(2026, 1, 1, 12, 0))  # noqa: DTZ001 — the naive reading under test

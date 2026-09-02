@@ -613,7 +613,14 @@ class SqliteConversationStore:
             # which leaves a read-then-write mutation open to exactly the
             # interleaving the exclusion exists to forbid.
             conn = sqlite3.connect(self._path, check_same_thread=False, isolation_level=None)
-        except (sqlite3.Error, OSError) as exc:
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            # ``ValueError`` is named because a path carrying an embedded NUL
+            # raises it out of the driver rather than a ``sqlite3.Error``, and a
+            # bad path is this layer's fault to report rather than a raw builtin
+            # escaping past the ``ConversationStoreError`` boundary this
+            # constructor documents. Doubly so here: the constructor already
+            # documents ``ValueError`` for a duration it refuses, so an
+            # untranslated one from the path reads as that instead (#1933).
             msg = f"failed to open conversation store at {self._path!r}: {exc}"
             raise ConversationStoreError(msg) from exc
         try:

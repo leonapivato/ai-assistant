@@ -18,6 +18,7 @@ import os
 import sqlite3
 import stat
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -49,7 +50,6 @@ from ai_assistant.testing import FakeTraceSink
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from pathlib import Path
 
     from ai_assistant.core.protocols import Embedder
     from ai_assistant.core.types import Embedding
@@ -588,6 +588,21 @@ async def test_a_file_that_is_not_a_memory_store_is_refused(tmp_path: Path) -> N
 
     with pytest.raises(MemoryStoreError):
         Reembedder(store=store, embedder=HashingEmbedder(dimensions=_NEW)).plan()
+
+
+async def test_a_path_the_driver_refuses_outright_is_still_a_memory_store_error() -> None:
+    """A path with an embedded NUL leaves ``sqlite3.connect`` as a ``ValueError``.
+
+    Neither a ``sqlite3.Error`` nor an ``OSError``, so a clause catching only those
+    lets a bare builtin escape the ``MemoryStoreError`` boundary ``_connect``
+    documents (#1933). The private function is exercised directly because no public
+    caller reaches it with such a path: ``plan`` gates on ``Path.is_file()``, which
+    swallows the ``ValueError`` and answers ``False``, so the run stops at "there is
+    no memory store at" — and every other call site opens a path this class derived
+    from one that already opened. No filesystem is touched.
+    """
+    with pytest.raises(MemoryStoreError, match="failed to open"):
+        reembed_module._connect(Path("memory\x00.db"))
 
 
 async def test_an_undecodable_record_aborts_and_names_it(tmp_path: Path) -> None:
