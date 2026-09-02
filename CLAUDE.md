@@ -49,6 +49,7 @@ permissions/    policy/permission checks + audit trail
 learning/       feedback capture → memory updates
 evaluation/     Tier-2 trace store; no subsystem imports it   → TraceStore
 secret_store/   OS keyring; no subsystem imports it     → Secrets/SecretStore
+archive/        transcript archive; no subsystem imports it   → TranscriptArchive
 orchestration/  the engine wiring the pipeline together (consumes contracts)
 app/            composition root; the only place concretes are wired
 service/        the hub: one resident process per data directory

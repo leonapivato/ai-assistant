@@ -2535,6 +2535,54 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- The transcript archive (ADR-0225) -------------------------------
+    # Whether the archive is written at all, and how long it keeps what it holds.
+    # Two settings rather than one, because one field cannot spell both answers
+    # (§6): "how long" and "whether at all" are different questions, and the
+    # durations here are validated ``gt=timedelta(0)``, so there is no duration that
+    # spells "off". Collapsing them would mean either a zero duration — the value
+    # ADR-0074 §8 calls out as breaking its own protocol — or reading ``None`` as
+    # "off", which is the mirror image of the mistake §7 warns about for
+    # ``confirmation_ttl``: the same spelling meaning "keep forever" in one field and
+    # "keep nothing" in another.
+    #
+    # ``transcript_archive_retention`` **defaults to ``None``, and that is the
+    # deliberate opposite of ``episode_retention``'s finite default** (§6). §7's
+    # argument for a finite episodic default is entirely about the read path: an
+    # unbounded one "would ship an ever-growing Tier 1 log of everything the user has
+    # ever typed" inside the store the pipeline retrieves from and the observer
+    # mines. The archive is in neither — nothing retrieves it, nothing observes it,
+    # nothing reads it into a prompt (§4) — and a finite default here would
+    # reintroduce exactly the loss the archive exists to remove, at a second number
+    # nobody can argue for. The user may set one; the system does not choose one on
+    # their behalf.
+    #
+    # It is read from nowhere else: no implementation derives it from
+    # ``episode_retention``, and a change to that setting moves nothing in the
+    # archive. Enforcement is **at the read** (§6), so shortening it takes effect on
+    # the next read everywhere and lengthening it undertakes nothing in the other
+    # direction — what reclamation has already taken is gone.
+    #
+    # ``transcript_archive_enabled`` defaults to ``True``, because a worst-case net
+    # that is off by default catches nothing. Turning it off stops the write and
+    # **destroys nothing**: entries already held stay, stay searchable and stay
+    # destroyable, so a configuration change is never a silent deletion.
+    transcript_archive_enabled: bool = Field(
+        default=True,
+        description=(
+            "Whether a captured turn is also written to the transcript archive "
+            "(ADR-0225 §6). Turning it off stops the write and destroys nothing."
+        ),
+    )
+    transcript_archive_retention: _NullableDuration = Field(
+        default=None,
+        gt=timedelta(0),
+        description=(
+            "How long the transcript archive keeps an entry, enforced at the read. "
+            "Unset means keep forever, which is the default (ADR-0225 §6)."
+        ),
+    )
+
     # --- Observation (ADR-0077) ------------------------------------------
     # The two per-call bounds on an observation pass. Both are **named here rather
     # than left to the implementation** (ADR-0077 §1, §2, following ADR-0074 §9.3):

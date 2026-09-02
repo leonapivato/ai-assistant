@@ -17054,3 +17054,178 @@ class SpokenTurn(BaseModel):
             )
             raise ValueError(msg)
         return self
+
+
+# --- the transcript archive: what was said, kept as text (ADR-0225) -----------
+# Three frozen, additive-only models (§10). They cross a subsystem boundary in one
+# direction only — capture hands an entry to `ai_assistant.archive`, and the
+# engine reads entries and hits back out of it — so they live here for ADR-0068
+# §1's reason and no other. Nothing about them reaches a prompt: §4's never-list
+# is a property of which seam each holder is handed, not of these shapes.
+
+
+#: The most UTF-8 bytes a :class:`TranscriptHit` excerpt may encode to (ADR-0225 §7).
+#:
+#: **Named here rather than left as "bounded", and ADR-0094 §8 is the authority for
+#: naming it**: a bound with no figure is two conforming implementations diverging
+#: (ADR-0074 §9.3). "Bounded" alone would have admitted an implementation returning
+#: an entry's whole text minus one byte — bounded in the letter, unbounded in the
+#: response — and would leave a scan-backed implementation and an index-backed one
+#: with no shared assertion to conform to.
+#:
+#: **Bytes rather than characters**, because what it bounds is a response that
+#: crosses the local API; the truncation it implies is stated at a codepoint
+#: boundary, because a byte bound applied to UTF-8 without that clause produces
+#: invalid text.
+#:
+#: Public for :data:`FIRST_TURN_ORDINAL`'s own reason: every ``TranscriptArchive``
+#: implementation and the shared conformance suite need the same figure, and a
+#: bound one of them re-derived is a response size two stores could disagree about.
+TRANSCRIPT_EXCERPT_BYTES = 512
+
+
+class TranscriptEntry(BaseModel):
+    """One captured turn, as the two parties said it (ADR-0225 §1).
+
+    **A transcript is what was said, which is why this is not built from**
+    :attr:`EpisodicMemory.content`. That field is a *rendering* built for the
+    observer and for retrieval (ADR-0005 §1), and it interleaves the model's own
+    plan rationale with the user's sentence — so archiving it would put model prose
+    into the one store nothing may read, for no reader who wants it, and would make
+    the archive's answer to "what did I actually say?" a rendering the user has to
+    parse rather than a quotation. ``asked`` carries the user's own words instead,
+    and no other part of ``content`` reaches here: not the plan rationale, not the
+    confirmation line, not the tool line.
+
+    **Keyed by ``address`` alone; a conversation is something an entry belongs
+    *to*** (§1, §3). ``conversation_id`` and ``ordinal`` are grouping fields and
+    never the key, so no implementation makes an entry's identity, storage or
+    retrieval depend on it having a conversation. A later ADR admitting a producer
+    of episodes belonging to no conversation may widen the two — making them
+    optional, or adding a second grouping beside them — and supersedes no clause of
+    ADR-0225 by doing it (§15).
+
+    **The address is the episode's own id** (§3), whatever produced that episode:
+    the archive mints no identifier, derives none and predicts none. It is
+    *stable* — never changed, never reissued — and stays a valid name for this entry
+    after the episode it names has expired, been reclaimed or been destroyed. It is
+    a name and never a capability: holding one confers no read.
+
+    **``disposition`` is required and carries no ``None``** (§10). The one
+    production caller of capture computes a member on every path, so an optional
+    field would be a ``None``-only slot with no producer — which ADR-0073 §4's
+    standing test refuses — and it would recreate for a parked turn exactly the
+    ambiguity the field is carried to prevent, since without it a turn that parked
+    reads in the transcript as a question nobody answered. A caller supplying no
+    disposition is recording an exchange this system did not drive, and writes no
+    entry at all.
+
+    **Modality is deliberately absent, and the asymmetry is decided** (§1). How the
+    words arrived is a fact the *episode* states, at the address this entry already
+    carries; putting :class:`Capture` here would also make this store a carrier for
+    the two fields ADR-0221 §5 reserves for decisions ADR-0225 may not make.
+    ADR-0225 §15 defers a modality of the entry's own with what fires it.
+
+    **It carries no embedding, no score, no band, no confidence, no provenance and
+    no belief** (§1), and the archive holds no vector column for one to go in (§4).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    address: Identifier = Field(
+        description="The id of the episode this entry derives from; stable, never reissued."
+    )
+    conversation_id: Identifier = Field(
+        description="The conversation this turn belongs to — a grouping, never the key."
+    )
+    # `ConversationTurn.ordinal`'s own domain and not a second statement of it
+    # (ADR-0225 §10): the floor is that model's own shared constant, and the ceiling
+    # is the bound `ConversationStore`'s refusals are stated over throughout
+    # `core/protocols.py` (`[FIRST_TURN_ORDINAL, 2**63)`). Written as the ratified
+    # shape spells it rather than as a constant of the archive's own, which §10
+    # forbids in terms.
+    ordinal: int = Field(
+        ge=FIRST_TURN_ORDINAL,
+        lt=2**63,
+        description="The turn's position in its conversation; ConversationTurn's own domain.",
+    )
+    occurred_at: UtcInstant = Field(description="When the exchange this entry records happened.")
+    asked: EncodableText | None = Field(
+        description="The user's own words, unrewritten and unrendered; None where none."
+    )
+    replied: EncodableText | None = Field(
+        description="The composed reply, whole; None where the pass produced none."
+    )
+    disposition: ExchangeDisposition = Field(
+        description="What became of the exchange (ADR-0221 §2). Required, never None."
+    )
+
+
+class TranscriptHit(BaseModel):
+    """One search result: where a match is, and a bounded taste of it (ADR-0225 §7).
+
+    **Show a hit, then read the entry.** A transcript search over a year of
+    conversation can match hundreds of turns, and rendering each one whole makes the
+    result unreadable and the bound meaningless. So a hit carries an excerpt and the
+    address to read the entry whole by — which is also the cheapest possible way for
+    §3's address stability to be exercised rather than asserted.
+
+    **``excerpt`` encodes to at most** :data:`TRANSCRIPT_EXCERPT_BYTES` **bytes of
+    UTF-8** (§7). Where the text it was taken from exceeds that, it is truncated at
+    a codepoint boundary — so the encoded result never exceeds the bound and never
+    splits a codepoint — and ``elided`` is ``True``; where it does not, the excerpt
+    is that text and ``elided`` is ``False``. Which window of the entry it is taken
+    from is the implementing lane's; the bound is not.
+
+    It carries no rank and no score: §7 offers no relevance model, and the order a
+    page comes back in is total and recency-based rather than ranked.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    address: Identifier = Field(description="The entry's address, to read it whole by.")
+    conversation_id: Identifier = Field(description="The conversation the matched turn is in.")
+    occurred_at: UtcInstant = Field(description="When the matched exchange happened.")
+    excerpt: EncodableText = Field(
+        description="A bounded window of the matching text, never an entry's text beyond it."
+    )
+    elided: bool = Field(description="Whether the bound truncated what this excerpt came from.")
+
+
+class TranscriptArchiveSize(BaseModel):
+    """What the archive holds, and what it costs on disk (ADR-0225 §6).
+
+    **The two figures answer different questions and are allowed to disagree.**
+    ``entries`` is what the reads would return, so an entry hidden by a finite
+    ``transcript_archive_retention`` is not counted; ``stored_bytes`` is what is on
+    the disk, hidden and unreclaimed entries included. That gap is the point rather
+    than an inconsistency to be smoothed away: the figure that would fire the
+    deferred size cap is the one that measures the storage, and a report that netted
+    the two would hide exactly the growth the cap exists to catch.
+
+    **``stored_bytes`` counts every byte the archive's files occupy on disk**, as
+    they stand at the moment of the call: the database, the index inside it, and any
+    journal or write-ahead log beside it. It is not a sum of entry lengths, not a
+    count of logical row bytes, and not the main database file alone — §7 lets a
+    lane serve the search from a full-text index, and an index over this text costs
+    about as much as the text again, so an accounting that excluded it would
+    understate the archive by roughly half, and would understate an un-checkpointed
+    log without bound. An implementation holding no files of its own reports by the
+    same standard rather than reporting zero: a ``stored_bytes`` of zero over an
+    archive holding entries is not a conforming answer for any implementation, and a
+    fake that gave one would make the conformance case vacuous.
+
+    **Both fields are ``ge=0`` and neither carries an upper bound**, which is decided
+    rather than overlooked (§10): a store holds no negative number of entries and
+    occupies no negative number of bytes, and an impossible figure crossing the local
+    API to a surface that renders it is worse than an error — while there is no
+    store-side refusal to anchor a ceiling on a count or a byte total, and inventing
+    one would be exactly the unargued number §6 declines to invent for the cap.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    entries: int = Field(ge=0, description="How many entries the reads would return.")
+    stored_bytes: int = Field(
+        ge=0, description="How many bytes the archive's files occupy on disk, right now."
+    )
