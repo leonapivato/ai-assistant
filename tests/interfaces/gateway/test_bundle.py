@@ -4116,24 +4116,37 @@ def test_the_browser_explains_an_episode_as_a_record_and_never_as_a_derivation()
     assert "no supporting evidence was recorded" not in episodic
 
 
-def test_the_browser_keeps_the_episodes_heading_and_says_what_it_is() -> None:
-    """#1891's display question, answered the same way on both surfaces.
+def test_the_browser_heads_an_episodes_row_with_a_filing_and_not_a_claim() -> None:
+    """#1891's display question, answered where this surface makes it sharpest.
 
-    ADR-0073 §4 requires every row to convey its band and its confidence and exempts no
-    kind, and on *this* surface the heading carries a second load the terminal's does
-    not: the three band checkboxes are what selected the rows, so a row that stopped
-    naming its band would stop saying which box it arrived under. So
-    ``renderBeliefFields`` is unchanged and the ``Why`` line is what disarms the
-    figure — ADR-0074 §4 sets an episode's confidence at capture and documents it as
-    standing rather than certainty.
+    ``bandWords`` renders a band as a first-person sentence — it is what the page shows
+    and what its three filter checkboxes are labelled with. On an episode "I worked it
+    out" is not a label but a claim, and a false one (ADR-0075 §2), asserted one line
+    above a ``Why`` that denies it. So an episode's row leads with the band's own words
+    quoted **as a filing**.
+
+    Both halves are pinned. The band's words stay inside the phrase, because ADR-0073
+    §4 requires the band conveyed — "never omitted, never implied by position alone" —
+    and because the heading is how a user reads a row back to the box that selected it.
+    The confidence is still rendered beside it, for the same section's other clause and
+    ADR-0072 §6's; what the figure *means* for an episode is said in the ``Why`` line,
+    where there is room to say it.
+
+    And every other kind is left on the bare band, which is the arm the three kinds
+    that really are beliefs take.
     """
     functions = _functions(_code("app.js"))
+    heading = functions["beliefHeading"]
+    fields = functions["renderBeliefFields"]
 
-    assert "confidence ${belief.confidence.toFixed(2)}" in functions["renderBeliefFields"], (
-        "the confidence is still rendered (ADR-0073 §4)"
+    assert "${beliefHeading(belief)} · ${belief.kind}" in fields
+    assert "confidence ${belief.confidence.toFixed(2)}" in fields, "ADR-0073 §4's other clause"
+    assert _EPISODIC_GUARD in heading
+    assert "Filed under '${bandWords(belief.band)}'" in heading, (
+        "the band's own words survive inside the phrase (ADR-0073 §4)"
     )
-    assert "${bandWords(belief.band)}" in functions["renderBeliefFields"], (
-        "and so is the band, which is also the filter the row arrived under"
+    assert heading.count("return bandWords(belief.band);") == 1, (
+        "and every other kind leads with the band bare"
     )
     assert "a standing figure rather than a measure of doubt" in _joined(functions["whyEpisodic"])
 
