@@ -1138,30 +1138,39 @@ are absent in that window because the events they describe have not happened.
     rejected for capacity, which `AssistantEngine` decides **after** the loop has
     planned and serviced, and a turn whose `PlanStore.save_plan` raises. Neither
     suppresses the record, so neither depresses the fire rate.
-11. **The budget and the bounds hold.** A hop naming three labels is not a request the
-    types admit; a request whose asks are two of one kind is not either; a servicing
-    whose candidates exceed ten returns ten; and a record already in the supply is
-    deduplicated out with the original keeping its position, counting against nothing.
-    The ordering guarantee is asserted over a **fixed** candidate set: one request and
-    one supply over a store that returns the same candidates twice produce the same
-    group in the same order, and no test asserts that a concurrently-written store
-    does — ADR-0113 §5's accepted miss is inherited, and §6 says so rather than
-    pinning a guarantee the store does not offer.
-12. **The fourth group is appended, not interleaved, and the planner never saw it.**
+11. **Every condition §4 puts on the models is refused by the models**, arm for arm,
+    and none of them is left to a caller: a `ReadRequest` whose `asks` is empty; one
+    carrying two asks of one kind; a `SIGHTED_QUERY` ask with a blank or
+    whitespace-only query; one carrying a query **and** labels; a `CITATION_HOP` ask
+    with no labels; one carrying labels **and** a query; a hop naming three labels; an
+    unknown field on either model; and a mutation of either after construction. Each
+    is asserted as a validation failure at construction, and the empty-request arm is
+    the one worth naming: a `ReadRequest` that admitted no ask would be a non-`None`
+    `read_request`, which §8 defines as a turn the trigger fired on, servicing nothing
+    — a fire-rate numerator with no read under it.
+12. **The budget and the bounds hold.** A servicing whose candidates exceed ten
+    returns ten, and a record already in the supply is deduplicated out with the
+    original keeping its position, counting against nothing. The ordering guarantee is
+    asserted over a **fixed** candidate set: one request and one supply over a store
+    that returns the same candidates twice produce the same group in the same order,
+    and no test asserts that a concurrently-written store does — ADR-0113 §5's accepted
+    miss is inherited, and §6 says so rather than pinning a guarantee the store does
+    not offer.
+13. **The fourth group is appended, not interleaved, and the planner never saw it.**
     The `memories` the planner was called with carries exactly the three groups
     ADR-0158 §5 fixes; the `TurnResult` the same turn returns carries those three, in
     that order and in those positions, followed by the serviced records whole; and
     `planning/planner.py`'s leading-`EPISODIC`-run split is unaffected by a group of
     episodes appended at the tail. On a turn that serviced nothing the two sequences
     are identical, which is ADR-0158 §5's clause where it still binds.
-13. **A failed servicing degrades and does not fail.** A store that raises during
+14. **A failed servicing degrades and does not fail.** A store that raises during
     servicing leaves the turn composing from the supply planning saw, reports the
     degradation, records what was asked and that nothing returned, and parks nothing.
-14. **The plan is still frozen and still auditable.** A plan carrying a request
+15. **The plan is still frozen and still auditable.** A plan carrying a request
     refuses mutation; a plan carrying none is the default; and a `ReadAsk` is never
     selected, ruled on or driven — asserted by a turn whose request names a query that
     reads like a tool call and which reaches no registry, no gate and no executor.
-15. **The export carries the request and announces its shape.** A `PlanExport` whose
+16. **The export carries the request and announces its shape.** A `PlanExport` whose
     plans carry a request round-trips through serialisation with the request intact
     and `schema_version` 3; a document labelled 2 does not validate as a `PlanExport`
     at all; and both conforming `PlanStore` implementations export the new version.
