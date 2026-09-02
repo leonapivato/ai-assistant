@@ -1146,6 +1146,21 @@ async def test_the_mark_is_not_stamped_when_the_open_fails(tmp_path: Path) -> No
     assert "goals" not in _tables(path)  # the half-built schema rolled back with it
 
 
+async def test_a_path_the_driver_refuses_outright_is_still_a_planning_error() -> None:
+    """A path with an embedded NUL leaves ``sqlite3.connect`` as a ``ValueError``.
+
+    Neither a ``sqlite3.Error`` nor an ``OSError``, so a clause catching only those
+    two lets a bare builtin escape the ``PlanningError`` boundary this constructor
+    documents — the hole #1933 records across nine stores, of which this is the
+    last to be closed.
+
+    No ``integration`` mark and no ``tmp_path``: the driver refuses the argument
+    before it opens anything, so this reaches no filesystem.
+    """
+    with pytest.raises(PlanningError, match="failed to open"):
+        SqlitePlanStore(path="plans\x00.db", now=_fixed_now)
+
+
 async def test_a_mark_below_the_counter_is_promoted_at_open_not_refused(tmp_path: Path) -> None:
     """A lagging mark is levelled up, not refused — and levelled *at the open*.
 

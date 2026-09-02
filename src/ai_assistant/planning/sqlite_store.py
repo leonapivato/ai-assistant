@@ -334,8 +334,13 @@ class SqlitePlanStore:
         """Connect, enforce foreign keys, create the schema, verify the version."""
         try:
             conn = sqlite3.connect(self._path, check_same_thread=False)
-        except (sqlite3.Error, OSError) as exc:
+        except (sqlite3.Error, OSError, ValueError) as exc:
             # e.g. the parent directory does not exist — no connection to close.
+            # ``ValueError`` is named because a path carrying an embedded NUL
+            # raises it out of the driver rather than a ``sqlite3.Error``, and a
+            # bad path is this layer's fault to report rather than a raw builtin
+            # escaping past the ``PlanningError`` boundary this constructor
+            # documents (#1933; the last of the nine stores that carried the hole).
             msg = f"failed to open the plan store at {self._path!r}: {exc}"
             raise PlanningError(msg) from exc
         try:
