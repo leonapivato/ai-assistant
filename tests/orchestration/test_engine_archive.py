@@ -19,7 +19,8 @@ from base64 import b64encode
 from typing import TYPE_CHECKING
 
 import pytest
-from test_engine import AT, PATIENT, Harness, tool
+from test_engine import AT, PATIENT, Harness, confirmable, tool
+from test_engine_routing import _UTTERANCE, _parked, _routed_harness, _seed_belief, _token
 
 from ai_assistant.core.errors import TranscriptArchiveError
 from ai_assistant.core.types import (
@@ -301,3 +302,45 @@ async def test_forget_answers_about_the_record_and_not_about_the_transcript() ->
     assert await harness.engine.forget("orphan:1") is False
 
     assert await harness.archive.entry("orphan:1") is None
+
+
+async def test_a_parked_steps_resolution_archives_no_user_words() -> None:
+    """ADR-0225 §1's own clause, and it is a clause rather than an absence of data.
+
+    The parked turn is right there — :meth:`Engine._capture_resumption` is handed it,
+    and passes its ``modality`` and its ``supplied_withheld`` along unchanged. What it
+    does **not** pass is the user's words, because the utterance that parked was
+    archived at its own address by the pass that parked, and repeating it here would
+    render one sentence as though the user had said it twice.
+    """
+    harness = Harness(tools=(confirmable(),))
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+
+    await harness.engine.resume(parked.step.confirmation.token, approved=True, timeout=PATIENT)
+
+    # The harness's clock is frozen, so both entries share an instant and §7's
+    # **address** tie-break decides the order — ordinal 1 then ordinal 2, which here
+    # is the park then its resolution.
+    entries = await harness.archive.entries()
+    assert [one.asked for one in entries] == ["send it", None], (
+        "the park says what was asked; its resolution says nothing"
+    )
+
+
+async def test_a_routed_parks_resolution_archives_no_user_words() -> None:
+    """ADR-0225 §1's third case: the pass received no user words at all.
+
+    A ``resume`` is handed an opaque token and a boolean, so there is nothing to
+    archive — and unlike the case above, there is not even a turn in front of the
+    capture point to be tempted by.
+    """
+    harness = _routed_harness()
+    await _seed_belief(harness.memory)
+    parked = await _parked(harness)
+
+    await harness.engine.resume(_token(parked), approved=True, timeout=PATIENT)
+
+    entries = await harness.archive.entries()
+    assert [one.asked for one in entries] == [_UTTERANCE, None]
