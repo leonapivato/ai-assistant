@@ -1059,17 +1059,33 @@ def _labelled(output: str, label: str) -> str | None:
     login shell prints whatever its profile and MOTD print. A bare value would be
     indistinguishable from a banner.
 
+    The **last** match is the answer, not the first (issue #1413). A label is
+    only a prefix, so a profile or MOTD that happens to print one shadows the
+    real value under a first-match rule — and the shadowing is not hypothetical
+    in its consequence: ``INVOCATION_ID=`` taken from a banner names an *earlier*
+    start of the unit, whose journal already holds ``hub_ready``, so a deploy
+    that never came up would verify as one that did. Last is the honest rule
+    because every command that ends in a labelled line puts that ``echo``
+    **last** — after the profile, after the MOTD, and after whatever the work
+    itself printed (:meth:`Plan.restart`, :meth:`Plan.is_active`,
+    :meth:`Plan.verify_staged`). It is not a defence against a hostile box, which
+    could print a label after ours; that is what the per-run token brackets on
+    the marker read are for (:meth:`Plan.read_marker`). It is a defence against
+    an ordinary login shell that says something we did not expect.
+
     Args:
         output: The command's standard output.
         label: The line prefix, including its ``=``.
 
     Returns:
-        The value, or ``None`` when no line carries the label.
+        The value carried by the last line with the label, or ``None`` when no
+        line carries it.
     """
+    value: str | None = None
     for line in output.splitlines():
         if line.startswith(label):
-            return line.removeprefix(label).strip()
-    return None
+            value = line.removeprefix(label).strip()
+    return value
 
 
 def invocation_id(output: str) -> str:

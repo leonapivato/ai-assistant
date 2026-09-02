@@ -708,6 +708,63 @@ def test_a_banner_does_not_hide_the_invocation_id(tmp_path: Path) -> None:
     assert _MODULE.invocation_id("Welcome to Ubuntu\nINVOCATION_ID=abc123\n") == "abc123"
 
 
+# --------------------------------------------------------------------------- #
+# A label a banner also prints: the LAST match is the answer (issue #1413)      #
+# --------------------------------------------------------------------------- #
+#
+# A label is only a prefix, and `su -` starts a login shell by design — so a
+# profile or MOTD that prints one of these labels sits AHEAD of the command's
+# own answer in stdout. Every command that ends in a labelled line puts that
+# `echo` last, after the profile, after the MOTD and after whatever the work
+# itself printed, so the last match is the honest rule and the first match is a
+# banner's.
+
+
+def test_a_banner_that_prints_the_same_label_does_not_shadow_the_answer() -> None:
+    # The consequence, which is why this is not cosmetic: an INVOCATION_ID taken
+    # from a profile names an EARLIER start of the unit, whose journal already
+    # holds hub_ready — so `_wait_for_ready` would be satisfied instantly and a
+    # deploy that never came up would report as one that did.
+    shadowed = "INVOCATION_ID=from-the-profile\nMOTD\nINVOCATION_ID=this-start\n"
+
+    assert _MODULE.invocation_id(shadowed) == "this-start"
+
+
+def test_an_empty_answer_is_not_rescued_by_an_earlier_label() -> None:
+    # The safe direction. An empty id means a systemd too old to report one, and
+    # accepting the banner's would bind the readiness check to an unrelated start
+    # rather than refusing.
+    with pytest.raises(_MODULE.DeployError, match="printed no unit InvocationID"):
+        _MODULE.invocation_id("INVOCATION_ID=from-the-profile\nINVOCATION_ID=\n")
+
+
+def test_a_shadowed_unit_state_reports_the_state_the_command_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shadowed = "UNIT_STATE=active\nlast login\nUNIT_STATE=failed\n"
+    monkeypatch.setattr(_MODULE, "_probe", lambda _argv: (0, shadowed, ""))
+
+    with pytest.raises(_MODULE.DeployError, match="the unit is failed"):
+        _MODULE._assert_active(_plan(_repo(tmp_path)))
+
+
+def test_a_shadowed_digest_is_the_commands_own_not_the_banners(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Reading the banner's digest here would install a truncated wheel while
+    # reporting the transfer verified.
+    shadowed = "STAGED_SHA256=cafe1234\nSTAGED_SHA256=deadbeef\n"
+    monkeypatch.setattr(_MODULE, "_probe", lambda _argv: (0, shadowed, ""))
+
+    with pytest.raises(_MODULE.DeployError, match="not the one that was sent"):
+        _MODULE._assert_staged(_plan(_repo(tmp_path)), "cafe1234")
+
+
+def test_the_label_rule_is_last_match_wins() -> None:
+    assert _MODULE._labelled("X=one\nX=two\nX=three\n", "X=") == "three"
+    assert _MODULE._labelled("nothing labelled here\n", "X=") is None
+
+
 def test_a_failed_journal_poll_is_reported_as_itself(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
