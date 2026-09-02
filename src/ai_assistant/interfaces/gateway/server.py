@@ -2733,8 +2733,11 @@ class Gateway:
     async def _observe(self, request: Request) -> Response:
         """Read a bounded batch of a conversation's episodes and report what it did.
 
-        ``conversation_id`` is "a **selector rather than a subject**", so an absent one
-        selects the most recently active conversation rather than being an error.
+        ``conversation_id`` is "a **selector rather than a subject**" (ADR-0085 §2), so
+        an absent one selects rather than being an error. What it selects is the first
+        conversation holding a turn above its observation watermark, ordered
+        ``last_active_at`` ascending (ADR-0212 §3) — it was "the most recently active
+        conversation" until that decision replaced ADR-0077 §8's selection sentence.
 
         Args:
             request: The admitted request, carrying an optional ``conversation_id``.

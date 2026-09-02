@@ -1777,7 +1777,10 @@ def observe(
     conversation_id: str | None = typer.Argument(
         None,
         callback=_present_optional_id,
-        help="The conversation to observe. Defaults to the most recently active one.",
+        help=(
+            "The conversation to observe. Defaults to the least recently active "
+            "conversation that still has turns nobody has distilled."
+        ),
     ),
 ) -> None:
     """Distil beliefs from a conversation's recent turns, and record what stuck.

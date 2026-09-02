@@ -1,19 +1,24 @@
 """Resolve a synonymous capability name onto an advertised one (ADR-0053).
 
 ``ModelBackedPlanner`` (ADR-0047) emits capability strings from an *open*
-vocabulary and is kept blind to the tool set (ADR-0014 §2), so a real utterance
-like "what time is it" may name ``get_time`` while the only tool that can serve
-it advertises ``report_current_time`` (ADR-0048). Without a bridge that step is
+vocabulary — ADR-0211 §1 hands it the vocabulary the registry advertises, and §6
+rejects nothing on the ground of that vocabulary — so a real utterance like "what
+time is it" may still name ``get_time`` while the only tool that can serve it
+advertises ``report_current_time`` (ADR-0048). Without a bridge that step is
 ``SKIPPED``/``NO_CAPABLE_TOOL`` (ADR-0037 §1) — a legitimate, detectable outcome,
 but one that means the wired tools never fire from natural language.
 
 This module is that bridge, at *selection* time and nowhere else: a pure function
 :func:`resolve_capability` that :class:`~ai_assistant.orchestration.runner.StepRunner`
-calls just before ``ToolRegistry.find``. It is deliberately **non-contract** —
-the ``Planner.plan`` Protocol is unchanged and the planner learns nothing about
-the tool set. ADR-0053 records why the richer "publish the registry's vocabulary
-to the planner" option (issue #60's territory) stays deferred: it constrains the
-planner to the tools that exist today.
+calls just before ``ToolRegistry.find``. It is deliberately **non-contract**:
+nothing here appears in ``core/protocols.py``, and no subsystem outside
+``orchestration`` can see it. ADR-0053 recorded the richer "publish the registry's
+vocabulary to the planner" option (issue #60's territory) as deferred; ADR-0211 §1
+has since taken it, and **the layer survives that change whole** — §7 rules that
+"ADR-0053's selection-time capability alias layer is untouched". What it becomes is
+the safety net rather than the routine path: a planner told the vocabulary will
+mostly emit names from it exactly, and the variant and synonym branches keep
+catching the case where it does not.
 
 **The rule is honest by construction: an alias maps a *known synonym*, it never
 guesses.** Two things bound it, and both are checked against the live registry,
