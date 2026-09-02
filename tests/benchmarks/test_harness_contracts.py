@@ -21,6 +21,7 @@ import urllib.request
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest import mock
 from zoneinfo import ZoneInfo
@@ -43,15 +44,16 @@ from benchmarks.memory.run import (
 )
 from benchmarks.memory.wiring import build_harness, build_reconciler, reconciler_spec
 
+from sqlite_census import connection_census, is_open
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from pathlib import Path
     from types import ModuleType
 
 from ai_assistant.app import composition
 from ai_assistant.app.composition import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
-from ai_assistant.core.errors import ConfigurationError
+from ai_assistant.core.errors import ConfigurationError, TranscriptArchiveError
 from ai_assistant.learning import ModelBackedObserver
 from ai_assistant.memory import MemoryIngestor, ModelBackedReconciler
 from ai_assistant.memory import traces as memory_traces
@@ -166,6 +168,60 @@ def test_a_harness_may_not_carry_a_belief_budget_the_product_would_refuse(
             dataclasses.replace(harness, retrieval_limit=0, episodic_limit=0)
     finally:
         harness.close()
+
+
+async def test_closing_the_harness_closes_every_database_it_opened(tmp_path: Path) -> None:
+    """The teardown's roster, swept rather than enumerated (#1903).
+
+    A run builds one harness per case, so a store the harness opens and
+    :meth:`Harness.close` does not close leaks one live SQLite connection per case —
+    and a pilot is hundreds of cases. That is not a hypothetical: the transcript
+    archive was added to ``build_harness`` and reached ``close`` only in a later fix
+    (#1902), which landed with no test because this module was outside that lane's
+    footprint. A case naming the five stores of today would leave the sixth in
+    exactly that position.
+
+    So the roster is discovered: ``sqlite_census`` records what the build actually
+    opens, and the assertion is that none of it is usable afterwards. Both directions
+    are asserted, because only the pair is evidence — and the file listing is checked
+    against the census so that a store reaching SQLite by another route shows up as a
+    gap rather than as a test that quietly stopped testing.
+
+    The archive is named on top of the sweep, and it is the reason to: it is the one
+    store here with **no file** — ADR-0225 §10's ephemeral in-memory archive, which a
+    listing of ``*.db`` cannot see and a leak of which is invisible on disk. Asserted
+    through its own refusal, which is the claim the sweep makes about the connection
+    restated about the object the lifecycle stage was handed.
+    """
+    settings = Settings(data_dir=tmp_path, embedder=EmbedderKind.HASHING)
+    case_dir = tmp_path / "case"
+    with connection_census() as recorded:
+        harness = build_harness(
+            settings, data_dir=case_dir, model=FakeModelProvider(), observer=FakeObserver()
+        )
+
+    assert recorded, "the census saw no connection at all, so nothing below is evidence"
+    on_disk = {path.name for path in case_dir.glob("*.db")}
+    watched = {Path(database).name for database, _ in recorded}
+    assert on_disk <= watched, (
+        f"the harness left {sorted(on_disk - watched)} in the case directory without the "
+        f"census seeing it opened; a store reaching SQLite by another route is outside "
+        f"what this test can guard"
+    )
+    open_before = sorted(name for name, connection in recorded if is_open(connection))
+    assert open_before, "the build closed everything it opened, so the sweep below is vacuous"
+    assert await harness.archive.size() is not None, "open before, so the refusal below counts"
+
+    harness.close()
+
+    open_after = sorted(name for name, connection in recorded if is_open(connection))
+    assert open_after == [], (
+        f"{[Path(name).name for name in open_after]} survived `Harness.close()` with a "
+        f"live connection; a run builds one harness per case, so each of these is a "
+        f"connection leaked per case (#1903)"
+    )
+    with pytest.raises(TranscriptArchiveError):
+        await harness.archive.size()
 
 
 def test_the_supplement_reads_the_kinds_and_bands_the_loop_reads() -> None:
