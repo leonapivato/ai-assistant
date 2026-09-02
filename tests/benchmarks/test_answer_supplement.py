@@ -86,14 +86,26 @@ PROPOSALS = 3
 #: is what makes the bound observable rather than vacuously satisfied.
 #:
 #: **Turns, not episodes, and capture halves them** — one ``EpisodicMemory`` per
-#: user/assistant exchange — so this figure buys 16 episodes against ADR-0160 §1's
-#: bound of 15. It was 16 when that bound was 5; at 15 it would have yielded 8 and
-#: the assertion below would have been the fixture failing rather than the read.
-TURNS = 32
+#: user/assistant exchange — so this figure buys 34 episodes against ADR-0224 §1's
+#: bound of 30.
+#:
+#: **It is sized against the bound, so it moves whenever the bound rises.** It was 16
+#: when the bound was 5, and went to 32 when ADR-0160 §1 took the bound to 15, because
+#: 16 turns buy 8 episodes and the assertion below would then have been the fixture
+#: failing rather than the read. It stood unchanged through ADR-0162 §9's drop to 10,
+#: which needed no room it did not already have, and goes to 68 here because 32 turns
+#: buy 16 against ADR-0224 §1's 30 — the same fixture failure, reported by the same
+#: assertion, which is why that assertion is worth its runtime.
+TURNS = 68
 
 
 def _case() -> BenchCase:
-    """A case whose episodes outnumber the episodic budget several times over.
+    """A case holding more eligible episodes than the episodic budget admits.
+
+    The margin is deliberately narrow rather than a comfortable multiple: ``TURNS``
+    tracks the bound, and at ADR-0224 §1's 30 every further turn is ingestion time
+    the assertion does not need. 34 episodes against 30 proves the bound bites in
+    exactly the way 16 against 10 did.
 
     Returns:
         The case, with one question.
