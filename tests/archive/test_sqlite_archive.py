@@ -219,6 +219,53 @@ async def test_an_in_memory_archive_reports_what_its_entries_occupy() -> None:
         archive.close()
 
 
+async def test_a_database_that_cannot_be_measured_refuses_rather_than_reporting_zero(
+    tmp_path: Path,
+) -> None:
+    """ADR-0225 §6: zero bytes over an archive holding entries conforms for nobody.
+
+    The one way a file-backed store could give that answer, and it is not
+    hypothetical: an open connection keeps answering ``entries`` from a database
+    another process has unlinked or moved, because the descriptor holds the inode
+    open after the directory entry is gone. A ``stat`` swallowed under the tolerance
+    the *sidecars* are owed would then report ``entries=1, stored_bytes=0`` — the
+    dead figure §6 is written to prevent, arriving through the accounting itself.
+    The sidecars keep that tolerance below, and they are the only ones that do.
+    """
+    path = tmp_path / "transcripts.db"
+    archive = _at_now(path=path)
+    try:
+        await archive.append(entry())
+        assert (await archive.size()).stored_bytes > 0
+
+        path.unlink()
+
+        with pytest.raises(TranscriptArchiveError, match="measure"):
+            await archive.size()
+    finally:
+        archive.close()
+
+
+async def test_an_absent_sidecar_is_measured_as_nothing(tmp_path: Path) -> None:
+    """The other half of §6's asymmetry: a quiescent database has no sidecars.
+
+    A cleanly closed database keeps none of the three, so a store that treated a
+    missing one as a fault would refuse to measure the ordinary archive. The figure
+    is the database's own size, and it is reported rather than raised.
+    """
+    path = tmp_path / "transcripts.db"
+    archive = _at_now(path=path)
+    try:
+        await archive.append(entry())
+        # Sync helpers for the reason `_names_in` records: the blocking `pathlib`
+        # calls are the test's own filesystem read, not an I/O path on the loop.
+        assert _names_in(tmp_path) == {"transcripts.db"}, "a quiescent database keeps none"
+
+        assert (await archive.size()).stored_bytes == _bytes_on_disk(path)
+    finally:
+        archive.close()
+
+
 # --- the closed file set (§6, §9, §13 item 18) ------------------------------
 
 
