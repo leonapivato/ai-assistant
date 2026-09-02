@@ -542,15 +542,20 @@ compete for the same ten slots, and either order satisfies every other clause of
 section while producing a different fourth group, a different prompt and a different
 audit.
 
-**The hop goes first because it is the bounded read and the one the query cannot
-substitute for.** Its size is fixed and small by §2's two-label cap and the measured
-shape behind it — one or two beliefs citing one to three episodes each — so it can
-never crowd the query out by much. A sighted query, by contrast, can return the whole
-budget on its own, so putting it first would let a broad reformulation starve the hop
-entirely and silently reduce the envelope to its weaker half: on the hop territory
-the query alone reaches 50.0% where the union reaches 63.3%. Ordering the small
-bounded read ahead of the large unbounded one is what makes the union the *measured*
-union rather than whichever kind happened to run first.
+**The hop goes first because it is the capped read and the one the query cannot
+substitute for.** Its size is bounded by §2's two-label cap, and the shape the replay
+measured behind that cap is small — one or two beliefs citing one to three episodes
+each. It is **not** guaranteed small: `MAX_EVIDENCE_CITATIONS` is 64, so two labels
+may resolve to ten distinct live evidence records and take the whole budget, leaving
+the query none. That is permitted by the truncation clause above and asserted by
+§11's seventh test, and it is stated here as an accepted cost rather than glossed.
+
+**The alternative is worse in the case that recurs.** A sighted query can return the
+whole budget on *every* firing, so query-first would starve the hop routinely rather
+than exceptionally, and would quietly reduce the envelope to its weaker half — on the
+hop territory the query alone reaches 50.0% where the union reaches 63.3%. Ordering
+the capped read ahead of the uncapped one makes the union the *measured* union in the
+ordinary case, and gives the query up only where a hop genuinely reached ten records.
 
 **Ten is a measured figure rather than a judged one, from three directions.** The
 replay's oracle shape is *"311/349 need **exactly one** belief, 29 need two, 9 need
@@ -1041,6 +1046,29 @@ from that turn"* — so §7's evaluation requirement is that clause applied, not
 That earlier draft's partial supersession of §1 was **withdrawn**, and §7 says so where
 a reader will meet it. §1's third clause as ADR-0217 amended it is read with the field
 where ADR-0217 moved it; this ADR neither restores the old name nor moves it again.
+
+**ADR-0039 §10 is applied rather than superseded, and the working is shown because a
+review round reached for the other answer.** §10 pinned `PlanExport.schema_version` to
+`Literal[2]` and, in the same section, said what happens next: *"The cost is that every
+future shape change edits the annotation, which is the intended friction — a version
+that moves without anyone noticing is the failure this replaces."* A reader holding
+ADR-0039 alone, making a shape change to a record the export carries, is instructed by
+that sentence to edit the annotation, and writes `Literal[3]` — which is what §4
+requires. Acting on §10 alone produces identical conduct before and after this ADR,
+which is ADR-0070 §1's test and the reason no record is owed against ADR-0039.
+
+**The corpus has already ruled this on the sibling export.** ADR-0212 §8 moved
+`ConversationExport.schema_version` under §10's rule and recorded no supersession,
+stating the test in terms: *"A reader holding ADR-0014 alone therefore acts identically
+before and after, which is ADR-0070 §1's test and the reason nothing is recorded on
+ADR-0014 here."* ADR-0039's `Status` is `Accepted` and carries no pair from that
+change. The contrary reading takes `Literal[2]` as a permanent fact about the field
+and leaves §10's friction clause out of the section it sits in.
+
+**What would owe a record, and is not what §4 does**, is changing the *mechanism*:
+returning the field to a default, admitting a range, or deciding a shape change need
+not move it. §4 edits one integer exactly as §10 prescribes and carries §10's
+"not readable at any version" rule forward with one more value inside it.
 
 **ADR-0204 §2 is untouched and its evaluation is relied on.** §7 requires only that it
 be taken after servicing, so the boolean it sets reflects the supply the turn actually
