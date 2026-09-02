@@ -1539,8 +1539,8 @@ def _run_root_as(run_root: Path, worker: str | None) -> Path:
     )
 
 
-def _locked(lock: Path) -> bool:
-    """Is *lock* already held exclusively — by another run, or by this caller?
+def _held_exclusively(lock: Path) -> bool:
+    """Is *lock* held **exclusively** — by another run, or by this caller?
 
     ``flock`` locks live on the open file *description*, so a second descriptor on
     the same file is refused by a lock the very same process already holds through
@@ -1548,10 +1548,18 @@ def _locked(lock: Path) -> bool:
     That is what lets one process observe "my caller is holding this" without a
     second worker to contend with it, and it is why this probe opens the file
     itself rather than reusing a handle.
+
+    The probe is a **shared** one, which is what makes the answer *exclusive*
+    rather than merely *locked*: an exclusive request is refused by a shared holder
+    just as it is by an exclusive one, so probing with ``LOCK_EX`` would report the
+    same ``True`` for a lock downgraded to ``LOCK_SH`` — under which two workers
+    both pass the record check and both build, the regression this is here to see
+    (adversarial review of this change, round 2). A shared request is granted by a
+    shared holder and refused only by an exclusive one.
     """
     with lock.open("ab") as probe:
         try:
-            fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(probe.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
         except OSError:
             return True
         fcntl.flock(probe.fileno(), fcntl.LOCK_UN)
@@ -1598,13 +1606,15 @@ def test_the_shared_build_is_resolved_under_the_run_wide_lock(
     expensive than what it guards. ``flock`` treats two descriptors on one file
     independently even within a process, so a probe opened *inside* the step under
     test reports whether the caller is holding the lock around it — which is the
-    ordering, stated directly rather than raced for.
+    ordering, stated directly rather than raced for. The probe asks for a *shared*
+    lock, so what it reports is that the held lock is **exclusive**: a shared one
+    admits every worker at once and would answer the question wrongly.
     """
     held: list[bool] = []
     resolve = _read_or_build
 
     def watched(directory: Path, digest: str) -> _Distributions:
-        held.append(_locked(tmp_path / f"{_SHARED_BUILD}.lock"))
+        held.append(_held_exclusively(tmp_path / f"{_SHARED_BUILD}.lock"))
         return resolve(directory, digest)
 
     _mock_the_build(monkeypatch)
@@ -1612,10 +1622,10 @@ def test_the_shared_build_is_resolved_under_the_run_wide_lock(
 
     _shared_build_in(tmp_path, _INPUTS)
 
-    assert held == [True], "the read-or-build step must run inside the run-wide lock"
+    assert held == [True], "the read-or-build step must run under an exclusive run-wide lock"
     # The probe says "held" for a reason, not by construction: with the step over,
     # the lock is free again.
-    assert not _locked(tmp_path / f"{_SHARED_BUILD}.lock")
+    assert not _held_exclusively(tmp_path / f"{_SHARED_BUILD}.lock")
 
 
 def test_a_serial_runs_basetemp_is_already_its_run_root(tmp_path: Path) -> None:
