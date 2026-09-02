@@ -2640,6 +2640,76 @@ async def test_beliefs_listed_by_episodic_kind_carry_the_episodic_arm(
     assert "ep-2" in rendered, "and the unstamped episode is listed beside it, unchanged"
 
 
+def test_an_episodes_two_lines_are_two_lines(output: StringIO) -> None:
+    """#1890: the break inside a captured turn is a break, not ``\ufffd``.
+
+    ``_exchange_of`` writes an episode as "The user asked: …" and "The assistant's
+    plan: …" separated by a newline, and this row rendered that newline as the
+    replacement character — :func:`~ai_assistant.interfaces.cli._safe` replaces it by
+    default, which is #1336's fix reaching a value it was never aimed at. The content
+    is the one field of the row printed as a block of its own, which is the carve-out
+    :func:`~ai_assistant.interfaces.cli._safe_prose` exists for.
+
+    Read off the **raw** buffer rather than through ``_flat``, because the line
+    structure is the whole subject and flattening it would assert nothing.
+    """
+    cli._render_belief_summary(
+        _summary(
+            BeliefBand.DERIVED,
+            kind=MemoryKind.EPISODIC,
+            content="The user asked: where is the office?\nThe assistant's plan: answer directly.",
+        )
+    )
+    rendered = output.getvalue()
+
+    assert "\ufffd" not in rendered
+    assert "  The user asked: where is the office?\n" in rendered
+    assert "  The assistant's plan: answer directly.\n" in rendered, (
+        "and the second line carries the row's own indent, so it is not read as a new record"
+    )
+
+
+def test_a_carriage_return_in_a_records_content_is_a_break_and_not_a_scribble(
+    output: StringIO,
+) -> None:
+    """The ``\r`` half of the same fix, settled the way #1336 settled it.
+
+    A carriage return *is* a character this terminal acts on — it returns the cursor
+    to column zero, so what follows overwrites what came before, which is ADR-0042
+    §4's threat in its purest form. Replacing it would leave the half-fixed rendering
+    #1336 records; normalising ``\r\n`` and a lone ``\r`` to ``\n`` removes the
+    character that overwrites *and* yields the break the producer meant.
+    """
+    cli._render_belief_summary(
+        _summary(BeliefBand.DERIVED, kind=MemoryKind.EPISODIC, content="first\r\nsecond\rthird")
+    )
+    rendered = output.getvalue()
+
+    assert "\r" not in rendered
+    assert "\ufffd" not in rendered
+    assert "  first\n  second\n  third\n" in rendered
+
+
+def test_markup_split_across_a_break_in_a_records_content_is_still_escaped(
+    output: StringIO,
+) -> None:
+    """The break is content; Rich markup is still neutralised (ADR-0042 §4).
+
+    Rich's tag pattern matches across a newline, so ``[red\nbold]`` survives per-line
+    escaping intact and is then consumed as markup — a value that reaches the screen
+    *emptied* of what it said. The escape is therefore taken over the whole value and
+    the split comes after it, which this case is what proves: both halves of the tag
+    are still on the screen and neither was interpreted.
+    """
+    cli._render_belief_summary(
+        _summary(BeliefBand.DERIVED, kind=MemoryKind.EPISODIC, content="[red\nbold] hello")
+    )
+    rendered = output.getvalue()
+
+    assert "[red" in rendered
+    assert "bold] hello" in rendered
+
+
 def test_render_beliefs_reports_an_empty_page_plainly(output: StringIO) -> None:
     """Nothing matching is said, not shown as an empty success."""
     cli._render_beliefs((), limit=50, offset=0)

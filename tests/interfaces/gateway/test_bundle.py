@@ -4158,6 +4158,26 @@ def test_the_two_surfaces_explain_an_episode_in_the_same_words() -> None:
     assert browser == terminal[0].upper() + terminal[1:]
 
 
+def test_the_browser_renders_a_records_own_line_breaks_in_its_content() -> None:
+    """#1890's other surface, verified rather than assumed.
+
+    A captured episode's content is two lines — "The user asked: …" and "The
+    assistant's plan: …" — and the terminal was replacing the break between them with
+    ``\ufffd``. This page never had that fault, and the two facts that make it so are
+    both in the shipped bytes, so they are pinned here rather than restated as a drive
+    (ADR-0216 §2: "a property decidable by reading the shipped bytes is asserted in the
+    text layer"). The content is inserted as ``textContent``, which carries a newline
+    verbatim, into the one class whose rule keeps it — the same ``pre-wrap`` the
+    composed answer needs, for the same reason.
+    """
+    functions = _functions(_code("app.js"))
+    styles = _asset("app.css")
+
+    assert 'line(item, belief.content, "reply");' in functions["renderBeliefFields"]
+    assert "p.textContent = text;" in functions["line"], "inserted as text, never as markup"
+    assert ".reply {\n  white-space: pre-wrap;" in styles
+
+
 def test_the_browser_leaves_an_unstamped_episode_exactly_where_it_was() -> None:
     """The byte-identity half of ADR-0223 §10's eighth test, on this surface.
 
