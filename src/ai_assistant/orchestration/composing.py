@@ -1510,6 +1510,29 @@ def _render_record(record: MemoryRecord) -> str:
     what a connected source reported") and leaves the authorship to the stance
     clause. ADR-0098 §2's fourth clause leaves this wording to the assembler.
 
+    **And an episode gets a third arm, because both belief phrases are wrong for it
+    in opposite directions** (ADR-0223 §4). A captured episode is ``OBSERVED``, which
+    ``band_of`` places in ``DERIVED``, so a stamped one would otherwise fall into the
+    arm above. But an episode's warrant is not a derivation at all: ADR-0074 §4 makes
+    it "the terminal citation: the thing other records cite", its ``evidence`` is
+    empty by decision, and its warrant is that it happened and was recorded as it
+    happened. There is nothing for it to *rest on*, so predicating the mark of its
+    warrant asserts a derivation the record does not have — and attributing its
+    content to a source would be the ``ATTESTED`` inflation the paragraph above
+    forbids, one record shape over. What the mark actually records about an episode
+    is a fact about the **occasion**: external material was on the desk while this
+    exchange was conducted. So the phrase keeps the authorship where ADR-0074 §4 puts
+    it, adds the mixed-origin fact, and predicates nothing of the warrant. It
+    attributes no part of the episode's content to a connected source and states no
+    external warrant, which are §4's two prohibitions, and it states the fact §4
+    requires. The unstamped episodic bullet is unchanged, byte for byte.
+
+    **The ``ATTESTED`` arm is deliberately left alone.** Capture writes ``OBSERVED``
+    and no other producer makes an episode, so an ``ATTESTED`` episode is not a
+    record this system can produce; ADR-0223 §4 rules the *stamped* episode, which is
+    exactly the second arm, and widening the split into a band this path cannot reach
+    would be this module deciding a case no ADR has.
+
     **A belief states the standing it is held with** (ADR-0072 §6): a derived belief
     reaching a prompt is rendered as a belief, carrying its band and its confidence,
     "never as a bare fact indistinguishable from what the user stated".
@@ -1535,7 +1558,14 @@ def _render_record(record: MemoryRecord) -> str:
     if band is BeliefBand.ATTESTED:
         origin = "reported by a connected source"
     elif rests_on_recorded_external_content(provenance):
-        origin = "resting on what a connected source reported"
+        # ADR-0223 §4: the record shape decides which of the two tainted phrases is
+        # true, and an episode takes neither belief phrase. Read off `isinstance`,
+        # which is what this function already asks of the same record below.
+        origin = (
+            "recorded by this system, over material that included a connected source's report"
+            if isinstance(record, EpisodicMemory)
+            else "resting on what a connected source reported"
+        )
     else:
         origin = "recorded by this system"
     standing = f"{band.value}, confidence {provenance.confidence:.2f}, {origin}"

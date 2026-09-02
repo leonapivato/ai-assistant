@@ -1486,6 +1486,17 @@ class _Parked:
     record as typed. :data:`Modality.TEXT` on a recovered entry, whose ``turn`` is
     ``None``: §5's third case, and true of what that episode holds rather than a
     fallback, because it renders no user material at all.
+
+    ``derived_from_external`` is retained for a third time by the same argument
+    (ADR-0223 §3's second case, "ADR-0204 §2's fourth clause applied to a third
+    field, for that clause's own reason"). It is the parking turn's own disjunction
+    over the supply *that* turn ran over, and the resolution's episode renders that
+    turn's goal statement and plan rationale — so recomputing it at the second
+    capture would evaluate the empty supply of a pass that retrieves nothing and
+    answer ``False`` about a rendering the parked turn's supply produced. ``False``
+    on a recovered entry, whose ``turn`` is ``None``: §3's third case, true of an
+    episode that renders no turn's material at all rather than a default it falls
+    back on.
     """
 
     turn: TurnResult | None
@@ -1494,6 +1505,7 @@ class _Parked:
     confirmation_id: str | None
     supplied_withheld: bool = False
     modality: Modality = Modality.TEXT
+    derived_from_external: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -6967,6 +6979,21 @@ class Engine:
         # Nothing is inferred and nothing is asked; this method is told which
         # operation it is running under, exactly as it is for the delivery.
         modality = Modality.TEXT if spoken is None else Modality.SPEECH
+        # ADR-0223 §2, hoisted here beside `withheld` and `modality` for their reason
+        # and read once: this pass's own disjunction of
+        # `rests_on_recorded_external_content` over the selection it actually made.
+        # ADR-0181 §2, §4 already put computing it on this component — `turn.memories`
+        # **is** that selection, carried on the turn as data `LearningLoop.respond`
+        # assembled (the conversation's recent turns, then the relevance-retrieved
+        # beliefs, then the episodic supplement), so one argument here is already the
+        # disjunction over every selection that fed this pass. Computed **before
+        # anything is driven** and above the branch, so the no-step branch below
+        # stamps it too — the branch a threading from the old call site, which sat
+        # inside the branch that has a step, would have lost. One computation, two
+        # consumers: the episode's stamp and the `SelectionOrigin` the runner is
+        # given, which makes them the same boolean rather than two that agree.
+        origin = SelectionOrigin.over(turn.memories)
+        external = origin.planned_with_external_content
         self._check_plan_is_for_goal(turn)
         if not turn.plan.steps:
             # A no-action decision is still a decision, and drives nothing that
@@ -6983,6 +7010,10 @@ class Engine:
                 composed=composed,
                 supplied_withheld=withheld,
                 modality=modality,
+                # ADR-0223 §3's first case on the branch §2 exists for: the pass
+                # produced the turn this episode renders, so the value is that turn's
+                # own — the same one an otherwise identical pass with a step stamps.
+                derived_from_external=external,
                 spoken=spoken,
             )
         first = turn.plan.steps[0]
@@ -6998,17 +7029,12 @@ class Engine:
             await self._plans.save_goal(turn.goal)
             await self._plans.save_plan(turn.plan)
             state = await self._plans.start_execution(turn.plan.id)
-            # ADR-0181 §2, §4: the origin the authoriser evaluates, computed here
-            # from the selection this system actually made rather than read off
-            # anything the planner emitted. ``turn.memories`` **is** that selection,
-            # carried on the turn as data: ``LearningLoop.respond`` assembles it as
-            # the conversation's recent turns, then the relevance-retrieved beliefs,
-            # then the episodic supplement — three reads — and hands exactly it to
-            # the planner. So one argument here is already the disjunction over
-            # every selection that fed this step (§4's third clause), and a lane
-            # adding a second model call over a second selection adds an argument
-            # rather than replacing this one.
-            origin = SelectionOrigin.over(turn.memories)
+            # ADR-0181 §2, §4: the origin the authoriser evaluates — the value
+            # hoisted above, handed on rather than recomputed here. Until ADR-0223 §2
+            # it was computed at this line, inside the branch that has a step to
+            # drive; a lane adding a second model call over a second selection adds
+            # an argument to that one call (§4's third clause) rather than replacing
+            # it or reinstating a second one here.
             disposition = await self._runner.run(state, first.id, timeout=timeout, origin=origin)
             step = self._step_outcome(
                 turn,
@@ -7017,6 +7043,7 @@ class Engine:
                 handle=handle,
                 supplied_withheld=withheld,
                 modality=modality,
+                derived_from_external=external,
             )
         finally:
             # The reservation held the slot across the awaits. It is now either in
@@ -7048,6 +7075,10 @@ class Engine:
             composed=composed,
             supplied_withheld=withheld,
             modality=modality,
+            # ADR-0223 §3's first case: this pass's own value, carried unchanged from
+            # the one computation above — the same boolean the runner's
+            # ``SelectionOrigin`` carried to the egress seam on this very pass.
+            derived_from_external=external,
             spoken=spoken,
         )
 
@@ -7546,6 +7577,14 @@ class Engine:
             # where the pass that *parked* was spoken — the modality belongs to the
             # material the episode renders, and this one renders none.
             modality=Modality.TEXT,
+            # ADR-0223 §3's third case, at the same site and over ADR-0204 §2's own
+            # partition: the pass that parked was **routed**, so it reached no
+            # retrieval and no planner and selected nothing for the predicate to find,
+            # and this pass retrieves nothing of its own. There is no turn to retain a
+            # value from, so `False` is a fact about what this episode holds rather
+            # than a default it falls back on — stated in code exactly as
+            # `origin.NOTHING_EXTERNAL` has a caller state it.
+            derived_from_external=False,
         )
 
     async def _finish_route(
@@ -7586,6 +7625,15 @@ class Engine:
             # supply for the predicate to find and nothing in the episode for a
             # stamp to be about (ADR-0204 §2's fifth clause).
             supplied_withheld=False,
+            # ADR-0223 §3's third case, and the one site where its partition
+            # **differs from ADR-0221 §5's deliberately**. `modality` above is this
+            # pass's own, because a routed pass does have user material — the
+            # utterance it threads to the capture point. This field is not about the
+            # user material: it is about *the supply the turn ran over*, which is what
+            # `supplied_withheld` is about, and a routed pass has none. So the routed
+            # pass sits in the third case here and in the first case there, and the
+            # two partitions are not one table.
+            derived_from_external=False,
         )
 
     async def _composed_routed_whole(
@@ -8258,9 +8306,18 @@ class Engine:
             # retained `TEXT`, which is §5's third case and true of an episode that
             # renders no user material at all.
             modality=parked.modality,
+            # And the parking turn's origin mark, on ADR-0223 §3's second case, which
+            # is ADR-0204 §2's fourth clause applied to a third field for that
+            # clause's own reason. Recomputing it here would evaluate the empty supply
+            # of a pass that retrieves nothing and answer `False` about a rendering
+            # the parked turn's supply produced — the laundering ADR-0181 §4 forbids,
+            # arrived at through a park instead of a re-plan. A recovered park
+            # retained `False`, which is §3's third case and true of an episode that
+            # renders no turn's goal statement and no turn's plan rationale.
+            derived_from_external=parked.derived_from_external,
         )
 
-    async def _capture(  # noqa: PLR0913 — the capture point's five inputs plus the parked binding, the routed account, the utterance a routed pass has no turn to carry, the turn's disclosure evaluation and its spoken capture; every one is a distinct fact about the pass
+    async def _capture(  # noqa: PLR0913 — the capture point's five inputs plus the parked binding, the routed account, the utterance a routed pass has no turn to carry, the turn's disclosure evaluation, its origin mark and its spoken capture; every one is a distinct fact about the pass
         self,
         conversation_id: str,
         *,
@@ -8270,6 +8327,7 @@ class Engine:
         composed: ComposedReply | None,
         supplied_withheld: bool,
         modality: Modality,
+        derived_from_external: bool,
         parked: ParkedBinding | None = None,
         routed: RoutedOperation | None = None,
         utterance: str | None = None,
@@ -8354,6 +8412,20 @@ class Engine:
         value the park retained, and :meth:`_compose_and_capture_routed` with
         ``TEXT`` — and a required parameter is what makes a site that has not thought
         about it fail to compile rather than silently record ``TEXT``.
+
+        **``derived_from_external`` is passed at every call site too, and this method
+        neither computes nor defaults it either** (ADR-0223 §1) — a third field with
+        the shape ``supplied_withheld`` and ``modality`` already have, and for a
+        reason of its own: the value is the disjunction of
+        ``rests_on_recorded_external_content`` over *the supply the turn ran over*,
+        which only the pass that made the selection holds. §3's partition is
+        **ADR-0204 §2's and not ADR-0221 §5's**, and the two differ on one site:
+        :meth:`_finish_route` passes this pass's ``modality`` and ``False`` here,
+        because a routed pass does have user material and does not have a supply. The
+        other sites are the same three — :meth:`_run_turn` from the single computation
+        it hoists above its branch, :meth:`_capture_resumption` from the value the
+        park retained, and :meth:`_compose_and_capture_routed` with ``False``, which
+        is true of an episode rendering no turn rather than a fallback.
         """
         report = await self._conversations.capture(
             conversation_id,
@@ -8369,6 +8441,7 @@ class Engine:
             parked=parked,
             supplied_withheld=supplied_withheld,
             modality=modality,
+            derived_from_external=derived_from_external,
             delivery=None if spoken is None else spoken.delivery,
         )
         if spoken is not None:
@@ -8541,7 +8614,7 @@ class Engine:
         page_argument(offset, name="offset")
         check_arguments(method, max_bytes=self._max_payload_bytes, limit=limit, offset=offset)
 
-    def _step_outcome(  # noqa: PLR0913 — the turn, the raw disposition, the step it names, the pre-minted handle, and the two values a park retains for its resolution's capture; every one is a distinct fact about the pass
+    def _step_outcome(  # noqa: PLR0913 — the turn, the raw disposition, the step it names, the pre-minted handle, and the three values a park retains for its resolution's capture; every one is a distinct fact about the pass
         self,
         turn: TurnResult | None,
         disposition: StepDisposition,
@@ -8550,6 +8623,7 @@ class Engine:
         handle: str | None,
         supplied_withheld: bool = False,
         modality: Modality = Modality.TEXT,
+        derived_from_external: bool = False,
     ) -> StepOutcome:
         """Wrap a raw stage disposition, enriching a parked step (ADR-0042 §4).
 
@@ -8569,6 +8643,12 @@ class Engine:
         second case): it is this turn's own value, bound for the parked entry so the
         resolution stamps the material *this* turn supplied rather than recomputing
         one from a pass that has no user material of its own.
+
+        ``derived_from_external`` is the third, on ADR-0223 §3's second case: this
+        turn's own disjunction over the supply it ran over — the very value its own
+        ``SelectionOrigin`` carried to the egress seam on this pass (§2) — bound for
+        the parked entry so the resolution stamps that turn's answer rather than
+        recomputing one over a supply that has moved on.
         """
         confirmation: Confirmation | None = None
         if disposition.disposition is Disposition.AWAITING_CONFIRMATION:
@@ -8588,6 +8668,7 @@ class Engine:
                 handle,
                 supplied_withheld=supplied_withheld,
                 modality=modality,
+                derived_from_external=derived_from_external,
             )
         return StepOutcome(
             disposition=disposition.disposition,
@@ -8597,7 +8678,7 @@ class Engine:
             confirmation=confirmation,
         )
 
-    def _confirmation(
+    def _confirmation(  # noqa: PLR0913 — the turn, the raw disposition, the pre-minted handle, and the three values the parked entry retains for its resolution's capture; every one is a distinct fact about the pass
         self,
         turn: TurnResult,
         disposition: StepDisposition,
@@ -8605,6 +8686,7 @@ class Engine:
         *,
         supplied_withheld: bool = False,
         modality: Modality = Modality.TEXT,
+        derived_from_external: bool = False,
     ) -> Confirmation:
         """Assemble the confirmation content around a pre-minted token (ADR-0042 §4).
 
@@ -8635,9 +8717,12 @@ class Engine:
             # to so the resolution's capture stamps that turn's value rather than
             # recomputing one from a pass that retrieves nothing (ADR-0204 §2) — and
             # its own modality beside it, retained for ADR-0221 §5's second case,
-            # which is that clause applied to a second field.
+            # which is that clause applied to a second field, and its own origin mark
+            # beside both, retained for ADR-0223 §3's second case, which is that same
+            # clause applied to a third.
             supplied_withheld=supplied_withheld,
             modality=modality,
+            derived_from_external=derived_from_external,
         )
         return Confirmation(
             tool_id=recorded.tool.id,
