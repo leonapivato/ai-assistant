@@ -408,12 +408,12 @@ a lane that wants it needs the ADR that decides it.
 > implementation short-circuits a forget on an absent memory record.
 
 > **Normative.** A **conversation-scoped** destruction performs its archive discard
-> inside ADR-0074 §8's reclaim, which is idempotent and re-runs — in the deleting
-> call, at engine start, and later on the hub's schedule. §8's step 3 gains a third
-> conjunct: the index and the record are dropped once step 2 has nothing left that
-> resolves, **and the archive holds no entry for that conversation**, and the grace
-> has passed. A failed archive discard therefore keeps the tombstone alive to be
-> re-run rather than stranding a transcript behind a dropped index.
+> as the **first action of ADR-0074 §8's step 2**, before any episode is deleted. A
+> discard that raises aborts the call there, and **no clause of §8 changes**: every
+> episode the index names still resolves, so step 3's own condition is unmet by §8's
+> own terms, the tombstone survives, and §8's reclaim re-runs the whole of step 2 —
+> discard included — in the deleting call, at engine start, and later on the hub's
+> schedule.
 
 > **Normative.** A **subject erasure** cascades by an enumerate-then-erase-then-
 > discard sequence, because ADR-0101 §1 gives `delete_about` the shape
@@ -476,6 +476,14 @@ way leaves retained text after a deletion the user was told succeeded, and that 
 the one residue ADR-0004 §6 cannot tolerate. This is ADR-0074 §8's own third
 mitigation — *"the residue is visible and destroyable, not invisible"* — used as a
 design rule rather than as a consolation.
+
+**An index dropped over a live archive is the design and not a leak, which is worth
+saying before it is mistaken for one.** ADR-0074 §7's reclaim drops an emptied
+conversation's index and record on the horizon, and after this ADR the transcript
+stays — that is precisely what "expiry evicts" means, and it is the steady state
+rather than an anomaly. What follows from it is the paragraph below: the archive's
+conversation-scoped destroy has to work without the index, because most of the time
+there will not be one.
 
 **The archive's own destroy is what closes the hole the reclaim would otherwise
 open.** ADR-0074 §7 reclaims a conversation's index and record once it has no live
@@ -1158,10 +1166,15 @@ address, and it is discharged.
     archive discard raises leaves the memory record present and reports the
     failure; a second forget at the same id destroys the entry although the store
     now holds no live record for it. A conversation-scoped delete whose archive
-    discard raises does not drop the index or the record, and the reclaim run again
-    finishes it. Neither path ever leaves a transcript reachable behind a dropped
-    index.
-15. **No archive text in a log or a trace**, on the capture path and on every
+    discard raises deletes no episode, does not drop the index or the record, and is
+    finished by the reclaim run again. And a conversation reclaimed on the horizon
+    — index and record gone, transcript kept — still yields to the archive's own
+    conversation-scoped destroy.
+15. **The disposition boundary.** A `TranscriptEntry` built with an omitted or
+    `None` disposition fails validation; and a `ConversationLifecycle.capture` call
+    supplying no disposition writes **no** archive entry, rather than coercing one
+    to a member and archiving an exchange this system did not drive.
+16. **No archive text in a log or a trace**, on the capture path and on every
     failure path (ADR-0004 §5).
 
 ### 14. What the implementing lanes owe
@@ -1272,14 +1285,21 @@ this ADR gives no reclaimed id back its ability to be continued, appended to, or
 retrieved from.
 
 **ADR-0074 §8 is extended in application and unchanged in text, and the extension
-is named rather than slipped in.** §2 adds one write inside its capture sequence;
-§5 adds one destroy inside its compensation, one destroy inside its reclaim, and a
-third conjunct to its step 3 — the archive holds no entry for the conversation.
-Every clause §8 states about the two stores it knew binds unchanged, and a reader
-running its protocol over those two stores runs it exactly as written; what is added
-is a step and a condition over a store §8 did not have, which is what "extended in
-application" means here. Its accepted window is inherited, restated, and honestly
-described as widened in content rather than in reach.
+was deliberately shaped so that it is.** §2 adds one write inside its capture
+sequence; §5 adds one destroy inside its compensation and one at the head of its
+step 2. No condition §8 states is altered, and in particular **step 3's completion
+condition is untouched**: a failed archive discard leaves every episode the index
+names still resolving, so §8's own condition already withholds the drop, and no
+third conjunct is added to it.
+
+An earlier draft of §5 *did* add that conjunct, and the third review round was right
+that it would have been a partial supersession under ADR-0070 §1 rather than an
+extension — a reader of §8 would have dropped the record where this ADR required
+them not to. Putting the discard at the head of step 2 instead of the foot of step 3
+reaches the same guarantee through §8's existing text, which is the better fix and is
+recorded here because "we nearly amended §8 by accident" is the kind of thing a later
+reader should be able to see. §8's accepted window is inherited, restated, and
+honestly described as widened in content rather than in reach.
 
 **ADR-0004 §7's "prefer references over copies where practical" is not satisfied and
 this ADR says so.** A reference would be a pointer to a record that will not exist,
