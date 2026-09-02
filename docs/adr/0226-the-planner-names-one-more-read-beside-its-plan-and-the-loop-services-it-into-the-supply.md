@@ -877,9 +877,11 @@ by making the planner ask twice.
 
 > **Normative.** **The only identifier the record carries is the ambient correlation
 > identifier**, ADR-0119 §4's, which `core/correlation.py` mints and which *"cannot be
-> supplied"*, and which `core/logging.py`'s `merge_contextvars` already puts on every
-> event. It carries **no plan identifier, no goal identifier and no record
-> identifier** — no value whose provenance is a caller's rather than this system's.
+> supplied"*. The emitter **reads it with `current_correlation()` and attaches it under
+> a fixed field on the event**; where it is `None` the field says the turn ran outside
+> a correlated operation and the record is emitted regardless. It carries **no plan
+> identifier, no goal identifier and no record identifier** — no value whose provenance
+> is a caller's rather than this system's.
 
 > **Normative.** The record is emitted **once per turn**, at any point in the turn
 > after the servicing decision is known, and its emission is conditioned on nothing:
@@ -952,6 +954,15 @@ carries no plan identifier at all. Joinability was never the pointer's job — t
 correlation id is on this event and on every other line of the same turn — and what is
 genuinely lost is the hop from an audit event to the plan's ask text, which §12 defers
 along with the durable surface that would make such a join worth building.
+
+**The correlation id is attached explicitly rather than inherited, and that is a fact
+about the tree rather than a belt-and-braces choice.** `core/logging.py` configures
+`structlog.contextvars.merge_contextvars`, and `core/correlation.py` keeps the id in
+its **own** `ContextVar` — nothing binds one into the other. So an emitter that merely
+logged and expected the id to arrive would emit an event with no correlation field at
+all, and the audit's only identifier would be silently absent. Reading
+`current_correlation()` at the emitter is one line and is what the clause requires;
+ADR-0119 §4's carrier stays exactly where it is and gains nothing.
 
 **Emitting unconditionally is what keeps the denominator honest.** A record gated on
 the plan being persisted, or on the turn completing, would silently drop exactly the
@@ -1112,9 +1123,11 @@ are absent in that window because the events they describe have not happened.
    that exhausts the budget leaves the query no slots and does not fail.
 8. **The audit records a fired, a non-fired and a declined turn**, with the counts §9
    names; it copies no text, so neither a distinctive span of a returned record nor
-   the planner's query string appears anywhere in it; and the ask it points at is
-   readable on the plan. Asserted at the emitting seam through a capturing processor,
-   so the test is about the code's obligation and not about a configured level.
+   the planner's query string appears anywhere in it; it carries **no pointer to the
+   plan** and no identifier but the correlation id; and that correlation id is present
+   on the event and equal to the turn's. Asserted at the emitting seam through a
+   capturing processor, so the test is about the code's obligation and not about a
+   configured level.
 9. **The audit carries no identifier a caller supplied.** A turn whose `Planner`
    returns a plan whose id is an address-shaped string emits a record in which that
    string appears nowhere — no plan id, no goal id, no record id — and the ambient
@@ -1574,8 +1587,10 @@ lane tempted by it on some later channel should find the refusal recorded here.
 **Retain the planner's query text in the audit.** Refused in §9. Nothing bounds what
 a planner may put in a query — it reads the rendered supply — so the clause retaining
 the query and the clause forbidding record content would contradict each other on the
-same bytes, and ADR-0004 §7 would be breached by a second retained copy. The audit
-points at the plan that already holds the ask.
+same bytes, and ADR-0004 §7 would be breached by a second retained copy. The ask stays
+on the frozen plan, which the planning store already keeps, and the audit neither
+copies it nor points at it — a pointer would have to be `ActionPlan.id`, whose
+provenance §9 shows cannot be established.
 
 **Let the implementing lane choose the cross-kind fill order.** Refused in §6. Under
 one shared budget the order decides which records reach the prompt, and ADR-0158
