@@ -505,21 +505,26 @@ class TranscriptArchiveContract:
         assert found["c1:1"] == "the lender was Ravensworth"
         assert found["c2:1"] == "was it Ravensworth"
 
-    async def test_the_users_half_wins_where_both_halves_match(
+    async def test_a_two_sided_match_excerpts_one_of_the_halves_and_not_both(
         self, archive: TranscriptArchive
     ) -> None:
-        """The tie, decided the same way by every conforming implementation.
+        """**Which** half is the lane's; that it is one of them is not (§7).
 
-        §7 leaves *which window* of the matching text an excerpt is taken from to the
-        lane; it does not leave two implementations free to answer a two-sided match
-        with different halves, which would be the divergence §7 names the predicate to
-        prevent, one level up.
+        §7 says "which window of the entry the excerpt is taken from is the
+        implementing lane's", and where both halves match, either is matching text —
+        so a suite naming one would narrow the seam past what the ADR ratified, which
+        takes an ADR rather than a test. What §7 does fix is the bound and the
+        never-both clause, and those are what this asserts: the excerpt is one half's
+        text, not the two run together.
+
+        Each implementation records its own choice in its own module.
         """
         await self.store(archive, entry(asked="Ravensworth asked", replied="Ravensworth said"))
 
         hit = (await archive.search("Ravensworth"))[0]
 
-        assert hit.excerpt == "Ravensworth asked"
+        assert hit.excerpt in {"Ravensworth asked", "Ravensworth said"}
+        assert hit.elided is False
 
     async def test_a_query_spanning_the_two_halves_matches_nothing(
         self, archive: TranscriptArchive

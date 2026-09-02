@@ -22,7 +22,7 @@ suite is what keeps the two spellings answering the same way, over the cases §7
 from __future__ import annotations
 
 import unicodedata
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
@@ -36,7 +36,6 @@ from ai_assistant.core.types import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-    from datetime import timedelta
 
     from ai_assistant.core.clock import Clock
 
@@ -48,6 +47,24 @@ _PAGE_BOUND = 2**63
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+#: One past the largest microsecond key a horizon may be clamped to, mirroring the
+#: durable store's bind range so the two agree at the edge as well as in the middle.
+_MICROS_BOUND = 2**63
+
+
+def _to_micros(instant: datetime) -> int:
+    """Return ``instant`` as whole microseconds since the epoch, by integer arithmetic."""
+    delta = instant - _EPOCH
+    return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
+
+
+def _span_micros(span: timedelta) -> int:
+    """Return ``span`` as whole microseconds."""
+    return (span.days * 86_400 + span.seconds) * 1_000_000 + span.microseconds
 
 
 def _folded(text: str) -> str:
@@ -336,8 +353,15 @@ class FakeTranscriptArchive:
             reading = self._clock()
         except ClockReadingError as exc:
             raise TranscriptArchiveError(str(exc)) from exc
-        floor = reading - self._retention
-        return [row for row in rows if row.occurred_at >= floor]
+        # In microseconds rather than as `reading - self._retention`, for the durable
+        # store's reason and to the same edge: `datetime` subtraction raises
+        # `OverflowError` for a reading close enough to `datetime.min`, and
+        # `checked_clock` admits such a reading — it refuses a naive or indeterminate
+        # one, not an early one. A fake that crashed where the store answered would
+        # be the divergence the shared suite exists to prevent, arriving through the
+        # one path the suite's own fixed clock cannot reach.
+        floor = max(_to_micros(reading) - _span_micros(self._retention), -_MICROS_BOUND)
+        return [row for row in rows if _to_micros(row.occurred_at) >= floor]
 
     @staticmethod
     def _newest_first(rows: list[TranscriptEntry]) -> list[TranscriptEntry]:

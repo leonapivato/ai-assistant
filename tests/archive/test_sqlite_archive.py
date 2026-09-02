@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 import stat
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -30,8 +31,6 @@ from ai_assistant.archive import SqliteTranscriptArchive
 from ai_assistant.core.errors import TranscriptArchiveError
 
 if TYPE_CHECKING:
-    from datetime import timedelta
-
     from ai_assistant.core.protocols import TranscriptArchive, TranscriptArchiveWriter
     from ai_assistant.core.types import TranscriptEntry
 
@@ -407,3 +406,67 @@ def _names_in(directory: Path) -> set[str]:
     ``tests/memory/test_sqlite_conversation_store.py`` established.
     """
     return {each.name for each in directory.iterdir()}
+
+
+# --- this implementation's own choices, where ADR-0225 leaves one ----------
+
+
+async def test_the_users_half_is_this_stores_choice_on_a_two_sided_match(
+    tmp_path: Path,
+) -> None:
+    """ADR-0225 §7 leaves the window to the lane; this records what this lane picked.
+
+    Deliberately **not** in the shared suite: §7 says "which window of the entry the
+    excerpt is taken from is the implementing lane's", and where both halves match
+    either is matching text — so a shared assertion would narrow the seam past what
+    the ADR ratified, which takes an ADR rather than a test. The suite asserts what
+    §7 does fix (one half, bounded, never both run together); this asserts what this
+    store does with the freedom left over.
+
+    ``asked`` wins, so a two-sided hit reads as what the *user* said.
+    """
+    archive = _at_now(path=tmp_path / "transcripts.db")
+    try:
+        await archive.append(entry(asked="Ravensworth asked", replied="Ravensworth said"))
+
+        hit = (await archive.search("Ravensworth"))[0]
+
+        assert hit.excerpt == "Ravensworth asked"
+    finally:
+        archive.close()
+
+
+# --- the horizon is total over every clock this seam admits (§6) -----------
+
+
+@pytest.mark.parametrize(
+    "retention", [timedelta(days=4), timedelta.max], ids=["past-the-calendar", "unrepresentable"]
+)
+async def test_a_horizon_before_the_calendar_answers_rather_than_raising(
+    tmp_path: Path, retention: timedelta
+) -> None:
+    """A reading near ``datetime.min`` must not take all four reads down with it.
+
+    ``checked_clock`` refuses a *naive* or *indeterminate* reading, not an early one,
+    so ``datetime.min + 1 day`` reaches this store — and subtracting a retention from
+    it raises ``OverflowError`` out of ``datetime`` rather than anything this seam
+    documents. ``timedelta.max`` is the other end of the same edge: it puts the floor
+    below the signed 64-bit range a SQLite bind takes, whatever the reading.
+
+    Both answer the same way, and it is the right answer: a horizon no stored instant
+    can precede hides nothing.
+    """
+    early = datetime.min.replace(tzinfo=UTC) + timedelta(days=1)
+    archive = SqliteTranscriptArchive(
+        path=tmp_path / "transcripts.db", retention=retention, now=lambda: early
+    )
+    try:
+        await archive.append(entry(at=early, asked="Ravensworth"))
+
+        assert [one.address for one in await archive.entries()] == ["c1:1"]
+        assert [one.address for one in await archive.conversation("c1")] == ["c1:1"]
+        assert await archive.entry("c1:1") is not None
+        assert [hit.address for hit in await archive.search("Ravensworth")] == ["c1:1"]
+        assert (await archive.size()).entries == 1
+    finally:
+        archive.close()
