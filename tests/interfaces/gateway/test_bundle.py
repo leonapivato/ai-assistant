@@ -4184,11 +4184,24 @@ def test_the_browser_renders_a_records_own_line_breaks_in_its_content() -> None:
     composed answer needs, for the same reason.
     """
     functions = _functions(_code("app.js"))
+    fields = functions["renderBeliefFields"]
     styles = _asset("app.css")
 
-    assert 'line(item, belief.content, "reply");' in functions["renderBeliefFields"]
+    assert 'line(item, belief.content, "reply");' in fields
     assert "p.textContent = text;" in functions["line"], "inserted as text, never as markup"
     assert ".reply {\n  white-space: pre-wrap;" in styles
+
+    # And the terminal's hazard does not arrive here. A break kept in a line the
+    # adapter authored forges a second one (ADR-0042 §4), which is why the CLI puts a
+    # multi-line content behind a gutter. This page never shared the line: the content
+    # is a paragraph of its own in a class the row's own fields do not use, and the
+    # stylesheet gives that class its own size and colour — so a forged "Why:" inside
+    # the content renders in the content's type, not in a field's.
+    assert fields.count('"hint"') == 5, (
+        "the band, the why, last-revised, the window's end and the id are the fields"
+    )
+    assert fields.count('"reply"') == 1, "and the content is the one line that is not a field"
+    assert ".hint {\n  font-size: 0.85rem;\n  color: var(--muted);" in styles
 
 
 def test_the_browser_leaves_an_unstamped_episode_exactly_where_it_was() -> None:
