@@ -6948,38 +6948,89 @@ def _elision_ceiling(elided: int) -> str:
     )
 
 
-def _outside_warrant(rests_on_recorded_external_content: bool) -> str:
-    """That a **derived** belief's warrant came from outside, or nothing (ADR-0189 §4).
+def _outside_warrant(belief: Belief | BeliefSummary) -> str:
+    """That a **derived** row's origin came from outside, or nothing (ADR-0189 §4).
 
     §4's third clause: a surface conveys that a warrant came from outside where the
     band is ``DERIVED`` and the externality answer is ``True``, read from
     ``rests_on_recorded_external_content`` beside ``band``. This is the sentence that
     discharges it, and its two silences are as ruled as its text.
 
-    **It says nothing about the belief's own content, and that prohibition is the
+    **Two arms, because the clause reaches a record whose warrant is not a
+    derivation** (ADR-0223 §5). A captured episode is projected into this listing
+    like anything else — ``assistant beliefs --kind episodic`` is documented as the
+    way to see captured turns — and ADR-0223 §1 stamps
+    ``Provenance.derived_from_external`` on one, so the predicate is now ``True`` of
+    a record the belief sentence is false of in every clause: this system did not
+    work an episode out, there is nothing it worked it out *from* (ADR-0074 §4 makes
+    ``evidence`` empty by decision), and an episode's warrant is that it happened,
+    which is entirely this system's own. §5 rules the fix as a **distinct arm**
+    rather than a suppression: the clause is not narrowed, the projections stay
+    kind-blind, and what changes is only the wording this surface may use.
+
+    The episodic wording satisfies §5's three conditions. It does not attribute the
+    episode's content, or any part of it, to a source outside this system; it does
+    not state that the episode was worked out from an external report; and it does
+    state the fact the mark actually records — that the exchange this record renders
+    was conducted over material that included a record resting on recorded external
+    content. It says *traces back to* rather than *came from* because the mark is a
+    disjunction over :func:`~ai_assistant.core.types.rests_on_recorded_external_content`
+    and not over the band: the material may be this system's own derived sentence
+    whose warrant reaches a source, and a phrase claiming the words themselves were a
+    source's would overclaim on exactly the second-order case ADR-0223 §10's second
+    test exists for.
+
+    **The arm reaches this renderer and not the question or retirement ones**, and
+    that is scope rather than oversight. §5 binds "every surface that renders the
+    belief listing"; a :class:`~ai_assistant.core.types.Question` renders a *proposal*
+    (:func:`_proposal_origin`) and no proposal is ever episodic — an observer "distils
+    evidence, it does not manufacture it" (ADR-0077 §2) — and no episode reaches a
+    deferral at all, because capture writes through ``write_atomic`` and never through
+    ``MemoryWriter.ingest``, so ADR-0106 §6's gate is not on its path (ADR-0223 §8).
+    A lane that ever routes capture through the writer inherits this arm's question
+    with the rest of that section's obligations.
+
+    **Everything else in the row is untouched**, which is the byte-identity §10's
+    eighth test asks for: an unstamped episode renders what it rendered before, the
+    head sentence :func:`_why_derived` computes is not rewritten for either kind, and
+    a kind this enum gains later takes the belief arm rather than a fifth state
+    nobody wrote (the derivation :data:`_DEFAULT_BELIEF_KINDS` makes one seam over).
+
+    **It says nothing about the record's own content, and that prohibition is the
     clause itself.** §4 is explicit that a surface "does **not** present the record's
     own content as third-party text on that ground: the content is a sentence this
     system's model wrote, and ADR-0098 §1 decides externality by the recorded origin
-    of the text." ADR-0098 §7's own round-6 mistake was exactly this reach, so the
-    line names the *warrant* and affirms the words are mine in the same breath.
+    of the text." ADR-0098 §7's own round-6 mistake was exactly this reach, so each
+    arm names the origin of the *occasion* or the *warrant* and affirms the words are
+    mine in the same breath.
 
-    **And it is silent on ``False`` rather than negative.** A ``False`` is *nothing
-    external is recorded in this warrant*, never *nothing external influenced it*
-    (ADR-0098 §5, ADR-0106 §1): the link is unrecoverable once a model's output is
-    recorded truthfully, so a surface printing "nothing outside reached this" would
-    assert what no field on the record holds.
+    **And it is silent on ``False`` rather than negative, on both arms.** A ``False``
+    is *nothing external is recorded in this warrant*, never *nothing external
+    influenced it* (ADR-0098 §5, ADR-0106 §1, ADR-0223 §5's last clause): the link is
+    unrecoverable once a model's output is recorded truthfully, so a surface printing
+    "nothing outside reached this" would assert what no field on the record holds.
+    The silence is taken **before** the kind is looked at, so neither arm can render a
+    ``False`` as an assurance and a third arm could not either.
 
     Args:
-        rests_on_recorded_external_content: The projection's own field, as the engine
-            computed it — never recomputed here from ``band``, which ADR-0189 §2
-            forbids and which would drop the disjunction's second half anyway.
+        belief: The projected row being explained. Both of its fields are read as the
+            engine computed them — the predicate is never recomputed here from
+            ``band``, which ADR-0189 §2 forbids and which would drop the disjunction's
+            second half anyway, and ``kind`` is the projection's own tag rather than
+            anything inferred from the content.
 
     Returns:
         The clause, or the empty string where there is nothing that can honestly be
         said.
     """
-    if not rests_on_recorded_external_content:
+    if not belief.rests_on_recorded_external_content:
         return ""
+    if belief.kind is MemoryKind.EPISODIC:
+        return (
+            " Some of the material this exchange was conducted over traces back to a "
+            "connected source rather than to you — the record above is still my own "
+            "account of what was said."
+        )
     return (
         " Some of what I worked it out from came from a connected source rather than "
         "from you — the belief above is still my own sentence, but its warrant is not "
@@ -7046,7 +7097,7 @@ def _why_derived(belief: Belief | BeliefSummary) -> str:
         )
     else:
         head = f"I worked it out from {belief.evidence_count} piece(s) of evidence."
-    return head + ceiling + _outside_warrant(belief.rests_on_recorded_external_content)
+    return head + ceiling + _outside_warrant(belief)
 
 
 def _why(belief: Belief | BeliefSummary) -> str:

@@ -6473,7 +6473,29 @@ function whyHeld(belief) {
   return whyDerived(belief);
 }
 
-// That a **derived** belief's warrant came from outside, or nothing (ADR-0189 §4).
+// That a **derived** row's origin came from outside, or nothing (ADR-0189 §4).
+//
+// **Two arms, because the clause reaches a record whose warrant is not a derivation**
+// (ADR-0223 §5). A captured episode is listed here like anything else — this page asks
+// for beliefs without a kind filter, so every kind comes back — and ADR-0223 §1 stamps
+// the mark on one, so the predicate is now true of a record the belief sentence is
+// false of in every clause: this system did not work an episode out, there is nothing
+// it worked it out from (ADR-0074 §4 makes its evidence empty by decision), and its
+// warrant is that it happened. §5 rules a distinct arm rather than a suppression: the
+// clause is not narrowed and the projection stays kind-blind.
+//
+// The episodic wording meets §5's three conditions — it attributes no part of the
+// episode's content to a source outside this system, states no derivation from an
+// external report, and does state what the mark records: that the exchange was
+// conducted over material that included a record resting on recorded external content.
+// It says *traces back to* rather than *came from* because the mark is a disjunction
+// over `rests_on_recorded_external_content` and not over the band, so the material may
+// be this system's own derived sentence whose warrant reaches a source.
+//
+// The sibling CLI renders the same two sentences (`_outside_warrant`), because §5's
+// third clause is that every surface rendering the listing renders the arm or none
+// does: "a fact stated on one surface and not on its sibling is a fact a user learns
+// to distrust on both".
 //
 // Read off the projection's own field beside its band, and never recomputed from the
 // band: ADR-0189 §2 forbids that in as many words, and a client re-deriving the
@@ -6489,12 +6511,24 @@ function whyHeld(belief) {
 // recorded in this warrant*, never *nothing external influenced it* (ADR-0098 §5) —
 // the link is unrecoverable once a model's output is recorded truthfully, so a line
 // claiming the negative would assert what no field holds.
-function outsideWarrant(rests) {
-  return rests
-    ? " Some of what I worked it out from came from a connected source rather than " +
-        "from you — the belief above is still my own sentence, but its warrant is " +
-        "not entirely mine."
-    : "";
+function outsideWarrant(belief) {
+  // The silence is taken before the kind is looked at, so neither arm can render a
+  // false as an assurance and a third arm could not either.
+  if (!belief.rests_on_recorded_external_content) {
+    return "";
+  }
+  if (belief.kind === "episodic") {
+    return (
+      " Some of the material this exchange was conducted over traces back to a " +
+      "connected source rather than to you — the record above is still my own " +
+      "account of what was said."
+    );
+  }
+  return (
+    " Some of what I worked it out from came from a connected source rather than " +
+    "from you — the belief above is still my own sentence, but its warrant is " +
+    "not entirely mine."
+  );
 }
 
 function whyDerived(belief) {
@@ -6508,7 +6542,7 @@ function whyDerived(belief) {
   // §4 binds the clause to the band and not to any of the four count states, so a
   // per-branch append would be four chances to forget it — and the belief whose
   // warrant came from outside is the one a user needs told on every one of them.
-  const outside = outsideWarrant(belief.rests_on_recorded_external_content);
+  const outside = outsideWarrant(belief);
   if (belief.evidence_count === 0) {
     return (
       (ceiling
