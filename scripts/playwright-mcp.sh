@@ -93,20 +93,37 @@ version_key() {
 
 if [[ -z "$npx" ]] && ! npx="$(command -v npx)"; then
     # No `npx` on PATH. Look where nvm keeps them, and take the newest.
-    nvm_dir="${NVM_DIR:-$HOME/.nvm}"
+    #
+    # HOME is read as `${HOME:-}` and not `$HOME` (issue #1408). An MCP server is
+    # spawned by the editor's own launcher, and that environment can be very
+    # nearly empty — the same reason this branch exists at all. Under `set -u` a
+    # bare `$HOME` there does not fall through to the guidance below: bash aborts
+    # the script on the spot with `HOME: unbound variable`, so the one message
+    # naming the install commands and PLAYWRIGHT_MCP_NPX was unreachable in
+    # exactly the environment that needed it.
+    #
+    # With neither NVM_DIR nor HOME set there is no directory to search, so the
+    # search is skipped rather than aimed at `/.nvm` — a real path, and one no
+    # caller asked for.
+    nvm_dir="${NVM_DIR:-}"
+    if [[ -z "$nvm_dir" && -n "${HOME:-}" ]]; then
+        nvm_dir="$HOME/.nvm"
+    fi
     npx=""
     best_key=""
-    shopt -s nullglob
-    for candidate in "$nvm_dir"/versions/node/*/bin/npx; do
-        [[ -x "$candidate" ]] || continue
-        candidate_dir="${candidate%/bin/npx}"
-        candidate_key="$(version_key "${candidate_dir##*/}")"
-        if [[ -z "$npx" || "$candidate_key" > "$best_key" ]]; then
-            npx="$candidate"
-            best_key="$candidate_key"
-        fi
-    done
-    shopt -u nullglob
+    if [[ -n "$nvm_dir" ]]; then
+        shopt -s nullglob
+        for candidate in "$nvm_dir"/versions/node/*/bin/npx; do
+            [[ -x "$candidate" ]] || continue
+            candidate_dir="${candidate%/bin/npx}"
+            candidate_key="$(version_key "${candidate_dir##*/}")"
+            if [[ -z "$npx" || "$candidate_key" > "$best_key" ]]; then
+                npx="$candidate"
+                best_key="$candidate_key"
+            fi
+        done
+        shopt -u nullglob
+    fi
 fi
 
 if [[ -z "$npx" || ! -x "$npx" ]]; then
