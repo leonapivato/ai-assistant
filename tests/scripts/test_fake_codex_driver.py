@@ -1,8 +1,10 @@
 """The shared driver's own contract: it diagnoses, and it isolates.
 
 ``_fake_codex.run_review`` is what every module under ``tests/scripts`` drives
-``scripts/codex-review.sh`` through. Two properties of the driver itself — not of
-the script — are pinned here, because issue #1792 turned on both of them.
+``scripts/codex-review.sh`` through. Properties of the driver itself — not of the
+script — are pinned here: the first two because issue #1792 turned on both of
+them, the third because the fix for it put a stub in the round's ``PATH`` whose
+exit status the round then reads (#1825).
 
 **It surfaces the script's own words.** ``subprocess.run(check=True)`` raises a
 ``CalledProcessError`` whose ``str()`` is the command line and the exit status;
@@ -18,6 +20,12 @@ merely its illegibility: ``gh pr view`` forks a detached ``gh send-telemetry``
 child, which inherits the descriptor the round holds its in-flight ``flock`` on,
 so the lock outlived the round and the next round in that repository was refused
 as a concurrent one.
+
+**And the stub fails the way the real one did.** ``codex-review.sh`` records the
+PR description it was taken beside; a ``gh`` that succeeds with an empty body is
+recorded as a snapshot of that empty body, not as no snapshot. The stub's
+``exit 1`` is what keeps a round in this package honest about having no PR to
+ask about.
 """
 
 from __future__ import annotations
@@ -30,21 +38,31 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _fake_codex import ReviewFailed, install_fake_codex, review_env, run_review
+from _fake_codex import (
+    ReviewFailed,
+    install_fake_codex,
+    require_artifact,
+    review_env,
+    run_review,
+)
 from _repo_template import seed_repo
 
 _GIT = shutil.which("git")
 
 
-def _git(repo: Path, *args: str) -> None:
+def _git(repo: Path, *args: str) -> str:
     assert _GIT is not None
-    subprocess.run(  # noqa: S603  # resolved git path, test-controlled repo
+    return subprocess.run(  # noqa: S603  # resolved git path, test-controlled repo
         [_GIT, *args], cwd=repo, check=True, capture_output=True, text=True
-    )
+    ).stdout.strip()
 
 
-def _init_repo(repo: Path) -> None:
-    """A minimal repository on a feature branch, reviewable by the script."""
+def _init_repo(repo: Path) -> str:
+    """A minimal repository on a feature branch, reviewable by the script.
+
+    Returns:
+        The SHA of the feature commit a round reviews.
+    """
     repo.mkdir(parents=True)
     seed_repo(repo)
     (repo / "docs" / "review").mkdir(parents=True)
@@ -57,6 +75,7 @@ def _init_repo(repo: Path) -> None:
     (repo / "f.txt").write_text("two\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "change")
+    return _git(repo, "rev-parse", "HEAD")
 
 
 def test_a_refused_round_raises_with_the_scripts_own_stderr(tmp_path: Path) -> None:
@@ -131,3 +150,37 @@ def test_a_test_installed_gh_outranks_the_stub(tmp_path: Path) -> None:
     resolved = shutil.which("gh", path=review_env(tmp_path)["PATH"])
 
     assert resolved == str(mine)
+
+
+def test_a_round_under_the_stub_alone_records_no_description(tmp_path: Path) -> None:
+    """The stub's ``exit 1`` is a required semantic, pinned where it is observable.
+
+    Issue #1825. The stub stands in for the operator's ``gh``, which had nothing to
+    answer here anyway — the repository under ``tmp_path`` has no remote. What makes
+    *how* it fails load-bearing is what `codex-review.sh` does with a successful
+    read: it hashes the body it got and records that hash as ``pr_desc``. A stub
+    that regressed to ``exit 0`` answers with an **empty** body, whose SHA-1
+    (``da39a3ee…``) is a perfectly well-formed 40-hex name — so every round in this
+    package would start recording a description snapshot for a body no PR has, and
+    `ship` would read that empty snapshot as ADR-0209 §5 text this branch had.
+
+    Nothing else catches that. ``test_the_operators_gh_never_reaches_the_round``
+    asserts only where ``gh`` resolves, and the one test that asserts
+    ``pr_desc=unavailable``
+    (``test_review_artifact.py::test_a_description_that_cannot_be_read_is_recorded_as_unavailable``)
+    installs a failing ``gh`` of its own in ``tmp_path/"bin"``, which outranks the
+    stub — so it would pass over a stub that had stopped failing. This round runs
+    with the shipped stub as the *only* ``gh`` on ``PATH``, which is the default
+    every other module here drives.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+
+    run_review(repo, tmp_path)
+
+    header = require_artifact(repo, sha).read_text().splitlines()[0]
+    assert " pr_desc=unavailable " in header, header
+    # No snapshot either: the field and the directory have to agree, or `ship`
+    # would be reading a body against an artifact that never claimed one.
+    snapshots = repo / ".review" / "descriptions"
+    assert not snapshots.exists() or not any(snapshots.iterdir())
