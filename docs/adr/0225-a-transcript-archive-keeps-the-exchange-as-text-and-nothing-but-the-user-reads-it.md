@@ -213,6 +213,12 @@ make (§11). §15 defers a modality of the entry's own with what fires it.
 > the episode and the archive entry at that address if the conversation is stamped
 > deleted or gone.
 
+> **Normative.** That verification runs whenever **either** write landed, the path
+> on which the episode write failed included. Today capture returns its degraded
+> report without verifying when the episode write raises, because on that path
+> nothing had been written; with an archive entry already at the address, that path
+> now has something to compensate and takes the verification.
+
 > **Normative.** Capture writes at most one archive entry per outcome, at the
 > address the store allocated for that turn (§3), and never retries. An entry
 > already present at that address is a fault of the same class ADR-0074 §3 names for
@@ -320,8 +326,12 @@ direction; §3 is what makes it cheap when it is decided deliberately.
 > not in ADR-0074 §5's tail, not in the belief composition ADR-0072 §5 orders, and
 > not in ADR-0158's episodic supplement.
 
-> **Normative.** No transcript entry is a citation target. No `Provenance.evidence`
-> names a transcript entry as such, and no citation resolution reads the archive:
+> **Normative.** No transcript entry is a citation target. ADR-0072 §3's rule that
+> *"An evidence reference denotes the id of a record in the same store"* is
+> unchanged and denotes a `MemoryStore` record still: an `Evidence` reference is
+> never read as naming a transcript entry, no producer writes one intending to, and
+> **no citation resolution reads the archive**. That an expired episode's address
+> is also a live archive address is a property of §3's reuse and is not a fallback:
 > what a belief whose cited episode has expired renders is unchanged by this
 > decision, and remains ADR-0072 §3's open question and ADR-0073 §4's gate.
 
@@ -401,10 +411,10 @@ a lane that wants it needs the ADR that decides it.
 > `forget-conversation` does, and states what will be destroyed before consent is
 > taken.
 
-> **Normative.** No lane ships a whole-store erasure, an application-level
-> encryption option, or a whole-memory export that reaches the memory store and not
-> the archive. Each of the three is shipped for both stores in one change or for
-> neither.
+> **Normative.** No lane ships a whole-store erasure surface, or a whole-memory
+> export surface, that reaches the memory store and not the archive. Each is
+> shipped for both stores in one change or for neither. (At-rest encryption carries
+> the same obligation and is stated once, in §9.)
 
 **Eviction versus destruction is the whole design, and it is one clause because
 conflating them is the failure mode.** Today one mechanism does both: a turn
@@ -511,10 +521,11 @@ looks.
 
 ### 7. Search and reading: lexical, bounded, and the user's alone
 
-> **Normative.** The archive answers exactly three reads: a **lexical search** over
-> entries; an **ordered read of one conversation's** entries; and a **read of one
-> entry by address**. It answers no other, and offers no relevance model, no
-> ranking by similarity and no vector search.
+> **Normative.** The archive answers exactly four reads: a **lexical search** over
+> entries; an **ordered read of one conversation's** entries; a **read of one entry
+> by address**; and an **unfiltered enumeration** of every entry it holds. It
+> answers no other, and offers no relevance model, no ranking by similarity and no
+> vector search.
 
 > **Normative.** The search is lexical over the text the archive stores. Whether it
 > is served by a full-text index or by a scan is the implementing lane's, and the
@@ -529,14 +540,16 @@ looks.
 > two entries sharing an instant. A conversation's own read is in **ordinal order**,
 > because a transcript's order is the order it was said in.
 
-> **Normative.** A search result carries each hit's address, its conversation, its
-> instant, and a bounded excerpt of the matching text. Reading an entry whole is a
-> second, addressed act. No search response renders an entry's full text.
+> **Normative.** A **search** result carries each hit's address, its conversation,
+> its instant, and a bounded excerpt of the matching text. Reading an entry whole is
+> a second, addressed act, and no search response renders an entry's full text. The
+> other three reads return entries **whole**, and elide, truncate and summarise
+> nothing.
 
-> **Normative.** The unfiltered form of the conversation-ordered read — every entry,
-> paged, whole — **is** the archive's export, and it satisfies ADR-0004 §6's export
-> right for the archive. Any surface that later exports the memory store exports the
-> archive beside it (§5).
+> **Normative.** The unfiltered enumeration **is** the archive's export: every
+> entry, whole, paged, in the total order above, and it satisfies ADR-0004 §6's
+> export right for the archive. Any surface that later exports the memory store
+> exports the archive beside it (§5).
 
 **Lexical rather than semantic, and it is a property rather than a preference.**
 The never-list forbids an embedding (§4), so a vector search is not available even
@@ -554,11 +567,11 @@ one whole makes the result unreadable and the bound meaningless. Splitting it ma
 the address load-bearing in the surface the user actually touches, which is the
 cheapest possible way for §3's stability to be exercised rather than asserted.
 
-**The export is the read, and that is not a shortcut.** ADR-0004 §6 requires that
-the user can view, export and delete. For a store that holds text and nothing else,
-a paged, ordered, unfiltered read of every entry *is* a portable snapshot of
-everything it holds; inventing a second serialisation would be a second thing to
-keep correct for no information the first does not carry. This also makes the
+**The export is a read rather than a fourth artifact, and that is not a shortcut.**
+ADR-0004 §6 requires that the user can view, export and delete. For a store that
+holds text and nothing else, a paged, ordered, unfiltered read of every entry *is* a
+portable snapshot of everything it holds; inventing a second serialisation would be
+a second thing to keep correct for no information the first does not carry. This also makes the
 archive the first Tier-1 store whose export exists on day one rather than
 deferred — the gap ADR-0101 names for the memory store is not inherited here.
 
@@ -571,8 +584,8 @@ deferred — the gap ADR-0101 names for the memory store is not inherited here.
 > user act or grant that admits it, and admitting one takes an ADR that supersedes
 > this clause.
 
-> **Normative.** The archive's reads live on their **own** command, distinct from
-> `beliefs` and from `conversations`, and never as a mode of either. No surface
+> **Normative.** The archive's reads and destroys live on their **own** command,
+> distinct from `beliefs` and from `conversations`, and never as a mode of either. No surface
 > presents a transcript entry as a belief, as something the assistant holds, or as
 > evidence for anything.
 
@@ -581,8 +594,8 @@ deferred — the gap ADR-0101 names for the memory store is not inherited here.
 > believes or retrieves.
 
 > **Normative.** The CLI carries the surface first. A gateway page is permitted and
-> is not required by this decision; where one ships it renders the same three reads
-> and the same two destroys and adds no fourth.
+> is not required by this decision; where one ships it offers the same four reads
+> and the same two destroys and adds no fifth.
 
 **This section exists because ADR-0199 §3 requires it to.** That clause is explicit:
 *"An ADR admitting a new source, a new facet, a new notification producer, or any
@@ -603,8 +616,8 @@ transcript is speakable would therefore mean inspecting the words — which ADR-
 §2 forbids in terms, deciding a class *"from recorded origin, never by inspecting
 the words"* — or inferring a subject, which ADR-0100 §4 forbids. There is no third
 option, so there is no way for archive content to be placed as speakable, and the
-honest form of that is a clause rather than a silence. #1842 §16.1's `about_person`
-blindness is the same observation from the other side.
+honest form of that is a clause rather than a silence. #1843 points at the same
+observation from the other side, in #1842 §16.1's `about_person` blindness.
 
 **And it is what makes gate 2 true rather than aspirational** (§9): a surface only
 the user is looking at is what makes "the explicit act is the whole authorisation"
@@ -688,11 +701,14 @@ mechanism is decided, and this ADR decides none of it.
 ### 10. The contract surface owed, and why the archive is its own subsystem
 
 > **Normative.** `core/protocols.py` gains one Protocol, `TranscriptArchive`,
-> carrying the append of §2, the two destroys of §5, and the three reads of §7. It
+> carrying the append of §2, the two destroys of §5, and the four reads of §7. It
 > gains no second Protocol.
 
 > **Normative.** `core/types.py` gains one frozen pydantic model, `TranscriptEntry`,
-> carrying exactly the fields §1 enumerates and no other.
+> carrying exactly the fields §1 enumerates **as this ADR ships it** and no other.
+> A later ADR may widen it by an additive, defaulted field, as §1's grouping clause
+> and §11 each contemplate; no implementation, setting or lane widens it without
+> one.
 
 > **Normative.** The archive is a new subsystem package, `ai_assistant.archive`,
 > which depends on `ai_assistant.core` and on nothing else in `ai_assistant`. The
@@ -848,7 +864,8 @@ cascade in the conversation-scoped and record-scoped deletions.
 
 That is one lane under ADR-0137 on both of its tests. §1's: the substantial new
 machinery is in one subsystem, `archive/`, and what lands in `orchestration/` is one
-threaded argument, one call and one call — adaptation, which §1 admits anywhere. And
+threaded argument, one write beside an existing one and one destroy beside an
+existing one — adaptation, which §1 admits anywhere. And
 §2's: the triad rides with its primary production implementation, *"the consumer whose
 demands shape the contract"*, which is capture — the caller whose needs fix `append`'s
 shape. §2's reason applies exactly here: the contract stays soft while its hardest
@@ -856,7 +873,7 @@ consumer stress-tests it, and a `TranscriptArchive` whose only exercise was its 
 conformance suite would harden before anything had tried to write an entry from a
 routed pass or a recovered resumption. §3 binds too: the triad is not split.
 
-**Lane C — the surfaces.** The engine's three read operations and two destroy
+**Lane C — the surfaces.** The engine's four read operations and two destroy
 operations, their registration on the local API in `wire/` and `service/`, the
 `PROTOCOL_VERSION` bump the added methods oblige, the CLI command group, and the
 statements §8 requires. A gateway page may ride with it or follow as its own lane
@@ -908,8 +925,10 @@ touching `interfaces/` alone; the ADR requires the CLI and permits the page.
 
 ### 16. Scope, and what this records against earlier ADRs
 
-> **Normative.** This ADR supersedes no clause of any ratified ADR, in whole or in
-> part. Every clause it cites binds as written.
+**This ADR supersedes no clause of any ratified ADR, in whole or in part**, and
+every clause it cites binds as written. That is a classification of this change and
+is therefore stated as prose rather than marked (ADR-0089 §1); what follows is the
+working that supports it, clause by clause, under ADR-0070 §1's test.
 
 **ADR-0074 §3 is distinguished, not superseded, and the distinction is exact.** Its
 ruling — every turn is an episode, capture writes one `EpisodicMemory` per outcome,
@@ -949,11 +968,13 @@ model's rationale.
 recorded here so a later reader can find it: the posture is that archive content is
 withheld from every channel of unbounded audience, unconditionally.
 
-**Everything else this ADR cites is used as ratified**: ADR-0007 §2, §4 and §5;
-ADR-0015 §1 and §5; ADR-0072 §3 and §5; ADR-0073 §4 and §5; ADR-0089 for the marks;
-ADR-0094 §7 and §8; ADR-0100 §4; ADR-0101 §4 and §6; ADR-0114 §6; ADR-0119 §6 and §7;
-ADR-0137 §1, §2 and §3; ADR-0158 §1; ADR-0197 §10; ADR-0208 §1; ADR-0210 §1;
-ADR-0221 §1, §2 and §5.
+**Everything else this ADR cites is used as ratified**: ADR-0004 §1, §4, §5, §6 and
+§7; ADR-0005 §1; ADR-0007 §2, §4 and §5; ADR-0015 §1 and §5; ADR-0017 §1; ADR-0072
+§3 and §5; ADR-0073 §4, §5 and §7; ADR-0075 §2; ADR-0088 and ADR-0089 for the
+citation forms and the marks; ADR-0094 §7 and §8; ADR-0100 §4; ADR-0101 §1, §4, §6
+and §7; ADR-0114 §6; ADR-0119 §6 and §7; ADR-0137 §1, §2 and §3; ADR-0154 §2;
+ADR-0155 §1; ADR-0158 §1; ADR-0162 §5; ADR-0197 §10; ADR-0199 §1, §2 and §3;
+ADR-0208 §1; ADR-0210 §1; ADR-0221 §1, §2 and §5.
 
 ## Consequences
 
