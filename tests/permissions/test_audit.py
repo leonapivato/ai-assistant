@@ -253,6 +253,107 @@ async def test_recording_opens_and_closes_exactly_one_immediate_transaction(
     _assert_one_immediate_transaction(statements, what="clear")
 
 
+async def test_the_pending_confirmation_pair_reads_inside_one_deferred_transaction(
+    ephemeral: SqliteAuditTrail,
+) -> None:
+    """The read form of the discipline: one snapshot, and **not** the write lock.
+
+    ``BEGIN`` rather than ``BEGIN IMMEDIATE`` is the assertion that carries
+    meaning here. The two ``SELECT``s must see one state of the trail (#720), and
+    that is all a reader needs; taking the write lock as well would exclude every
+    other writer for the length of a read that writes nothing, which is a cost
+    the hazard does not ask for.
+    """
+    await ephemeral.record(decision("c-1", request=action(execution_id="exec-a")))
+
+    with _traced(ephemeral) as statements:
+        park = await ephemeral.pending_confirmation(execution_id="exec-a", step_id="step-1")
+
+    assert park is not None
+    opened, first, second, closed = statements
+    assert opened.strip().upper() == "BEGIN", (
+        f"the read pair opened with {opened!r}: a reader has no use for the write "
+        f"lock, and `immediate=False` is the form the sibling reads use"
+    )
+    assert first.strip().upper().startswith("SELECT")
+    assert second.strip().upper().startswith("SELECT")
+    assert closed.strip().upper() == "COMMIT"
+    assert ephemeral._conn.in_transaction is False
+
+
+@pytest.mark.integration
+async def test_a_resolution_cannot_land_between_the_two_pending_reads(tmp_path: Path) -> None:
+    """#720, staged: the hazard is another **process**, so there are two connections.
+
+    ``pending_confirmation`` makes two dependent reads — "is this binding already
+    resolved", then "which ``CONFIRM`` is still open". Run bare, a resolution
+    committed between them makes the pair describe two states of the trail: the
+    first says unresolved, the second hands back a ``CONFIRM`` that has since been
+    answered, and the caller rebuilds a park for a binding that is already decided
+    (the #257 hazard ADR-0044 §2b closes, and the ``asyncio`` lock arbitrates only
+    one process — ADR-0036 §2).
+
+    The second trail is the second process, and it writes through the store's own
+    ``record`` path rather than through hand-built SQL, so what is staged is a
+    real commit and not an approximation of one. It is driven from a trace
+    callback on the *first* trail's connection, which fires immediately before the
+    second ``SELECT`` executes — the exact instant the issue is about, and one no
+    sleep or thread schedule has to be trusted to hit. Its ``busy_timeout`` is
+    zeroed so the excluded write is refused at once instead of waiting out the
+    driver's five seconds.
+
+    Without the transaction the interleaved commit lands (the first read's
+    implicit transaction ended with the statement, so nothing holds the file) and
+    ``refused`` comes back empty.
+    """
+    path = tmp_path / "audit.db"
+    trail = SqliteAuditTrail(path=path)
+    racer = SqliteAuditTrail(path=path)
+    try:
+        racer._conn.execute("PRAGMA busy_timeout = 0")
+        await trail.record(decision("c-1", request=action(execution_id="exec-a")))
+        resolution = decision(
+            "r-1",
+            request=action(execution_id="exec-a"),
+            ruled=ruling(PermissionOutcome.DENY),
+            resolves="c-1",
+        )
+        refused: list[AuditError] = []
+
+        def interleave(statement: str) -> None:
+            if not statement.strip().upper().startswith("SELECT DATA FROM DECISIONS"):
+                return
+            trail._conn.set_trace_callback(None)  # once, and before re-entering SQL
+            try:
+                racer._record_sync(resolution, None)
+            except AuditError as exc:
+                refused.append(exc)
+
+        trail._conn.set_trace_callback(interleave)
+        park = await trail.pending_confirmation(execution_id="exec-a", step_id="step-1")
+
+        assert refused, (
+            "a second process committed a resolution between the two reads, so the "
+            "park handed back describes a binding that is already decided"
+        )
+        # Named, not merely counted: ``AuditError`` covers the store's refusals too,
+        # so a duplicate id or an invalid resolution would otherwise satisfy the
+        # assertion above without the exclusion having done anything.
+        assert "locked" in str(refused[0]), refused[0]
+        assert park is not None
+        assert park.id == "c-1"
+        assert await trail.resolution_of(execution_id="exec-a", step_id="step-1") is None
+
+        # And the exclusion is only for the length of the read: the same write
+        # lands once it is over, and the park is then gone.
+        await racer.record(resolution)
+        assert await trail.pending_confirmation(execution_id="exec-a", step_id="step-1") is None
+    finally:
+        trail._conn.set_trace_callback(None)
+        racer.close()
+        trail.close()
+
+
 async def test_the_refusals_share_one_catchable_base(ephemeral: SqliteAuditTrail) -> None:
     """A caller that only wants "the trail would not accept this" gets one handler."""
     await ephemeral.record(decision("d-1"))
