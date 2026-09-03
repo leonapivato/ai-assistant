@@ -1,7 +1,42 @@
 # 222. The stored reply is read back, in the conversation tail and by the observer
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0227 (§2's first normative clause, in the single respect that a record a turn's citation hop reached renders its `outcome` at `orchestration/composing.py`'s request assembler; and §5's eligibility enumeration, in the single respect that such a rendered reply is counted on the pair §5 already requires. §2's second normative clause — `benchmarks/` untouched and every prompt `render_context` builds byte-identical — binds entire; the retrieved group, the episodic supplement and the records a sighted query serviced all stay phrase-only; §1, §3, §4, §6, §7, §8 and §9 and the rest of §5 stand)
 - Date: 2026-09-01
+- Partially superseded: 2026-09-03 by ADR-0227 — **§2's phrase-only rule no longer
+  reaches a record a turn's citation hop reached, and §5's eligible set now counts the
+  reply that record renders.** §2's clause — *"No record of the **retrieved** group at
+  either request assembler renders its `outcome` where it carries a `disposition`"* —
+  was written the day before the read envelope existed, and it governs the assembler's
+  whole non-tail population in effect: the episodic supplement is nowhere named in it
+  and is plainly covered, and `_split_conversation_tail` puts every non-tail record in
+  one bucket. The fourth group ADR-0226 §7 appends therefore fell under it, so a hop
+  that reached an exchange **by pointer, for its reply** delivered the disposition
+  phrase and withheld the reply — the failure #1944 records against the live hub.
+
+  **Replaced**, in one scope: §2's first clause as it reaches a record the turn's
+  citation hop resolved through a named label's `Provenance.evidence`, at
+  `orchestration/composing.py`'s assembler alone. Such a record renders its `outcome`
+  beside the phrase, in §1's shape and order, under §4's ceiling and §5's elision. A
+  reader holding only this ADR would refuse to render it, which is
+  [ADR-0070](0070-amendment-and-supersession-rules.md) §1's test for a change to what
+  was decided.
+
+  **And, in a second scope**, §5's *"eligible to render a reply under §1 or §3"*: a
+  reply rendered under the clause above is eligible in that sense and is counted on the
+  one statement §5 already requires, over both populations. Every other clause of §5 —
+  the prefix rule, the held-data marker outside the quoted span, one statement, no
+  reply text, counts of one assembly, the structured-log carrier — binds unchanged.
+
+  **What is not replaced, and is load-bearing.** §2's second normative clause binds
+  entire and [ADR-0227](0227-a-record-the-citation-hop-reached-renders-its-reply-and-the-test-that-says-so-runs-the-real-renderer.md)
+  §6 restates it as its own obligation: `benchmarks/` is untouched, every prompt
+  `render_context` builds is byte-identical, and no benchmark result moves — which the
+  harness gets for free four times over, since it runs no planner emission, no
+  servicer and no hop, and §1's third clause keeps the line out of `_render_record`.
+  §2's three reasons are each answered against the hop and each still reaches the
+  retrieved group, the episodic supplement and the records a **sighted query**
+  serviced, which stay phrase-only. §1, §3, §4, §6, §7, §8 and §9 stand as ratified,
+  and §8's tests 10 and 11 are re-owed rather than narrowed.
 - **Partially supersedes:**
   [ADR-0221](0221-an-episode-carries-the-reply-a-typed-disposition-and-how-the-turn-was-captured.md)
   — **§3's second arm and its no-budget clause, at two of the three render sites;
