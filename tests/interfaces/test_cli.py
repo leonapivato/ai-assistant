@@ -1136,10 +1136,20 @@ async def test_a_data_directory_too_long_for_the_socket_is_reported_as_itself(
 
 
 @pytest.mark.parametrize("bad", ["inf", "nan", "0", "-1", "1e100", "1e-7"])
-def test_ask_rejects_an_unusable_timeout(bad: str) -> None:
-    """A non-finite, non-positive, overflowing, or sub-resolution --timeout is a usage error."""
+def test_ask_rejects_an_unusable_timeout(bad: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-finite, non-positive, overflowing, or sub-resolution --timeout is a usage error.
+
+    **And no client is opened**, which is the half the exit code alone does not say
+    (#1970). ``ask`` is the command with the most to build behind it — a hub client
+    and a turn — so a refusal that ran after the connection would be paid for on
+    every mistyped ``--timeout``, and would still exit 2.
+    """
+    opened = _wire_recording_opens(monkeypatch, FakeAssistantEngine())
+
     result = CliRunner().invoke(cli.app, ["ask", "hello", "--timeout", bad])
+
     assert result.exit_code == 2  # Typer's usage-error code, before the engine is built
+    assert opened == []
 
 
 # --- learn: the correction leg (ADR-0042 §3, §6) ------------------------
@@ -1205,6 +1215,66 @@ def _wire(monkeypatch: pytest.MonkeyPatch, engine: object) -> None:
     monkeypatch.setattr(cli, "configure_logging", lambda _settings: None)
     monkeypatch.setattr(cli, "_open_engine", _open)
     monkeypatch.setattr(cli, "_utcnow", lambda: AT)
+
+
+def _wire_recording_opens(monkeypatch: pytest.MonkeyPatch, engine: object) -> list[None]:
+    """Wire ``engine`` as :func:`_wire` does, and record every open of a client.
+
+    The seam every parse-boundary refusal in this module is actually about.
+    ``_wire``'s stub answers with the engine and keeps no record, so a test using
+    it can assert the *exit code* of a refusal but not the claim its own name or
+    docstring makes — that the refusal landed **before any client was built**
+    (ADR-0085 §3c's "before any I/O", #728). A regression that opened the hub,
+    probed it, and only then converted a malformed argument into an exit-2 usage
+    error would keep every assertion those cases held.
+
+    Recording rather than raising, deliberately: a stub that raised would fail the
+    invocation for a second reason and could not tell "the refusal came first" from
+    "the refusal came second and the failure masked it". The returned list is empty
+    exactly when no client was opened, whatever else the command did.
+
+    It sits beside :func:`_wire` rather than beside the id arguments that first
+    needed it because the cases making that claim are spread the length of this
+    module — ``--timeout``, ``learn`` content and ``--kind``, ``--limit``,
+    ``--offset`` and ``--band``, a grant's ``source``, a quiet window, and the id
+    arguments themselves (#1970).
+
+    Args:
+        monkeypatch: The patcher whose lifetime the substitution follows.
+        engine: The engine a client, if one were opened, would be.
+
+    Returns:
+        One entry per :func:`~ai_assistant.interfaces.cli._open_engine` awaited.
+    """
+    _wire(monkeypatch, engine)
+    opened: list[None] = []
+
+    async def _open() -> object:
+        opened.append(None)
+        return engine
+
+    monkeypatch.setattr(cli, "_open_engine", _open)
+    return opened
+
+
+def test_the_open_recorder_sees_the_client_an_accepted_invocation_builds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The recorder is non-vacuous, which is what makes every ``opened == []`` evidence.
+
+    An absence only says something if the observer would have seen the thing. A
+    helper that patched the wrong name, or whose stub a later ``_wire`` overwrote,
+    would make every refusal case below pass for a reason unrelated to when the
+    refusal happened — and go on passing through exactly the regression #728 is
+    about. So one *accepted* invocation is pinned here: it opens a client, and the
+    list has to show it.
+    """
+    opened = _wire_recording_opens(monkeypatch, _RecordingEngine(_stored_outcome()))
+
+    result = CliRunner().invoke(cli.app, ["learn", "--kind", "correction", "hello"])
+
+    assert result.exit_code == 0
+    assert opened == [None]
 
 
 def test_learn_leaves_a_corrections_memory_kind_for_the_engine_to_resolve(
@@ -1522,10 +1592,18 @@ def test_learn_memory_kind_flag_pins_a_correction_that_would_otherwise_resolve(
     assert event.memory_kind is MemoryKind.SEMANTIC
 
 
-def test_learn_rejects_an_unknown_kind() -> None:
-    """An unrecognised --kind is a usage error, before any engine is built."""
+def test_learn_rejects_an_unknown_kind(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unrecognised --kind is a usage error, before any engine is built.
+
+    The recorded opens are what hold the second half of that sentence (#1970): exit
+    2 is equally what a command that connected first and refused afterwards returns.
+    """
+    opened = _wire_recording_opens(monkeypatch, _RecordingEngine(_stored_outcome()))
+
     result = CliRunner().invoke(cli.app, ["learn", "--kind", "bogus", "hello"])
+
     assert result.exit_code == 2  # Typer's usage-error code
+    assert opened == []
 
 
 def test_learn_requires_a_kind() -> None:
@@ -1535,16 +1613,26 @@ def test_learn_requires_a_kind() -> None:
 
 
 @pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
-def test_learn_rejects_blank_content(blank: str) -> None:
+def test_learn_rejects_blank_content(blank: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """Whitespace-only content is a usage error, not an uncaught ValidationError (§7).
 
     ``FeedbackEvent.content`` rejects blank text, and that ``ValidationError`` is not
     an ``AssistantError``; the parse-time callback turns it into a clean usage error
     (exit 2) before any event is constructed, rather than a dumped traceback.
+
+    **No client is opened either** (#1970). ``_learn_feedback`` builds the event
+    before it opens one, so today the two claims coincide — which is exactly why the
+    second needs an assertion of its own: swap those two statements and every
+    assertion this case already held still passes, while a mistyped ``learn`` starts
+    costing a hub connection to be told what was typed.
     """
+    opened = _wire_recording_opens(monkeypatch, _RecordingEngine(_stored_outcome()))
+
     result = CliRunner().invoke(cli.app, ["learn", "--kind", "correction", blank])
+
     assert result.exit_code == 2  # Typer's usage-error code
     assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert opened == []
 
 
 def test_learn_surfaces_a_write_failure_with_a_nonzero_exit(
@@ -3028,24 +3116,40 @@ def test_beliefs_command_still_lists_episodes_when_they_are_asked_for(
 
 
 @pytest.mark.parametrize("bad", ["-1", str(2**63)])
-def test_beliefs_command_rejects_a_page_the_store_would_refuse(bad: str) -> None:
+def test_beliefs_command_rejects_a_page_the_store_would_refuse(
+    bad: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """An out-of-range --limit is a usage error, not an uncaught ValueError (§2, §7).
 
     ``list_beliefs`` raises ``ValueError`` outside ``[0, 2**63)``, and a ``ValueError``
     is not an ``AssistantError``, so it would escape the command's error boundary as
     a traceback. The parse-time check turns it into exit code 2 before any engine is
-    built.
+    built — and the recorded opens are what say the last four words are still true
+    (#1970), since the refusal the parse-time check replaced was raised by the store,
+    on the far side of a client.
     """
+    opened = _wire_recording_opens(monkeypatch, FakeAssistantEngine())
+
     for flag in ("--limit", "--offset"):
         result = CliRunner().invoke(cli.app, ["beliefs", flag, bad])
-        assert result.exit_code == 2
-        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert result.exit_code == 2, flag
+        assert result.exception is None or isinstance(result.exception, SystemExit), flag
+        assert opened == [], flag
 
 
-def test_beliefs_command_rejects_an_unknown_band() -> None:
-    """A band outside the ratified vocabulary is a usage error, before any engine."""
+def test_beliefs_command_rejects_an_unknown_band(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A band outside the ratified vocabulary is a usage error, before any engine.
+
+    Typer resolves the enum during parsing, so nothing about this refusal needs a
+    hub — and the recorded opens say so rather than leaving it to be inferred
+    (#1970).
+    """
+    opened = _wire_recording_opens(monkeypatch, FakeAssistantEngine())
+
     result = CliRunner().invoke(cli.app, ["beliefs", "--band", "guessed"])
+
     assert result.exit_code == 2
+    assert opened == []
 
 
 def test_forget_command_renders_before_acting_under_yes(
@@ -5837,12 +5941,16 @@ def test_a_blank_source_is_a_usage_error_and_never_a_traceback(
     ordering rather than by a rule, so both are pinned here.
 
     Exit code 2, because it is a usage error caught before any client is built —
-    the treatment ``--limit`` and blank ``learn`` content already get.
+    the treatment ``--limit`` and blank ``learn`` content already get. **And that
+    second clause is asserted rather than asserted-about** (#1970): ``grant``'s
+    right answer here is right "by accident of ordering rather than by a rule", as
+    above, and an ordering is the one thing an exit code cannot show.
     """
-    _wire(monkeypatch, _granting_engine())
+    opened = _wire_recording_opens(monkeypatch, _granting_engine())
 
     assert CliRunner().invoke(cli.app, ["revoke", "   "]).exit_code == 2
     assert CliRunner().invoke(cli.app, ["grant", "   ", "--scope", "facet"]).exit_code == 2
+    assert opened == []
 
 
 def test_a_repeated_scope_is_a_usage_error_and_never_a_traceback(
@@ -6739,39 +6847,6 @@ def _id_invocations(value: str) -> tuple[tuple[str, list[str]], ...]:
         # — the residual that walk's own docstring names.
         ("tune --class", ["tune", "--class", value, "--reach", "interrupt"]),
     )
-
-
-def _wire_recording_opens(monkeypatch: pytest.MonkeyPatch, engine: object) -> list[None]:
-    """Wire ``engine`` as :func:`_wire` does, and record every open of a client.
-
-    The seam these cases are actually about. ``_wire``'s stub answers with the
-    engine and keeps no record, so a test using it can assert the *exit code* of a
-    refusal but not the claim its own name makes — that the refusal landed **before
-    any client was built** (ADR-0085 §3c's "before any I/O", #728). A regression
-    that opened the hub, probed it, and only then converted a malformed id into an
-    exit-2 usage error would keep every assertion those cases held.
-
-    Recording rather than raising, deliberately: a stub that raised would fail the
-    invocation for a second reason and could not tell "the refusal came first" from
-    "the refusal came second and the failure masked it". The returned list is empty
-    exactly when no client was opened, whatever else the command did.
-
-    Args:
-        monkeypatch: The patcher whose lifetime the substitution follows.
-        engine: The engine a client, if one were opened, would be.
-
-    Returns:
-        One entry per :func:`~ai_assistant.interfaces.cli._open_engine` awaited.
-    """
-    _wire(monkeypatch, engine)
-    opened: list[None] = []
-
-    async def _open() -> object:
-        opened.append(None)
-        return engine
-
-    monkeypatch.setattr(cli, "_open_engine", _open)
-    return opened
 
 
 @pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
@@ -7912,15 +7987,21 @@ def test_an_unparseable_quiet_window_is_a_usage_error_before_any_client_is_built
     design, so without the grammar check the user asks for one window and is given
     another 59 seconds wide of it, with nothing said. Every one becomes exit code 2,
     and none reaches a hub.
+
+    **"None reaches a hub" is two claims, and the calls list only carries one.** An
+    engine with no ``set_notification_preferences`` call recorded is also what a
+    command that opened a client, held it, and refused afterwards would leave — so
+    the recorded opens are what make this case's own name true (#1970).
     """
     engine = FakeAssistantEngine()
-    _wire(monkeypatch, engine)
+    opened = _wire_recording_opens(monkeypatch, engine)
 
     result = CliRunner().invoke(cli.app, ["tune", "--quiet-window", spec])
 
     assert result.exit_code == 2
     assert result.exception is None or isinstance(result.exception, SystemExit)
     assert not [call for call in engine.calls if call[0] == "set_notification_preferences"]
+    assert opened == []
 
 
 def test_tune_sets_the_interruption_budget_and_accepts_zero(
