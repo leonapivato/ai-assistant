@@ -234,6 +234,32 @@ def _git_dir(clone: Path) -> Path | None:
         return None
 
 
+def _acquire(fd: int, target: Path) -> None:
+    """Take the exclusive lock on ``fd``, saying so first if it has to wait.
+
+    Args:
+        fd: The open lock file.
+        target: The clone it guards, for the message.
+
+    Raises:
+        SyncError: If the lock cannot be taken at all — a filesystem that does
+            not support locking, say. Every other failure in this script is a
+            refusal carrying its reason, and a traceback here would be the one
+            exception.
+    """
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # Say so before blocking. The wait is another sync holding this one
+            # target and is bounded by it, but a silent pause reads as a hang.
+            # On stderr: stdout carries the report, and this is not part of it.
+            print(f"{target}: waiting for another clone-sync to finish here...", file=sys.stderr)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError as exc:
+        raise SyncError(f"{target}: cannot take the sync lock: {exc}") from exc
+
+
 @contextlib.contextmanager
 def _target_lock(target: Path) -> Iterator[None]:
     """Hold an exclusive lock on ``target`` for the block.
@@ -260,16 +286,13 @@ def _target_lock(target: Path) -> Iterator[None]:
         # there is nowhere outside its work tree to put a lock file anyway.
         yield
         return
-    fd = os.open(directory / LOCK_NAME, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    lock = directory / LOCK_NAME
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            # Say so before blocking. The wait is another sync holding this one
-            # target and is bounded by it, but a silent pause reads as a hang.
-            # On stderr: stdout carries the report, and this is not part of it.
-            print(f"{target}: waiting for another clone-sync to finish here...", file=sys.stderr)
-            fcntl.flock(fd, fcntl.LOCK_EX)
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    except OSError as exc:
+        raise SyncError(f"{target}: cannot open the sync lock {lock}: {exc}") from exc
+    try:
+        _acquire(fd, target)
         yield
     finally:
         os.close(fd)
