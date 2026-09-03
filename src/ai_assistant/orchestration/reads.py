@@ -8,9 +8,11 @@ that decision (§10's "Lane B"), and it holds three things:
 * :func:`service_read_request`, which turns one
   :class:`~ai_assistant.core.types.ReadRequest` into the records ADR-0226 §7
   appends to the supply as a **fourth group**, under §6's single budget of ten and
-  its hop-before-query precedence — and, since ADR-0227 §3, returns which of those
-  records the **citation hop** reached, because this is the one place the two kinds
-  are distinguishable;
+  its hop-before-query precedence — and, since ADR-0227 §3, returns which records
+  the **citation hop** reached, because this is the one place the two kinds are
+  distinguishable. Since ADR-0229 §1 the hop reaches the record a label **names** as
+  well as that record's evidence, so the carrier holds records the fourth group does
+  not, and §2 of that ADR is why the fourth group is nonetheless unmoved;
 * :func:`resolve_label`, §3's whole label scheme — an ordinal into the very
   ``memories`` sequence the loop passed the planner on this call; and
 * :func:`emit_read_audit`, §9's record, written **once per turn whether or not the
@@ -198,6 +200,38 @@ class _Reads:
         self.returned_any = self.returned_any or count > 0
 
 
+@dataclass(frozen=True, slots=True)
+class _HopReach:
+    """What one ``CITATION_HOP`` ask reached, in the two shapes the servicing needs.
+
+    **Two sequences and not one, because ADR-0229 §2 separates reach from supply.**
+    A record a label *named* is in the pre-servicing supply by construction — §3's
+    label is a position in the very sequence the loop passed the planner — so
+    offering it to :class:`_Union` could only ever deduplicate it, and the sole
+    effect would be one more ``returned`` and one more ``deduplicated`` on every
+    serviced hop. §2 forbids exactly that: "a record named by a label is counted in
+    none of the three", and ADR-0226 §8's novelty rate would otherwise report a
+    constant depression that tells a reader nothing the labels do not.
+
+    So :attr:`evidence` is what the union sees — unchanged from before ADR-0229 —
+    and :attr:`expansion` is what ADR-0227 §3's carrier is built from.
+
+    Attributes:
+        expansion: ADR-0229 §3's **pre-deduplication** expansion sequence: labels in
+            the order the ask names them and, for each label that resolved to a live
+            record, that record **immediately followed by** its own live evidence in
+            the order that record stores it.
+        evidence: The candidates for ADR-0226 §7's fourth group — every named
+            record's live evidence, labels in the ask's order and each record's
+            evidence in stored order, and **no named record**.
+        unresolved: How many labels resolved to nothing (ADR-0226 §3).
+    """
+
+    expansion: tuple[MemoryRecord, ...]
+    evidence: tuple[MemoryRecord, ...]
+    unresolved: int
+
+
 @dataclass(slots=True)
 class _Union:
     """The turn's supply under construction, and what §9 counts about it (§7).
@@ -315,16 +349,24 @@ async def service_read_request(
     it would put record identifiers on a surface whose whole discipline is that they
     are not there".
 
-    **What the carrier holds** (ADR-0227 §3, §4): the **distinct** ids of the records
-    the hop resolved that the turn's supply holds **after** this servicing — in
-    ADR-0226 §6's order, first occurrence keeping the place. A record the hop reached
-    that the supply already held is deduplicated out of the fourth group, keeps its
-    position and **is** in the carrier (ADR-0227 §1's third clause); a record
-    ADR-0226 §6's budget cut is not in the supply at all and so is not, which is
-    ADR-0227 §4's "the records it cut render nothing at all". It is **empty** on every
-    turn that did not fire, whose servicing was declined, whose servicing failed or
-    was partial, and whose hop resolved no live record — the same all-or-nothing
-    posture §5 gives the supply.
+    **What the carrier holds** (ADR-0227 §3, §4; ADR-0229 §3): the **distinct** ids of
+    the records the hop reached that the turn's supply holds **after** this
+    servicing — ADR-0229 §3's **expansion sequence**, restricted to the records
+    ADR-0227 §3 admits, under §4's deduplication with the **first** occurrence
+    keeping the place. The expansion is labels in the order the ask names them and,
+    for each label that resolved to a live record, that record **immediately followed
+    by** its own live evidence in the order that record stores it; the relation binds
+    the expansion and binds nothing after the deduplication, so a hop naming an
+    episode ``E`` and a belief ``B`` citing ``E`` expands to ``E, B, E`` and carries
+    ``E, B``. A record the hop reached that the supply already held is deduplicated
+    out of the fourth group, keeps its position and **is** in the carrier (ADR-0227
+    §1's third clause); a record ADR-0226 §6's budget cut is not in the supply at all
+    and so is not, which is ADR-0227 §4's "the records it cut render nothing at all".
+    A **named** record is never excluded by that test, because ADR-0226 §3's label is
+    a position in the pre-servicing supply and so the record is in it by construction
+    (ADR-0229 §2). It is **empty** on every turn that did not fire, whose servicing
+    was declined, whose servicing failed or was partial, and whose hop resolved no
+    live record — the same all-or-nothing posture §5 gives the supply.
 
     **The order is fixed here and the tail exclusion and the cap are not**
     (ADR-0227 §3): "the servicer fixes the order and the render site applies §1's tail
@@ -349,9 +391,10 @@ async def service_read_request(
 
     Returns:
         ADR-0227 §3's carrier: the distinct ids of the records this turn's citation
-        hop reached that the supply holds after this servicing, in ADR-0226 §6's
-        order. Empty where nothing was serviced, where the servicing failed, and
-        where the hop reached nothing.
+        hop reached that the supply holds after this servicing, in ADR-0229 §3's
+        order — the expansion sequence under ADR-0227 §4's first-occurrence
+        deduplication. Empty where nothing was serviced, where the servicing failed,
+        and where the hop reached nothing.
     """
     reads = _Reads()
     union = _Union(held={record.id for record in supply}, budget=READ_BUDGET)
@@ -368,9 +411,16 @@ async def service_read_request(
     unresolved = 0
     try:
         if hop is not None:
-            candidates, unresolved = await _hop_records(store, hop, supply=supply, reads=reads)
-            resolved_by_hop = candidates
-            if union.admit(candidates):
+            reach = await _hop_records(store, hop, supply=supply, reads=reads)
+            unresolved = reach.unresolved
+            resolved_by_hop = reach.expansion
+            # ADR-0229 §2: the union is offered the **evidence** alone. A named
+            # record is in the pre-servicing supply by construction, so admitting it
+            # could only deduplicate — adding one to `returned` and one to
+            # `deduplicated` on every serviced hop, for no informational gain and at
+            # the cost of ADR-0226 §8's novelty rate. It spends no slot of §6's
+            # budget and moves no field of §9's record.
+            if union.admit(reach.evidence):
                 truncated.append(ReadKind.CITATION_HOP)
         if statement is not None:
             allowed = union.remaining
@@ -400,10 +450,14 @@ async def service_read_request(
         # ADR-0227 §3's carrier, computed on the success path alone and over
         # `union.held` — which is seeded from the pre-servicing supply and grown by
         # every admission, so membership of it *is* "the supply holds this record
-        # after servicing". `dict.fromkeys` is ADR-0227 §4's deduplication with the
-        # first occurrence keeping ADR-0226 §6's place: `Provenance.evidence` carries
-        # no uniqueness constraint and two labelled records may cite one episode, so
-        # the sequence `_hop_records` returns can name one record more than once.
+        # after servicing". A named record passes that test by construction
+        # (ADR-0229 §2), so the restriction bites on truncated evidence alone.
+        # `dict.fromkeys` is ADR-0227 §4's deduplication over ADR-0229 §3's
+        # expansion sequence, with the first occurrence keeping the place:
+        # `Provenance.evidence` carries no uniqueness constraint and nothing stops
+        # one label naming what another cites, so the expansion can name one record
+        # more than once — `E, B, E` deduplicates to `E, B`, which §3 rules the
+        # required result rather than a case to repair.
         reached = tuple(
             identifier
             for identifier in dict.fromkeys(record.id for record in resolved_by_hop)
@@ -588,8 +642,18 @@ async def _hop_records(
     *,
     supply: Sequence[MemoryRecord],
     reads: _Reads,
-) -> tuple[tuple[MemoryRecord, ...], int]:
-    """Follow one ``CITATION_HOP`` ask to the records its labels cite (§2, §3).
+) -> _HopReach:
+    """Follow one ``CITATION_HOP`` ask to the records its labels reach (§2, §3).
+
+    **A label names a destination** (ADR-0229 §1). The hop's reach is, for each
+    label, the record that label resolves to **together with** that record's own
+    stored ``Provenance.evidence`` — where ADR-0226 §3's "follows only … evidence"
+    reached the evidence alone, which left the record the planner pointed at in no
+    return value and is the defect #1960 measures. **No class, kind or field test is
+    applied here**: not on ``MemoryKind``, not on ``disposition``, not on
+    ``outcome``, and not on whether the evidence is empty. What a reached record
+    *renders* is ADR-0227 §1's question, decided at the render site, and a second
+    copy of that test here is the site ADR-0227 §3 divides away from it.
 
     **A keyed load and not a search.** The labels resolve in code to records the
     loop already selected; their stored ``Provenance.evidence`` is resolved through
@@ -603,11 +667,15 @@ async def _hop_records(
     absent from the mapping is a label that resolved to nothing rather than a hop
     that proceeds from a record the store no longer holds. Batching the liveness
     check with the evidence keeps both judged against one read-time snapshot,
-    which is the guarantee ``get_many`` offers and two calls would forfeit.
+    which is the guarantee ``get_many`` offers and two calls would forfeit — and it
+    is what ADR-0229 §7 means by "no second store call is added": the named records
+    this function now returns were already in this call's result.
 
     **Only the named records' evidence is read** (§3): the hop follows the labelled
     record's own citations and never the citations of a record reached through it —
-    "that is iteration, and it is §12's".
+    "that is iteration, and it is §12's". Reaching the named record is **zero**
+    levels of traversal rather than two (ADR-0229 §1), so ADR-0226 §3's prohibition
+    and ADR-0228's restatement of it bind here entire and unweakened.
 
     Args:
         store: The store to resolve identifiers against.
@@ -617,8 +685,9 @@ async def _hop_records(
         reads: The servicing's read observer, noted when this call returns records.
 
     Returns:
-        The cited records — labels in the ask's order, each record's evidence in the
-        order that record stores it — and how many labels resolved to nothing.
+        What the ask reached (:class:`_HopReach`): ADR-0229 §3's expansion sequence,
+        the evidence alone for ADR-0226 §7's union, and how many labels resolved to
+        nothing.
 
     Raises:
         MemoryStoreError: If the store's read fails. The caller owns the
@@ -628,7 +697,7 @@ async def _hop_records(
     unresolved = sum(1 for _, record in labelled if record is None)
     found = [record for _, record in labelled if record is not None]
     if not found:
-        return (), unresolved
+        return _HopReach(expansion=(), evidence=(), unresolved=unresolved)
 
     wanted: list[str] = []
     seen: set[str] = set()
@@ -640,15 +709,25 @@ async def _hop_records(
     resolved = await store.get_many(wanted)
     reads.note(len(resolved))
 
+    expansion: list[MemoryRecord] = []
     cited: list[MemoryRecord] = []
     for record in found:
         if record.id not in resolved:
             # §3's third way of resolving to nothing: the label named a record the
-            # store no longer holds, so there is nothing here to follow evidence
-            # *from*. Counted with the malformed and out-of-range labels, because
-            # from the audit's side all three are one population: a label the turn
-            # could not honour.
+            # store no longer holds. It reaches **nothing** — not the named record
+            # and not any evidence (ADR-0229 §4) — because honouring it from the
+            # supply's own copy would read a forgotten exchange back to the user by
+            # a route no forgetting mechanism watches. Counted with the malformed
+            # and out-of-range labels, because from the audit's side all three are
+            # one population: a label the turn could not honour.
             unresolved += 1
             continue
-        cited += [resolved[cite] for cite in record.provenance.evidence if cite in resolved]
-    return tuple(cited), unresolved
+        evidence = [resolved[cite] for cite in record.provenance.evidence if cite in resolved]
+        # ADR-0229 §3's "immediately followed by": the named record, then its own
+        # live evidence. The relation binds this sequence and binds nothing after
+        # it — the deduplication below is what resolves the overlap cases, and no
+        # later step reorders to restore it.
+        expansion.append(resolved[record.id])
+        expansion += evidence
+        cited += evidence
+    return _HopReach(expansion=tuple(expansion), evidence=tuple(cited), unresolved=unresolved)

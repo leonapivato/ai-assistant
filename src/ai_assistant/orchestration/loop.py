@@ -96,8 +96,8 @@ class RespondedTurn:
     position in ``memories``, not from a prefix length, not from
     ``Provenance.evidence`` read back at the renderer, and not from
     ``ActionPlan.read_request``. Each of those reconstructions is wrong in a way a
-    test would not obviously catch: the first is a second implementation of ADR-0226
-    §6's order, the second marks records on turns that fired nothing, and the third
+    test would not obviously catch: the first is a second implementation of ADR-0229
+    §3's order, the second marks records on turns that fired nothing, and the third
     marks them on turns whose servicing failed.
 
     **It rides beside the** :class:`~ai_assistant.core.types.TurnResult` **rather
@@ -112,12 +112,16 @@ class RespondedTurn:
         turn: What the turn produced — goal, context, memories, plan, and whether
             memory degraded.
         hop_reached: ADR-0227 §3's carrier. The **distinct** ids of the records this
-            turn's citation hop reached that :attr:`turn`'s supply holds, in ADR-0226
-            §6's order — labels in the order the ask names them, and each labelled
-            record's evidence in the order that record stores it. **Ordered**,
-            because ADR-0227 §4's cap is taken over it in that order. Empty on every
-            turn that did not fire, whose servicing was declined, whose servicing
-            failed or was partial, and whose hop resolved no live record.
+            turn's citation hop reached that :attr:`turn`'s supply holds, in
+            ADR-0229 §3's order: the **expansion sequence** — labels in the order the
+            ask names them and, for each label that resolved to a live record, that
+            record **immediately followed by** its own live evidence in the order that
+            record stores it — restricted to the records ADR-0227 §3 admits, under
+            §4's deduplication with the first occurrence keeping the place.
+            **Ordered**, because ADR-0227 §4's cap is taken over it in that order.
+            Empty on every turn that did not fire, whose servicing was declined,
+            whose servicing failed or was partial, and whose hop resolved no live
+            record.
     """
 
     turn: TurnResult
@@ -749,8 +753,9 @@ class LearningLoop:
         **And which records the hop reached rides out beside the turn** (ADR-0227
         §3). The servicer is the one component that can distinguish a
         ``CITATION_HOP``'s records from a ``SIGHTED_QUERY``'s, so it states the fact
-        and this method carries it — as data, in ADR-0226 §6's order, deduplicated by
-        identifier — to :class:`~ai_assistant.orchestration.engine.Engine`, which
+        and this method carries it — as data, in ADR-0229 §3's expansion order,
+        deduplicated by identifier — to
+        :class:`~ai_assistant.orchestration.engine.Engine`, which
         hands it to the composing stage exactly as it hands ADR-0205 §5's delivery
         facts. No identifier in it reaches a model, a log, a trace or ADR-0226 §9's
         audit record (ADR-0227 §3), and this method reads nothing off it.
