@@ -1177,14 +1177,7 @@ class LearningLoop:
             # included, runs over what it returned.
             context, memories = _narrowed(narrow, context, memories, retrieved_ids)
         plans: tuple[ActionPlan, ...] = ()
-        # ADR-0228 §9 asks for "how many planner calls the turn **made**", so a call
-        # is counted when it is started and not when it returns: a turn whose second
-        # call raises made two, and a record saying one beside **planning failed**
-        # would say planning failed on a call it claims never happened. A turn that
-        # ended before the planner was reached at all still says zero, which is the
-        # distinction §9's `trigger` outcome draws for its own field.
-        audit.planner_calls += 1
-        plan = _stamped(await self._planned(goal, context=context, memories=memories))
+        plan = _stamped(await self._planned(goal, context=context, memories=memories, audit=audit))
         plans += (plan,)
         while True:
             request = plan.read_request
@@ -1268,9 +1261,8 @@ class LearningLoop:
             # this line assigns the reason again, so the value only stands where the
             # call did not return.
             audit.stop = StopReason.PLANNING_FAILED
-            audit.planner_calls += 1
             plan = _stamped(
-                await self._planned(goal, context=context, memories=memories),
+                await self._planned(goal, context=context, memories=memories, audit=audit),
                 supersedes=plan.id,
             )
             plans += (plan,)
@@ -1311,6 +1303,7 @@ class LearningLoop:
         *,
         context: CurrentContext,
         memories: Sequence[MemoryRecord],
+        audit: TurnReadAudit,
     ) -> ActionPlan:
         """Read the capability vocabulary, then plan over it (ADR-0211 §3).
 
@@ -1338,6 +1331,15 @@ class LearningLoop:
             memories: The supply **as it stands for this call** — three groups on a
                 turn's first, and those three plus the servicing's fourth on its
                 second (ADR-0228 §7).
+            audit: This turn's record, whose ``planner_calls`` this method advances.
+                **Counted here and nowhere else**, between the vocabulary read and the
+                call, which is what makes the field say what ADR-0228 §9 asks of it:
+                "how many calls to ``Planner.plan`` the turn made". A count taken
+                before the read would report a call on a turn whose registry raised
+                and whose planner was never reached; one taken after the call returned
+                would report one on a turn whose second call raised, and a record
+                saying that beside **planning failed** would say planning failed on a
+                call it claims never happened.
 
         Returns:
             The plan, exactly as the planner returned it. ``supersedes`` is not
@@ -1348,6 +1350,10 @@ class LearningLoop:
             PlanningError: If the planner could not produce a plan.
         """
         capabilities = await self._registry.capabilities()
+        # Between the read and the call: the vocabulary is now in hand, so the next
+        # line is a call this turn genuinely made, and it is counted whether or not
+        # it returns (ADR-0228 §9).
+        audit.planner_calls += 1
         return await self._planner.plan(
             goal, context=context, memories=memories, capabilities=capabilities
         )
