@@ -298,7 +298,17 @@ class ProcPlatformTables:
         return self._walk(node, depth=0)
 
     def _block_node(self, device: int, source: str) -> Path | None:
-        """The ``sysfs`` directory for a mount's block device, if it has one."""
+        """The ``sysfs`` directory for a mount's block device, if it has one.
+
+        **Every branch here that cannot answer returns ``None``**, which the caller
+        turns into :attr:`DeviceBacking.UNKNOWN` and §6 refuses — so the ``exists``
+        calls below carry no verdict of their own. That matters because ``exists``
+        answers ``False`` for "absent", for "unreadable" and for "a dangling symbolic
+        link" alike, and the surrounding methods draw those apart precisely because
+        they *do* carry verdicts. Here the collapse is harmless in the only direction
+        that matters: an unreadable node is not found, and a device not found is not
+        established local.
+        """
         by_number = self._sysfs / "dev" / "block" / f"{os.major(device)}:{os.minor(device)}"
         if by_number.exists():
             return by_number
@@ -341,19 +351,35 @@ class ProcPlatformTables:
         question is actually about.
 
         Returns:
-            The stacked layers, empty for a leaf device, or ``None`` where the
-            directory exists and could not be read — which is a chain the platform
-            did not report through and is refused rather than treated as a leaf.
+            The stacked layers, empty for a leaf device, or ``None`` where the directory
+            exists and could not be read, or where any entry in it could not be — both
+            of which are chains the platform did not report through, and are refused
+            rather than treated as a leaf or as a shorter stack.
         """
         holder = resolved / "slaves"
         try:
-            return [entry for entry in holder.iterdir() if entry.is_dir()]
+            entries = list(holder.iterdir())
         except FileNotFoundError:
             # A device with no `slaves` directory is a leaf, which is an answer
             # rather than a failure to answer.
             return []
         except OSError:
             return None
+        layers: list[Path] = []
+        for entry in entries:
+            try:
+                usable = entry.is_dir()
+            except OSError:
+                return None
+            if not usable:
+                # An entry that is there and does not resolve to a directory is a layer
+                # of this stack that cannot be read. **Dropping it would be the same
+                # defect one level up**: the walk would decide the stack over the layers
+                # it could see, and a mirror of a local disk and a dangling link to an
+                # iSCSI LUN would come back `LOCAL`.
+                return None
+            layers.append(entry)
+        return layers
 
     def _classify_ancestry(self, resolved: Path) -> DeviceBacking:
         """Walk a leaf block device's ``sysfs`` ancestry for a bus or a transport.
@@ -475,13 +501,27 @@ class ProcPlatformTables:
             ordinary case for an intermediate node and is an answer; or ``None`` where
             the link exists and could not be resolved, which is not.
         """
+        link = node / "subsystem"
         try:
-            return (node / "subsystem").resolve(strict=True).name
+            link.readlink()
         except FileNotFoundError:
             # No `subsystem` link at all: this node belongs to no bus and no class,
-            # which is what most intermediate nodes of a device path are.
+            # which is what most intermediate nodes of a device path are. This is the
+            # **one** answer here that is an answer, and it is established before
+            # anything is resolved — because `Path.resolve(strict=True)` raises
+            # `FileNotFoundError` for an absent link and for a **dangling** one alike,
+            # and only the first of those two means "belongs to no subsystem".
             return ""
         except OSError:
+            # Present, or unreadable, or not a symbolic link at all. None of those is
+            # "declares no subsystem".
+            return None
+        try:
+            return link.resolve(strict=True).name
+        except OSError:
+            # The link is there and its target is not resolvable — dangling, or removed
+            # between the two observations above. Either way the membership this node
+            # declares cannot be read, which is not the same as declaring none.
             return None
 
     @staticmethod

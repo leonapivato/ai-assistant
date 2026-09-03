@@ -481,3 +481,42 @@ def test_a_node_declaring_no_subsystem_at_all_is_walked_past(tmp_path: Path) -> 
 
     assert not (sysfs.root / "devices" / "pci0000:00" / "nvme" / "subsystem").exists()
     assert _backing(sysfs) is DeviceBacking.LOCAL
+
+
+def test_a_controller_whose_subsystem_link_dangles_is_unknown(tmp_path: Path) -> None:
+    """An absent link and a dangling one are the same ``FileNotFoundError``.
+
+    ``Path.resolve(strict=True)`` raises it for a ``subsystem`` link that is not there
+    **and** for one whose target does not resolve, and only the first means "belongs to
+    no subsystem". Reading the second that way skips the NVMe transport check on a
+    fabric-attached controller and lets the walk reach the ``pci`` ancestor above —
+    admitting the device precisely because its evidence was unavailable.
+
+    Staged without privilege, which is what makes it a real arm rather than a pinned
+    constant: the link is simply pointed at a directory that does not exist.
+    """
+    sysfs = Sysfs(tmp_path)
+    controller = _nvme(sysfs, transport="tcp")
+    (controller / "subsystem").unlink()
+    (controller / "subsystem").symlink_to(sysfs.root / "class" / "gone", target_is_directory=True)
+
+    assert (controller / "subsystem").is_symlink()
+    assert not (controller / "subsystem").exists()
+    assert _backing(sysfs) is DeviceBacking.UNKNOWN
+
+
+def test_a_stack_whose_layer_link_dangles_is_unknown(tmp_path: Path) -> None:
+    """The same shape one level up, where dropping the layer is the tempting mistake.
+
+    A ``slaves`` entry that does not resolve to a directory is a layer of the stack that
+    could not be read. Skipping it would decide the stack over the layers that *were*
+    readable — so a mirror of a local disk and a dangling link to an iSCSI LUN would
+    come back ``LOCAL``, which is ADR-0230 §6's "over the whole backing chain" answered
+    over part of it.
+    """
+    sysfs = Sysfs(tmp_path)
+    _stack(sysfs, transports=["pcie"])
+    slaves = sysfs.root / "devices" / "virtual" / "block" / "dm-0" / "slaves"
+    (slaves / "gone").symlink_to(sysfs.root / "devices" / "nowhere", target_is_directory=True)
+
+    assert _backing(sysfs) is DeviceBacking.UNKNOWN
