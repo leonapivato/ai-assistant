@@ -994,6 +994,17 @@ def test_every_integer_setting_is_discovered() -> None:
         "email_max_messages",
         "email_max_bytes",
         "email_max_content_bytes",
+        # ADR-0230 §6's three integer bounds on the local-file fetch, acknowledged
+        # here for every reader figure's reason and with the same ``bool`` argument.
+        # §6 states the domain in as many words — "integers of **at least 1**" — and
+        # says why zero and negative are refused rather than given a meaning: "a zero
+        # entry cap is a mechanism that shows nothing while appearing configured", and
+        # a negative one is worse, because "the obvious Python spelling of a cap,
+        # ``entries[:-1]``, quietly yields all but the last entry, so a bound would be
+        # defeated by a configuration value rather than enforced by one".
+        "fetch_listing_max_entries",
+        "fetch_max_file_bytes",
+        "fetch_max_content_bytes",
         # ADR-0159 §3's spend bound, acknowledged here with the same `bool`
         # argument the caps above carry: `reconciler_max_conflicts=True` is a
         # bound of one, which asks the model about the best-ranked conflict alone
@@ -1324,6 +1335,10 @@ def test_every_duration_setting_is_discovered() -> None:
         "email_reader_interval",
         "email_window_past",
         "email_read_timeout",
+        # ADR-0230 §4's listing expiry, acknowledged here for the same reason: it is
+        # strictly positive by §6's domain clause and "refused at load rather than at
+        # the first fetch".
+        "fetch_listing_ttl",
         # ADR-0168 §8's four durations, none of them nullable for the reason
         # ``hub_read_timeout`` is not: "a gateway with no session expiry, no session
         # ceiling and no request bound is a resident process that a single local

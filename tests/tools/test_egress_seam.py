@@ -247,6 +247,13 @@ NOT_TRANSPORT_BEARING = frozenset(
         "python_dateutil",
         "python_dotenv",
         "pywin32_ctypes",
+        # PDF text extraction over bytes it is handed, with no client of any kind
+        # (ADR-0230 §6): `PdfReader` takes a stream or a path and the whole package
+        # imports no `socket`, `urllib`, `http` or `ssl`. It is a pure-Python wheel
+        # with no runtime dependency of its own, so it drags no transport in behind
+        # it either, and `readers/` — the only importer — is the leaf package no
+        # subsystem may reach.
+        "pypdf",
         "pyyaml",
         "referencing",
         "regex",
