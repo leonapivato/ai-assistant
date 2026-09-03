@@ -27,9 +27,11 @@ the contract.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from hashlib import sha256
 from typing import TYPE_CHECKING
 
+from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.types import (
     EpisodicMemory,
     FeedbackEvent,
@@ -48,9 +50,14 @@ from ai_assistant.core.types import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import MemoryRecord
 
 _FULL_CONFIDENCE = 1.0
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
 
 
 def _derived_id(event: FeedbackEvent) -> str:
@@ -69,9 +76,10 @@ def _derived_id(event: FeedbackEvent) -> str:
     what makes the scheme collision-free rather than collision-prone.
 
     The whole event is hashed rather than a chosen subset, because every field
-    reaches the synthesised record: ``created_at`` becomes an episode's
-    ``occurred_at`` and every record's ``provenance.last_updated``, and
-    ``evidence`` becomes its provenance evidence. A subset would let two events
+    reaches the synthesised record: ``created_at`` becomes every record's
+    ``provenance.last_confirmed_at`` — an episode's ``occurred_at`` and a guarded
+    act's ``set_at`` besides — and ``evidence`` becomes its provenance evidence. A
+    subset would let two events
     that produce *different* records share an id, and ``MemoryStore.add`` treats
     a repeated id as an upsert, so the first record would vanish. Hashing
     everything makes that impossible by construction instead of by a judgement
@@ -179,6 +187,7 @@ class FakeFeedbackProcessor:
         self,
         proposals: Sequence[MemoryUpdateProposal] | None = None,
         *,
+        now: Clock = _utcnow,
         id_factory: Callable[[], str] | None = None,
     ) -> None:
         """Create the fake processor.
@@ -188,11 +197,25 @@ class FakeFeedbackProcessor:
                 synthesises one proposal per event instead; an *empty* sequence
                 is the distinct, explicit "this processor proposes nothing", which
                 a consumer needs to exercise its no-op learning path.
+            now: Clock for each synthesised record's ``provenance.last_updated`` —
+                *transaction* time, and so this processor's rather than the event's
+                (ADR-0045 §3, #775). Defaults to the wall clock exactly as
+                ``RuleBasedFeedbackProcessor``'s does, and is injectable for the
+                same reason: a consumer asserting an exact stamp wires one, as it
+                already does for every other canonical fake that stamps. Guarded by
+                :func:`~ai_assistant.core.clock.checked_clock` (ADR-0026 §7), whose
+                own ``ClockReadingError`` is left unwrapped here because it is left
+                unwrapped by the implementation this fake doubles — `learning` has
+                no error class of its own to translate it into, and a fake that
+                invented one would certify a consumer's handling against a class it
+                never meets in production.
             id_factory: Supplies ids for synthesised records, for a test that
                 wants to name them. Defaults to deriving the id from the event
                 (see :func:`_derived_id`) — deterministic without being
                 order-dependent, and stable across instances, so two fakes
-                feeding one store do not overwrite each other's records.
+                feeding one store do not overwrite each other's records. The id
+                stays a pure function of the event, and ``now`` does not reach it:
+                a fixture asserting an exact *id* is undisturbed by this seam.
 
         Raises:
             ValueError: If any scripted proposal has blank ``proposed.content`` or
@@ -217,6 +240,7 @@ class FakeFeedbackProcessor:
         self._proposals: tuple[MemoryUpdateProposal, ...] | None = (
             None if proposals is None else tuple(p.model_copy(deep=True) for p in proposals)
         )
+        self._clock = checked_clock(now, owner="FakeFeedbackProcessor")
         self._id_factory = id_factory
         self.events: list[FeedbackEvent] = []
 
@@ -236,7 +260,13 @@ class FakeFeedbackProcessor:
                 script to answer with (:meth:`_to_record`, ADR-0122 §7). A *scripted*
                 fake answers with its script whatever the event carries: the script
                 is the consumer's own stated outcome, and the refusal belongs to the
-                branch that would otherwise invent a drawer.
+                branch that would otherwise invent a drawer. Or if the injected
+                clock's reading does not conform — a
+                :class:`~ai_assistant.core.clock.ClockReadingError`, which is a
+                ``ValueError`` and is left unwrapped exactly as
+                ``RuleBasedFeedbackProcessor`` leaves it (ADR-0026 §2, §4). A
+                scripted fake stamps nothing and so reads no clock; an unresolved
+                event is refused before any reading is taken.
         """
         self.events.append(event.model_copy(deep=True))
         act = _act(event)
@@ -327,19 +357,36 @@ class FakeFeedbackProcessor:
                     about_person=event.about_person,
                 )
 
-    @staticmethod
-    def _provenance(event: FeedbackEvent) -> Provenance:
+    def _provenance(self, event: FeedbackEvent) -> Provenance:
         """User-asserted provenance carrying the feedback's evidence and time.
 
-        ``last_confirmed_at`` is the utterance's instant, matching
-        ``FeedbackProcessor`` (ADR-0109 §4): an ``ASSERTED`` belief is confirmed by
-        the user stating it, never by the moment we wrote it down.
+        **The two instants come from different sources, and each answers to its own
+        rule** — the same split ``RuleBasedFeedbackProcessor`` draws, drawn here
+        because a fake looser than the implementation it doubles certifies
+        consumers the real one will reject (ADR-0026 §7's reason for holding the
+        ``testing/`` fakes to the same rules).
+
+        ``last_confirmed_at`` is the utterance's instant (ADR-0109 §4): an
+        ``ASSERTED`` belief is confirmed by the user stating it, never by the moment
+        we wrote it down.
+
+        ``last_updated`` is *transaction* time and so this processor's clock
+        (ADR-0045 §3): "when **we** last revised the belief". Taking it from the
+        event made the record claim a revision at an instant nothing was revised at,
+        wrongly by exactly the delay of a queued, retried or replayed event — the
+        defect #775 removed from the production processor and left standing here
+        (#780).
+
+        Read on the branch that mints a record rather than once in ``process``, for
+        the reason the production processor reads it there: a scripted fake mints
+        nothing, and consuming a reading for it would turn a misconfigured clock
+        into a failure of a call that touches no seam.
         """
         return Provenance(
             source=MemorySource.USER_ASSERTED,
             confidence=_FULL_CONFIDENCE,
             evidence=event.evidence,
-            last_updated=event.created_at,
+            last_updated=self._clock(),
             last_confirmed_at=event.created_at,
         )
 
