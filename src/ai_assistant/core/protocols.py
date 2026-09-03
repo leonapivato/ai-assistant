@@ -11645,14 +11645,20 @@ class Secrets(Protocol):
 class SecretStore(Secrets, Protocol):
     """The whole keyring seam: read, write and remove (ADR-0125 §1).
 
-    :class:`Secrets` plus the two methods that change what is stored. **Only the
-    wire client's enrolment and unenrolment paths hold one** — it is the sole
-    consumer that writes, at enrolment and at unenrolment, and even it is given
-    the narrow face on its connect path (ADR-0125 §8). `models/` and `tools/`
-    hold neither method here, and no other subsystem holds either face:
-    `orchestration`, `memory`, `context`, `planning`, `permissions`, `learning`,
-    `readers`, `evaluation`, `service` and `interfaces` hold none, and none may
-    acquire one without the ADR ADR-0125 §2 requires for a fourth scope.
+    :class:`Secrets` plus the two methods that change what is stored. **Holding
+    this face is what makes a consumer a writer**, which is the whole point of
+    ADR-0125 §1's split: a consumer that only reads is handed :class:`Secrets`,
+    and a consumer that writes on one path and reads on another is handed the
+    narrow face on the reading one — the shape ADR-0125 §8 gives the wire client,
+    whose connect path is `Secrets` and nothing wider.
+
+    **Which consumers hold it is not enumerated here, deliberately.** That is
+    decided per scope by ADR-0125 §8 and by whichever later ADR admits a holder,
+    each holder's own module saying what it holds and why; a roster in this file
+    would read as a closed list while the decisions moved past it, which is what
+    happened to the one that stood here (issue #1322). What *is* closed is the
+    set of scopes — ADR-0125 §2's three — and no consumer may acquire a fourth
+    without the ADR that clause requires.
 
     Every clause on :class:`Secrets` binds here unchanged — the scope and
     installation binding, the refusal to enumerate, the storage-not-authorisation
