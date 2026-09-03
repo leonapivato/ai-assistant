@@ -57,6 +57,11 @@ from ai_assistant.tools.egress import (
 #: call's arguments hold and what the transport has to canonicalise for itself.
 ARGUMENTS: Final = arguments()
 
+#: Two ARABIC-INDIC DIGIT FIVE, written as escapes so this source stays ASCII and
+#: nothing here depends on an editor rendering it. It is the port spelling
+#: ``int()`` reads as 55 while a byte-exact comparison against ``"55"`` does not.
+ANOTHER_SCRIPTS_55: Final = "\u0665\u0665"
+
 
 @pytest.mark.parametrize(
     ("endpoint", "expected"),
@@ -76,6 +81,16 @@ ARGUMENTS: Final = arguments()
         (
             "smtp+starttls://mx.example.invalid:25",
             TransportEndpoint(host="mx.example.invalid", port=25, implicit_tls=False),
+        ),
+        # The ends of the range the grammar admits, so that tightening what a port
+        # may be written as cannot quietly narrow which ports are reachable.
+        (
+            "smtps://mail.example.invalid:1",
+            TransportEndpoint(host="mail.example.invalid", port=1, implicit_tls=True),
+        ),
+        (
+            "smtps://mail.example.invalid:65535",
+            TransportEndpoint(host="mail.example.invalid", port=65535, implicit_tls=True),
         ),
     ],
 )
@@ -101,6 +116,17 @@ def test_the_endpoint_grammar_accepts_a_host_a_port_and_two_schemes(
         pytest.param("smtps://mail.example.invalid:70000", id="port-out-of-range"),
         pytest.param("smtps://mail.example.invalid:submission", id="port-not-a-number"),
         pytest.param("smtps:// mail.example.invalid", id="host-with-space"),
+        # **#1147's three cases, and the two the same grammar closes with them.**
+        # Each was accepted or escaped before the port grammar was written down as
+        # one to five ASCII decimal digits with no leading zero.
+        pytest.param("smtps://mail.example.invalid:", id="trailing-colon-under-implicit-tls"),
+        pytest.param("smtp+starttls://mail.example.invalid:", id="trailing-colon-under-starttls"),
+        pytest.param("smtps://mail.example.invalid:²", id="digit-int-cannot-read"),
+        pytest.param(
+            f"smtps://mail.example.invalid:{ANOTHER_SCRIPTS_55}", id="digit-int-reads-as-55"
+        ),
+        pytest.param("smtps://mail.example.invalid:0465", id="port-with-a-leading-zero"),
+        pytest.param("smtps://mail.example.invalid:" + "1" * 5000, id="port-of-5000-digits"),
     ],
 )
 def test_the_endpoint_grammar_refuses_every_form_it_will_not_pin(endpoint: str) -> None:
@@ -111,6 +137,23 @@ def test_the_endpoint_grammar_refuses_every_form_it_will_not_pin(endpoint: str) 
     authority, a path a later lane could read as a route. Refusing is cheaper than
     deciding, and an unreadable port is refused rather than defaulted, because
     defaulting connects somewhere nobody wrote down.
+
+    **The port rows are that last sentence made true (#1147).** A trailing colon
+    was a port written and left empty, which ``rpartition`` handed on as the same
+    empty tail an endpoint with no colon produces, so it took the scheme's default
+    — it connected somewhere nobody wrote down, which is the one thing the rule
+    above says it does not do. ``²`` and a 5000-digit port are the two ways
+    ``str.isdigit()`` admitted text ``int()`` then refused: the first is not a
+    decimal digit at all, the second exceeds CPython's 4300-digit conversion
+    limit, and **both left as a bare ``ValueError``** — the wrong taxonomy for a
+    refusal about a binding (ADR-0191 §4), reaching ``ToolInvoker`` as an internal
+    fault rather than as a refusal. That every row here raises
+    ``TransportPinError`` and not merely *something* is the whole assertion:
+    ``ValueError`` is not in this type's ancestry, so a leaked one fails this test.
+
+    A port in another script and a port with a leading zero are the inverse —
+    text ``int()`` reads happily, which was therefore *accepted*, and is refused
+    now for the reason the next test states.
     """
     with pytest.raises(TransportPinError):
         parse_smtp_endpoint(endpoint)
@@ -172,6 +215,37 @@ def test_a_host_this_seam_will_not_pin_is_refused_in_its_own_taxonomy(endpoint: 
 def test_the_grammar_never_normalises_the_host(host: str) -> None:
     """Two spellings of one host stay two endpoints (ADR-0148 §2's exactness default)."""
     assert parse_smtp_endpoint(f"smtps://{host}:465").host == host
+
+
+@pytest.mark.parametrize(
+    ("written", "canonical"),
+    [
+        pytest.param(ANOTHER_SCRIPTS_55, "55", id="another-script"),
+        pytest.param("0465", "465", id="leading-zero"),
+        pytest.param("00025", "25", id="padded-to-five-digits"),
+    ],
+)
+def test_the_grammar_never_normalises_the_port(written: str, canonical: str) -> None:
+    """One port has one spelling, for the reason one host has one spelling (#1147).
+
+    What pins the connection is a **textual** comparison of the binding's endpoint
+    against the registration's, run before anything is parsed
+    (``SmtpEgressTransport._pinned``, ADR-0154's condition 5). A spelling that
+    parses to the same port while comparing unequal as that text is therefore not
+    a harmless synonym: it is a second name for a pinned endpoint, which is the
+    fold ADR-0148 §2's exactness default forbids on the host and which nothing
+    made safe on the port. Each row is refused while the port it would have parsed
+    to is accepted, so the tightening removes an alias rather than a port.
+
+    Args:
+        written: A spelling ``int()`` reads as ``canonical`` and text comparison
+            does not.
+        canonical: The one spelling of that port this grammar accepts.
+    """
+    assert parse_smtp_endpoint(f"smtps://mail.example.invalid:{canonical}").port == int(canonical)
+
+    with pytest.raises(TransportPinError):
+        parse_smtp_endpoint(f"smtps://mail.example.invalid:{written}")
 
 
 async def test_a_conforming_exchange_sends_to_exactly_the_bound_recipients() -> None:
