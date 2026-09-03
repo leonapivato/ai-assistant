@@ -925,10 +925,15 @@ def _retirement_set(
       **assertion**.
 
     **This is not :data:`_REINFORCE_SAFE`, and the difference is load-bearing**
-    (ADR-0092 §5). That set is still ``{OBSERVED, INFERRED}``, because the question
-    it answers — may an assertion fold at *this record's* id — turns on the foreign
-    idempotency key an ``EXTERNAL`` record carries, which widening the retirement
-    class does not change.
+    (ADR-0092 §5). That set's membership is stated where it is defined and is
+    deliberately not restated here — the enumeration this sentence used to carry
+    went stale the first time the set widened (ADR-0121 §5), which is the drift
+    ADR-0092 §5 warns about read from the documentation side. What is load-bearing
+    at *this* site is that ``EXTERNAL`` is in the retirement class and not in
+    ``_REINFORCE_SAFE``, because the question that set answers — may an assertion
+    fold at *this record's* id — turns on the foreign idempotency key an
+    ``EXTERNAL`` record carries, which widening the retirement class does not
+    change.
 
     ``target`` leads the list (it is the primary the policy named and
     ``MemoryDecision`` audits); order among the rest follows ``conflicts`` (retrieval
