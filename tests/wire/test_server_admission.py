@@ -408,10 +408,18 @@ async def test_a_credential_of_the_wrong_type_never_reaches_admission(
     present ``null`` is "present and… not a string", so it takes this code and not
     the absent member's — and the code is the whole of what the peer and the hub's
     own refusal record are told, which is what §7 requires distinguished.
+
+    **Both limbs are asserted on this arm** rather than on its neighbours alone
+    (#935): §7 requires the reasons distinguished "in the error it returns **and
+    in what the hub logs**", and a server that recorded ``credential_required``
+    for a present ``null`` while replying ``credential_rejected`` would satisfy
+    only the first. The two agree today because one local feeds both, which is a
+    property of a line that could be edited rather than one the test held.
     """
     admission = _ScriptedAdmission()
     async with _serving(FakeAssistantEngine(), admission, tmp_path) as (peer, _):
         await peer.send(_connect(credential))
         reply = await peer.receive()
     assert reply.payload["code"] == env.CREDENTIAL_REJECTED
+    assert admission.refusals == [env.CREDENTIAL_REJECTED]
     assert admission.credentials == []

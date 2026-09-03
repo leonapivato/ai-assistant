@@ -53,6 +53,14 @@ _STRANGER: Final = "nSTRANGRCNTRL"
 #: here in full, which is the half a test can actually reach.
 _BIND: Final = "127.0.0.1"
 
+#: What :meth:`_Peer.connect` leaves the credential member out for. ``None`` is a
+#: value a peer can actually send — the codec writes it as a JSON ``null`` — and
+#: ADR-0124 §7 gives the two frames *different* refusals, so a helper that spelt
+#: "omit" as ``None`` could only ever drive one of them and would label it as the
+#: other (#938). ``wire/envelope.py`` reads the member against a sentinel of its
+#: own for the same reason.
+_OMITTED: Final = object()
+
 
 @dataclass
 class _FakeAgent:
@@ -222,13 +230,23 @@ class _Peer:
     reader: asyncio.StreamReader
     writer: asyncio.StreamWriter
 
-    async def connect(self, credential: object | None) -> env.Envelope:
-        """Send a connect frame and read whatever comes back."""
+    async def connect(self, credential: object = _OMITTED) -> env.Envelope:
+        """Send a connect frame and read whatever comes back.
+
+        Args:
+            credential: The credential member's value — ``None`` included, which
+                the codec writes as a JSON ``null`` and which ADR-0124 §7 refuses
+                as a credential that did not verify. :data:`_OMITTED` leaves the
+                member out entirely, which is the *other* refusal.
+
+        Returns:
+            Whatever frame the listener answered with.
+        """
         payload: dict[str, Any] = {
             env.CONNECT_VERSION: env.PROTOCOL_VERSION,
             env.CONNECT_CLIENT: "assistant-cli",
         }
-        if credential is not None:
+        if credential is not _OMITTED:
             payload[env.CONNECT_CREDENTIAL] = credential
         await self.send(env.Envelope(kind=env.FrameKind.CONNECT, id="c-0", payload=payload))
         return await self.receive()
@@ -875,10 +893,11 @@ async def test_a_callback_that_runs_after_the_close_is_refused_not_served(
 @pytest.mark.parametrize(
     ("credential", "code"),
     [
-        (None, env.CREDENTIAL_REQUIRED),
-        ("", env.CREDENTIAL_REQUIRED),
-        ("not-a-credential", env.CREDENTIAL_REJECTED),
-        (7, env.CREDENTIAL_REJECTED),
+        pytest.param(_OMITTED, env.CREDENTIAL_REQUIRED, id="omitted"),
+        pytest.param("", env.CREDENTIAL_REQUIRED, id="empty"),
+        pytest.param(None, env.CREDENTIAL_REJECTED, id="null"),
+        pytest.param("not-a-credential", env.CREDENTIAL_REJECTED, id="malformed"),
+        pytest.param(7, env.CREDENTIAL_REJECTED, id="wrong-type"),
     ],
 )
 async def test_every_remote_refusal_is_recorded_against_its_device(
@@ -891,10 +910,17 @@ async def test_every_remote_refusal_is_recorded_against_its_device(
     for is auditable even though the read that produced it is not" — and §7 requires
     the reasons distinguished "in the error it returns **and in what the hub logs**".
 
-    The four cases here are the ones the *frame reader* refuses, before any verifier
+    The five cases here are the ones the *frame reader* refuses, before any verifier
     is consulted: they never reach the admission's own decision, so without a seam
     for them the hub would answer the peer and record nothing about who it was. The
     log carries neither the credential nor the verifier (§7).
+
+    **Omitting the member and sending a JSON ``null`` are two of those five, not
+    one** (#938). §7 puts a present ``null`` on the malformed side — it is
+    "present and… not a string" — and only an absent or empty member on the
+    required side, so the pair is what pins that the record distinguishes them
+    rather than answering ``credential_required`` to anything that reads as
+    ``None`` through ``dict.get``.
     """
     async with _remote(tmp_path) as hub:
         hub.registry.enrol(_DEVICE, now=_MOMENT)
