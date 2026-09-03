@@ -890,18 +890,21 @@ scope is a smaller falsehood than any of those — it is, in fact, none.
 > admits has performed the very read the refusal exists to prevent — no `Fetcher` survives,
 > but `readers/` has already reached the network. Both stages are required, in this order.
 
-> **Normative.** **Stage 1 — admission — reads only local information, and opens and
-> traverses nothing under the configured path.** The constructor establishes, from the
-> platform's own mount and device tables — which are local files, read without touching the
-> configured path — that the path resolves under a mount whose filesystem **and** backing
-> device are local, and refuses otherwise. Deciding **which** mount the path falls under is
-> a longest-prefix decision over those tables and not a traversal of the path, so a
-> symbolic link inside the path can make that decision wrong — which is precisely what
-> stage 2's mismatch catches, and why neither stage stands alone. A platform that cannot
-> answer the question without touching the path does not thereby make this stage optional:
-> on such a platform the mechanism is **unavailable** and the root is refused. This is the
+> **Normative.** **Stage 1 — admission — resolves the configured path without following a
+> symbolic link and without opening the path itself.** The constructor walks the path
+> **component by component from the filesystem root**, opening each ancestor directory
+> **with no-follow**, and **refuses at the first ancestor component that is a symbolic
+> link**. Before it takes any descent — the last one, onto the configured path itself,
+> included — it establishes from the platform's own mount and device tables that the
+> component it is about to enter lies on a mount whose filesystem **and** backing device
+> are local, and refuses otherwise. So every directory it opens was established local
+> before it was opened, **no open crosses onto a mount the tables do not vouch for**, and
+> the configured path itself is opened by nothing in this stage. A symbolic link at the
+> **final** component is stage 2's, whose no-follow open refuses it without following it.
+> A platform that cannot answer the question does not thereby make this stage optional: on
+> such a platform the mechanism is **unavailable** and the root is refused. This is the
 > stage at which a root whose reads would leave the device is refused, and it is refused
-> having been opened by nothing.
+> having been read through by nothing.
 
 > **Normative.** **Stage 2 — acquisition and binding — opens the admitted root and
 > re-establishes locality against the opened object.** Construction opens the root
@@ -1669,7 +1672,7 @@ same reason; this decision adds a contract, so it adds a lane.
     turn. This is the arm that fails on any implementation carrying an unchecked bound
     through to a slice.
 22. **A root whose reads would leave the device does not wire, one whose locality is
-    merely unproven does not either, and refusing one reads nothing through it.** Six arms
+    merely unproven does not either, and refusing one reads nothing through it.** Seven arms
     at construction, over a fetcher whose view of the platform's mount and device
     information the test supplies. Four decide admission: a root on a filesystem the
     platform reports as network-attached refuses; a root whose filesystem type is
@@ -1684,9 +1687,11 @@ same reason; this decision adds a contract, so it adds a lane.
     **A fifth arm asserts that the refusal cost no access**: with the filesystem calls the
     constructor makes instrumented, a root the platform reports as network-attached is
     refused **and no `open`, and no other call naming the configured path or anything
-    beneath it, is issued** — the constructor reads the platform's own mount and device
-    tables and nothing else. This is §6 stage 1 asserted rather than only stated, and it is
-    the arm that fails on any implementation opening the root before admitting it.
+    beneath it, is issued** — the only filesystem calls the constructor makes are the
+    tables' own reads and the no-follow opens of ancestor directories those tables had
+    already established local, none of them on the refused mount. This is §6 stage 1
+    asserted rather than only stated, and it is the arm that fails on any implementation
+    opening the root before admitting it.
     **And a sixth arm, over a real filesystem, for the construction-time race**: the root's
     pathname is replaced — by a symlink to a remote-backed directory, or by a mount landing
     on it — deterministically sequenced to land **between** stage 1's admission and stage
@@ -1694,6 +1699,13 @@ same reason; this decision adds a contract, so it adds a lane.
     will not follow; the interval exists and the refusal is deterministic; and in **no** arm
     does a listing or a fetch read through the replacement. This is the arm that fails on
     any implementation that admits a root and then binds whatever its pathname later names.
+    **And a seventh arm, for a symbolic link inside the configured path**: a root whose
+    configured path has an **ancestor** component that is a symbolic link to a
+    remote-backed directory is refused, **and, instrumented, nothing crosses the link** —
+    no open of its target, of anything beneath that target, or of the configured path. This
+    is the arm that fails on any implementation admitting by a longest-prefix match over
+    the mount table, which reads the link's own pathname as ordinary text and leaves the
+    link to be discovered after it has been followed.
 
 ### 15. Deferred, by name, each with what fires it
 
@@ -1956,6 +1968,17 @@ avoided: the record carries an attestation because it is in the attested band.
   membership a minted capability instead of an obligation on the caller. A planner that
   serialised its inputs would put a live capability in a prompt, which is precisely what
   §2 exists to prevent. `ShownFile` removes the field rather than forbidding its use.
+- **Admitting the root by a longest-prefix match of its configured path over the mount
+  table, with an in-path symbolic link left to stage 2's mismatch.** It was this ADR's
+  answer for one round and it is unsound in the direction that costs: a prefix match reads
+  the configured path as text, so for `/local/root/link/subdir` whose `link` targets an NFS
+  mount it admits `/local`, and an open guarded only at the final component **follows**
+  `link` — the remote filesystem is contacted and only then is the device mismatch seen.
+  That is the round-14 defect one component in, and stage 2 cannot repair it, because the
+  mismatch it detects is detected after the read. Resolving component by component with
+  no-follow refuses **at** the link, before it is followed, and is the only ordering in
+  which the refusal costs the network nothing. §14's item 22 carries the arm that fails a
+  prefix-match implementation.
 - **Opening the root first and deciding locality only against the opened handle.** It was
   this ADR's answer for one round, and it is right about the *object* the property must be
   established over — a pathname decided and then re-opened leaves the replacement interval
