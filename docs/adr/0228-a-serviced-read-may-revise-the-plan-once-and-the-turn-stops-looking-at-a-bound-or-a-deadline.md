@@ -65,10 +65,14 @@
   is re-planning, which ADR-0226 §12 defers"*), which is the fourth and fifth
   widenings of that contract's documented meaning and is why §12 binds the lane to
   extend the shared `PlannerContract`. And `PlanStore.save_plan` gains one rejection
-  (§5), which is ADR-0014 §5's export promise kept rather than a new decision.
-  Neither is a compatibility break: no signature moves, `supersedes` is additive and
-  defaulted, and every existing `Planner` and `PlanStore` implementation keeps
-  conforming. The version move is the one place this ADR departs from ADR-0226's
+  (§5), which is ADR-0014 §5's export promise kept rather than a new decision. **The
+  two compatibility facts differ and are stated separately rather than together.**
+  The `Planner` widening breaks nothing: no signature moves, `supersedes` is additive
+  and defaulted, and every existing implementation conforms exactly as it does today.
+  The `PlanStore` widening is **source-compatible but behaviourally breaking** — a
+  store that accepts a `supersedes` naming a plan it does not hold no longer
+  conforms — so §12 binds the lane to the shared `PlanStore` conformance suite and to
+  **both** implementations, not only to the `Planner` one. The version move is the one place this ADR departs from ADR-0226's
   own statement about the same type, and §15 shows why: ADR-0226 §4 and §10 rest on
   *"`ActionPlan` crosses neither `wire/` nor `service/` in the tree"*, and that
   sentence is false against `origin/main` — `TurnOutcome.turn` is a `TurnResult`,
@@ -586,6 +590,27 @@ prohibition is what keeps that from becoming a licence: `id`, `goal_id`, `steps`
 `rationale` and `read_request` are the planner's, `supersedes` is the loop's, and
 there is no third case.
 
+**What that costs is one turn's ask text, the cost is not new, and this ADR names
+its enlargement rather than letting a reader discover it.** On a turn that fired,
+whose servicing completed, and whose **second** planner call then raised, no plan is
+persisted, so the ask the loop actually serviced is retained nowhere durable. Three
+facts bound that, and the first is the one a reader is most likely to get wrong.
+**ADR-0226 already ships turns of exactly this shape**: §11 item 10 requires a record
+from *"a turn rejected for capacity, which `AssistantEngine` decides **after** the
+loop has planned and serviced"* — fired, serviced, and persisting no plan — so §9's
+sentence that *"The ask stays durable on the frozen `ActionPlan`"* was already the
+ground for copying no text rather than a guarantee holding on every turn. **The live
+instrument is §9's record and not the plan store**: §10's persisted-plan reading is
+stated over *"the Lane-A-only window"*, before a servicer existed, and that window
+closed when Lane B merged; the turn in question still emits its record, still carries
+**fired**, still carries its servicing counts, and now says **planning failed**.
+**And what is genuinely lost is a join ADR-0226 §12 has already deferred** — *"a join
+from an audit event to the plan whose ask it describes"* — which §14 carries forward
+with this population added to what fires it. The enlargement is a planner outage on a
+second call, and the alternative was refused in the same breath as the last one:
+carrying a plan out of a failing turn needs a second channel out of `respond` and a
+second reason for the engine to write.
+
 **Persisting every plan means every plan of a turn that persists one, and not a
 retroactive write from a turn that failed.** ADR-0226 §10 already settles the
 population: *"A turn whose planner did not return a plan persists none, so it is
@@ -1041,6 +1066,15 @@ what the model's output is.
 > same rules. This is the obligation ADR-0226 §10 put on its own lane for its own
 > widening, taken here for the same reason.
 
+> **Normative.** The lane **also extends the shared `PlanStore` conformance suite**
+> (`tests/planning/plan_store_contract.py`) with §5's three rejection arms, and
+> **updates both implementations** — `planning/store.py`'s in-memory store and
+> `planning/sqlite_store.py`'s durable one — to satisfy them. That widening is
+> behavioural, not merely documented: a store that accepts an unresolvable
+> `supersedes` stops conforming the moment §5 binds, and a suite left unextended
+> would leave the rejection asserted by nothing. §13's eleventh test is that
+> obligation stated as behaviour.
+
 > **Normative.** The lane **adds no Protocol, no member to one and no parameter to
 > any signature**. Where it finds a change of that kind owed, it stops and says so
 > rather than making one.
@@ -1244,6 +1278,14 @@ to work.
   retrieval has neither backstop nor deadline"*. §4's budget is an interactive figure
   on an interactive surface; a proactive spend profile needs a proactive turn path,
   which this loop is not. Fired by #838's own ADR.
+- **The ask text of a turn that fired, serviced and then failed before the engine's
+  persistence site** (§5). ADR-0226 §12 already defers *"a durable, queryable surface
+  for §9's audit, and with it a join from an audit event to the plan whose ask it
+  describes"*, and notes that the join needs *"trustworthy provenance at the seam"*
+  because an `Identifier` carries none. This ADR enlarges that population by one
+  shape — a second planner call that raised — and adds nothing else to the deferral.
+  Fired by that surface's own ADR. **Not** fired by a lane wanting to carry a plan
+  out of a failing turn, which §5 refuses.
 - **Repairing `PROTOCOL_VERSION` for `ActionPlan.read_request`** (§6). Filed as
   #1956. Fired there, and not by this ADR's implementing lane, which moves the
   version for its own field and inherits nothing about the window already open.
@@ -1341,6 +1383,21 @@ case alone**: within one servicing a hop still follows exactly one level, and §
 namer rule, its no-identifier rule, its ordinal scheme, its resolves-to-nothing rule
 and its statement that a label is meaningful only within the call that rendered it all
 bind entire and are what make the second level safe.
+
+**ADR-0226 §9's durability sentence is not a clause this ADR moves, and the working
+is shown because a review round reached for the other answer.** §9's marked block
+reads *"The record holds **counts and kinds**, and copies no text … The ask stays
+durable on the frozen `ActionPlan` (§4) and the record neither copies it nor points at
+it."* The obligation there is on the **record** — copy nothing — and the sentence
+about the ask is the **ground** for it rather than a second obligation binding some
+other component to persist (ADR-0089 §2: a passage stating two separable obligations
+is two clauses, and a statement of fact is not an obligation). It was already not true
+of every turn when it was written: §11 item 10 requires a record from a turn *"rejected
+for capacity, which `AssistantEngine` decides **after** the loop has planned and
+serviced"*, which fired, serviced and persisted no plan. A reader holding ADR-0226 §9
+copies no text before this ADR and copies no text after it — identical conduct, which
+is ADR-0070 §1's test — so no record is owed. What **is** owed is saying that this ADR
+enlarges the population by one shape, which §5 does and §14 defers.
 
 **ADR-0226 §9 is applied rather than superseded, and §9 says so itself.** Its last
 clause reads *"These are the fields milestone 2 **raises rather than replaces**. An ADR
