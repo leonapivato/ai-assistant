@@ -973,12 +973,23 @@ class SwallowedSeam:
             a shared copy this module would have to keep in step.
         kind: The ``kind`` field §5's loss record carries, which is what
             distinguishes the two ``MemoryTraces`` crossings from each other.
+        seam: The ``seam`` field of the same record — §5's third named field, and
+            the one an emitter can regress on while ``kind`` and ``error_class``
+            stay right. Taken from the emitting module's own constant where it has
+            one, so a renamed seam fails here rather than being asserted against a
+            copy of the old name.
     """
 
     label: str
     drive: Callable[[Clock, FakeTraceSink], Coroutine[None, None, None]]
     event: str
     kind: str
+    seam: str
+
+
+#: The crossing label ``_operation_traces`` drives, named once so the driver and
+#: the row it is asserted against cannot drift apart.
+_OPERATION_SEAM: Final = "converse"
 
 
 async def _nothing() -> None:
@@ -1020,7 +1031,7 @@ async def _operation_traces(now: Clock, sink: FakeTraceSink) -> None:
     not the work: what §5 promises is that ``observing`` returns whatever ``work``
     returned however badly the clock is wired.
     """
-    await OperationTraces(sink=sink, now=now).observing("converse", _nothing())
+    await OperationTraces(sink=sink, now=now).observing(_OPERATION_SEAM, _nothing())
 
 
 async def _configuration_stamp(now: Clock, sink: FakeTraceSink) -> None:
@@ -1045,24 +1056,28 @@ SWALLOWING_SEAMS = [
         _ingestor_write_traces,
         memory_traces.TRACE_NOT_RECORDED,
         "memory_write",
+        memory_traces.SEAM_INGEST,
     ),
     SwallowedSeam(
         "SqliteMemoryStore retrieval traces",
         _store_retrieval_traces,
         memory_traces.TRACE_NOT_RECORDED,
         "retrieval",
+        memory_traces.SEAM_SEARCH,
     ),
     SwallowedSeam(
         "OperationTraces",
         _operation_traces,
         operation_traces.TRACE_NOT_RECORDED,
         "operation",
+        _OPERATION_SEAM,
     ),
     SwallowedSeam(
         "ConfigurationStamp",
         _configuration_stamp,
         configuration.TRACE_NOT_RECORDED,
         "configuration",
+        configuration.SEAM_STARTUP,
     ),
 ]
 
@@ -1085,9 +1100,9 @@ async def test_an_instruments_clock_fault_costs_the_trace_and_not_the_work(
     An instrument that failed a memory write because its own clock was
     misconfigured would be the tail wagging the dog.
 
-    **The loss is loud, and that is what proves the guard is still there.** §5
-    requires the drop to leave a Tier 2 record naming the kind, the seam and the
-    failure's class, because "a measure over a stream with dropped rows reports a
+    **The loss is loud, and that is what proves the guard is still there.** All
+    three fields §5 requires are asserted — the kind, the seam and the failure's
+    class, because "a measure over a stream with dropped rows reports a
     smaller numerator and does not know it". Asserting only the externally visible
     outcome — no trace, work completed — would be satisfied by an emitter that had
     stopped calling ``checked_clock`` altogether: a naive instant handed straight
@@ -1116,6 +1131,10 @@ async def test_an_instruments_clock_fault_costs_the_trace_and_not_the_work(
         f"record; §5 forbids a silent loss"
     )
     assert losses[0]["kind"] == seam.kind
+    assert losses[0]["seam"] == seam.seam, (
+        f"{seam.label} named {losses[0]['seam']!r} as the crossing it lost, not "
+        f"{seam.seam!r}; §5's record has to name the seam it is a record of"
+    )
     assert losses[0]["error_class"] == refusal, (
         f"{seam.label} lost its trace to a {losses[0]['error_class']}, not to the guard "
         f"refusing the reading — which is what an unguarded seam handing a naive instant "
@@ -1195,15 +1214,77 @@ def test_the_untranslated_seams_are_the_declared_ones() -> None:
     )
 
 
-#: Seams whose ``owner=`` is a run-time expression, so no scan of the source can
-#: name them: the unparsed expression maps to the labels it actually produces.
-#: Each label is driven by a row of :data:`SEAMS` above, and
-#: :func:`test_every_seam_refuses_a_naive_reading_as_its_own_error` asserts the
-#: label appears in the rejection — which is what keeps this mapping honest
-#: rather than a second declaration nothing checks.
-COMPUTED_OWNERS: Final[dict[str, tuple[str, ...]]] = {
-    "type(self).__name__": ("CalendarContextSource", "EmailContextSource"),
-    "owner": ("MemoryIngestor write traces", "SqliteMemoryStore retrieval traces"),
+def _classes_deriving(base: str) -> frozenset[str]:
+    """Every class in ``src/`` that has ``base`` above it, however deep.
+
+    Read out of the source for :func:`_clock_seam_roster`'s reason. The obvious
+    alternative, ``base.__subclasses__()``, only sees the subclasses something has
+    already imported — so a third one in a module this test never loads would be
+    invisible, which is the failure a roster exists to prevent.
+
+    Args:
+        base: The class name to walk down from. It is not itself included.
+
+    Returns:
+        The names of every class deriving from it.
+    """
+    children: dict[str, set[str]] = {}
+    for path in sorted(Path(ai_assistant.__file__).parent.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for parent in node.bases:
+                named = parent.id if isinstance(parent, ast.Name) else getattr(parent, "attr", None)
+                if named is not None:
+                    children.setdefault(named, set()).add(node.name)
+    found: set[str] = set()
+    pending = [base]
+    while pending:
+        for name in children.get(pending.pop(), set()) - found:
+            found.add(name)
+            pending.append(name)
+    return frozenset(found)
+
+
+def _literal_owners_given_to(callee: str) -> frozenset[str]:
+    """Every string literal passed as ``owner=`` to ``callee`` anywhere in ``src/``.
+
+    The other half of a computed owner: ``MemoryTraces`` takes its label as a
+    constructor argument, so the *seam's* own ``owner=`` is unreadable but every
+    caller's is a literal one file away.
+
+    Args:
+        callee: The constructor's name, matched bare or as an attribute.
+
+    Returns:
+        The labels its callers name.
+    """
+    labels: set[str] = set()
+    for path in sorted(Path(ai_assistant.__file__).parent.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            named = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if named != callee:
+                continue
+            for keyword in node.keywords:
+                if keyword.arg == "owner" and isinstance(keyword.value, ast.Constant):
+                    labels.add(str(keyword.value.value))
+    return frozenset(labels)
+
+
+#: Seams whose ``owner=`` is a run-time expression, so the scan cannot read the
+#: label off the seam itself: the unparsed expression maps to a function that
+#: **derives** the labels it produces from ``src/``. Derived rather than listed,
+#: because a list is exactly what goes stale — a third ``_GrantedFacetSource``
+#: subclass, or a third ``MemoryTraces`` construction, would produce a new label
+#: while the expression at the seam stayed word for word the same, and a declared
+#: pair would have gone on passing. What stays declared is the *expression*, so a
+#: new computed-owner seam still has to be accounted for here by hand.
+COMPUTED_OWNERS: Final[dict[str, Callable[[], frozenset[str]]]] = {
+    "type(self).__name__": lambda: _classes_deriving("_GrantedFacetSource"),
+    "owner": lambda: _literal_owners_given_to("MemoryTraces"),
 }
 
 #: Seams the roster below finds in ``src/`` that :data:`SEAMS` deliberately does
@@ -1362,11 +1443,20 @@ def test_the_seam_table_is_the_whole_set() -> None:
     assert computed == frozenset(COMPUTED_OWNERS), (
         f"the run-time ``owner=`` expressions in ``src/`` are {sorted(computed)}, but "
         f"``COMPUTED_OWNERS`` declares {sorted(COMPUTED_OWNERS)}; a seam whose owner is "
-        f"computed has to name the labels it produces here, because no scan can read them"
+        f"computed has to say here how its labels are derived, since no scan can read "
+        f"them off the seam"
     )
 
     tabled = {seam.label for seam in SEAMS} | {seam.label for seam in SWALLOWING_SEAMS}
-    roster = literal | {label for labels in COMPUTED_OWNERS.values() for label in labels}
+    derived: set[str] = set()
+    for expression, produce in COMPUTED_OWNERS.items():
+        labels = produce()
+        assert labels, (
+            f"{expression!r} derived no label at all, so the roster is short by however "
+            f"many seams that expression stands for and the partition below is vacuous"
+        )
+        derived |= labels
+    roster = literal | derived
     assert tabled - roster == set(), (
         f"{sorted(tabled - roster)} is tabled here but reads no clock in ``src/``: a "
         f"label that drifted from its constructor, or a seam that has been removed"
