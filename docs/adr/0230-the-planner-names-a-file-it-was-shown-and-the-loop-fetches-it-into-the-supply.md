@@ -806,6 +806,17 @@ scope is a smaller falsehood than any of those — it is, in fact, none.
 > stops the deployment, never an empty listing and never a `FetchRefusal`; a deployment
 > with no root configured is unaffected, because there is nothing to check.
 
+> **Normative.** **The handle is opened first and locality is decided against it, never
+> against the pathname the handle was opened from.** This is §4's rule for the same reason
+> one clause earlier: a pathname probed and then re-opened leaves an interval in which the
+> configured root can be replaced — by a symlink, or by a mount landing on it — so a
+> constructor that establishes locality and *then* opens the directory can bind its
+> long-lived handle to storage it never checked. So construction opens the root directory
+> **without following a symbolic link at the final component**, decides locality **against
+> that open object and the chain backing it**, and keeps that same handle as the one §4
+> anchors every fetch to. Nothing is re-derived from the path between the two, and where
+> the probe cannot be performed against the open object the root is refused.
+
 > **Normative.** **Eligibility is decided over the whole backing chain and not over the
 > filesystem's type alone.** A filesystem type is necessary and **not sufficient**: an
 > ext4 or XFS volume on an iSCSI, NBD, NVMe-oF or otherwise network-attached block device
@@ -1258,8 +1269,9 @@ that line, so a later lane that erodes it meets a stop rather than a silence.
 `Fetcher`; `core/types.py`'s `SourceListingEntry`, `SourceListing`, `FetchOutcome`,
 `FetchRefusal`, `ReadKind.LOCAL_FILE` and `ReadAsk.entry` with its validator arm; the
 `Settings` fields of §6 and §4 with their named defaults and their load-time refusal;
-§6's **local-filesystem eligibility refusal on the root**, satisfying its fail-closed
-property, in the concrete fetcher and not in `core`;
+§6's **eligibility refusal on the root**, satisfying its fail-closed property over the
+backing chain and deciding it against the opened root handle rather than a pathname, in
+the concrete fetcher and not in `core`;
 §4's token-and-handle mechanism, satisfying all three of its stated properties and its
 expiry, **in the fetcher and not in `core`** — the types carry the values and the fetcher
 owns what makes them unforgeable; the **shared conformance suite** for `Fetcher`; the
@@ -1304,10 +1316,11 @@ wiring, which constructs a `Fetcher` only where a root is configured.
 > `FetchRefusal` member); that a path escaping the root is refused and that the three race
 > transitions of §4 are refused (a concrete fetcher's test over a real filesystem, and it
 > owes `..`, a separator in `name`, a symlink out of the root, a replacement between
-> validation and acquisition, a growth past the bound between them, and a replacement of
+> validation and acquisition, a growth past the bound between them, a replacement of
 > the **root's own pathname** by a symlink to an outside directory between the listing and
-> the fetch — a generic suite cannot replace an arbitrary fetcher's root, so this arm is
-> the concrete fetcher's and not the suite's); and that the
+> the fetch, and a replacement of that pathname between the constructor's locality probe
+> and its handle acquisition (§6) — a generic suite cannot replace an arbitrary fetcher's
+> root, so these arms are the concrete fetcher's and not the suite's); and that the
 > listing is ordered most-recently-modified-first and capped. Each is named here so the
 > lane does not read its absence from the suite as its absence from the contract.
 
@@ -1446,7 +1459,7 @@ same reason; this decision adds a contract, so it adds a lane.
     engages no `DestinationProtocol` member, requires no confirmation of its own and routes
     through no egress seam, which is §8's property (b) asserted rather than only stated.
 20. **A root whose reads would leave the device does not wire, and neither does one whose
-    locality is merely unproven.** Four arms at construction, over a fetcher whose view of
+    locality is merely unproven.** Five arms at construction, over a fetcher whose view of
     the platform's mount and device information the test supplies: a root on a filesystem
     the platform reports as network-attached refuses; a root whose filesystem type is
     **unrecognised** refuses, which is the fail-closed arm that fails on any implementation
@@ -1457,6 +1470,12 @@ same reason; this decision adds a contract, so it adds a lane.
     refusal is a configuration error that stops construction — no `Fetcher` exists
     afterwards — and not an empty listing, not a `FetchRefusal` and not a degraded turn.
     A deployment with no root configured constructs no fetcher and reaches no arm.
+    **And a fifth arm, over a real filesystem, for the construction-time race**: the root's
+    pathname is replaced — by a symlink to a remote-backed directory, or by a mount landing
+    on it — deterministically sequenced to land **between** any locality probe and the
+    handle acquisition. Construction either refuses or holds a handle on the original local
+    directory, and in **no** arm does a listing or a fetch read through the replacement.
+    This is the arm that fails on any implementation probing a pathname and then opening it.
 11. **The fetch is serviced before the hop and takes one slot.** A request carrying a
     `LOCAL_FILE` ask and a `CITATION_HOP` whose evidence would fill the budget produces a
     fourth group holding the fetched record first and exactly nine hop records after it, in
