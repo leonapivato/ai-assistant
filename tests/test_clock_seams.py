@@ -1267,43 +1267,100 @@ def _classes_deriving(base: str) -> frozenset[str]:
     return frozenset(found)
 
 
-def _literal_owners_given_in(source: str, callee: str) -> frozenset[str]:
-    """Every string literal one module passes as ``owner=`` to ``callee``.
+def _module_constants(tree: ast.Module) -> dict[str, str]:
+    """The module-level names bound to a string literal.
+
+    A label is as often a named constant as an inline literal — ``_OWNER = "…"``
+    beside the emitter, then ``owner=_OWNER`` at the call. Resolving those is what
+    keeps :func:`_owners_given_in` reading labels rather than refusing them.
+
+    Args:
+        tree: One parsed module.
+
+    Returns:
+        Name to string value, for the module-level string assignments only.
+    """
+    resolved: dict[str, str] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign | ast.AnnAssign):
+            continue
+        value = node.value
+        if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        for target in targets:
+            if isinstance(target, ast.Name):
+                resolved[target.id] = value.value
+    return resolved
+
+
+def _owners_given_in(source: str, callee: str) -> tuple[frozenset[str], frozenset[str]]:
+    """Every ``owner=`` one module passes to ``callee``, resolved where it can be.
 
     The other half of a computed owner: ``MemoryTraces`` takes its label as a
     constructor argument, so the *seam's* own ``owner=`` is unreadable but every
-    caller's is a literal one file away.
+    caller's is readable one file away — as a literal, or as a module constant
+    :func:`_module_constants` resolves.
+
+    **What it cannot read it reports rather than skips.** Returning only the
+    labels it understood would let a caller building its label at run time slip
+    a seam past the partition assertion in silence, which is the one thing this
+    roster exists to stop; the second set is what the assertion refuses on.
 
     Args:
         source: One module's text.
         callee: The constructor's name, matched under any spelling of its import.
 
     Returns:
-        The labels this module's calls name.
+        The labels this module's calls name, and the ``owner`` expressions that
+        could not be resolved to one, unparsed.
     """
     tree = ast.parse(source)
     aliases = _bindings(tree)
-    return frozenset(
-        str(keyword.value.value)
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and _refers_to(node.func, callee, aliases)
-        for keyword in node.keywords
-        if keyword.arg == "owner" and isinstance(keyword.value, ast.Constant)
-    )
+    constants = _module_constants(tree)
+    labels: set[str] = set()
+    unresolved: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not _refers_to(node.func, callee, aliases):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg != "owner":
+                continue
+            given = keyword.value
+            if isinstance(given, ast.Constant) and isinstance(given.value, str):
+                labels.add(given.value)
+            elif isinstance(given, ast.Name) and given.id in constants:
+                labels.add(constants[given.id])
+            else:
+                unresolved.add(ast.unparse(given))
+    return frozenset(labels), frozenset(unresolved)
 
 
-def _literal_owners_given_to(callee: str) -> frozenset[str]:
-    """:func:`_literal_owners_given_in`, unioned over every module under ``src/``.
+def _owners_given_to(callee: str) -> frozenset[str]:
+    """:func:`_owners_given_in`, unioned over ``src/`` and refusing what it cannot read.
 
     Args:
         callee: The constructor's name.
 
     Returns:
         The labels its callers name.
+
+    Raises:
+        AssertionError: If any caller's ``owner`` could not be resolved to a
+            label. Raised here rather than returned, so a seam that becomes
+            unreadable fails the roster instead of shrinking it.
     """
     labels: set[str] = set()
+    unreadable: set[str] = set()
     for path in sorted(Path(ai_assistant.__file__).parent.rglob("*.py")):
-        labels |= _literal_owners_given_in(path.read_text(encoding="utf-8"), callee)
+        found, unresolved = _owners_given_in(path.read_text(encoding="utf-8"), callee)
+        labels |= found
+        unreadable |= unresolved
+    assert not unreadable, (
+        f"{sorted(unreadable)} is passed as {callee}'s ``owner`` and cannot be read "
+        f"statically, so the seam it names is outside this roster; give it a literal, "
+        f"a module constant, or an explicit derivation in ``COMPUTED_OWNERS``"
+    )
     return frozenset(labels)
 
 
@@ -1317,7 +1374,7 @@ def _literal_owners_given_to(callee: str) -> frozenset[str]:
 #: new computed-owner seam still has to be accounted for here by hand.
 COMPUTED_OWNERS: Final[dict[str, Callable[[], frozenset[str]]]] = {
     "type(self).__name__": lambda: _classes_deriving("_GrantedFacetSource"),
-    "owner": lambda: _literal_owners_given_to("MemoryTraces"),
+    "owner": lambda: _owners_given_to("MemoryTraces"),
 }
 
 #: Seams the roster below finds in ``src/`` that :data:`SEAMS` deliberately does
@@ -1449,9 +1506,11 @@ def test_the_roster_scans_follow_a_name_under_any_spelling_of_its_import() -> No
     stopped finding seams is worse than no scan, because the partition assertion
     would go on passing. This is the three of them run over source written to
     break each in turn: the guard called under an alias, a constructor whose owner
-    label is a literal called under an alias, and a subclass declared against an
-    aliased base, which is how a fourth ``_GrantedFacetSource`` could arrive with
-    no row driving it.
+    label is a literal or a module constant called under an alias, and a subclass
+    declared against an aliased base — which is how a fourth
+    ``_GrantedFacetSource`` could arrive with no row driving it. The last emitter
+    builds its label at run time, which nothing static can follow: that one is
+    *reported*, so the roster refuses it rather than shortening itself.
     """
     source = textwrap.dedent("""
         from ai_assistant.core.clock import checked_clock
@@ -1464,7 +1523,11 @@ def test_the_roster_scans_follow_a_name_under_any_spelling_of_its_import() -> No
         b = guard(now, owner="Aliased")
         c = module.checked_clock(now, owner="Qualified")
         d = guard(now, owner=type(self).__name__)
+        _OWNER: Final = "Named constant"
+
         e = Emitter(kind=kind, sink=sink, now=now, owner="Aliased emitter")
+        f = Emitter(kind=kind, sink=sink, now=now, owner=_OWNER)
+        g = Emitter(kind=kind, sink=sink, now=now, owner=build_label())
 
         class SmsContextSource(Facet):
             pass
@@ -1474,7 +1537,10 @@ def test_the_roster_scans_follow_a_name_under_any_spelling_of_its_import() -> No
 
     assert literal == {"Plain", "Aliased", "Qualified"}
     assert computed == {"type(self).__name__"}
-    assert _literal_owners_given_in(source, "MemoryTraces") == {"Aliased emitter"}
+    assert _owners_given_in(source, "MemoryTraces") == (
+        frozenset({"Aliased emitter", "Named constant"}),
+        frozenset({"build_label()"}),
+    )
     assert _derived_classes_in(source)["_GrantedFacetSource"] == {"SmsContextSource"}
 
 
