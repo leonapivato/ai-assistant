@@ -1043,6 +1043,36 @@ async def test_a_cancelled_close_releases_and_leaves_the_channel_closeable(
     await channel.close()
 
 
+async def test_a_release_that_fails_only_in_the_wait_is_reported_by_type_alone() -> None:
+    """§1's report, on the half of the release the conformance hook cannot reach.
+
+    ``arm_release_failure`` arms both halves, and ``close`` returns from its first
+    ``except OSError`` — so the contract's report case only ever observes the
+    *synchronous* one. Both halves reach the same reporting site today, which is
+    why one case covers both; a second site added beside ``wait_closed``'s
+    ``except`` would not be, and it is the site whose failure came from the far
+    end and can carry that far end's own words. So this is the sibling of the
+    round-7 case above: the hook arms the easier ordering and this arms the other,
+    with the message discipline asserted where the message actually originates.
+    Adversarial review found it on round 1 of this PR.
+
+    The arrangement is a writer that releases cleanly and then fails to settle:
+    ``close`` gives the socket back, and the ``wait_closed`` production started
+    afterwards raises.
+    """
+    channel = _channel()
+    writer = _writer_of(channel)
+    writer.fails = True
+
+    with structlog_reports("egress_channel_close_failed") as reports:
+        await channel.close()
+
+    assert len(reports) == 1, reports
+    assert "OSError" in reports[0]
+    assert RELEASE_FAILURE_DETAIL not in reports[0]
+    assert writer.aborts == 1
+
+
 async def test_a_release_that_fails_beside_a_cancellation_is_still_logged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1098,6 +1128,9 @@ async def test_a_release_that_fails_beside_a_cancellation_is_still_logged(
     failures = [entry for entry in captured if entry["event"] == "egress_channel_close_failed"]
     assert failures, [entry["event"] for entry in captured]
     assert failures[0]["error_type"] == "OSError"
+    # By type alone here too: this is the third route into the one reporting site,
+    # and the failure it reports came from the far end (ADR-0152 §11).
+    assert RELEASE_FAILURE_DETAIL not in repr(failures[0])
 
 
 @pytest.mark.integration
