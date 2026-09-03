@@ -1123,20 +1123,26 @@ a comment; ADR-0226 §10 already ruled that shape, saying of its own additions t
 *"The types Lane A adds are `core/types.py` models with validators, which the ordinary
 rule covers."* This is the same rule with less in it.
 
-**The Protocol widening does not make this two lanes, and the test is where machinery
-lands.** ADR-0137 §1 asks where *substantial new machinery* goes, and a docstring is
-not machinery. What the lane touches in `planning`'s tree is
-`tests/planning/planner_contract.py`, the shared conformance suite — the guardrail for
-a widened meaning rather than an implementation of one — and `planning/`'s production
-code is untouched. ADR-0226 §10 drew exactly this line for its own widening, binding
-its Lane A to the suite while noting that *"this ADR adds no Protocol, so no triad
-exists to split and §3 has no subject here"*; the same holds here.
+**The lane does touch `planning/`, and it is worth being exact about how much,
+because the one-lane claim rests on it.** `planning/planner.py` is untouched entire.
+What moves under `planning/` is the two `PlanStore` implementations, each gaining
+§5's rejection — a comparison against maps the store already holds, beside the goal
+check and the id-reuse check it already performs — and
+`tests/planning/plan_store_contract.py` and `tests/planning/planner_contract.py`, the
+two shared conformance suites. That is **adaptation to a widened contract, not new
+machinery**: no new object, no new collaborator, no new stage and no new decision
+lives there afterwards, and the rejection is three lines of the shape the file's
+neighbouring lines already have. ADR-0137 §1's test is where *substantial new
+machinery* lands, and on this change that is `orchestration` alone.
 
 **Which is why this ADR's implementation is one lane where ADR-0226's was two**, and
 the difference is worth stating so it does not read as a shortcut. ADR-0226 split
-because its Lane A put a labelled rendering and a second parser into `planning` — real
-machinery in a second subsystem. This ADR puts nothing there at all, and §2's
-conditions are the reason: every one of them is a fact the **loop** holds.
+because its Lane A put a **labelled rendering and a second parser** into `planning` —
+a prompt to write, an output to read, a scheme to get right — which is machinery in a
+second subsystem. This ADR asks that subsystem for a guard clause and a docstring, and
+§2's conditions are why: every one of them is a fact the **loop** holds. A lane that
+found itself writing a *stage* under `planning/` would have left this ADR's scope and
+should stop rather than continue.
 
 **Not telling the planner which iteration it is on is a decision, not an omission.**
 ADR-0226 §8 rules that *"No lane makes the trigger's firing conditional on a setting, a
@@ -1640,12 +1646,14 @@ which is written to fail if revision is wired but not working.
 - **The prompt can be twenty serviced records wider.** That is on top of a belief
   budget and an episodic supplement of thirty, and it is the honest cost of a budget
   per servicing rather than a share.
-- **`planning/`'s production code does not change at all**, which is the surprising
-  consequence and the measure of how much ADR-0226 got right: the planner already
-  emits a request beside its plan, and asking it twice needs nothing new from it.
-  What does change is what the `Planner` contract *documents* — four groups on a
-  second call, and two requests in one turn — which is flagged as a breaking change
-  under golden rule 5 and held by the shared `PlannerContract` rather than by prose.
+- **The planner itself does not change at all**, which is the surprising consequence
+  and the measure of how much ADR-0226 got right: it already emits a request beside
+  its plan, and asking it twice needs nothing new from it. What changes is what the
+  `Planner` contract *documents* — four groups on a second call, and two requests in
+  one turn — flagged as a breaking change under golden rule 5 and held by the shared
+  `PlannerContract` rather than by prose. What changes under `planning/` is narrower
+  still: both `PlanStore` implementations gain §5's rejection, which is a behavioural
+  contract break for any store outside this repository and a guard clause inside it.
 - **Revisit when** §9's stop distribution shows the budget firing often or never; when
   the iteration rate shows the second emission is a different facet rather than a
   follow-up (§14's decomposition trigger); when a bounded-audience spoken surface is
