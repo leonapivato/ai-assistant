@@ -2732,11 +2732,20 @@ async def test_the_carve_out_excepts_a_reply_line_that_shows_only_a_prefix() -> 
     tell the planner that a fact it cannot see is present, which is #1929's failure
     in a second costume — a rendering mistaken for the exchange.
 
-    Both halves are asserted, because either alone would pass over a broken pair:
-    that the block names the elided shape, and that the rendering really can hide
-    the answer past the cut. The second is the one worth having — a ceiling raised
-    above every reply this fixture can produce would leave the block warning about
-    something that no longer happens.
+    **The block states this as a bound and does not point at the hop**, which round
+    3 of the review is why. A tail record is written with no
+    ``Provenance.evidence`` (``orchestration/conversations.py``), and ADR-0226 §2's
+    hop resolves the labelled record's *evidence* and yields only that — so naming
+    an elided turn's own label fires a serviced read with a zero yield, spending §6's
+    budget for nothing. That end of it is pinned where it lives, by
+    ``tests/orchestration/test_loop_reads.py::
+    test_the_turn_is_not_failed_by_a_request_naming_a_record_with_no_evidence``.
+
+    Both halves are asserted here, because either alone would pass over a broken
+    pair: that the block names the elided shape, and that the rendering really can
+    hide the answer past the cut. The second is the one worth having — a ceiling
+    raised above every reply this fixture can produce would leave the block warning
+    about something that no longer happens.
     """
     hidden = f"{'the usual comparisons apply. ' * 40}{_REPLY_ONLY_WORD} is where I would start."
     tail = _turn(

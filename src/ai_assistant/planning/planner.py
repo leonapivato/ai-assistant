@@ -482,6 +482,19 @@ sending, and you are still answering now from what you have."""
 #: #1929's own failure in a second costume: a rendering mistaken for the exchange.
 #: The block names the elided shape too and says what it is worth.
 #:
+#: **And what it is worth is nothing a read can add, which is why the block states
+#: it as a bound rather than pointing at the hop.** A tail record is written by
+#: ``orchestration/conversations.py`` with no ``Provenance.evidence``, and ADR-0226
+#: §2's hop resolves *the labelled record's evidence* and returns only that — the
+#: labelled record's own id rides in the ``get_many`` for §3's liveness check and
+#: is not among the records the hop yields. So naming an elided tail turn's label
+#: fires a serviced read with a zero yield, which §8 is explicit is "precisely the
+#: population … *not* evidence the trigger was wrong" and which spends §6's budget
+#: for nothing. §7's deduplication closes the indirect route too: an episode
+#: already in the supply is subtracted from the fourth group whichever belief cites
+#: it. An earlier draft of this block said "the label is still the way to it" and
+#: was wrong on all three counts.
+#:
 #: A separate constant for :data:`_STATED_FACT_GUIDANCE`'s reason: the prompt test
 #: can assert it **reaches the model** without string-matching its wording.
 _ACT_RECORD_GUIDANCE = """\
@@ -510,11 +523,12 @@ there is nothing to ask for — even though that exchange also had wording you \
 cannot see. And where a bullet below is printed with a `what the assistant \
 replied:` line under it, that line is the reply itself in the words it was sent, \
 not a summary of it: a question about its content is answered from it, and asking \
-for the exchange it is already showing you would buy nothing. That one has its own \
-exception. A line reading `what the assistant replied (first 200 of 900 \
-characters): ...` is showing you the opening of the reply and not the reply, so \
-what the goal turns on may be in the part you cannot read, and the label is still \
-the way to it."""
+for the exchange it is already showing you would buy nothing. That carve-out has a limit of \
+its own, and the limit is not a second thing to ask for. A line reading `what the \
+assistant replied (first 200 of 900 characters): ...` is showing you the opening \
+of the reply and not the reply, so what the goal turns on may be in the part you \
+cannot read. No read brings that remainder back, and naming that turn's own label \
+does not: it is a bound on what you can answer from, not a reason to ask."""
 
 
 def _system_prompt(capabilities: Sequence[str]) -> str:
