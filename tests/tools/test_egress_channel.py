@@ -1126,7 +1126,13 @@ async def test_a_release_that_fails_beside_a_cancellation_is_still_logged(
     assert writer.aborts == 1
     assert sockets.open == 0
     failures = [entry for entry in captured if entry["event"] == "egress_channel_close_failed"]
-    assert failures, [entry["event"] for entry in captured]
+    # Exactly one, as `ByteChannelContract`'s ordinary-path case already requires of
+    # this reporting site: a `close` whose cancellation handler reported the completed
+    # `wait_closed` failure and whose surrounding release path then reported it again
+    # emits two and satisfies a merely non-empty assertion (issue #1986). The whole
+    # event roster is what a failure renders, because it says which of the two ways
+    # this went wrong -- none at all, or twice.
+    assert len(failures) == 1, [entry["event"] for entry in captured]
     assert failures[0]["error_type"] == "OSError"
     # By type alone here too: this is the third route into the one reporting site,
     # and the failure it reports came from the far end (ADR-0152 §11).
