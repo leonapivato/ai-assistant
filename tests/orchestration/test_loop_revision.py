@@ -39,7 +39,7 @@ from test_loop_reads import (
     _unbounded,
 )
 
-from ai_assistant.core.errors import MemoryStoreError, PlanningError
+from ai_assistant.core.errors import MemoryStoreError, PlanningError, ToolError
 from ai_assistant.core.types import (
     ActionPlan,
     MemorySource,
@@ -1308,3 +1308,58 @@ def test_an_operation_nobody_priced_declares_no_budget() -> None:
     assert _PLANNING_BUDGETS.get(cast("ConversationalOperation", "an-operation-nobody-priced")) is (
         None
     )
+
+
+class _RaisingRegistry:
+    """A ``ToolRegistry`` whose ``capabilities()`` raises on a chosen call.
+
+    ADR-0211 §3 has the vocabulary read "immediately before each planner call", so a
+    registry that raises stops the turn *before* ``Planner.plan`` is reached — which
+    is the population ADR-0228 §9's ``planner_calls`` must not count.
+    """
+
+    def __init__(self, *, raises_on: int) -> None:
+        self._raises_on = raises_on
+        self.reads = 0
+
+    async def capabilities(self) -> tuple[str, ...]:
+        """Answer the vocabulary, or raise where this call is the chosen one."""
+        self.reads += 1
+        if self.reads == self._raises_on:
+            msg = "the registry is down"
+            raise ToolError(msg)
+        return ("send_email",)
+
+
+@pytest.mark.parametrize(
+    ("raises_on", "planner_calls", "counted"),
+    [(1, 0, 0), (2, 1, 1)],
+    ids=["registry-raises-before-the-first-call", "registry-raises-before-the-revision"],
+)
+async def test_a_registry_failure_is_not_counted_as_a_planner_call(
+    raises_on: int, planner_calls: int, counted: int
+) -> None:
+    """§9's field is calls to ``Planner.plan``, not calls this loop set out to make.
+
+    The vocabulary is read immediately before each planner call (ADR-0211 §3), so a
+    registry that raises ends the turn with the planner never reached. A count taken
+    before that read would report a call that did not happen — on the first call, a
+    turn that never planned at all; on the revision, a turn that planned once.
+
+    The second arm is also §9's **planning failed** in its second limb — "the turn
+    ended between a servicing and the next plan's return" — and the record it leaves
+    is coherent: planning failed, and one planner call was made.
+    """
+    memory = await _seeded()
+    planner = _Script(requests=[_hop("M1")])
+    registry = _RaisingRegistry(raises_on=raises_on)
+    loop = _loop(memory, planner=planner, registry=cast("Any", registry))
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(ToolError, match="the registry is down"),
+    ):
+        await loop.respond(_ASKED, narrow=_bounded(), operation=ConversationalOperation.CONVERSE)
+
+    assert len(planner.calls) == planner_calls, "the planner was never reached on that call"
+    assert _record(captured)["planner_calls"] == counted
