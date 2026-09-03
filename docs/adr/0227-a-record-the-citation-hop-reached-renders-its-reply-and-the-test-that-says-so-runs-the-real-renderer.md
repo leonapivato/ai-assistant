@@ -1,6 +1,6 @@
 # 227. A record the citation hop reached renders its reply, and the test that says so runs the real renderer
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-03
 - **Partially supersedes:**
   [ADR-0222](0222-the-stored-reply-is-read-back-in-the-conversation-tail-and-by-the-observer.md)
