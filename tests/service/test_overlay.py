@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import json
 import os
 import socket
@@ -773,3 +774,35 @@ async def test_a_platform_with_no_peer_credential_call_refuses_as_the_hub_catche
         with pytest.raises(OverlayIdentityUnavailableError, match="peer-credential"):
             await agent.identify("100.64.0.11", 41234)
         assert asked == []
+
+
+async def test_a_kernel_that_refuses_the_credential_read_says_so_rather_than_blaming_the_daemon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The third way not to know, and here the *message* is the property (ADR-0131 §7).
+
+    :func:`ai_assistant.wire.peer.peer_uid` raises ``OSError`` when the kernel
+    itself declines the credential read, and §7's direction is the same as for the
+    other two: "who answers there cannot be established", so refuse. Unlike the
+    ``ProtocolError`` case above, the *class* cannot carry this one — an unhandled
+    ``OSError`` would not escape, because ``_get``'s ``except (TimeoutError,
+    OSError)`` one frame up catches it and rewraps it as this module's
+    ``OverlayIdentityUnavailableError`` too. What it would lose is the cause: the
+    hub would report that the agent "did not answer", pointing an operator at a
+    daemon that is running and answering, and away from the credential read that
+    actually refused. So both halves are asserted — that the refusal names the
+    kernel's refusal to say, and that it is *not* the daemon-unreachable fallback.
+    """
+
+    def _kernel_refused(_sock: object) -> int:
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr("ai_assistant.wire.overlay.peer_uid", _kernel_refused)
+    async with _daemon(tmp_path, {"/localapi/v0/whois": _ok(_WHOIS)}) as (agent, asked):
+        with pytest.raises(OverlayIdentityUnavailableError) as raised:
+            await agent.identify("100.64.0.11", 41234)
+        assert asked == []
+    refusal = str(raised.value)
+    assert "the kernel would not say" in refusal
+    assert "Operation not permitted" in refusal
+    assert "did not answer" not in refusal
