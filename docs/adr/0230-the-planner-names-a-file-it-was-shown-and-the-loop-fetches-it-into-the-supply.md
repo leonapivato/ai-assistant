@@ -716,6 +716,17 @@ scope is a smaller falsehood than any of those — it is, in fact, none.
 > `fetch_max_content_bytes`, the extracted text, default **32 KiB**, which bounds what
 > reaches the prompt.
 
+> **Normative.** **Both bounds are counts of bytes, and `fetch_max_content_bytes` is the
+> UTF-8 encoded byte length of the exact value that becomes `MemoryRecord.content` — never
+> a character count.** An implementation enforces it **while extracting** rather than
+> after, so a file whose text exceeds it is refused without the whole of that text having
+> been materialised. This is the convention the corpus's other content budget already uses
+> — `calendar_max_content_bytes` is charged against encoded length — and it is stated here
+> rather than inherited because the two readings differ by up to a factor of four on
+> ordinary text: 20,000 characters outside the ASCII range are 20,000 to a character count
+> and 80 KiB on the prompt path, so an implementation reading the bound the other way would
+> send two and a half times the figure this section fixes.
+
 > **Normative.** **A bound is enforced by refusing, never by truncating.** A file over
 > either bound yields a refusal and no record. No implementation returns a prefix, a
 > first page, a first *n* bytes, an abridgement or a "first part of" record, and none
@@ -1219,7 +1230,10 @@ same reason; this decision adds a contract, so it adds a lane.
    `fetch_max_file_bytes` and a file whose extracted text is over `fetch_max_content_bytes`
    each yield a refusal, add no record, fail no turn, and put no prefix of the text
    anywhere in the supply or the reply. Asserted over the supply and over the audit's
-   refusal class.
+   refusal class. **The content bound is counted in encoded bytes**, asserted with two
+   multibyte arms: text of exactly `fetch_max_content_bytes` encoded bytes made of
+   non-ASCII characters is fetched, and text one encoded byte over is refused — a pair
+   that an implementation counting characters fails on the second arm.
 9. **Every refusal class is reachable from a real source.** One arm per `FetchRefusal`
    member, over a real filesystem: absent, a directory, unreadable by permission,
    over-size, an unsupported extension, and a corrupt file of a supported format. This is
