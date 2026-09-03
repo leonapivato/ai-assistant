@@ -390,3 +390,126 @@ async def test_a_row_paired_with_a_record_of_another_decision_is_reported(
 
     with pytest.raises(AuditError, match="the store is corrupt"):
         await trail.export_invocations()
+
+
+# --- the append ordinal is a bound, and an exhausted bound is a refusal --------
+# ADR-0192 §2's refusal orders are "exhaustive over the classes a refusal arrives
+# in": anything that is neither a named refusal nor an argument fault — including
+# "the store cannot be written" — leaves the ledger as a plain `AuditError`. The
+# durable ordinal is `MAX(seq) + 1` over a column this store is not the only writer
+# of, so the state below is reachable, and before #1576 it left as `OverflowError`.
+
+#: SQLite's widest ``INTEGER``. Written out rather than imported from the store, so
+#: that moving the store's own bound moves the subject and not the assertion.
+_WIDEST_SQLITE_INT = 2**63 - 1
+
+
+def _plant_foreign_row(path: Path, seq: object) -> None:
+    """Insert an invocation row at ordinal ``seq``, from a *second* connection.
+
+    The only producer of the state, and so the only honest way to arrive at it:
+    ``seq`` is written by ``_append`` alone, from 1 and stepping by one, and the
+    ``invocations_append_only`` trigger closes the ``UPDATE`` route — so nothing
+    this store can be driven to do reaches the ceiling in a test's lifetime. A
+    writer of the *file* needs one statement (#1576).
+    """
+    foreign = sqlite3.connect(str(path))
+    try:
+        with foreign:
+            foreign.execute(
+                "INSERT INTO invocations(seq, recorded_at_us, data) VALUES (?, ?, ?)",
+                (seq, 0, '{"id": "i-foreign"}'),
+            )
+    finally:
+        foreign.close()
+
+
+def _rows_in(path: Path) -> int:
+    """How many invocation rows the file holds, counted from outside the store."""
+    foreign = sqlite3.connect(str(path))
+    try:
+        return int(foreign.execute("SELECT COUNT(*) FROM invocations").fetchone()[0])
+    finally:
+        foreign.close()
+
+
+@pytest.mark.integration
+async def test_a_claim_refuses_an_exhausted_append_ordinal(
+    trail: SqliteAuditTrail, tmp_path: Path
+) -> None:
+    """The claim leaves as an ``AuditError``, and appends nothing (#1576).
+
+    ``pytest.raises(AuditError)`` is the whole assertion about the class: before
+    the guard this call left as ``OverflowError``, which
+    :func:`~ai_assistant.permissions._transactions.transaction` does not translate
+    because it is not a ``sqlite3.Error``, and which is not an ``AssistantError``
+    at all. The **exact** class is pinned too, because ADR-0192 §2 reserves its
+    three named subclasses for statements about the *authorisation*: an exhausted
+    ordinal says nothing about this decision, and refusing it as
+    ``AuthorisationSpentError`` would tell a caller its authority was consumed by
+    an act nobody performed.
+    """
+    path = tmp_path / "audit.db"  # the file the `trail` fixture opened
+    authorisation = _allow("d-1")
+    await trail.record(authorisation)
+    _plant_foreign_row(path, _WIDEST_SQLITE_INT)
+
+    with pytest.raises(AuditError, match="append ordinal is exhausted") as caught:
+        await trail.claim_invocation(decision=authorisation)
+
+    assert type(caught.value) is AuditError
+    assert await trail.open_invocations(decision_id="d-1") == []
+    assert _rows_in(path) == 1  # the planted row alone: the transaction rolled back
+
+
+@pytest.mark.integration
+async def test_a_completion_refuses_an_exhausted_append_ordinal(
+    trail: SqliteAuditTrail, tmp_path: Path
+) -> None:
+    """The other append leaks the same way, and leaves the claim completable.
+
+    Taken per operation rather than once over ``_append``, because ADR-0192 §2
+    states its refusal classes of each member and the two reach the ordinal down
+    different paths — the claim after the consume, the completion after the open
+    claim is found. The claim surviving the refusal is the point of the rollback:
+    a completion refused for a fault of the *store* must not consume the row it
+    failed to write against, or the act would be unrecordable for good.
+    """
+    path = tmp_path / "audit.db"  # the file the `trail` fixture opened
+    claim = await _claimed(trail, _allow("d-1"))
+    _plant_foreign_row(path, _WIDEST_SQLITE_INT)
+
+    with pytest.raises(AuditError, match="append ordinal is exhausted") as caught:
+        await trail.complete_invocation(
+            claim_id=claim.id,
+            outcome=ToolOutcome.SUCCEEDED,
+            incurred_cost=ToolCost(basis=CostBasis.UNKNOWN),
+        )
+
+    assert type(caught.value) is AuditError
+    assert [row.id for row in await trail.open_invocations(decision_id="d-1")] == [claim.id]
+    assert _rows_in(path) == 2  # the claim and the planted row; no completion
+
+
+@pytest.mark.integration
+async def test_a_claim_refuses_an_ordinal_that_is_not_a_number_to_append_after(
+    trail: SqliteAuditTrail, tmp_path: Path
+) -> None:
+    """The neighbouring route out of the same read, closed with it.
+
+    ``seq`` has INTEGER affinity, which SQLite applies only where the conversion is
+    lossless — a non-finite REAL is stored as it stands, and ``MAX(seq) + 1`` is
+    then a value ``int`` refuses rather than one it merely cannot bind. Left
+    unguarded that is the identical defect one line earlier: a raw ``OverflowError``
+    out of a member whose refusal classes ADR-0192 §2 makes exhaustive.
+    """
+    path = tmp_path / "audit.db"  # the file the `trail` fixture opened
+    authorisation = _allow("d-1")
+    await trail.record(authorisation)
+    _plant_foreign_row(path, float("inf"))
+
+    with pytest.raises(AuditError, match="not a number to append after") as caught:
+        await trail.claim_invocation(decision=authorisation)
+
+    assert type(caught.value) is AuditError
+    assert _rows_in(path) == 1
