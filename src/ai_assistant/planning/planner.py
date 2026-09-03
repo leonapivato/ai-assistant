@@ -460,6 +460,18 @@ sending, and you are still answering now from what you have."""
 #: trigger beside the judged one, and §8 admits no second seam — "there is no
 #: separate flag, no confidence score and no second seam".
 #:
+#: **It carves out the one supply that does carry the reply.** ADR-0222 §1 renders
+#: a ``what the assistant replied:`` line under a **conversation-tail** record and
+#: §2 gives the retrieved group none of it (:func:`_reply_lines`), so a turn from
+#: this conversation arrives with the assistant's own words and a turn from an
+#: earlier one arrives as a phrase. Without the carve-out this block would push a
+#: hop for a reply already on the page — a read that costs §6's budget, returns
+#: what the model is looking at, and inflates the very rate §8 measures. The block
+#: names §1's line rather than describing it, so the model matches what it can see;
+#: that couples this text to that rendering, and
+#: ``test_the_carve_out_names_the_line_the_tail_actually_renders`` is what keeps
+#: the two from drifting apart silently.
+#:
 #: A separate constant for :data:`_STATED_FACT_GUIDANCE`'s reason: the prompt test
 #: can assert it **reaches the model** without string-matching its wording.
 _ACT_RECORD_GUIDANCE = """\
@@ -481,10 +493,14 @@ answering from the summary. This is what `labels` is for: name that memory's \
 label, and what comes back is the original exchange it was drawn from, in the \
 wording it actually had.
 
-None of this widens the ordinary case. Where the goal turns instead on whether \
-that exchange happened, when it was, what it was about, or what the user asked \
-for, the same memory answers it as asked, and there is nothing to ask for — even \
-though that exchange also had wording you cannot see."""
+None of this widens the ordinary case, and two kinds of turn are outside it. \
+Where the goal turns instead on whether that exchange happened, when it was, what \
+it was about, or what the user asked for, the same memory answers it as asked, and \
+there is nothing to ask for — even though that exchange also had wording you \
+cannot see. And where a bullet below is printed with a `what the assistant \
+replied:` line under it, that line is the reply itself in the words it was sent, \
+not a summary of it: a question about its content is answered from it, and asking \
+for the exchange it is already showing you would buy nothing."""
 
 
 def _system_prompt(capabilities: Sequence[str]) -> str:

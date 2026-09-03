@@ -2678,3 +2678,43 @@ async def test_a_question_the_act_record_answers_emits_nothing() -> None:
     plan, _ = await _planned(_VALID_REPLY, "Did I ever ask you to recommend a lender by name?")
 
     assert plan.read_request is None
+
+
+async def test_the_carve_out_names_the_line_the_tail_actually_renders() -> None:
+    """The one string this block may be matched on, and why it is the exception.
+
+    :data:`_ACT_RECORD_GUIDANCE` tells the planner that a bullet printed with a
+    ``what the assistant replied:`` line under it is showing the reply itself, so
+    there is nothing to hop for. That carve-out exists because ADR-0222 §1 renders
+    such a line under a **conversation-tail** record while §2 gives the retrieved
+    group none of it: a turn from this conversation arrives with the assistant's
+    own words, and a turn from an earlier one arrives as a phrase. Without it this
+    block would push a read for a reply already on the page — one that spends
+    ADR-0226 §6's budget, returns what the model is looking at, and inflates the
+    rate §8 measures.
+
+    **This is a cross-reference and not a wording, which is what makes matching it
+    admissible** where the sibling prompt tests refuse to match a sentence. The
+    guidance quotes §1's line so the model can match what it sees; if that
+    rendering is ever reworded and this text is not, the prompt starts naming a
+    line no bullet carries and the carve-out silently stops applying — a failure
+    nothing else in this suite would show, because both halves would still be
+    internally consistent. Asserted over the prompt the planner actually assembled,
+    so it is the rendering that is checked and not a second copy of the literal.
+    """
+    line = f"{_REPLY_LABEL.strip()}:"
+    assert line in _ACT_RECORD_GUIDANCE, "the block names the line by its rendered opening"
+
+    tail = _turn(
+        "t1",
+        "Ada: which bank should I start with?",
+        outcome=f"{_REPLY_ONLY_WORD} is a common starting point.",
+        disposition=ExchangeDisposition.NO_ACTION_NEEDED,
+    )
+    over_the_tail = _bullets_for(tail)
+    _, over_the_act_record = await _planned(_VALID_REPLY, "Which bank did you name?")
+
+    assert any(row.startswith(_REPLY_LABEL) for row in await over_the_tail), (
+        "a tail record renders the line the block names (ADR-0222 §1)"
+    )
+    assert line not in over_the_act_record, "the retrieved group renders none of it (§2)"
