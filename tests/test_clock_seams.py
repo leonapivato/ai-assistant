@@ -1294,7 +1294,9 @@ def _module_constants(tree: ast.Module) -> dict[str, str]:
     return resolved
 
 
-def _owners_given_in(source: str, callee: str) -> tuple[frozenset[str], frozenset[str]]:
+def _owners_given_in(
+    source: str, callee: str, module: str
+) -> tuple[frozenset[str], frozenset[str]]:
     """Every ``owner=`` one module passes to ``callee``, resolved where it can be.
 
     The other half of a computed owner: ``MemoryTraces`` takes its label as a
@@ -1310,18 +1312,19 @@ def _owners_given_in(source: str, callee: str) -> tuple[frozenset[str], frozense
     Args:
         source: One module's text.
         callee: The constructor's name, matched under any spelling of its import.
+        module: The dotted path of the module defining it.
 
     Returns:
         The labels this module's calls name, and the ``owner`` expressions that
         could not be resolved to one, unparsed.
     """
     tree = ast.parse(source)
-    aliases = _bindings(tree)
+    bound = _modules_bound_in(tree)
     constants = _module_constants(tree)
     labels: set[str] = set()
     unresolved: set[str] = set()
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not _refers_to(node.func, callee, aliases):
+        if not isinstance(node, ast.Call) or not _refers_to(node.func, callee, module, bound):
             continue
         for keyword in node.keywords:
             if keyword.arg != "owner":
@@ -1336,11 +1339,12 @@ def _owners_given_in(source: str, callee: str) -> tuple[frozenset[str], frozense
     return frozenset(labels), frozenset(unresolved)
 
 
-def _owners_given_to(callee: str) -> frozenset[str]:
+def _owners_given_to(callee: str, module: str) -> frozenset[str]:
     """:func:`_owners_given_in`, unioned over ``src/`` and refusing what it cannot read.
 
     Args:
         callee: The constructor's name.
+        module: The dotted path of the module defining it.
 
     Returns:
         The labels its callers name.
@@ -1353,7 +1357,7 @@ def _owners_given_to(callee: str) -> frozenset[str]:
     labels: set[str] = set()
     unreadable: set[str] = set()
     for path in sorted(Path(ai_assistant.__file__).parent.rglob("*.py")):
-        found, unresolved = _owners_given_in(path.read_text(encoding="utf-8"), callee)
+        found, unresolved = _owners_given_in(path.read_text(encoding="utf-8"), callee, module)
         labels |= found
         unreadable |= unresolved
     assert not unreadable, (
@@ -1373,8 +1377,8 @@ def _owners_given_to(callee: str) -> frozenset[str]:
 #: pair would have gone on passing. What stays declared is the *expression*, so a
 #: new computed-owner seam still has to be accounted for here by hand.
 COMPUTED_OWNERS: Final[dict[str, Callable[[], frozenset[str]]]] = {
-    "type(self).__name__": lambda: _classes_deriving("_GrantedFacetSource"),
-    "owner": lambda: _owners_given_to("MemoryTraces"),
+    "type(self).__name__": lambda: _classes_deriving(_FACET_SOURCE),
+    "owner": lambda: _owners_given_to(_EMITTER, _EMITTER_MODULE),
 }
 
 #: Seams the roster below finds in ``src/`` that :data:`SEAMS` deliberately does
@@ -1401,8 +1405,17 @@ UNTABLED: Final[dict[str, str]] = {
 }
 
 
-#: The guard's own name, which is also the only spelling ``src/`` uses today.
+#: The guard, and the module that defines it: a call is the seam only when both
+#: halves match, which is what keeps an unrelated ``x.checked_clock(…)`` out.
 _GUARD: Final = "checked_clock"
+_CLOCK: Final = "ai_assistant.core.clock"
+
+#: The emitter whose ``owner`` is a constructor argument, and its module.
+_EMITTER: Final = "MemoryTraces"
+_EMITTER_MODULE: Final = "ai_assistant.memory.traces"
+
+#: The gated context adapter every concrete facet source derives from.
+_FACET_SOURCE: Final = "_GrantedFacetSource"
 
 
 def _bindings(tree: ast.Module) -> dict[str, str]:
@@ -1433,21 +1446,75 @@ def _bindings(tree: ast.Module) -> dict[str, str]:
     }
 
 
-def _refers_to(func: ast.expr, target: str, aliases: dict[str, str]) -> bool:
-    """Whether a call's callee names ``target``, under any spelling of the import.
+def _modules_bound_in(tree: ast.Module) -> dict[str, str]:
+    """The module each importable name in this module stands for, fully qualified.
+
+    The receiver half of :func:`_refers_to`: ``clock.checked_clock(…)`` is the
+    guard only when ``clock`` is *this* project's ``core.clock``.
+
+    Args:
+        tree: One parsed module.
+
+    Returns:
+        Local name to dotted path, over both import forms. Names imported *from*
+        a module are included too; they simply never match a module path.
+    """
+    bound: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound[alias.asname or alias.name] = alias.name
+        elif isinstance(node, ast.ImportFrom) and node.module is not None and not node.level:
+            for alias in node.names:
+                bound[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return bound
+
+
+def _dotted(expr: ast.expr) -> str | None:
+    """The dotted path a pure name-or-attribute chain spells, if it is one.
+
+    Args:
+        expr: Any expression; anything else answers ``None``.
+
+    Returns:
+        ``"a.b.c"``, or ``None`` for an expression with a call or a subscript in it.
+    """
+    if isinstance(expr, ast.Name):
+        return expr.id
+    if isinstance(expr, ast.Attribute):
+        prefix = _dotted(expr.value)
+        return None if prefix is None else f"{prefix}.{expr.attr}"
+    return None
+
+
+def _refers_to(func: ast.expr, target: str, module: str, bound: dict[str, str]) -> bool:
+    """Whether a call's callee is ``module.target``, under any spelling of the import.
+
+    **Both directions matter, and they were found one round apart.** Matching a
+    bare name only would miss a seam imported under an alias, and the partition
+    assertion would pass with no row driving it. Matching *any* attribute called
+    ``target`` would claim an unrelated ``scheduler.checked_clock(…)``, and the
+    partition assertion would fail naming a seam that does not exist. So the
+    receiver is resolved to the module that defines the target.
 
     Args:
         func: The ``func`` of an :class:`ast.Call`.
         target: The name being looked for.
-        aliases: :func:`_bindings` for the module the call is in.
+        module: The dotted path of the module that defines it.
+        bound: :func:`_modules_bound_in` for the module the call is in. Passed in
+            rather than derived here, because this is asked once per call node and
+            re-walking the module for each of them is quadratic.
 
     Returns:
-        ``True`` for a bare name, an aliased bare name, or any attribute access
-        ending in ``target`` — which covers every module-import spelling.
+        ``True`` for a bare name bound to ``target``, or an attribute access on a
+        receiver bound to ``module``.
     """
     if isinstance(func, ast.Name):
-        return func.id == target or aliases.get(func.id) == target
-    return isinstance(func, ast.Attribute) and func.attr == target
+        return func.id == target or bound.get(func.id) == f"{module}.{target}"
+    if not isinstance(func, ast.Attribute) or func.attr != target:
+        return False
+    receiver = _dotted(func.value)
+    return receiver is not None and bound.get(receiver, receiver) == module
 
 
 def _owners_in(source: str) -> tuple[frozenset[str], frozenset[str]]:
@@ -1461,11 +1528,11 @@ def _owners_in(source: str) -> tuple[frozenset[str], frozenset[str]]:
         expressions computed at run time, unparsed.
     """
     tree = ast.parse(source)
-    aliases = _bindings(tree)
+    bound = _modules_bound_in(tree)
     literal: set[str] = set()
     computed: set[str] = set()
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not _refers_to(node.func, _GUARD, aliases):
+        if not isinstance(node, ast.Call) or not _refers_to(node.func, _GUARD, _CLOCK, bound):
             continue
         owner = next((kw.value for kw in node.keywords if kw.arg == "owner"), None)
         if isinstance(owner, ast.Constant) and isinstance(owner.value, str):
@@ -1511,6 +1578,10 @@ def test_the_roster_scans_follow_a_name_under_any_spelling_of_its_import() -> No
     ``_GrantedFacetSource`` could arrive with no row driving it. The last emitter
     builds its label at run time, which nothing static can follow: that one is
     *reported*, so the roster refuses it rather than shortening itself.
+
+    And once, in the other direction: an unrelated object with a method of the
+    guard's name is **not** the guard, and claiming it would fail the partition
+    naming a seam that does not exist.
     """
     source = textwrap.dedent("""
         from ai_assistant.core.clock import checked_clock
@@ -1522,6 +1593,7 @@ def test_the_roster_scans_follow_a_name_under_any_spelling_of_its_import() -> No
         a = checked_clock(now, owner="Plain")
         b = guard(now, owner="Aliased")
         c = module.checked_clock(now, owner="Qualified")
+        impostor = scheduler.checked_clock(now, owner="NotASeam")
         d = guard(now, owner=type(self).__name__)
         _OWNER: Final = "Named constant"
 
@@ -1537,11 +1609,11 @@ def test_the_roster_scans_follow_a_name_under_any_spelling_of_its_import() -> No
 
     assert literal == {"Plain", "Aliased", "Qualified"}
     assert computed == {"type(self).__name__"}
-    assert _owners_given_in(source, "MemoryTraces") == (
+    assert _owners_given_in(source, _EMITTER, _EMITTER_MODULE) == (
         frozenset({"Aliased emitter", "Named constant"}),
         frozenset({"build_label()"}),
     )
-    assert _derived_classes_in(source)["_GrantedFacetSource"] == {"SmsContextSource"}
+    assert _derived_classes_in(source)[_FACET_SOURCE] == {"SmsContextSource"}
 
 
 def test_the_seam_table_is_the_whole_set() -> None:
