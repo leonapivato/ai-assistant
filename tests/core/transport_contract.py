@@ -14,8 +14,9 @@ hooks.
 **Why the hooks.** Several of ADR-0191 §1's clauses are about what an
 implementation does on a path a caller cannot reach from the outside: a connection
 that fails under it, a release after an establishment failure, a release after a
-cancellation delivered inside the acquisition, and a release failure at ``close``
-that must be swallowed rather than raised. None of those is arrangeable through
+cancellation delivered inside the acquisition, a release failure at ``close``
+that must be swallowed rather than raised, and the report that swallowing owes,
+which goes to an operator rather than to the holder. None of those is arrangeable through
 the Protocol — a contract whose whole point is that it exposes no such lever — so
 each suite takes the lever from its binding instead, in the shape
 ``tests/memory``'s cancellation cases already use
@@ -42,15 +43,22 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Final
 
 import pytest
+import structlog
 
+from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import TransportError
+from ai_assistant.core.logging import configure_logging
 from ai_assistant.core.types import TRANSPORT_OCTET_CEILING, TransportEndpoint
 from ai_assistant.testing.cancellation import settle
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence
+    from contextlib import AbstractContextManager
+
     from ai_assistant.core.protocols import ByteChannel, OutboundTransport
     from ai_assistant.testing.cancellation import SuspendedCall
 
@@ -67,6 +75,47 @@ UPGRADE_ENDPOINT: Final = TransportEndpoint(
 #: like the one line of an SMTP exchange that carries a credential, so a
 #: regression that started printing writes prints something a reader recognises.
 _SECRET_WRITE: Final = b"AUTH PLAIN AHdvcmtAZXhhbXBsZS5pbnZhbGlkAGFuLWFwcC1wYXNzd29yZA==\r\n"
+
+#: What every binding's armed release failure says, so that "reported by type
+#: alone" is assertable rather than assumed. It carries a recipient address —
+#: precisely the value ADR-0152 §11 forbids a message on the neighbouring surface
+#: to name — because a case can only assert that a log dropped the failure's words
+#: if the failure had words worth dropping.
+RELEASE_FAILURE_DETAIL: Final = "the far end named work@example.invalid on its way out"
+
+
+@contextmanager
+def structlog_reports(event: str) -> Iterator[list[str]]:
+    """Record every ``structlog`` event named ``event``, each rendered whole.
+
+    A convenience for bindings whose implementation reports through the project's
+    logging chain, and not part of what
+    :meth:`ByteChannelContract.observe_release_reports` requires: the hook owes the
+    reports, and an implementation that recorded them by some other route would
+    supply its own manager.
+
+    **The level is raised for the duration.** A failed release is reported at
+    ``debug`` and importing the package configures the chain at ``info``, so the
+    filtering bound logger would drop the event before any processor saw it — and
+    a case would then pass on a channel that reported nothing at all. It is put
+    back to the import-time default afterwards, so nothing later in the session
+    inherits the verbosity. ``tests/tools``' own cancellation-path case found that
+    trap first.
+
+    Args:
+        event: The event name the implementation reports under.
+
+    Yields:
+        One rendering per matching event, filled in once the block has finished.
+    """
+    reports: list[str] = []
+    configure_logging(Settings(log_level="DEBUG"))
+    try:
+        with structlog.testing.capture_logs() as captured:
+            yield reports
+        reports.extend(repr(entry) for entry in captured if entry["event"] == event)
+    finally:
+        configure_logging(Settings(log_level="INFO"))
 
 
 class ByteChannelContract(ABC):
@@ -111,11 +160,22 @@ class ByteChannelContract(ABC):
         """
 
     @abstractmethod
-    def arm_release_failure(self, channel: ByteChannel) -> None:
+    def arm_release_failure(self, channel: ByteChannel) -> type[BaseException]:
         """Arm an ordinary release failure that :meth:`close` must not raise.
+
+        **The failure's message carries :data:`RELEASE_FAILURE_DETAIL`**, so that
+        the case below can assert the implementation's report of it does *not*.
+        A failure armed with a message of no consequence would let a channel that
+        logged the whole exception pass the payload half of that case.
 
         Args:
             channel: The subject.
+
+        Returns:
+            The type armed. Which type an implementation's release fails with is
+            its own business — ADR-0191 §1 says "an ordinary release failure" and
+            names no type — so the binding says what it armed rather than the
+            suite assuming it.
         """
 
     @abstractmethod
@@ -127,6 +187,30 @@ class ByteChannelContract(ABC):
 
         Returns:
             The lever this suite waits on and releases.
+        """
+
+    @abstractmethod
+    def observe_release_reports(
+        self, channel: ByteChannel
+    ) -> AbstractContextManager[Sequence[str]]:
+        """Record what this implementation reports about a failed release.
+
+        The last of the levers a caller cannot reach from the outside: a report
+        goes to an operator's logs and not to the holder, so the Protocol offers
+        nothing to read it back with. Where the implementation reports through the
+        project's logging chain the binding is one line — the event name it
+        reports under, handed to :func:`structlog_reports`.
+
+        Args:
+            channel: The subject.
+
+        Returns:
+            A context manager whose value is one rendering per report the
+            implementation made about a failed release while the block ran, each
+            the whole of what was recorded. Whole, because which field carries the
+            failure's type is the implementation's business while whether its
+            message reached the log is the contract's, and a case that read named
+            fields could assert only the first.
         """
 
     # --- §1: read_line's terminator, its end of stream, its ceiling ---------
@@ -365,6 +449,34 @@ class ByteChannelContract(ABC):
         self.arm_release_failure(channel)
 
         await channel.close()
+
+    async def test_close_reports_an_ordinary_release_failure_by_type_alone(
+        self, channel: ByteChannel
+    ) -> None:
+        """§1: suppressed is not silent, and the report is the other half of it.
+
+        The case above pins that the failure does not reach the caller. Without
+        this one a channel could satisfy the whole suite by discarding it, which
+        is the state the clause exists to prevent rather than a tidier version of
+        it: an operator with a connection that will not release and no record of
+        it anywhere. Deleting the report from either implementation leaves every
+        other case here green.
+
+        **By type alone.** An ordinary release failure comes from the far end and
+        can carry that far end's own words — a recipient address among them — so
+        ADR-0152 §11's discipline over the neighbouring surface governs what may
+        be recorded: an error type may be named, a value may not. Exactly one
+        report, because a channel with two paths into it has already been observed
+        reporting from both.
+        """
+        armed = self.arm_release_failure(channel)
+
+        with self.observe_release_reports(channel) as reports:
+            await channel.close()
+
+        assert len(reports) == 1, reports
+        assert armed.__name__ in reports[0]
+        assert RELEASE_FAILURE_DETAIL not in reports[0]
 
     async def test_close_makes_the_channel_safe_and_re_raises_a_cancellation(
         self, channel: ByteChannel
