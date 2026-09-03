@@ -213,6 +213,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Final, final
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -241,7 +242,6 @@ from ai_assistant.readers._source import OneWorker, acquire
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from datetime import tzinfo
-    from pathlib import Path
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.readers._occurrences import Occurrence
@@ -386,32 +386,24 @@ class CalendarReader:
 
         Raises:
             ValueError: If ``path`` is not absolute, ``timezone`` is not a known
-                IANA zone, or any figure is outside ADR-0093 §7a's range.
+                IANA zone, or any figure is outside ADR-0093 §7a's range —
+                **including when the argument is of the wrong type**. Every
+                argument is typed before it is compared or called into, so a
+                direct caller's mistake is refused as a value naming the field
+                rather than escaping as an operator's ``TypeError`` or as an
+                ``AttributeError`` naming a method (#1057).
         """
-        if not path.is_absolute():
-            msg = (
-                f"the calendar source must be an absolute path, got {str(path)!r}; a "
-                f"relative value resolves against each process's working directory "
-                f"(ADR-0093 §7)"
-            )
-            raise ValueError(msg)
-        try:
-            zone = ZoneInfo(timezone)
-        except (ZoneInfoNotFoundError, ValueError) as exc:
-            msg = f"unknown timezone {timezone!r}"
-            raise ValueError(msg) from exc
-
+        source = _checked_path(path)
+        zone = _checked_zone(timezone)
         _check_window("calendar_window_past", window_past, allow_zero=True)
         _check_window("calendar_window_future", window_future, allow_zero=False)
         _check_count("calendar_max_entries", max_entries)
         _check_count("calendar_max_expansion", max_expansion)
         _check_positive_int("calendar_max_bytes", max_bytes)
         _check_positive_int("calendar_max_content_bytes", max_content_bytes)
-        if read_timeout <= timedelta(0):
-            msg = f"calendar_read_timeout must be > 0, got {read_timeout!r}"
-            raise ValueError(msg)
+        _check_duration("calendar_read_timeout", read_timeout)
 
-        self._path = path
+        self._path = source
         self._now = checked_clock(now, owner="CalendarReader")
         self._zone: tzinfo = zone
         self._window_past = window_past
@@ -916,7 +908,102 @@ def _when(occurrence: Occurrence) -> str:
     return f"from {start:%Y-%m-%d %H:%M} to {end:%Y-%m-%d %H:%M} ({zone})"
 
 
+def _checked_path(value: object) -> Path:
+    """The configured source as an absolute ``Path``, or a refusal naming the field.
+
+    **Typed before it is called into**, which is this constructor's rule for every
+    argument rather than a guard bolted onto one: a ``str`` has no ``is_absolute``
+    and ``None`` has no attributes at all, so an unguarded call turns a caller's
+    mistake into an ``AttributeError`` naming a *method* instead of the
+    ``ValueError`` naming the field this seam documents. The ``str`` case is the
+    one a second composition root actually writes, because it looks correct.
+
+    Typed ``object`` and returning the narrowed value, for
+    :func:`_refuse_a_non_duration`'s reason: a ``Path`` annotation would make the
+    refusal statically unreachable, which is the reasoning that let the value
+    through. ``type(value).__name__`` rather than ``repr`` — a hostile
+    ``__repr__`` must not raise past a guard.
+
+    Raises:
+        ValueError: If ``value`` is not a ``Path``, or is not absolute. Absoluteness
+            is the *shape* checked here; existence is a property of the world at an
+            instant and is checked at run time, where it degrades under ADR-0093 §8.
+    """
+    if not isinstance(value, Path):
+        msg = f"the calendar source must be a Path, got {type(value).__name__}"
+        raise ValueError(msg)
+    if not value.is_absolute():
+        msg = (
+            f"the calendar source must be an absolute path, got {str(value)!r}; a "
+            f"relative value resolves against each process's working directory "
+            f"(ADR-0093 §7)"
+        )
+        raise ValueError(msg)
+    return value
+
+
+def _checked_zone(value: object) -> ZoneInfo:
+    """The configured zone resolved, or a refusal naming what was wrong with it.
+
+    Typed before it is called into, for :func:`_checked_path`'s reason: ``ZoneInfo``
+    accepts anything ``os.PathLike``-ish and raises its own ``TypeError`` for the
+    rest, so ``timezone=None`` escaped as ``expected str, bytes or os.PathLike
+    object, not NoneType`` — a message naming neither this reader's field nor the
+    rule the ``Raises:`` clause above promises for it.
+
+    Raises:
+        ValueError: If ``value`` is not a ``str``, or is not a known IANA zone.
+    """
+    if not isinstance(value, str):
+        msg = f"the calendar timezone must be a str, got {type(value).__name__}"
+        raise ValueError(msg)
+    try:
+        return ZoneInfo(value)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        msg = f"unknown timezone {value!r}"
+        raise ValueError(msg) from exc
+
+
+def _refuse_a_non_duration(field: str, value: object) -> None:
+    """Refuse a value no ordering comparison below could survive.
+
+    Typed ``object`` because the guard **disbelieves the annotation, which is the
+    point** — the same reason :func:`~ai_assistant.core.clock.checked_clock`
+    states for its own parameter. A ``timedelta`` annotation here would make the
+    refusal statically unreachable, which is exactly the reasoning that let the
+    value through in the first place.
+
+    **The type check is the two integer guards' rule for the durations**, and
+    without it this constructor is asymmetric with itself: ``_check_count``
+    refuses anything that is not exactly an ``int`` while a duration reached a
+    bare ``<``, so ``window_past=None`` escaped as a ``TypeError`` from an
+    operator rather than as the ``ValueError`` this constructor documents
+    (#1057).
+
+    Nothing was ever silently *accepted* here — ``Settings`` refuses these at load
+    and ``mypy`` refuses them at a type-checked call site, and the one value that
+    is silently accepted for an integer, ``bool``, is already excluded by the
+    exact-type tests below (#471). What was wrong is the exception's class and
+    message at the direct-construction seam ADR-0093 §10 puts the guard at.
+
+    ``isinstance`` rather than an exact-type test, unlike the integer guards: they
+    are exact in order to exclude ``bool`` specifically, and there is no
+    ``timedelta`` subclass whose acceptance would be a mistake.
+    """
+    if not isinstance(value, timedelta):
+        msg = f"{field} must be a timedelta, got {value!r}"
+        raise ValueError(msg)
+
+
+def _check_duration(field: str, value: timedelta) -> None:
+    _refuse_a_non_duration(field, value)
+    if value <= timedelta(0):
+        msg = f"{field} must be > 0, got {value!r}"
+        raise ValueError(msg)
+
+
 def _check_window(field: str, value: timedelta, *, allow_zero: bool) -> None:
+    _refuse_a_non_duration(field, value)
     floor = timedelta(0)
     if value < floor or (value == floor and not allow_zero) or value > MAX_CALENDAR_WINDOW:
         bound = ">= 0" if allow_zero else "> 0"
