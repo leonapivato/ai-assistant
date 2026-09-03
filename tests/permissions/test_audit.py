@@ -950,6 +950,29 @@ async def test_a_trigger_this_store_did_not_define_is_refused(table: str, tmp_pa
 
 
 @pytest.mark.integration
+async def test_a_foreign_trigger_on_a_differently_cased_table_is_refused(tmp_path: Path) -> None:
+    """SQLite folds an identifier's case; ``sqlite_master`` keeps the spelling.
+
+    A file whose table is declared ``Decisions`` is the very table every statement
+    here reads — ``CREATE TABLE IF NOT EXISTS decisions`` is a no-op against it, and
+    ``PRAGMA table_info(decisions)`` describes it — so the columns, the indexes and
+    the collations all check out. But ``sqlite_master.tbl_name`` records
+    ``"Decisions"``, so a trigger attached to it is looked up under a name this
+    store does not define unless the lookup folds too, and the silent discard is
+    back.
+    """
+    path = tmp_path / "audit.db"
+    _seed(
+        path,
+        _STORE_SHAPE.replace("CREATE TABLE decisions", "CREATE TABLE Decisions"),
+        "CREATE TRIGGER discard BEFORE INSERT ON Decisions BEGIN SELECT RAISE(IGNORE); END",
+    )
+
+    with pytest.raises(AuditError, match="trigger 'discard'"):
+        SqliteAuditTrail(path=path)
+
+
+@pytest.mark.integration
 async def test_a_decisions_table_carrying_an_extra_column_still_opens(tmp_path: Path) -> None:
     """Tolerant of what a later version of this store would add, and only of that.
 
