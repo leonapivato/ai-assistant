@@ -267,6 +267,26 @@ def _closed_count(live: int, closed_fraction: float) -> int:
     return round(live * closed_fraction / (1.0 - closed_fraction))
 
 
+def _check_share(name: str, value: float) -> None:
+    """Refuse a share outside ``[0.0, 1.0)``, from one owner rather than two copies.
+
+    :meth:`AgedStoreSpec.sized` does arithmetic on ``closed_fraction`` *before* it
+    can build the spec whose ``__post_init__`` would have vetted it, so a
+    non-finite fraction used to reach ``round()`` first: ``inf`` surfaced as
+    ``OverflowError`` and ``nan`` as a ``ValueError`` about converting a float,
+    neither of which is the refusal this constructor documents. Both paths call
+    this, so the range and the sentence that reports it have a single owner and
+    cannot drift apart.
+
+    The bound is written as one chained comparison rather than two ``or``-ed
+    tests because ``nan`` compares false against everything: ``0.0 <= nan`` is
+    already false, so the chain is false and the negation refuses it.
+    """
+    if not 0.0 <= value < 1.0:
+        msg = f"{name} must be in [0.0, 1.0), got {value}"
+        raise ValueError(msg)
+
+
 class ClosedBy(StrEnum):
     """Which producer closed a planted record's validity window."""
 
@@ -305,15 +325,29 @@ class AgedStoreSpec:
     seed: int = 789
 
     def __post_init__(self) -> None:
-        """Reject a spec that cannot be planted, rather than planting something else."""
+        """Reject a spec that cannot be planted, rather than planting something else.
+
+        ``topics > live`` is refused here and not in :meth:`sized`, because it is
+        the *spec* that misreports: :attr:`cluster_density` divides ``live`` by
+        ``topics`` whichever constructor built it, while ``_live_drafts`` deals
+        the live population round-robin. So at ``live=10, topics=100`` only topics
+        0-9 hold a live record and a query against any of the other ninety meets
+        an empty cluster, under a density the spec states uniformly. An empty
+        topical cluster is not a density this fixture has any use for.
+        """
         if self.live < 1 or self.topics < 1:
             msg = f"live and topics must both be >= 1, got {self.live} and {self.topics}"
             raise ValueError(msg)
+        if self.topics > self.live:
+            msg = (
+                f"topics must not exceed live ({self.topics} > {self.live}); the live "
+                f"population is dealt round-robin across the topics, so the surplus "
+                f"clusters hold no live record at all while cluster_density reports a "
+                f"density every cluster has"
+            )
+            raise ValueError(msg)
         for name in ("closed_fraction", "absence_share", "preference_share"):
-            value = cast("float", getattr(self, name))
-            if not 0.0 <= value < 1.0:
-                msg = f"{name} must be in [0.0, 1.0), got {value}"
-                raise ValueError(msg)
+            _check_share(name, cast("float", getattr(self, name)))
         if not 0.0 <= self.closed_concentration <= 1.0:
             msg = f"closed_concentration must be in [0.0, 1.0], got {self.closed_concentration}"
             raise ValueError(msg)
@@ -358,11 +392,21 @@ class AgedStoreSpec:
                 ``total=2000, closed_fraction=0.9999`` request became a
                 **10,000**-record store, which is exactly the wrong volume to
                 report a sweep against. Refusing is the only honest answer,
-                because the caller's stated ``total`` cannot be met.
+                because the caller's stated ``total`` cannot be met. Also if
+                ``closed_fraction`` is outside ``[0.0, 1.0)`` — checked before the
+                arithmetic, since a non-finite fraction otherwise reached
+                ``round()`` and surfaced as ``OverflowError`` rather than as this
+                refusal. And also, from ``__post_init__``, if ``crowding`` is fine
+                enough that ``total // crowding`` exceeds the live count it
+                leaves: those surplus clusters would hold no live record.
         """
         if total < 1 or crowding < 1:
             msg = f"total and crowding must both be >= 1, got {total} and {crowding}"
             raise ValueError(msg)
+        # Before the arithmetic, not after it: `round()` on a non-finite product
+        # raises first, and an `OverflowError` about converting a float is not the
+        # refusal this constructor documents.
+        _check_share("closed_fraction", closed_fraction)
         estimate = round(total * (1.0 - closed_fraction))
         if estimate < 1:
             msg = (
@@ -403,7 +447,11 @@ class AgedStoreSpec:
 
     @property
     def cluster_density(self) -> float:
-        """Live records per topical cluster."""
+        """Live records per topical cluster.
+
+        A density every cluster has at least one of: ``__post_init__`` refuses
+        ``topics > live``, so no cluster is empty of live records.
+        """
         return self.live / self.topics
 
     @property
@@ -497,6 +545,15 @@ class Instants:
         rather than about the timeline. This check makes no judgement those two
         do not; it establishes the precondition its own comparisons need.
 
+        **Awareness is Python's own definition of it, not ``tzinfo is not None``.**
+        A ``datetime`` whose ``tzinfo`` returns ``None`` from ``utcoffset()`` is
+        naive while the attribute is plainly set, so the attribute test admitted
+        exactly the value that then raised the ``TypeError`` this check exists to
+        turn into a sentence about the timeline. ``datetime.utcoffset()`` answers
+        both halves — ``None`` when there is no ``tzinfo`` and ``None`` when the
+        one there declines to give an offset — so the guard asks it rather than
+        restating it.
+
         Raises:
             ValueError: If any instant is naive, or if they are not ordered
                 ``opened < closed <= now`` with ``written <= now``.
@@ -504,7 +561,7 @@ class Instants:
         naive = sorted(
             name
             for name in ("now", "written", "closed", "opened")
-            if cast("datetime", getattr(self, name)).tzinfo is None
+            if cast("datetime", getattr(self, name)).utcoffset() is None
         )
         if naive:
             msg = f"every instant must be timezone-aware; {', '.join(naive)} is not"
