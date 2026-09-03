@@ -478,6 +478,41 @@ class TestABudgetTheClockCannotAddIsHonoured:
         assert await outbox.claim() is None
 
 
+class _ParkingWaitOutbox(FakeNotificationOutbox):
+    """The canonical outbox, signalling when a poll parks in its wait and what ends it.
+
+    ``next_notification`` spends nearly all of a poll's life inside
+    ``wait_for_arrival``, and that is the state ADR-0131 §2a's "close detected
+    before that step runs" describes. A case aiming a cancel at it has to know the
+    poll got there — a sleep only makes it likely — and has to know the cancel
+    reached *inside* the park rather than merely ending the awaiting task, which is
+    precisely what an unconditional shield would leave true.
+
+    So both edges are signalled: ``wait_entered`` on the way in, ``wait_cancelled``
+    where the wait unwinds cancelled. Everything else is the canonical fake's, so
+    the entry the case goes on to assert about is held by a contract-correct outbox
+    rather than by a stub.
+    """
+
+    def __init__(self) -> None:
+        """An empty outbox on the fixed clock, with nobody parked and nothing cancelled."""
+        super().__init__(now=lambda: NOW)
+        self.wait_entered = asyncio.Event()
+        self.wait_cancelled = asyncio.Event()
+
+    async def wait_for_arrival(
+        self,
+        timeout: timedelta,  # noqa: ASYNC109 — the caller's own poll budget (ADR-0029 §4)
+    ) -> bool:
+        """Park as the canonical fake does, announcing the entry and any cancellation."""
+        self.wait_entered.set()
+        try:
+            return await super().wait_for_arrival(timeout)
+        except asyncio.CancelledError:
+            self.wait_cancelled.set()
+            raise
+
+
 class _ParkingClaimOutbox(RecordingOutbox):
     """An outbox whose ``claim`` parks, so a case can cancel *inside* the one step.
 
@@ -530,20 +565,41 @@ class TestACancelledPollHonoursSection2a:
         outlived its connection, so a notification arriving afterwards was claimed and
         leased for a device that had already gone, and the owner's next poll found
         nothing. The entry has to survive the dead poll.
+
+        **Both halves are signalled rather than timed**, which is what keeps it a
+        guard on other hardware. It reached the park on ``await asyncio.sleep(0.05)``
+        and gave a surviving poll another ``0.05`` to take the entry, and neither
+        number is a fact about anything: on a loaded loop the cancel could land
+        before ``wait_for_arrival`` was ever entered, and the case then passed
+        because nothing parked rather than because the cancellation was honoured. It
+        could not fail loudly; it would just stop discriminating.
+
+        So the park is awaited on the double's own ``wait_entered``, and the cancel
+        is then proven to have landed *in* it on ``wait_cancelled`` — the assertion
+        that actually separates this from an unconditional shield, under which
+        ``await poll`` raises just the same while the poll's own wait runs on. That
+        proof is also what retires the second sleep: it said "no poll survived" by
+        giving one time to act, where the cancelled wait says the poll is unwinding,
+        so the ``claim`` below asserts against a settled outbox rather than a
+        hopefully-quiet one. The two bounds left are failure bounds — reached only
+        when the property is already broken — and are the ones the sibling cases use.
         """
-        outbox = FakeNotificationOutbox(now=lambda: NOW)
+        outbox = _ParkingWaitOutbox()
         engine = _wired(Harness(), outbox)
         poll = asyncio.ensure_future(engine.next_notification(budget=timedelta(seconds=30)))
-        await asyncio.sleep(0.05)  # let it reach the park
+        await asyncio.wait_for(outbox.wait_entered.wait(), 2)
 
         poll.cancel()
         with pytest.raises(asyncio.CancelledError):
             await poll
+        # The cancel reached *inside* the park rather than only ending the awaiting
+        # task, which is the whole property: an unconditionally shielded poll would
+        # raise here too, having left its own wait running.
+        await asyncio.wait_for(outbox.wait_cancelled.wait(), 2)
 
         # The notification arrives *after* the disconnect, which is the reviewer's
         # own scenario: a shielded poll would still be parked to receive it.
         await outbox.offer(_candidate())
-        await asyncio.sleep(0.05)  # ample time for a surviving poll to take it
 
         delivery = await outbox.claim()
         assert delivery is not None

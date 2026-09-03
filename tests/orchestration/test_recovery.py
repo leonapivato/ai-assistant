@@ -854,6 +854,29 @@ class CountingScan(RecoveryScan):
         await asyncio.sleep(0)
 
 
+class FailingScan(RecoveryScan):
+    """A scan that raises on its first pass and counts every pass it starts.
+
+    The failure is raised **after** the suspension rather than before it, so the
+    pass is one an implementation could plausibly have marked done: it began, it
+    reached the store, and it stopped partway. ADR-0192 §3's crash protocol makes
+    exactly that pass re-runnable — the interrupted step is still ``RUNNING``, so
+    the next scan finds it and completes whatever is still open.
+    """
+
+    def __init__(self) -> None:
+        """Count only; every collaborator is unreached because ``recover`` is not."""
+        self.calls = 0
+
+    async def recover(self) -> None:
+        """Count the pass, suspend, and fail the first one as a store fault would."""
+        self.calls += 1
+        await asyncio.sleep(0)
+        if self.calls == 1:
+            msg = "the trail could not be read"
+            raise AuditError(msg)
+
+
 def engine_with(scan: RecoveryScan | None) -> Engine:
     """A façade over a harness's durable state, holding ``scan``."""
     harness = Harness()
@@ -922,6 +945,41 @@ async def test_two_overlapping_starts_scan_once_between_them() -> None:
     await asyncio.gather(engine.start(), engine.start())
 
     assert scan.calls == 1
+
+
+async def test_a_failed_scan_is_retried_by_the_next_start() -> None:
+    """The flag is set only *after* the scan returns, so a failed pass is not done.
+
+    The guard's two cases beside this one drive an always-successful scan, so an
+    implementation that set ``_recovery_scanned`` before awaiting the scan passes
+    both — and the docstring's promise, which is the half that matters when the
+    scan fails, goes unpinned. ADR-0192 §3 makes a re-run idempotent by
+    construction: a pass that raised "completed nothing it had not already
+    committed", the interrupted step is still ``RUNNING``, and the next scan finds
+    it. Marking that attempt done would strand the step — and every claim open
+    under its authorisation — for the life of the process, which is ADR-0014 §4's
+    recovery defeated by the guard meant to keep it a startup act.
+
+    **The flag is asserted through the behaviour it exists to produce** rather than
+    by reading it: a second pass is reachable only with the flag unset, so
+    ``calls == 2`` states the same fact without pinning a private attribute's name.
+    And the retry does not cost the guard — the third ``start`` scans no more,
+    because the pass that succeeded is the one that sets it.
+    """
+    scan = FailingScan()
+    engine = engine_with(scan)
+
+    with pytest.raises(AuditError):
+        await engine.start()
+    assert scan.calls == 1
+
+    await engine.start()
+
+    assert scan.calls == 2, "a failed attempt is not a completed one"
+
+    await engine.start()
+
+    assert scan.calls == 2, "the pass that returned is the one that sets the flag"
 
 
 async def test_an_engine_wired_with_no_scan_still_starts() -> None:
