@@ -290,9 +290,10 @@ system holds. §3 says how the render site comes to hold it too.
 
 > **Normative.** The set is **recorded where the kind is known** — at the servicer,
 > which is the one place `CITATION_HOP` and `SIGHTED_QUERY` are distinguishable — and
-> is carried from there to the render site as data. It carries the records the hop
-> resolved that the turn's supply holds after servicing, the deduplicated-out ones
-> included (§1), under §4's cap and in ADR-0226 §6's order, and nothing else.
+> is carried from there to the render site as data. It carries the **distinct** records
+> the hop resolved that the turn's supply holds after servicing, the deduplicated-out
+> ones included (§1), under §4's deduplication and cap and in ADR-0226 §6's order, and
+> nothing else.
 
 > **Normative.** The set is **empty** on every turn that did not fire, on a turn whose
 > servicing ADR-0226 §5 declined, on a turn whose servicing failed or was partial —
@@ -385,13 +386,19 @@ discipline is that they are not there. The audit stays what it is.
 > span, the reply's full length in its own characters, and no head-and-tail composite.
 > This ADR states no second marker wording and permits no site to render one.
 
+> **Normative.** **The cap is taken over distinct record identifiers**, deduplicated
+> **before** it is applied, with the **first** occurrence in ADR-0226 §6's order
+> keeping the place. A record renders **at most one** reply line per assembly however
+> many times the hop reached it — `Provenance.evidence` is a `tuple` with no
+> uniqueness constraint, and two labels may name records citing the same episode.
+
 > **Normative.** **At most ten reply lines are rendered under §1 per assembly**, which
 > is ADR-0226 §6's own figure of ten and not a second number. Where this turn's hop
-> reached more than ten records that §1 admits, the **first ten** render a reply line
-> and the rest render none, taken in ADR-0226 §6's own order — labels in the order the
-> ask names them, and each labelled record's evidence in the order that record stores
-> it. The cap is applied where §3's set is recorded, at the servicer, so that one
-> component decides it once.
+> reached more than ten **distinct** records that §1 admits, the **first ten** of them
+> render a reply line and the rest render none, taken in ADR-0226 §6's own order —
+> labels in the order the ask names them, and each labelled record's evidence in the
+> order that record stores it. The cap is applied where §3's set is recorded, at the
+> servicer, so that one component decides it once.
 
 > **Normative.** A record the cap excludes renders **exactly as it renders today** —
 > its bullet and its phrase line, unchanged — and **no site writes a marker, a count
@@ -436,6 +443,19 @@ already fixes exactly this order for the servicing, and rules what it is for: *"
 one request, one pre-servicing supply and one set of candidates, two conforming
 implementations append the same records in the same order"*. The cap is taken over that
 same sequence, so two conforming implementations render the same ten lines.
+
+**And deduplicated first, because otherwise the order alone does not fix them.**
+`Provenance.evidence` is `tuple[EncodableText, ...]` and carries no uniqueness
+constraint; `_hop_records` deduplicates the identifiers it *asks* `get_many` for and
+then rebuilds `cited` by walking each record's `evidence` in stored order, so a
+repeated citation yields the same record twice, and ADR-0226 §7's deduplication removes
+it only later, at the union. A cap taken over that sequence as it stands would let
+`(A, A, …, B)` spend ten positions on one record and render one line, while a
+deduplicate-first reading renders ten — two conforming implementations, two different
+prompts, which is exactly what §6's order clause exists to prevent. So the
+deduplication is stated ahead of the cap rather than left to be inferred from the word
+"set", and it is the same rule ADR-0226 §7 already applies to the union, for its own
+reason: *"the second arrival is deduplicated out and **consumes no slot**"*.
 
 **The arithmetic, now true.** Ten reply lines at ADR-0222 §4's per-line bound of 736
 characters is **7,360 characters** of added prompt on a turn that fired — the true
@@ -666,25 +686,31 @@ behaviour. This section states it once so that it is cited rather than rediscove
     record whose `outcome` contains a newline followed by `    how it turned out:` and
     a well-formed bullet renders as one line and produces no second continuation line
     and no second bullet. ADR-0098 §9's regression shape applied to the new span.
-12. **The cap binds at ten, in ADR-0226 §6's order, and discloses nothing.** A hop
-    whose two labels resolve to records citing more than ten live episodes that §1
-    admits — constructed directly, since `Provenance.evidence` carries no read-time
-    length bound — renders exactly ten reply lines, over the first ten records in
-    labels-then-evidence order; the eleventh and later render their bullet and phrase
-    line unchanged and no reply line; and no marker, count or "and *N* more" line
-    appears in the prompt or in any log about the exclusion. A hop reaching exactly ten
-    renders ten.
-13. **The counts are one pair over both populations.** An assembly with tail replies
+12. **The cap binds at ten distinct records, in ADR-0226 §6's order, and discloses
+    nothing.** A hop whose two labels resolve to records citing more than ten live
+    episodes that §1 admits — constructed directly, since `Provenance.evidence` carries
+    no read-time length bound — renders exactly ten reply lines, over the first ten
+    **distinct** records in labels-then-evidence order; the eleventh and later render
+    their bullet and phrase line unchanged and no reply line; and no marker, count or
+    "and *N* more" line appears in the prompt or in any log about the exclusion. A hop
+    reaching exactly ten renders ten.
+13. **A repeated citation is one record and one line.** An `evidence` tuple holding the
+    same identifier many times, and two labels whose records cite one episode in
+    common, each render that record **once** with **one** reply line, and the repeats
+    consume no position of §4's cap — asserted by a case whose evidence is
+    `(A, A, …, B)` long enough that a list-first cap would render one line where the
+    decision requires two.
+14. **The counts are one pair over both populations.** An assembly with tail replies
     and hop replies reports one statement whose eligible count is the sum and whose
     elided count is no greater; an assembly with eligible replies and no elision reports
     a non-zero denominator and a zero numerator; an assembly with neither reports zero
     and zero rather than staying silent; and no such statement carries reply text or a
     record identifier.
-14. **No identifier reaches a prompt, a log or the audit.** On a turn that serviced a
+15. **No identifier reaches a prompt, a log or the audit.** On a turn that serviced a
     hop, no record identifier from §3's carrier appears in the assembled prompt, in any
     emitted log event, or in ADR-0226 §9's record — which carries the correlation id and
     no other identifier, as its own test asserts.
-15. **The planner's assembler is unchanged.** `planning/planner.py`'s prompt for a turn
+16. **The planner's assembler is unchanged.** `planning/planner.py`'s prompt for a turn
     is byte-identical to today's in every case above, tail included; the planner runs
     before the servicer and renders no reply line under this ADR.
 
@@ -699,7 +725,7 @@ behaviour. This section states it once so that it is cited rather than rediscove
 > (§3); the carrier from there to `orchestration/composing.py`'s assembler through the
 > loop and the engine (§3); the render rule at that assembler (§1), emitted by the
 > caller and not by `_render_record`; the counts folded onto the one existing statement
-> (§5); §8's fifteen tests, with ADR-0226 §11 item 1's existing test **rewritten**
+> (§5); §8's sixteen tests, with ADR-0226 §11 item 1's existing test **rewritten**
 > under §7 rather than supplemented; and the docstrings this corpus expects, citing
 > this ADR by number at each site it changes.
 
