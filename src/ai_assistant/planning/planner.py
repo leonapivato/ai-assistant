@@ -524,11 +524,11 @@ cannot see. And where a bullet below is printed with a `what the assistant \
 replied:` line under it, that line is the reply itself in the words it was sent, \
 not a summary of it: a question about its content is answered from it, and asking \
 for the exchange it is already showing you would buy nothing. That carve-out has a limit of \
-its own, and the limit is not a second thing to ask for. A line reading `what the \
-assistant replied (first 200 of 900 characters): ...` is showing you the opening \
-of the reply and not the reply, so what the goal turns on may be in the part you \
-cannot read. No read brings that remainder back, and naming that turn's own label \
-does not: it is a bound on what you can answer from, not a reason to ask."""
+its own. A line reading `what the assistant replied (first 200 of 900 \
+characters): ...` is showing you the opening of the reply and not the reply, so \
+what the goal turns on may be in the part you cannot read. Nothing you can ask \
+for returns the rest of that line — it is a bound on what you can answer from, \
+and a turn printed that way is not itself worth naming in `labels`."""
 
 
 def _system_prompt(capabilities: Sequence[str]) -> str:
