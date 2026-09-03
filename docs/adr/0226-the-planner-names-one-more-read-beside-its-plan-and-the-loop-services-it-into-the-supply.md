@@ -1,6 +1,6 @@
 # 226. The planner names one more read beside its plan, and the loop services it into the supply
 
-- Status: Accepted, §11 item 1 amended by ADR-0227
+- Status: Partially superseded by ADR-0228 (§3's second-level clause, §6's one-emission-per-turn clause, §7's re-planning prohibition together with its evaluation-timing phrase and its restatement that `Planner.plan`'s `memories` carries exactly three groups, and §8's trigger clause read as a test on the one plan a turn produced — a turn may make a second planner call over the supply the first plan's serviced read produced, and may service that plan's own request once; §3's namer rule, no-identifier rule and ordinal scheme, §5's channel scoping and degradation posture, §6's budget of ten, cross-kind precedence and two-label cap, §7's fourth group, whole-union deduplication, discards-nothing-by-class clause and constructed-once rule, §9 entire, and §§1, 2, 4, 10, 11, 12 and 13 all stand)
 - Date: 2026-09-02
 - Amended: 2026-09-03 by ADR-0227 — §11 item 1's assertion *"the answer carries it"*
   stands and is not replaced; what it gains is the **fidelity requirement** under which
@@ -98,6 +98,102 @@
   export, and §4 moves it. **This ADR changes no code.** §10 states what the
   implementing lanes owe; nothing implements against it until it has merged
   ([ADR-0015](0015-simplify-the-agent-workflow.md) §5, golden rule 5).
+
+- **Partially superseded: 2026-09-03 by ADR-0228** — four scopes, and no others. This
+  is the ADR §6 and §12 reserve by name.
+
+  **§6's one-emission clause.** §6 rules *"One emission is serviced **once** per
+  turn"* and that *"no configuration, setting or later lane makes the count
+  configurable without the ADR that decides it (§12)"*. ADR-0228 §3 makes the count
+  **two** planner calls, each of which may emit a request that is serviced once, and
+  it does **not** make the figure configurable — §6's non-configurability reasoning is
+  inherited and applied one level up, to the plan count. The scope is the count and
+  nothing else: the budget of ten, the hop-first precedence, the two-label cap, the
+  second-budget rule and ADR-0113 §5's inherited non-promise all bind **per
+  servicing**, unchanged.
+
+  **§7's re-planning prohibition, its timing phrase, and its three-group
+  restatement.** §7 rules that *"no lane closes the gap by re-calling the planner:
+  §6 services one emission once and ADR-0014 §2's frozen plan stands (§12)"* —
+  ADR-0228 re-calls the planner, and the sentence names §12 as where the question
+  goes. §7 also takes ADR-0204 §2's evaluation *"once, over the turn's final supply
+  … after servicing"*: on a turn with two servicings a reader may take it after the
+  **first** and record a value about a supply the turn did not compose over, so
+  ADR-0228 §7 fixes that it is taken after the **last** servicing the turn performs.
+  And §7 restates that *"`Planner.plan`'s `memories` still carries exactly three
+  groups"* on the ground that *"the planner cannot be handed a group produced from
+  its own output"* — true of the first call, false of a second, whose input was
+  produced by the first call's output. Everything else of §7 binds and is relied on:
+  the fourth group's construction and position, the whole-union deduplication, the
+  discards-nothing-by-class clause, the constructed-once rule, and the sameness
+  clause as this ADR narrowed ADR-0158 §5.
+
+  **§8's trigger clause, read as a test on one plan.** §8 rules that *"a turn on
+  which `read_request` is not `None` is a turn the trigger fired on, and a turn on
+  which it is `None` is a turn it did not"*. On a revising turn there are two plans,
+  and the one a consumer reaches — `TurnResult.plan` — is the **last**, whose request
+  may be `None` on a turn that fired. A reader holding only this ADR reads the
+  trigger off it and records a fired turn as a non-firing, depressing exactly the
+  figure §8 exists to keep honest. ADR-0228 §9 fixes that a turn's trigger fired if
+  **any** plan it produced carried a request, and that the fire rate stays a per-turn
+  rate directly comparable to the replay's 13.6%. §8's every-turn obligation, its
+  third outcome, its planner-attribution clause, its population rules, its
+  novelty-rate reasoning and its prohibition on reporting precision or recall from
+  this record all bind unchanged and bind ADR-0228's new figures too.
+
+  **§3's second-level clause, and the deferral in the same sentence.** §3 rules that
+  a hop *"does not follow the evidence of a record reached by that hop, and no lane
+  adds a second level: that is iteration, and it is §12's"*. ADR-0228 §8 admits a
+  second level **across** iterations. The sentence both defers the question and
+  forecloses it in the meantime, so — following §13's own ruling on ADR-0208 §8 — the
+  deferral is discharged **and** the clause is superseded, *"in that order, and
+  neither instead of the other"*. The scope is the across-turn case alone: within one
+  servicing a hop still follows exactly one level, and §3's namer rule, its
+  no-identifier rule, its ordinal scheme, its resolves-to-nothing rule and its
+  statement that a label is meaningful only within the call that rendered it all bind
+  entire and are what make the second level safe.
+
+  **§9 is applied and not superseded, by §9's own instruction.** Its last clause reads
+  *"These are the fields milestone 2 **raises rather than replaces**"*, and ADR-0228
+  §9 accounts per emission, keeps every field's meaning, renames and drops nothing,
+  and starts no second audit. A reader acting on §9 alone acts identically before and
+  after, which is ADR-0070 §1's test and the reason no record is owed against it.
+  **§10's no-bump clause is likewise not superseded**: it is stated over this ADR's
+  own two lanes and both have merged. See the note below on the fact it rests on.
+
+  The `Status` line takes the leading `Partially superseded by` token, so under
+  ADR-0082 §2 the amendment qualifier *"§11 item 1 amended by ADR-0227"* comes **off**
+  that line — it would otherwise be read as a supersession target under ADR-0070 §4's
+  extraction invariant — and its record stands whole and unchanged in the `Amended:
+  2026-09-03 by ADR-0227` note above. Nothing is lost by the move; it is ADR-0080 §8's
+  operation, which ADR-0082 §2 generalises. The scope on the line names clauses and
+  carries no `ADR-NNNN` token. Appended note per ADR-0070 §1; no text below is
+  rewritten. This note lands in the same change as ADR-0228 itself, which is the
+  existence condition ADR-0082 §7 states. Refs #1908, #1952.
+- Note (2026-09-03): **this ADR's milestone is `track:planning` #1908's milestone
+  27, not "milestone 1".** #1908's milestones are numbered globally, 27 to 30, on the
+  owner's ruling of 2026-09-03, and the issue states the mapping: *"1→27, 2→28, 3→29,
+  4→30."* This ADR was written before that ruling and says "milestone 1" in Context
+  and "milestone 2" in §9 and §12; read those as **27** and **28**. ADR-0070 §1
+  permits no rewrite of ratified text, so the mapping is recorded here rather than
+  applied above. Nothing this ADR decided changes: the deferrals §12 assigns to
+  "milestone 2" are milestone 28's and are taken by ADR-0228.
+- Note (2026-09-03): **§4's and §10's statement that "`ActionPlan` crosses neither
+  `wire/` nor `service/` in the tree" is false against `origin/main`, and ADR-0228 §6
+  carries the correction.** `wire/client.py`'s `converse` and `resume` return a
+  `TurnOutcome`; `TurnOutcome.turn` is a `TurnResult`; `TurnResult.plan` is an
+  `ActionPlan`; `wire/codec.py`'s `project` renders a model with a bare
+  `value.model_dump()`, every field included; and `ActionPlan` sets
+  `ConfigDict(extra="forbid", frozen=True)`. `wire/envelope.py`'s own log reasons
+  from the same chain for a different field — *"`TurnResult.memories` is
+  `tuple[MemoryRecord, ...]`, carried inside `TurnOutcome.turn`"* — and records a bump
+  for exactly this shape: *"an older client handed a `TurnOutcome` carrying `reply`
+  fails"*. **No decision of this ADR changes.** §10's instruction to its two lanes was
+  followed and those lanes have merged; §10's own clause anticipated the discovery —
+  *"A lane that finds otherwise stops and says so rather than bumping it"* — and this
+  note is the saying-so. What that leaves for the released version is #1956, and
+  ADR-0228 §6 moves `PROTOCOL_VERSION` for **its** field rather than inheriting the
+  reading. Appended note per ADR-0070 §1; no text below is rewritten.
 
 ## Context
 

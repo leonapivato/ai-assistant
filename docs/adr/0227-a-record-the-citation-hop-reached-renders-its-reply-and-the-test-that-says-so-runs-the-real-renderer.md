@@ -51,6 +51,18 @@
   implementing lane owes; nothing implements against it until it has merged
   ([ADR-0015](0015-simplify-the-agent-workflow.md) §5, golden rule 5).
 
+- Note (2026-09-03): **the milestone this ADR closes is `track:planning` #1908's
+  milestone 27, not "milestone 1".** #1908's milestones are numbered globally, 27 to
+  30, on the owner's ruling of 2026-09-03, and the issue states the mapping: *"1→27,
+  2→28, 3→29, 4→30."* This ADR was written before that ruling; read its "milestone 1"
+  as **27**. ADR-0070 §1 permits no rewrite of ratified text, so the mapping is
+  recorded here rather than applied above, and nothing this ADR decided changes.
+  **This ADR is not superseded or amended by ADR-0228**, which reads §1's render rule
+  and §3's carrier as stated over the **turn** — so a turn with two servicings
+  accumulates one hop set across both, in ADR-0226 §6's order, with §4's cap of ten
+  reply lines taken over that one set — and relies on §7's test-fidelity rule for its
+  own tests. Refs #1908, #1952.
+
 ## Context
 
 ### Where this comes from

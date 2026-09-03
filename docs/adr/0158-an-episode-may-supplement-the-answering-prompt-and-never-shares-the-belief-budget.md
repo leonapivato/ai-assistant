@@ -1,6 +1,6 @@
 # 158. An episode may supplement the answering prompt, and never shares the belief budget
 
-- Status: Partially superseded by ADR-0160 (§3's value clause, §6's arm mandate and retraction predicate, and §8's first bullet) and ADR-0226 (§5's sameness clause alone, that `TurnResult.memories` carries the same three groups in the same order as `Planner.plan`'s `memories` — on a turn whose planner emitted a read request the `TurnResult` carries those three groups, in that order, and a fourth appended after them; §5's three-group clause on `Planner.plan`, its grouping-not-ranking caution, its degraded-read clause, its episodic-bound clauses and its `Settings` prohibition all stand, and §4 is untouched)
+- Status: Partially superseded by ADR-0160 (§3's value clause, §6's arm mandate and retraction predicate, and §8's first bullet) and ADR-0226 (§5's sameness clause alone, that `TurnResult.memories` carries the same three groups in the same order as `Planner.plan`'s `memories` — on a turn whose planner emitted a read request the `TurnResult` carries those three groups, in that order, and a fourth appended after them; §5's three-group clause on `Planner.plan`, its grouping-not-ranking caution, its degraded-read clause, its episodic-bound clauses and its `Settings` prohibition all stand, and §4 is untouched) and ADR-0228 (§5's three-group clause alone, as it governs `Planner.plan`'s `memories` — a turn's **second** planner call, made over the supply the first plan's serviced read produced, is handed four groups, because the fourth exists by the time it is made; §5's sameness clause as already narrowed, its grouping-not-ranking caution, its degraded-read clause, its episodic-bound clauses and its `Settings` prohibition all stand, and §4's append-never-interleave rule is extended in application and unchanged in text)
 - Date: 2026-08-15
 - Partially superseded: 2026-08-16 by ADR-0160 — **the bound's *value* moves from
   5 to 15, the separately registered ablation arm is retired in favour of post-hoc
@@ -256,6 +256,43 @@
   amendment qualifier, per ADR-0082 §2. Appended note per ADR-0070 §1; no text below
   is rewritten. This note lands in the same change as ADR-0226 itself, which is the
   existence condition ADR-0082 §7 states. Refs #1908.
+
+- **Partially superseded: 2026-09-03 by ADR-0228** — §5's three-group clause, as it
+  governs `Planner.plan`'s `memories`, and no other clause of §5 or of this ADR.
+  §5 rules that that parameter carries the conversation tail, the retrieved beliefs
+  and the episodic supplement, three groups in that order. ADR-0228 §1 lets a turn
+  call the planner a **second** time over the supply the first plan's serviced read
+  produced, and that call is handed **four** groups: the three, and the fourth the
+  servicing appended.
+
+  **The reason the earlier note gave for keeping this clause is true of the first
+  call and false of the second**, which is why the scope is the clause rather than
+  the section. The note directly above records that *"the planner cannot receive a
+  group produced from its own output"*. That holds of the call whose output produced
+  the group; it does not hold of a **later** call, whose input was produced by an
+  **earlier** call's output. A reader holding only this ADR hands the second call
+  three groups and strips exactly the records the revision exists to plan over,
+  which is ADR-0070 §1's test met.
+
+  **Not replaced — everything else, and the sameness clause is untouched here.**
+  ADR-0226 already narrowed §5's sameness clause for the fourth group and ADR-0228
+  does not reach it: on a turn that revised, `TurnResult.memories` still carries the
+  three groups in order followed by the appended fourth. §5's operative caution —
+  that an implementation *"may rely on the grouping and may not rely on a global
+  relevance order"* — is carried word for word to both calls and to the fourth group.
+  §5's degraded-read clause, its episodic-bound clauses, its `Settings` prohibition
+  and its no-Protocol-member clause all bind unchanged: ADR-0228 adds no member to
+  any Protocol either, and `Planner.plan`'s signature is untouched. **§4 is
+  untouched** — every servicing of a turn contributes to **one** fourth group,
+  appended whole after the supplement in servicing order, so *"appended whole, never
+  interleaved"* holds over the whole of it and §4's separator rule is still evaluated
+  over what precedes the supplement. §§1, 2, 3 and 6 are untouched entirely.
+
+  The scope on the `Status` line names a clause and carries no `ADR-NNNN` token, so
+  ADR-0070 §4's extraction invariant holds and the pair accumulates beside ADR-0160's
+  and ADR-0226's rather than replacing either. Appended note per ADR-0070 §1; no text
+  below is rewritten. This note lands in the same change as ADR-0228 itself, which is
+  the existence condition ADR-0082 §7 states. Refs #1908, #1952.
 
 ## Context
 
