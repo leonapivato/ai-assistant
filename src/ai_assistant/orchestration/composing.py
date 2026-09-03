@@ -542,7 +542,9 @@ class ComposingStage:
                 tail carries none, which is every turn until one has run on
                 ``converse_spoken``.
             hop_reached: Which records of ``turn.memories`` this turn's **citation
-                hop** reached, in ADR-0226 §6's order (ADR-0227 §3). **Supplied, not
+                hop** reached, in ADR-0229 §3's order (ADR-0227 §3) — each record a
+                label named followed by that record's own evidence, deduplicated to
+                the first occurrence. **Supplied, not
                 inferred**: it is stated at the servicer, which is the one component
                 that can tell a ``CITATION_HOP``'s records from a
                 ``SIGHTED_QUERY``'s, and this stage derives it from nothing — not
@@ -1030,7 +1032,9 @@ def _render_request(  # noqa: PLR0913 — one parameter per block this prompt is
         deliveries: What a device reported playing of each turn of the tail, keyed
             by the episode it qualifies (ADR-0205 §5).
         hop_reached: Which records of ``turn.memories`` this turn's citation hop
-            reached, in ADR-0226 §6's order (ADR-0227 §3).
+            reached, in ADR-0229 §3's order (ADR-0227 §3) — each record a label named
+            followed by that record's own evidence, deduplicated to the first
+            occurrence.
 
     Returns:
         The user-turn prompt.
@@ -1246,8 +1250,9 @@ def _render_memories(
         degraded: Whether the turn's memory reads degraded.
         deliveries: What a device reported playing of each turn of the tail
             (ADR-0205 §5).
-        hop_reached: Which records this turn's citation hop reached, in ADR-0226
-            §6's order (ADR-0227 §3).
+        hop_reached: Which records this turn's citation hop reached, in ADR-0229
+            §3's order (ADR-0227 §3) — each record a label named followed by that
+            record's own evidence, deduplicated to the first occurrence.
 
     Returns:
         The rendered block, line by line.
@@ -1545,8 +1550,9 @@ def _hop_reply_lines(
     """Which non-tail records render a reply line under ADR-0227 §1, and what it says.
 
     **The two halves of one rule, decided where each is known** (ADR-0227 §3). The
-    servicer fixed the order — ADR-0226 §6's labels-then-evidence order, deduplicated
-    by identifier — and this function applies the two things only the render site
+    servicer fixed the order — ADR-0229 §3's expansion order, each record a label
+    named followed by that record's own evidence, deduplicated to the first
+    occurrence — and this function applies the two things only the render site
     knows: §1's **tail exclusion** and §4's **cap**. It computes neither the hop's
     order nor the conversation-tail split of its own; ``retrieved`` is what
     :func:`_split_conversation_tail` returned at the one call site, so a record of the
@@ -1582,7 +1588,7 @@ def _hop_reply_lines(
         retrieved: The trailing group :func:`_split_conversation_tail` returned — the
             supply with the conversation tail removed.
         hop_reached: ADR-0227 §3's carrier: which records this turn's citation hop
-            reached, in ADR-0226 §6's order.
+            reached, in ADR-0229 §3's order.
 
     Returns:
         The reply line and §5's two counts for each record that renders one, keyed by
