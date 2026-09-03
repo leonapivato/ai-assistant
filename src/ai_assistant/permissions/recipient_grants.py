@@ -910,15 +910,38 @@ class SqliteRecipientGrantStore:
         no liveness is evaluated, so no clock is read.
 
         Raises:
-            ValueError: If ``limit`` is not strictly positive. Refused rather than
-                clamped or passed through: SQLite reads ``LIMIT -1`` as *no limit
-                at all*, so the one call offering a bounded read of a Tier 1 store
-                would become the unbounded read it exists to avoid.
+            ValueError: If ``limit`` is not a strictly positive **exact** ``int``.
+                Non-positive is refused rather than clamped or passed through:
+                SQLite reads ``LIMIT -1`` as *no limit at all*, so the one call
+                offering a bounded read of a Tier 1 store would become the
+                unbounded read it exists to avoid. **The type is checked as an
+                allowlist of the exact ``int``**, which a comparison alone does
+                not do and a denylist naming ``bool`` cannot close: ``True`` is an
+                ``int``, passes ``<= 0``, and is silently taken as a bound of one,
+                so a caller asking for the newest fifty would be handed one record
+                and told nothing; a ``float`` is bound to ``LIMIT ?`` as a float or
+                truncates somewhere below this layer; and an ``int`` subclass
+                overriding its comparisons passes the positivity check while
+                meaning something other than its integer value. ``None`` is the
+                case this closes at the surface rather than in the driver — the
+                comparison itself raised a bare ``TypeError``, which is neither
+                class this member documents, so it left this layer's error
+                boundary through a hole (#1598).
             RecipientGrantError: If the store cannot be read, or holds a record
                 that no longer validates.
         """
-        if limit <= 0:
-            msg = f"limit must be strictly positive, got {limit}"
+        # ``ValueError`` for the type as well as for the sign, and not the
+        # ``TypeError``/``ValueError`` split some constructors in this corpus use:
+        # ``RecipientGrantStore.recent`` in ``core/protocols.py`` documents exactly
+        # ``ValueError`` and ``RecipientGrantError``, and an implementation raising
+        # a third class would be one the contract does not describe. It is also the
+        # shape this file's own ``max_outstanding`` guard already takes.
+        if type(limit) is not int or limit <= 0:
+            msg = (
+                f"limit must be a strictly positive int, got "
+                f"{describe_untrusted(limit)}; the type is checked because a bool "
+                f"passes the comparison while meaning a bound of one"
+            )
             raise ValueError(msg)
         # Clamped *upward* only. A Python int has no width, and binding one wider
         # than SQLite's signed 64-bit parameter raises `OverflowError` — neither

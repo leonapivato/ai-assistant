@@ -1155,12 +1155,28 @@ class FakeRecipientGrantStore:
     async def recent(self, *, limit: int = 50) -> list[RecipientGrant]:
         """Return up to ``limit`` records, newest first, ties broken by id.
 
+        The store's guard, in its class and with its allowlist, because ADR-0084 §4's
+        substitutability runs in **both** directions: a double admitting ``limit=True``
+        would hand a consumer's tests one record where the store hands them one too but
+        under a bound production would have refused, and a double refusing it as a
+        different class would make the two disagree about what kind of failure it is —
+        the half a positivity check on its own leaves open.
+
         Raises:
-            ValueError: If ``limit`` is not strictly positive.
+            ValueError: If ``limit`` is not a strictly positive **exact** ``int``. The
+                type is allowlisted rather than a ``bool`` denylisted, for the reasons
+                :meth:`SqliteRecipientGrantStore.recent` states at length, and the
+                untrusted value is described through :func:`describe_untrusted` rather
+                than ``repr`` so a hostile ``__repr__`` cannot replace the documented
+                refusal with its own exception (#1598).
             RecipientGrantError: If a read fault is scripted (:meth:`fail_reads`).
         """
-        if limit <= 0:
-            msg = f"limit must be strictly positive, got {limit}"
+        if type(limit) is not int or limit <= 0:
+            msg = (
+                f"limit must be a strictly positive int, got "
+                f"{describe_untrusted(limit)}; the type is checked because a bool "
+                f"passes the comparison while meaning a bound of one"
+            )
             raise ValueError(msg)
         self._refuse_read()
         async with self._resource.held():
