@@ -769,3 +769,154 @@ async def test_a_declined_route_runs_the_ordinary_pipeline_and_writes_one_record
 
     assert outcome.routed is None, "the route was declined"
     assert _record(captured)["trigger"] == TriggerOutcome.NOT_FIRED.value
+
+
+# --------------------------------------------------------------------------- #
+# ADR-0229 §6: a label names a destination, and the hop reaches it             #
+# --------------------------------------------------------------------------- #
+#
+# §6's tests 1, 2, 5 and 7 — each an assertion about a prompt the *engine*
+# assembled from a supply the *servicer* built, which is what puts them here and
+# not beside the carrier. Every one is subject to ADR-0227 §7's fidelity rule
+# entire: the production :class:`ComposingStage` assembles the prompt, and the
+# fixtures are shaped as ``Engine._capture`` writes an episode — the reply's
+# distinctive word in ``outcome``, beside a ``disposition``, and absent from
+# ``content``. Tests 3, 4, 6 and 7 assert over the carrier the servicer produced —
+# which no engine-level case can see — and live in ``test_loop_reads.py``.
+
+
+class _OmittingKeyedLoad(FakeMemoryStore):
+    """A store whose keyed load omits one record it still holds (ADR-0226 §3).
+
+    §3's third way of resolving to nothing is "a record ``MemoryStore.get_many``
+    does not return", and ADR-0229 §4 keeps it entire: such a label reaches nothing
+    at all, "even though the turn's supply still holds that record and still renders
+    its bullet". A store that *raised* would degrade the whole servicing (§5) and so
+    could not produce this case; one that drops a single identifier can.
+    """
+
+    def __init__(self, omitted: str, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._omitted = omitted
+
+    async def get_many(self, record_ids: Sequence[str]) -> dict[str, MemoryRecord]:
+        found = await super().get_many(record_ids)
+        return {
+            identifier: record
+            for identifier, record in found.items()
+            if identifier != self._omitted
+        }
+
+
+async def test_a_named_episode_in_the_supplement_renders_the_reply_it_carries() -> None:
+    """ADR-0229 §6 test 1: #1960's probe, as a fixture. **This fails on ``origin/main``.**
+
+    The exchange is in the **episodic supplement**, where ADR-0222 §2 renders it as a
+    bullet with a ``how it turned out:`` phrase and no reply — "precisely the shape
+    ``planning/planner.py``'s act-record guidance tells the planner to point at". The
+    planner names that episode's own label, and no belief cites it, so the record
+    holding the answer is zero edges away and a hop that could only travel outward
+    reached nothing: on ``origin/main`` the carrier is empty and the word never
+    reaches the prompt. That is #1960's audit line —
+    ``returned=10 new=0 deduplicated=10`` beside *"I wasn't able to pull up that
+    original reply"* — in fixture form.
+
+    **No belief cites the episode, and that is the discriminating half.** ADR-0229 §5:
+    "an exchange from this week that no observation pass has yet distilled into
+    anything is reachable **only** by naming it", so there is no longer route to the
+    same record for an implementation to take instead. The belief that *is* seeded
+    cites nothing: it is
+    :meth:`~ai_assistant.orchestration.loop.LearningLoop._supplement`'s separator, and
+    a supply of episodes alone is one ADR-0074 §5 gives no supplement to.
+    """
+    memory = FakeMemoryStore(now=lambda: AT)
+    await memory.add(_belief("belief-1", "the user asked about a lender for the house purchase"))
+    await memory.add(
+        _episode(
+            "episode-1",
+            f"The user asked: {_QUESTION} for the house purchase?",
+            outcome=f"{_LENDER} is the best fit for your budget.",
+            disposition=ExchangeDisposition.STEP_EXECUTED,
+        )
+    )
+    composing, model = _recorder()
+    planner = _AskingPlanner(_hop("M2"))
+    harness = Harness(memory=memory, planner=planner, composing=composing)
+
+    outcome = await harness.engine.converse(_QUESTION, timeout=PATIENT)
+
+    planned = [record.id for record in planner.calls[0]]
+    assert planned == ["belief-1", "episode-1"], "the supplement held the exchange"
+    assert outcome.turn is not None
+    assert not any(record.provenance.evidence for record in outcome.turn.memories), "no citation"
+    assert _LENDER not in outcome.turn.memories[1].content, "the word is in `outcome` alone"
+    (line,) = _reply_lines_of(_assembled(model))
+    assert _LENDER in line, "the record the label named rendered its reply"
+
+
+async def test_a_belief_label_still_hops_to_its_evidence_and_adds_nothing_else() -> None:
+    """ADR-0229 §6 test 2: the case ADR-0226 §2 was built for is untouched.
+
+    A labelled belief citing an episode: the episode's reply renders exactly as it
+    did, and the belief — now in the carrier ahead of its own evidence, because
+    ADR-0229 §1 applies "no class, kind or field test at the servicer" — grows no
+    line. ADR-0227 §1's field test decides that at the render site, over a
+    ``disposition`` a ``SemanticMemory`` has no field for, and
+    :func:`~ai_assistant.orchestration.composing._hop_reply_lines` skips an
+    ineligible record before counting it against §4's cap.
+
+    **The byte-identity is asserted against this very turn under the old carrier**,
+    which is the only control that isolates what §1 widened: the same supply, the
+    same production renderer, and a carrier holding the episode alone. Anything the
+    named belief added would show up as a difference.
+    """
+    composing, model = _recorder()
+    harness = Harness(
+        memory=await _seeded_store(), planner=_AskingPlanner(_hop("M1")), composing=composing
+    )
+
+    outcome = await harness.engine.converse(_QUESTION, timeout=PATIENT)
+
+    assert outcome.turn is not None
+    assert [record.id for record in outcome.turn.memories] == ["belief-1", "episode-1"]
+    (line,) = _reply_lines_of(_assembled(model))
+    assert _LENDER in line, "the belief's evidence rendered its reply"
+
+    control_stage, control = _recorder()
+    await control_stage.compose(
+        turn=outcome.turn, step=None, undriven=(), hop_reached=("episode-1",)
+    )
+    assert _assembled(model) == _assembled(control), "the belief added not one byte"
+
+
+async def test_a_label_whose_record_the_keyed_load_omits_reaches_nothing() -> None:
+    """ADR-0229 §6 test 5: §4's liveness case, which this ADR deliberately did not move.
+
+    "A label whose record ``MemoryStore.get_many`` does not return resolved to
+    **nothing**: it never enters this section's expansion sequence at all." The
+    tempting answer — honouring the label from the supply's own copy, which the turn
+    demonstrably has — is refused twice over: it would change what
+    ``labels_unresolved`` counts, and it "would render, into a model prompt, the reply
+    of a record the store no longer holds — reading a forgotten exchange back to the
+    user by a route no forgetting mechanism is watching".
+
+    So the supply still holds the episode and still renders its bullet, and the
+    prompt carries no reply line at all.
+    """
+    memory = await _seeded(
+        _OmittingKeyedLoad("episode-1", now=lambda: AT),
+        content=f"The user asked: {_QUESTION} for the house purchase?",
+    )
+    composing, model = _recorder()
+    harness = Harness(memory=memory, planner=_AskingPlanner(_hop("M2")), composing=composing)
+
+    with structlog.testing.capture_logs() as captured:
+        outcome = await harness.engine.converse(_QUESTION, timeout=PATIENT)
+
+    assert outcome.turn is not None
+    assert [record.id for record in outcome.turn.memories] == ["belief-1", "episode-1"]
+    record = _record(captured)
+    assert record["labels_unresolved"] == 1, "the label resolved to nothing"
+    prompt = _assembled(model)
+    assert _reply_lines_of(prompt) == [], "and the deleted record's reply reached no prompt"
+    assert _LENDER not in prompt
