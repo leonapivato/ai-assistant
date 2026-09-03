@@ -30,20 +30,18 @@ from ai_assistant.core.types import (
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 
-#: An utterance far enough back that no implementation's *write* could plausibly
-#: land there. Only the transaction-time arm uses it, and only so that arm's
-#: inequality is a statement about where the stamp came from.
-_LONG_AGO = datetime(1970, 1, 1, tzinfo=UTC)
+#: What a subject wired for the transaction-time arm reads from its clock. Distinct
+#: from :data:`_WHEN` on purpose: with the two equal, a processor that conflated
+#: them would satisfy the arm.
+_STAMPED_AT = datetime(2026, 5, 6, 7, 8, tzinfo=UTC)
 
 
-def _event(
-    memory_kind: MemoryKind, *, guarded: bool = False, created_at: datetime = _WHEN
-) -> FeedbackEvent:
+def _event(memory_kind: MemoryKind, *, guarded: bool = False) -> FeedbackEvent:
     return FeedbackEvent(
         kind=FeedbackKind.CORRECTION,
         memory_kind=memory_kind,
         content="some feedback content",
-        created_at=created_at,
+        created_at=_WHEN,
         guarded=guarded,
     )
 
@@ -72,9 +70,22 @@ class FeedbackProcessorContract:
             assert proposal.proposed.content.strip()
             assert proposal.rationale.strip()
 
+    @pytest.fixture
+    def stamping(self) -> FeedbackProcessor | None:
+        """Override with a subject whose clock reads :data:`_STAMPED_AT`.
+
+        A second fixture rather than a constraint on ``processor``, because the two
+        arms want opposite things: every other case wants the subject a consumer
+        actually constructs, and the arm below has to know what the subject's clock
+        was told to say. ``None`` — the default — is "this implementation mints no
+        record of its own", which is the honest answer for a double answering from
+        a fixed script: it stamps nothing, so there is no source to state.
+        """
+        return None
+
     @pytest.mark.parametrize("memory_kind", list(MemoryKind))
-    async def test_no_record_takes_its_transaction_time_from_the_event(
-        self, processor: FeedbackProcessor, memory_kind: MemoryKind
+    async def test_a_minted_record_is_stamped_from_the_processors_own_clock(
+        self, stamping: FeedbackProcessor | None, memory_kind: MemoryKind
     ) -> None:
         """``last_updated`` is *our* write's instant, never the utterance's (ADR-0045 §3).
 
@@ -83,32 +94,35 @@ class FeedbackProcessorContract:
         claim a revision at an instant nothing was revised at — wrongly by exactly
         the delay of a queued, retried or replayed event. That is #775, and it was
         fixed in one implementation while the canonical fake every consumer drives
-        kept it (#780). Held **here** for that reason: the arm each implementation
+        kept it (#780). Held **here** for that reason: the arm one implementation
         keeps to itself is the arm the next implementation does not inherit, and a
         consumer certified against the fake was certified against a conflation the
         production processor had already stopped producing.
 
-        **What a shared suite can state is the source, not the value.** The instant
-        a conforming implementation stamps is its own clock's, and this suite
-        neither owns that clock nor knows whether the subject was handed a frozen
-        one — so bracketing the call in real time would fail every implementation a
-        fixture wires a fixed clock into. What is universal is the source it must
-        not be.
+        The **source** is what is asserted, and asserting it needs a clock whose
+        reading the suite knows — hence the fixture. An inequality against the
+        event's instant would not do it: an implementation stamping any fixed
+        constant satisfies that while reading no clock at all, which is a different
+        defect of the same field. Equality against :data:`_STAMPED_AT` admits only a
+        subject that read what it was given.
 
-        The event's instant is put **far from any plausible write** rather than at
-        the suite's usual ``_WHEN``, so the arm is about that source and not about a
-        constant two fixtures might happen to share: a processor taking transaction
-        time from the event stamps a record as revised in 1970, whatever clock it
-        was given. That is also what lets the arm bind a *scripted* implementation
-        as the guarded arm below binds one, without the assertion becoming a demand
-        that no script reuse a particular date.
+        ``last_confirmed_at`` is asserted beside it and *is* the event's
+        (ADR-0109 §4), because the two are one decision: an implementation that
+        moved both onto the clock would satisfy this arm's first line while losing
+        the confirming instant, and ADR-0103 §9 is explicit that two quantities a
+        live path puts microseconds apart are the ones that break silently.
         """
-        event = _event(memory_kind, created_at=_LONG_AGO)
+        if stamping is None:
+            pytest.skip("this implementation mints no record of its own to stamp")
+        event = _event(memory_kind)
 
-        proposals = await processor.process(event)
+        proposals = await stamping.process(event)
 
+        assert event.created_at != _STAMPED_AT  # or the arm below proves nothing
         for proposal in proposals:
-            assert proposal.proposed.provenance.last_updated != event.created_at
+            provenance = proposal.proposed.provenance
+            assert provenance.last_updated == _STAMPED_AT
+            assert provenance.last_confirmed_at == event.created_at
 
     @pytest.mark.parametrize("memory_kind", list(MemoryKind))
     async def test_a_guarded_event_places_every_record_it_produces_for_the_owner(

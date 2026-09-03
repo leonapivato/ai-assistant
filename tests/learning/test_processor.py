@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from feedback_processor_contract import FeedbackProcessorContract
+from feedback_processor_contract import _STAMPED_AT, FeedbackProcessorContract
 
 from ai_assistant.core.clock import ClockReadingError
 from ai_assistant.core.protocols import FeedbackProcessor
@@ -65,6 +65,11 @@ class TestRuleBasedFeedbackProcessorContract(FeedbackProcessorContract):
     @pytest.fixture
     def processor(self) -> FeedbackProcessor:
         return RuleBasedFeedbackProcessor()
+
+    @pytest.fixture
+    def stamping(self) -> FeedbackProcessor:
+        """The same subject with its transaction clock told what to read."""
+        return RuleBasedFeedbackProcessor(now=lambda: _STAMPED_AT)
 
 
 def test_conforms_to_protocol() -> None:
