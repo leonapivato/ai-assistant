@@ -19,6 +19,7 @@ contract certifies consumers the real implementation will reject.
 from __future__ import annotations
 
 import ast
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -27,6 +28,7 @@ from typing import TYPE_CHECKING, Final
 import pytest
 
 import ai_assistant
+from ai_assistant.archive import SqliteTranscriptArchive
 from ai_assistant.context.sources import (
     CalendarContextSource,
     ClockContextSource,
@@ -37,38 +39,82 @@ from ai_assistant.core.clock import ClockReadingError
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import (
     AssistantError,
+    AuditError,
     ContextError,
+    ConversationStoreError,
+    DeferralStoreError,
     MemoryStoreError,
+    NotificationOutboxError,
+    NotificationStoreError,
     PlanningError,
     TraceStoreError,
+    TranscriptArchiveError,
 )
 from ai_assistant.core.types import (
     ActionPlan,
+    ActionRequest,
+    CostBasis,
     CurrentContext,
+    EpisodicMemory,
+    FeedbackEvent,
+    FeedbackKind,
     Goal,
+    Idempotency,
+    MemoryDecision,
     MemoryDecisionKind,
+    MemoryKind,
     MemorySource,
     MemoryUpdateProposal,
+    PermissionDecision,
+    PermissionOutcome,
+    PermissionRuling,
+    PlanStep,
     Provenance,
+    Reversibility,
+    RiskLevel,
     SemanticMemory,
     TimeOfDay,
+    ToolCall,
+    ToolCost,
+    ToolDefinition,
+    ToolOutcome,
 )
-from ai_assistant.memory import InMemoryMemoryStore, MemoryIngestor, SqliteMemoryStore
+from ai_assistant.learning import ModelBackedObserver, RuleBasedFeedbackProcessor
+from ai_assistant.memory import (
+    InMemoryMemoryStore,
+    MemoryIngestor,
+    SqliteDeferralStore,
+    SqliteMemoryStore,
+    SqliteNotificationOutbox,
+    SqliteNotificationStore,
+)
+from ai_assistant.memory.conversation_store import SqliteConversationStore
+from ai_assistant.memory.health import StoreHealthReader
 from ai_assistant.orchestration import (
     ComposingStage,
     ConnectionOperations,
+    ConsolidationStage,
     ConversationLifecycle,
     Engine,
     GrantOperations,
+    IngestionStage,
     LearningLoop,
     MemoryWriteStage,
     ObservationStage,
     QuestionStage,
     StepExecutor,
     StepRunner,
+    UpcomingEventStage,
 )
+from ai_assistant.orchestration.origin import NOTHING_EXTERNAL
 from ai_assistant.orchestration.traces import OperationTraces
-from ai_assistant.planning import InMemoryPlanStore, PlanExecution
+from ai_assistant.permissions import SqliteAuditTrail, SqliteRecipientGrantStore
+from ai_assistant.planning import (
+    InMemoryPlanStore,
+    ModelBackedPlanner,
+    PlanExecution,
+    SqlitePlanStore,
+)
 from ai_assistant.service.configuration import ConfigurationStamp
 from ai_assistant.testing import (
     FakeActionPolicy,
@@ -83,10 +129,16 @@ from ai_assistant.testing import (
     FakeMemoryStore,
     FakeMemoryWriter,
     FakeModelProvider,
+    FakeNotificationOutbox,
+    FakeNotificationPolicy,
+    FakeNotificationStore,
+    FakeNotificationWriter,
     FakeObserver,
     FakePlanner,
     FakePlanStore,
     FakeReader,
+    FakeRecipientGrants,
+    FakeRecipientGrantStore,
     FakeSourceGrants,
     FakeSourceGrantStore,
     FakeSourceReadRecorder,
@@ -98,7 +150,11 @@ from ai_assistant.testing import (
     FakeTraceSink,
     FakeTranscriptArchive,
     FakeTranscriptArchiveWriter,
+    invoker_over,
+    source_grant,
+    succeeds,
 )
+from ai_assistant.tools.builtin import CurrentTime
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -119,6 +175,16 @@ def _composing() -> ComposingStage:
     ``tests/orchestration/test_engine_composing.py``.
     """
     return ComposingStage(model=FakeModelProvider(), streaming=FakeStreamingCompleter())
+
+
+#: A model reply the plan extractor can parse, so ``ModelBackedPlanner``'s seam is
+#: the clock and not the output: a bare ``FakeModelProvider()`` raises
+#: ``PlanningError('no JSON object found in the model reply')`` before the clock is
+#: reached, which would pass this table's assertion for the wrong reason.
+_PLAN_REPLY: Final = (
+    '{"rationale": "one step", "steps": [{"intent": "find a place", '
+    '"capability": "search_housing", "parameters": {}}]}'
+)
 
 
 def _naive_clock() -> datetime:
@@ -384,6 +450,382 @@ async def _engine(now: Clock) -> None:
     ).purge_expired()
 
 
+def _writes(memory: FakeMemoryStore) -> MemoryWriteStage:
+    """The write stage every memory-writing stage takes, on a conforming clock."""
+    return MemoryWriteStage(
+        writer=FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: _AWARE),
+        deferrals=FakeDeferralStore(now=lambda: _AWARE),
+    )
+
+
+def _feedback() -> FeedbackEvent:
+    """A correction carrying the resolved kind a ``FeedbackProcessor`` requires."""
+    return FeedbackEvent(
+        kind=FeedbackKind.CORRECTION,
+        content="that is wrong",
+        created_at=_AWARE,
+        memory_kind=MemoryKind.SEMANTIC,
+    )
+
+
+def _episode() -> EpisodicMemory:
+    """One episode for the observer to read."""
+    return EpisodicMemory(
+        id="e1",
+        content="we talked about coffee",
+        provenance=Provenance(
+            source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_AWARE
+        ),
+        occurred_at=_AWARE,
+    )
+
+
+def _tool() -> ToolDefinition:
+    """The one side-effecting tool the execution seams run a step over."""
+    return ToolDefinition(
+        id="smtp",
+        capability="send_email",
+        description="Send an email.",
+        risk_level=RiskLevel.LOW,
+        reversibility=Reversibility.REVERSIBLE,
+        side_effecting=True,
+        reads=(),
+        writes=(),
+        discloses=(),
+        cost=ToolCost(basis=CostBasis.FREE),
+        idempotency=Idempotency.NATURAL,
+    )
+
+
+def _request(*, execution_id: str | None = None) -> ActionRequest:
+    """The one request the permission and execution seams are driven over."""
+    return ActionRequest(tool=_tool(), parameters={}, step_id="s1", execution_id=execution_id)
+
+
+def _decision(request: ActionRequest) -> PermissionDecision:
+    """The ``ALLOW`` a runner records before executing ``request``."""
+    return PermissionDecision.from_request(
+        request,
+        PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="because the user said so"),
+        id="d1",
+        decided_at=_AWARE,
+    )
+
+
+async def _claimed(store: FakePlanStore) -> str:
+    """Store a goal and a one-step plan, open an execution, and answer its id."""
+    await store.save_goal(_goal())
+    await store.save_plan(
+        ActionPlan(
+            id="p1",
+            goal_id="g1",
+            steps=(PlanStep(id="s1", intent="send the note", capability="send_email"),),
+            created_at=_AWARE,
+            rationale="because",
+        )
+    )
+    state = await store.start_execution("p1")
+    return state.id
+
+
+def _ask() -> MemoryDecision:
+    """The ruling that puts a proposal on the deferral queue as a question."""
+    return MemoryDecision(kind=MemoryDecisionKind.ASK_USER, reason="the user decides")
+
+
+# ---- drivers -------------------------------------------------------------
+
+
+async def _consolidation(now: Clock) -> None:
+    """Consolidation reads its clock to fix the run budget before the first chunk."""
+    memory = FakeMemoryStore(now=lambda: _AWARE)
+    await memory.add(_record())
+    await ConsolidationStage(
+        memory=memory, writes=_writes(memory), model=FakeModelProvider(), now=now
+    ).run()
+
+
+async def _conversation_lifecycle(now: Clock) -> None:
+    """The retention reclaim reads the clock to place the episodic horizon."""
+    await ConversationLifecycle(
+        conversations=FakeConversationStore(now=lambda: _AWARE),
+        memory=FakeMemoryStore(now=lambda: _AWARE),
+        archive=FakeTranscriptArchiveWriter(),
+        archive_enabled=True,
+        retention=timedelta(days=30),
+        now=now,
+    ).reclaim()
+
+
+async def _current_time(now: Clock) -> None:
+    """The tool's whole output is the reading, so invoking it is the seam."""
+    await CurrentTime(now=now)({}, idempotency_key=None)
+
+
+async def _fake_audit_trail(now: Clock) -> None:
+    """A completion stamps ``recorded_at``, which is the trail's guarded reading."""
+    trail = FakeAuditTrail(now=now)
+    authorisation = _decision(_request())
+    await trail.record(authorisation)
+    claim = await trail.claim_invocation(decision=authorisation)
+    await trail.complete_invocation(
+        claim_id=claim.id,
+        outcome=ToolOutcome.FAILED,
+        incurred_cost=ToolCost(basis=CostBasis.UNKNOWN),
+    )
+
+
+async def _fake_conversation_store(now: Clock) -> None:
+    """Starting a conversation stamps it from the store's own clock."""
+    await FakeConversationStore(now=now).start()
+
+
+async def _fake_deferral_store(now: Clock) -> None:
+    """The retention purge reads the clock to place its horizon."""
+    await FakeDeferralStore(now=now).purge()
+
+
+async def _fake_feedback_processor(now: Clock) -> None:
+    """Every proposal the fake synthesises carries a provenance it stamps."""
+    await FakeFeedbackProcessor(now=now).process(_feedback())
+
+
+async def _fake_notification_outbox(now: Clock) -> None:
+    """A claim reads the clock to settle leases before it answers."""
+    await FakeNotificationOutbox(now=now).claim()
+
+
+async def _fake_recipient_grant_store(now: Clock) -> None:
+    """The standing listing reads the clock to judge which grants are still live."""
+    await FakeRecipientGrantStore(now=now).standing()
+
+
+async def _fake_recipient_grants(now: Clock) -> None:
+    """A cover query reads the clock to judge the grant's expiry."""
+    await FakeRecipientGrants(now=now).covering(_request())
+
+
+async def _fake_transcript_archive(now: Clock) -> None:
+    """A retention floor is evaluated at the read, which is what reads the clock."""
+    await FakeTranscriptArchive(retention=timedelta(days=7), now=now).size()
+
+
+async def _ingestion(now: Clock) -> None:
+    """The stage stamps the read it records from its own clock."""
+    memory = FakeMemoryStore(now=lambda: _AWARE)
+    await IngestionStage(
+        reader=FakeReader(),
+        writes=_writes(memory),
+        grants=FakeSourceGrants([source_grant()]),
+        reads=FakeSourceReadRecorder(),
+        now=now,
+    ).ingest()
+
+
+async def _observer(now: Clock) -> None:
+    """The observer stamps each proposal it draws from the batch."""
+    await ModelBackedObserver(FakeModelProvider(), now=now).observe([_episode()])
+
+
+async def _planner(now: Clock) -> None:
+    """The plan the model's reply becomes is stamped ``created_at`` from the clock."""
+    await ModelBackedPlanner(FakeModelProvider(_PLAN_REPLY), now=now).plan(
+        _goal(), context=_context(), capabilities=("search_housing",)
+    )
+
+
+async def _observation(now: Clock) -> None:
+    """The pass reads the clock to decide which conversation is due."""
+    memory = FakeMemoryStore(now=lambda: _AWARE)
+    conversations = FakeConversationStore(now=lambda: _AWARE)
+    await conversations.start()
+    await ObservationStage(
+        observer=FakeObserver(),
+        conversations=conversations,
+        memory=memory,
+        writes=_writes(memory),
+        batch_size=20,
+        route="anthropic:claude-opus-4-8",
+        now=now,
+    ).run()
+
+
+async def _questions(now: Clock) -> None:
+    """Accepting a question reads the clock for the proposal's staleness check."""
+    memory = FakeMemoryStore(now=lambda: _AWARE)
+    deferrals = FakeDeferralStore(now=lambda: _AWARE)
+    await deferrals.defer(deferral_id="q1", proposal=_proposal(), decision=_ask())
+    await QuestionStage(
+        writer=FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: _AWARE),
+        deferrals=deferrals,
+        memory=memory,
+        now=now,
+    ).answer("q1", accept=True)
+
+
+async def _rule_based_processor(now: Clock) -> None:
+    """Every proposal the rules produce carries a provenance stamped from the clock."""
+    await RuleBasedFeedbackProcessor(now=now).process(_feedback())
+
+
+async def _sqlite_audit_trail(now: Clock) -> None:
+    """A completion stamps ``recorded_at``, which is the trail's guarded reading."""
+    with tempfile.TemporaryDirectory() as directory:
+        trail = SqliteAuditTrail(path=Path(directory) / "audit.db", now=now)
+        try:
+            authorisation = _decision(_request())
+            await trail.record(authorisation)
+            claim = await trail.claim_invocation(decision=authorisation)
+            await trail.complete_invocation(
+                claim_id=claim.id,
+                outcome=ToolOutcome.FAILED,
+                incurred_cost=ToolCost(basis=CostBasis.UNKNOWN),
+            )
+        finally:
+            trail.close()
+
+
+async def _sqlite_conversation_store(now: Clock) -> None:
+    """Starting a conversation stamps it from the store's own clock."""
+    with tempfile.TemporaryDirectory() as directory:
+        store = SqliteConversationStore(path=Path(directory) / "conversations.db", now=now)
+        try:
+            await store.start()
+        finally:
+            store.close()
+
+
+async def _sqlite_deferral_store(now: Clock) -> None:
+    """The retention purge reads the clock to place its horizon."""
+    with tempfile.TemporaryDirectory() as directory:
+        store = SqliteDeferralStore(path=Path(directory) / "deferrals.db", now=now)
+        try:
+            await store.purge()
+        finally:
+            store.close()
+
+
+async def _sqlite_notification_outbox(now: Clock) -> None:
+    """A claim reads the clock to settle leases before it answers."""
+    with tempfile.TemporaryDirectory() as directory:
+        outbox = SqliteNotificationOutbox(
+            path=Path(directory) / "outbox.db",
+            records=FakeNotificationStore(now=lambda: _AWARE),
+            lease=timedelta(minutes=2),
+            max_entries=256,
+            max_bytes=1 << 20,
+            candidate_ceiling=64,
+            now=now,
+        )
+        try:
+            await outbox.claim()
+        finally:
+            outbox.close()
+
+
+async def _sqlite_notification_store(now: Clock) -> None:
+    """The retention purge reads the clock to place its horizon."""
+    with tempfile.TemporaryDirectory() as directory:
+        store = SqliteNotificationStore(
+            path=Path(directory) / "notifications.db", traces_sink=FakeTraceSink(), now=now
+        )
+        try:
+            await store.purge()
+        finally:
+            store.close()
+
+
+async def _sqlite_plan_store(now: Clock) -> None:
+    """The export stamps ``exported_at`` from the store's own clock."""
+    with tempfile.TemporaryDirectory() as directory:
+        store = SqlitePlanStore(path=Path(directory) / "plans.db", now=now)
+        try:
+            await store.export()
+        finally:
+            store.close()
+
+
+async def _sqlite_recipient_grant_store(now: Clock) -> None:
+    """The standing listing reads the clock to judge which grants are still live."""
+    with tempfile.TemporaryDirectory() as directory:
+        store = SqliteRecipientGrantStore(
+            path=Path(directory) / "grants.db", max_outstanding=64, now=now
+        )
+        try:
+            await store.standing()
+        finally:
+            store.close()
+
+
+async def _sqlite_transcript_archive(now: Clock) -> None:
+    """A retention floor is evaluated at the read, which is what reads the clock."""
+    with tempfile.TemporaryDirectory() as directory:
+        archive = SqliteTranscriptArchive(
+            path=Path(directory) / "archive.db", retention=timedelta(days=7), now=now
+        )
+        try:
+            await archive.size()
+        finally:
+            archive.close()
+
+
+async def _executor(now: Clock) -> None:
+    """The executor reads the clock between the claim and the callable."""
+    plans = FakePlanStore()
+    execution_id = await _claimed(plans)
+    invoker, trail = invoker_over([(_tool(), succeeds)])
+    request = _request(execution_id=execution_id)
+    decision = _decision(request)
+    await trail.record(decision)
+    state = await plans.get_execution(execution_id)
+    assert state is not None
+    await StepExecutor(plans=plans, registry=invoker, invoker=invoker, now=now).execute(
+        state,
+        step_id="s1",
+        call=ToolCall(request=request, decision=decision),
+        timeout=timedelta(seconds=30),
+    )
+
+
+async def _runner(now: Clock) -> None:
+    """The runner reads the clock to stamp the decision it records before executing."""
+    plans = FakePlanStore()
+    execution_id = await _claimed(plans)
+    invoker, trail = invoker_over([(_tool(), succeeds)])
+    state = await plans.get_execution(execution_id)
+    assert state is not None
+    await StepRunner(
+        plans=plans,
+        registry=invoker,
+        policy=FakeActionPolicy(),
+        trail=trail,
+        executor=StepExecutor(plans=plans, registry=invoker, invoker=invoker, now=lambda: _AWARE),
+        now=now,
+    ).run(state, "s1", timeout=timedelta(seconds=30), origin=NOTHING_EXTERNAL)
+
+
+async def _store_health(now: Clock) -> None:
+    """The report stamps the instant it was taken; synchronous, as the reader is."""
+    with tempfile.TemporaryDirectory() as directory:
+        store = Path(directory) / "memory.db"
+        store.touch()
+        StoreHealthReader(store=store, now=now).report()
+
+
+async def _upcoming(now: Clock) -> None:
+    """The stage reads the clock to place the lead window it notices within."""
+    await UpcomingEventStage(
+        reader=FakeReader(),
+        grants=FakeSourceGrants([source_grant()]),
+        writer=FakeNotificationWriter(
+            store=FakeNotificationStore(now=lambda: _AWARE), policy=FakeNotificationPolicy()
+        ),
+        reads=FakeSourceReadRecorder(),
+        now=now,
+        lead=timedelta(hours=1),
+    ).notice()
+
+
 #: Every seam ADR-0026 §7 covers, verified against the code rather than the table:
 #: ``FakeMemoryWriter`` is an eleventh the ADR's table predates (ADR-0028), and it
 #: is in scope for §7's reason — it is a canonical double (#186).
@@ -409,6 +851,39 @@ SEAMS = [
     # A twelfth, later than the ADR's table (ADR-0119 §10): the façade reads a
     # clock to place the trace horizon, so its error is the sweep's own.
     Seam("Engine", _engine, TraceStoreError),
+    # The rest of the tree, added when the roster below made the omission visible
+    # (#781). Nothing here is a new claim about what a seam *should* raise: each
+    # row is what driving that seam's real entry point over a naive reading was
+    # observed to produce, which is the only thing this table can honestly assert.
+    Seam("ConsolidationStage", _consolidation, ClockReadingError),
+    Seam("ConversationLifecycle", _conversation_lifecycle, ConversationStoreError),
+    Seam("CurrentTime", _current_time, ClockReadingError),
+    Seam("FakeAuditTrail", _fake_audit_trail, AuditError),
+    Seam("FakeConversationStore", _fake_conversation_store, ConversationStoreError),
+    Seam("FakeDeferralStore", _fake_deferral_store, DeferralStoreError),
+    Seam("FakeFeedbackProcessor", _fake_feedback_processor, ClockReadingError),
+    Seam("FakeNotificationOutbox", _fake_notification_outbox, NotificationOutboxError),
+    Seam("FakeRecipientGrantStore", _fake_recipient_grant_store, ClockReadingError),
+    Seam("FakeRecipientGrants", _fake_recipient_grants, ClockReadingError),
+    Seam("FakeTranscriptArchive", _fake_transcript_archive, TranscriptArchiveError),
+    Seam("IngestionStage", _ingestion, ClockReadingError),
+    Seam("ModelBackedObserver", _observer, ClockReadingError),
+    Seam("ModelBackedPlanner", _planner, PlanningError),
+    Seam("ObservationStage", _observation, ClockReadingError),
+    Seam("QuestionStage", _questions, DeferralStoreError),
+    Seam("RuleBasedFeedbackProcessor", _rule_based_processor, ClockReadingError),
+    Seam("SqliteAuditTrail", _sqlite_audit_trail, AuditError),
+    Seam("SqliteConversationStore", _sqlite_conversation_store, ConversationStoreError),
+    Seam("SqliteDeferralStore", _sqlite_deferral_store, DeferralStoreError),
+    Seam("SqliteNotificationOutbox", _sqlite_notification_outbox, NotificationOutboxError),
+    Seam("SqliteNotificationStore", _sqlite_notification_store, NotificationStoreError),
+    Seam("SqlitePlanStore", _sqlite_plan_store, PlanningError),
+    Seam("SqliteRecipientGrantStore", _sqlite_recipient_grant_store, ClockReadingError),
+    Seam("SqliteTranscriptArchive", _sqlite_transcript_archive, TranscriptArchiveError),
+    Seam("StepExecutor", _executor, PlanningError),
+    Seam("StepRunner", _runner, PlanningError),
+    Seam("StoreHealthReader", _store_health, ClockReadingError),
+    Seam("UpcomingEventStage", _upcoming, ClockReadingError),
 ]
 
 
@@ -585,6 +1060,15 @@ async def test_an_instruments_clock_fault_costs_the_trace_and_not_the_work(
     )
 
 
+#: The reason shared by every seam that propagates without saying so: ADR-0026 §4
+#: maps its subsystem, and nothing in its module mentions ``ClockReadingError`` at
+#: all. That is the fact separating these from the six that argue the posture in
+#: their own docstrings, and it is what #1966 asks to be settled.
+_UNDECLARED: Final = (
+    "#1966: undocumented — ADR-0026 §4 maps this seam's subsystem, and its module "
+    "mentions ``ClockReadingError`` nowhere"
+)
+
 #: Seams that let `core`'s rejection reach their caller untranslated, and why
 #: each is entitled to. ADR-0026 §4 enumerates the translation per subsystem; a
 #: seam here is one whose subsystem the enumeration does not reach, or one whose
@@ -597,6 +1081,24 @@ PROPAGATED: Final[dict[str, str]] = {
         "the required ClockContextSource owes ContextError (ADR-0026 §4)"
     ),
     "EmailContextSource": "the second adapter of that one class",
+    "ConsolidationStage": _UNDECLARED,
+    "CurrentTime": ("documented at ``tools/builtin.py:148``, and `tools` is not in §4's list"),
+    "FakeFeedbackProcessor": (
+        "documented at ``testing/learning.py:207``, doubling a `learning` seam that propagates"
+    ),
+    "FakeRecipientGrantStore": _UNDECLARED,
+    "FakeRecipientGrants": _UNDECLARED,
+    "IngestionStage": _UNDECLARED,
+    "ModelBackedObserver": (
+        "documented at ``learning/observer.py:656``, and `learning` owns no error class"
+    ),
+    "ObservationStage": _UNDECLARED,
+    "RuleBasedFeedbackProcessor": (
+        "documented at ``learning/processor.py:146``, on the observer's precedent"
+    ),
+    "SqliteRecipientGrantStore": _UNDECLARED,
+    "StoreHealthReader": _UNDECLARED,
+    "UpcomingEventStage": _UNDECLARED,
 }
 
 
@@ -638,8 +1140,6 @@ COMPUTED_OWNERS: Final[dict[str, tuple[str, ...]]] = {
 #: not drive, each with the reason it is not merely an omission. **Empty is the
 #: intended state**; an entry here is a debt with an issue behind it, and the
 #: partition assertion is what stops the list growing by accident.
-_NOT_YET_DRIVEN: Final = "#781: guarded, and its guard is not yet driven from this table"
-
 UNTABLED: Final[dict[str, str]] = {
     "AdminListener": (
         "#1965: guarded, and its fault is caught by the connection handler's "
@@ -651,41 +1151,12 @@ UNTABLED: Final[dict[str, str]] = {
         "ADR-0093 §8's blanket wrapper collapses the clock's *own* failure into the "
         "same type — so it fails ``test_no_seam_steals_a_failure_of_the_clock_itself``"
     ),
-    "ConsolidationStage": _NOT_YET_DRIVEN,
-    "ConversationLifecycle": _NOT_YET_DRIVEN,
-    "CurrentTime": _NOT_YET_DRIVEN,
     "EmailReader": "#1963: the second reader, with ``CalendarReader``'s clause verbatim",
-    "FakeAuditTrail": _NOT_YET_DRIVEN,
-    "FakeConversationStore": _NOT_YET_DRIVEN,
-    "FakeDeferralStore": _NOT_YET_DRIVEN,
-    "FakeFeedbackProcessor": _NOT_YET_DRIVEN,
-    "FakeNotificationOutbox": _NOT_YET_DRIVEN,
     "FakeNotificationStore": (
         "#1964: translates into ``NotificationStoreError`` correctly but replaces the "
         "guard's message with a constant, so the ``owner`` label the seam paid for is "
         "not in the rejection this module asserts on"
     ),
-    "FakeRecipientGrantStore": _NOT_YET_DRIVEN,
-    "FakeRecipientGrants": _NOT_YET_DRIVEN,
-    "FakeTranscriptArchive": _NOT_YET_DRIVEN,
-    "IngestionStage": _NOT_YET_DRIVEN,
-    "ModelBackedObserver": _NOT_YET_DRIVEN,
-    "ModelBackedPlanner": _NOT_YET_DRIVEN,
-    "ObservationStage": _NOT_YET_DRIVEN,
-    "QuestionStage": _NOT_YET_DRIVEN,
-    "RuleBasedFeedbackProcessor": _NOT_YET_DRIVEN,
-    "SqliteAuditTrail": _NOT_YET_DRIVEN,
-    "SqliteConversationStore": _NOT_YET_DRIVEN,
-    "SqliteDeferralStore": _NOT_YET_DRIVEN,
-    "SqliteNotificationOutbox": _NOT_YET_DRIVEN,
-    "SqliteNotificationStore": _NOT_YET_DRIVEN,
-    "SqlitePlanStore": _NOT_YET_DRIVEN,
-    "SqliteRecipientGrantStore": _NOT_YET_DRIVEN,
-    "SqliteTranscriptArchive": _NOT_YET_DRIVEN,
-    "StepExecutor": _NOT_YET_DRIVEN,
-    "StepRunner": _NOT_YET_DRIVEN,
-    "StoreHealthReader": _NOT_YET_DRIVEN,
-    "UpcomingEventStage": _NOT_YET_DRIVEN,
 }
 
 
