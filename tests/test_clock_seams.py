@@ -37,12 +37,14 @@ from __future__ import annotations
 
 import ast
 import tempfile
+import textwrap
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import pytest
+import structlog.testing
 
 import ai_assistant
 from ai_assistant.archive import SqliteTranscriptArchive
@@ -105,6 +107,7 @@ from ai_assistant.memory import (
     SqliteNotificationOutbox,
     SqliteNotificationStore,
 )
+from ai_assistant.memory import traces as memory_traces
 from ai_assistant.memory.conversation_store import SqliteConversationStore
 from ai_assistant.memory.health import StoreHealthReader
 from ai_assistant.orchestration import (
@@ -123,6 +126,7 @@ from ai_assistant.orchestration import (
     StepRunner,
     UpcomingEventStage,
 )
+from ai_assistant.orchestration import traces as operation_traces
 from ai_assistant.orchestration.origin import NOTHING_EXTERNAL
 from ai_assistant.orchestration.traces import OperationTraces
 from ai_assistant.permissions import SqliteAuditTrail, SqliteRecipientGrantStore
@@ -132,6 +136,7 @@ from ai_assistant.planning import (
     PlanExecution,
     SqlitePlanStore,
 )
+from ai_assistant.service import configuration
 from ai_assistant.service.configuration import ConfigurationStamp
 from ai_assistant.testing import (
     FakeActionPolicy,
@@ -959,15 +964,21 @@ class SwallowedSeam:
     silently stopped being guarded here would look identical.
 
     Attributes:
-        label: The seam, as ``owner`` names it. These two are the seams whose
-            ``owner`` is the ``MemoryTraces`` constructor's argument, so they are
-            among the labels :data:`COMPUTED_OWNERS` declares.
+        label: The seam, as ``owner`` names it.
         drive: Builds the emitting object over the given clock and the given sink
             and drives one crossing of it, through the emitter's real entry point.
+        event: The emitter module's own ``trace_not_recorded`` constant. Each of
+            the three modules declares the literal separately and says why in its
+            own comment, so the row takes the one its emitter will log rather than
+            a shared copy this module would have to keep in step.
+        kind: The ``kind`` field §5's loss record carries, which is what
+            distinguishes the two ``MemoryTraces`` crossings from each other.
     """
 
     label: str
     drive: Callable[[Clock, FakeTraceSink], Coroutine[None, None, None]]
+    event: str
+    kind: str
 
 
 async def _nothing() -> None:
@@ -1029,19 +1040,41 @@ async def _configuration_stamp(now: Clock, sink: FakeTraceSink) -> None:
 #: whose ``owner`` is a constructor argument — and the two emitters that take the
 #: same posture on their own account.
 SWALLOWING_SEAMS = [
-    SwallowedSeam("MemoryIngestor write traces", _ingestor_write_traces),
-    SwallowedSeam("SqliteMemoryStore retrieval traces", _store_retrieval_traces),
-    SwallowedSeam("OperationTraces", _operation_traces),
-    SwallowedSeam("ConfigurationStamp", _configuration_stamp),
+    SwallowedSeam(
+        "MemoryIngestor write traces",
+        _ingestor_write_traces,
+        memory_traces.TRACE_NOT_RECORDED,
+        "memory_write",
+    ),
+    SwallowedSeam(
+        "SqliteMemoryStore retrieval traces",
+        _store_retrieval_traces,
+        memory_traces.TRACE_NOT_RECORDED,
+        "retrieval",
+    ),
+    SwallowedSeam(
+        "OperationTraces",
+        _operation_traces,
+        operation_traces.TRACE_NOT_RECORDED,
+        "operation",
+    ),
+    SwallowedSeam(
+        "ConfigurationStamp",
+        _configuration_stamp,
+        configuration.TRACE_NOT_RECORDED,
+        "configuration",
+    ),
 ]
 
 
 @pytest.mark.parametrize(
-    "clock", [_naive_clock, _failing_clock], ids=["a naive reading", "a clock that is down"]
+    ("clock", "refusal"),
+    [(_naive_clock, "ClockReadingError"), (_failing_clock, "ValueError")],
+    ids=["a naive reading", "a clock that is down"],
 )
 @pytest.mark.parametrize("seam", SWALLOWING_SEAMS, ids=[seam.label for seam in SWALLOWING_SEAMS])
 async def test_an_instruments_clock_fault_costs_the_trace_and_not_the_work(
-    seam: SwallowedSeam, clock: Clock
+    seam: SwallowedSeam, clock: Clock, refusal: str
 ) -> None:
     """ADR-0119 §5: the instrument's clock fault reaches the trace and stops there.
 
@@ -1052,10 +1085,17 @@ async def test_an_instruments_clock_fault_costs_the_trace_and_not_the_work(
     An instrument that failed a memory write because its own clock was
     misconfigured would be the tail wagging the dog.
 
-    Both halves are asserted, because the first alone is satisfied by an emitter
-    that never emits anything: the same crossing is driven again over a conforming
-    clock and has to produce the trace the faulted one did not. Without that, a
-    seam whose instrumentation had been disconnected entirely would pass.
+    **The loss is loud, and that is what proves the guard is still there.** §5
+    requires the drop to leave a Tier 2 record naming the kind, the seam and the
+    failure's class, because "a measure over a stream with dropped rows reports a
+    smaller numerator and does not know it". Asserting only the externally visible
+    outcome — no trace, work completed — would be satisfied by an emitter that had
+    stopped calling ``checked_clock`` altogether: a naive instant handed straight
+    to ``EvaluationTrace.occurred_at`` fails ``UtcInstant``'s validator instead,
+    the same broad handler drops the same trace, and the work still completes. The
+    two are told apart only by ``error_class``, which is ``ClockReadingError``
+    when the guard refused the reading and would be a ``ValidationError`` if
+    nothing had.
 
     Both clocks, because §5 draws no distinction: a refused *reading* and the
     clock's own failure are the same fact to an instrument that may not fail, and
@@ -1063,18 +1103,30 @@ async def test_an_instruments_clock_fault_costs_the_trace_and_not_the_work(
     """
     faulted = FakeTraceSink()
 
-    await seam.drive(clock, faulted)
+    with structlog.testing.capture_logs() as captured:
+        await seam.drive(clock, faulted)
 
     assert faulted.recorded == (), (
         f"{seam.label} emitted a trace from a clock that never produced a conforming "
         f"reading; an unstamped trace is one ADR-0119 §3 cannot order"
     )
+    losses = [record for record in captured if record["event"] == seam.event]
+    assert len(losses) == 1, (
+        f"{seam.label} dropped its trace without leaving exactly one {seam.event!r} "
+        f"record; §5 forbids a silent loss"
+    )
+    assert losses[0]["kind"] == seam.kind
+    assert losses[0]["error_class"] == refusal, (
+        f"{seam.label} lost its trace to a {losses[0]['error_class']}, not to the guard "
+        f"refusing the reading — which is what an unguarded seam handing a naive instant "
+        f"to ``UtcInstant``'s validator would look like from outside"
+    )
 
     conforming = FakeTraceSink()
     await seam.drive(lambda: _AWARE, conforming)
     assert len(conforming.recorded) == 1, (
-        f"{seam.label} emits no trace even over a conforming clock, so the assertion "
-        f"above is vacuous and this seam is no longer instrumented at all"
+        f"{seam.label} emits no trace even over a conforming clock, so the assertions "
+        f"above are vacuous and this seam is no longer instrumented at all"
     )
 
 
@@ -1178,6 +1230,64 @@ UNTABLED: Final[dict[str, str]] = {
 }
 
 
+#: The guard's own name, which is also the only spelling ``src/`` uses today.
+_GUARD: Final = "checked_clock"
+
+
+def _owners_in(source: str) -> tuple[frozenset[str], frozenset[str]]:
+    """Every ``checked_clock`` call in one module's source, by how its owner is written.
+
+    **Aliases are resolved rather than assumed away.** A module may validly write
+    ``from ai_assistant.core.clock import checked_clock as guard`` and then call
+    ``guard(now, owner="NewSeam")``; a scan matching only the literal name would
+    miss the seam and the partition assertion would still pass, which is the exact
+    silence this roster exists to end. So the local names this module's imports
+    bind the guard to are collected first, and the call is matched against those.
+    The attribute form — ``clock.checked_clock(…)`` after any spelling of the
+    module import — is matched on the attribute, so no module alias can hide it
+    either.
+
+    What remains out of reach is a *runtime* rebinding: ``guard = checked_clock``
+    as a statement, or a call through a dictionary. Nothing static can follow
+    that, and nothing in the tree does it.
+
+    Args:
+        source: One module's text.
+
+    Returns:
+        The ``owner`` labels written as string literals, and the ``owner``
+        expressions computed at run time, unparsed.
+    """
+    tree = ast.parse(source)
+    bound = {_GUARD} | {
+        alias.asname
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+        if alias.name == _GUARD and alias.asname is not None
+    }
+    literal: set[str] = set()
+    computed: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        called = node.func
+        if isinstance(called, ast.Name):
+            hit = called.id in bound
+        elif isinstance(called, ast.Attribute):
+            hit = called.attr == _GUARD
+        else:
+            hit = False
+        if not hit:
+            continue
+        owner = next((kw.value for kw in node.keywords if kw.arg == "owner"), None)
+        if isinstance(owner, ast.Constant) and isinstance(owner.value, str):
+            literal.add(owner.value)
+        else:
+            computed.add("<positional or absent>" if owner is None else ast.unparse(owner))
+    return frozenset(literal), frozenset(computed)
+
+
 def _clock_seam_roster() -> tuple[frozenset[str], frozenset[str]]:
     """Every ``checked_clock`` call in ``src/``, read out of the source itself.
 
@@ -1187,8 +1297,7 @@ def _clock_seam_roster() -> tuple[frozenset[str], frozenset[str]]:
     inside it is the definition, not a seam.
 
     Returns:
-        The ``owner`` labels written as string literals, and the ``owner``
-        expressions computed at run time, unparsed.
+        :func:`_owners_in`'s two sets, unioned over every module under ``src/``.
     """
     literal: set[str] = set()
     computed: set[str] = set()
@@ -1196,19 +1305,35 @@ def _clock_seam_roster() -> tuple[frozenset[str], frozenset[str]]:
     for path in sorted(Path(ai_assistant.__file__).parent.rglob("*.py")):
         if path == definition:
             continue
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if not isinstance(node, ast.Call):
-                continue
-            called = node.func
-            name = called.id if isinstance(called, ast.Name) else getattr(called, "attr", None)
-            if name != "checked_clock":
-                continue
-            owner = next((kw.value for kw in node.keywords if kw.arg == "owner"), None)
-            if isinstance(owner, ast.Constant) and isinstance(owner.value, str):
-                literal.add(owner.value)
-            else:
-                computed.add("<positional or absent>" if owner is None else ast.unparse(owner))
+        found, expressions = _owners_in(path.read_text(encoding="utf-8"))
+        literal |= found
+        computed |= expressions
     return frozenset(literal), frozenset(computed)
+
+
+def test_the_roster_scan_follows_the_guard_under_any_name_a_module_can_bind() -> None:
+    """A seam hidden behind an import alias is a seam this module never sees.
+
+    No module in ``src/`` writes any of these spellings today, so nothing above
+    would fail if the scan handled only the first — and a scan that silently
+    stopped finding seams is worse than no scan, because the partition assertion
+    would go on passing. This is that scan run over source written to break it.
+    """
+    literal, computed = _owners_in(
+        textwrap.dedent("""
+            from ai_assistant.core.clock import checked_clock
+            from ai_assistant.core.clock import checked_clock as guard
+            from ai_assistant.core import clock as module
+
+            a = checked_clock(now, owner="Plain")
+            b = guard(now, owner="Aliased")
+            c = module.checked_clock(now, owner="Qualified")
+            d = guard(now, owner=type(self).__name__)
+            """)
+    )
+
+    assert literal == {"Plain", "Aliased", "Qualified"}
+    assert computed == {"type(self).__name__"}
 
 
 def test_the_seam_table_is_the_whole_set() -> None:
