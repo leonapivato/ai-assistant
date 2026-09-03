@@ -855,6 +855,26 @@ def _seed(path: Path, *statements: str) -> None:
             "expires_at_us INTEGER, data TEXT NOT NULL)",
             id="a resolves column that is NOT NULL",
         ),
+        # A collation, which neither the columns nor the index definitions show:
+        # `PRAGMA table_info` says plain `TEXT`, and every index over the column
+        # inherits the collation instead of restating it, so every definition still
+        # matches verbatim — while `WHERE id = ?` has become case-insensitive and
+        # `get("A")` answers with the record written as "a".
+        pytest.param(
+            "CREATE TABLE decisions(id TEXT COLLATE NOCASE PRIMARY KEY, "
+            "decided_at_us INTEGER NOT NULL, "
+            "resolves TEXT, execution_id TEXT, step_id TEXT, outcome TEXT, "
+            "expires_at_us INTEGER, data TEXT NOT NULL)",
+            id="a case-insensitive id",
+        ),
+        # The same move against the resolution pointer rather than the id: a
+        # resolution naming "A" would resolve the confirmation recorded as "a".
+        pytest.param(
+            "CREATE TABLE decisions(id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
+            "resolves TEXT COLLATE NOCASE, execution_id TEXT, step_id TEXT, outcome TEXT, "
+            "expires_at_us INTEGER, data TEXT NOT NULL)",
+            id="a case-insensitive resolves",
+        ),
     ],
 )
 async def test_a_foreign_decisions_table_is_refused(create: str, tmp_path: Path) -> None:

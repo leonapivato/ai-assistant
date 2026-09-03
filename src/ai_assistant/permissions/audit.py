@@ -324,6 +324,27 @@ _DECISION_COLUMNS: Final[dict[str, tuple[str, bool, int]]] = {
     "data": ("TEXT", True, 0),
 }
 
+#: **Every column whose *text* is compared, and which must therefore collate byte
+#: for byte.** The third part of the shape, and the one neither the columns nor the
+#: index definitions can see: ``TEXT COLLATE NOCASE`` reports plain ``TEXT`` to
+#: ``PRAGMA table_info``, and an index over such a column *inherits* the collation
+#: rather than restating it, so every definition above still matches verbatim — and
+#: yet ``WHERE id = ?`` has become case-insensitive. ``get("A")`` then answers with
+#: the record written as ``"a"``, which is ADR-0192 §2's single id space broken from
+#: the other side; a resolution naming ``"A"`` likewise passes
+#: :meth:`SqliteAuditTrail._check_resolution` by reading the confirmation ``"a"``
+#: (ADR-0036 §2).
+#:
+#: ``data`` is not here: it is decoded, never compared. Nor are the two integer
+#: columns, which do not collate at all.
+_DECISION_COMPARED: Final[tuple[str, ...]] = (
+    "id",
+    "resolves",
+    "execution_id",
+    "step_id",
+    "outcome",
+)
+
 _ORDERED = "SELECT data FROM decisions ORDER BY decided_at_us DESC, id ASC"
 
 # --- the invocation rows (ADR-0192 §2) ---------------------------------------
@@ -849,6 +870,62 @@ class SqliteAuditTrail:
             "its decision rows cannot be trusted to carry the uniqueness an admission "
             "is decided on",
         )
+        self._check_decision_collations(conn)
+
+    def _check_decision_collations(self, conn: sqlite3.Connection) -> None:
+        """Refuse a ``decisions`` table whose identifiers do not compare byte for byte.
+
+        The part of the shape neither half of :meth:`_check_decisions_schema` can
+        see, for the reason :data:`_DECISION_COMPARED` gives: a collation is invisible
+        to ``PRAGMA table_info`` and is inherited rather than restated by every index
+        over the column, so a file arriving with ``id TEXT COLLATE NOCASE PRIMARY KEY``
+        satisfies both checks above and is nonetheless a store in which two
+        identifiers differing only in case are one record.
+
+        Read off the *indexes*, because SQLite reports a collating sequence only per
+        indexed column. That is enough and not a compromise: every column in
+        :data:`_DECISION_COMPARED` is a key column of an index in :data:`_INDEXES` or
+        of the primary key, and both have just been held to what this store defines,
+        so the collation of each one is observed at least once. A column whose
+        collation is *not* observed is refused rather than assumed, since an
+        unreadable shape is not a checked one.
+
+        Raises:
+            AuditError: If a compared column collates as anything but ``BINARY``, or
+                if no index over it reports a collating sequence at all.
+        """
+        wanted = [
+            str(name)
+            for name, origin in conn.execute(
+                "SELECT name, origin FROM pragma_index_list('decisions')"
+            )
+            if str(name) in _INDEXES or str(origin) == "pk"
+        ]
+        collations: dict[str, set[str]] = {}
+        for index in wanted:
+            for column, collation, is_key in conn.execute(
+                "SELECT name, coll, key FROM pragma_index_xinfo(?)", (index,)
+            ):
+                # The trailing entry names no column and is not part of the key; it
+                # is the rowid (or the remaining table columns, on a WITHOUT ROWID
+                # table), and neither is a comparison this store makes.
+                if is_key and column is not None:
+                    collations.setdefault(str(column), set()).add(str(collation).upper())
+        for column in _DECISION_COMPARED:
+            found = collations.get(column, set())
+            if found == {"BINARY"}:
+                continue
+            detail = (
+                "no index over it reports a collating sequence"
+                if not found
+                else f"it collates as {', '.join(sorted(found))}"
+            )
+            msg = (
+                f"the audit trail at {self._path!r} holds a decisions table whose {column!r} "
+                f"column does not compare byte for byte ({detail}); two identifiers "
+                f"differing only in case would then be one record, so it is not opened"
+            )
+            raise AuditError(msg)
 
     def _check_invocation_schema(self, conn: sqlite3.Connection) -> None:
         """Refuse a file whose invocation objects are not the ones this store defines.
