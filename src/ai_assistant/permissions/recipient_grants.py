@@ -930,6 +930,21 @@ class SqliteRecipientGrantStore:
             RecipientGrantError: If the store cannot be read, or holds a record
                 that no longer validates.
         """
+        # **This is not a narrowing of ADR-0193's "the contract admits every strictly
+        # positive integer".** That sentence's subject is *magnitude*: it is stated of
+        # `recent(limit=2**63)`, against a store that would raise `OverflowError` on it,
+        # and the conformance case pinning it passes here unchanged. What is refused
+        # below is a *class*, not a value — and refusing it is the rule this corpus
+        # already states where it states it most fully, `core.config`'s own integer
+        # setting validator (issue #471): an allowlist of the exact ``int``, because
+        # "every value this refuses — ``bool``, and any other ``int`` subclass whose
+        # instances mean something other than their integer value — is precisely an
+        # ``isinstance`` match". Nothing that reaches this member through the wire is
+        # such a class; the surface decodes plain ints, which is why that validator
+        # calls its own guard reachable only from untyped code. Settling the reading in
+        # `core/protocols.py`'s own text is #1597's, which asks the question of the
+        # whole grant-shaped family at once.
+        #
         # ``ValueError`` for the type as well as for the sign, and not the
         # ``TypeError``/``ValueError`` split some constructors in this corpus use:
         # ``RecipientGrantStore.recent`` in ``core/protocols.py`` documents exactly
