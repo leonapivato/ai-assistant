@@ -30,8 +30,16 @@ freshness test is taken again under that lock immediately before the first byte
 is written (issue #1409). Deciding and then copying is a window: two syncs from
 different source clones could each read one target as free and interleave, leaving
 it with ``.env`` from one and ``.mcp.json`` from the other, and a person can start
-working in a target after it was found free. The lock closes the first, the
-re-test closes the second, and neither is load-bearing on its own.
+working in a target after it was found free.
+
+**The lock closes the first and the re-test only narrows the second**, which this
+says plainly rather than implying more. Every sync takes the lock, so no sync can
+interleave with another. Nobody else takes it — a person working in a target holds
+nothing — so every check made before a write is check-then-act against them, and
+the residual window is the copy itself. What the re-test buys is that a target
+somebody has *already* taken is not written to at all. What it cannot buy is
+safety against someone who arrives mid-copy: only a protocol every writer observed
+would, and there is none.
 """
 
 from __future__ import annotations
@@ -384,10 +392,13 @@ def copy_into(source: Path, target: Path, synced: Sequence[str], *, dry_run: boo
 
     # The freshness test again, at the last moment before the first byte. The
     # lock keeps another sync out, but nobody else takes it: a person or an agent
-    # can start working in a target between the moment it was found free and now,
-    # and what makes that safe is re-asking rather than the lock (issue #1409). A
-    # dry run writes nothing, so it has nothing to guard — the plan it prints is
-    # the one `inspect` decided a moment ago, under the same lock.
+    # can start working in a target between the moment it was found free and now
+    # (issue #1409). This *narrows* that window and cannot close it — a check made
+    # before a write is check-then-act against a writer holding no lock, so
+    # someone arriving during the copy below is not caught, and the module
+    # docstring says so. A dry run writes nothing, so it has nothing to guard —
+    # the plan it prints is the one `inspect` decided a moment ago, under the
+    # same lock.
     if not dry_run:
         busy = inspect(target, synced)
         if busy.reason is not None:

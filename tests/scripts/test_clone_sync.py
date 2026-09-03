@@ -510,3 +510,24 @@ def test_deciding_not_to_copy_never_reads_either_file_whole(
 
     assert _in_process(source, listing) == 0
     assert "same .env" in capsys.readouterr().out
+
+
+def test_the_re_test_narrows_the_window_it_cannot_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The disclosure, pinned. A person working in a target holds no lock, so every
+    # check before a write is check-then-act against them: someone arriving during
+    # the copy is not caught, and the module says that rather than implying it has
+    # been closed. This fails the day the claim grows past what the code does.
+    source, (sibling,) = _clones(tmp_path, 2)
+    listing = _list_file(tmp_path, ".env")
+    replace = _MODULE._replace_atomically
+
+    def arriving(src: Path, dst: Path) -> None:
+        (sibling / "someones-work.txt").write_text("arrived mid-copy\n")
+        replace(src, dst)
+
+    monkeypatch.setattr(_MODULE, "_replace_atomically", arriving)
+
+    assert _in_process(source, listing) == 0
+    assert (sibling / ".env").read_text() == "ASSISTANT_X=1\n"
