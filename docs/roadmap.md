@@ -406,10 +406,10 @@ order #1844 records, and the plan-once, drive-at-most-one-step shape ADR-0014
 and ADR-0037 rule. This track earns, rung by rung, a loop in which the planner
 may look again, revise, and reach outward. Milestones are ordered by
 **dependency only**, and each closes on an exit ruling recorded on #1908.
-`track:world` above holds milestones 23–26; this track starts at 27. It was
-renumbered from a track-local 1–4 by the owner's ruling of 2026-09-03, so text
-written before that ruling — ADRs and batch issues among it — still carries the
-old numbers; the mapping is on #1908.
+`track:conversation` above holds the highest number the tracks have taken so
+far, 26; this track starts at 27. It was renumbered from a track-local 1–4 by
+the owner's ruling of 2026-09-03, so text written before that ruling — ADRs and
+batch issues among it — still carries the old numbers; the mapping is on #1908.
 
 **The charter caution, recorded at the track's opening** and carried by every
 milestone: the loop is not justified by memory-benchmark numbers. Its value is
