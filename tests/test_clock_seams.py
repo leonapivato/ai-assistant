@@ -136,6 +136,8 @@ from ai_assistant.planning import (
     PlanExecution,
     SqlitePlanStore,
 )
+from ai_assistant.readers._locality import DeviceBacking, MountClaim
+from ai_assistant.readers.files import LocalFileFetcher
 from ai_assistant.service import configuration
 from ai_assistant.service.configuration import ConfigurationStamp
 from ai_assistant.testing import (
@@ -368,6 +370,51 @@ async def _email_context_source(now: Clock) -> None:
     await EmailContextSource(
         reader=FakeReader(), grants=FakeSourceGrants([]), reads=FakeSourceReadRecorder(), now=now
     ).contribute()
+
+
+@dataclass(frozen=True)
+class _VouchingTables:
+    """A platform view that vouches for one real directory, truthfully about its device.
+
+    ADR-0230 §6 decides eligibility in two stages, and stage 2 checks the opened mount
+    root's device identity against what stage 1 claimed — so a view that names the
+    directory itself, with the device the kernel reports for it, passes the check while
+    saying nothing this test has not verified.
+    """
+
+    root: Path
+
+    def claim_for(self, path: Path) -> MountClaim:
+        """What the tables say about the mount the fetch root falls under."""
+        return MountClaim(
+            mount_point=self.root,
+            filesystem_type="tmpfs",
+            device=self.root.stat().st_dev,
+            backing=DeviceBacking.LOCAL,
+        )
+
+
+async def _local_file_fetcher(now: Clock) -> None:
+    """The fetch seam's wall clock: read at acquisition, on the loop (ADR-0230 §4).
+
+    Driven through ``listing()``, which is where the clock is read — for the listing's
+    ``read_at`` and for one of the two expiry deadlines — and read **before** anything
+    is dispatched off the loop, so a bad reading is the caller's fault rather than a
+    worker thread's.
+
+    **The platform view is supplied**, for the reason
+    ``tests/readers/fetch_fixtures.py`` states: ``ProcPlatformTables`` is fail-closed
+    by decision (ADR-0230 §6), so a container's ``overlay`` root or a CI runner's
+    device chain may legitimately refuse to establish locality — and a clock test has
+    no business being decided by the machine it runs on.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        fetcher = LocalFileFetcher(root, now=now, tables=_VouchingTables(root))
+        try:
+            await fetcher.listing()
+        finally:
+            fetcher.close()
 
 
 async def _fake_planner(now: Clock) -> None:
@@ -860,6 +907,12 @@ SEAMS = [
     # facet source is optional, so its clock fault is left to reach the assembler as
     # itself and become an absent facet like every other fault there (ADR-0008 §4).
     Seam("CalendarContextSource", _calendar_context_source, ClockReadingError),
+    # ADR-0230 §4's fetch seam, propagating rather than translating for the reason
+    # `PROPAGATED` records: that ADR adds **no** error class to `core.errors`, because
+    # "there is no failure a caller would handle differently from a refusal it must
+    # already handle" — and a clock fault is not a source reason, so it is not one of
+    # the refusals either.
+    Seam("LocalFileFetcher", _local_file_fetcher, ClockReadingError),
     Seam("EmailContextSource", _email_context_source, ClockReadingError),
     Seam("PlanExecution", _plan_execution, PlanningError),
     Seam("InMemoryPlanStore", _in_memory_plan_store, PlanningError),
@@ -1170,6 +1223,11 @@ PROPAGATED: Final[dict[str, str]] = {
         "the required ClockContextSource owes ContextError (ADR-0026 §4)"
     ),
     "EmailContextSource": "the second adapter of that one class",
+    "LocalFileFetcher": (
+        "ADR-0230 §4 adds **no** error class to `core.errors` — a source failure is a "
+        "`FetchRefusal` rather than a raise — and a clock fault is not a source reason, "
+        "so `core`'s own rejection is what a caller sees"
+    ),
     "ConsolidationStage": _UNDECLARED,
     "CurrentTime": ("documented at ``tools/builtin.py:148``, and `tools` is not in §4's list"),
     "FakeFeedbackProcessor": (

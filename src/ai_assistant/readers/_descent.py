@@ -38,6 +38,7 @@ from __future__ import annotations
 import ctypes
 import errno
 import os
+from functools import cache
 from typing import Final
 
 #: ``__NR_openat2``. The number is 437 on every Linux architecture that has the
@@ -176,14 +177,22 @@ def open_contained(start: int, relative: str, *, flags: int) -> int:
 _UNAVAILABLE: Final = frozenset({errno.ENOSYS, errno.EPERM, errno.E2BIG, errno.EINVAL})
 
 
+@cache
 def descent_is_available() -> bool:
     """Whether this platform can perform ADR-0230 §6's resolution at all.
 
     Answered by *doing* it — a contained open of ``"."`` beneath the process's own
     current directory — rather than by reading a version number, because a kernel
     that has the call and a sandbox that refuses it are the same answer to the only
-    question this asks. Costs one descriptor, and is called once per fetcher
-    construction.
+    question this asks.
+
+    **Answered once per process**, and the cache is not an optimisation. ADR-0230 §14
+    item 22's fifth arm requires that refusing a remote root issue **no filesystem call
+    at all** on the configured path, on anything beneath it or on the mount root; this
+    probe touches none of those, but it does open the process's own working directory,
+    and a probe re-run per construction would be a descriptor opened per build for an
+    answer a kernel cannot change under a running process. A test driving the
+    unavailable branch clears the cache.
     """
     try:
         probe = os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)

@@ -947,16 +947,27 @@ def test_a_label_that_resolves_to_nothing_is_still_constructible() -> None:
         assert _hop(label).labels == (label,)
 
 
-def test_the_kind_vocabulary_is_the_two_the_decision_admits() -> None:
-    """§1: a closed enumeration, and §4: added to and never renamed.
+def test_the_kind_vocabulary_is_the_three_the_decisions_admit() -> None:
+    """ADR-0226 §1: a closed enumeration, and §4: added to and never renamed.
 
     Pinned by value as well as by name, because the serialised spelling is what a
     ``PlanExport`` carries and what a later reader matches on — renaming a member
     would silently invalidate every document already written.
+
+    **Three since ADR-0230 §1**, which admits ``LOCAL_FILE`` as an *additive entry*
+    under ADR-0226 §1's own licence: it adds no second request object, no second
+    servicing site, no second budget and no second audit. The closure is unchanged —
+    a fourth still needs the ADR that decides it — and so is the no-rename rule, which
+    is why the two older values are still asserted here one by one.
     """
-    assert {member.value for member in ReadKind} == {"sighted_query", "citation_hop"}
+    assert {member.value for member in ReadKind} == {
+        "sighted_query",
+        "citation_hop",
+        "local_file",
+    }
     assert ReadKind.SIGHTED_QUERY.value == "sighted_query"
     assert ReadKind.CITATION_HOP.value == "citation_hop"
+    assert ReadKind.LOCAL_FILE.value == "local_file"
 
 
 # --- PlanExport ---------------------------------------------------------
