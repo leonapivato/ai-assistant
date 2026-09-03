@@ -41,6 +41,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -69,7 +70,7 @@ from ai_assistant.orchestration.reads import (
 from ai_assistant.orchestration.retrieval import assemble_by_band
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
@@ -239,12 +240,22 @@ class ConversationalOperation(StrEnum):
         rather than a claim — which is ADR-0226 §8's posture, and the reason a figure
         this soft is safe to fix here rather than defer.
 
+        **A member absent from :data:`_PLANNING_BUDGETS` declares none**, and that
+        direction is the whole of §4's fail-closed posture rather than a detail of
+        this lookup. §2(a) rules that "no implementation reads an absent declaration
+        as a default, as unknown-and-therefore-permitted, or as a case to decide at
+        run time from anything other than a declaration", and §4 says why: "a lane
+        that adds an operation and forgets to price it should get the turn the system
+        already has, not a second model call nobody budgeted". So this is a lookup
+        with a ``None`` default and never a branch with a figure at the end of it — a
+        member added tomorrow and left unpriced does not iterate, which is the case
+        §4 is written for by name (a worn earpiece is a *bounded*-audience channel
+        under ADR-0199 §1, so nothing else would stop it).
+
         Returns:
             The budget, or ``None`` where this operation declares none.
         """
-        if self is ConversationalOperation.CONVERSE_SPOKEN:
-            return None
-        return _PLANNING_BUDGET
+        return _PLANNING_BUDGETS.get(self)
 
 
 #: ADR-0228 §4's figure for the two operations that declare one. Stated once rather
@@ -252,6 +263,21 @@ class ConversationalOperation(StrEnum):
 #: ``converse_streaming`` differ in where the answer goes rather than in how long a
 #: user waits for it — two copies would be two places for one ruled figure to drift.
 _PLANNING_BUDGET: Final = timedelta(seconds=20)
+
+#: Which operations declare a planning budget, and what it is (ADR-0228 §4).
+#:
+#: **Membership is the declaration**, which is what makes an unpriced operation
+#: fail closed: :attr:`ConversationalOperation.planning_budget` reads this with a
+#: ``None`` default, so an operation added without an entry here does not iterate.
+#: ``converse_spoken`` is absent deliberately and is the one member whose absence is
+#: itself a decision (§4: it "declares **none**", whatever its audience); every future
+#: member is absent by accident until someone prices it, and gets the same answer.
+_PLANNING_BUDGETS: Final[Mapping[ConversationalOperation, timedelta]] = MappingProxyType(
+    {
+        ConversationalOperation.CONVERSE: _PLANNING_BUDGET,
+        ConversationalOperation.CONVERSE_STREAMING: _PLANNING_BUDGET,
+    }
+)
 
 
 #: A filter over the supply one turn runs on, applied **between retrieval and

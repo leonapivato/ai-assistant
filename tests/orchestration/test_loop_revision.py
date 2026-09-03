@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import inspect
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
 import structlog
@@ -49,7 +49,12 @@ from ai_assistant.core.types import (
     Role,
 )
 from ai_assistant.orchestration.composing import ComposingStage
-from ai_assistant.orchestration.loop import ConversationalOperation, LearningLoop
+from ai_assistant.orchestration.loop import (
+    _PLANNING_BUDGET,
+    _PLANNING_BUDGETS,
+    ConversationalOperation,
+    LearningLoop,
+)
 from ai_assistant.orchestration.reads import (
     READ_BUDGET,
     Servicing,
@@ -1270,4 +1275,36 @@ def test_the_budget_is_read_off_the_operation_and_never_supplied_by_a_caller() -
     assert "ConversationalOperation" in str(annotation)
     assert signature.parameters["operation"].default is None, (
         "a caller that names no operation declares no budget and does not iterate"
+    )
+
+
+def test_an_operation_nobody_priced_declares_no_budget() -> None:
+    """§4 fail-closed: membership of the budget table **is** the declaration.
+
+    §2(a) rules that "no implementation reads an absent declaration as a default, as
+    unknown-and-therefore-permitted, or as a case to decide at run time from anything
+    other than a declaration", and §4 gives the reason: "a lane that adds an operation
+    and forgets to price it should get the turn the system already has, not a second
+    model call nobody budgeted".
+
+    So the budget is a **lookup with a ``None`` default** and never a branch with a
+    figure at the end of it. That distinction is the whole finding: an operation added
+    tomorrow and left unpriced must not fall through to twenty seconds — and §4 names
+    the case, because a worn earpiece is a *bounded*-audience channel under ADR-0199
+    §1 and nothing else would stop it.
+    """
+    priced = set(_PLANNING_BUDGETS)
+    assert priced == {
+        ConversationalOperation.CONVERSE,
+        ConversationalOperation.CONVERSE_STREAMING,
+    }
+    for member in ConversationalOperation:
+        if member in priced:
+            assert member.planning_budget == _PLANNING_BUDGET
+        else:
+            assert member.planning_budget is None, f"{member.value} is unpriced"
+    # The default a member absent from the table gets — which is what a *future*
+    # member gets, and the property that a branch ending in a figure would not have.
+    assert _PLANNING_BUDGETS.get(cast("ConversationalOperation", "an-operation-nobody-priced")) is (
+        None
     )

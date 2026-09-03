@@ -179,12 +179,13 @@ class FakePlanner:
                 what makes the discard assertable.
 
         Raises:
-            ValueError: If both ``plan`` and ``read_request`` are given — a scripted
+            ValueError: If both ``plan`` and ``read_request`` are given. A scripted
                 plan carries its own ``read_request`` field, so honouring both would
-                give one value two sources that can disagree, and a fake that can
-                disagree with itself certifies nothing. Or if ``plan`` and
-                ``revision`` share an ``id``, which is a script no conforming planner
-                could satisfy (ADR-0014 §2, ADR-0228 §5).
+                give one value two sources that can disagree — and a fake that can
+                disagree with itself certifies nothing. A ``revision`` reusing the
+                first plan's ``id`` is refused too, but at the **call** rather than
+                here: with no scripted first plan that id comes from the goal, which
+                this constructor has not seen.
         """
         if plan is not None and read_request is not None:
             msg = (
@@ -192,20 +193,14 @@ class FakePlanner:
                 "its own read_request field"
             )
             raise ValueError(msg)
-        if plan is not None and revision is not None and plan.id == revision.id:
-            # A turn persists both plans and `save_plan` refuses a `supersedes` naming
-            # the saving plan's own id (ADR-0228 §5), so a script whose two plans share
-            # an id is a script no conforming planner could satisfy — refused here
-            # rather than surfacing as a store error the consumer would blame the
-            # store for.
-            msg = (
-                f"plan and revision share the id {plan.id!r}; a turn's two plans are two "
-                "records with two ids (ADR-0014 §2, ADR-0228 §5)"
-            )
-            raise ValueError(msg)
         self._plan = plan
         self._read_request = read_request
         self._revision = revision
+        #: The id of the plan this fake answered a turn's **first** call with, which
+        #: a scripted revision may not reuse. Recorded rather than derived: the
+        #: synthesised id is a function of the goal, so it is not knowable until the
+        #: call is made.
+        self._first_id: str | None = None
         self._clock = checked_clock(now, owner="FakePlanner")
         #: One entry per call: the goal, the context, the memories and the
         #: capability vocabulary the caller stated (ADR-0211 §9 item 3). The
@@ -302,6 +297,19 @@ class FakePlanner:
                 )
                 raise RuntimeError(msg)
             if ordinal > 1:
+                # A turn persists both plans and `save_plan` refuses a `supersedes`
+                # naming the saving plan's own id (ADR-0228 §5), so a script whose two
+                # plans share an id is a script no conforming planner could satisfy.
+                # Checked **here** rather than at construction, because that is the
+                # first moment it is checkable in every case: a synthesised first plan
+                # takes its id from the goal, which the constructor has not seen.
+                if self._revision.id == self._first_id:
+                    msg = (
+                        f"the scripted revision reuses the first plan's id "
+                        f"{self._first_id!r}; a turn's two plans are two records with two "
+                        "ids (ADR-0014 §2, ADR-0228 §5)"
+                    )
+                    raise RuntimeError(msg)
                 return self._revision
         if self._plan is not None:
             # Exactly as scripted on the first call, and with a fresh id afterwards
@@ -310,9 +318,10 @@ class FakePlanner:
             # refuses, and a fake that failed its consumer for its own defect would
             # certify nothing.
             if ordinal == 1:
+                self._first_id = self._plan.id
                 return self._plan
             return self._plan.model_copy(update={"id": f"{self._plan.id}-{ordinal}"})
-        return ActionPlan(
+        synthesised = ActionPlan(
             # Distinct on every call after the first (ADR-0228 §3, ADR-0014 §2). The
             # first keeps the id this fake has always minted, so nothing that named
             # it moves; a revision takes a new one, because a turn persists both
@@ -326,6 +335,9 @@ class FakePlanner:
             rationale="synthesised by FakePlanner",
             read_request=self._read_request,
         )
+        if ordinal == 1:
+            self._first_id = synthesised.id
+        return synthesised
 
 
 class FakePlanStore:

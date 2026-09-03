@@ -238,17 +238,43 @@ async def test_a_scripted_revision_answers_the_call_after_the_first() -> None:
     assert second is revision
 
 
-def test_a_script_whose_two_plans_share_an_id_is_refused() -> None:
-    """A script no conforming planner could satisfy is refused at construction.
+async def test_a_scripted_revision_reusing_the_first_plans_id_is_refused() -> None:
+    """A script no conforming planner could satisfy, over a **scripted** first plan.
 
     A turn persists both plans and ``save_plan`` refuses a ``supersedes`` naming the
     saving plan's own id (ADR-0228 §5), so two plans sharing one is not a fake that
-    behaves oddly — it is a fake that cannot be used at all. Refused here rather than
-    surfacing as a store error the consumer would blame the store for.
+    behaves oddly — it is a fake that cannot be used at all. Refused by the fake
+    rather than surfacing as a store error the consumer would blame the store for.
     """
     shared = ActionPlan(id="p1", goal_id="g1", steps=(), created_at=_fixed_now())
-    with pytest.raises(ValueError, match="two records with two ids"):
-        FakePlanner(shared, now=_fixed_now, revision=shared)
+    planner = FakePlanner(shared, now=_fixed_now, revision=shared)
+
+    await planner.plan(_goal_for(), context=_context_for(), capabilities=())
+    with pytest.raises(RuntimeError, match="two records with two ids"):
+        await planner.plan(_goal_for(), context=_context_for(), capabilities=())
+
+
+async def test_a_revision_colliding_with_the_synthesised_first_id_is_refused() -> None:
+    """The same, over a **synthesised** first plan — which is why the check is late.
+
+    ``FakePlanner(read_request=…, revision=…)`` is the most natural way to script the
+    milestone's own shape: a synthesised first plan that asks, and a scripted second
+    that carries the value. Its first call mints ``{goal.id}-plan``, so a revision
+    scripted with that id collides — and the constructor cannot see it, because the
+    id is a function of a goal the constructor was never given. Checking at the call
+    is what makes the refusal total rather than covering only the case a constructor
+    could reach.
+    """
+    planner = FakePlanner(
+        now=_fixed_now,
+        read_request=ReadRequest(asks=(ReadAsk(kind=ReadKind.CITATION_HOP, labels=("M1",)),)),
+        revision=ActionPlan(id="g1-plan", goal_id="g1", steps=(), created_at=_fixed_now()),
+    )
+
+    first = await planner.plan(_goal_for(), context=_context_for(), capabilities=())
+    assert first.id == "g1-plan", "the id the fake synthesises for this goal"
+    with pytest.raises(RuntimeError, match="two records with two ids"):
+        await planner.plan(_goal_for(), context=_context_for(), capabilities=())
 
 
 async def test_a_revision_scripted_fake_refuses_a_third_call() -> None:
