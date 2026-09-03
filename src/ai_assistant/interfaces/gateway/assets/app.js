@@ -993,6 +993,56 @@ function renderOutcome(outcome, chosenAt, provenance) {
   show("answer", true);
 }
 
+// **An answer this page cannot put on screen is not one it has read**, said once for the
+// two entries that render a turn (#1622). `renderOutcome` reads the outcome's members
+// from its first lines — `capture_degraded`, then `reply`, then `steps.length` — so a
+// `2xx` carrying no `outcome`, or one whose members are not the ones this page renders,
+// throws there.
+//
+// **Left unguarded that throw does not escape: it is caught by `ask` and announced as
+// `GATEWAY_GONE`**, which is the state that makes this worth fixing and is not the one
+// #1622 describes. A `TypeError` raised inside either entry lands in the one catch above
+// them, whose sentence is "The gateway did not answer, so it may have stopped" — said of
+// a gateway that answered, about a turn that ran, with the remedy being to restart the
+// gateway and start a session from the value it prints. That is a wrong explanation
+// rather than a missing one, which is the distinction this page keeps everywhere else,
+// and it is ADR-0139 §4 in the direction that section spends five clauses refusing: an
+// act whose outcome is *not known* reported as one that is known not to have landed.
+//
+// **The render is the test, rather than a shape check that has to enumerate what
+// renders.** This is the reading rounds 9 and 10 of PR #1612 settled one surface over:
+// round 9 checked that the outcome was an object and round 10 walked `{}` straight past
+// it, because any list of members needs re-deriving every time `renderOutcome` reads a
+// new one and getting it wrong reinstates the same silent failure. What an entry needs
+// to know is whether it can put the answer on screen, and running the render is the only
+// thing that answers that. A defect in `renderOutcome` itself therefore also lands here,
+// reported as an outcome that is not known — the conservative direction, and what it is
+// weighed against is not a truthful crash but a panel that stops mid-sentence saying
+// nothing.
+//
+// **It renders or it reports, and it never leaves half.** Whatever reached the screen
+// before the throw is not an answer, so it does not stay beside a line saying the
+// outcome is not known.
+//
+// **`renderOutcome` is left intolerant of a missing outcome**, which is the whole point:
+// rendering an answer-shaped nothing is the failure and the throw is not, so nothing here
+// makes the renderer tolerate one — it makes the callers answer for it.
+//
+// `answerConfirmation` states the same rule inline, in its own `try`, and is left there:
+// its `catch` also strands a consent token and gives up the park's row, and that shape is
+// the ruling #1612 spent two rounds reaching. Folding it in is filed as #2006 rather than
+// taken here.
+function couldRenderOutcome(outcome, chosenAt) {
+  try {
+    renderOutcome(outcome, chosenAt);
+  } catch (_) {
+    clearNode(el("answer-body"));
+    show("answer", false);
+    return false;
+  }
+  return true;
+}
+
 // The composed answer, or a statement that composing one failed (ADR-0170 §6).
 //
 // **Beside the step account, never instead of it.** Everything `renderOutcome`
@@ -3150,6 +3200,46 @@ const PARTIAL_CLEARED =
   "What had been written into the answer is not the answer and was not kept, so it has " +
   "been cleared rather than left on screen looking like one.";
 
+// **An answer this browser read and cannot put on screen** (#1622), which is
+// `PARK_REPLY_UNREADABLE`'s condition arriving on the ask surface. `readBody` answers an
+// unreadable `2xx` with `{}`, a well-formed object may still be missing `outcome`, and an
+// `outcome` that is present may still not carry what `renderOutcome` reads —
+// `couldRenderOutcome` is where all three are found, and this is what is said about them.
+// The reachable case is `relay`'s own: a truncated, reassembled or proxy-substituted
+// `200`, the class round 6 of PR #1612 admitted for a refusal. Every `2xx` the gateway
+// writes goes through `_json_response`, so a well-formed gateway produces none of it.
+//
+// **Cause-neutral about which of the three shapes it was**, for `PARK_REPLY_UNREADABLE`'s
+// reason: naming the one that happened would be a distinction drawn from a body this page
+// has just found it cannot read, and the owner's position is the same in all of them.
+//
+// **And it says the turn ran, because on this entry that is read rather than assumed.**
+// `_ask` awaits `converse` and answers with the outcome, so a `200` cannot come back
+// until the assistant has finished with the question — the same fact `askWhole` sets
+// `heard` from, and the one that lets `ASK_ABANDONED_MIDWAY` say the assistant received
+// it. Announcing a turn that demonstrably ran as one that may never have happened is
+// ADR-0139 §4 breached in the direction adversarial review found on rounds 3 and 5, and
+// the head is intact evidence here: it is the *body* this page could not read.
+const ANSWER_UNREADABLE =
+  "The gateway answered that question and this browser could not read an outcome from " +
+  "the answer, so what the turn did is not known. The turn itself ran: this entry " +
+  "answers only once the assistant has finished with the question. Nothing was re-sent " +
+  "and nothing was cancelled. " +
+  WHERE_TO_LOOK;
+
+// **The same condition on the streamed entry, claiming less** — for the reason
+// `askStreaming` records against its own head: `/ask/stream`'s head is written and
+// drained before `_pump_answer` is awaited, so it proves nothing about the assistant, and
+// the only other evidence here is the terminal value this page has just found it cannot
+// read an outcome from. Reading "the turn ran" off the `kind` member of a frame whose
+// `outcome` member is missing is the inference from an unreadable body that the sentence
+// above declines to make and that this state does not license.
+const STREAMED_ANSWER_UNREADABLE =
+  "That answer's stream ended in a value this browser could not read an outcome from, " +
+  "so what became of the turn is not known. Nothing was re-sent and nothing was " +
+  "cancelled. " +
+  WHERE_TO_LOOK;
+
 // **And the ending where the outcome is not unknown at all**, which adversarial review
 // found on round 3. A head this page already read can name the outcome: an expired
 // session or a mismatched cookie half is answered by `_session_bound` — `401` and `409`
@@ -3495,7 +3585,15 @@ async function askWhole(half, asked, chosenAt, waiting) {
     return;
   }
   if (response.ok) {
-    renderOutcome(body.outcome, chosenAt);
+    // **An outcome that could not be put on screen is one this page has not read**
+    // (#1622). `readBody` answers an unreadable `2xx` with `{}`, so `body.outcome` is
+    // `undefined` and the render threw here — into `ask`'s catch, which called it
+    // `GATEWAY_GONE` for a gateway that had just answered. The abort above has already
+    // taken the read the owner stopped, so what is left for this branch is a body the
+    // gateway did not write.
+    if (!couldRenderOutcome(body.outcome, chosenAt)) {
+      fault(ANSWER_UNREADABLE, "console");
+    }
     return;
   }
   show("answer", false);
@@ -3592,7 +3690,19 @@ async function askStreaming(half, asked, chosenAt, waiting) {
     refused("console", terminal, response.status);
     return;
   }
-  renderOutcome(terminal.outcome, chosenAt);
+  // The same reading on the streamed entry (#1622), and the partial text goes the way
+  // `ANSWER_STREAM_CUT` sends it rather than staying under a fault: ADR-0173 §3 makes the
+  // terminal outcome's `reply` the answer, so an accumulated chunk sequence left on
+  // screen renders a non-answer as one. `couldRenderOutcome` has already taken it off,
+  // and the clause is added only where there was something to take — a stream that ended
+  // in an unreadable terminal value before its first chunk cleared an empty panel, and
+  // announcing that would be a sentence about nothing.
+  if (!couldRenderOutcome(terminal.outcome, chosenAt)) {
+    const said = waiting.heard
+      ? `${STREAMED_ANSWER_UNREADABLE} ${PARTIAL_CLEARED}`
+      : STREAMED_ANSWER_UNREADABLE;
+    fault(said, "console");
+  }
 }
 
 // --- push to talk (ADR-0200 §10) ---------------------------------------------

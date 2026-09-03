@@ -1247,11 +1247,17 @@ def test_the_page_renders_the_terminal_reply_over_what_it_accumulated() -> None:
     ``renderOutcome`` clears the panel before rendering, so the chunks the owner
     watched arrive are replaced by the outcome's own reply rather than left standing
     beside it.
+
+    Reached through ``couldRenderOutcome`` since #1622, which changes nothing about this
+    clause: the guard runs the same render and adds an ending for the case where it
+    threw, so the terminal reply is still what replaces the chunks wherever there is one
+    to render.
     """
     script = _code("app.js")
 
     assert "composing.textContent += value.text;" in script
-    assert "renderOutcome(terminal.outcome, chosenAt);" in script
+    assert "couldRenderOutcome(terminal.outcome, chosenAt)" in script
+    assert "renderOutcome(outcome, chosenAt);" in _functions(script)["couldRenderOutcome"]
     assert "clearNode(body);" in script
 
 
@@ -2270,9 +2276,126 @@ def test_the_announcement_is_read_off_what_this_browser_actually_observed() -> N
     # apart on it — and it points rather than promises, because a turn that ran is not
     # thereby a turn that was recorded (`TurnOutcome.capture_degraded`, ADR-0074 §9
     # item 6).
-    assert script.count("WHERE_TO_LOOK") == 5
+    #
+    # **Seven rather than five since #1622**, and the two additions are not abandonments:
+    # ``ANSWER_UNREADABLE`` and ``STREAMED_ANSWER_UNREADABLE`` are what the two ask entries
+    # say where the answer came back and could not be put on screen. They carry this clause
+    # for the reason the five above do — the turn's ending is what nobody here read, so
+    # where to look for it is the whole of what is left to say — and they carry neither of
+    # the two counted above it, because nothing was abandoned and no act of the owner's is
+    # being explained. The declaration and its six sites.
+    assert script.count("WHERE_TO_LOOK") == 7
     assert "though a turn whose record " in script
     assert "could not be written does not appear there" in script
+
+
+def test_an_answer_that_cannot_be_put_on_screen_is_not_rendered_as_one() -> None:
+    """#1622: two ``renderOutcome`` callers threw on a ``2xx`` that carried no outcome.
+
+    ``renderOutcome`` reads the outcome's members from its first lines, so
+    ``renderOutcome(undefined, …)`` is a ``TypeError`` at the call site. It is not
+    uncaught: both entries are awaited inside ``ask``'s own ``try``, whose ``catch``
+    announces ``GATEWAY_GONE`` — "The gateway did not answer, so it may have stopped",
+    with a restart and a fresh bootstrap value as the remedy — said of a gateway that
+    answered and a turn that ran. ADR-0139 §4 reports an act as one of exactly three
+    outcomes and never as either of the other two, so an outcome that is *not known*
+    announced as a gateway that never replied breaches it in the direction rounds 3 and 5
+    of the abandonment sentences were spent closing.
+
+    **The render is the test, and that is the reading rounds 9 and 10 of PR #1612
+    reached** one surface over: round 9 checked that the outcome was an object and round
+    10 walked ``{}`` straight past it, because ``{}`` still throws on ``steps.length`` and
+    any enumeration of members needs re-deriving every time the renderer reads a new one.
+    So the guard runs the render and reports whether the answer reached the screen, and a
+    shape check that has to know what renders is what it replaces.
+
+    **And ``renderOutcome`` itself is not made tolerant**, which #1622 rules out in terms:
+    rendering an answer-shaped nothing is the failure and the throw is not.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+    guard = functions["couldRenderOutcome"]
+
+    # The render is inside the `try`, and the `catch` is what the callers read back.
+    assert guard.index("try {") < guard.index("renderOutcome(outcome, chosenAt);")
+    assert guard.index("renderOutcome(outcome, chosenAt);") < guard.index("catch (_) {")
+    # It renders or it reports and never leaves half: what reached the screen before the
+    # throw is not an answer, so it does not stay beside a line saying so.
+    assert guard.index('clearNode(el("answer-body"));') < guard.index('show("answer", false);')
+    assert guard.index('show("answer", false);') < guard.index("return false;")
+    assert guard.index("return false;") < guard.index("return true;")
+    # The renderer keeps reading the members unguarded — the throw is what the callers
+    # answer for, and a renderer that tolerated a missing outcome would render nothing as
+    # an answer instead.
+    render = functions["renderOutcome"]
+    assert "if (outcome.capture_degraded) {" in render
+    for tolerated in ("if (!outcome", "outcome === null", "outcome === undefined", "asOutcome"):
+        assert tolerated not in render, tolerated
+    # Both entries reach the render through it, and neither calls it directly any more.
+    for entry, passed in (("askWhole", "body.outcome"), ("askStreaming", "terminal.outcome")):
+        body = functions[entry]
+        assert f"if (!couldRenderOutcome({passed}, chosenAt)) {{" in body, entry
+        assert "renderOutcome(" not in body, entry
+    # On the whole entry the abort is still decided first: a read the owner stopped is
+    # already answered, so what is left for the guard is a body the gateway did not write.
+    whole = functions["askWhole"]
+    assert whole.index("if (waiting.stopping.signal.aborted) {") < whole.index(
+        "couldRenderOutcome(body.outcome, chosenAt)"
+    )
+
+
+def test_an_unreadable_answer_says_the_turn_ran_only_where_that_was_read() -> None:
+    """The two sentences #1622's endings need, and the clause that separates them.
+
+    ADR-0139 §4 is a rule in both directions — an act is reported as one of exactly three
+    outcomes "and never as either of the other two" — so a turn known to have run and
+    announced as one that may never have happened breaches it exactly as the reverse does.
+    That is the mistake adversarial review found on rounds 3 and 5 of the abandonment
+    sentences, and the evidence differs by entry for the reason ``askWhole`` and
+    ``askStreaming`` already record about ``heard``.
+
+    ``/ask`` answers only once ``converse`` has returned, so a successful head is proof
+    the turn ran and the head is intact evidence here — it is the *body* this page could
+    not read. ``/ask/stream``'s head is written and drained before ``_pump_answer`` is
+    awaited and proves nothing about the assistant, and the only other evidence is the
+    terminal value the page has just found it cannot read an outcome from. So the streamed
+    sentence claims less, rather than reading "the turn ran" off the ``kind`` member of a
+    frame whose ``outcome`` member is missing.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+
+    said = _joined(_constant(script, "ANSWER_UNREADABLE"))
+    streamed = _joined(_constant(script, "STREAMED_ANSWER_UNREADABLE"))
+
+    # What is not known is what the turn did, and the whole entry says the turn ran.
+    assert "could not read an outcome from the answer" in said
+    assert "what the turn did is not known" in said
+    assert "The turn itself ran" in said
+    # And the streamed one says neither of those, because neither was read.
+    assert "could not read an outcome from" in streamed
+    assert "what became of the turn is not known" in streamed
+    assert "ran" not in streamed
+    # Neither re-sends and neither cancels, which is the clause every not-known ending on
+    # this page carries, and both end at the one route back.
+    for sentence in (said, streamed):
+        assert "Nothing was re-sent and nothing was cancelled." in sentence
+    for named in ("ANSWER_UNREADABLE", "STREAMED_ANSWER_UNREADABLE"):
+        assert _constant(script, named).rstrip().endswith("WHERE_TO_LOOK"), named
+    # Each is said at its own entry and nowhere else. Counted with the prefix excluded,
+    # because the streamed name ends in the other one and a bare count reads five.
+    assert len(re.findall(r"(?<!_)ANSWER_UNREADABLE", script)) == 2, "one declaration, one site"
+    assert script.count("STREAMED_ANSWER_UNREADABLE") == 3, "one declaration, two arms of one site"
+    assert 'fault(ANSWER_UNREADABLE, "console");' in functions["askWhole"]
+    stream = functions["askStreaming"]
+    assert "STREAMED_ANSWER_UNREADABLE" in stream
+    assert "ANSWER_UNREADABLE" not in functions["answerConfirmation"]
+    # The partial text goes the way `ANSWER_STREAM_CUT` sends it, and the clause about the
+    # screen is added only where there was something on it — a stream that ended before
+    # its first chunk cleared an empty panel, and saying so would be a sentence about
+    # nothing. `abandonAsk`'s own division, on the ending that is not an abandonment.
+    assert "waiting.heard" in stream[stream.index("couldRenderOutcome(terminal.outcome") :]
+    assert "PARTIAL_CLEARED}`" in stream
 
 
 def test_a_wait_stopped_after_a_session_refusal_is_re_entry_and_not_an_unknown_outcome() -> None:
@@ -3176,6 +3299,14 @@ def test_an_answer_in_flight_cannot_undo_the_owners_own_choice() -> None:
     rendered = re.findall(r"renderOutcome\(([^)]*)\)", script)
     assert rendered
     for call in rendered:
+        assert [one.strip() for one in call.split(",")][1] == "chosenAt", call
+    # And the guard the two ask entries reach it through (#1622), which the pattern above
+    # does not see — ``couldRenderOutcome`` capitalises the name it wraps, so a call to it
+    # is not a call to ``renderOutcome`` as far as that search is concerned, and an entry
+    # that stopped passing the count would go unread.
+    guarded = re.findall(r"couldRenderOutcome\(([^)]*)\)", script)
+    assert guarded
+    for call in guarded:
         assert [one.strip() for one in call.split(",")][1] == "chosenAt", call
 
 
