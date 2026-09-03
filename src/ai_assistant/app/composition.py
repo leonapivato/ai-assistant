@@ -93,7 +93,7 @@ from ai_assistant.permissions import (
 )
 from ai_assistant.permissions.spend import SpendConfiguration
 from ai_assistant.planning import ModelBackedPlanner, SqlitePlanStore
-from ai_assistant.readers import CalendarReader, EmailReader
+from ai_assistant.readers import CalendarReader, EmailReader, LocalFileFetcher
 from ai_assistant.secret_store import KeyringSecretStore
 from ai_assistant.tools import (
     build_default_registry,
@@ -946,6 +946,35 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             directory, opened=opened
         )
 
+        # **The local-file fetcher, where a root is configured** (ADR-0230 §6, §13).
+        # Constructed here rather than above the data directory because it *opens*
+        # something: ADR-0230 §6's stage 2 acquires a directory handle on the
+        # configured root and holds it for the fetcher's life, so it is a resource and
+        # belongs on this list rather than in #372's resource-free region. Its two
+        # refusals — a bound outside its domain, and a root whose reads would leave the
+        # device — are both `ConfigurationError` and both stop the build, so a
+        # misconfigured root still fails before the engine exists; what it does not do
+        # is fail before the data directory is created, which is the one thing #372
+        # would have preferred and which cannot be had while the check must be taken
+        # against an opened handle (§6: "one open precedes locality-against-an-object,
+        # it is irreducible, and it is stated rather than hidden").
+        #
+        # **Its ``close`` is registered here and in the façade's ordered shutdown
+        # below** (ADR-0230 §4, ADR-0042 §2), which releases the root handle when a
+        # later construction step fails *and* on an ordinary shutdown. "A fetcher wired
+        # outside that registration would pin its root's mount for the life of the
+        # process and leak a descriptor per build."
+        #
+        # **Nothing consumes it yet, and that is the intended state of this lane**
+        # (ADR-0230 §13): "A merged C1 is a fetcher nothing calls, in a deployment with
+        # no root configured." The loop that reads a listing and the servicer that
+        # fetches from one are ADR-0230's later lanes; what lands here is the wiring
+        # that owns the resource, so the lane that adds the consumer adds a consumer and
+        # not a lifecycle.
+        fetcher = _build_local_file_fetcher(settings)
+        if fetcher is not None:
+            opened.append(fetcher.close)
+
         # ADR-0130 §4 and §5's deterministic ruling, built once and held twice: the
         # engine hands it to the store on the reconsideration path, and the write
         # stage below hands it to the same store on the live path. One object,
@@ -1762,6 +1791,14 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 # in-flight work before any of these run, so what this protects is
                 # the tail of that drain rather than a race with it.
                 _as_async(traces.close),
+                # And the fetch root's directory handle, last of all (ADR-0230 §4,
+                # ADR-0042 §2). Position is free: nothing reads it and it reads
+                # nothing, and it is not a connection to a store any other closer
+                # could still be writing through. What matters is that it is *here*
+                # as well as on the build-failure list above, which is the pair
+                # §4 requires — "released **both** when a later construction step
+                # fails and in the façade's ordered shutdown".
+                *([_as_async(fetcher.close)] if fetcher is not None else []),
             ],
             # The shutdown budget every production engine gets, hub and CLI alike
             # (ADR-0083 §4). It belongs here rather than on the ``Engine`` default
@@ -2286,6 +2323,62 @@ def _build_email_reader(settings: Settings) -> EmailReader | None:
         max_bytes=settings.email_max_bytes,
         read_timeout=settings.email_read_timeout,
         max_content_bytes=settings.email_max_content_bytes,
+    )
+
+
+def _build_local_file_fetcher(settings: Settings) -> LocalFileFetcher | None:
+    """Construct the configured local-file fetcher, or ``None`` if no root is set.
+
+    :func:`_build_calendar_reader`'s shape for a **third** local source, and that
+    function's whole account of why this layer may import ``ai_assistant.readers`` at
+    all holds here unchanged: listing the composition root in the "nothing imports the
+    readers" contract "would make ``readers`` unreachable in production for good", so
+    the carve-out is what lets a concrete implementation be constructed and injected.
+
+    **``None`` is the shipping default and it is a consent decision, not a technical
+    one** — ADR-0093 §7's rule, which ADR-0230 §6 restates as its own first clause:
+    "the mechanism is **off until a deployment configures it** — no root, no listing,
+    no ask, no fetch." A fresh install that read the owner's documents unasked would be
+    making a grant decision by omission, which is the one way it must not be made.
+
+    **Keyed on ``fetch_root_path`` and on nothing else.** There is no interval, because
+    a fetch is not a scheduled read: it happens inside the turn that asked (ADR-0230
+    §7), so there is no incoherent path-without-interval state for this layer to
+    refuse.
+
+    **This construction can fail, and every failure is a `ConfigurationError` that
+    stops the deployment** (ADR-0230 §6). A bound outside its domain, a platform with
+    no atomic contained resolution, a root the platform will not establish as local, a
+    mount root whose opened device identity contradicts the tables, and a descent that
+    would cross a mount or follow a symbolic link are all refusals of the *build* —
+    "never an empty listing, never a ``FetchRefusal`` and never a degraded turn". A
+    deployment with no root configured reaches none of them, because there is nothing
+    to check.
+
+    The clock is left at the fetcher's own default, for the two readers' reason:
+    nothing at this layer has a second clock to hand it, and inventing one would be
+    the second source ADR-0026 exists to prevent.
+
+    Args:
+        settings: Loaded application settings — the root and ADR-0230 §4 and §6's four
+            figures, each already refused at load.
+
+    Returns:
+        The fetcher, or ``None`` when ``fetch_root_path`` is unset.
+
+    Raises:
+        ConfigurationError: For every refusal above. The caller registers the
+            fetcher's ``close`` on both cleanup paths, so a failure *after* this
+            returns still releases the handle.
+    """
+    if settings.fetch_root_path is None:
+        return None
+    return LocalFileFetcher(
+        settings.fetch_root_path,
+        listing_ttl=settings.fetch_listing_ttl,
+        listing_max_entries=settings.fetch_listing_max_entries,
+        max_file_bytes=settings.fetch_max_file_bytes,
+        max_content_bytes=settings.fetch_max_content_bytes,
     )
 
 
