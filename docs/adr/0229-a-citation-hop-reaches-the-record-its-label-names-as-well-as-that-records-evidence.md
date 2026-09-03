@@ -408,15 +408,22 @@ exchange works.
 > `PROTOCOL_VERSION`, and changes no file under `src/ai_assistant/planning/` or
 > `src/ai_assistant/interfaces/`.
 
-> **Normative.** **The docstring half of that fence is narrow and is owed rather than
-> permitted.** `RespondedTurn.hop_reached` and `ComposingStage.compose`'s `hop_reached`
-> parameter both document the carrier as being *"in ADR-0226 §6's order"*, which §3
-> above makes an incomplete account of it. The lane corrects those two docstrings to
-> cite this ADR's expansion-and-deduplication order, and does **nothing else** in
-> either file: no signature moves, no behaviour changes, and no statement either
-> docstring makes about supply-holds, emptiness or the supplied-never-inferred rule is
-> touched. `service_read_request`'s own docstring is corrected in the same way, in a
-> file the fence already admits.
+> **Normative.** **The docstring half of that fence is stated as a rule over a class
+> of declarations and never as a list, and it is owed rather than permitted.** The lane
+> corrects **every** declaration in those three files that states either the order of
+> ADR-0227 §3's carrier or what `_hop_records` returns, so that it describes §3 above:
+> the expansion sequence, restricted to the records ADR-0227 §3 admits, under §4's
+> stable first-occurrence deduplication. A list of sites is what leaves the rest
+> knowingly stale, so no implementation reads this clause as naming any.
+
+> **Normative.** **The rule is scoped to the carrier and to `_hop_records`' return, and
+> reaches nothing else that cites ADR-0226 §6.** A declaration describing the **fourth
+> group's** order — `ServicedRead.records`, and every statement of what the servicer
+> appends — is describing something §2 above leaves untouched, and is **not** corrected:
+> ADR-0226 §6's order is still exactly right there. The lane does nothing else in any of
+> the three files: no signature moves, no behaviour changes, and no statement any
+> docstring makes about supply-holds, budgets, emptiness or the supplied-never-inferred
+> rule is touched.
 
 > **Normative.** The change is confined to what `_hop_records` returns and to how
 > `service_read_request` builds ADR-0227 §3's carrier from it. **No second store call
