@@ -32,7 +32,9 @@
   ADR-0226 §12 and cites ADR-0228 toward none of it. §11's steered-loop argument is
   **extended rather than moved**, and §8 below is the extension: the loop moves up
   exactly one rung, from the owner's own store to the owner's own disk, which is the
-  rung #1844 names as having no channel out. §11's class clause on a planner-composed
+  rung #1844 names as having no channel out — claimed there for a root on a local
+  filesystem, with the network-mount case scoped out of it rather than argued into it.
+  §11's class clause on a planner-composed
   query, its no-filtering clause and its no-recomputation clause bind unchanged, and
   §7's monotonicity is what §8 rests on.
 - **Partially supersedes**
@@ -966,8 +968,9 @@ subject.
 > ADR-0204 §4's narrowing prohibition, ADR-0226 §7's discards-nothing-by-class clause and
 > ADR-0228 §11's own no-filtering clause bind here unchanged.
 
-> **Normative.** **The containment is that there is nowhere to steer to, and it rests on
-> three properties, each of which is a clause of this corpus rather than an
+> **Normative.** **The containment is that there is nowhere to steer to; it is claimed
+> for a root on a local filesystem, which is what §6 documents the field to be, and it
+> rests on three properties, each of which is a clause of this corpus rather than an
 > implementation detail.** (a) The address space is the listing of one root a deployment
 > configured, and the model names an **ordinal into it** — §2, under which no byte of
 > model output is ever interpreted as an address. (b) A fetch is an open, a read and a
@@ -979,25 +982,27 @@ subject.
 > capture, so ADR-0223 §6's allow applies and *"every subsequent turn of that
 > conversation that reaches the egress seam is a confirmation rather than an allow"*.
 
-> **Normative.** **(b) is a statement about what this system composes, not about what
-> packets a mount emits, and the difference is where a network-backed root sits.** The
-> configured root is a **local-filesystem path**, and a deployment that points it at a
-> network-backed mount — NFS, SMB, a FUSE-backed remote drive — is placing this system's
-> reads on a transport its operator configured and this decision did not. The fetch is
-> still an `openat` and a bounded read: **no lane composes a request, resolves a name, or
-> names a destination**, and nothing this system authored crosses a wire. What such a mount
-> emits is its own protocol, addressed to the endpoint the operator mounted.
+> **Normative.** **A network-backed root is outside that claim, and this ADR does not
+> classify it as contained.** Where a deployment points the root at an NFS, SMB or
+> FUSE-backed remote mount, the fetch is still an `openat` and a bounded read — no lane
+> composes a request, resolves a name or names a destination, so (b) holds as written — but
+> **an observer of that mount sees which entry a turn opened**, and a revising turn's second
+> ask may be composed over the first fetch's content (§7). That is a data-steered signal
+> reaching a party outside this device without passing the egress seam. It is bounded: at
+> most **which of the listing's at-most-`fetch_listing_max_entries` entries was read**,
+> under five bits per servicing at the default of 40, never a name the model composed (§2
+> admits no composed address), never a payload this system assembled (there is no request
+> body to put one in), and never an endpoint a plan selected. **Bounded is not contained**,
+> and this decision does not offer the bound as though it were: on such a root the
+> containment above is a property the deployment has stepped outside, not one this ADR
+> still holds.
 
-> **Normative.** **The residual on such a root is named rather than claimed away, and it is
-> the choice among the listed entries.** A revising turn's second ask may be composed over
-> the first fetch's content (§7), so on a network-backed root an observer of that mount
-> learns at most **which of the listing's at-most-`fetch_listing_max_entries` entries a turn
-> read** — under five bits per servicing at the default of 40. It never learns a name the
-> model composed, because §2 admits no composed address; it never carries a payload this
-> system assembled, because there is no request body to put one in; and it reaches only the
-> endpoint the operator already mounted, never one a plan selected. That is a side channel
-> of the deployment's storage, bounded by the listing cap, and it is not the outward channel
-> #1844 names.
+> **Normative.** **So a deployment for which that signal matters does not put the root on a
+> network-backed mount**, and that is an operator condition stated here rather than a
+> property claimed. §6 documents the field as a local-filesystem directory, §15 defers the
+> mechanical refusal with what fires it, and until that fires the condition is carried by
+> the operator's own choice of path — which is the same place §6 already puts the decision
+> to enable the mechanism at all.
 
 > **Normative.** **No mechanical eligibility check is required of an implementation, and
 > adding one would be a guess.** Deciding "is this path local" has no portable answer:
@@ -1009,12 +1014,15 @@ subject.
 > stated as an **operator** condition, §15 defers the enforcement with what fires it, and
 > nothing in this ADR reads a filesystem type.
 
-> **Normative.** **Three things would break it, and each is named so that a later lane
+> **Normative.** **Four things would break it, and each is named so that a later lane
 > meets it as a condition rather than discovers it.** A kind whose fetch itself leaves the
 > device — that is #1996's Lane B, deferred in §15, and this ADR decides nothing for it. A
 > fetch whose address space is composed by a model rather than shown to it, which §2
-> forbids. And any relaxation of ADR-0223 §6's stamp or ADR-0154 §4's
+> forbids. Any relaxation of ADR-0223 §6's stamp or ADR-0154 §4's
 > standing-authorisation floor, neither of which this ADR touches or may be cited toward.
+> And **a root on a network-backed filesystem**, which removes the argument's premise
+> rather than weakening its conclusion — the clauses above say what remains there and
+> decline to call it contained.
 
 > **Normative.** A planner-composed query is a **model completion with no recorded
 > origin**, of the same class as `ActionPlan.rationale`, at every iteration and whether or
@@ -1416,6 +1424,12 @@ same reason; this decision adds a contract, so it adds a lane.
     **subsequent** turn of that conversation reaching the egress seam is a confirmation
     rather than an allow. This is the assertion standing between this rung and #1844's
     exfiltration channel, and it is asserted end to end rather than at the predicate.
+    **And the fetch is not itself an egress**, asserted on the same turn: servicing the ask
+    engages no `DestinationProtocol` member, requires no confirmation of its own and routes
+    through no egress seam, which is §8's property (b) asserted rather than only stated. No
+    arm asserts anything about a network-backed root: §8 scopes the containment claim to a
+    local root and states the residual on a mounted one, so there is no property there to
+    pin until §15's refusal fires.
 11. **The fetch is serviced before the hop and takes one slot.** A request carrying a
     `LOCAL_FILE` ask and a `CITATION_HOP` whose evidence would fill the budget produces a
     fourth group holding the fetched record first and exactly nine hop records after it, in
