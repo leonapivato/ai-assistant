@@ -2,11 +2,14 @@
 
 - Status: Proposed
 - Date: 2026-09-03
-- **Partially supersedes five ADRs, in seven narrowly stated scopes** — four of
+- **Partially supersedes five ADRs, in eight narrowly stated scopes** — five of
   ADR-0226, one of ADR-0158, one of ADR-0014 and one of ADR-0204 — and §15 shows the
-  working for every one. The first four:
+  working for every one. The first five:
   [ADR-0226](0226-the-planner-names-one-more-read-beside-its-plan-and-the-loop-services-it-into-the-supply.md)
-  **partially**, in four scopes. §6's **one-emission clause**, *"One emission is
+  **partially**, in five scopes. §2's **second-emission clause**, *"nor is a second
+  emission on the same turn, which is re-planning and is §12's"* — the clause
+  `core/protocols.py` carries verbatim on `Planner.plan` as *"never a second request
+  on the same turn"*. §6's **one-emission clause**, *"One emission is
   serviced **once** per turn"*, together with the sentence reserving the count's
   movement to *"the ADR that decides it (§12)"* — this is that ADR, and the count
   becomes two. §7's **re-planning prohibition**, *"no lane closes the gap by
@@ -52,9 +55,20 @@
   leaves *"This object disposes of one step, once"* exactly where it is.
 - **Decides a change to `src/ai_assistant/core/types.py`** — one additive defaulted
   field on `ActionPlan`, `supersedes`, with `PlanExport.schema_version` moving to
-  **4** and **`PROTOCOL_VERSION` moving to 27**. It adds **no Protocol and no member
-  to one**, and `Planner.plan`'s signature, its inputs and its documented return are
-  all unchanged. The version move is the one place this ADR departs from ADR-0226's
+  **4** and **`PROTOCOL_VERSION` moving to 27**. It adds **no Protocol, no member to
+  one and no parameter to any signature**. It **does widen two Protocols' documented
+  meaning, and both are flagged as breaking changes under golden rule 5** exactly as
+  ADR-0226 §10 flagged its own. `Planner.plan`'s `memories` may carry **four** groups
+  on a turn's second call, and a turn may put **two** requests to one planner —
+  `core/protocols.py` states both the other way today (*"`memories` still carries
+  exactly those three groups"*, and *"never a second request on the same turn — that
+  is re-planning, which ADR-0226 §12 defers"*), which is the fourth and fifth
+  widenings of that contract's documented meaning and is why §12 binds the lane to
+  extend the shared `PlannerContract`. And `PlanStore.save_plan` gains one rejection
+  (§5), which is ADR-0014 §5's export promise kept rather than a new decision.
+  Neither is a compatibility break: no signature moves, `supersedes` is additive and
+  defaulted, and every existing `Planner` and `PlanStore` implementation keeps
+  conforming. The version move is the one place this ADR departs from ADR-0226's
   own statement about the same type, and §15 shows why: ADR-0226 §4 and §10 rest on
   *"`ActionPlan` crosses neither `wire/` nor `service/` in the tree"*, and that
   sentence is false against `origin/main` — `TurnOutcome.turn` is a `TurnResult`,
@@ -246,11 +260,15 @@ it does not measure itself: §9's raised audit is the instrument, exactly as ADR
 > the turn's **revision**.
 
 > **Normative.** A revision is a **new `ActionPlan` with a new `id`**, produced by
-> the planner in the ordinary way. No implementation mutates a plan, rebuilds one
-> from another's fields, edits a plan's steps, or constructs a plan anywhere but at
-> the `Planner.plan` seam. [ADR-0014](0014-planning-model.md) §2's `frozen=True` and
-> its rule that *"Re-planning produces a *new* `ActionPlan` with a new `id`"* bind
-> unchanged and are what this section is built on.
+> the planner in the ordinary way. **A plan's decision content is authored at the
+> `Planner.plan` seam and nowhere else**: no implementation mutates a plan in place,
+> rebuilds one from another's fields, or authors or edits a plan's `id`, `goal_id`,
+> `steps`, `rationale` or `read_request` anywhere but there. The **one** field any
+> other component ever sets is `supersedes`, which §5 gives to the loop and which is
+> not a decision the planner is in a position to make.
+> [ADR-0014](0014-planning-model.md) §2's `frozen=True` and its rule that
+> *"Re-planning produces a *new* `ActionPlan` with a new `id`"* bind unchanged and are
+> what this section is built on.
 
 > **Normative.** The revision carries the **same `goal_id`** as the plan it replaces.
 > The goal is minted once per turn from the user's unrewritten words and nothing about
@@ -453,6 +471,36 @@ second model call nobody budgeted.
 > every other plan it is `None`, which means **this plan replaced nothing**. No
 > implementation reads `None` as an error or as an unknown.
 
+> **Normative.** **The loop sets it, and the planner never does.** On a turn that
+> revises, the loop produces the revision as the plan the second call returned with
+> `supersedes` set to the predecessor's `id` and **every other field exactly as the
+> planner returned it**. It does this **once**, immediately on return and before any
+> other component observes the plan; there is never a moment at which a component
+> other than the loop holds the unstamped revision, and no lane sets, clears or
+> re-sets the field anywhere else.
+
+> **Normative.** **No plan identifier is rendered to a model and none is accepted
+> from one.** No lane puts a predecessor's `id` in a prompt, adds a parameter to
+> `Planner.plan` to carry one, or reads one out of model output. `Identifier` admits
+> any non-blank encodable string, so an id a model returned would be an unprovenanced
+> value in a durable audit record — which is the ground ADR-0226 §9 refused to log
+> `ActionPlan.id` on, applied here to a field that would then be *written* rather
+> than merely logged.
+
+> **Normative.** **`PlanStore.save_plan` refuses a plan whose `supersedes` does not
+> resolve** — one naming a plan the store does not hold, one naming the saving plan's
+> own `id`, and one naming a plan under a different `goal_id` are each rejected as an
+> unknown goal already is, with the same error class. This is ADR-0014 §5's export
+> promise kept at write time rather than a new invariant (below).
+
+> **Normative.** **`PlanExport`'s reference closure covers `supersedes`.** ADR-0014
+> §5 rules that an export is *"complete and internally consistent: every
+> `goal_id`/`plan_id` referenced by an included record resolves within the same
+> export"*, and `supersedes` is a `plan_id` referenced by an included record. A
+> document whose `supersedes` names a plan the document does not carry does not
+> validate as a `PlanExport` at all. No lane reads the existing validator's silence
+> as permission.
+
 > **Normative.** **Every plan a turn produced is persisted through
 > `PlanStore.save_plan`**, oldest first, at the one site that persists a plan today.
 > A superseded plan is persisted whether or not the turn that produced it goes on to
@@ -471,6 +519,27 @@ second model call nobody budgeted.
 
 > **Normative.** **`PlanExport.schema_version` becomes `Literal[4]`**, edited rather
 > than defaulted, and **`PROTOCOL_VERSION` moves to 27** (§6).
+
+**The loop stamps the link because the planner is the one component that must not.**
+A model asked for a predecessor id would be asked to hand back a system identifier,
+and ADR-0226 §9 already refused to put `ActionPlan.id` in a *log* on the ground that
+*"`Identifier` admits any non-blank encodable string, so a `Planner` — or
+`ModelBackedPlanner`'s own injectable id factory — may supply one carrying content"*.
+Writing such a value into a durable audit chain is that hazard with the retention
+lengthened. Nor is the link a decision the planner is in a position to take: it has
+no opinion about which plan its output replaces, and it is not told which iteration
+it is on (§12). The loop is the only component that knows, so the loop states it —
+which is the same division ADR-0223 §2 draws when the engine computes the
+externality value *"once, immediately after the turn is in hand"* and stamps it into
+a `core` model the turn produced.
+
+**And the stamp is not an edit of a decision.** ADR-0014 §2's frozen rule exists so
+that a plan is not mutated *"out from under an in-flight execution"*; the revision at
+this moment has been persisted by nothing, driven by nothing and observed by nothing,
+and every field the planner authored is byte-identical afterwards. §1's narrowed
+prohibition is what keeps that from becoming a licence: `id`, `goal_id`, `steps`,
+`rationale` and `read_request` are the planner's, `supersedes` is the loop's, and
+there is no third case.
 
 **Persisting every plan is not book-keeping; it is what keeps ADR-0226 §9 true.** That
 section deliberately copies no text into the audit record, resting the retention on
@@ -495,6 +564,29 @@ resting on it would break silently the first time a goal is resumed. Recording t
 link on the plan makes the chain a fact the store holds rather than one a reader
 reconstructs — which is ADR-0227 §3's discipline, *"supplied, never inferred"*, applied
 to the durable side.
+
+**The store and the export checks are ADR-0014 §5's own promise kept, not a new
+invariant**, and the distinction decides whether a record is owed. §5 already rules
+that an export is *"complete and internally consistent: every `goal_id`/`plan_id`
+referenced by an included record resolves within the same export"*, and ADR-0049 §1
+states how that promise is kept at write time: *"`save_plan`'s app-level orphan check
+(ADR-0014 §5 rejects a plan whose goal is unknown, so `export` can promise
+referential integrity without repair)"*. A reader holding ADR-0014 §5 alone, adding a
+`plan_id` reference to a record the export carries, is instructed by §5's own sentence
+to make it resolve — identical conduct before and after, which is ADR-0070 §1's test
+and the reason §15 records nothing against ADR-0014 §5. What this section supplies is
+the *statement* that the new reference is inside that promise, so that the existing
+validator's silence is not read as an exemption.
+
+**A durable foreign key is deliberately not required, and ADR-0049 §1's own reason is
+why.** Its `REFERENCES` constraints exist to close a *cross-process* window — *"one
+connection deletes goal `g` between another's check and its insert"*. This reference
+has no such window: both plans of a turn are written by that turn, oldest first, and
+`PlanStore` offers no way to delete a single plan — `delete_goal` removes a goal's
+plans together and both of a turn's plans share its `goal_id`, and `clear` removes
+everything. So no interleaving leaves a live plan whose predecessor is gone. A
+durable constraint is fired by a future member that deletes plans individually, or by
+a chain that spans goals, which §1 forbids.
 
 **A superseded plan drives nothing, and the clause is stated because the tempting
 implementation is a loop.** ADR-0226 §4 states the sibling rule for its own
@@ -693,11 +785,20 @@ rule names.
 > fields: **how many planner calls the turn made**, and **why the turn stopped
 > iterating**.
 
-> **Normative.** "Why the turn stopped" is a closed vocabulary of four: **not
+> **Normative.** "Why the turn stopped" is a closed vocabulary of **five**: **not
 > iterated** (no revision was admissible — §2's conditions (a) to (e)), **settled**
-> (the last plan carried no request), **bound reached** (§3), and **budget reached**
-> (§4). No implementation, setting or later lane adds a fifth without the ADR that
-> decides it.
+> (the last plan carried no request), **bound reached** (§3), **budget reached**
+> (§4), and **planning failed** (a planner call after the first raised, or the turn
+> ended between a servicing and the next plan's return). No implementation, setting
+> or later lane adds a sixth without the ADR that decides it.
+
+> **Normative.** **"Not iterated" is the record's default**, so a turn that ended
+> before it reached a first plan carries it and says something true — it did not
+> iterate. What separates that turn from one that reached a plan and found no
+> revision admissible is §8's `trigger` outcome, **not reached** against **fired** or
+> **not fired**, which is the same division ADR-0226 §9 already draws between its
+> `trigger` and its `servicing` defaults. No lane reads "not iterated" as a claim
+> that a first plan existed.
 
 > **Normative.** ADR-0226 §9's **counts-and-kinds rule binds the extension entire**.
 > The record still copies no text — no query, no label, no `content` span, no excerpt,
@@ -718,6 +819,17 @@ over turns would produce a figure above 100% in the limit and would move for a r
 that has nothing to do with the planner's judgement about a first supply. The
 per-turn definition also survives the bound moving, which is what a comparable series
 needs.
+
+**The fifth member exists because a turn can fail between its two plans, and the
+record still has to say something true.** ADR-0226 §9 emits *"once per turn"*,
+*"conditioned on nothing"*, so a second planner call that raises still writes a
+record — and none of the four successful outcomes describes it. Labelling such a turn
+**settled** would say the planner stopped asking when it did not; **bound reached**
+would say a guard fired when none did. A vocabulary that forces an implementation to
+pick a falsehood is a vocabulary with a hole, and §13's fifteenth test asserts this
+arm rather than leaving it to be discovered. It is a stop *reason* and never a turn
+outcome: the original failure still propagates unchanged, exactly as ADR-0226 §11
+item 10 requires of its own arms.
 
 **Two turn-level fields and a sequence, rather than a second event.** §9 forbids a
 second audit beside this one in terms, and the shape it prescribes — *"account per
@@ -847,13 +959,32 @@ what the model's output is.
 > §9's raised audit, §10's carrier to the composing stage, and the persistence of
 > every plan at the engine's existing site.
 
-> **Normative.** In `planning/`: **nothing**. The planner's prompt, its emission and
-> its parser are unchanged, and **the planner is not told which iteration it is on**.
-> No lane adds an iteration index, a "last look" instruction or any other signal to
-> the planner's input, and `Planner.plan`'s signature gains no parameter.
+> **Normative.** In `planning/`'s **production code**: nothing. The planner's prompt,
+> its emission and its parser are unchanged, and **the planner is not told which
+> iteration it is on**. No lane adds an iteration index, a "last look" instruction or
+> any other signal to the planner's input, and `Planner.plan`'s signature gains no
+> parameter.
 
-> **Normative.** The lane moves **no Protocol and adds no member to one**. Where it
-> finds a Protocol change owed, it stops and says so rather than making one.
+> **Normative.** In `core/protocols.py`: the lane **widens `Planner.plan`'s
+> documented meaning in exactly two respects and no others** — that `memories` may
+> carry the fourth group on a turn's **second** call, and that a turn may put two
+> requests to one planner, replacing that docstring's *"never a second request on the
+> same turn"*. It **also** widens `PlanStore.save_plan`'s documented rejection set by
+> §5's one clause. Both are **flagged as breaking changes under golden rule 5**, and
+> the compatibility fact is stated beside the flag rather than instead of it: no
+> signature moves, `supersedes` is additive and defaulted, and every existing
+> `Planner` and `PlanStore` implementation conforms exactly as it does today.
+
+> **Normative.** The lane **extends the shared `PlannerContract` conformance suite**
+> (`tests/planning/planner_contract.py`) for the widened input, so that every
+> `Planner` implementation is held to it through the `Test…Contract` subclasses that
+> already run it — a planner handed four groups plans over them and emits under the
+> same rules. This is the obligation ADR-0226 §10 put on its own lane for its own
+> widening, taken here for the same reason.
+
+> **Normative.** The lane **adds no Protocol, no member to one and no parameter to
+> any signature**. Where it finds a change of that kind owed, it stops and says so
+> rather than making one.
 
 > **Normative.** The lane implements, prepares for, and leaves a hook for **none** of
 > §14's deferrals, and in particular does not drive a second `PlanStep`, admit an
@@ -872,6 +1003,15 @@ defaulted field and one edited annotation, and `wire/envelope.py` gains an integ
 a comment; ADR-0226 §10 already ruled that shape, saying of its own additions that
 *"The types Lane A adds are `core/types.py` models with validators, which the ordinary
 rule covers."* This is the same rule with less in it.
+
+**The Protocol widening does not make this two lanes, and the test is where machinery
+lands.** ADR-0137 §1 asks where *substantial new machinery* goes, and a docstring is
+not machinery. What the lane touches in `planning`'s tree is
+`tests/planning/planner_contract.py`, the shared conformance suite — the guardrail for
+a widened meaning rather than an implementation of one — and `planning/`'s production
+code is untouched. ADR-0226 §10 drew exactly this line for its own widening, binding
+its Lane A to the suite while noting that *"this ADR adds no Protocol, so no triad
+exists to split and §3 has no subject here"*; the same holds here.
 
 **Which is why this ADR's implementation is one lane where ADR-0226's was two**, and
 the difference is worth stating so it does not read as a shortcut. ADR-0226 split
@@ -945,32 +1085,51 @@ to work.
    still carries the `read_request` that was serviced; the export carries both at
    `schema_version` 4; and a document labelled 3 does not validate as a `PlanExport` at
    all.
-10. **The superseded plan drives nothing.** It starts no execution, reaches no
+10. **The loop sets `supersedes` and the planner sets nothing.** The revision the turn
+    persists differs from the plan the planner returned in `supersedes` and in **no
+    other field** — asserted field by field against the planner's own return value —
+    and a planner that returns a plan already carrying a `supersedes` does not thereby
+    choose one. No plan identifier appears in any prompt the turn assembles, asserted
+    through the production renderer.
+11. **A `supersedes` that does not resolve is refused, at the store and in the
+    document.** `save_plan` rejects a plan whose `supersedes` names a plan the store
+    does not hold, one naming the saving plan's own `id`, and one naming a plan under a
+    different `goal_id` — three arms, each a `PlanningError`, on **both** conforming
+    `PlanStore` implementations through the shared conformance suite. And a
+    `PlanExport` carrying a plan whose `supersedes` names a plan the document does not
+    carry does not validate, beside the existing dangling-`goal_id` arm.
+12. **The superseded plan drives nothing.** It starts no execution, reaches no
     `StepRunner`, no gate and no executor; exactly one capacity slot is taken by the
     turn; and a superseded plan whose first step names a side-effecting capability
     still runs nothing.
-11. **The evaluation and the stamp are taken once over the final supply.** On a turn
+13. **The evaluation and the stamp are taken once over the final supply.** On a turn
     with two servicings, a record ADR-0199 §3 withholds that arrives in the **first**
     servicing sets the value the capture records, and so does one carrying the mark
     ADR-0217 moved into `MemoryBase.placement`; the externality value is computed once
     and is the same boolean the egress binding carries. This fails on any
     implementation that evaluates between iterations.
-12. **The supply is monotone and the fourth group is one group.** The three groups the
+14. **The supply is monotone and the fourth group is one group.** The three groups the
     first call saw are byte-identical in the `TurnResult`; both servicings' records
     follow them in servicing order as one appended run; a record both servicings reach
     appears once, at its first arrival's position, consuming no slot of the second
     budget; and `planning/planner.py`'s leading-`EPISODIC`-run split is unaffected.
-13. **The audit accounts per emission and the fire rate keeps its meaning.** One record
+    And ADR-0227 §3's hop-set carrier **accumulates across both servicings** rather
+    than the second replacing the first: a record the **first** hop reached still
+    renders its reply in the prompt the turn finally assembles, asserted through the
+    production renderer under ADR-0227 §7's fidelity rule.
+15. **The audit accounts per emission and the fire rate keeps its meaning.** One record
     per turn carrying two servicing entries, the turn-level trigger **fired**, two
     planner calls, and the stop reason; a turn whose **second** planner call raises
-    emits exactly one record still saying **fired**, with the original failure
-    propagating; and a turn whose first plan carried a request and whose revision
+    emits exactly one record still saying **fired**, with **planning failed** as its
+    stop reason and the original failure propagating unchanged; a turn that ended
+    before any plan emits one saying **not reached** with the default **not
+    iterated**; and a turn whose first plan carried a request and whose revision
     carried none is **fired**, not **not fired**.
-14. **The audit still copies nothing.** Neither a distinctive span of a returned record
+16. **The audit still copies nothing.** Neither a distinctive span of a returned record
     nor either iteration's query string appears anywhere in the record; no plan
     identifier appears, including the superseded plan's; and the correlation id is the
     only identifier on the event.
-15. **On a turn that did not revise, nothing moved.** The prompt the composing stage
+17. **On a turn that did not revise, nothing moved.** The prompt the composing stage
     assembles is byte-identical to today's, the audit's per-servicing sequence has at
     most one entry, `ActionPlan.supersedes` is `None`, and the `TurnResult` is
     constructed once.
@@ -1029,6 +1188,19 @@ to work.
 classification of this change and is therefore stated as prose rather than marked
 (ADR-0089 §1); what follows is the working under ADR-0070 §1's test, and for the
 clauses a reader would most expect to have moved with them and which did not.
+
+**ADR-0226 §2's second-emission clause is partially superseded, and it is the clause
+`core/protocols.py` carries.** §2 rules that *"One emission may carry **at most one
+ask of each kind**, and is serviced **once**"*, and then that *"nor is a second
+emission on the same turn, which is re-planning and is §12's"*. ADR-0228 §3 admits a
+second emission. The `Planner` Protocol's own docstring states it as *"It emits **at
+most one ask of each kind**, and never a second request on the same turn — that is
+re-planning, which ADR-0226 §12 defers"*, so a reader holding only ADR-0226 builds a
+planner that refuses to emit twice and an orchestration that would not service it.
+ADR-0070 §1's test is met. **The scope is the second-emission sentence alone**: the
+at-most-one-ask-of-each-kind rule binds **per emission**, unchanged; two asks of one
+kind is still not an emission this corpus admits (§14 defers decomposition); and §2's
+two kinds, their servicing and the argument for shipping them together are untouched.
 
 **ADR-0226 §6's one-emission clause is partially superseded, and §6 names the ADR that
 may do it.** §6 rules *"One emission is serviced **once** per turn"* and that *"no
@@ -1119,6 +1291,30 @@ the intended friction"* — instructs a reader making a shape change to a record
 export carries to write the next integer, which is what §5 requires. ADR-0212 §8 and
 ADR-0226 §4 each did the same and each recorded nothing; so does this.
 
+**ADR-0014 §5 is applied and not superseded, and this is the record the store and
+export clauses of §5 above answer to.** §5 rules that an export is *"complete and
+internally consistent: every `goal_id`/`plan_id` referenced by an included record
+resolves within the same export"*, and ADR-0049 §1 records how that promise is kept at
+write time: *"`save_plan`'s app-level orphan check (ADR-0014 §5 rejects a plan whose
+goal is unknown, so `export` can promise referential integrity without repair)"*.
+`ActionPlan.supersedes` is a `plan_id` referenced by an included record, so §5's
+sentence already reaches it by its own words: a reader holding ADR-0014 alone, adding
+such a reference, makes it resolve and refuses a document in which it does not.
+Identical conduct before and after is ADR-0070 §1's test, and it is the reason nothing
+is recorded against §5 — the same shape ADR-0226 §13 found for ADR-0039 §10 and this
+ADR finds again for it. What §5 above supplies is the *statement* that the new
+reference is inside the promise, so an implementation does not read the existing
+validator's silence as an exemption. `PlanStore` gains **no member**, and the widened
+rejection set is flagged under golden rule 5 in §12 without being a decision this ADR
+takes on its own account.
+
+**ADR-0049 is untouched, and §1's foreign keys are not extended.** Its `REFERENCES`
+constraints close a *cross-process* window — *"one connection deletes goal `g` between
+another's check and its insert"* — which this reference does not have: both plans of a
+turn are written by that turn oldest-first, `PlanStore` offers no single-plan delete,
+`delete_goal` removes a goal's plans together and both share the goal. §5 above states
+what would fire a durable constraint rather than adding one nothing needs.
+
 **ADR-0014 §2's parenthetical is partially superseded, and only the parenthetical.**
 §2 rules that *"Re-planning produces a *new* `ActionPlan` with a new `id` (the previous
 one stays referenced by the `ExecutionState` that ran it), rather than mutating a plan
@@ -1202,7 +1398,7 @@ hop resolved that the turn's supply holds after servicing"* — both stated over
 turn, so a turn with two servicings accumulates one set across both, in ADR-0226 §6's
 order, and §4's cap of ten reply lines is taken over that one accumulated set. That is
 §3 read as written; the risk is an implementation that keys the carrier on a servicing
-and lets the second replace the first, which §13's twelfth test is written against.
+and lets the second replace the first, which §13's fourteenth test is written against.
 §7's test-fidelity rule binds this ADR's own tests 2 and 3.
 
 **ADR-0170 §2 and §5a are untouched.** The composing stage still holds no
@@ -1278,9 +1474,12 @@ which is written to fail if revision is wired but not working.
 - **The prompt can be twenty serviced records wider.** That is on top of a belief
   budget and an episodic supplement of thirty, and it is the honest cost of a budget
   per servicing rather than a share.
-- **`planning/` does not change at all**, which is the surprising consequence and the
-  measure of how much ADR-0226 got right: the planner already emits a request beside
-  its plan, and asking it twice needs nothing new from it.
+- **`planning/`'s production code does not change at all**, which is the surprising
+  consequence and the measure of how much ADR-0226 got right: the planner already
+  emits a request beside its plan, and asking it twice needs nothing new from it.
+  What does change is what the `Planner` contract *documents* — four groups on a
+  second call, and two requests in one turn — which is flagged as a breaking change
+  under golden rule 5 and held by the shared `PlannerContract` rather than by prose.
 - **Revisit when** §9's stop distribution shows the budget firing often or never; when
   the iteration rate shows the second emission is a different facet rather than a
   follow-up (§14's decomposition trigger); when a bounded-audience spoken surface is

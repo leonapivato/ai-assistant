@@ -1,6 +1,6 @@
 # 226. The planner names one more read beside its plan, and the loop services it into the supply
 
-- Status: Partially superseded by ADR-0228 (§3's second-level clause, §6's one-emission-per-turn clause, §7's re-planning prohibition together with its evaluation-timing phrase and its restatement that `Planner.plan`'s `memories` carries exactly three groups, and §8's trigger clause read as a test on the one plan a turn produced — a turn may make a second planner call over the supply the first plan's serviced read produced, and may service that plan's own request once; §3's namer rule, no-identifier rule and ordinal scheme, §5's channel scoping and degradation posture, §6's budget of ten, cross-kind precedence and two-label cap, §7's fourth group, whole-union deduplication, discards-nothing-by-class clause and constructed-once rule, §9 entire, and §§1, 2, 4, 10, 11, 12 and 13 all stand)
+- Status: Partially superseded by ADR-0228 (§2's second-emission clause, §3's second-level clause, §6's one-emission-per-turn clause, §7's re-planning prohibition together with its evaluation-timing phrase and its restatement that `Planner.plan`'s `memories` carries exactly three groups, and §8's trigger clause read as a test on the one plan a turn produced — a turn may make a second planner call over the supply the first plan's serviced read produced, and may service that plan's own request once; §2's at-most-one-ask-of-each-kind rule read per emission, §3's namer rule, no-identifier rule and ordinal scheme, §5's channel scoping and degradation posture, §6's budget of ten, cross-kind precedence and two-label cap, §7's fourth group, whole-union deduplication, discards-nothing-by-class clause and constructed-once rule, §9 entire, and §§1, 2, 4, 10, 11, 12 and 13 all stand)
 - Date: 2026-09-02
 - Amended: 2026-09-03 by ADR-0227 — §11 item 1's assertion *"the answer carries it"*
   stands and is not replaced; what it gains is the **fidelity requirement** under which
@@ -99,8 +99,20 @@
   implementing lanes owe; nothing implements against it until it has merged
   ([ADR-0015](0015-simplify-the-agent-workflow.md) §5, golden rule 5).
 
-- **Partially superseded: 2026-09-03 by ADR-0228** — four scopes, and no others. This
+- **Partially superseded: 2026-09-03 by ADR-0228** — five scopes, and no others. This
   is the ADR §6 and §12 reserve by name.
+
+  **§2's second-emission clause.** §2 rules that *"One emission may carry **at most
+  one ask of each kind**, and is serviced **once**"*, and then that *"nor is a second
+  emission on the same turn, which is re-planning and is §12's"*. ADR-0228 §3 admits a
+  second emission on a turn that revises. `core/protocols.py` carries the clause
+  verbatim on `Planner.plan` — *"never a second request on the same turn"* — so a
+  reader holding only this ADR builds a planner that refuses to emit twice and an
+  orchestration that would not service it, which is ADR-0070 §1's test met. The scope
+  is that sentence alone: the at-most-one-ask-of-each-kind rule binds **per
+  emission**, unchanged, two asks of one kind is still not an emission this corpus
+  admits, and §2's two kinds, their servicing and the argument for shipping them
+  together are untouched.
 
   **§6's one-emission clause.** §6 rules *"One emission is serviced **once** per
   turn"* and that *"no configuration, setting or later lane makes the count
