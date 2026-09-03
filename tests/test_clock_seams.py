@@ -1214,6 +1214,32 @@ def test_the_untranslated_seams_are_the_declared_ones() -> None:
     )
 
 
+def _derived_classes_in(source: str) -> dict[str, set[str]]:
+    """The base-to-subclass edges one module declares, with aliased bases resolved.
+
+    Args:
+        source: One module's text.
+
+    Returns:
+        Each base's *imported* name mapped to the classes deriving from it here.
+    """
+    tree = ast.parse(source)
+    aliases = _bindings(tree)
+    edges: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for parent in node.bases:
+            if isinstance(parent, ast.Name):
+                named = aliases.get(parent.id, parent.id)
+            elif isinstance(parent, ast.Attribute):
+                named = parent.attr
+            else:
+                continue
+            edges.setdefault(named.rpartition(".")[2], set()).add(node.name)
+    return edges
+
+
 def _classes_deriving(base: str) -> frozenset[str]:
     """Every class in ``src/`` that has ``base`` above it, however deep.
 
@@ -1230,13 +1256,8 @@ def _classes_deriving(base: str) -> frozenset[str]:
     """
     children: dict[str, set[str]] = {}
     for path in sorted(Path(ai_assistant.__file__).parent.rglob("*.py")):
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if not isinstance(node, ast.ClassDef):
-                continue
-            for parent in node.bases:
-                named = parent.id if isinstance(parent, ast.Name) else getattr(parent, "attr", None)
-                if named is not None:
-                    children.setdefault(named, set()).add(node.name)
+        for named, derived in _derived_classes_in(path.read_text(encoding="utf-8")).items():
+            children.setdefault(named, set()).update(derived)
     found: set[str] = set()
     pending = [base]
     while pending:
@@ -1246,31 +1267,43 @@ def _classes_deriving(base: str) -> frozenset[str]:
     return frozenset(found)
 
 
-def _literal_owners_given_to(callee: str) -> frozenset[str]:
-    """Every string literal passed as ``owner=`` to ``callee`` anywhere in ``src/``.
+def _literal_owners_given_in(source: str, callee: str) -> frozenset[str]:
+    """Every string literal one module passes as ``owner=`` to ``callee``.
 
     The other half of a computed owner: ``MemoryTraces`` takes its label as a
     constructor argument, so the *seam's* own ``owner=`` is unreadable but every
     caller's is a literal one file away.
 
     Args:
-        callee: The constructor's name, matched bare or as an attribute.
+        source: One module's text.
+        callee: The constructor's name, matched under any spelling of its import.
+
+    Returns:
+        The labels this module's calls name.
+    """
+    tree = ast.parse(source)
+    aliases = _bindings(tree)
+    return frozenset(
+        str(keyword.value.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _refers_to(node.func, callee, aliases)
+        for keyword in node.keywords
+        if keyword.arg == "owner" and isinstance(keyword.value, ast.Constant)
+    )
+
+
+def _literal_owners_given_to(callee: str) -> frozenset[str]:
+    """:func:`_literal_owners_given_in`, unioned over every module under ``src/``.
+
+    Args:
+        callee: The constructor's name.
 
     Returns:
         The labels its callers name.
     """
     labels: set[str] = set()
     for path in sorted(Path(ai_assistant.__file__).parent.rglob("*.py")):
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            named = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
-            if named != callee:
-                continue
-            for keyword in node.keywords:
-                if keyword.arg == "owner" and isinstance(keyword.value, ast.Constant):
-                    labels.add(str(keyword.value.value))
+        labels |= _literal_owners_given_in(path.read_text(encoding="utf-8"), callee)
     return frozenset(labels)
 
 
@@ -1315,22 +1348,53 @@ UNTABLED: Final[dict[str, str]] = {
 _GUARD: Final = "checked_clock"
 
 
+def _bindings(tree: ast.Module) -> dict[str, str]:
+    """What each name this module imports under an alias actually refers to.
+
+    Both scans below match source by name, and a name is only ever a local
+    binding: ``from ... import checked_clock as guard`` and
+    ``class X(Facet)`` after ``import _GrantedFacetSource as Facet`` are both
+    valid, and both would make a name-matching scan miss a real seam while the
+    partition assertion went on passing — the silence this roster exists to end.
+
+    What remains out of reach is a *runtime* rebinding — ``guard = checked_clock``
+    as a statement, a lookup through a dictionary, a dynamically built class.
+    Nothing static can follow those, and nothing in the tree does them.
+
+    Args:
+        tree: One parsed module.
+
+    Returns:
+        Local name to imported name, for the aliased imports only.
+    """
+    return {
+        alias.asname: alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom | ast.Import)
+        for alias in node.names
+        if alias.asname is not None
+    }
+
+
+def _refers_to(func: ast.expr, target: str, aliases: dict[str, str]) -> bool:
+    """Whether a call's callee names ``target``, under any spelling of the import.
+
+    Args:
+        func: The ``func`` of an :class:`ast.Call`.
+        target: The name being looked for.
+        aliases: :func:`_bindings` for the module the call is in.
+
+    Returns:
+        ``True`` for a bare name, an aliased bare name, or any attribute access
+        ending in ``target`` — which covers every module-import spelling.
+    """
+    if isinstance(func, ast.Name):
+        return func.id == target or aliases.get(func.id) == target
+    return isinstance(func, ast.Attribute) and func.attr == target
+
+
 def _owners_in(source: str) -> tuple[frozenset[str], frozenset[str]]:
     """Every ``checked_clock`` call in one module's source, by how its owner is written.
-
-    **Aliases are resolved rather than assumed away.** A module may validly write
-    ``from ai_assistant.core.clock import checked_clock as guard`` and then call
-    ``guard(now, owner="NewSeam")``; a scan matching only the literal name would
-    miss the seam and the partition assertion would still pass, which is the exact
-    silence this roster exists to end. So the local names this module's imports
-    bind the guard to are collected first, and the call is matched against those.
-    The attribute form — ``clock.checked_clock(…)`` after any spelling of the
-    module import — is matched on the attribute, so no module alias can hide it
-    either.
-
-    What remains out of reach is a *runtime* rebinding: ``guard = checked_clock``
-    as a statement, or a call through a dictionary. Nothing static can follow
-    that, and nothing in the tree does it.
 
     Args:
         source: One module's text.
@@ -1340,26 +1404,11 @@ def _owners_in(source: str) -> tuple[frozenset[str], frozenset[str]]:
         expressions computed at run time, unparsed.
     """
     tree = ast.parse(source)
-    bound = {_GUARD} | {
-        alias.asname
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-        for alias in node.names
-        if alias.name == _GUARD and alias.asname is not None
-    }
+    aliases = _bindings(tree)
     literal: set[str] = set()
     computed: set[str] = set()
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        called = node.func
-        if isinstance(called, ast.Name):
-            hit = called.id in bound
-        elif isinstance(called, ast.Attribute):
-            hit = called.attr == _GUARD
-        else:
-            hit = False
-        if not hit:
+        if not isinstance(node, ast.Call) or not _refers_to(node.func, _GUARD, aliases):
             continue
         owner = next((kw.value for kw in node.keywords if kw.arg == "owner"), None)
         if isinstance(owner, ast.Constant) and isinstance(owner.value, str):
@@ -1392,29 +1441,41 @@ def _clock_seam_roster() -> tuple[frozenset[str], frozenset[str]]:
     return frozenset(literal), frozenset(computed)
 
 
-def test_the_roster_scan_follows_the_guard_under_any_name_a_module_can_bind() -> None:
+def test_the_roster_scans_follow_a_name_under_any_spelling_of_its_import() -> None:
     """A seam hidden behind an import alias is a seam this module never sees.
 
     No module in ``src/`` writes any of these spellings today, so nothing above
-    would fail if the scan handled only the first — and a scan that silently
+    would fail if the scans handled only the plain one — and a scan that silently
     stopped finding seams is worse than no scan, because the partition assertion
-    would go on passing. This is that scan run over source written to break it.
+    would go on passing. This is the three of them run over source written to
+    break each in turn: the guard called under an alias, a constructor whose owner
+    label is a literal called under an alias, and a subclass declared against an
+    aliased base, which is how a fourth ``_GrantedFacetSource`` could arrive with
+    no row driving it.
     """
-    literal, computed = _owners_in(
-        textwrap.dedent("""
-            from ai_assistant.core.clock import checked_clock
-            from ai_assistant.core.clock import checked_clock as guard
-            from ai_assistant.core import clock as module
+    source = textwrap.dedent("""
+        from ai_assistant.core.clock import checked_clock
+        from ai_assistant.core.clock import checked_clock as guard
+        from ai_assistant.core import clock as module
+        from ai_assistant.memory.traces import MemoryTraces as Emitter
+        from ai_assistant.context.sources import _GrantedFacetSource as Facet
 
-            a = checked_clock(now, owner="Plain")
-            b = guard(now, owner="Aliased")
-            c = module.checked_clock(now, owner="Qualified")
-            d = guard(now, owner=type(self).__name__)
-            """)
-    )
+        a = checked_clock(now, owner="Plain")
+        b = guard(now, owner="Aliased")
+        c = module.checked_clock(now, owner="Qualified")
+        d = guard(now, owner=type(self).__name__)
+        e = Emitter(kind=kind, sink=sink, now=now, owner="Aliased emitter")
+
+        class SmsContextSource(Facet):
+            pass
+        """)
+
+    literal, computed = _owners_in(source)
 
     assert literal == {"Plain", "Aliased", "Qualified"}
     assert computed == {"type(self).__name__"}
+    assert _literal_owners_given_in(source, "MemoryTraces") == {"Aliased emitter"}
+    assert _derived_classes_in(source)["_GrantedFacetSource"] == {"SmsContextSource"}
 
 
 def test_the_seam_table_is_the_whole_set() -> None:
