@@ -3028,6 +3028,18 @@ def _disclose_bootstrap(disclosure: Disclosure) -> None:
     signal safe, because "an advertisement the gateway cannot make safe is an
     instruction to kill it".
 
+    **The origin line makes no claim about a live listener, and that is the point
+    of the wording.** ``run_gateway`` discloses *before* it serves — ADR-0182 §1
+    says so of the disposition it installs "before any disclosure names the act",
+    and ADR-0168 §5's "a gateway that cannot disclose its bootstrap value does not
+    start" puts the disclosure ahead of the bind by construction. So on a failed
+    bind the owner used to read "listening on http://…" one line above the error
+    saying the port could not be bound: a claim about a listener that did not exist
+    and, in that run, never would (#1460). Naming the address the gateway is *for*
+    is true when it is written and just as useful to paste. Neither ADR constrains
+    the verb; both constrain what the disclosure must name, and §1's four — the
+    value, the origins, the count and the act — are all still here.
+
     Args:
         disclosure: The value, the origins, the advisory count and the act.
 
@@ -3045,7 +3057,7 @@ def _disclose_bootstrap(disclosure: Disclosure) -> None:
     )
     try:
         sys.stdout.write(
-            f"Assistant gateway listening on {', '.join(disclosure.origins)}\n"
+            f"Assistant gateway at {', '.join(disclosure.origins)}\n"
             f"Bootstrap value (good once, and only for this gateway process):\n"
             f"{disclosure.value}\n"
             f"{beside}"

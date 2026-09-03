@@ -31,9 +31,11 @@ from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import (
     ConfigurationError,
     DeferralStoreError,
+    GrantError,
     InvalidGrantError,
     MemoryStoreError,
     ModelUnavailableError,
+    OversizedValueError,
     PlanningError,
     UngrantableSourceError,
 )
@@ -6231,6 +6233,11 @@ class _ScriptedGrantEngine(FakeAssistantEngine):
     reaches only two on its own. ``commit_then_lose`` is the one that could not be
     written any other way: the record lands and the answer does not, which is
     ADR-0085 §8e's residual (#570) and the whole reason the third outcome exists.
+
+    A fourth arm, ``standing_raises``, covers the **read** rather than an act: the
+    canonical fake answers ``standing_grants`` from its recorded history and has no
+    way to refuse, so the branch ``_drive_standing`` keeps for a store fault and an
+    oversized set was reachable from no test at all (#1047).
     """
 
     def __init__(self) -> None:
@@ -6238,6 +6245,8 @@ class _ScriptedGrantEngine(FakeAssistantEngine):
         super().__init__()
         #: Raised instead of answering ``revoke``, after nothing has been recorded.
         self.revoke_raises: BaseException | None = None
+        #: Raised instead of answering ``standing_grants``, having read nothing.
+        self.standing_raises: BaseException | None = None
         #: Raised instead of answering ``grant``.
         self.grant_raises: BaseException | None = None
         #: Whether ``grant`` records its grant *before* raising — the hub having
@@ -6247,6 +6256,18 @@ class _ScriptedGrantEngine(FakeAssistantEngine):
         #: **second connected client**'s act lands: between our two calls, on the
         #: hub's side, exactly as ADR-0102 §5 says two clients may.
         self.after_revoke: Callable[[], None] | None = None
+
+    async def standing_grants(self) -> tuple[SourceGrant, ...]:
+        """Answer the live set, or refuse it — never answer it partly.
+
+        The call is recorded before the refusal, so a case can tell "asked and was
+        refused" from "never asked", which is the difference between the client
+        rendering an error and the client having quietly skipped the read.
+        """
+        if self.standing_raises is not None:
+            self.calls.append(("standing_grants", {}))
+            raise self.standing_raises
+        return await super().standing_grants()
 
     async def revoke(self, source: str) -> SourceGrant | None:
         """Withdraw, or raise what was scripted before touching anything."""
@@ -6366,6 +6387,67 @@ def test_granted_on_an_empty_store_offers_nothing_as_already_granted(
     assert "have not granted anything" in rendered
     assert "assistant sources" in rendered
     assert "calendar" not in rendered
+
+
+def test_granted_reports_a_store_that_could_not_answer_and_lists_nothing(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read that failed is a failure, not an empty authorization set (#1047).
+
+    ``GrantError`` is the store fault, and ADR-0097 §5a's "a driver that cannot get
+    an answer fails closed" is stated on the error itself because the tempting
+    reading is the other one. Here the tempting reading has a second face: a client
+    that caught the refusal and fell through to the renderer would print the empty
+    set's wording — telling a user who authorises three sources that they have
+    authorised none, on the one surface whose subject is what they decided.
+    """
+    engine = _amendable_engine()
+    engine.standing_raises = GrantError("the grant store could not be opened")
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["granted"])
+
+    assert result.exit_code == 1
+    rendered = output.getvalue()
+    assert "the grant store could not be opened" in rendered
+    assert "have not granted anything" not in rendered
+    assert "calendar" not in rendered
+    assert [call[0] for call in engine.calls] == ["standing_grants"]
+
+
+def test_granted_reports_a_set_too_large_to_carry_rather_than_a_page_of_it(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0139 §2's refusal has to survive as far as the terminal (#1047).
+
+    The clause is that a frame too small for the live set reaches the user as a
+    **refusal**, never as an empty or partial list, because "a page of what you
+    authorise reads as complete while omitting an authorisation". The engine half
+    is pinned against all three implementations by the shared conformance suite
+    (``test_standing_grants_refuses_an_oversized_set_rather_than_truncating_it``);
+    what had no test is the last hop, where a client that swallowed
+    ``OversizedValueError`` would invert the clause exactly — and would invert it
+    with a green suite, because the exit code is not what is wrong in that world.
+
+    So the assertion that carries this case is the **absence** of the empty-set
+    wording, not the presence of the exit code.
+    """
+    engine = _amendable_engine()
+    engine.standing_raises = OversizedValueError(
+        "the live set does not fit in one frame",
+        limit=65024,
+        size=70112,
+    )
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["granted"])
+
+    assert result.exit_code == 1
+    rendered = output.getvalue()
+    assert "does not fit in one frame" in rendered
+    assert "have not granted anything" not in rendered
+    assert "calendar" not in rendered
+    assert [call[0] for call in engine.calls] == ["standing_grants"]
 
 
 def test_amend_renders_the_location_before_it_asks_and_before_it_revokes(
@@ -6659,6 +6741,39 @@ def _id_invocations(value: str) -> tuple[tuple[str, list[str]], ...]:
     )
 
 
+def _wire_recording_opens(monkeypatch: pytest.MonkeyPatch, engine: object) -> list[None]:
+    """Wire ``engine`` as :func:`_wire` does, and record every open of a client.
+
+    The seam these cases are actually about. ``_wire``'s stub answers with the
+    engine and keeps no record, so a test using it can assert the *exit code* of a
+    refusal but not the claim its own name makes — that the refusal landed **before
+    any client was built** (ADR-0085 §3c's "before any I/O", #728). A regression
+    that opened the hub, probed it, and only then converted a malformed id into an
+    exit-2 usage error would keep every assertion those cases held.
+
+    Recording rather than raising, deliberately: a stub that raised would fail the
+    invocation for a second reason and could not tell "the refusal came first" from
+    "the refusal came second and the failure masked it". The returned list is empty
+    exactly when no client was opened, whatever else the command did.
+
+    Args:
+        monkeypatch: The patcher whose lifetime the substitution follows.
+        engine: The engine a client, if one were opened, would be.
+
+    Returns:
+        One entry per :func:`~ai_assistant.interfaces.cli._open_engine` awaited.
+    """
+    _wire(monkeypatch, engine)
+    opened: list[None] = []
+
+    async def _open() -> object:
+        opened.append(None)
+        return engine
+
+    monkeypatch.setattr(cli, "_open_engine", _open)
+    return opened
+
+
 @pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
 def test_every_id_argument_refuses_a_blank_before_any_client_is_built(
     blank: str, monkeypatch: pytest.MonkeyPatch
@@ -6670,13 +6785,19 @@ def test_every_id_argument_refuses_a_blank_before_any_client_is_built(
     ``except (AssistantError, TransportError)`` boundary and is caught by neither.
     Refusing during Typer's parameter parsing makes it a usage error instead, the
     treatment blank ``learn`` content and a blank ``source`` already get.
+
+    **And no client is opened**, which is the half this case's name promised and did
+    not check (#728). Exit 2 alone is passed by a refusal that first built a client
+    and probed the hub; the recorded opens are what say the refusal happened at the
+    parse boundary, where ADR-0085 §3c's "before any I/O" puts it.
     """
-    _wire(monkeypatch, FakeAssistantEngine())
+    opened = _wire_recording_opens(monkeypatch, FakeAssistantEngine())
 
     for name, argv in _id_invocations(blank):
         result = CliRunner().invoke(cli.app, argv)
         assert result.exit_code == 2, name
         assert result.exception is None or isinstance(result.exception, SystemExit), name
+        assert opened == [], name
 
 
 def test_every_id_argument_refuses_a_value_with_no_utf8_encoding(
@@ -6693,14 +6814,19 @@ def test_every_id_argument_refuses_a_value_with_no_utf8_encoding(
     than a policy borrowed from ``_present_source``: a value with no UTF-8 encoding
     is one this process may not be able to write down, so reporting the fault would
     fail the same way the fault does.
+
+    **And, as with a blank, no client is opened** (#728): the value has no UTF-8
+    encoding, so a command that reached the hub with it would have to write it down
+    somewhere on the way — which is the failure, not the report of it.
     """
-    _wire(monkeypatch, FakeAssistantEngine())
+    opened = _wire_recording_opens(monkeypatch, FakeAssistantEngine())
     unwritable = "\udce9"
 
     for name, argv in _id_invocations(unwritable):
         result = CliRunner().invoke(cli.app, argv)
         assert result.exit_code == 2, name
         assert unwritable not in result.output, name
+        assert opened == [], name
 
 
 def test_an_id_is_stripped_before_it_is_looked_up_or_reported(

@@ -459,6 +459,31 @@ def test_a_disclosure_of_a_gateway_without_the_act_names_neither_it_nor_the_pid(
     assert "kill" not in written
 
 
+def test_the_origin_line_names_the_address_without_claiming_a_live_listener(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#1460: the disclosure is written before anything is bound, so it says so.
+
+    ``run_gateway`` mints and discloses before it serves — ADR-0168 §5's "a gateway
+    that cannot disclose its bootstrap value does not start" puts the disclosure
+    ahead of the bind — so a first line reading "listening on http://…" was a claim
+    about a listener that, on a failed bind, never came to exist: the owner read it
+    directly above the error saying the port could not be bound.
+
+    Asserted as a negative on the verb *and* a positive on the origin together,
+    because either alone is passed by the wrong fix: dropping the address satisfies
+    the first and loses what ADR-0182 §1 requires the disclosure to name, and the
+    old line satisfies the second.
+    """
+    cli._disclose_bootstrap(_disclosure("the-value"))
+
+    written = capsys.readouterr().out
+
+    assert "http://127.0.0.1:8422" in written
+    assert "listening" not in written
+    assert "serving" not in written
+
+
 def test_the_bootstrap_value_is_written_to_standard_output_and_not_logged(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
