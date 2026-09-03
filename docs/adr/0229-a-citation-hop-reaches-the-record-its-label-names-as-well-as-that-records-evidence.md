@@ -249,9 +249,18 @@ ADR widens.
 > as before this ADR: the budget is spent at the servicer, a cut record is in no group
 > of the turn's supply, and §3's supply-holds test excludes it. ADR-0227 §4's rule that
 > *"the records it cut render **nothing at all**"* binds unchanged, and no expansion
-> order can reach around it. **A record a label named is never excluded by that test**,
-> because §2 above shows it is in the supply by construction — so the restriction bites
-> on truncated evidence and on nothing this ADR admits.
+> order can reach around it. **A record whose label resolved to a live store record is
+> never excluded by that test**, because §2 above shows such a record is in the supply
+> by construction — so the restriction bites on truncated evidence and on nothing this
+> ADR admits.
+
+> **Normative.** **That last sentence is about the supply-holds test and is never a
+> route into the carrier.** A label whose record `MemoryStore.get_many` does not return
+> resolved to **nothing** (§4 below): it never enters this section's expansion sequence
+> at all, so there is no entry for any later test to keep or to drop. **No
+> implementation reads the clause above as admitting a named record from the supply's
+> own copy**, and §4's deleted-record case is entire and unchanged — which is the one
+> case where doing otherwise would render a forgotten exchange back to the user.
 
 > **Normative.** **The deduplication is what resolves the two rules where they meet,
 > and no implementation reorders to satisfy the relation after it.** A hop over labels
