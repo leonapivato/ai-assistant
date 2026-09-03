@@ -1099,24 +1099,36 @@ def load_adrs(root: Path) -> dict[int, tuple[str, str]]:
             next-free number — because that bookkeeping has gone wrong before.
             This is the check that makes the result loud rather than silent
             (#1245).
+
+    **Nothing is read until every number is known to be unique.** A collision is
+    decidable from the filenames alone, so reading first would let an unrelated
+    file fault — a non-UTF-8 byte, a permission — crash the run before the defect
+    it could have named, on a tree where the defect was determinable without
+    opening anything. The two passes are that guarantee: the first decides, the
+    second reads.
     """
-    adrs: dict[int, tuple[str, str]] = {}
     directory = root / "docs" / "adr"
     if not directory.is_dir():
-        return adrs
-    seen: dict[int, list[str]] = {}
+        return {}
+    found: dict[int, list[Path]] = {}
     for file in sorted(directory.rglob("*.md")):
         match = _ADR_FILENAME_RE.match(file.name)
-        if match is None:
-            continue
-        number = int(match.group(1))
-        relative = file.relative_to(root).as_posix()
-        seen.setdefault(number, []).append(relative)
-        adrs[number] = (relative, file.read_text(encoding="utf-8"))
-    collisions = {number: paths for number, paths in seen.items() if len(paths) > 1}
+        if match is not None:
+            found.setdefault(int(match.group(1)), []).append(file)
+    collisions = {
+        number: [file.relative_to(root).as_posix() for file in files]
+        for number, files in found.items()
+        if len(files) > 1
+    }
     if collisions:
         raise DuplicateAdrNumberError(_collision_message(collisions))
-    return adrs
+    return {
+        number: (
+            files[0].relative_to(root).as_posix(),
+            files[0].read_text(encoding="utf-8"),
+        )
+        for number, files in found.items()
+    }
 
 
 def _collision_message(collisions: dict[int, list[str]]) -> str:
