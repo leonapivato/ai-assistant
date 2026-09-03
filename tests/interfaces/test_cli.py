@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 import typer.main
+from cli_open_recorder import wire_recording_opens
 from rich.console import Console
 from typer.core import TyperGroup
 from typer.testing import CliRunner
@@ -1228,16 +1229,12 @@ def _wire_recording_opens(monkeypatch: pytest.MonkeyPatch, engine: object) -> li
     probed it, and only then converted a malformed argument into an exit-2 usage
     error would keep every assertion those cases held.
 
-    Recording rather than raising, deliberately: a stub that raised would fail the
-    invocation for a second reason and could not tell "the refusal came first" from
-    "the refusal came second and the failure masked it". The returned list is empty
-    exactly when no client was opened, whatever else the command did.
-
-    It sits beside :func:`_wire` rather than beside the id arguments that first
-    needed it because the cases making that claim are spread the length of this
-    module — ``--timeout``, ``learn`` content and ``--kind``, ``--limit``,
-    ``--offset`` and ``--band``, a grant's ``source``, a quiet window, and the id
-    arguments themselves (#1970).
+    The observation itself is :func:`cli_open_recorder.wire_recording_opens`, which
+    three sibling modules make the same claim through (#1973); this binds it to
+    *this* module's wiring. The cases making the claim here are spread the length of
+    the module — ``--timeout``, ``learn`` content, ``--kind``, an ``--about-person``,
+    ``--limit``, ``--offset`` and ``--band``, a grant's ``source``, a repeated
+    ``--scope``, a quiet window, and the id arguments themselves.
 
     Args:
         monkeypatch: The patcher whose lifetime the substitution follows.
@@ -1246,15 +1243,7 @@ def _wire_recording_opens(monkeypatch: pytest.MonkeyPatch, engine: object) -> li
     Returns:
         One entry per :func:`~ai_assistant.interfaces.cli._open_engine` awaited.
     """
-    _wire(monkeypatch, engine)
-    opened: list[None] = []
-
-    async def _open() -> object:
-        opened.append(None)
-        return engine
-
-    monkeypatch.setattr(cli, "_open_engine", _open)
-    return opened
+    return wire_recording_opens(_wire, monkeypatch, engine)
 
 
 def test_the_open_recorder_sees_the_client_an_accepted_invocation_builds(
@@ -1418,7 +1407,7 @@ def test_learn_passes_a_subject_through_byte_for_byte(monkeypatch: pytest.Monkey
 
 
 @pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
-def test_learn_rejects_a_blank_about_person(blank: str) -> None:
+def test_learn_rejects_a_blank_about_person(blank: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """A blank subject is a usage error, not an uncaught ValidationError (§7).
 
     ``FeedbackEvent.about_person`` is ``NonBlankEncodableText``, whose refusal is
@@ -1426,29 +1415,44 @@ def test_learn_rejects_a_blank_about_person(blank: str) -> None:
     built, which is *before* :func:`_learn_feedback`'s error boundary opens. The
     parse-time callback turns it into a clean exit 2, the shape ``_present_source``
     already uses one command over.
+
+    **And no client is opened** (#1973). "Parse-time" is the whole of the claim
+    above — the callback runs while Typer is still binding parameters, before
+    ``learn`` has reached its own body — and neither the exit code nor the absent
+    exception says so on its own. A client is wired here for the first time so that
+    the refusal has one to fail to open.
     """
+    opened = _wire_recording_opens(monkeypatch, _RecordingEngine(_stored_outcome()))
+
     result = CliRunner().invoke(
         cli.app, ["learn", "--kind", "correction", "x", "--about-person", blank]
     )
 
     assert result.exit_code == 2  # Typer's usage-error code
     assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert opened == []
 
 
-def test_learn_rejects_an_unencodable_about_person() -> None:
+def test_learn_rejects_an_unencodable_about_person(monkeypatch: pytest.MonkeyPatch) -> None:
     r"""A lone surrogate reaches argv and no UTF-8 encoder will take it.
 
     Linux passes argv as bytes and Python decodes it with ``surrogateescape``, so
     ``assistant learn x --about-person $'\xe9'`` arrives as half a character.
     ``EncodableText`` refuses it, and without the parse-time check that refusal
     would land as the same uncaught ``ValidationError`` a blank one would.
+
+    Refused at the same boundary as a blank one, and observed the same way: the
+    value never reaches a client, because no client is opened (#1973).
     """
+    opened = _wire_recording_opens(monkeypatch, _RecordingEngine(_stored_outcome()))
+
     result = CliRunner().invoke(
         cli.app, ["learn", "--kind", "correction", "x", "--about-person", "\udce9"]
     )
 
     assert result.exit_code == 2
     assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert opened == []
 
 
 def test_learn_guarded_flag_reaches_the_engine_on_the_event(
@@ -5961,13 +5965,20 @@ def test_a_repeated_scope_is_a_usage_error_and_never_a_traceback(
     Both the client and the engine raise ``ValueError`` for it, which is again not
     an :class:`AssistantError`, so ``--scope facet --scope facet`` escaped as a
     traceback for the same reason a blank source did.
+
+    **Refused at the parse boundary, which is asserted rather than asserted-about**
+    (#1973): ``_distinct_scope`` is a Typer callback, and the two places that would
+    otherwise raise are both *past* a client — so a refusal that had drifted behind
+    the open would be answering the same argument with the same exit code, from the
+    far side of the I/O this one precedes.
     """
-    _wire(monkeypatch, _granting_engine())
+    opened = _wire_recording_opens(monkeypatch, _granting_engine())
 
     result = CliRunner().invoke(
         cli.app, ["grant", "calendar", "--scope", "facet", "--scope", "facet", "--yes"]
     )
     assert result.exit_code == 2
+    assert opened == []
 
 
 def test_a_source_with_no_utf8_encoding_is_a_usage_error(
@@ -5984,14 +5995,20 @@ def test_a_source_with_no_utf8_encoding_is_a_usage_error(
     **The refusal does not echo the value**, which is both ADR-0097 §9's rule about
     a caller-supplied source and a practical necessity: the process may not be able
     to write it down at all.
+
+    **And "at the parse boundary" is observed rather than named** (#1973), for the
+    reason the blank-source case one over states: ``grant`` reaches the right answer
+    for a bad source partly by accident of ordering, so where the refusal falls
+    relative to the client is exactly what wants pinning.
     """
-    _wire(monkeypatch, _granting_engine())
+    opened = _wire_recording_opens(monkeypatch, _granting_engine())
     unwritable = "\udce9"
 
     result = CliRunner().invoke(cli.app, ["revoke", unwritable])
     assert result.exit_code == 2
     assert unwritable not in result.output
     assert CliRunner().invoke(cli.app, ["grant", unwritable, "--scope", "facet"]).exit_code == 2
+    assert opened == []
 
 
 def test_the_source_reaches_the_hub_exactly_as_it_was_typed(
