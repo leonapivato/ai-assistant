@@ -1076,6 +1076,25 @@ class DuplicateAdrNumberError(Exception):
     """
 
 
+def _markdown_files(directory: Path) -> list[Path]:
+    """Return every regular ``*.md`` file under ``directory``, in sorted order.
+
+    ``rglob`` yields directories as readily as files, and nothing about a
+    directory's name stops it ending in ``.md``. Both ADR discovery passes below
+    read this rather than ``rglob`` directly, because a directory named
+    ``0002-drafts.md`` is wrong for each of them in a different way: read as a
+    document it raises ``IsADirectoryError``, and counted as an ADR it is a
+    second file carrying ADR-0002 and a collision that does not exist. The
+    second is the worse of the two. ADR-0088 §6's asymmetry is that a miss is
+    benign and a false report is not, and a phantom collision is a false report
+    that suppresses the entire run (#1999).
+
+    ``is_file()`` follows symlinks, so a symlinked ADR is still an ADR, and a
+    dangling one is skipped rather than faulting on the read.
+    """
+    return [path for path in sorted(directory.rglob("*.md")) if path.is_file()]
+
+
 def load_adrs(root: Path) -> dict[int, tuple[str, str]]:
     """Return every numbered ADR: number -> (relative path, whole text).
 
@@ -1111,7 +1130,7 @@ def load_adrs(root: Path) -> dict[int, tuple[str, str]]:
     if not directory.is_dir():
         return {}
     found: dict[int, list[Path]] = {}
-    for file in sorted(directory.rglob("*.md")):
+    for file in _markdown_files(directory):
         match = _ADR_FILENAME_RE.match(file.name)
         if match is not None:
             found.setdefault(int(match.group(1)), []).append(file)
@@ -1221,11 +1240,16 @@ def _adr_documents(root: Path) -> list[tuple[str, str]]:
         return []
     return [
         (file.relative_to(root).as_posix(), file.read_text(encoding="utf-8"))
-        for file in sorted(directory.rglob("*.md"))
+        for file in _markdown_files(directory)
     ]
 
 
-def check(root: Path, *, tracker_numbers: Iterable[int] | None) -> Report:
+def check(
+    root: Path,
+    *,
+    tracker_numbers: Iterable[int] | None,
+    adrs: dict[int, tuple[str, str]],
+) -> Report:
     """Run every check ADR-0088 §6 permits over one checkout.
 
     Args:
@@ -1233,16 +1257,16 @@ def check(root: Path, *, tracker_numbers: Iterable[int] | None) -> Report:
         tracker_numbers: Every issue/PR number that exists, or ``None`` when the
             tracker could not be read — in which case tracker citations are
             unevaluable and pass silently (§6).
+        adrs: The corpus :func:`load_adrs` returned. It is the caller's rather
+            than this function's because a collision in it means there is no
+            report to compute at all, and :func:`main` therefore has to settle
+            it before it does anything expensive — see the note there. Passing
+            the loaded mapping in is what keeps that ordering from walking
+            ``docs/adr/`` twice (#2000).
 
     Returns:
         The whole report, Tier 1 findings first.
-
-    Raises:
-        DuplicateAdrNumberError: Two files under ``docs/adr/`` carry the same number,
-            which makes the issued set the rest of this function is computed
-            over unsound. No report is produced rather than an unsound one.
     """
-    adrs = load_adrs(root)
     targets = build_decision_targets(adrs)
     known_trackers = None if tracker_numbers is None else frozenset(tracker_numbers)
     definitions = build_definition_index(root)
@@ -1538,15 +1562,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         finding but the reason there is no report to qualify. Otherwise **1**
         when a Tier 1 finding exists and ``--report-only`` was not passed, else
         **0**. Tier 2 never affects the exit code (ADR-0088 §3, §6).
+
+    **The corpus is loaded before the tracker is fetched.** A collision is
+    decidable from the filenames alone and ends the run with no report, so any
+    tracker numbers gathered first would be gathered only to be discarded —
+    while ``gh api --paginate`` carries a 120-second timeout, which is how long
+    a purely local, purely deterministic diagnostic could be made to wait on a
+    stalled network before it was printed (#2000). The loaded mapping is then
+    handed to :func:`check` rather than reloaded there, so deciding early costs
+    no second walk of ``docs/adr/``.
     """
     args = _parse_args(argv)
     root = args.root.resolve()
-    trackers = None if args.no_tracker else fetch_tracker_numbers(root)
     try:
-        report = check(root, tracker_numbers=trackers)
+        adrs = load_adrs(root)
     except DuplicateAdrNumberError as error:
         print(error, file=sys.stderr)
         return 2
+    trackers = None if args.no_tracker else fetch_tracker_numbers(root)
+    report = check(root, tracker_numbers=trackers, adrs=adrs)
 
     renderers = {"text": format_text, "markdown": format_markdown}
     if args.format == "json":

@@ -125,11 +125,19 @@ def _rendered(root: Path, output_format: str, *args: str) -> str:
     return result.stdout
 
 
-def _fake_gh(directory: Path, numbers: list[int]) -> dict[str, str]:
-    """Put a ``gh`` on PATH that reports ``numbers`` and never touches the network."""
+def _fake_gh(directory: Path, numbers: list[int], *, marker: Path | None = None) -> dict[str, str]:
+    """Put a ``gh`` on PATH that reports ``numbers`` and never touches the network.
+
+    Args:
+        directory: Where to write the shim; it is prepended to ``PATH``.
+        numbers: The issue/PR numbers the shim reports.
+        marker: A path the shim creates before answering, so a test can assert
+            from its *absence* that the fetch never happened at all.
+    """
     script = directory / "gh"
     body = "\n".join(str(n) for n in numbers)
-    script.write_text(f'#!/bin/sh\ncat <<"EOF"\n{body}\nEOF\n', encoding="utf-8")
+    touch = "" if marker is None else f': > "{marker}"\n'
+    script.write_text(f'#!/bin/sh\n{touch}cat <<"EOF"\n{body}\nEOF\n', encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     env = dict(os.environ)
     env["PATH"] = f"{directory}{os.pathsep}{env.get('PATH', '')}"
@@ -1335,3 +1343,78 @@ def test_a_collision_is_named_even_when_one_of_the_files_cannot_be_decoded(
     assert "docs/adr/0002-two.md" in result.stderr
     assert "docs/adr/0002-two-again.md" in result.stderr
     assert "UnicodeDecodeError" not in result.stderr
+
+
+# --------------------------------------------------------------------------- #
+# #1999 / #2000 — the discovery pass, and where the collision is decided.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_directory_named_like_an_adr_is_not_a_second_file_on_that_number(
+    tmp_path: Path,
+) -> None:
+    """``rglob`` yields directories, and one named like an ADR is not one (#1999).
+
+    ADR-0088 §6's asymmetry — a miss is benign, a false report is not — is what
+    ranks the two failures this guards. Without it the directory is a second
+    file carrying ADR-0001, so the run exits 2 naming a collision nobody
+    created and prints no report at all; the real corpus, whose one dangling
+    citation is asserted below, is never judged.
+    """
+    _make_repo(tmp_path, {"0001-one.md": "# 1. One\n\nSee ADR-0002.\n"})
+    (tmp_path / "docs" / "adr" / "0001-drafts.md").mkdir()
+
+    result = _run(tmp_path, "--no-tracker")
+
+    assert result.returncode == 1, result.stderr
+    assert result.stderr == ""
+    assert _citations(json.loads(result.stdout), "decision") == ["ADR-0002"]
+
+
+def test_a_directory_ending_in_md_is_not_a_document_to_read(tmp_path: Path) -> None:
+    """The second discovery site has no filename filter, so only ``is_file()`` stops it.
+
+    ``notes.md`` carries no ADR number, so the collision guard above never sees
+    it; it reaches the pass that reads every document under ``docs/adr``, where
+    without the guard ``read_text`` raises ``IsADirectoryError`` and the whole
+    run dies on a traceback.
+    """
+    _make_repo(tmp_path, {"0001-one.md": "# 1. One\n\nSee ADR-0002.\n"})
+    (tmp_path / "docs" / "adr" / "notes.md").mkdir()
+
+    result = _run(tmp_path, "--no-tracker")
+
+    assert result.returncode == 1, result.stderr
+    assert "IsADirectoryError" not in result.stderr
+    assert _citations(json.loads(result.stdout), "decision") == ["ADR-0002"]
+
+
+def test_a_collision_is_decided_before_the_tracker_is_fetched(tmp_path: Path) -> None:
+    """The collision path exits with no report, so it was never going to use ``gh``.
+
+    ``fetch_tracker_numbers`` allows the call 120 seconds. Making a decision
+    that is local, deterministic and already known wait that out on a stalled
+    network is the whole of #2000 — so the shim here records that it ran, and
+    what is asserted is that it did not.
+    """
+    _make_repo(tmp_path, _COLLIDING)
+    marker = tmp_path / "gh-was-run"
+    env = _fake_gh(tmp_path, [1, 2, 3], marker=marker)
+
+    result = _run(tmp_path, env=env)
+
+    assert result.returncode == 2
+    assert "docs/adr/0002-two-again.md" in result.stderr
+    assert not marker.exists()
+
+
+def test_the_tracker_is_still_fetched_when_the_corpus_is_sound(tmp_path: Path) -> None:
+    """The guard against fixing the latency by never fetching at all."""
+    _make_repo(tmp_path, {"0001-one.md": "# 1. One\n\nSee #3 and #9.\n"})
+    marker = tmp_path / "gh-was-run"
+    env = _fake_gh(tmp_path, [1, 2, 3], marker=marker)
+
+    report = _report(tmp_path, env=env)
+
+    assert marker.exists()
+    assert _citations(report, "tracker") == ["#9"]
