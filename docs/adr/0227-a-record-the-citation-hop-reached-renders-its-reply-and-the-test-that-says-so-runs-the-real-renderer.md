@@ -1,6 +1,6 @@
 # 227. A record the citation hop reached renders its reply, and the test that says so runs the real renderer
 
-- Status: Accepted
+- Status: Accepted, §§1 and 3 amended by ADR-0229
 - Date: 2026-09-03
 - **Partially supersedes:**
   [ADR-0222](0222-the-stored-reply-is-read-back-in-the-conversation-tail-and-by-the-observer.md)
@@ -62,6 +62,42 @@
   accumulates one hop set across both, in ADR-0226 §6's order, with §4's cap of ten
   reply lines taken over that one set — and relies on §7's test-fidelity rule for its
   own tests. Refs #1908, #1952.
+- Amended: 2026-09-03 by ADR-0229 — **§1's statement of the population, and §3's
+  statement of the carrier's contents and order.** §1's first sentence is the rule and
+  is unchanged — *"'Reached by the citation hop' is the whole of the test, and the
+  record's group is not part of it"* — but its second sentence states the population as
+  *"A record the hop resolved **through a named label's `Provenance.evidence`**"*, which
+  is narrower than the rule above it and which a reader, handed a carrier containing a
+  record a label **named**, could read as excluding it. §3 says the carrier holds *"the
+  distinct records the hop resolved … in ADR-0226 §6's order"*, and §6 fixes an order
+  over the records the servicer **appends**, which places nothing for a record the
+  servicer appends nothing for; ADR-0229 §3 places it, immediately before that record's
+  own evidence, and until it did two implementations could order the carrier
+  differently and render different prompts from one supply. Both are ADR-0082 §1's test
+  met; neither is a supersession, because nothing either clause forbids becomes
+  permitted.
+
+  **Everything else of §1 and §3 binds unchanged**, and most of it is load-bearing in
+  ADR-0229: §1's field test over `disposition` and `outcome` is the reason ADR-0229
+  applies **no** class or field test at the servicer; §1's conversation-tail exclusion
+  binds a named record exactly as it binds an evidence-reached one; §1's
+  caller-emitted-line rule and its silence at `planning/planner.py` and
+  `learning/observer.py` are untouched; and §3's supplied-never-inferred rule, its
+  division of labour — *"each component states what it alone knows, and neither holds a
+  second implementation of the other's rule"* — its empty-set cases, its namer rule and
+  its no-`core`, no-Protocol, no-`PROTOCOL_VERSION` clause all bind entire.
+
+  **§2, §4, §5, §6, §7, §8 and §9 are not amended.** §2's phrase-only rule for the
+  sighted query's records is untouched and ADR-0229 admits no record through the query.
+  §4's cap of ten, its ceiling, its deduplication and its silence about excluded records
+  bind unchanged over a carrier that now has more in it — and a carrier entry §1 does
+  not admit still consumes no position of the cap. §5's pair still counts records once
+  each. §7's fidelity rule is **applied** by ADR-0229's tests rather than changed. No
+  sentence of any of them becomes false or over-wide.
+
+  The `Status` line carries no leading token, so under ADR-0082 §2 the qualifier stays
+  on it beside this note. Appended note per ADR-0070 §1; no text below is rewritten.
+  Refs #1960, #1945, #1908.
 
 ## Context
 

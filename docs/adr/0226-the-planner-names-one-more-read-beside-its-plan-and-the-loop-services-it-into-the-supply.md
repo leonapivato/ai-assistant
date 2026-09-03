@@ -206,6 +206,41 @@
   note is the saying-so. What that leaves for the released version is #1956, and
   ADR-0228 §6 moves `PROTOCOL_VERSION` for **its** field rather than inheriting the
   reading. Appended note per ADR-0070 §1; no text below is rewritten.
+- Amended: 2026-09-03 by ADR-0229 — **§2's servicing clause for the `CITATION_HOP`
+  kind, and §3's "follows only" clause, in one respect each: the hop's *reach* is the
+  record a label names as well as that record's evidence.** §2 reads *"The loop
+  resolves each label **in code** to the record it labelled, reads that record's own
+  `Provenance.evidence`, and resolves those identifiers through
+  `MemoryStore.get_many`"*, and §3 reads *"A `CITATION_HOP` follows **only** the
+  labelled record's own stored `Provenance.evidence`."* Both describe a hop whose
+  result is the evidence and nothing else, and a reader holding only this ADR builds
+  exactly that — which is what `orchestration/reads.py::_hop_records` does, and what
+  #1960 measures: a planner that names the **episode** rather than a belief citing it
+  reaches nothing, because ADR-0074 §4 makes an episode *"the terminal citation: the
+  thing other records cite"* and its `Provenance.evidence` is empty. That reader would
+  now act differently, which is ADR-0082 §1's test met on both clauses.
+
+  **What §3 forbids is untouched.** Its prohibition is on a **second level** of
+  evidence — *"does not follow the evidence of a record reached by that hop"* — and
+  ADR-0229 reads no `Provenance.evidence` the labels did not name: reaching the named
+  record is zero levels of traversal, not two. §3's namer rule, its no-identifier
+  rule, its ordinal scheme, its resolves-to-nothing rule and its statement that a
+  label is meaningful only within the call that rendered it all bind entire, and two
+  of them are load-bearing in ADR-0229: the label space *is* the sequence the loop
+  passed the planner, which is why a named record is in the supply by construction,
+  and a label resolving to nothing still reaches nothing.
+
+  **§6, §7 and §9 are not amended and do not move**, which ADR-0229 §2 argues rather
+  than assumes: a named record enters no group of the supply, is never offered to §7's
+  deduplicated union as a candidate, spends no slot of §6's budget of ten, and is
+  counted in none of §9's three record counts. It enters ADR-0227 §3's carrier and
+  nothing else. No sentence of §6, §7 or §9 becomes false or over-wide, so under
+  ADR-0082 §1 there is nothing to record against them.
+
+  This ADR's `Status` line carries the leading `Partially superseded by` token, so
+  under ADR-0082 §2 no amendment qualifier is written on it and this note is the whole
+  record. Appended note per ADR-0070 §1; no text below is rewritten. Refs #1960,
+  #1945, #1908.
 
 ## Context
 
