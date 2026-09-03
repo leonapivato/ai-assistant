@@ -5399,16 +5399,305 @@ class PlanStep(BaseModel):
     )
 
 
-class ReadKind(StrEnum):
-    """What a planner's read request asks to have read (ADR-0226 §2).
+# --- the fetch seam: a listing of a configured root, and one file from it ------
+# ADR-0230 §4. Five values and one enumeration, all frozen and all refusing
+# unknown fields. The pair that carries a **capability** — `SourceListingEntry`
+# and `SourceListing` — is fetcher-facing and never crosses into `planning`;
+# `ShownFile` is the planner-facing projection and carries none, which is what
+# makes §4's containment a property of the types rather than a rule a planner is
+# trusted to keep.
+#
+# **What a token and a handle *are* is deliberately not stated here.** §4 fixes
+# four properties of the mechanism — unforgeable without state private to the
+# fetcher, a handle bound to the listing that minted it, a token committing to
+# its listing's ordered entry names, and verification that retains nothing — and
+# leaves the construction to the fetcher. So `core` carries the values and the
+# concrete fetcher owns what makes them unforgeable, exactly as §13 divides them.
 
-    A **closed** enumeration with exactly two members. ADR-0226 §1 rules that no
-    implementation, setting or later lane adds a third without the ADR that
+
+class FetchRefusal(StrEnum):
+    """Why a fetch produced no record (ADR-0230 §6).
+
+    A **closed** enumeration with exactly five members, and no lane adds a sixth
+    without the ADR that decides it. A refusal names a **class** and carries no
+    path, no name, no excerpt and no message from an underlying library: the
+    whole value is one of these members, so there is nowhere for one to sit.
+
+    **Every member is reachable over a real filesystem from an authentic entry**
+    (§6), which is why §6 re-applies every bound at ``fetch`` and carries none
+    from the listing. The clause is stated on the enumeration because an
+    enumeration is where a decision most easily acquires a member that only its
+    own prose can reach.
+
+    **There is no ``UNSUPPORTED_TYPE`` member and its absence is a decision**
+    (§6). The type allow-list is applied where the listing is built, so the only
+    caller who can name an unsupported file is one presenting an entry the
+    fetcher never minted — and §4 rules that refusal :attr:`NOT_FOUND`,
+    "deliberately the same class an absent file yields, so that it discloses
+    nothing about whether a guessed name exists under the root". A distinct class
+    would restore exactly that disclosure.
+    """
+
+    NOT_FOUND = "not_found"
+    """The named file is not one this fetcher can resolve **now**.
+
+    An absent file, an entry or listing this fetcher did not mint, an authentic
+    token carried onto an altered listing, a handle minted for a different
+    listing, a listing past either of §4's deadlines, and a ``name`` that is not a
+    single path component all land here — deliberately one class, so that a
+    caller holding nothing but a guess learns nothing about what the root holds
+    (ADR-0230 §4)."""
+
+    NOT_A_FILE = "not_a_file"
+    """The named object is not a regular file.
+
+    **Decided by what the object is, never by which step discovered it** (§4). A
+    directory, a named pipe, a socket, a block or character device, and a
+    symbolic link at the final component are all this class — including the kinds
+    that cannot be opened at all, where the open itself refuses because of the
+    object's kind. An implementation that classified only what it managed to open
+    and folded every open *failure* into :attr:`UNREADABLE` would pass the
+    directory and FIFO cases and mis-class the socket."""
+
+    UNREADABLE = "unreadable"
+    """The open or the read failed for a reason that is **not** about the
+    object's kind — a permission denial, an I/O error, a resource limit (§4)."""
+
+    TOO_LARGE = "too_large"
+    """The file exceeded ``fetch_max_file_bytes``, or its extracted text exceeded
+    ``fetch_max_content_bytes`` (§6).
+
+    Both bounds refuse rather than truncate: "No implementation returns a prefix,
+    a first page, a first *n* bytes, an abridgement or a 'first part of' record,
+    and none records a truncation flag in place of refusing." A file that *grew*
+    past the size bound between the listing and the fetch lands here too, because
+    the read is itself bounded and no bound is carried from the listing."""
+
+    EXTRACTION_FAILED = "extraction_failed"
+    """The file is of a supported format and its text could not be decoded (§6).
+
+    Extraction is a **decoding** — a deterministic, library-performed
+    transformation of bytes into the text they encode (§5) — and a failure of it
+    is a refusal rather than a raise, because there is no failure a caller would
+    handle differently from a refusal it must already handle (§4)."""
+
+
+class SourceListingEntry(BaseModel):
+    """One file a :class:`~ai_assistant.core.protocols.Fetcher` showed (ADR-0230 §4).
+
+    The **fetcher-facing** value: held by `orchestration`, handed back to
+    ``fetch``, and never crossing into `planning`. Its planner-facing projection
+    is :class:`ShownFile`, which carries no :attr:`handle` and so has no
+    capability to leak.
+
+    **It carries no path, no root and no directory component.** :attr:`name` is
+    what a person calls the file — one path component, rendered into a prompt
+    beside its label — and the address is the :attr:`handle`, which is rendered
+    nowhere.
+
+    **Display fields are not authority** (§4). Neither :attr:`size_bytes` nor
+    :attr:`modified_at` is consulted by any fetch decision: the file is named by
+    :attr:`name`, which a handle is bound over, and the size is decided against
+    the object ``fetch`` opens. So a copy carrying an altered ``size_bytes`` or
+    ``modified_at`` widens nothing and reaches nothing — it edits a rendering that
+    has already happened.
+
+    **A faithful copy is the same authority.** §4 forbids the fetcher retaining
+    anything, so a byte-identical copy of a minted entry is indistinguishable from
+    what was minted and is accepted; an implementation refusing one would be
+    deciding from retained object identity, which §4 rejects.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: NonBlankEncodableText = Field(
+        description=(
+            "What a person calls the file — one path component, never a path "
+            "(ADR-0230 §4). This is what a handle is bound over."
+        ),
+    )
+    size_bytes: int = Field(
+        ge=0,
+        description=(
+            "The file's size when it was listed. A **display** field: no fetch "
+            "decision consults it, and the bound is decided against the object "
+            "``fetch`` opens (ADR-0230 §4)."
+        ),
+    )
+    modified_at: UtcInstant = Field(
+        description=(
+            "When the filesystem last recorded a write (tz-aware). A **display** "
+            "field, offered so a person or a planner can tell one file from "
+            "another; it never reaches a ``Provenance`` or an ``Attestation``, "
+            "which ADR-0092 §3 forbids and ADR-0230 §5 leaves untouched."
+        ),
+    )
+    handle: EncodableText = Field(
+        description=(
+            "The opaque capability this entry is addressed by (ADR-0230 §4). "
+            "Minted by the fetcher for this listing, over this entry's name and "
+            "position; unforgeable without state private to the fetcher. Rendered "
+            "to no model, written to no log, and carried on no record."
+        ),
+    )
+
+
+class ShownFile(BaseModel):
+    """The planner-facing projection of a listing entry (ADR-0230 §4).
+
+    :class:`SourceListingEntry` minus its capability, and **nothing else**. The
+    loop projects each entry of the listing it holds onto one of these —
+    positionally, in order, one for one, the whole sequence — and passes that to
+    ``Planner.plan``.
+
+    **The containment is a property of this type rather than a rule a planner is
+    trusted to keep.** A ``Planner`` receives no ``handle``, no ``token`` and no
+    :class:`SourceListing`, so an implementation that rendered every field of
+    every value it was handed, logged them, or returned them discloses no
+    capability, because there is none on the value to disclose.
+
+    **It carries no label either.** The label is the entry's 1-based ordinal in
+    the sequence, derived on each side from the sequence itself (§2), so putting
+    one here would be a second place for the two sides to disagree.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: NonBlankEncodableText = Field(
+        description="What a person calls the file — one path component (ADR-0230 §4)."
+    )
+    size_bytes: int = Field(ge=0, description="The file's size when it was listed (ADR-0230 §4).")
+    modified_at: UtcInstant = Field(
+        description="When the filesystem last recorded a write (tz-aware; ADR-0230 §4)."
+    )
+
+
+class SourceListing(BaseModel):
+    """What a fetcher's configured root currently holds (ADR-0230 §4, §6).
+
+    The root's **direct children only** — no recursion, no subdirectory
+    traversal, no following of symbolic links out of the root — ordered most
+    recently modified first, capped at ``fetch_listing_max_entries``, and
+    restricted to the supported formats. The truncation and the ordering are both
+    **declared**, which is why the cap is not the indistinguishable truncation
+    ADR-0093 §5 refuses: a listing proposes no belief and mints no record.
+
+    **An empty listing is a valid, successful listing** and every clause here
+    holds on it. A root that cannot be read and an empty root both produce one,
+    and no consumer distinguishes them (§6).
+
+    **:attr:`read_at` is not the expiry's input** (§4). It is the tz-aware
+    instant this system listed, which §3 renders and ADR-0026 §1 governs; the two
+    deadlines are bound into the authenticated :attr:`token`, are rendered
+    nowhere, and outlive no process.
+
+    **The token commits to the ordered entry names**, which is what makes an
+    authentic token useless over an altered listing: an entries tuple that was
+    emptied, shortened, reordered, or had an entry's ``name`` changed is not the
+    sequence that was signed, and every fetch against it is refused
+    :attr:`FetchRefusal.NOT_FOUND`. The tuple a caller hands in is untrusted
+    input rather than evidence — it is read, and never believed.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source: EncodableText = Field(
+        description=(
+            "The producing fetcher's declared identity, equal to its ``name`` — "
+            "Tier 2, stable, and never derived from the root's location "
+            "(ADR-0230 §4, ADR-0189, ADR-0190)."
+        ),
+    )
+    read_at: UtcInstant = Field(
+        description=(
+            "When **this system** listed (tz-aware), captured once at acquisition. "
+            "Not the expiry's input, which lives inside ``token`` (ADR-0230 §4)."
+        ),
+    )
+    entries: tuple[SourceListingEntry, ...] = Field(
+        default=(),
+        description=(
+            "The root's supported direct children, most recently modified first "
+            "and capped. Empty is a **successful** listing (ADR-0230 §4, §6)."
+        ),
+    )
+    token: EncodableText = Field(
+        description=(
+            "The opaque authority this listing is verified by (ADR-0230 §4). "
+            "Minted by the fetcher, committing to the ordered entry names and to "
+            "both expiry deadlines. Rendered to no model and written to no log."
+        ),
+    )
+
+
+class FetchOutcome(BaseModel):
+    """What one fetch produced: a record, or a refusal (ADR-0230 §4).
+
+    **Exactly one of the two, enforced here rather than by a caller.** Neither
+    both nor neither: a value carrying both would be two answers wearing one
+    outcome's name, and one carrying neither would be the one outcome §6 says a
+    fetch never has — "neither succeeding nor failing".
+
+    **A refusal is a resolved outcome and never a failure** (§6). It adds no
+    record, fails no turn, degrades no servicing and discards no other kind's
+    records. Neither ``Fetcher`` member raises for a source reason, and ADR-0230
+    adds no error class to ``core/errors.py``, because there is no failure a
+    caller would handle differently from a refusal it must already handle.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    record: MemoryRecord | None = Field(
+        default=None,
+        description=(
+            "The one record a successful fetch minted — ``SEMANTIC``, "
+            "``EXTERNAL``-sourced, carrying the file's text verbatim "
+            "(ADR-0230 §5). ``None`` where the fetch was refused."
+        ),
+    )
+    refusal: FetchRefusal | None = Field(
+        default=None,
+        description=(
+            "Why no record was produced (ADR-0230 §6). ``None`` where one was. A "
+            "**class** and nothing else: no path, no name, no excerpt, no message."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _exactly_one_of_a_record_and_a_refusal(self) -> FetchOutcome:
+        """Refuse an outcome carrying both answers, and one carrying neither.
+
+        ADR-0230 §4 states the invariant on the model rather than on its
+        producers, so a fetcher cannot emit an unreadable outcome and a consumer
+        never has to decide which half to believe.
+        """
+        if self.record is not None and self.refusal is not None:
+            msg = "a fetch outcome carries a record or a refusal, never both"
+            raise ValueError(msg)
+        if self.record is None and self.refusal is None:
+            msg = "a fetch outcome carries a record or a refusal, never neither"
+            raise ValueError(msg)
+        return self
+
+
+class ReadKind(StrEnum):
+    """What a planner's read request asks to have read (ADR-0226 §2, ADR-0230 §1).
+
+    A **closed** enumeration with exactly three members. ADR-0226 §1 rules that no
+    implementation, setting or later lane adds a fourth without the ADR that
     decides it, and that no lane widens an admitted kind's meaning to carry a read
     the ADR that admitted it did not describe. §4 adds that the vocabulary is
     **added to and never renamed**: no later ADR removes a member, renames one,
     gives one a second spelling, or replaces this enum with a differently-named one
     for the same question.
+
+    **The third member is ADR-0230 §1's additive entry** under ADR-0226 §1's own
+    licence, and it is an entry rather than a second seam: it adds no second
+    request object, no second servicing site, no second budget and no second
+    audit. ADR-0226 §2's membership sentence — "The enumeration's two members are
+    ``SIGHTED_QUERY`` and ``CITATION_HOP``" — is what ADR-0230 amends, in that one
+    respect; §2's statement of what each named kind *is*, its at-most-one-ask-of-
+    each-kind rule and its closure against un-ADR'd additions all bind entire.
 
     The pattern is ADR-0221 §5's, for its reason: a vocabulary that grows by
     implementation grows without anyone deciding what the new member means.
@@ -5425,6 +5714,18 @@ class ReadKind(StrEnum):
     (ADR-0226 §2). It selects nothing by relevance: it is a keyed load in ADR-0208
     §1's own sense, "records the turn already names, fetched by identifier"."""
 
+    LOCAL_FILE = "local_file"
+    """One **file** the planner was shown, named by its ordinal in the listing the
+    loop passed on that call and fetched through the ``Fetcher`` seam (ADR-0230
+    §1, §2). It selects nothing by relevance and reads nothing the loop did not
+    already show: the label is an index into a sequence, and an index outside the
+    range resolves to nothing.
+
+    **One file and not several, which is the whole of this kind's bound** (§1). No
+    implementation reads two files for one ask, reads a directory as a file,
+    follows a reference out of a fetched file, or fetches a file it was not asked
+    for; there is no depth, no recursion and no traversal of any kind."""
+
 
 #: ADR-0226 §6's cap on how many labels one ``CITATION_HOP`` ask may name.
 #:
@@ -5437,14 +5738,25 @@ MAX_HOP_LABELS: Final = 2
 
 
 class ReadAsk(BaseModel):
-    """One kind's part of a planner's read request (ADR-0226 §4).
+    """One kind's part of a planner's read request (ADR-0226 §4, ADR-0230 §1).
 
-    A discriminated pair rather than two models: a ``SIGHTED_QUERY`` ask carries a
-    non-blank ``query`` and no labels, and a ``CITATION_HOP`` ask carries one or
-    two ``labels`` and no query. **Each of those conditions is enforced here rather
-    than by a caller** (§4) — an emission that fails any of them is not a request
-    ADR-0226 admits, and the planner that emitted it is not owed a partial reading
-    of it.
+    A discriminated triple rather than three models: a ``SIGHTED_QUERY`` ask
+    carries a non-blank ``query`` and nothing else, a ``CITATION_HOP`` ask carries
+    one or two ``labels`` and nothing else, and a ``LOCAL_FILE`` ask carries one
+    non-blank ``entry`` and nothing else. **Each of those conditions is enforced
+    here rather than by a caller** (§4) — an emission that fails any of them is not
+    a request ADR-0226 admits, and the planner that emitted it is not owed a
+    partial reading of it.
+
+    **``entry`` is a field of its own rather than a reuse of ``labels``, because
+    the two name different sequences** (ADR-0230 §1). A ``CITATION_HOP`` label is
+    an ordinal into the ``memories`` sequence the loop passed; a ``LOCAL_FILE``
+    label is an ordinal into the *listing* it passed. Two namespaces in one field
+    would make this model a place where a reader has to consult ``kind`` to know
+    which sequence a string indexes, and would make the model's output ambiguous at
+    exactly the seam ADR-0226 §3 exists to keep unambiguous. A field per argument
+    keeps every arm of the validator uniform: each kind carries exactly its own
+    argument and refuses the others.
 
     **A label's *form* is deliberately not validated.** ADR-0226 §3 gives the loop
     the whole of label resolution and rules that a string that does not match the
@@ -5464,6 +5776,10 @@ class ReadAsk(BaseModel):
             nothing else. One or two of them (:data:`MAX_HOP_LABELS`), in the order
             the ask names them, which ADR-0226 §6 makes the order they are followed
             in.
+        entry: The entry label the planner was shown, for a ``LOCAL_FILE`` and for
+            nothing else. Non-blank, and carried byte for byte — the loop parses
+            its ordinal and indexes the very sequence it passed on this call
+            (ADR-0230 §2).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -5480,25 +5796,82 @@ class ReadAsk(BaseModel):
             f"at most {MAX_HOP_LABELS} of them (ADR-0226 §4, §6)."
         ),
     )
+    entry: EncodableText | None = Field(
+        default=None,
+        description=(
+            "The entry label the planner was shown, for a LOCAL_FILE ask and no "
+            "other; non-blank (ADR-0230 §1)."
+        ),
+    )
 
     @model_validator(mode="after")
     def _the_ask_carries_exactly_its_kind_s_argument(self) -> ReadAsk:
         """Require the one argument this ask's kind takes, and refuse the other's.
 
-        An ask carrying both would be two asks wearing one kind's name, and the
-        servicer would have to choose which half to honour — a choice ADR-0226
-        gives nobody. An ask carrying neither asks for nothing while occupying the
-        one slot its kind has.
-        """
-        if self.kind is ReadKind.SIGHTED_QUERY:
-            if self.query is None:
-                msg = "a sighted_query ask must carry a query"
-                raise ValueError(msg)
-            if self.labels:
-                msg = "a sighted_query ask must not carry labels"
-                raise ValueError(msg)
-            return self
+        An ask carrying two kinds' arguments would be two asks wearing one kind's
+        name, and the servicer would have to choose which half to honour — a
+        choice ADR-0226 gives nobody. An ask carrying none asks for nothing while
+        occupying the one slot its kind has.
 
+        **Three arms since ADR-0230 §1**, and the ``entry`` refusal is stated for
+        the two older kinds as its own clause rather than folded into each: a
+        ``SIGHTED_QUERY`` and a ``CITATION_HOP`` ask carry no ``entry``, and a
+        ``LOCAL_FILE`` ask carries a non-blank one, no ``query`` and no ``labels``.
+        """
+        if self.kind is ReadKind.LOCAL_FILE:
+            self._only_an_entry()
+        elif self.kind is ReadKind.SIGHTED_QUERY:
+            self._only_a_query()
+        else:
+            self._only_labels()
+        return self
+
+    def _only_an_entry(self) -> None:
+        """A ``LOCAL_FILE`` ask carries a non-blank entry and nothing else (ADR-0230 §1).
+
+        ``entry`` is annotated ``EncodableText | None`` rather than
+        ``NonBlankEncodableText | None`` so that the non-blankness is decided here
+        beside the other two arms: ``None`` and ``"  "`` are different mistakes,
+        only one of them is "this kind's argument is missing", and a field-level
+        refusal would name neither.
+
+        Raises:
+            ValueError: If the entry is absent or blank, or a query or labels ride
+                beside it.
+        """
+        if self.entry is None or not self.entry.strip():
+            msg = "a local_file ask must carry a non-blank entry"
+            raise ValueError(msg)
+        if self.query is not None:
+            msg = "a local_file ask must not carry a query"
+            raise ValueError(msg)
+        if self.labels:
+            msg = "a local_file ask must not carry labels"
+            raise ValueError(msg)
+
+    def _only_a_query(self) -> None:
+        """A ``SIGHTED_QUERY`` ask carries a query and nothing else (ADR-0226 §4).
+
+        Raises:
+            ValueError: If the query is absent, or labels or an entry ride beside it.
+        """
+        if self.query is None:
+            msg = "a sighted_query ask must carry a query"
+            raise ValueError(msg)
+        if self.labels:
+            msg = "a sighted_query ask must not carry labels"
+            raise ValueError(msg)
+        if self.entry is not None:
+            msg = "a sighted_query ask must not carry an entry"
+            raise ValueError(msg)
+
+    def _only_labels(self) -> None:
+        """A ``CITATION_HOP`` ask carries one or two labels and nothing else (§4, §6).
+
+        Raises:
+            ValueError: If no label is named, more than :data:`MAX_HOP_LABELS` are,
+                or a query or an entry rides beside them.
+        """
         if not self.labels:
             msg = "a citation_hop ask must name at least one label"
             raise ValueError(msg)
@@ -5511,7 +5884,9 @@ class ReadAsk(BaseModel):
         if self.query is not None:
             msg = "a citation_hop ask must not carry a query"
             raise ValueError(msg)
-        return self
+        if self.entry is not None:
+            msg = "a citation_hop ask must not carry an entry"
+            raise ValueError(msg)
 
 
 class ReadRequest(BaseModel):
@@ -6187,8 +6562,11 @@ class PlanExport(BaseModel):
     internally consistent — every ``goal_id``/``plan_id`` referenced by an
     included record resolves within the same export.
 
-    **``schema_version`` is 4 because ``ActionPlan`` gained ``supersedes``**
-    (ADR-0228 §5, §6), as it was 3 because that model gained ``read_request``
+    **``schema_version`` is 5 because ``ActionPlan``'s ``read_request`` changed
+    shape** (ADR-0230 §12): ``ReadAsk`` gained ``entry`` and ``ReadKind`` gained
+    ``LOCAL_FILE``, so a plan carrying either is a plan an earlier reading of this
+    document refuses. It was 4 because ``ActionPlan`` gained ``supersedes``
+    (ADR-0228 §5, §6) and 3 because that model gained ``read_request``
     (ADR-0226 §4). This document carries ``tuple[ActionPlan, ...]``, so a member of
     it changing shape is exactly what the version exists to announce (ADR-0039 §10,
     ADR-0014 §5) — the same reading that moved it to 2 for ``StepExecution`` and
@@ -6210,20 +6588,20 @@ class PlanExport(BaseModel):
     ``PlanStore`` offers ``export`` and no ``import``, ``restore`` or ``load``, so
     nothing in this system ever validates a ``PlanExport`` it did not just
     construct. ADR-0039 §10's rule carries forward unchanged and widens by one
-    value: an export of an earlier shape is not readable by this contract at any
-    version, and if an import path is ever contracted, accepting or refusing one is
+    value again: an export of an earlier shape is not readable by this contract at
+    any version, and if an import path is ever contracted, accepting or refusing one is
     that ADR's decision and is not settled here.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[4] = Field(
-        default=4,
+    schema_version: Literal[5] = Field(
+        default=5,
         description=(
-            "Shape of this export, pinned to exactly 4 (ADR-0039 §10, ADR-0228 §6): an "
+            "Shape of this export, pinned to exactly 5 (ADR-0039 §10, ADR-0230 §12): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[4]`` "
-            "refuses every other value — a v1, v2 or v3 document does not validate "
+            "the document rather than a producer's unchecked claim. ``Literal[5]`` "
+            "refuses every other value — a v1, v2, v3 or v4 document does not validate "
             "against this contract at all — so the advertised version cannot be "
             "mislabelled."
         ),

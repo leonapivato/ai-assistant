@@ -146,6 +146,7 @@ if TYPE_CHECKING:
         EvaluationTrace,
         ExecutionState,
         FeedbackEvent,
+        FetchOutcome,
         FrozenJsonMapping,
         Goal,
         GoalDeletion,
@@ -184,6 +185,8 @@ if TYPE_CHECKING:
         SecretName,
         SecretValue,
         SourceGrant,
+        SourceListing,
+        SourceListingEntry,
         SourceReading,
         SourceReadRecord,
         SpendAdmissionHandle,
@@ -2556,6 +2559,229 @@ class Reader(Protocol):
                 everything it catches would convert it, with the result that the
                 facet degrades and the scheduler logs a source fault and re-arms,
                 on a shutdown that was working correctly (ADR-0093 §8, ADR-0083 §4).
+        """
+        ...
+
+
+@runtime_checkable
+class Fetcher(Protocol):
+    """Lists one configured root, and reads one file of it (ADR-0230 §4).
+
+    The **fetch** seam: it shows what a configured local root currently holds, and
+    reads one entry of that listing into a single attested
+    :class:`~ai_assistant.core.types.MemoryRecord` carrying the file's own text.
+    Named for its product role, as every Protocol here is (``Planner``,
+    ``Observer``, ``Reader``): the role is *fetching one named thing, now, for
+    this turn*.
+
+    **It is not a ``Reader`` and reusing that seam was never available.** A
+    ``Reader`` performs a whole-source read on its own cadence, bound by its own
+    configuration, taking no address at all — and ADR-0093 §10 gives ``read()`` no
+    arguments *by decision*. An address is exactly what this contract needs, so it
+    is a second seam rather than a widened one.
+
+    **Three members and not two, because the listing is the address space** (§4).
+    A contract offering only :meth:`fetch` would need its caller to hold the
+    addresses, which is the design ADR-0230 §2 refuses; a contract offering only
+    :meth:`listing` cannot deliver a file. The two are one seam because the same
+    configuration must govern both — an entry that is shown but not fetchable, or
+    fetchable but never shown, is a bug in a place no test would look.
+
+    **Listing membership is a capability this seam mints and verifies, and never a
+    claim its caller makes** (§4). A ``Fetcher`` mints a fresh, unguessable
+    ``token`` for each listing it produces and a fresh, unguessable ``handle`` for
+    each entry of it, both derived from state **private to the fetcher**. Four
+    properties are required of the mechanism and its spelling is an
+    implementation's, in ADR-0093 §10's own form:
+
+    * a token and a handle are **unforgeable without state private to the
+      fetcher**;
+    * a handle is **bound to the listing that minted it**;
+    * a token **commits to its listing's ordered entry names**, so an authentic
+      token cannot be carried onto an altered listing; and
+    * verification does **not depend on the fetcher retaining anything**, so no
+      listing's validity is a function of how many others have been produced
+      since.
+
+    A keyed digest satisfies all four — a per-listing random identifier and the
+    listing's ordered entry names signed together with a key generated when the
+    fetcher is constructed and never leaving it, each handle signed over that
+    identifier, the entry's name and its position — and ADR-0230 §4 names no
+    construction as the required one.
+
+    **No token and no handle is rendered to any model, written to any log, put in
+    any audit record, or carried on any record a fetch mints** (§4). Either in a
+    prompt would be a capability offered to a model, which is the whole of what §2
+    exists to prevent. The planner-facing projection of an entry is
+    :class:`~ai_assistant.core.types.ShownFile`, which carries no capability at
+    all, so a planner has none to leak.
+
+    **A ``Fetcher`` holds no store, no writer, no policy, no engine and no
+    model.** It reads its own configured source and returns what it read. It may
+    not write to any store, may not read a belief, and may not decide the fate of
+    anything it mints. This is ADR-0093 §1's rule for its own reason: a producer
+    that held a store would make the scope of what a fetch can do a property of an
+    implementation rather than of a ratified seam.
+
+    **It carries no lifecycle member, deliberately** (§4). A concrete fetcher
+    holding an opened root handle exposes a ``close``; this Protocol does not,
+    staying free of lifecycle exactly as ``MemoryStore`` and this system's other
+    stores do, so the contract keeps saying what a fetch *is* and not who shuts
+    one down. ``app/composition.py`` registers that ``close`` among the resources
+    it has opened (ADR-0042 §2).
+
+    **Neither member raises for a source reason** (§4). An absent file, an
+    unreadable one, an over-size one and a failed extraction are
+    :class:`~ai_assistant.core.types.FetchRefusal` members and never exceptions;
+    an unreadable root is an empty listing. ADR-0230 adds **no** error class to
+    ``core/errors.py``, because there is no failure a caller would handle
+    differently from a refusal it must already handle.
+
+    Cancelling either member is governed by this module's cancellation clause
+    (ADR-0060), with the one consequence ADR-0230 §4 spells out because it is the
+    place a conforming-looking implementation could satisfy every other clause and
+    still get it wrong: a call cancelled from outside while suspended re-raises
+    ``CancelledError`` and is converted into neither an empty listing nor a
+    refusal.
+    """
+
+    @property
+    def name(self) -> str:
+        """The identity of the **configured source** this fetcher serves.
+
+        In :attr:`Reader.name`'s own form and under its own obligation (ADR-0093
+        §7, ADR-0189, ADR-0190), and every clause stated there binds here: it is
+        **Tier 2 / operational**, it is never derived from the source's location
+        or contents — a path, filename, directory name or account identifier may
+        not be used as one, or as any part of one — it is assigned once when the
+        source is configured and never changes, and it takes one of ADR-0190 §4's
+        two forms and no third (a **bare** declared name, or that declared name,
+        one ASCII colon and exactly 32 characters drawn from ``0123456789abcdef``).
+
+        It is what ADR-0230 §5 puts in an
+        :attr:`~ai_assistant.core.types.Attestation.reported_by`, and what a
+        :attr:`~ai_assistant.core.types.SourceListing.source` equals. **The
+        attested source is the configured root itself** — "the owner's documents
+        folder" and not a vendor, a sender, or a service that synced a file into
+        it — so a fetcher that named a document's origin here would be attributing
+        a record to a system it cannot see (§5).
+
+        **Stable across calls.** A fetcher whose identity moved under a listing
+        would scatter one source's records across two ``reported_by`` values no
+        later fold could bring back together, and would orphan every grant keyed on
+        the old one.
+        """
+        ...
+
+    async def listing(self) -> SourceListing:
+        """Show what the configured root currently holds, within this fetcher's bound.
+
+        **It takes no arguments, and that is a decision** (ADR-0230 §4, ADR-0093
+        §10). The root, the ordering, the entry cap and the type allow-list are the
+        fetcher's own configuration, and "a caller able to widen the listing is a
+        caller able to defeat every bound behind it". There is no argument through
+        which any of them can be moved, so the bound is not merely un-widenable —
+        the address space is not reachable from a caller at all.
+
+        **The root's direct children only** (§6): no recursion, no subdirectory
+        traversal, no following of symbolic links out of the root. Ordered **most
+        recently modified first**, capped at ``fetch_listing_max_entries``, and
+        restricted to the formats the implementation supports — a file of any other
+        type is **not listed**, so there is no authentic entry naming one.
+
+        **The cap is a truncation and it is a declared one**, which is why it is
+        not the case ADR-0093 §5 refuses. That section's objection is that a
+        consumer *cannot tell*; a listing states in terms that it is the most
+        recently modified entries of the root, up to its cap, and it proposes no
+        belief and mints no record.
+
+        Returns:
+            One listing. An **empty ``entries`` tuple is a successful listing** —
+            and a root that cannot be read produces one too, with no consumer
+            distinguishing the two (§6). Its ``token`` is minted fresh, commits to
+            the ordered entry names, and carries both of §4's expiry deadlines;
+            neither deadline is rendered anywhere and neither outlives the process.
+
+        Raises:
+            CancelledError: Re-raised unchanged when the call is cancelled from
+                outside, and converted into neither an empty listing nor a refusal
+                (ADR-0230 §4).
+        """
+        ...
+
+    async def fetch(self, listing: SourceListing, entry: SourceListingEntry) -> FetchOutcome:
+        """Read the file ``entry`` names, once, and mint one record for it.
+
+        **It takes the listing as well as the entry because the listing is the
+        authority the entry's membership is verified against** (§4), and a contract
+        in which the caller supplies only the entry has nothing to verify it in.
+
+        **Membership is decided against the authenticated payload and never by
+        value equality.** An implementation establishes three things and nothing
+        else: that **this** fetcher signed the ``token``, whose payload commits to
+        the listing's ordered sequence of entry ``name``s; that the ``handle`` is
+        one this fetcher minted **for that listing**, over that entry's ``name``
+        and its position; and that the name stands at that position of the
+        committed sequence. **The ``entries`` tuple the caller handed in is
+        untrusted input rather than evidence** — a caller can put any tuple there
+        — so what an implementation does with it is compare its ordered names
+        against the sequence the signed payload commits to, and refuse on any
+        difference. The tuple is read; it is never believed.
+
+        **What is refused, and what is not.** A listing or an entry this fetcher
+        did not mint, an authentic token carried onto an altered ``entries`` —
+        emptied, shortened, reordered, or with an entry's ``name`` changed — a
+        handle minted for another listing, and a listing past either of §4's
+        deadlines are all refused
+        :attr:`~ai_assistant.core.types.FetchRefusal.NOT_FOUND`, deliberately the
+        same class an absent file yields so that nothing is disclosed about
+        whether a guessed name exists under the root. A **faithful copy** of an
+        authentic listing and entry is *accepted*, because §4 forbids the fetcher
+        retaining anything and an implementation distinguishing a copy would be
+        deciding from retained object identity; and a copy whose ``size_bytes`` or
+        ``modified_at`` was altered is accepted too, its altered fields ignored,
+        because the commitment covers the addresses and not the display.
+
+        **The membership check does not replace the root bound; both bind.** A
+        conforming implementation refuses any entry that does not resolve to a
+        regular file directly under its configured root, and one that reads outside
+        that root for any entry, however that entry was constructed, does not
+        conform. The handle establishes *that this fetcher showed it*; the root
+        check establishes *that it is still what may be read*, and a bug in either
+        is not covered by the other.
+
+        **Resolution and acquisition are one operation, and no bound is decided
+        against a path the fetch then re-opens.** A conforming implementation holds
+        an **opened directory handle** on its configured root and opens the entry's
+        file relative to that handle, by its single final component, without
+        following a symbolic link and **without blocking** — the acquiring open is
+        non-blocking, because a listed regular file can be replaced by a named pipe
+        with no writer and an ordinary read-mode open of one blocks until a writer
+        arrives, which is neither a record nor a refusal. It then decides every
+        remaining question against the object it has open, never against a path or
+        a ``stat`` taken before the open, and every bound is re-applied here rather
+        than carried from the listing.
+
+        Args:
+            listing: The listing ``entry`` came from — the authority its membership
+                is verified against, and the carrier of the token this fetcher
+                minted.
+            entry: The entry naming the file to read.
+
+        Returns:
+            One outcome carrying a record **or** a refusal, never both and never
+            neither. A successful fetch mints exactly one ``SEMANTIC`` record whose
+            ``content`` is the file's text as extracted, **verbatim** — nothing
+            summarises, abridges, rewrites, annotates or classifies it — with
+            ``provenance.source`` :attr:`~ai_assistant.core.types.MemorySource.EXTERNAL`,
+            an :class:`~ai_assistant.core.types.Attestation` whose ``reported_by``
+            is this fetcher's :attr:`name` and whose ``reported_at`` is the instant
+            the file was read, and an empty ``evidence`` (ADR-0230 §5).
+
+        Raises:
+            CancelledError: Re-raised unchanged when the call is cancelled from
+                outside, and converted into neither an outcome nor a refusal
+                (ADR-0230 §4).
         """
         ...
 

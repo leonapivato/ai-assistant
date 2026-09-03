@@ -915,7 +915,66 @@ from ai_assistant.wire.errors import (
 #: it "neither repairs it nor inherits it"; the window already open is #1956's, and a
 #: lane taking that issue decides what to do about a released version rather than
 #: reading this entry as having settled it.
-PROTOCOL_VERSION: Final[int] = 27
+#: **28 since ADR-0230 §12**, which admits ``LOCAL_FILE`` to
+#: :class:`~ai_assistant.core.types.ReadKind` and adds ``entry`` to
+#: :class:`~ai_assistant.core.types.ReadAsk` (§1) — ADR-0124 §9's **second** limb
+#: again, and the same **conjunction** the entry above states, each limb checked
+#: against the tree rather than assumed:
+#:
+#: * ``ActionPlan`` is carried to a client, and a ``ReadAsk`` rides inside it:
+#:   ``wire/client.py``'s ``converse`` and ``resume`` return
+#:   :class:`~ai_assistant.core.types.TurnOutcome`, whose ``turn`` is a
+#:   :class:`~ai_assistant.core.types.TurnResult`, whose ``plan`` is an
+#:   ``ActionPlan``, whose ``read_request`` carries the asks.
+#: * ``wire/codec.py``'s ``project`` renders a model with a bare ``model_dump()``:
+#:   **every** field, defaults included. So ``entry`` is on the wire on every turn
+#:   that carries a request at all, not only on a ``LOCAL_FILE`` one.
+#: * ``ReadAsk`` sets ``ConfigDict(extra="forbid", frozen=True)``, so a peer whose
+#:   ``ReadAsk`` predates ``entry`` **fails to decode** every ``TurnOutcome`` whose
+#:   plan carries a request; and a peer whose ``ReadKind`` predates ``LOCAL_FILE``
+#:   fails to decode one whose plan names that kind.
+#:
+#: **Which of the two changes obliges the move.** Both do, independently, and the
+#: distinction is worth stating rather than leaving to be re-derived. ``ReadKind``
+#: gaining a member bites only on a turn that actually emits a ``LOCAL_FILE`` ask —
+#: the old peer sees a string its enumeration does not admit. ``ReadAsk`` gaining
+#: ``entry`` bites on **every** request-carrying turn, because the projection emits
+#: the defaulted ``null`` and ``extra="forbid"`` refuses it. So the field is the
+#: wider of the two and would move this number on its own; the enum member would
+#: move it too, on the narrower population. ADR-0230 §12 obliges the move for the
+#: conjunction rather than for a defaulted addition alone, and ADR-0213 §11's
+#: no-bump ruling stands for the case it decided.
+#:
+#: **The method set does not move and stands at forty-nine.** ADR-0230 adds one
+#: Protocol — :class:`~ai_assistant.core.protocols.Fetcher` — but it is not the
+#: promoted ``AssistantEngine`` surface and adds no method to it, so ADR-0124 §9's
+#: first limb is not reached; ``tests/core/test_engine_surface_closure.py`` pins
+#: the figure beside this constant. ADR-0177 §1's browser enumeration does **not**
+#: move either and stands at thirty-one: no gateway route is added and no browser
+#: request resolves differently.
+#:
+#: **Five ``core`` models cross no wire and are not a second ground for this
+#: bump.** :class:`~ai_assistant.core.types.SourceListingEntry`,
+#: :class:`~ai_assistant.core.types.ShownFile`,
+#: :class:`~ai_assistant.core.types.SourceListing`,
+#: :class:`~ai_assistant.core.types.FetchOutcome` and
+#: :class:`~ai_assistant.core.types.FetchRefusal` are held inside the hub — a
+#: listing never leaves ``orchestration`` and ADR-0230 §4 forbids a token or a
+#: handle crossing a process boundary at all — so no value a version 27 peer emits
+#: or decodes changes shape on their account, and they mint no row in ADR-0087
+#: §2c's scalar table.
+#:
+#: **The error registry is untouched**, and nothing else under ``wire/`` changes
+#: for this bump: ADR-0230 §4 adds **no** error class to ``core/errors.py``,
+#: because a source failure is a ``FetchRefusal`` rather than a raise. The framing,
+#: the connect exchange, the frame kinds, the codec's dispatch, ``surface.METHODS``
+#: and both adapters are derived from the Protocol or unaffected by it.
+#:
+#: **This move covers the shape going forward and repairs nothing already
+#: released**, exactly as the entry above says of itself: #1956's window stays
+#: open, and ADR-0230 §12 states in terms that it "neither repairs nor inherits"
+#: it.
+PROTOCOL_VERSION: Final[int] = 28
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a
