@@ -22,6 +22,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent))
 from _operator_recipes import git, init_repo, load, run
 
@@ -415,6 +417,35 @@ def test_a_symlinked_artifact_is_archived_as_the_link_it_is(tmp_path: Path) -> N
     assert archived.readlink() == outside
     assert not (repo / ".review" / "a.md").is_symlink()
     assert outside.exists()
+
+
+def test_a_source_that_cannot_be_removed_leaves_no_half_archived_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Linking and then failing to remove the source would leave the archive
+    # holding a copy of a file that was never swept, and the next sweep would
+    # number a second one beside it: two copies from one failed move.
+    repo = _repo(tmp_path)
+    artifact = _artifact(
+        repo, "a.md", persona="adversarial", branch="gone/lane", sha="0" * 40, tree="t1"
+    )
+    review = repo / ".review"
+    plan = _MODULE.archive_plan([artifact], review)
+    removed = Path.unlink
+
+    def refuse(self: Path, missing_ok: bool = False) -> None:
+        if self == artifact:
+            raise PermissionError(13, "Permission denied", str(self))
+        removed(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+
+    with pytest.raises(_MODULE.SweepError, match="could not sweep"):
+        _MODULE._act([artifact], plan, delete=False, dry_run=False)
+    monkeypatch.undo()
+
+    assert artifact.exists()
+    assert not (review / "archive" / "a.md").exists()
 
 
 def test_dry_run_says_which_name_it_would_land_under(tmp_path: Path) -> None:
