@@ -1,6 +1,6 @@
 # 229. A citation hop reaches the record its label names, as well as that record's evidence
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-03
 - **Amends** [ADR-0226](0226-the-planner-names-one-more-read-beside-its-plan-and-the-loop-services-it-into-the-supply.md)
   — **§2's servicing clause for the `CITATION_HOP` kind, and §3's "follows only"
