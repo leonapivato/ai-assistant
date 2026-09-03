@@ -32,6 +32,7 @@ from io import StringIO
 from typing import TYPE_CHECKING, Final
 
 import pytest
+from cli_open_recorder import wire_recording_opens
 from pydantic import TypeAdapter
 from rich.console import Console
 from typer.testing import CliRunner
@@ -202,8 +203,8 @@ class _ScriptedDecisionEngine(FakeAssistantEngine):
     ``FakeAssistantEngine`` is otherwise untouched, so what the adapter is handed is
     the contract's own shape. The two overrides do **not** re-implement ADR-0186
     §3's local refusal of ``limit``: the CLI refuses a malformed one during Typer's
-    parameter parsing, before any engine exists, and the case below asserts exactly
-    that by observing that no call was ever recorded.
+    parameter parsing, before any client is opened, and the case below asserts
+    exactly that by observing that no open was ever recorded (#1973).
     """
 
     def __init__(self, *recorded: PermissionDecision) -> None:
@@ -261,6 +262,46 @@ def _wire(monkeypatch: pytest.MonkeyPatch, engine: object) -> None:
     monkeypatch.setattr(cli, "load_settings", Settings)
     monkeypatch.setattr(cli, "configure_logging", lambda _settings: None)
     monkeypatch.setattr(cli, "_open_engine", _open)
+
+
+def _wire_recording_opens(monkeypatch: pytest.MonkeyPatch, engine: object) -> list[None]:
+    """Wire ``engine`` as :func:`_wire` does, and record every open of a client.
+
+    The observation is
+    :func:`cli_open_recorder.wire_recording_opens`, shared with the three sibling
+    CLI modules that make the same claim (#1973); this binds it to this module's
+    wiring. Only the ``--limit`` refusal below needs it, and what it needs is the
+    thing an engine's empty call list does not say: a command that opened a client
+    and refused *afterwards* leaves that list empty too.
+
+    Args:
+        monkeypatch: The patcher whose lifetime the substitution follows.
+        engine: The engine a client, if one were opened, would be.
+
+    Returns:
+        One entry per :func:`~ai_assistant.interfaces.cli._open_engine` awaited.
+    """
+    return wire_recording_opens(_wire, monkeypatch, engine)
+
+
+def test_the_open_recorder_sees_the_client_an_accepted_listing_builds(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The recorder is non-vacuous on *this* surface, which is what makes it evidence.
+
+    An absence says something only if the observer would have seen the thing, and
+    that is a question about this module's own ``_wire`` and this surface's own
+    commands — a pin one module over answers it for neither. A helper bound to the
+    wrong wiring, or a ``decisions`` that reached its client by some route the
+    recorder does not sit on, would leave the refusal below asserting an emptiness
+    that could never have been anything else.
+    """
+    opened = _wire_recording_opens(monkeypatch, _ScriptedDecisionEngine(_decision("d-1")))
+
+    result = CliRunner().invoke(cli.app, ["decisions"])
+
+    assert result.exit_code == 0
+    assert opened == [None]
 
 
 def _flat(rendered: str) -> str:
@@ -419,15 +460,22 @@ def test_a_malformed_limit_is_refused_before_any_engine_exists(
     Zero is refused as well as a negative, a non-integer and ``2**63``, which is
     stricter than ADR-0085 §9's ``[0, 2**63)`` and is what ``AuditTrail.recent``
     itself requires — ADR-0186 §3 takes ``recent_grants``' warning that neither
-    implementation may be silently more permissive. Asserted by observing that the
-    engine recorded **no call**, which is the only way to see "before any I/O" from
-    outside.
+    implementation may be silently more permissive.
+
+    **Asserted by observing that no client was ever opened** (#1973). This case used
+    to observe that the engine recorded no call, and to say that was the only way to
+    see "before any I/O" from outside. It is neither the only way nor the right one:
+    a command that opened a client, probed the hub, and refused afterwards leaves an
+    empty call list behind exactly as a parse-time callback does, so the weaker
+    absence is what an ordering regression would keep intact. The engine's silence is
+    still asserted, because §3's refusal is local *and* nothing is asked of the hub.
     """
     engine = _ScriptedDecisionEngine(_decision("d-1"))
-    _wire(monkeypatch, engine)
+    opened = _wire_recording_opens(monkeypatch, engine)
 
     result = CliRunner().invoke(cli.app, ["decisions", "--limit", bad])
     assert result.exit_code == 2
+    assert opened == []
     assert engine.calls == []
 
 
