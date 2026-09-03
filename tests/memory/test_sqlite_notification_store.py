@@ -286,18 +286,21 @@ async def test_a_horizon_past_the_calendar_is_not_purgeable_and_does_not_raise(
 ) -> None:
     """The sweep survives a record whose horizon leaves representable time.
 
-    ``HeldNotification.is_purgeable_at`` computes ``ceased + retention``, which
-    raises ``OverflowError`` once the sum passes the end of the calendar — and
-    :data:`_MAX_RETENTION` permits one, because the ceiling that bounds it is
-    SQLite's integer column rather than the calendar. A record dismissed today
-    under it is exactly that case.
+    :data:`_MAX_RETENTION` permits a retention of a few hundred thousand years,
+    because the ceiling that bounds it is SQLite's integer column rather than the
+    calendar, so a record dismissed today under it has a horizon past the end of
+    representable time. ``HeldNotification.is_purgeable_at`` answers it by
+    measuring the elapsed span — ``moment - ceased``, whose operands are both
+    already in range — rather than by materialising ``ceased + retention``, the
+    spelling that raised ``OverflowError`` here until #954 was fixed.
 
-    Letting the raw error out would be worse than wrong: ``purge`` is called by
-    ADR-0083 §7's **shared** retention job, which sweeps the memory store and the
-    deferral queue in the same operation, so one such record would stop every
-    store's retention being enforced while the job logged a failure and retried
-    forever. "Not purgeable" is also the true answer — a horizon past the end of
-    representable time has not elapsed, and will not.
+    **This case is the backend's, not the predicate's**, which is why it stays
+    after the store stopped guarding the predicate: ``purge`` is called by
+    ADR-0083 §7's **shared** retention job, sweeping the memory store and the
+    deferral queue in one operation, so a raw error out of this sweep would stop
+    every store's retention being enforced while the job logged a failure and
+    retried forever. "Not purgeable" is also the true answer — a horizon past the
+    end of representable time has not elapsed, and will not.
     """
     store = SqliteNotificationStore(
         traces_sink=FakeTraceSink(),
