@@ -1926,3 +1926,192 @@ async def test_a_cancellation_after_a_query_band_returned_records_the_partial_fa
     assert record["failed"] is True
     assert record["failed_after_read_returned"] is True
     assert record["returned"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# ADR-0227 §3: the carrier this servicer states, and what it holds             #
+# --------------------------------------------------------------------------- #
+#
+# The render rule ADR-0227 §1 adds turns on *which records this turn's citation hop
+# reached*, and §3 rules that fact "recorded where the kind is known — at the
+# servicer, which is the one place ``CITATION_HOP`` and ``SIGHTED_QUERY`` are
+# distinguishable". These are that half of the rule; ``test_composing.py`` holds the
+# render site's, and ``test_engine_read_envelope.py`` drives both end to end.
+
+
+async def test_the_carrier_names_what_the_hop_reached_in_the_asks_own_order() -> None:
+    """ADR-0227 §3: labels in the ask's order, each record's evidence in stored order.
+
+    "It is an **ordered** carrier, because §4's cap is taken over it in that order" —
+    and the order §4 takes it in is ADR-0226 §6's own, which that section rules is
+    what makes two conforming implementations append the same records in the same
+    order. The sighted query's records are **not** in it (ADR-0227 §2): they were
+    selected by relevance against a key their replies are not in, so ADR-0222 §2's
+    first reason reaches them in its own words.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_belief("belief-1", "billing schedule notes", evidence=("cited-2", "cited-1")))
+    await memory.add(_belief("belief-2", "billing notes", evidence=("cited-3",)))
+    for cited in ("cited-1", "cited-2", "cited-3"):
+        await memory.add(_episode(cited, "an earlier exchange"))
+    await memory.add(_belief("found-1", "the kestrel report"))
+    planner = FakePlanner(now=_clock, read_request=_both("the kestrel report", "M1", "M2"))
+
+    responded = await _loop(memory, planner=planner).respond(
+        "billing schedule notes", narrow=_bounded()
+    )
+
+    assert _ids(responded.turn.memories) == [
+        "belief-1",
+        "belief-2",
+        "cited-2",
+        "cited-1",
+        "cited-3",
+        "found-1",
+    ]
+    assert responded.hop_reached == ("cited-2", "cited-1", "cited-3")
+
+
+async def test_a_deduplicated_out_record_is_carried_and_a_budget_cut_one_is_not() -> None:
+    """ADR-0227 §1's third clause and §4's silence, at the seam that decides both.
+
+    §3 carries "the **distinct** records the hop resolved that the turn's supply holds
+    after servicing, the deduplicated-out ones included". A record the supply already
+    held keeps its position (ADR-0226 §7) and still renders its reply — "the exact
+    record a belief cites would render phrase-only whenever the episodic supplement
+    happened to have picked it up already, and the turn would fail for the same reason
+    #1944 records, by a narrower route that no probe would distinguish from success".
+
+    A record ADR-0226 §6's budget **cut**, by contrast, is not in the supply at all,
+    so it is not carried: §4 rules that such records "render nothing at all — no
+    bullet, no phrase line and no reply line".
+    """
+    memory = FakeMemoryStore(now=_clock)
+    cited = tuple(f"cited-{n}" for n in range(READ_BUDGET + 2))
+    await memory.add(_belief("belief-1", "billing schedule notes", evidence=cited))
+    for record_id in cited:
+        await memory.add(_episode(record_id, "an earlier exchange about billing"))
+    planner = FakePlanner(now=_clock, read_request=_hop("M1"))
+
+    responded = await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+
+    assert responded.hop_reached == cited[:READ_BUDGET], "the budget cut the last two"
+    assert set(responded.hop_reached) <= {record.id for record in responded.turn.memories}
+
+
+async def test_a_record_the_supply_already_held_stays_in_the_carrier() -> None:
+    """The pair to the case above: deduplication removes a record from the *group*, not
+    from the carrier.
+
+    The cited episode is in the conversation tail this turn was handed, so ADR-0226
+    §7's deduplication keeps "the copy the supply already held … its position" and the
+    fourth group is empty. ADR-0227 §1 renders it all the same, because the test is
+    "reached by the citation hop" and not which group a record ended up in.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_belief("belief-1", "billing schedule notes", evidence=("cited-1",)))
+    await memory.add(_episode("cited-1", "an earlier exchange about billing"))
+    tail = _episode("cited-1", "an earlier exchange about billing")
+    planner = FakePlanner(now=_clock, read_request=_hop("M2"))
+
+    responded = await _loop(memory, planner=planner).respond(
+        "billing schedule", history=(tail,), narrow=_bounded()
+    )
+
+    assert _ids(responded.turn.memories) == ["cited-1", "belief-1"], "no fourth group"
+    assert responded.hop_reached == ("cited-1",)
+
+
+async def test_a_repeated_citation_is_one_entry_of_the_carrier() -> None:
+    """ADR-0227 §8's assertion 14 at the servicer: ``(A, A, …, B)`` is two records.
+
+    ``Provenance.evidence`` is a ``tuple`` with no uniqueness constraint, and
+    ``_hop_records`` rebuilds its answer by walking each record's evidence in stored
+    order — so a repeated citation yields the same record twice, and ADR-0226 §7's
+    deduplication removes it only later, at the union. §3 makes the carrier
+    **distinct** here, and §4 restates the deduplication ahead of the cap, so a
+    list-first cap cannot spend ten positions on one record.
+
+    The evidence is deliberately :data:`READ_BUDGET` repeats of ``A`` before ``B``,
+    which is exactly the length §8 asks for: an implementation carrying the repeats
+    would render one line where the decision requires two.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(
+        _belief("belief-1", "billing schedule notes", evidence=("cited-1",) * READ_BUDGET)
+    )
+    await memory.add(_belief("belief-2", "billing notes", evidence=("cited-1", "cited-2")))
+    await memory.add(_episode("cited-1", "an earlier exchange"))
+    await memory.add(_episode("cited-2", "a later exchange"))
+    planner = FakePlanner(now=_clock, read_request=_hop("M1", "M2"))
+
+    responded = await _loop(memory, planner=planner).respond(
+        "billing schedule notes", narrow=_bounded()
+    )
+
+    assert responded.hop_reached == ("cited-1", "cited-2")
+    assert _ids(responded.turn.memories) == ["belief-1", "belief-2", "cited-1", "cited-2"]
+
+
+async def test_the_carrier_is_empty_on_every_turn_that_serviced_no_hop() -> None:
+    """ADR-0227 §3's last clause, over the four shapes it names.
+
+    "The set is **empty** on every turn that did not fire, on a turn whose servicing
+    ADR-0226 §5 declined, on a turn whose servicing failed or was partial … and on a
+    turn whose hop resolved no live record." Each is asserted here, and what follows
+    from all four is §8's assertion 8: an empty carrier "renders no reply line
+    anywhere, and the assembled prompt is then byte-identical to what it is today".
+    """
+    seeded = _belief("belief-1", "billing schedule notes", evidence=("cited-1",))
+    cited = _episode("cited-1", "an earlier exchange about billing")
+
+    quiet = FakeMemoryStore(now=_clock)
+    await quiet.add(seeded)
+    await quiet.add(cited)
+    not_fired = await _loop(quiet).respond("billing schedule", narrow=_bounded())
+
+    planner = FakePlanner(now=_clock, read_request=_hop("M1"))
+    declined = await _loop(quiet, planner=planner).respond("billing schedule", narrow=_unbounded())
+
+    failing = _FailingKeyedLoad(now=_clock)
+    await failing.add(seeded)
+    await failing.add(cited)
+    failed = await _loop(failing, planner=planner).respond("billing schedule", narrow=_bounded())
+
+    barren = FakeMemoryStore(now=_clock)
+    await barren.add(_belief("belief-1", "billing schedule notes", evidence=("gone-1",)))
+    nothing = await _loop(barren, planner=planner).respond("billing schedule", narrow=_bounded())
+
+    assert not_fired.hop_reached == ()
+    assert declined.hop_reached == ()
+    assert failed.hop_reached == ()
+    assert nothing.hop_reached == ()
+    assert _ids(failed.turn.memories) == ["belief-1"], "the supply is as planning saw it"
+
+
+async def test_no_identifier_the_carrier_holds_reaches_the_audit() -> None:
+    """ADR-0227 §8's assertion 16 at the servicer, and §3's namer rule entire.
+
+    "No record identifier reaches a model and none is accepted from one … the
+    identifiers in it are held data, used to decide which line the assembler writes,
+    and they are rendered into no prompt, no log, no trace and no audit record."
+    ADR-0226 §9's record carries counts, kinds and the correlation id, and threading a
+    render decision through it "would put record identifiers on a surface whose whole
+    discipline is that they are not there" — which is why the carrier is returned
+    rather than written onto it.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_belief("belief-1", "billing schedule notes", evidence=("cited-1",)))
+    await memory.add(_episode("cited-1", "an earlier exchange about billing"))
+    planner = FakePlanner(now=_clock, read_request=_hop("M1"))
+
+    with structlog.testing.capture_logs() as captured:
+        responded = await _loop(memory, planner=planner).respond(
+            "billing schedule", narrow=_bounded()
+        )
+
+    assert responded.hop_reached == ("cited-1",)
+    record = _record(captured)
+    assert record["new"] == 1
+    assert "cited-1" not in str(record), "the audit names no record"
+    assert not any("cited-1" in str(event) for event in captured), "and neither does any log event"

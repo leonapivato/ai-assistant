@@ -7,7 +7,14 @@ rather than beside the servicer:
 * **item 1** — the reply-vocabulary question answering through the hop, driven end
   to end through ``converse`` so that "the answer carries it" is the reply and not
   a seam. §11 calls this "the milestone's exit shape and the one test that fails if
-  the hop is merely wired".
+  the hop is merely wired". **ADR-0227 §7 re-specifies it** and this module carries
+  the re-specification: the fixture is shaped as ``Engine._capture`` writes an
+  episode — the user's material in ``content``, the composed reply in ``outcome``,
+  an ``ExchangeDisposition`` beside it — because "a fixture that carries in one
+  field what production carries in another asserts nothing about production, however
+  faithfully the rest of the path is wired". §7 requires the existing test
+  **rewritten** rather than supplemented, "a second test beside a fixture that cannot
+  fail is a test suite that reports two greens for one guarantee".
 * **item 5**'s engine arm — ``converse_spoken`` declares its channel's audience
   unbounded (ADR-0200 §3), so its request is declined by the object the engine
   already mints rather than by a second fact it has to keep in step.
@@ -15,7 +22,14 @@ rather than beside the servicer:
   ``PlanStore.save_plan`` raises, both of which happen **after** the loop has
   planned and serviced, and neither of which may suppress §9's record.
 
-Everything else §11 owes this lane is in ``test_loop_reads.py``.
+Everything else §11 owes that lane is in ``test_loop_reads.py``.
+
+**ADR-0227 §8's assertions 4, 5, 8 and 16 are here too**, for the same reason: each
+is about a prompt the *engine* assembled from a supply the servicer built, so a case
+that stopped at the loop would assert over a carrier nothing had rendered. §8's
+assertions about the render rule itself — the tail, the ceiling, the cap, the counts
+and the planner's assembler — are in ``test_composing.py``, and the carrier's own
+order, deduplication and emptiness are in ``test_loop_reads.py``.
 """
 
 from __future__ import annotations
@@ -33,11 +47,13 @@ from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     ActionPlan,
     EpisodicMemory,
+    ExchangeDisposition,
     MemorySource,
     Provenance,
     ReadAsk,
     ReadKind,
     ReadRequest,
+    Role,
     SemanticMemory,
 )
 from ai_assistant.orchestration.composing import ComposingStage
@@ -56,9 +72,23 @@ if TYPE_CHECKING:
 #: The token the assistant introduced and the user never used. §11 item 1's whole
 #: premise is that a blind read keyed on the *question's* vocabulary cannot reach
 #: the exchange holding it, because only ``content`` is embedded.
+#:
+#: **It lives in ``outcome`` and nowhere else** (ADR-0227 §7). ``Engine._capture``
+#: writes ``outcome=composed.text`` and ``content=_exchange_of(...)``, so the
+#: vocabulary of what the assistant *said* is in ``outcome`` and ``content`` carries
+#: what the user said and what this system planned. Until ADR-0227 this constant sat
+#: in the episode's ``content``, "where every group renders it" — so the assertion
+#: was true of a record no capture site writes and the mechanism under test was never
+#: exercised (#1944, and §7's reason for stating a rule rather than making a repair).
 _LENDER: Final = "Brightpath Financial"
 
 _QUESTION: Final = "which lender was recommended"
+
+#: What the user said on the earlier turn, as ``_exchange_of`` renders it into
+#: ``content``. It deliberately shares no term with :data:`_QUESTION`, which is what
+#: makes the blind read reach the belief and not the exchange — "a question whose
+#: answer shares no wording with the record that holds it is not a ranking problem".
+_EARLIER: Final = "The user asked: help me pick a mortgage provider."
 
 #: The utterance ``_routed_harness`` routes a ``forget`` on (ADR-0197 §1).
 _ROUTED: Final = "please forget that preference"
@@ -73,6 +103,16 @@ def _hop(*labels: str) -> ReadRequest:
 
 def _query(text: str) -> ReadRequest:
     return ReadRequest(asks=(ReadAsk(kind=ReadKind.SIGHTED_QUERY, query=text),))
+
+
+def _both(text: str, *labels: str) -> ReadRequest:
+    """One ask of each kind, query first — so the servicing order is asserted, not the tuple's."""
+    return ReadRequest(
+        asks=(
+            ReadAsk(kind=ReadKind.SIGHTED_QUERY, query=text),
+            ReadAsk(kind=ReadKind.CITATION_HOP, labels=labels),
+        )
+    )
 
 
 class _AskingPlanner(NoStepPlanner):
@@ -138,11 +178,26 @@ def _belief(record_id: str, content: str, *, evidence: tuple[str, ...] = ()) -> 
     )
 
 
-def _episode(record_id: str, content: str) -> EpisodicMemory:
+def _episode(
+    record_id: str,
+    content: str,
+    *,
+    outcome: str | None = None,
+    disposition: ExchangeDisposition | None = None,
+) -> EpisodicMemory:
+    """One captured turn, shaped as ``Engine._capture`` writes one (ADR-0227 §7).
+
+    ``content`` is the user's material and the plan's rationale; ``outcome`` is the
+    composed reply; ``disposition`` is what became of the pass. A reply asserted to
+    have reached a prompt goes in ``outcome`` on a record that also carries a
+    ``disposition``, "because that is the combination the render rules turn on".
+    """
     return EpisodicMemory(
         id=record_id,
         content=content,
         occurred_at=AT,
+        outcome=outcome,
+        disposition=disposition,
         provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=AT),
     )
 
@@ -163,6 +218,29 @@ def _echoing_composer() -> ComposingStage:
     return ComposingStage(model=FakeModelProvider(reply=reply), streaming=FakeStreamingCompleter())
 
 
+def _recorder() -> tuple[ComposingStage, FakeModelProvider]:
+    """A real composing stage over a fake that keeps the prompt it was handed.
+
+    ADR-0227 §7 forbids substituting "the renderer whose output the assertion is
+    about", and permits a fake ``ModelProvider``: so the production
+    :class:`~ai_assistant.orchestration.composing.ComposingStage` assembles the
+    prompt and the fake merely records it.
+    """
+    model = FakeModelProvider("answer")
+    return ComposingStage(model=model, streaming=FakeStreamingCompleter()), model
+
+
+def _assembled(model: FakeModelProvider) -> str:
+    """The one user-turn prompt the stage assembled, from the fake's own record."""
+    assert len(model.calls) == 1
+    return next(one.content for one in model.calls[0].messages if one.role is Role.USER)
+
+
+def _reply_lines_of(prompt: str) -> list[str]:
+    """Every reply line of a prompt, in the order it wrote them (ADR-0222 §1)."""
+    return [row for row in prompt.splitlines() if row.startswith("    what the assistant replied")]
+
+
 def _records(captured: Sequence[MutableMapping[str, Any]]) -> list[Mapping[str, Any]]:
     return [event for event in captured if event["event"] == READ_AUDIT_EVENT]
 
@@ -177,27 +255,51 @@ def _record(captured: Sequence[MutableMapping[str, Any]]) -> Mapping[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
-async def _seeded_store() -> FakeMemoryStore:
+async def _seeded_store(*, content: str = _EARLIER) -> FakeMemoryStore:
     """A store holding the exchange and the belief that cites it.
 
     The belief carries the *question's* vocabulary and the episode carries the
-    *answer's*: "a question whose answer shares no wording with the record that holds
-    it is not a ranking problem, and no allocation of a blind read fixes it".
+    *answer's* — in ``outcome``, beside a ``disposition``, as ADR-0227 §7 requires and
+    as ``Engine._capture`` writes one: "a question whose answer shares no wording with
+    the record that holds it is not a ranking problem, and no allocation of a blind
+    read fixes it".
+
+    Args:
+        content: What the episode's ``content`` says. The default shares no term with
+            :data:`_QUESTION`, so the blind read cannot reach the exchange by any
+            route; a case that wants the *episodic supplement* to pick it up passes
+            one that does.
     """
-    memory = FakeMemoryStore(now=lambda: AT)
-    await memory.add(_episode("episode-1", f"{_LENDER} is the best fit for your budget."))
-    await memory.add(
+    return await _seeded(FakeMemoryStore(now=lambda: AT), content=content)
+
+
+async def _seeded[StoreT: FakeMemoryStore](store: StoreT, *, content: str = _EARLIER) -> StoreT:
+    """Put :func:`_seeded_store`'s two records into ``store`` and hand it back.
+
+    Separate from :func:`_seeded_store` so a case needing a *subclassed* store — one
+    whose keyed load fails, say — holds the same two records without reaching into
+    another store's internals for them.
+    """
+    await store.add(
+        _episode(
+            "episode-1",
+            content,
+            outcome=f"{_LENDER} is the best fit for your budget.",
+            disposition=ExchangeDisposition.STEP_EXECUTED,
+        )
+    )
+    await store.add(
         _belief(
             "belief-1",
             "the user asked about a lender for the house purchase",
             evidence=("episode-1",),
         )
     )
-    return memory
+    return store
 
 
 async def test_the_reply_vocabulary_question_answers_through_the_hop() -> None:
-    """§11 item 1: the milestone's exit shape, end to end.
+    """ADR-0226 §11 item 1 **as ADR-0227 §7 re-specifies it**: the exit shape, end to end.
 
     The blind read returns the belief and not the exchange — it is keyed on the
     question's words, and only ``content`` is embedded. The planner names that
@@ -207,7 +309,14 @@ async def test_the_reply_vocabulary_question_answers_through_the_hop() -> None:
     which is the only mechanism that answers 'which lender did you recommend?'"
 
     **This fails if the hop is merely wired**, which is why the assertion is the
-    composed reply rather than the fourth group.
+    composed reply rather than the fourth group — and it now fails if the hop's yield
+    is merely *supplied*, which is what #1944 records and what §7's fidelity rule
+    exists to catch. The distinctive word is in the episode's ``outcome``, beside a
+    ``disposition``, and absent from its ``content``: "the one combination no group
+    but the tail renders" before ADR-0227 §1. The production
+    :class:`~ai_assistant.orchestration.composing.ComposingStage` is on the path and
+    the fake model reads the assembled prompt, so the answer can carry the word only
+    if the renderer wrote it.
     """
     planner = _AskingPlanner(_hop("M1"))
     harness = Harness(memory=await _seeded_store(), planner=planner, composing=_echoing_composer())
@@ -218,6 +327,7 @@ async def test_the_reply_vocabulary_question_answers_through_the_hop() -> None:
     assert planned == ["belief-1"], "the blind read reached the belief and not the exchange"
     assert outcome.turn is not None
     assert [record.id for record in outcome.turn.memories] == ["belief-1", "episode-1"]
+    assert _LENDER not in outcome.turn.memories[1].content, "the word is in `outcome` alone"
     assert outcome.reply == _LENDER
 
 
@@ -228,6 +338,10 @@ async def test_the_same_question_without_the_emission_cannot_answer() -> None:
     asks for nothing. The exchange is unreachable, which is the system as it stands
     before this envelope and is what the +22.8 points of "hop" in the replay's split
     are made of.
+
+    ADR-0227 §8 keeps it as assertion 2, "the control, unchanged in force": without
+    it the case above would be a coincidence rather than a finding, since a composer
+    that answered with the word for any reason would satisfy it.
     """
     harness = Harness(
         memory=await _seeded_store(),
@@ -240,6 +354,212 @@ async def test_the_same_question_without_the_emission_cannot_answer() -> None:
     assert outcome.turn is not None
     assert [record.id for record in outcome.turn.memories] == ["belief-1"]
     assert outcome.reply == "I have no record of that."
+
+
+# --------------------------------------------------------------------------- #
+# ADR-0227 §8's assertions 4, 5, 8 and 16: the prompt the engine assembled      #
+# --------------------------------------------------------------------------- #
+
+
+class _FailingKeyedLoad(FakeMemoryStore):
+    """A store whose keyed load fails, so the servicing degrades (ADR-0226 §5)."""
+
+    async def get_many(self, record_ids: Sequence[str]) -> dict[str, MemoryRecord]:
+        del record_ids
+        msg = "fake: the keyed load is unavailable"
+        raise MemoryStoreError(msg)
+
+
+async def test_a_record_both_kinds_reached_renders_once_at_the_hops_position() -> None:
+    """ADR-0227 §8's assertion 4: ADR-0226 §7's union case, and §2 beside it.
+
+    "A belief's cited evidence that the sighted query also returns" enters the fourth
+    group once, at the hop's position, and its second arrival "consumes no slot of the
+    budget". ADR-0227 §1 rules it a record the hop reached — "both kinds reaching one
+    record is the hop reaching it" — so it is admitted by §1 and not by §2.
+
+    **The shared record is a belief, and that is forced rather than chosen.** ADR-0226
+    §6 services a ``SIGHTED_QUERY`` through ``assemble_by_band(… kinds=BELIEF_KINDS)``,
+    so no query can return an episode — and an episode is the only record shape
+    carrying an ``outcome`` and a ``disposition`` at all. What this case can therefore
+    assert end to end is the half only the servicer decides: one bullet, at the hop's
+    position, with no second copy. The reply-line half of §8's assertion 4 is
+    ``test_composing.py``'s, over the carrier this servicing produces, because at the
+    render site a union record and a hop-only record are the same input.
+
+    **And §2 is asserted positively here** (§8's assertion 3, engine arm): the record
+    the query alone returned renders its bullet and no reply line, and neither does
+    the union record, because neither carries a reply to render.
+    """
+    memory = FakeMemoryStore(now=lambda: AT)
+    await memory.add(_belief("belief-1", "the user asked about a lender", evidence=("shared-1",)))
+    # Neither of the two below shares a term with `_QUESTION`, so the blind read
+    # reaches neither and both arrive through the servicing alone.
+    await memory.add(_belief("shared-1", "an earlier exchange about mortgages"))
+    await memory.add(_belief("query-1", "an earlier exchange about rates"))
+    composing, model = _recorder()
+    harness = Harness(
+        memory=memory,
+        planner=_AskingPlanner(_both("an earlier exchange", "M1")),
+        composing=composing,
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        outcome = await harness.engine.converse(_QUESTION, timeout=PATIENT)
+
+    assert outcome.turn is not None
+    assert [record.id for record in outcome.turn.memories] == ["belief-1", "shared-1", "query-1"]
+    record = _record(captured)
+    assert record["new"] == 2, "the union record consumed one slot, not two"
+    assert record["deduplicated"] == 1
+    prompt = _assembled(model)
+    assert prompt.count("an earlier exchange about mortgages") == 1, "one bullet"
+    assert _reply_lines_of(prompt) == [], "neither belief carries a reply to render"
+
+
+async def test_a_hop_record_the_supplement_already_held_renders_its_reply_where_it_sits() -> None:
+    """ADR-0227 §8's assertion 5: the case a group-shaped test would miss.
+
+    Here the episodic supplement has already picked the exchange up, so ADR-0226 §7's
+    deduplication removes it from the fourth group and "the copy the supply already
+    held keeps its position". §1's third clause renders it all the same: "a record the
+    hop resolved through a named label's ``Provenance.evidence`` renders its reply
+    whether it entered the fourth group or was deduplicated out against the
+    pre-servicing supply".
+
+    **This is the failure #1944 records, on a turn that looks like a success.** Under
+    a group-shaped test the exact record the belief cites would render phrase-only
+    whenever the supplement happened to have reached it first, "and no live probe
+    would distinguish it from success" — which is why §1's test is why the record is
+    there rather than which group it sits in.
+    """
+    memory = await _seeded_store(content=f"The user asked: {_QUESTION} for the house purchase?")
+    composing, model = _recorder()
+    harness = Harness(memory=memory, planner=_AskingPlanner(_hop("M1")), composing=composing)
+
+    with structlog.testing.capture_logs() as captured:
+        outcome = await harness.engine.converse(_QUESTION, timeout=PATIENT)
+
+    assert outcome.turn is not None
+    assert [record.id for record in outcome.turn.memories] == ["belief-1", "episode-1"]
+    record = _record(captured)
+    assert (record["new"], record["deduplicated"]) == (0, 1), "no fourth group, and one duplicate"
+    (line,) = _reply_lines_of(_assembled(model))
+    assert _LENDER in line, "the deduplicated-out record still renders its reply"
+
+
+async def test_every_turn_that_serviced_no_hop_assembles_the_prompt_it_would_have() -> None:
+    """ADR-0227 §8's assertion 8: the four empty cases render nothing.
+
+    §3's carrier "is **empty** on every turn that did not fire, on a turn whose
+    servicing ADR-0226 §5 declined, on a turn whose servicing failed or was partial …
+    and on a turn whose hop resolved no live record. An empty set renders no reply
+    line anywhere, and the assembled prompt is then byte-identical to what it is
+    today."
+
+    Each fired arm is compared against the **same store and the same question** under
+    a planner that asks for nothing, which is what "byte-identical to today's" means
+    operationally: the emission changed no byte of the prompt.
+    """
+
+    async def prompt_for(store: FakeMemoryStore, request: ReadRequest | None) -> str:
+        composing, model = _recorder()
+        harness = Harness(memory=store, planner=_AskingPlanner(request), composing=composing)
+        await harness.engine.converse(_QUESTION, timeout=PATIENT)
+        return _assembled(model)
+
+    async def failing() -> _FailingKeyedLoad:
+        return await _seeded(_FailingKeyedLoad(now=lambda: AT))
+
+    async def barren() -> FakeMemoryStore:
+        store = FakeMemoryStore(now=lambda: AT)
+        await store.add(
+            _belief(
+                "belief-1",
+                "the user asked about a lender for the house purchase",
+                evidence=("gone-1",),
+            )
+        )
+        return store
+
+    # Each pair is two identically seeded stores, asked the same question: once by a
+    # planner that emitted a request and once by one that did not. A *fresh* store per
+    # arm, because a turn captures its own episode — reusing one would compare a supply
+    # of two records against a supply of one, rather than comparing two emissions.
+    assert await prompt_for(await failing(), _hop("M1")) == await prompt_for(await failing(), None)
+    assert await prompt_for(await barren(), _hop("M1")) == await prompt_for(await barren(), None)
+    for store, request in (
+        (await _seeded_store(), None),
+        (await failing(), _hop("M1")),
+        (await barren(), _hop("M1")),
+    ):
+        assert _reply_lines_of(await prompt_for(store, request)) == []
+
+
+async def test_a_declined_servicing_assembles_a_prompt_with_no_reply_line() -> None:
+    """ADR-0227 §8's assertion 8, on ADR-0226 §5's declined arm.
+
+    ``converse_spoken``'s channel audience is unbounded, so the request is emitted and
+    not serviced; §3's carrier is empty and ADR-0227 §10 records what follows — "this
+    ADR reaches no unbounded-audience turn: a declined servicing reaches no record
+    here, and the composed prompt on such a turn is byte-identical to today's".
+
+    Compared against the same operation under a planner that asks for nothing, which
+    is the same operational reading of "byte-identical" the case above takes.
+    """
+
+    async def spoken_prompt(request: ReadRequest | None) -> str:
+        composing, model = _recorder()
+        harness = Harness(
+            memory=await _seeded_store(), planner=_AskingPlanner(request), composing=composing
+        )
+        await harness.engine.converse_spoken(_recording(), plays=(_MP4,), timeout=PATIENT)
+        return _assembled(model)
+
+    assert await spoken_prompt(_hop("M1")) == await spoken_prompt(None)
+    assert _reply_lines_of(await spoken_prompt(_hop("M1"))) == []
+
+
+async def test_no_identifier_the_hop_carried_reaches_a_prompt_a_log_or_the_audit() -> None:
+    """ADR-0227 §8's assertion 16: §3's namer rule, on a turn that serviced a hop.
+
+    "The identifiers in it are held data, used to decide which line the assembler
+    writes, and they are rendered into no prompt, no log, no trace and no audit
+    record." ADR-0226 §9's record carries "no identifier but the correlation id", as
+    its own test asserts, and this ADR "introduces no second label scheme, adds no
+    member to ``ReadKind``, and adds no marking to a ``MemoryRecord``".
+
+    The reply *text* does reach the prompt — that is the whole decision — so the
+    assertion is on the identifier, which is the value §3 keeps off every surface.
+    """
+    composing, model = _recorder()
+    harness = Harness(
+        memory=await _seeded_store(), planner=_AskingPlanner(_hop("M1")), composing=composing
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        outcome = await harness.engine.converse(_QUESTION, timeout=PATIENT)
+
+    assert outcome.turn is not None
+    prompt = _assembled(model)
+    assert _LENDER in prompt, "the reply reached the prompt"
+    assert "episode-1" not in prompt, "and its identifier did not"
+    assert not any("episode-1" in json.dumps(event, default=str) for event in captured)
+    assert set(_record(captured)) == {
+        "event",
+        "log_level",
+        "correlation_id",
+        "trigger",
+        "servicing",
+        "kinds",
+        "returned",
+        "new",
+        "deduplicated",
+        "labels_unresolved",
+        "truncated_kinds",
+        "failed",
+        "failed_after_read_returned",
+    }
 
 
 # --------------------------------------------------------------------------- #
