@@ -81,6 +81,27 @@ from ai_assistant.testing.recipient_grants import (
 if TYPE_CHECKING:
     from ai_assistant.core.types import RecipientGrant
 
+
+class _Deceptive(int):
+    """An ``int`` subclass that answers ``<=`` with a lie, and carries its value.
+
+    Not a contrivance for its own sake: it is the value class a denylist naming
+    ``bool`` lets through, and the reason the guard it exercises is written as an
+    allowlist of the exact ``int``. ``describe_untrusted`` still describes it, so
+    the refusal it provokes names something the operator can recognise.
+    """
+
+    def __le__(self, other: object) -> bool:
+        """Answer ``False`` to every ``<=``, which is what carries it past a sign check."""
+        return False
+
+
+#: The ids for the non-exact-``int`` limits, spelled out because two of the values
+#: (``True`` and ``1.0``) would otherwise collect under ids pytest derives from
+#: their truthiness and their repr, and a failure has to name which case failed.
+_NON_INT_LIMIT_IDS = ["none", "bool", "float", "str", "int-subclass"]
+
+
 #: The ceiling every store the suite builds starts at. Small enough that the
 #: count cases can reach it with a handful of records and large enough that no
 #: case *not* about the ceiling ever brushes it.
@@ -1041,6 +1062,42 @@ class RecipientGrantStoreContract(RecipientGrantsContract, RecipientGrantResolut
         """
         with pytest.raises(ValueError, match="strictly positive"):
             await store.recent(limit=limit)
+
+    @pytest.mark.parametrize(
+        "limit", [None, True, 1.0, "50", _Deceptive(-1)], ids=_NON_INT_LIMIT_IDS
+    )
+    async def test_recent_refuses_a_limit_that_is_not_an_exact_int(
+        self, store: RecipientGrantStore, limit: object
+    ) -> None:
+        """The type is allowlisted, because the sign check alone decides nothing (#1598).
+
+        The rule above is about a value; this one is about the class the value is
+        an instance of, and the sign check cannot reach it. Each case here reaches
+        the guard by a different route and every one of them is a way a bounded
+        read of a Tier 1 store stops being one:
+
+        * ``None`` left the comparison as a bare ``TypeError``, which is neither
+          class this member documents — the error boundary with a hole in it.
+        * ``True`` **passes** ``limit <= 0``. It is an ``int``, so no comparison
+          refuses it, and a caller who asked for the newest fifty is handed one
+          record and told nothing.
+        * ``1.0`` and ``"50"`` are bound to ``LIMIT ?`` as themselves, so what
+          the bound means is the driver's business rather than this contract's.
+        * ``_Deceptive(-1)`` is the case that makes this an **allowlist** rather
+          than a denylist naming ``bool``: an ``int`` subclass may override its
+          comparisons, and Python gives the subclass's reflected comparison
+          priority, so it answers ``False`` to ``limit <= 0`` while carrying
+          ``-1`` — which SQLite reads as *no limit at all*, the exact unbounded
+          read the case above exists to prevent, arriving past the guard that
+          prevents it.
+
+        ``ValueError`` and not ``TypeError``: ``core/protocols.py`` documents
+        ``ValueError`` and ``RecipientGrantError`` for this member and no third
+        class, so an implementation raising one would be outside the contract
+        both implementations are held to.
+        """
+        with pytest.raises(ValueError, match="strictly positive"):
+            await store.recent(limit=limit)  # type: ignore[arg-type]  # the point of the test
 
     async def test_recent_admits_a_limit_wider_than_the_store(
         self, store: RecipientGrantStore
