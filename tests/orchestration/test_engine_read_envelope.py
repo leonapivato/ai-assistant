@@ -58,7 +58,12 @@ from ai_assistant.core.types import (
     SemanticMemory,
 )
 from ai_assistant.orchestration.composing import ComposingStage
-from ai_assistant.orchestration.reads import READ_AUDIT_EVENT, Servicing, TriggerOutcome
+from ai_assistant.orchestration.reads import (
+    READ_AUDIT_EVENT,
+    Servicing,
+    StopReason,
+    TriggerOutcome,
+)
 from ai_assistant.testing import (
     FakeMemoryStore,
     FakeModelProvider,
@@ -257,6 +262,11 @@ def _record(captured: Sequence[MutableMapping[str, Any]]) -> Mapping[str, Any]:
     return only
 
 
+def _serviced(captured: Sequence[MutableMapping[str, Any]], ordinal: int = 0) -> Mapping[str, Any]:
+    """One servicing's entry in this turn's record (ADR-0228 §9)."""
+    return _record(captured)["servicings"][ordinal]  # type: ignore[no-any-return]
+
+
 # --------------------------------------------------------------------------- #
 # §11 item 1: the reply-vocabulary question answers through the hop            #
 # --------------------------------------------------------------------------- #
@@ -445,9 +455,9 @@ async def test_a_record_both_kinds_reached_renders_once_at_the_hops_position() -
 
     assert outcome.turn is not None
     assert [record.id for record in outcome.turn.memories] == ["belief-1", "shared-1", "query-1"]
-    record = _record(captured)
-    assert record["new"] == 2, "the union record consumed one slot, not two"
-    assert record["deduplicated"] == 1
+    serviced = _serviced(captured)
+    assert serviced["new"] == 2, "the union record consumed one slot, not two"
+    assert serviced["deduplicated"] == 1
     prompt = _assembled(model)
     assert prompt.count("an earlier exchange about mortgages") == 1, "one bullet"
     assert _reply_lines_of(prompt) == [], "neither belief carries a reply to render"
@@ -478,8 +488,10 @@ async def test_a_hop_record_the_supplement_already_held_renders_its_reply_where_
 
     assert outcome.turn is not None
     assert [record.id for record in outcome.turn.memories] == ["belief-1", "episode-1"]
-    record = _record(captured)
-    assert (record["new"], record["deduplicated"]) == (0, 1), "no fourth group, and one duplicate"
+    serviced = _serviced(captured)
+    assert (serviced["new"], serviced["deduplicated"]) == (0, 1), (
+        "no fourth group, and one duplicate"
+    )
     (line,) = _reply_lines_of(_assembled(model))
     assert _LENDER in line, "the deduplicated-out record still renders its reply"
 
@@ -601,12 +613,20 @@ async def test_no_identifier_the_hop_carried_reaches_a_prompt_a_log_or_the_audit
     assert _LENDER in prompt, "the reply reached the prompt"
     assert "episode-1" not in prompt, "and its identifier did not"
     assert not any("episode-1" in json.dumps(event, default=str) for event in captured)
+    # ADR-0228 §9 extends this record rather than replacing it: the per-servicing
+    # counts became `servicings`, one entry per servicing, and two turn-level fields
+    # joined them. Neither level carries an identifier but the correlation id.
     assert set(_record(captured)) == {
         "event",
         "log_level",
         "correlation_id",
         "trigger",
         "servicing",
+        "planner_calls",
+        "stop",
+        "servicings",
+    }
+    assert set(_serviced(captured)) == {
         "kinds",
         "returned",
         "new",
@@ -648,7 +668,13 @@ async def test_a_spoken_turn_services_nothing_and_records_the_emission_as_declin
     record = _record(captured)
     assert record["trigger"] == TriggerOutcome.FIRED.value
     assert record["servicing"] == Servicing.DECLINED.value
-    assert record["returned"] == 0
+    # Nothing was serviced, so ADR-0228 §9's sequence is empty — and this operation
+    # neither iterates nor could: §2(c) admits a revision only where the request was
+    # serviced, and §4 declares `converse_spoken` no planning budget at all (§2(a)).
+    assert record["servicings"] == ()
+    assert record["planner_calls"] == 1
+    assert record["stop"] == StopReason.NOT_ITERATED.value
+    assert len(planner.calls) == 1, "no spoken turn iterates (ADR-0228 §4)"
 
 
 async def test_a_typed_turn_of_the_same_engine_is_serviced() -> None:
@@ -667,8 +693,9 @@ async def test_a_typed_turn_of_the_same_engine_is_serviced() -> None:
     assert outcome.turn is not None
     assert [record.id for record in outcome.turn.memories] == ["belief-1", "episode-1"]
     record = _record(captured)
+    serviced = _serviced(captured)
     assert record["servicing"] == Servicing.SERVICED.value
-    assert record["new"] == 1
+    assert serviced["new"] == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -724,9 +751,10 @@ async def test_a_turn_whose_plan_cannot_be_persisted_still_contributes_its_numer
         await harness.engine.converse(_QUESTION, timeout=PATIENT)
 
     record = _record(captured)
+    serviced = _serviced(captured)
     assert record["trigger"] == TriggerOutcome.FIRED.value
     assert record["servicing"] == Servicing.SERVICED.value
-    assert record["new"] == 1
+    assert serviced["new"] == 1
 
 
 async def test_a_routed_pass_reaches_no_turn_stage_and_writes_no_record() -> None:
@@ -915,8 +943,8 @@ async def test_a_label_whose_record_the_keyed_load_omits_reaches_nothing() -> No
 
     assert outcome.turn is not None
     assert [record.id for record in outcome.turn.memories] == ["belief-1", "episode-1"]
-    record = _record(captured)
-    assert record["labels_unresolved"] == 1, "the label resolved to nothing"
+    serviced = _serviced(captured)
+    assert serviced["labels_unresolved"] == 1, "the label resolved to nothing"
     prompt = _assembled(model)
     assert _reply_lines_of(prompt) == [], "and the deleted record's reply reached no prompt"
     assert _LENDER not in prompt

@@ -330,13 +330,42 @@ def bound_binder(tool_definition: ToolDefinition) -> FakeEgressBinder:
     return binder
 
 
+def plan_id(goal_id: str, ordinal: int) -> str:
+    """The id a test planner mints for the ``ordinal``-th call of one turn.
+
+    **Distinct per call, because ADR-0014 §2's "re-planning produces a *new*
+    ``ActionPlan`` with a new ``id``" now binds within a turn** (ADR-0228 §3): a turn
+    may call ``Planner.plan`` twice, both plans are persisted, and
+    ``PlanStore.save_plan`` refuses a ``supersedes`` naming the saving plan's own id
+    (ADR-0228 §5). A planner minting one id twice is non-conforming, and would fail
+    its consumer for the planner's own defect.
+
+    **The first call keeps the id these planners have always minted**, so nothing that
+    named it moves.
+
+    Args:
+        goal_id: The goal the plan is for.
+        ordinal: Which call of this turn, 1-based.
+
+    Returns:
+        The plan id.
+    """
+    return f"{goal_id}-plan" if ordinal == 1 else f"{goal_id}-plan-{ordinal}"
+
+
 class OneStepPlanner:
     """A ``Planner`` that plans exactly one step **for the goal it is given**.
 
     Building the plan from the passed goal is what keeps ``plan.goal_id`` equal to
     the id the loop minted, so the façade's ``save_plan`` finds its goal. Structurally
     implements :class:`~ai_assistant.core.protocols.Planner`.
+
+    **Its plan id is per call** (:func:`plan_id`). ``_calls`` is a class-level default
+    that the first call shadows with an instance attribute, so every subclass keeps
+    working whether or not it calls ``super().__init__()``.
     """
+
+    _calls: int = 0
 
     def __init__(
         self,
@@ -364,11 +393,19 @@ class OneStepPlanner:
             capability=self._capability,
             parameters=self._parameters,  # type: ignore[arg-type]  # heterogeneous test arguments
         )
-        return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(step,), created_at=AT)
+        self._calls += 1
+        return ActionPlan(
+            id=plan_id(goal.id, self._calls), goal_id=goal.id, steps=(step,), created_at=AT
+        )
 
 
 class NoStepPlanner:
-    """A ``Planner`` that ends a turn at an empty plan."""
+    """A ``Planner`` that ends a turn at an empty plan.
+
+    Its plan id is per call, for :class:`OneStepPlanner`'s reason (:func:`plan_id`).
+    """
+
+    _calls: int = 0
 
     async def plan(
         self,
@@ -378,7 +415,10 @@ class NoStepPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
     ) -> ActionPlan:
-        return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(), created_at=AT)
+        self._calls += 1
+        return ActionPlan(
+            id=plan_id(goal.id, self._calls), goal_id=goal.id, steps=(), created_at=AT
+        )
 
 
 class RaisingMemoryStore(FakeMemoryStore):
