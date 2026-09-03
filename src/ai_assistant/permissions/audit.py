@@ -360,6 +360,14 @@ _DECISION_COMPARED: Final[tuple[str, ...]] = (
 #: ``meta`` is here for the same reason ADR-0049 §1's restamp exists: an ignored
 #: ``UPDATE`` would leave a version-1 marker standing over a version-2 shape, which
 #: is the downgrade the marker is what makes reportable.
+#:
+#: **Keyed lower-case, and looked up that way**, because SQLite folds an identifier's
+#: case while ``sqlite_master`` keeps the spelling it was declared with: a table
+#: created as ``Decisions`` is the one every statement here reads, and a trigger on
+#: it arrives under a ``tbl_name`` an exact lookup does not know. Only ASCII is
+#: folded by SQLite, and ``str.lower`` folds at least that, so a name SQLite calls
+#: this store's table is always matched — and the exotic spelling it would not is
+#: matched too, which refuses rather than admits.
 _TRIGGERS: Final[dict[str, frozenset[str]]] = {
     "meta": frozenset(),
     "decisions": frozenset(),
@@ -1023,7 +1031,11 @@ class SqliteAuditTrail:
         for name, table in conn.execute(
             "SELECT name, tbl_name FROM sqlite_master WHERE type = 'trigger'"
         ):
-            defined = _TRIGGERS.get(str(table))
+            # The trigger's own name is matched exactly, unlike the table's: a
+            # differently-cased spelling of this store's trigger is not this store's
+            # trigger, and `_check_objects` has already refused the file for holding
+            # nothing under the name it defines.
+            defined = _TRIGGERS.get(str(table).lower())
             if defined is None or str(name) in defined:
                 continue
             msg = (
