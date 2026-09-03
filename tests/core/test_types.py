@@ -1606,6 +1606,77 @@ def test_the_key_ignores_the_rationale() -> None:
     assert first.question_key == second.question_key
 
 
+def test_a_record_whose_model_dump_lies_is_fingerprinted_on_its_real_field_state() -> None:
+    """``model_dump`` is an ordinary attribute, and this fingerprint is a key.
+
+    An instance can shadow the method through ``__dict__`` — the bypass
+    ``frozen=True`` leaves open, and the one ``orchestration/executor.py``,
+    ``permissions/_detachment.py`` and :attr:`RecipientGrant.subject_digest`
+    already close about the same method — so a projection built by *calling* it
+    would fingerprint whatever that mapping described rather than the record. The
+    consequence here is ADR-0078 §7's: the coordinator digests at admission and
+    the writer recomputes at answer time, so a record able to nominate its own
+    fingerprint is a record able to collide with a question the user has already
+    answered, or to escape one they have not.
+    """
+    record = _semantic("1")
+    elsewhere = _semantic("1").model_copy(update={"fact": "something else entirely"})
+    record.__dict__["model_dump"] = elsewhere.model_dump
+    proposal = MemoryUpdateProposal(proposed=record, rationale="because")
+
+    honest = MemoryUpdateProposal(proposed=_semantic("1"), rationale="because")
+    lie = MemoryUpdateProposal(proposed=elsewhere, rationale="because")
+
+    assert proposal.proposal_fingerprint == honest.proposal_fingerprint
+    assert proposal.proposal_fingerprint != lie.proposal_fingerprint
+
+
+def test_a_subclass_of_a_record_is_fingerprinted_under_the_declared_union() -> None:
+    """The projection is taken under ``MemoryRecord``, not ``type(proposed)``.
+
+    The same rule ``_detached_tool`` states by rebuilding as a
+    :class:`ToolDefinition` and never as ``type(value)``: a subclass's extra
+    fields are outside the schema the key is taken under rather than silently
+    inside it. Otherwise two proposals agreeing in every field
+    :data:`MemoryRecord` declares would be two questions on a difference the user
+    was never shown — ``topics``' argument (ADR-0213 §10), reached through the
+    type instead of through a field.
+    """
+
+    class NotedSemanticMemory(SemanticMemory):
+        note_to_self: str = "not part of the belief"
+
+    subclassed = NotedSemanticMemory(
+        id="1",
+        content="c",
+        fact="f",
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.4, last_updated=_WHEN),
+    )
+    proposal = MemoryUpdateProposal(proposed=subclassed, rationale="because")
+    plain = MemoryUpdateProposal(proposed=_semantic("1"), rationale="because")
+
+    assert proposal.proposal_fingerprint == plain.proposal_fingerprint
+
+
+def test_the_fingerprint_and_the_key_survive_a_json_round_trip() -> None:
+    """ADR-0078 §10 item 24's parity, pinned where the projection is taken.
+
+    The projection is built in JSON mode precisely so a proposal reconstructed
+    from a serialised form digests identically to the one it was serialised from
+    — "the failure it guards is not a mismatch on some input but a mismatch on
+    *every* input". The store's conformance suite owns the clause end to end;
+    this guards the serializer this projection resolves, so a change to it that
+    left JSON mode behind is a red test here rather than a hub whose every
+    asserted conflict has stopped being confirmable.
+    """
+    proposal = MemoryUpdateProposal(proposed=_semantic("1"), rationale="because", conflicts=("c1",))
+
+    rebuilt = MemoryUpdateProposal.model_validate(proposal.model_dump(mode="json"))
+
+    assert rebuilt.proposal_fingerprint == proposal.proposal_fingerprint
+    assert rebuilt.question_key == proposal.question_key
+
+
 @pytest.mark.parametrize(
     ("outcome", "deferral", "valid"),
     [

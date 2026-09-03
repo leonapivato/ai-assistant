@@ -39,6 +39,7 @@ from pydantic import (
     ConfigDict,
     Field,
     SecretStr,
+    TypeAdapter,
     ValidationInfo,
     field_validator,
     model_validator,
@@ -3086,6 +3087,19 @@ class DataTier(StrEnum):
 #: level in, inside the nested projection.
 _FINGERPRINT_EXCLUDED_RECORD_FIELDS: frozenset[str] = frozenset({"id", "score", "topics"})
 
+#: The serializer the proposal fingerprint's projection is taken by, resolved
+#: once on the **declared** :data:`MemoryRecord` union and never reached through
+#: ``self.proposed.model_dump``. That method is an ordinary attribute: a subclass
+#: can override it and an instance can shadow it through ``__dict__``, and either
+#: can return a valid-but-false mapping for the record it is asked about.
+#: ``ai_assistant.orchestration.executor``, ``ai_assistant.permissions._detachment``
+#: and :meth:`RecipientGrant._digest_projection` state that rule about that method
+#: on a single class, resolving its ``__pydantic_serializer__``; a discriminated
+#: union has no class to resolve it on, and this adapter is what stands in its
+#: place — the union's own serializer, which reads the instance's field values and
+#: consults no instance attribute.
+_MEMORY_RECORD_PROJECTION: Final[TypeAdapter[MemoryRecord]] = TypeAdapter(MemoryRecord)
+
 
 def _canonical_members(values: Sequence[str]) -> list[str]:
     """Normalise a collection that is a *set in meaning* (ADR-0078 §7).
@@ -3290,13 +3304,30 @@ class MemoryUpdateProposal(BaseModel):
     def _fingerprint_projection(self) -> dict[str, object]:
         """The canonical projection :attr:`proposal_fingerprint` digests.
 
-        Built from ``model_dump(mode="json")`` rather than from the live objects,
-        so a record reconstructed field-by-field from a serialised form projects
-        identically to the one it was serialised from (ADR-0078 §10's parity
-        clause) — the failure that clause guards is not a mismatch on some input
-        but a mismatch on *every* input.
+        Built in JSON mode rather than from the live objects, so a record
+        reconstructed field-by-field from a serialised form projects identically
+        to the one it was serialised from (ADR-0078 §10's parity clause) — the
+        failure that clause guards is not a mismatch on some input but a mismatch
+        on *every* input.
+
+        **Serialised by :data:`_MEMORY_RECORD_PROJECTION`, the declared union's
+        own serializer, never through ``self.proposed.model_dump``.** That method
+        is an ordinary attribute, so an instance can shadow it through
+        ``__dict__`` and a subclass can override it, and a record that nominates
+        its own dump nominates its own fingerprint — which is a record able to
+        collide with a question the user has already answered, or to escape one
+        they have not. The projection is also taken under the *declared* type's
+        field set rather than ``type(self.proposed)``'s, for the reason
+        :func:`_detached_tool` rebuilds as a :class:`ToolDefinition` and not as
+        ``type(value)``: a subclass's extra fields would otherwise be silently
+        inside the digest's schema, so two records equal in everything
+        :data:`MemoryRecord` declares would fingerprint apart. ``warnings=False``
+        because serialising a subclass through the union's schema warns, and the
+        warning is noise here.
         """
-        record: dict[str, Any] = self.proposed.model_dump(mode="json")
+        record: dict[str, Any] = _MEMORY_RECORD_PROJECTION.dump_python(
+            self.proposed, mode="json", warnings=False
+        )
         for excluded in _FINGERPRINT_EXCLUDED_RECORD_FIELDS:
             record.pop(excluded, None)
         provenance: dict[str, Any] = dict(record["provenance"])
