@@ -947,6 +947,31 @@ scope is a smaller falsehood than any of those — it is, in fact, none.
 > filesystem substituted under that mount root and is refused immediately; that is the
 > fixed point of this argument rather than a layer left unexamined.
 
+> **Normative.** **That one open is not the egress ADR-0017 §1 governs, and the scope is a
+> ruling this ADR cites rather than an argument it makes.** Ruled by the owner on
+> 2026-09-03 (batch #1996, comment 5532194014): §1 does **not** reach the remote metadata
+> I/O caused by resolving an **operator-configured pathname at construction** — no user
+> content, no model-influenced byte, nothing read through it, no handle surviving the
+> refusal — and that includes the racing case above, where a mount is substituted under the
+> configured path between stage 1's read of the tables and stage 2's open. The ground is
+> that §1 exists to stop **this system** leaking the user's data, not to defend against a
+> principal who already holds mount privilege on the machine and who, in the owner's words,
+> *"could probably do a lot worse stuff already"*. The precedent is this system's own
+> startup: the hub opens its data directory, its SQLite stores and its keyring on configured
+> paths at every start, and the calendar and email readers open configured local sources,
+> none of which this corpus has ever read as an egress.
+
+> **Normative.** **The scope is exactly that and no wider, which is why it is stated as a
+> bound rather than as a permission.** It covers **one** open, of **one** mount root, at
+> **construction**, of a path an **operator** configured. It does not cover a listing, a
+> fetch, a read of any content, any call a plan or a model can reach, or any open at all
+> after the device identity has been checked — every one of which happens through the handle
+> stage 2 bound, on a resolution that crosses no mount. And it changes **no clause of the
+> mechanism**: the two stages, the tables-open-nothing rule, the check of the opened start
+> against what the tables claimed, and the atomic no-cross, no-symlink, beneath-only descent
+> all stand exactly as decided above. The ruling settled what §1 reaches, not what this ADR
+> should build, and the mechanism is already the tightest a userspace program can be given.
+
 > **Normative.** **Eligibility is decided over the whole backing chain and not over the
 > filesystem's type alone.** A filesystem type is necessary and **not sufficient**: an
 > ext4 or XFS volume on an iSCSI, NBD, NVMe-oF or otherwise network-attached block device
@@ -974,10 +999,16 @@ scope is a smaller falsehood than any of those — it is, in fact, none.
 > and a root swapped onto network-backed storage is that move by another route, at whichever
 > layer the swap is made. This ADR
 > pre-authorises no such egress and does not seek to; it makes the configuration that would
-> perform one unwireable, and the word is meant exactly: **no `Fetcher` is constructed over
-> such a root, and no read of the configured path is performed in refusing a root that is
-> remote as configured** — stage 1 decides from the platform's own tables, so that refusal
-> costs the network nothing.
+> perform one **unwireable**, and the word is meant exactly and no wider than it is true:
+> **no `Fetcher` is constructed over such a root, and no read of the configured path is
+> performed in refusing a root that is remote as configured** — stage 1 decides from the
+> platform's own tables, so that refusal costs the network nothing. What "unwireable" does
+> **not** claim is that no byte can cross under an adversary who substitutes a mount
+> mid-construction: the one open above can contact such a substitution and is refused on
+> the device-identity mismatch, and that contact is outside §1's reach under the ruling
+> recorded above — a scope this ADR cites rather than an exception it grants itself. **Every
+> read the mechanism performs after construction is taken on the checked handle**, so the
+> word holds entire over the listing, the fetch and everything a turn can reach.
 
 > **Normative.** The listing is the root's **direct children only** — no recursion, no
 > subdirectory traversal, no following of symbolic links out of the root — ordered
@@ -1189,15 +1220,29 @@ subject.
 > its width, and this ADR pre-authorises none. So the configuration is refused at
 > construction rather than documented, argued about, or left to operator discipline.
 
+> **Normative.** **What that refusal contains is the fetch path, and §6's construction-time
+> residual sits outside this property rather than unstated inside it.** The containment
+> above is a claim about what a **steered turn** can reach: every listing and every fetch
+> resolves through the handle stage 2 opened and checked, on a descent that crosses no
+> mount, so no turn of this system reads storage an observer off this device can watch. The
+> one open that precedes that check happens **once, at construction, before any turn
+> exists**, on a pathname an operator configured and no model influenced, and nothing is
+> read through it; under the owner's ruling of 2026-09-03 (#1996, comment 5532194014) it is
+> not the egress ADR-0017 §1 governs. So (b) holds unqualified where it is claimed — on the
+> fetch path — and the residual is disclosed in §6 where it occurs, rather than being
+> carried silently by a word here.
+
 > **Normative.** **Three things would break it, and each is named so that a later lane
 > meets it as a condition rather than discovers it.** A kind whose fetch itself leaves the
 > device — that is #1996's Lane B, deferred in §15, and this ADR decides nothing for it. A
 > fetch whose address space is composed by a model rather than shown to it, which §2
 > forbids. And any relaxation of ADR-0223 §6's stamp or ADR-0154 §4's
 > standing-authorisation floor, neither of which this ADR touches or may be cited toward.
-> **A network-backed root is not a fourth**, because §6 makes it unwireable rather than
-> discouraged; a relaxation of *that* refusal is the fourth by another name and needs the
-> ratified egress decision ADR-0084 §1 says such a hop owes.
+> **A network-backed root is not a fourth**, because §6 makes a root that is remote **as
+> configured** unwireable rather than discouraged, and refuses a substituted one on the
+> device-identity mismatch before any component of the configured path is resolved through
+> it; a relaxation of *that* refusal is the fourth by another name and needs the ratified
+> egress decision ADR-0084 §1 says such a hop owes.
 
 > **Normative.** A planner-composed query is a **model completion with no recorded
 > origin**, of the same class as `ActionPlan.rationale`, at every iteration and whether or
@@ -1695,7 +1740,7 @@ same reason; this decision adds a contract, so it adds a lane.
     turn. This is the arm that fails on any implementation carrying an unchecked bound
     through to a slice.
 22. **A root whose reads would leave the device does not wire, one whose locality is
-    merely unproven does not either, and refusing one reads nothing through it.** Eight arms
+    merely unproven does not either, and refusing one reads nothing through it.** Nine arms
     at construction, over a fetcher whose view of the platform's mount and device
     information the test supplies. Four decide admission: a root on a filesystem the
     platform reports as network-attached refuses; a root whose filesystem type is
@@ -1731,6 +1776,17 @@ same reason; this decision adds a contract, so it adds a lane.
     This is the arm that fails on any implementation walking the path as a sequence of
     checks and opens, however each of them is guarded, and it is the one that distinguishes
     an atomic descent from a careful one.
+    **And a ninth arm, bounding the one open the owner's ruling scopes**: in the sixth arm's
+    substituted-mount sequence, with every filesystem call the constructor makes
+    instrumented, the calls that reach the substituted filesystem are **exactly one directory
+    open of the mount root and nothing else** — no read through it, no directory listing, no
+    `openat` of any component of the configured path, no `stat` of anything beneath it, and
+    no second attempt after the mismatch — and construction ends holding no handle and
+    building no `Fetcher`. This is the arm that keeps the residual §6 discloses at the size
+    §6 states it at, which is the size the ruling of 2026-09-03 (#1996, comment 5532194014)
+    scopes out of ADR-0017 §1; it asserts that bound and nothing wider. It is the arm that
+    fails on any implementation that retries the open, that probes further after the
+    mismatch, or that reads through the start handle before checking it.
 
 ### 15. Deferred, by name, each with what fires it
 
@@ -1889,11 +1945,16 @@ avoided: the record carries an attestation because it is in the attested band.
 - **ADR-0154 §1, §4 and §7, and ADR-0017 §1.** This ADR authorises no egress, designates
   no seam, registers no tool, adds no `DestinationProtocol` member, and is cited toward none
   of those. §8's containment rests on ADR-0223 §6's stamp, which is a control this ADR
-  applies and does not relax. **ADR-0017 §1 is honoured by a refusal rather than by a
-  reading**: §6 will not construct a `Fetcher` on a root whose reads would leave the device,
-  so the one configuration that could have made a `readers/` read an egress does not wire,
-  and ADR-0084 §1's rule that such a hop *"owes its own ratified egress decision"* is left
-  standing rather than approached.
+  applies and does not relax. **ADR-0017 §1 is honoured on every read path by a refusal**:
+  §6 will not construct a `Fetcher` on a root whose reads would leave the device, so the one
+  configuration that could have made a `readers/` read an egress does not wire, and
+  ADR-0084 §1's rule that such a hop *"owes its own ratified egress decision"* is left
+  standing rather than approached. **The single construction-time open §6 discloses is
+  scoped out of §1 by the owner's ruling of 2026-09-03 (#1996, comment 5532194014), and
+  that is a reading of §1's reach rather than a movement of it.** ADR-0017's text is
+  unchanged, its rule binds as written on everything this ADR builds, and the ruling is the
+  owner's, cited here rather than recorded as this ADR's amendment: ADR-0082's records are
+  owed for a clause this ADR itself makes false or over-wide, and §1 is neither.
 
 ## Consequences
 
