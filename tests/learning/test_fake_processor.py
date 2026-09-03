@@ -447,6 +447,69 @@ async def test_an_absent_subject_is_distinct_from_an_empty_one() -> None:
     assert absent.proposed.id != empty.proposed.id
 
 
+async def test_a_fixed_events_id_is_this_exact_string() -> None:
+    """The literal :func:`_derived_id` derives for ``_event()``'s defaults.
+
+    Pinned because #1994 moved the derivation off ``event.model_dump_json()`` and
+    onto ``FeedbackEvent.__pydantic_serializer__.to_json(event, warnings=False)``,
+    and the whole claim of that move is that it changes *no honest event's id*:
+    ``model_dump_json`` is that serializer's ``to_json``, so the bytes are the same
+    bytes. This literal is the one the pre-change spelling produced, so the case
+    fails if the two ever diverge.
+
+    It is deliberately brittle in one direction: a new ``FeedbackEvent`` field
+    moves it, and that movement is real — every field reaches the record, so the
+    id must change — and this makes it arrive as a decision rather than silently.
+    """
+    [proposal] = await FakeFeedbackProcessor().process(_event())
+
+    assert proposal.proposed.id == "fake-memory-f54016d65976bb53"
+
+
+async def test_an_instance_shadowing_model_dump_json_cannot_nominate_its_id() -> None:
+    """#1994: the id is the serializer's, so a shadowed dump is not consulted.
+
+    ``model_dump_json`` is an ordinary attribute and a pydantic model keeps its
+    fields in ``__dict__``, so an entry of that name there shadows the method for
+    every ordinary lookup — which is exercised here rather than assumed. An id is
+    what ``MemoryStore.add`` upserts on, so an event able to nominate one is an
+    event able to destroy the record another established.
+    """
+    tampered = _event()
+    tampered.__dict__["model_dump_json"] = lambda *_args, **_kwargs: '{"content":"other"}'
+    assert tampered.model_dump_json() == '{"content":"other"}'  # the shadow is live
+
+    [nominated] = await FakeFeedbackProcessor().process(tampered)
+    [honest] = await FakeFeedbackProcessor().process(_event())
+
+    assert nominated.proposed.id == honest.proposed.id
+
+
+async def test_a_subclass_overriding_model_dump_json_cannot_nominate_its_id() -> None:
+    """#1994's other half, and why the serializer is the *declared* class's.
+
+    Resolved on ``FeedbackEvent`` rather than on ``type(event)``, so a subclass
+    neither overrides the render nor widens the schema it is taken under: two
+    events equal in every field ``FeedbackEvent`` declares establish the same
+    record, and so must derive the same id.
+    """
+
+    class _Nominating(FeedbackEvent):
+        """A subclass that would name its own id if the dump were consulted."""
+
+        def model_dump_json(self, **_kwargs: object) -> str:
+            """Return a render sharing nothing with this event's real one."""
+            return "{}"
+
+    nominating = _Nominating(**dict(_event()))
+    assert nominating.model_dump_json() == "{}"  # the override is live
+
+    [nominated] = await FakeFeedbackProcessor().process(nominating)
+    [honest] = await FakeFeedbackProcessor().process(_event())
+
+    assert nominated.proposed.id == honest.proposed.id
+
+
 async def test_id_factory_is_injectable() -> None:
     processor = FakeFeedbackProcessor(id_factory=lambda: "rec-1")
 
