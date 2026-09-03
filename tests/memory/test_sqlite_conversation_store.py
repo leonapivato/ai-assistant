@@ -1419,6 +1419,113 @@ async def test_a_legacy_orphan_survives_the_rebuild_and_is_reported(tmp_path: Pa
         reopened.close()
 
 
+class _RebuildFailsPartWay(sqlite3.Connection):
+    """A driver whose row copy fails part way through :meth:`_migrate_turns`' rebuild.
+
+    The failure is injected into the *mechanism* rather than into the data, unlike
+    the memory store's twin (``test_migration_rolls_back_a_rebuild_that_hits_a
+    _corrupt_row``), which corrupts a JSON blob the backfill decodes. This copy
+    decodes nothing, and no legacy row can fail it: the pre-#452 schema
+    ``_strip_the_foreign_key`` restores is the one the store originally wrote, and
+    it already carries every ``NOT NULL`` and the primary key ``turns_migrated``
+    declares — so any row the legacy table can hold, the new table accepts.
+
+    What can still fail is the write itself, which is what a full disk, a revoked
+    file, or a driver-level fault all look like from inside the copy — and which is
+    the case the explicit ``BEGIN`` exists for. Handed to the store the way the
+    enforcing-driver case above hands one over: through ``connect``'s ``factory``,
+    so the store meets an ordinary connection that simply fails.
+    """
+
+    #: How many rows go across before the injected failure. One rather than zero,
+    #: because what has to roll back is a rebuild already *underway*: the new table
+    #: created and holding a row, so there is something for the rollback to undo.
+    rows_before_failure: int = 1
+
+    def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
+        """Pass every statement through, failing the copy once the budget is spent."""
+        if sql.startswith("INSERT INTO turns_migrated"):
+            if self.rows_before_failure <= 0:
+                msg = "disk I/O error"
+                raise sqlite3.OperationalError(msg)
+            self.rows_before_failure -= 1
+        return super().execute(sql, parameters)
+
+
+@pytest.mark.integration
+async def test_a_rebuild_that_fails_part_way_rolls_back_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rewrite is all-or-nothing, so a failure mid-copy leaves the file as it was.
+
+    Without the explicit ``BEGIN`` the rebuild is a run of auto-committed
+    statements — SQLite commits a bare DDL statement in autocommit mode — so a
+    failure during the row copy would leave a half-filled ``turns_migrated`` beside
+    a ``turns`` table already dropped, or the swap done and rows missing. And
+    permanently: the next open would find the foreign key on the renamed table and
+    skip the migration that would have finished the job.
+
+    So what the transaction owes is not "the rows are safe somewhere" but "nothing
+    moved" — the legacy schema unchanged, its rows all present, no half-built table
+    left behind, and the file still migratable by a later, sound open.
+    """
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        conversation = await store.start()
+        first = await store.append(conversation.id, occurred_at=_NOW)
+        second = await store.append(conversation.id, occurred_at=_NOW)
+    finally:
+        store.close()
+
+    _strip_the_foreign_key(path)
+    assert not _cascading_keys_of(path), "the legacy file must really carry no key"
+
+    real_connect = sqlite3.connect
+
+    # Typed to the one call the store makes, as the enforcing-driver case above is.
+    def connect_failing(
+        database: str, *, check_same_thread: bool, isolation_level: None
+    ) -> sqlite3.Connection:
+        return real_connect(
+            database,
+            check_same_thread=check_same_thread,
+            isolation_level=isolation_level,
+            factory=_RebuildFailsPartWay,
+        )
+
+    # Scoped to the constructor, which is the only call that has to meet the
+    # failing driver — the assertions below open their own ordinary connections.
+    with monkeypatch.context() as patched:
+        patched.setattr(sqlite3, "connect", connect_failing)
+        with pytest.raises(ConversationStoreError, match="disk I/O error"):
+            SqliteConversationStore(path=path, now=_fixed_now)
+
+    raw = sqlite3.connect(path)
+    try:
+        assert not list(
+            raw.execute("SELECT name FROM sqlite_master WHERE name = 'turns_migrated'")
+        ), "the half-built table did not survive the rollback"
+        # Every row still there, and still under the legacy schema: the copy that
+        # failed took its own DDL down with it rather than leaving a swap behind.
+        assert [row[0] for row in raw.execute("SELECT ordinal FROM turns ORDER BY ordinal")] == [
+            first.ordinal,
+            second.ordinal,
+        ]
+    finally:
+        raw.close()
+    assert not _cascading_keys_of(path), "the swap did not commit"
+
+    # And the file is a *clean* legacy database rather than a half-swapped one, so
+    # a later open migrates it rather than refusing it or skipping past it.
+    reopened = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        assert _cascading_keys_of(path), "a sound open completes the migration later"
+        assert await reopened.turns(conversation.id) == [first, second]
+    finally:
+        reopened.close()
+
+
 @pytest.mark.integration
 async def test_a_gapped_turn_index_is_reported_rather_than_extended(tmp_path: Path) -> None:
     """Density is the store's invariant, so a gap is a fault and not a shape to build on.
