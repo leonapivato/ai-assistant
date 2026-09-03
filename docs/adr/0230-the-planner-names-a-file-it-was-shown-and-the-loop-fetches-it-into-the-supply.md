@@ -254,10 +254,13 @@ defers by name and #1908 places at a later milestone.
 > would be a label whose meaning depends on which kind quoted it.
 
 > **Normative.** **Both sides derive the label from the listing and neither consults
-> the other.** The planner renders each entry's label from the sequence it was given;
-> the loop resolves a label by parsing *n* and indexing **the very sequence it passed
-> on this call**. No mapping, table, path or handle crosses between `planning` and
-> `orchestration` other than that sequence and the `ActionPlan` that already crosses.
+> the other.** The planner renders each file's label from the sequence it was given; the
+> loop resolves a label by parsing *n* and indexing **the very sequence it passed on this
+> call**, and fetches the entry at that same position of the listing it holds — the
+> projection §4 requires is positional and one for one, so the two sequences have one
+> ordering and one length. Nothing but that sequence and the `ActionPlan` that already
+> crosses passes between `planning` and `orchestration`: no mapping, no table, no path,
+> and **no capability, because a `ShownFile` carries none** (§4).
 
 > **Normative.** **A label outside the shown set resolves to nothing.** A string that
 > does not match the form, an *n* below 1 or beyond the sequence's length, and a label
@@ -326,7 +329,7 @@ the case the exit names, a file saved yesterday, is the case the bound serves be
 
 ### 3. The listing crosses the seam on `Planner.plan`, and it is read once per turn
 
-> **Normative.** `Planner.plan` gains one keyword parameter, `files: Sequence[SourceListingEntry] = ()`,
+> **Normative.** `Planner.plan` gains one keyword parameter, `files: Sequence[ShownFile] = ()`,
 > additive and defaulted. `Planner.plan`'s other parameters, its return type and every
 > other Protocol are unchanged by this clause. `()` means **no file is nameable on this
 > turn** and is the semantically correct answer for a deployment with no fetcher wired
@@ -428,14 +431,19 @@ against the turn's own model round trips, which it is orders of magnitude below.
 >   the listing is the authority the entry's membership is verified against, and a
 >   contract in which the caller supplies only the entry has nothing to verify it in.
 
-> **Normative.** `core/types.py` gains three frozen models and one `StrEnum`, all
+> **Normative.** `core/types.py` gains four frozen models and one `StrEnum`, all
 > refusing mutation and unknown fields:
 >
 > - `SourceListingEntry` — `name: NonBlankEncodableText`, `size_bytes: int` (≥ 0),
 >   `modified_at: UtcInstant`, and `handle: EncodableText`. It carries **no path, no
->   root and no directory component**: `name` is what a person calls the file and is
->   what a prompt renders, and `handle` is the opaque capability of the clause below,
->   which is never rendered anywhere.
+>   root and no directory component**: `name` is what a person calls the file, and
+>   `handle` is the opaque capability of the clause below, which is never rendered
+>   anywhere. It is the **fetcher-facing** value — held by `orchestration`, handed back
+>   to `fetch`, and never crossing into `planning`.
+> - `ShownFile` — `name: NonBlankEncodableText`, `size_bytes: int` (≥ 0) and
+>   `modified_at: UtcInstant`, and **nothing else**. It is the **planner-facing**
+>   projection of an entry: what §3 renders into a prompt and the only listing value
+>   that crosses `Planner.plan`. It carries no capability, so a planner has none to leak.
 > - `SourceListing` — `source: EncodableText` equal to the producing fetcher's `name`,
 >   `read_at: UtcInstant` (the instant **this system** listed, captured once at
 >   acquisition), `entries: tuple[SourceListingEntry, ...]`, possibly empty, and
@@ -458,9 +466,42 @@ against the turn's own model round trips, which it is orders of magnitude below.
 > that never existed — is refused whatever its other fields say, and a `Fetcher` that
 > decides membership by re-reading its caller's `name` does not conform.
 
+> **Normative.** **The capability does not cross the planning seam, and that is a property
+> of the types rather than a rule a planner is trusted to keep.** The loop projects each
+> `SourceListingEntry` of the listing it holds onto a `ShownFile` — positionally, in
+> order, one for one, the whole sequence — and passes **that** to `Planner.plan`. A
+> `Planner` receives no `handle`, no `token` and no `SourceListing`, so an implementation
+> that rendered every field of every value it was handed, logged them, or returned them
+> discloses no capability, because there is none on the value to disclose. This is the
+> move the handle itself makes one clause above — *an obligation the type cannot enforce
+> is a convention and not a property* — applied to the seam that **carries** the entry as
+> well as to the one that verifies it. A `Fetcher` is handed the entry and the listing it
+> came from, and nothing in `planning/` ever is.
+
+> **Normative.** **An exactly copied authentic value is the same authority and is
+> accepted; what is refused is a value this fetcher did not mint.** Verification is over
+> the values and must be: the third required property below forbids the fetcher retaining
+> anything, so a byte-identical copy of a `SourceListing` and one of its entries is
+> indistinguishable from what was minted and no conforming implementation attempts to
+> distinguish them — one that did would be deciding from retained object identity, which
+> is the counting mechanism this section already rejected. Nothing is lost by accepting
+> it: a copy names the same entry of the same listing inside the same deadlines, so it
+> resolves to the file the loop was already shown, and §2's claim is about the
+> **resolvable set** and not about object identity. So *a listing the caller assembled*
+> means one whose `token` this fetcher did not mint, and *an entry the caller assembled*
+> one whose `handle` this fetcher did not mint for that listing — never a faithful copy
+> of one it did.
+
+> **Normative.** **An entry's display fields are not authority, and no fetch decision is
+> taken from them.** `size_bytes` and `modified_at` are what §3 renders; the file is named
+> by `name`, which is what a handle is bound over, and the size is decided against the
+> object `fetch` opens by the bounded read below. So a copy carrying an altered
+> `size_bytes` or `modified_at` widens nothing and reaches nothing — it edits a rendering
+> that has already happened, and no clause of this section consults either field.
+
 > **Normative.** **A listing's authority expires after `fetch_listing_ttl` of elapsed
-> time** — a `Settings` field with a named default of **five minutes**, refused at load
-> rather than at the first fetch.
+> time** — a `Settings` field with a named default of **five minutes**, strictly positive
+> by §6's domain clause, refused at load rather than at the first fetch.
 
 > **Normative.** **Two deadlines are bound into the authenticated token and a listing is
 > refused once *either* has passed.** When it mints a listing the fetcher reads both a
@@ -899,6 +940,20 @@ scope is a smaller falsehood than any of those — it is, in fact, none.
 > **32 KiB**, which bounds what reaches the prompt — roughly 32,000 characters of English,
 > about 5,400 CJK code points or about 2,700 emoji, by the clause below.
 
+> **Normative.** **Every `Settings` field this ADR adds has a stated domain, and a value
+> outside it is a load-time configuration error.** `fetch_listing_ttl` is **strictly
+> positive**; `fetch_listing_max_entries`, `fetch_max_file_bytes` and
+> `fetch_max_content_bytes` are integers of **at least 1**. Zero and negative values are
+> refused rather than given a meaning. A zero entry cap is a mechanism that shows nothing
+> while appearing configured, which §3 rules a listing may not be made to mean; and a
+> negative one is worse than meaningless — *capped at −1* has no reading, while the
+> obvious Python spelling of a cap, `entries[:-1]`, quietly yields all but the last
+> entry, so a bound would be defeated by a configuration value rather than enforced by
+> one. The root's own field is not in this class: its named default is unset, and unset
+> means the mechanism is off (this section's first clause). Each refusal is `Settings`'s
+> own, at load rather than at the first fetch (ADR-0093 §5), and stops the deployment
+> exactly as an ineligible root does.
+
 > **Normative.** **`fetch_max_content_bytes` is counted on the *quoted rendering* of the
 > extracted text — `json.dumps` at its default `ensure_ascii=True`, its two delimiters
 > included — and never on the source.** That rendering is pure ASCII, so its character
@@ -1302,9 +1357,10 @@ that line, so a later lane that erodes it meets a stop rather than a silence.
 > none before this ADR is Accepted and merged (golden rule 5).
 
 **Lane C1 — the contract, the fetcher, and the composition.** `core/protocols.py`'s
-`Fetcher`; `core/types.py`'s `SourceListingEntry`, `SourceListing`, `FetchOutcome`,
+`Fetcher`; `core/types.py`'s `SourceListingEntry`, `ShownFile`, `SourceListing`, `FetchOutcome`,
 `FetchRefusal`, `ReadKind.LOCAL_FILE` and `ReadAsk.entry` with its validator arm; the
-`Settings` fields of §6 and §4 with their named defaults and their load-time refusal;
+`Settings` fields of §6 and §4 with their named defaults, their stated domains and their
+load-time refusal;
 §6's **eligibility refusal on the root**, satisfying its fail-closed property over the
 backing chain in **both** of §6's stages — admitting the root from the platform's mount and
 device tables with nothing under the configured path opened, then binding the opened root
@@ -1334,8 +1390,10 @@ wiring, which constructs a `Fetcher` only where a root is configured.
 > `reported_by` equals `name`, and carries an empty `evidence`; **an entry the test
 > assembles itself is refused**, and so is one built by copying a listed entry's `name`,
 > `size_bytes` and `modified_at` onto a handle of the test's own choosing, and so is a
-> listing the test assembled, and so is an entry of listing A presented with listing B's
-> token; **a listing past either of §4's deadlines is refused** on fake clocks the suite
+> listing the test assembled around a token of its own, and so is an entry of listing A
+> presented with listing B's token — while **a faithful copy of an authentic listing and
+> entry is fetched**, the clause in the other direction, which fails an implementation
+> deciding from retained object identity; **a listing past either of §4's deadlines is refused** on fake clocks the suite
 > drives while one inside both is not, **a wall clock stepped backwards does not extend
 > one and a frozen monotonic source does not either**, and **producing further listings
 > invalidates none of them**; **no
@@ -1357,14 +1415,17 @@ wiring, which constructs a `Fetcher` only where a root is configured.
 > validation and acquisition, a growth past the bound between them, a replacement of
 > the **root's own pathname** by a symlink to an outside directory between the listing and
 > the fetch, and a replacement of that pathname between the constructor's admission of
-> the root and its acquisition of the root handle (§6) — a generic suite cannot replace an arbitrary fetcher's
-> root, so these arms are the concrete fetcher's and not the suite's); and that the
+> the root and its acquisition of the root handle (§6) — a generic suite cannot replace
+> an arbitrary fetcher's root, so these arms are the concrete fetcher's and not the
+> suite's); and that the
 > listing is ordered most-recently-modified-first and capped. Each is named here so the
 > lane does not read its absence from the suite as its absence from the contract.
 
 **Lane C2 — the listing across the seam and the planner's emission.** `Planner.plan`'s
-`files` parameter and its documented meaning; the loop reading the listing once per turn
-and passing the same sequence to both calls; §2's `F`-labelled rendering of it in
+`files` parameter and its documented meaning; the loop reading the listing once per turn,
+projecting its entries onto `ShownFile`s positionally (§4) and passing that same sequence
+to both calls, retaining the `SourceListing` itself in `orchestration`; §2's `F`-labelled
+rendering of it in
 `planning/planner.py` with ADR-0098 §2's escaping; the prompt that asks for a
 `LOCAL_FILE` ask and the parse that reads one; and the extension of the shared
 `PlannerContract` (`tests/planning/planner_contract.py`) for the widened input, so the
@@ -1428,7 +1489,11 @@ same reason; this decision adds a contract, so it adds a lane.
    invented handle. Both are refused `NOT_FOUND`, no record is added, and the file's
    distinctive text appears nowhere in the supply or the reply. Two further arms at the
    same seam: an entry of listing A presented with listing B's token, and a `SourceListing`
-   the test assembled around a real entry. Asserted at the `Fetcher` seam, because it is a
+   the test assembled around a real entry but carrying a token of its own. And **one arm
+   in the other direction**: a byte-identical copy of an authentic listing and one of its
+   entries **fetches**, because the authority is the authenticated value and not the
+   object, and an implementation refusing it would be retaining what §4 forbids retaining.
+   Asserted at the `Fetcher` seam, because it is a
    property of the contract and not of the loop that happens to call it.
 4. **The three race transitions are refused.** Over a real filesystem, deterministically
    sequenced so the transition lands **between** the fetcher's validation and its
@@ -1540,7 +1605,24 @@ same reason; this decision adds a contract, so it adds a lane.
     validate as a `PlanExport` at all; both conforming `PlanStore` implementations export
     the new version; and `PROTOCOL_VERSION` reads 28 with `wire/envelope.py`'s log naming
     this ADR.
-20. **A root whose reads would leave the device does not wire, one whose locality is
+20. **No capability crosses the planner seam, and the projection is positional.** A turn
+    whose listing holds several entries: the value passed to `Planner.plan` is a sequence
+    of `ShownFile`, one per entry in the listing's own order, and `SourceListingEntry`,
+    `SourceListing`, `token` and `handle` reach `planning/` in no argument of any call.
+    Asserted structurally — the planner-facing type has no field a capability could sit
+    in — and behaviourally: a planner double that renders **every field of every value it
+    receives** into its prompt produces a prompt in which no token and no handle of that
+    turn appears. And `F`*n* fetches the entry at position *n* of the listing the loop
+    holds, which is the arm that fails on any implementation projecting a filtered,
+    reordered or partial sequence.
+21. **An out-of-domain bound does not load.** One arm per field — a zero and a negative
+    `fetch_listing_ttl`, `fetch_listing_max_entries`, `fetch_max_file_bytes` and
+    `fetch_max_content_bytes` — each refused when `Settings` is constructed, before any
+    fetcher is built and before any filesystem call, and each a configuration error that
+    stops the deployment rather than an empty listing, a `FetchRefusal` or a degraded
+    turn. This is the arm that fails on any implementation carrying an unchecked bound
+    through to a slice.
+22. **A root whose reads would leave the device does not wire, one whose locality is
     merely unproven does not either, and refusing one reads nothing through it.** Six arms
     at construction, over a fetcher whose view of the platform's mount and device
     information the test supplies. Four decide admission: a root on a filesystem the
@@ -1811,8 +1893,23 @@ avoided: the record carries an attestation because it is in the attested band.
   an iSCSI, NBD or NVMe-oF volume reports an ordinary local type while every read traverses
   a network, so a type-only check admits the ADR-0017 §1 egress the NFS case is, one layer
   down. §6 now requires the filesystem **and** its backing device to be established, names
-  no construction as sufficient, and §14's item 20 carries the arm that fails a type-only
+  no construction as sufficient, and §14's item 22 carries the arm that fails a type-only
   implementation.
+- **Refusing an exact copy of an authentic listing, so that only the object the fetcher
+  handed out is fetchable.** It is the stricter reading of §4's *"a listing a caller
+  assembled is refused"*, and it is unavailable: distinguishing a faithful copy from the
+  original requires the fetcher to retain what it minted, which §4's third required
+  property forbids and which the eight-listing window already failed on from both sides.
+  It also buys nothing — a copy names the same entry of the same listing inside the same
+  deadlines — so the refusal rule is stated over **unminted or altered** values instead,
+  and §14's item 3 carries the arm in each direction.
+- **Passing `SourceListingEntry` itself across `Planner.plan`, with a rule that a planner
+  must not render the `handle`.** It was this ADR's answer for one round, and it makes the
+  containment §2 claims a convention held at the `planning` boundary rather than a
+  property of the seam — the very thing §4 refuses one clause earlier when it makes
+  membership a minted capability instead of an obligation on the caller. A planner that
+  serialised its inputs would put a live capability in a prompt, which is precisely what
+  §2 exists to prevent. `ShownFile` removes the field rather than forbidding its use.
 - **Opening the root first and deciding locality only against the opened handle.** It was
   this ADR's answer for one round, and it is right about the *object* the property must be
   established over — a pathname decided and then re-opened leaves the replacement interval
@@ -1823,7 +1920,7 @@ avoided: the record carries an attestation because it is in the attested band.
   and a rejection that asserts no `Fetcher` survives while asserting nothing about what the
   rejection cost. §6's two stages keep what was right about it — locality is finally decided
   against the open object — and drop what was not, that the object may be opened before it
-  has been admitted. §14's item 20 carries the instrumented arm that fails an open-first
+  has been admitted. §14's item 22 carries the instrumented arm that fails an open-first
   implementation.
 - **Classifying a file by where it came from, so that a synced or downloaded copy is
   refused an attestation and a locally authored one is granted it.** It is the shape a scope
