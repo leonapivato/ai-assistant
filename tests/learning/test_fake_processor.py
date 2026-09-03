@@ -14,6 +14,7 @@ import pytest
 from feedback_processor_contract import FeedbackProcessorContract
 from pydantic import ValidationError
 
+from ai_assistant.core.clock import ClockReadingError
 from ai_assistant.core.types import (
     EpisodicMemory,
     FeedbackEvent,
@@ -144,9 +145,23 @@ async def test_a_stated_subject_reaches_every_kind(memory_kind: MemoryKind) -> N
 
 
 async def test_synthesised_record_carries_the_feedbacks_provenance() -> None:
-    event = _event(subject="email tone", evidence=("ep-9",))
+    """The two instants come from two sources, and this pins which is which.
 
-    [proposal] = await FakeFeedbackProcessor().process(event)
+    ``last_updated`` is transaction time and so the processor's own clock
+    (ADR-0045 §3): the fake reads the injected one, exactly as
+    ``RuleBasedFeedbackProcessor`` does since #775 and as this fake did not until
+    #780. ``last_confirmed_at`` is the utterance's instant (ADR-0109 §4) — an
+    ``ASSERTED`` belief is confirmed by the user stating it — and is asserted
+    against the *event* rather than against the field beside it, so the claim stays
+    about the confirming event however the other moves.
+
+    The two are wired to different values on purpose: with one clock reading equal
+    to ``created_at`` the case would pass on an implementation that conflated them.
+    """
+    event = _event(subject="email tone", evidence=("ep-9",))
+    written_at = datetime(2026, 3, 4, 5, 6, tzinfo=UTC)
+
+    [proposal] = await FakeFeedbackProcessor(now=lambda: written_at).process(event)
 
     record = proposal.proposed
     assert isinstance(record, PreferenceMemory)
@@ -154,12 +169,66 @@ async def test_synthesised_record_carries_the_feedbacks_provenance() -> None:
     assert record.context == "email tone"
     assert record.provenance.source is MemorySource.USER_ASSERTED
     assert record.provenance.evidence == ("ep-9",)
-    assert record.provenance.last_updated == _WHEN
-    # The `ASSERTED` band's confirming event is the user stating it (ADR-0109 §4),
-    # so this fake takes the utterance's instant exactly as `FeedbackProcessor`
-    # does. Asserted against the *event* rather than against `last_updated` beside
-    # it, so the claim stays about the confirming event if #775 moves the other.
+    assert record.provenance.last_updated == written_at
     assert record.provenance.last_confirmed_at == event.created_at
+    assert event.created_at != written_at
+
+
+async def test_the_default_clock_is_the_wall_clock_and_the_event_never_stamps_the_write() -> None:
+    """Unwired, the fake stamps *now* — the defect #780 records was the default path.
+
+    A consumer that wires no clock is the case the issue is about: every
+    orchestration and world test drives this fake as constructed, and while
+    ``last_updated`` came off the event those tests certified their subjects
+    against records claiming a revision at the utterance's instant. Bracketing the
+    call is what states "the processing instant" without naming a value, and it is
+    available here — where the suite cannot — because this case owns the
+    construction.
+    """
+    event = _event()
+
+    before = datetime.now(UTC)
+    [proposal] = await FakeFeedbackProcessor().process(event)
+    after = datetime.now(UTC)
+
+    stamped = proposal.proposed.provenance.last_updated
+    assert before <= stamped <= after
+    assert stamped != event.created_at
+
+
+async def test_the_clock_is_guarded_and_its_own_refusal_is_left_unwrapped() -> None:
+    """ADR-0026 §7 covers the ``testing/`` fakes, and §2 splits the two failures.
+
+    The guard's own rejection of a non-conforming reading is a
+    ``ClockReadingError`` — a ``ValueError``, not an ``AssistantError`` — and it is
+    left unwrapped here because ``RuleBasedFeedbackProcessor`` leaves it unwrapped:
+    `learning` has no error class of its own, and a fake that invented one would
+    certify a consumer's handling against a class production never raises. The
+    label is asserted because it is how a caller learns *which* seam refused.
+    """
+    naive = FakeFeedbackProcessor(now=lambda: datetime(2026, 1, 1))  # noqa: DTZ001 — the subject
+
+    with pytest.raises(ClockReadingError, match="FakeFeedbackProcessor"):
+        await naive.process(_event())
+
+
+async def test_a_scripted_fake_reads_no_clock_at_all() -> None:
+    """A script mints nothing, so there is nothing to stamp and no reading to spend.
+
+    The same placement of the read the production processor defends for its
+    deferred targets: a call that touches no seam must not be turned into a failure
+    by a clock it never needed. A clock that raises on being read is the sharpest
+    way to say "not read".
+    """
+
+    def unusable() -> datetime:
+        raise AssertionError("a scripted fake must not read its clock")
+
+    scripted = FakeFeedbackProcessor([_proposal()], now=unusable)
+
+    [proposal] = await scripted.process(_event())
+
+    assert proposal.proposed.provenance.last_updated == _WHEN
 
 
 async def test_synthesised_ids_are_derived_from_the_feedback() -> None:
