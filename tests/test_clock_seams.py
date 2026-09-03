@@ -27,10 +27,16 @@ from typing import TYPE_CHECKING, Final
 import pytest
 
 import ai_assistant
-from ai_assistant.context.sources import ClockContextSource
+from ai_assistant.context.sources import (
+    CalendarContextSource,
+    ClockContextSource,
+    EmailContextSource,
+)
 from ai_assistant.core import clock
 from ai_assistant.core.clock import ClockReadingError
+from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import (
+    AssistantError,
     ContextError,
     MemoryStoreError,
     PlanningError,
@@ -61,7 +67,9 @@ from ai_assistant.orchestration import (
     StepExecutor,
     StepRunner,
 )
+from ai_assistant.orchestration.traces import OperationTraces
 from ai_assistant.planning import InMemoryPlanStore, PlanExecution
+from ai_assistant.service.configuration import ConfigurationStamp
 from ai_assistant.testing import (
     FakeActionPolicy,
     FakeAuditTrail,
@@ -78,7 +86,10 @@ from ai_assistant.testing import (
     FakeObserver,
     FakePlanner,
     FakePlanStore,
+    FakeReader,
+    FakeSourceGrants,
     FakeSourceGrantStore,
+    FakeSourceReadRecorder,
     FakeSourceReadTrail,
     FakeStreamingCompleter,
     FakeToolInvoker,
@@ -174,7 +185,14 @@ class Seam:
             what lets one table assert both halves of ADR-0026 §2's
             reading/invocation boundary. Async uniformly, so the one synchronous
             seam needs no separate branch.
-        error: The ``AssistantError`` subclass ADR-0026 §4 assigns the seam.
+        error: What a caller of ``drive`` sees when the reading is refused — the
+            ``AssistantError`` subclass ADR-0026 §4 assigns the seam, or
+            ``ClockReadingError`` itself where the subsystem deliberately lets
+            `core`'s rejection through untranslated. The second case is not a
+            gap in the table: it is a posture the tree takes on purpose and
+            states in the seam's own docstring, and :data:`PROPAGATED` is where
+            the reason is recorded, so a seam that quietly changed posture fails
+            :func:`test_the_untranslated_seams_are_the_declared_ones`.
     """
 
     label: str
@@ -238,6 +256,30 @@ async def _learning_loop(now: Clock) -> None:
 
 async def _clock_source(now: Clock) -> None:
     await ClockContextSource(now=now).contribute()
+
+
+async def _calendar_context_source(now: Clock) -> None:
+    """The granted facet adapter's clock, read whether or not a grant answers.
+
+    Driven with **no** grant, which is the shortest path to the reading: ADR-0185
+    §12 has the clock read the instant ``live()`` resolves, "by answering or by
+    raising", so a refusal reaches the seam exactly as a grant does.
+    """
+    await CalendarContextSource(
+        reader=FakeReader(), grants=FakeSourceGrants([]), reads=FakeSourceReadRecorder(), now=now
+    ).contribute()
+
+
+async def _email_context_source(now: Clock) -> None:
+    """The second adapter of the same class, on :func:`_calendar_context_source`'s rule.
+
+    Both are driven rather than one taken as representative of the pair: the
+    ``owner`` is ``type(self).__name__``, so the two labels are produced by one
+    line of source and only driving both proves that line yields both.
+    """
+    await EmailContextSource(
+        reader=FakeReader(), grants=FakeSourceGrants([]), reads=FakeSourceReadRecorder(), now=now
+    ).contribute()
 
 
 async def _fake_planner(now: Clock) -> None:
@@ -347,6 +389,13 @@ async def _engine(now: Clock) -> None:
 #: is in scope for §7's reason — it is a canonical double (#186).
 SEAMS = [
     Seam("ClockContextSource", _clock_source, ContextError),
+    # `context`'s other two seams take the *opposite* posture, and ADR-0026 §4 is
+    # why both are right: §4 gives `ClockContextSource` `ContextError` because it is
+    # the one **required** source, whose failure may not be degraded away. A granted
+    # facet source is optional, so its clock fault is left to reach the assembler as
+    # itself and become an absent facet like every other fault there (ADR-0008 §4).
+    Seam("CalendarContextSource", _calendar_context_source, ClockReadingError),
+    Seam("EmailContextSource", _email_context_source, ClockReadingError),
     Seam("PlanExecution", _plan_execution, PlanningError),
     Seam("InMemoryPlanStore", _in_memory_plan_store, PlanningError),
     Seam("InMemoryMemoryStore", _in_memory_store, MemoryStoreError),
@@ -428,6 +477,10 @@ class SwallowedSeam:
     drive: Callable[[Clock, FakeTraceSink], Coroutine[None, None, None]]
 
 
+async def _nothing() -> None:
+    """A crossing with no work in it, so the subject is the stamp alone."""
+
+
 async def _ingestor_write_traces(now: Clock, sink: FakeTraceSink) -> None:
     """The ``MEMORY_WRITE`` emitter's own clock, which is not the ingestor's.
 
@@ -456,11 +509,37 @@ async def _store_retrieval_traces(now: Clock, sink: FakeTraceSink) -> None:
     await store.search("coffee", limit=1)
 
 
-#: Both crossings of :class:`~ai_assistant.memory.traces.MemoryTraces`, which is
-#: the one seam in the tree whose ``owner`` is a constructor argument.
+async def _operation_traces(now: Clock, sink: FakeTraceSink) -> None:
+    """The request façade's own emitter, which opens the correlation scope (§4).
+
+    Driven over a crossing that does nothing, because the subject is the stamp and
+    not the work: what §5 promises is that ``observing`` returns whatever ``work``
+    returned however badly the clock is wired.
+    """
+    await OperationTraces(sink=sink, now=now).observing("converse", _nothing())
+
+
+async def _configuration_stamp(now: Clock, sink: FakeTraceSink) -> None:
+    """The hub's startup stamp, whose own docstring says it **never raises** (§5).
+
+    The strongest case for the posture and the one most worth pinning: a hub that
+    refused to start because the instrument's clock was misconfigured would have
+    let Tier 2 tracing become a boot dependency.
+    """
+    await ConfigurationStamp(
+        sink=sink, retrieval_search_limit=10, conflict_search_limit=12, now=now
+    ).record(Settings(embedder=EmbedderKind.HASHING))
+
+
+#: Every seam whose clock fault costs an observation and never the work: both
+#: crossings of :class:`~ai_assistant.memory.traces.MemoryTraces` — the one seam
+#: whose ``owner`` is a constructor argument — and the two emitters that take the
+#: same posture on their own account.
 SWALLOWING_SEAMS = [
     SwallowedSeam("MemoryIngestor write traces", _ingestor_write_traces),
     SwallowedSeam("SqliteMemoryStore retrieval traces", _store_retrieval_traces),
+    SwallowedSeam("OperationTraces", _operation_traces),
+    SwallowedSeam("ConfigurationStamp", _configuration_stamp),
 ]
 
 
@@ -506,6 +585,44 @@ async def test_an_instruments_clock_fault_costs_the_trace_and_not_the_work(
     )
 
 
+#: Seams that let `core`'s rejection reach their caller untranslated, and why
+#: each is entitled to. ADR-0026 §4 enumerates the translation per subsystem; a
+#: seam here is one whose subsystem the enumeration does not reach, or one whose
+#: caller already has the right posture for a raw wiring bug. It is a
+#: ``ValueError`` either way, so a caller holding only the ADR's promise still
+#: catches it.
+PROPAGATED: Final[dict[str, str]] = {
+    "CalendarContextSource": (
+        "an optional source, whose fault ADR-0008 §4 degrades to an absent facet; only "
+        "the required ClockContextSource owes ContextError (ADR-0026 §4)"
+    ),
+    "EmailContextSource": "the second adapter of that one class",
+}
+
+
+def test_the_untranslated_seams_are_the_declared_ones() -> None:
+    """A seam changing posture is a decision, so it may not happen silently.
+
+    ADR-0026 §4's enumeration is per subsystem and does not reach every subsystem
+    that now holds a seam, so "raises ``ClockReadingError``" is a real and stated
+    answer rather than a hole. What it must not be is an accident: a seam that
+    *stopped* translating would otherwise pass every assertion above by having its
+    row edited to match, and a subsystem that gained an error class would leave the
+    old posture behind with nothing to notice.
+    """
+    untranslated = {seam.label for seam in SEAMS if seam.error is ClockReadingError}
+    assert untranslated == set(PROPAGATED), (
+        f"{sorted(untranslated ^ set(PROPAGATED))} propagates or translates differently "
+        f"from what ``PROPAGATED`` records; the posture is the decision, not the row"
+    )
+    translated = [seam for seam in SEAMS if seam.error is not ClockReadingError]
+    assert all(issubclass(seam.error, AssistantError) for seam in translated), (
+        f"{sorted(s.label for s in translated if not issubclass(s.error, AssistantError))} "
+        f"translates into something that is not an ``AssistantError`` at all, which is "
+        f"neither of the two postures ADR-0026 §4 admits"
+    )
+
+
 #: Seams whose ``owner=`` is a run-time expression, so no scan of the source can
 #: name them: the unparsed expression maps to the labels it actually produces.
 #: Each label is driven by a row of :data:`SEAMS` above, and
@@ -524,21 +641,30 @@ COMPUTED_OWNERS: Final[dict[str, tuple[str, ...]]] = {
 _NOT_YET_DRIVEN: Final = "#781: guarded, and its guard is not yet driven from this table"
 
 UNTABLED: Final[dict[str, str]] = {
-    "AdminListener": _NOT_YET_DRIVEN,
-    "CalendarContextSource": _NOT_YET_DRIVEN,
-    "CalendarReader": _NOT_YET_DRIVEN,
-    "ConfigurationStamp": _NOT_YET_DRIVEN,
+    "AdminListener": (
+        "#1965: guarded, and its fault is caught by the connection handler's "
+        "``except ValueError`` — the act is abandoned, the socket closed and nothing "
+        "raised, so neither table above has an observable to assert on"
+    ),
+    "CalendarReader": (
+        "#1963: translates the refused reading into ``ReaderError`` correctly, but "
+        "ADR-0093 §8's blanket wrapper collapses the clock's *own* failure into the "
+        "same type — so it fails ``test_no_seam_steals_a_failure_of_the_clock_itself``"
+    ),
     "ConsolidationStage": _NOT_YET_DRIVEN,
     "ConversationLifecycle": _NOT_YET_DRIVEN,
     "CurrentTime": _NOT_YET_DRIVEN,
-    "EmailContextSource": _NOT_YET_DRIVEN,
-    "EmailReader": _NOT_YET_DRIVEN,
+    "EmailReader": "#1963: the second reader, with ``CalendarReader``'s clause verbatim",
     "FakeAuditTrail": _NOT_YET_DRIVEN,
     "FakeConversationStore": _NOT_YET_DRIVEN,
     "FakeDeferralStore": _NOT_YET_DRIVEN,
     "FakeFeedbackProcessor": _NOT_YET_DRIVEN,
     "FakeNotificationOutbox": _NOT_YET_DRIVEN,
-    "FakeNotificationStore": _NOT_YET_DRIVEN,
+    "FakeNotificationStore": (
+        "#1964: translates into ``NotificationStoreError`` correctly but replaces the "
+        "guard's message with a constant, so the ``owner`` label the seam paid for is "
+        "not in the rejection this module asserts on"
+    ),
     "FakeRecipientGrantStore": _NOT_YET_DRIVEN,
     "FakeRecipientGrants": _NOT_YET_DRIVEN,
     "FakeTranscriptArchive": _NOT_YET_DRIVEN,
@@ -546,7 +672,6 @@ UNTABLED: Final[dict[str, str]] = {
     "ModelBackedObserver": _NOT_YET_DRIVEN,
     "ModelBackedPlanner": _NOT_YET_DRIVEN,
     "ObservationStage": _NOT_YET_DRIVEN,
-    "OperationTraces": _NOT_YET_DRIVEN,
     "QuestionStage": _NOT_YET_DRIVEN,
     "RuleBasedFeedbackProcessor": _NOT_YET_DRIVEN,
     "SqliteAuditTrail": _NOT_YET_DRIVEN,
