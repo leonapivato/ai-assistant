@@ -23,6 +23,7 @@ from io import StringIO
 from typing import TYPE_CHECKING
 
 import pytest
+from cli_open_recorder import wire_recording_opens
 from rich.console import Console
 from typer.testing import CliRunner
 
@@ -143,6 +144,46 @@ def _wire(monkeypatch: pytest.MonkeyPatch, engine: object, *, credential: str = 
     monkeypatch.setattr(cli, "configure_logging", lambda _settings: None)
     monkeypatch.setattr(cli, "_open_engine", _open)
     monkeypatch.setattr(cli, "_prompt_for_credential", lambda: credential)
+
+
+def _wire_recording_opens(monkeypatch: pytest.MonkeyPatch, engine: object) -> list[None]:
+    """Wire ``engine`` as :func:`_wire` does, and record every open of a client.
+
+    The observation is
+    :func:`cli_open_recorder.wire_recording_opens`, shared with the three sibling
+    CLI modules that make the same claim (#1973); this binds it to this module's
+    wiring, credential reader included. Only the parameter-callback case below needs
+    it, and what it needs is the thing an engine's empty call list does not say: a
+    command that opened a client and refused *afterwards* leaves that list empty too.
+
+    Args:
+        monkeypatch: The patcher whose lifetime the substitutions follow.
+        engine: The engine a client, if one were opened, would be.
+
+    Returns:
+        One entry per :func:`~ai_assistant.interfaces.cli._open_engine` awaited.
+    """
+    return wire_recording_opens(_wire, monkeypatch, engine)
+
+
+def test_the_open_recorder_sees_the_client_an_accepted_listing_builds(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The recorder is non-vacuous on *this* surface, which is what makes it evidence.
+
+    An absence says something only if the observer would have seen the thing, and
+    that is a question about this module's own ``_wire`` and this surface's own
+    commands — a pin one module over answers it for neither. A helper bound to the
+    wrong wiring, or a ``connections`` that reached its client by some route the
+    recorder does not sit on, would leave the refusals below asserting an emptiness
+    that could never have been anything else.
+    """
+    opened = _wire_recording_opens(monkeypatch, _ScriptedConnectionEngine())
+
+    result = CliRunner().invoke(cli.app, ["connections"])
+
+    assert result.exit_code == 0
+    assert opened == [None]
 
 
 def _watching(
@@ -1152,11 +1193,19 @@ def test_a_refusable_argument_is_a_usage_error_before_any_client_is_built(
     controlled exit code — the failure ADR-0042 §7 forbids. Catching them during
     parameter parsing also means a person is not asked for a credential in order to
     be told the call was never going to be sent.
+
+    **"Before any client is built" is what this now observes** (#1973). It used to
+    observe that the engine recorded no call, and that is the weaker of the two
+    absences: a command that opened a client, probed the hub, and refused afterwards
+    leaves an empty call list behind exactly as a parse-time callback does — so the
+    name's own claim was the one thing the case could not have failed on. The engine's
+    silence is still asserted, because a refusal here asks the hub for nothing either.
     """
     engine = _ScriptedConnectionEngine()
-    _wire(monkeypatch, engine)
+    opened = _wire_recording_opens(monkeypatch, engine)
 
     assert CliRunner().invoke(cli.app, argv).exit_code == 2
+    assert opened == []
     assert engine.calls == []
 
 
