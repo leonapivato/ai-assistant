@@ -770,11 +770,12 @@ def test_load_settings_rejects_a_non_positive_deferral_ttl(
         load_settings()
 
 
-def test_the_deferral_queue_limit_defaults_to_a_page(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_deferral_queue_limit_defaults_to_a_page() -> None:
     # It matches `DeferralStore.pending`'s bounded default, so the whole answerable
     # queue fits one page and ADR-0078 §7's "the cap is legible from the first page"
-    # is true in the strongest sense.
-    monkeypatch.delenv("ASSISTANT_DEFERRAL_QUEUE_LIMIT", raising=False)
+    # is true in the strongest sense. The ambient `ASSISTANT_DEFERRAL_QUEUE_LIMIT` is
+    # swept by `hermetic_assistant_env`, which is autouse over the whole suite and is
+    # the whole of how that guard is applied (issues #1058, #1395, #1989).
     assert Settings().deferral_queue_limit == 50
 
 
