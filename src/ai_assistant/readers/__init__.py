@@ -28,6 +28,17 @@ rejection the deployment change makes *more* load-bearing rather than less — a
 co-located fetcher is the pattern that most resembles a connector, and it is not
 one. The fetcher does the network; the reader reads its output off disk.
 
+**A second seam lives here since ADR-0230, and it is not a ``Reader``.**
+:class:`~ai_assistant.readers.files.LocalFileFetcher` implements
+:class:`~ai_assistant.core.protocols.Fetcher`: it lists one configured directory
+and reads **one named file** of that listing, on the turn that asked, rather than
+performing a whole-source read on its own cadence. It is here for this package's
+own reason rather than by association — it opens a source the hub can read and
+proposes nothing, no subsystem may import it, and the leaf contract holds over it
+unchanged — and ADR-0230 §4 records why reusing ``Reader`` was never available:
+ADR-0093 §10 gives ``read()`` no arguments *by decision*, and an address is exactly
+what a fetch needs.
+
 The readers here are :class:`~ai_assistant.readers.calendar.CalendarReader` and
 :class:`~ai_assistant.readers.email.EmailReader` — two implementations of one
 behaviour, which ADR-0095 §3 named as "precisely and only what a shared
@@ -80,6 +91,14 @@ from ai_assistant.readers.email import (
     MAX_EMAIL_WINDOW,
     EmailReader,
 )
+from ai_assistant.readers.files import (
+    DEFAULT_FETCH_LISTING_MAX_ENTRIES,
+    DEFAULT_FETCH_LISTING_TTL,
+    DEFAULT_FETCH_MAX_CONTENT_BYTES,
+    DEFAULT_FETCH_MAX_FILE_BYTES,
+    FILE_FETCHER_NAME,
+    LocalFileFetcher,
+)
 
 __all__ = [
     "CALENDAR_READER_NAME",
@@ -95,12 +114,18 @@ __all__ = [
     "DEFAULT_EMAIL_MAX_MESSAGES",
     "DEFAULT_EMAIL_READ_TIMEOUT",
     "DEFAULT_EMAIL_WINDOW_PAST",
+    "DEFAULT_FETCH_LISTING_MAX_ENTRIES",
+    "DEFAULT_FETCH_LISTING_TTL",
+    "DEFAULT_FETCH_MAX_CONTENT_BYTES",
+    "DEFAULT_FETCH_MAX_FILE_BYTES",
     "DELIVERED_AT_HEADER",
     "EMAIL_READER_NAME",
+    "FILE_FETCHER_NAME",
     "MAX_CALENDAR_COUNT",
     "MAX_CALENDAR_WINDOW",
     "MAX_EMAIL_COUNT",
     "MAX_EMAIL_WINDOW",
     "CalendarReader",
     "EmailReader",
+    "LocalFileFetcher",
 ]

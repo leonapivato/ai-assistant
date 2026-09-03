@@ -36,6 +36,7 @@ from ai_assistant.testing.deferrals import FakeDeferralStore
 from ai_assistant.testing.egress import FakeEgressBinder
 from ai_assistant.testing.embeddings import FakeEmbedder
 from ai_assistant.testing.engine import FakeAssistantEngine
+from ai_assistant.testing.fetching import DEFAULT_FETCHER_NAME, FakeFetcher
 from ai_assistant.testing.grants import (
     DEFAULT_DECIDED_AT,
     DEFAULT_GRANTED_SOURCE,
@@ -164,6 +165,7 @@ __all__ = [
     "DEFAULT_BATCH_REPLY",
     "DEFAULT_CHECKED_AT",
     "DEFAULT_DECIDED_AT",
+    "DEFAULT_FETCHER_NAME",
     "DEFAULT_GRANTED_SOURCE",
     "DEFAULT_GRANT_ID",
     "DEFAULT_INSTALLATION",
@@ -204,6 +206,7 @@ __all__ = [
     "FakeEgressBinder",
     "FakeEmbedder",
     "FakeFeedbackProcessor",
+    "FakeFetcher",
     "FakeIdentifierSpace",
     "FakeIdentifiers",
     "FakeInvocationCompleter",

@@ -83,6 +83,52 @@ dependencies = [
     # audited embedding packages and is not this lane's to widen; it is filed as
     # #1462 and nothing here pre-empts it.
     "python-dateutil>=2.9",
+    # PDF text extraction for the local-file fetcher, and for nothing else:
+    # `readers/_extract.py` hands `pypdf` the bytes of a file under the configured
+    # fetch root and asks for the text they encode. ADR-0230 §6 puts PDF on the
+    # first rung because the milestone's exit names it, records that "nothing in
+    # this project extracts text from a PDF today", and deliberately names **no**
+    # library — "naming one here would decide a dependency on no evaluation, in a
+    # document whose reviewers are not evaluating it". What it fixes is the shape
+    # the adoption must satisfy: the extraction runs **in-process**, reaches no
+    # network, is **deterministic** for a given file, and converts a failure into
+    # `EXTRACTION_FAILED` rather than raising out of the fetch.
+    #
+    # **The evaluation, against four candidates.** `pypdf` 6.16.2 is a
+    # `py3-none-any` wheel with **no required runtime dependency** on Python ≥
+    # 3.11, so #664's 3.14 wheel filter is cleared trivially and nothing is dragged
+    # in behind it; it is BSD-3-Clause, which sits under this project's MIT licence
+    # without a notices obligation; and its `PdfReader(...).pages[n].extract_text()`
+    # is **page-at-a-time**, which is what lets §6's "an implementation enforces the
+    # bound **while extracting** rather than after" be true rather than aspirational
+    # — a whole-document API would have to materialise the text it then refuses.
+    #
+    # * **`pymupdf`** is the fastest and the best extractor of the four, and is
+    #   disqualified on licence: AGPL-3.0 or a commercial licence from Artifex.
+    #   Neither is compatible with shipping this project under MIT.
+    # * **`pypdfium2`** binds Google's PDFium, is Apache-2.0/BSD, and ships real
+    #   wheels — but they are per-platform binaries carrying a large native blob,
+    #   and its text API is page-at-a-time only through a lower-level handle. It
+    #   buys speed this seam does not need: a 4 MiB bound (`fetch_max_file_bytes`)
+    #   is not where extraction time matters, and a native dependency is a
+    #   permanent cost on every platform this hub is ever built for.
+    # * **`pdfminer.six`** is pure Python and MIT, and is the closest call. It is
+    #   rejected on two counts: its `extract_text` is whole-document by default, so
+    #   §6's while-extracting bound would have to be reconstructed around its
+    #   lower-level page interface; and it carries `cryptography` and `charset-
+    #   normalizer` as required dependencies, one of which this project pins for
+    #   two unrelated consumers (ADR-0123 §4, ADR-0202 §5) and would now be pinned
+    #   for three.
+    #
+    # **Ranged, in `icalendar`'s and `python-dateutil`'s form and for their
+    # reason.** `>=6.16` is the floor `uv.lock` fixes; no upper bound, which is this
+    # file's convention for every dependency outside ADR-0024 §3's exact-pinned set.
+    # Whether "parses adversary-chosen bytes" should be a second axis for
+    # exact-pinning beside §3's reproducibility one is #1462's question — open, and
+    # this line neither pre-empts nor escapes it. `readers` is the leaf package no
+    # subsystem may import, so `pypdf`'s types cross no boundary: what leaves this
+    # seam is a `core` `MemoryRecord` carrying `str`.
+    "pypdf>=6.16",
     # Two consumers, and no others. ChaCha20-Poly1305 for the backup artifact's age
     # v1 container (ADR-0123 §4), and `x509` for the gateway's remote browser
     # listener: `interfaces/gateway/tls.py` reads a certificate's `subjectAltName`
