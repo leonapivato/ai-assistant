@@ -91,8 +91,33 @@ def _derived_id(event: FeedbackEvent) -> str:
     events hash alike, and ``subject=None`` stays distinct from ``subject=""``.
     The digest is truncated only for legibility; 64 bits is far beyond what a
     test process can collide by accident.
+
+    **Serialised by the declared class's own serializer, never through
+    ``event.model_dump_json``.** That method is an ordinary attribute: an instance
+    can shadow it through ``__dict__`` and a subclass can override it, so an event
+    reached that way nominates the id of the record it establishes — and an id is
+    what ``MemoryStore.add`` upserts on, so a nominated one is the very collision
+    the paragraph above rules out by construction. It is the same rule
+    ``ai_assistant.testing._detachment`` states for a detached snapshot,
+    ``ai_assistant.orchestration.executor`` for a ``ToolResult``, and
+    :meth:`~ai_assistant.core.types.MemoryUpdateProposal._fingerprint_projection`
+    for a proposal's fingerprint; it is stated here because this is an identity
+    position too, and not because ``ai_assistant.testing`` has a boundary to
+    defend — it is test-only, and the worst outcome it could have had is two fake
+    events sharing an id inside one test process (#1994).
+
+    The serializer is resolved on the **declared** ``FeedbackEvent`` and not on
+    ``type(event)``, for the reason the proposal's projection is: a subclass's
+    extra fields would otherwise be silently inside the digest, so two events
+    equal in everything ``FeedbackEvent`` declares would derive different ids —
+    while the record they establish, built from the declared fields alone, is the
+    same record. ``warnings=False`` because serialising a subclass through the
+    declared schema warns, and the warning is noise here. The bytes are those
+    ``model_dump_json`` produced for every honest event, which is pinned against a
+    literal in ``tests/learning/test_fake_processor.py``.
     """
-    return f"fake-memory-{sha256(event.model_dump_json().encode()).hexdigest()[:16]}"
+    rendered = FeedbackEvent.__pydantic_serializer__.to_json(event, warnings=False)
+    return f"fake-memory-{sha256(rendered).hexdigest()[:16]}"
 
 
 def _act(event: FeedbackEvent) -> Placement | None:
