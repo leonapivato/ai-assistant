@@ -87,8 +87,27 @@ _BLOCK_BACKED: Final = frozenset(
 #: with no network marker on the way, is what "local" means here. ``vmbus`` and
 #: ``xen`` are the hypervisor transports a guest's own disk arrives on, which is a
 #: virtual machine's equivalent of a PCI slot rather than a network hop.
+#:
+#: **``platform`` is deliberately absent**, and its absence is the point of the
+#: list. The platform "bus" is the kernel's fallback for devices that are *not*
+#: discoverable on any real bus — membership of it says the enumerating code found
+#: no bus to describe the attachment with, which is an absence of evidence and not
+#: an establishment. Admitting on it is the same defect the tri-state answers below
+#: exist to close: unavailable evidence widening admission rather than narrowing
+#: it. A Linux iSCSI initiator's SCSI host is parented to ``platform_bus`` for
+#: exactly that reason (it is on no bus at all), so a chain that reaches only
+#: ``platform`` is one this module must not call local.
+#:
+#: The cost is a block device attached through an SoC-internal controller that
+#: reaches no more specific subsystem on the way up — refused as ``UNKNOWN``
+#: pending an ADR that can say what would establish such an attachment. That is
+#: §6's accepted failure direction ("a legitimate local configuration refused
+#: until the lane can establish it"), and it is narrower than it reads: an eMMC
+#: namespace reaches ``mmc``, a virtio disk ``virtio``, and an NVMe namespace on a
+#: platform-hosted PCIe root complex reaches ``pci``, each below any ``platform``
+#: ancestor.
 _LOCAL_BUSES: Final = frozenset(
-    {"acpi", "hv", "mmc", "nd", "pci", "platform", "usb", "vio", "virtio", "vmbus", "xen"}
+    {"acpi", "hv", "mmc", "nd", "pci", "usb", "vio", "virtio", "vmbus", "xen"}
 )
 
 #: Kernel block drivers whose device *is* a network client, whatever bus the
@@ -465,6 +484,27 @@ class ProcPlatformTables:
 
     def _hosts_of(self, kind: str, name: str) -> DeviceBacking | None:
         """Whether ``name`` is a host of a network transport class, if that is readable.
+
+        **An absent class directory is an answer about the kernel, not about the
+        device**, and it stays ``None`` deliberately. Reading it as
+        :attr:`DeviceBacking.UNKNOWN` would refuse every ordinary machine whose kernel
+        was built without, or has not loaded, ``scsi_transport_iscsi``: a SATA disk's
+        own ancestry runs through a ``scsi`` host exactly as an iSCSI LUN's does, so the
+        refusal would not be narrow — it would be every such machine, which is a
+        fail-closed rule turned into a fail-always one.
+        ``test_a_kernel_with_no_iscsi_class_at_all_is_not_refused_for_it`` pins it.
+
+        What that ``None`` no longer does is **permit on its own**. Since ``platform``
+        left :data:`_LOCAL_BUSES`, a chain whose only bus evidence is the fallback bus
+        answers :attr:`DeviceBacking.UNKNOWN` whether or not this class is visible, so
+        on such a chain the absence can now only strengthen a refusal reached elsewhere.
+        One case is still decided by this class alone: a *hardware* iSCSI or FC HBA,
+        which is locally attached hardware on a real bus (``pci``) reaching remote
+        storage, so nothing in the ancestry distinguishes it. A ``/sys`` that exposes
+        that ancestry while hiding the class is indistinguishable from a kernel without
+        the module — the same directory absent for two reasons — and refusing on it is
+        the fail-always rule above. That residual is a limit of the evidence sysfs
+        offers here, recorded rather than closed.
 
         Returns:
             :attr:`DeviceBacking.NETWORK` where the class holds this host,

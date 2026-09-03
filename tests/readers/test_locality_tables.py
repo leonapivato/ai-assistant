@@ -230,6 +230,78 @@ def test_a_kernel_with_no_iscsi_class_at_all_is_not_refused_for_it(tmp_path: Pat
     assert _backing(sysfs) is DeviceBacking.LOCAL
 
 
+def _platform_hosted_scsi(sysfs: Sysfs) -> Path:
+    """A SCSI host behind a controller on the kernel's **fallback** bus, and its disk.
+
+    The shape a Linux iSCSI initiator takes when nothing more specific describes the
+    attachment: the SCSI host is on no discoverable bus, so the only bus anywhere in
+    the ancestry is ``platform``. Returns the host node, so an arm may publish it
+    under a transport class or leave it unpublished.
+    """
+    sysfs.device("platform/1f00000.scsi", subsystem=sysfs.bus("platform"))
+    host = sysfs.device("platform/1f00000.scsi/host6", subsystem=sysfs.klass("scsi"))
+    sysfs.device("platform/1f00000.scsi/host6/target6:0:0", subsystem=sysfs.klass("scsi"))
+    disk = sysfs.device(
+        "platform/1f00000.scsi/host6/target6:0:0/sdb", subsystem=sysfs.klass("block")
+    )
+    sysfs.block(disk)
+    sysfs.mounted(source="/dev/sdb")
+    return host
+
+
+def test_a_host_on_the_fallback_bus_is_network_where_the_class_names_it(tmp_path: Path) -> None:
+    """The transport class still decides, and it decides before any bus is reached.
+
+    The positive half of the pair below: with ``/sys/class/iscsi_host`` naming this
+    host, the walk answers ``NETWORK`` at the host itself and never consults an
+    ancestor's bus at all.
+    """
+    sysfs = Sysfs(tmp_path)
+    host = _platform_hosted_scsi(sysfs)
+    (sysfs.klass("iscsi_host") / host.name).mkdir()
+
+    assert _backing(sysfs) is DeviceBacking.NETWORK
+
+
+def test_a_chain_whose_only_bus_is_the_fallback_one_is_not_local(tmp_path: Path) -> None:
+    """``platform`` membership is an absence of evidence, so it must not admit.
+
+    The same chain with no ``iscsi_host`` class at all — a partial ``/sys``, or a
+    kernel whose iSCSI transport module is not loaded. Nothing on the way up
+    affirmatively establishes an attachment: the platform "bus" is the kernel's
+    fallback for devices that are on *no* discoverable bus, so reaching it means the
+    enumerating code found nothing to describe the attachment with. §6 refuses "every
+    root whose locality the platform does not affirmatively establish", and this is
+    that root: ``UNKNOWN``, not ``LOCAL``.
+    """
+    sysfs = Sysfs(tmp_path)
+    _platform_hosted_scsi(sysfs)
+
+    assert not (sysfs.root / "class" / "iscsi_host").exists()
+    assert _backing(sysfs) is DeviceBacking.UNKNOWN
+
+
+def test_a_scsi_disk_under_pci_with_no_iscsi_class_is_local(tmp_path: Path) -> None:
+    """And the refusal above is not fail-always: the ordinary SATA machine still admits.
+
+    A SATA disk's ancestry runs through a ``scsi`` host exactly as an iSCSI LUN's
+    does, and most machines have no ``/sys/class/iscsi_host`` at all because the
+    transport module was never built or never loaded. Reading that absence as "we
+    could not tell" would refuse every one of them. It is read as what it is — this
+    kernel has no such transport — and the ``pci`` ancestor then establishes the
+    attachment positively.
+    """
+    sysfs = Sysfs(tmp_path)
+    sysfs.device("pci0000:00", subsystem=sysfs.bus("pci"))
+    sysfs.device("pci0000:00/host0", subsystem=sysfs.klass("scsi"))
+    disk = sysfs.device("pci0000:00/host0/target0:0:0/sda", subsystem=sysfs.klass("block"))
+    sysfs.block(disk)
+    sysfs.mounted(source="/dev/sda")
+
+    assert not (sysfs.root / "class" / "iscsi_host").exists()
+    assert _backing(sysfs) is DeviceBacking.LOCAL
+
+
 # --- stacked devices: the whole backing chain (ADR-0230 §6) -----------------
 
 
