@@ -32,9 +32,9 @@
   ADR-0226 §12 and cites ADR-0228 toward none of it. §11's steered-loop argument is
   **extended rather than moved**, and §8 below is the extension: the loop moves up
   exactly one rung, from the owner's own store to the owner's own disk, which is the
-  rung #1844 names as having no channel out — claimed there for a root on a local
-  filesystem, with the network-mount case scoped out of it rather than argued into it.
-  §11's class clause on a planner-composed
+  rung #1844 names as having no channel out — and "the owner's own disk" is made a
+  property of the wiring by §6's eligibility refusal rather than assumed of the
+  deployment. §11's class clause on a planner-composed
   query, its no-filtering clause and its no-recomputation clause bind unchanged, and
   §7's monotonicity is what §8 rests on.
 - **Partially supersedes**
@@ -795,10 +795,35 @@ scope is a smaller falsehood than any of those — it is, in fact, none.
 
 > **Normative.** A `Fetcher` reads from **one configured root** and from nothing else.
 > The root is a `Settings` field with a named default of **unset**, so the mechanism is
-> **off until a deployment configures it** — no root, no listing, no ask, no fetch. The
-> field's documented meaning is a **local-filesystem directory**; §8 states what a
-> network-backed mount does and does not change about the containment argument, and no
-> implementation on this rung inspects a filesystem type to decide it.
+> **off until a deployment configures it** — no root, no listing, no ask, no fetch.
+
+> **Normative.** **The root must lie on a local filesystem, and a `Fetcher` refuses to be
+> constructed on one that does not.** The check runs **when the fetcher is constructed** —
+> beside the bounds below and for their reason (ADR-0093 §5, refused at load rather than at
+> the first fetch) — and it is **fail-closed**: a filesystem whose backing the platform
+> reports as network-attached is refused, and so is one the platform will not identify at
+> all. A refused root is a configuration error that stops the deployment, never an empty
+> listing and never a `FetchRefusal`; a deployment with no root configured is unaffected,
+> because there is nothing to check.
+
+> **Normative.** **The property is fixed here and the procedure is the implementing
+> lane's**, in ADR-0093 §10's form and §4's. What is required is that a root be admitted
+> only where the platform affirmatively reports its filesystem as local, so an
+> unrecognised, unreported or newly invented backing is refused rather than admitted; an
+> allow-list of filesystem types read from the platform's own mount table satisfies that,
+> and no construction is named as the required one. **The failure mode is a legitimate
+> local mount refused until its type is named** — a configuration error a deployment can
+> see and fix — and never a remote-backed mount silently admitted.
+
+> **Normative.** **This is ADR-0017 §1 honoured, not a precaution.** Its rule is that
+> *"User data may leave the device only from `models/` or from a designated integration
+> seam inside `tools/`; every other egress is a bug"*, and a read served over NFS, SMB or a
+> FUSE-backed remote drive leaves the device from `readers/`, which is neither. ADR-0084 §1
+> settled the same question for this system's own transport — a non-loopback hop *"owes its
+> own ratified egress decision, and it cannot be reached by swapping an address family"* —
+> and a root swapped onto a network mount is that move by another route. This ADR
+> pre-authorises no such egress and does not seek to; it makes the configuration that would
+> perform one unwireable.
 
 > **Normative.** The listing is the root's **direct children only** — no recursion, no
 > subdirectory traversal, no following of symbolic links out of the root — ordered
@@ -968,9 +993,8 @@ subject.
 > ADR-0204 §4's narrowing prohibition, ADR-0226 §7's discards-nothing-by-class clause and
 > ADR-0228 §11's own no-filtering clause bind here unchanged.
 
-> **Normative.** **The containment is that there is nowhere to steer to; it is claimed
-> for a root on a local filesystem, which is what §6 documents the field to be, and it
-> rests on three properties, each of which is a clause of this corpus rather than an
+> **Normative.** **The containment is that there is nowhere to steer to, and it rests on
+> three properties, each of which is a clause of this corpus rather than an
 > implementation detail.** (a) The address space is the listing of one root a deployment
 > configured, and the model names an **ordinal into it** — §2, under which no byte of
 > model output is ever interpreted as an address. (b) A fetch is an open, a read and a
@@ -982,47 +1006,29 @@ subject.
 > capture, so ADR-0223 §6's allow applies and *"every subsequent turn of that
 > conversation that reaches the egress seam is a confirmation rather than an allow"*.
 
-> **Normative.** **A network-backed root is outside that claim, and this ADR does not
-> classify it as contained.** Where a deployment points the root at an NFS, SMB or
-> FUSE-backed remote mount, the fetch is still an `openat` and a bounded read — no lane
-> composes a request, resolves a name or names a destination, so (b) holds as written — but
-> **an observer of that mount sees which entry a turn opened**, and a revising turn's second
-> ask may be composed over the first fetch's content (§7). That is a data-steered signal
-> reaching a party outside this device without passing the egress seam. It is bounded: at
-> most **which of the listing's at-most-`fetch_listing_max_entries` entries was read**,
-> under five bits per servicing at the default of 40, never a name the model composed (§2
-> admits no composed address), never a payload this system assembled (there is no request
-> body to put one in), and never an endpoint a plan selected. **Bounded is not contained**,
-> and this decision does not offer the bound as though it were: on such a root the
-> containment above is a property the deployment has stepped outside, not one this ADR
-> still holds.
+> **Normative.** **(b) is what §6's eligibility refusal exists to keep true**, and a
+> network-backed root is why it is a refusal rather than a documented condition. On an NFS,
+> SMB or FUSE-backed remote mount the fetch would still compose no request and name no
+> destination — but **an observer of that mount would see which entry a turn opened**, and
+> a revising turn's second ask may be composed over the first fetch's content (§7). That is
+> a data-steered signal reaching a party off this device without passing the egress seam.
+> It would be bounded — at most **which of the listing's at-most-`fetch_listing_max_entries`
+> entries was read**, under five bits per servicing at the default of 40, never a name the
+> model composed (§2 admits no composed address), never a payload this system assembled
+> (there is no request body to put one in), and never an endpoint a plan selected — and
+> **bounded is not contained**. ADR-0017 §1 admits no such egress from `readers/` whatever
+> its width, and this ADR pre-authorises none. So the configuration is refused at
+> construction rather than documented, argued about, or left to operator discipline.
 
-> **Normative.** **So a deployment for which that signal matters does not put the root on a
-> network-backed mount**, and that is an operator condition stated here rather than a
-> property claimed. §6 documents the field as a local-filesystem directory, §15 defers the
-> mechanical refusal with what fires it, and until that fires the condition is carried by
-> the operator's own choice of path — which is the same place §6 already puts the decision
-> to enable the mechanism at all.
-
-> **Normative.** **No mechanical eligibility check is required of an implementation, and
-> adding one would be a guess.** Deciding "is this path local" has no portable answer:
-> `os.statvfs` reports no filesystem type, a `/proc/self/mountinfo` allow-list is
-> Linux-only and refuses a legitimate local FUSE mount while admitting the next
-> remote-backed type nobody listed, and a deny-list is worse in both directions. This is
-> §5's file-origin classifier one section over and it is refused for the same reason: a
-> classifier that guesses puts a ratified claim at the mercy of its guess. The condition is
-> stated as an **operator** condition, §15 defers the enforcement with what fires it, and
-> nothing in this ADR reads a filesystem type.
-
-> **Normative.** **Four things would break it, and each is named so that a later lane
+> **Normative.** **Three things would break it, and each is named so that a later lane
 > meets it as a condition rather than discovers it.** A kind whose fetch itself leaves the
 > device — that is #1996's Lane B, deferred in §15, and this ADR decides nothing for it. A
 > fetch whose address space is composed by a model rather than shown to it, which §2
-> forbids. Any relaxation of ADR-0223 §6's stamp or ADR-0154 §4's
+> forbids. And any relaxation of ADR-0223 §6's stamp or ADR-0154 §4's
 > standing-authorisation floor, neither of which this ADR touches or may be cited toward.
-> And **a root on a network-backed filesystem**, which removes the argument's premise
-> rather than weakening its conclusion — the clauses above say what remains there and
-> decline to call it contained.
+> **A network-backed root is not a fourth**, because §6 makes it unwireable rather than
+> discouraged; a relaxation of *that* refusal is the fourth by another name and needs the
+> ratified egress decision ADR-0084 §1 says such a hop owes.
 
 > **Normative.** A planner-composed query is a **model completion with no recorded
 > origin**, of the same class as `ActionPlan.rationale`, at every iteration and whether or
@@ -1041,10 +1047,9 @@ fetch of another file under the same root, or a sighted query over the owner's o
 It cannot cause a fetch of anything the listing did not show, because there is no
 argument through which a name can be expressed; and it cannot cause this system to compose
 an outward request on the read path, because the read path is a filesystem call and there
-is no request to compose. Where the operator has mounted that filesystem over a network,
-the clauses above say what remains and what it is bounded by — an ordinal among the listed
-entries, to an endpoint the operator chose — and say it rather than claiming a locality
-this decision does not enforce.
+is no request to compose. And it cannot reach a filesystem whose reads would leave the
+device, because §6 refuses to construct a fetcher on one — which is what makes "the owner's
+own disk" a property of the wiring rather than a description of the intended deployment.
 
 **What it *can* reach is an act, and the corpus already governs that, in the same words
 ADR-0228 §11 used.** A revised plan may name a step and that step may reach the egress
@@ -1242,6 +1247,8 @@ that line, so a later lane that erodes it meets a stop rather than a silence.
 `Fetcher`; `core/types.py`'s `SourceListingEntry`, `SourceListing`, `FetchOutcome`,
 `FetchRefusal`, `ReadKind.LOCAL_FILE` and `ReadAsk.entry` with its validator arm; the
 `Settings` fields of §6 and §4 with their named defaults and their load-time refusal;
+§6's **local-filesystem eligibility refusal on the root**, satisfying its fail-closed
+property, in the concrete fetcher and not in `core`;
 §4's token-and-handle mechanism, satisfying all three of its stated properties and its
 expiry, **in the fetcher and not in `core`** — the types carry the values and the fetcher
 owns what makes them unforgeable; the **shared conformance suite** for `Fetcher`; the
@@ -1426,10 +1433,16 @@ same reason; this decision adds a contract, so it adds a lane.
     exfiltration channel, and it is asserted end to end rather than at the predicate.
     **And the fetch is not itself an egress**, asserted on the same turn: servicing the ask
     engages no `DestinationProtocol` member, requires no confirmation of its own and routes
-    through no egress seam, which is §8's property (b) asserted rather than only stated. No
-    arm asserts anything about a network-backed root: §8 scopes the containment claim to a
-    local root and states the residual on a mounted one, so there is no property there to
-    pin until §15's refusal fires.
+    through no egress seam, which is §8's property (b) asserted rather than only stated.
+20. **A root that is not on a local filesystem does not wire, and neither does one the
+    platform will not classify.** Three arms at construction, over a fetcher whose view of
+    the platform's mount information the test supplies: a root the platform reports as
+    network-attached refuses; a root whose backing the platform reports as **unrecognised**
+    refuses, which is the fail-closed arm and the one that fails on any implementation
+    written as a deny-list; and a root on an ordinary local filesystem constructs. Each
+    refusal is a configuration error that stops construction — no `Fetcher` exists
+    afterwards — and not an empty listing, not a `FetchRefusal` and not a degraded turn.
+    A deployment with no root configured constructs no fetcher and reaches no arm.
 11. **The fetch is serviced before the hop and takes one slot.** A request carrying a
     `LOCAL_FILE` ask and a `CITATION_HOP` whose evidence would fill the budget produces a
     fourth group holding the fetched record first and exactly nine hop records after it, in
@@ -1503,15 +1516,14 @@ same reason; this decision adds a contract, so it adds a lane.
   root. A second root is a listing-composition and precedence decision; a root named in a
   turn is a model-composed address by another name and §2 forbids it. Fired by an ADR that
   decides how several address spaces are labelled and ordered.
-- **A mechanical eligibility check on the root, refusing a network-backed mount at load.**
-  §6 documents the field as a local-filesystem directory and §8 states the residual such a
-  mount leaves — under five bits per servicing, to an endpoint the operator mounted, with
-  no name and no payload this system composed. Enforcing it needs a portable way to decide
-  a filesystem's locality, which does not exist, and a Linux `mountinfo` allow-list is the
-  guessing classifier §5 and §8 both refuse. Fired by a portable decision procedure, or by
-  a deployment for which that residual matters stating so — and then it is a load-time
-  refusal beside §6's other bounds, with the refusal arm §14 would owe. **Not** fired by a
-  lane preferring a check to a documented condition.
+- **A root on a network-backed filesystem, and any widening of §6's local-filesystem
+  allow-list.** §6 refuses one at construction, fail-closed, so a legitimate local backing
+  the platform names in a way the allow-list does not yet carry is refused until it is
+  added — which is a deliberate direction of failure and not a defect. Adding a **local**
+  type to that list is an implementation change and needs no ADR. Admitting a
+  **network-attached** one is the egress decision ADR-0084 §1 says such a hop owes, and is
+  fired only by that ADR — never by a deployment finding the refusal inconvenient, and
+  never by this ADR, which pre-authorises none of it.
 - **A format whose extraction declares a report time.** §5 takes the fetch instant for
   every format. A format that carries its own declared instant — a PDF's `/ModDate`, a
   document's core properties — has a claim ADR-0092 §3 would prefer, and using it needs a
@@ -1632,7 +1644,11 @@ avoided: the record carries an attestation because it is in the attested band.
 - **ADR-0154 §1, §4 and §7, and ADR-0017 §1.** This ADR authorises no egress, designates
   no seam, registers no tool, adds no `DestinationProtocol` member, and is cited toward none
   of those. §8's containment rests on ADR-0223 §6's stamp, which is a control this ADR
-  applies and does not relax.
+  applies and does not relax. **ADR-0017 §1 is honoured by a refusal rather than by a
+  reading**: §6 will not construct a `Fetcher` on a root whose reads would leave the device,
+  so the one configuration that could have made a `readers/` read an egress does not wire,
+  and ADR-0084 §1's rule that such a hop *"owes its own ratified egress decision"* is left
+  standing rather than approached.
 
 ## Consequences
 
@@ -1699,6 +1715,17 @@ avoided: the record carries an attestation because it is in the attested band.
   It fires the same external mark and needs no supersession of ADR-0092 §3, which makes it
   genuinely tempting. Rejected in §5 because it is false: `DERIVED` means we worked it out
   and can re-derive it, and a verbatim document excerpt is neither.
+- **Documenting the root as local and leaving it to the operator, rather than refusing a
+  network-backed one at construction.** It was this ADR's answer for one round, on the
+  ground that no portable locality check exists and that a fail-open allow-list guesses.
+  Rejected because the width of the residual is not the question ADR-0017 §1 asks: its rule
+  is that user data leaves the device only from `models/` or a designated `tools/` seam, and
+  a read served over NFS leaves it from `readers/` however few bits it carries. A rule that
+  admits the configuration and asks the operator not to use it has authorised the egress and
+  then hoped. §6's refusal is fail-**closed** rather than fail-open, which answers the
+  guessing objection in the only direction that matters: an unrecognised backing is refused,
+  so the cost is a legitimate mount that must be named before it is used, and never a remote
+  one silently admitted.
 - **Classifying a file by where it came from, so that a synced or downloaded copy is
   refused an attestation and a locally authored one is granted it.** It is the shape a scope
   stated about the *file* would need, and it is unbuildable: a filesystem records no

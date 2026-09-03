@@ -1,6 +1,6 @@
 # 92. An attested belief names its source and its report time; a user assertion retires it
 
-- Status: Partially superseded by ADR-0230 (§3's local-substitute clause, in one scope: a source read **live**, at the instant of its report, holding no claim of its own made earlier — for such a source the fetch instant *is* the source's report time rather than a substitute for one; §3's mtime prohibition, its `reported_by` account, its ruling that a `reported_at` earlier than `last_updated` is normal and its ruling that one in our future is not refused all stand, and §§1, 2, 4–10 are untouched)
+- Status: Partially superseded by ADR-0230 (§3's local-substitute clause, in one scope stated about the **producer** and not about the file it reads: a source this system interrogates **directly**, whose answer is produced at the instant of the read rather than replayed from an answer another source gave earlier — for such a source the read instant *is* the source's report time rather than a substitute for one; §3's mtime prohibition, its `reported_by` account, its ruling that a `reported_at` earlier than `last_updated` is normal and its ruling that one in our future is not refused all stand, and §§1, 2, 4–10 are untouched)
 - Date: 2026-08-02
 - Amended: 2026-08-09 by ADR-0121 — **§5's reinforce-safe class becomes
   `{OBSERVED, INFERRED, USER_ASSERTED}`; the *meaning* §5 gave the class is what
@@ -38,15 +38,25 @@
   be attested — there is no fallback"*. A reader holding only this ADR would refuse to
   build it, so ADR-0070 §1's test is met and the partial form is the sanctioned tool.
 
-  **The scope is exactly the case in which the two clocks are one event**, and it reaches
-  nothing else: a source that is read **live**, at the instant of its report, and that
-  holds no claim of its own made earlier. §3's reason is that a substitute asserts *"a
-  report time the source never made"* — ADR-0073 §4's *"a true statement about us and a
-  false one about the source"* reintroduced under a different field name. Where the source
-  is asked and answers in the same instant, no such gap exists and no claim is being stood
-  in for. A **synced or cached copy** of a remote source — the `.ics` case this ADR was
-  written for — is outside the scope entirely and §3 binds it as written, as does any
-  source that declares its own instant.
+  **The scope is exactly the case in which the two clocks are one event**, it is stated
+  about the **producer** rather than about the file it reads, and it reaches nothing else:
+  a source this system interrogates **directly**, whose answer is produced at the instant
+  of the read rather than replayed from an answer another source gave earlier. §3's reason
+  is that a substitute asserts *"a report time the source never made"* — ADR-0073 §4's *"a
+  true statement about us and a false one about the source"* reintroduced under a different
+  field name. Where the source is asked and answers in the same instant, no such gap exists
+  and no claim is being stood in for.
+
+  **The attested source there is the configured root, never whatever wrote the document.**
+  ADR-0230 §5 puts the fetcher's own source-instance name in `reported_by` and forbids
+  attributing a fetched record to a system a file may have arrived from; what the record
+  attributes to that source is the **current content of a document the root holds**, and it
+  makes no claim about who composed that content or when. So the age of a file's bytes does
+  not move it in or out of the scope, and neither does whether a service synced it — which
+  is what makes the scope decidable at all, since no fetcher can classify a file's origin.
+  A kind whose fetch retrieves a **remote source's earlier answer**, or replays one from a
+  cache of its own — the `.ics` case this ADR was written for — is outside the scope
+  entirely and §3 binds it as written, as does any source that declares its own instant.
 
   **§3's mtime prohibition is untouched and is load-bearing in ADR-0230.** Its §6 forbids
   a file's mtime reaching an attestation, and quotes §3's reason for it: an mtime *"is a
