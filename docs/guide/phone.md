@@ -248,7 +248,7 @@ Stop the gateway with `Ctrl-C` and start it again. It now discloses **every**
 origin it can be reached at:
 
 ```text
-Assistant gateway listening on http://127.0.0.1:8422,
+Assistant gateway at http://127.0.0.1:8422,
 https://100.86.154.22:8422, https://laptop.tail2e4542.ts.net:8422
 Bootstrap value (good once, and only for this gateway process):
 pDSYe-a4xKAcwzG_nJMU0vvgpQ1fN0cTHfQCqNwDOGc
@@ -326,7 +326,7 @@ do not. [`first-run.md`](first-run.md)'s *When it does not work* is that case.
 A fresh value appears on the gateway's own terminal:
 
 ```text
-Assistant gateway listening on http://127.0.0.1:8422,
+Assistant gateway at http://127.0.0.1:8422,
 https://100.86.154.22:8422, https://laptop.tail2e4542.ts.net:8422
 Bootstrap value (good once, and only for this gateway process):
 IznwmhTUYUKp04I8Z_BfM8_tMFKYaCrDZqcFm_wCNGQ
