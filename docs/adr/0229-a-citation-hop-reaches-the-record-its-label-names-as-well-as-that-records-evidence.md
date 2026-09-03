@@ -233,13 +233,25 @@ ADR widens.
 > **pre-deduplication** sequence; the "immediately followed by" relation binds it and
 > binds nothing after it.
 
-> **Normative.** **ADR-0227 §3's carrier is that expansion sequence under ADR-0227
-> §4's deduplication, and that is the authoritative order.** §4's rule is unchanged and
-> is applied here as written: distinct identifiers, deduplicated before the cap, with
-> the **first** occurrence keeping the place. Where two labels cite one record, or one
-> label **names** a record another label **cites**, that record appears **once**, at
-> the position of its first occurrence in the expansion sequence, and no later
-> occurrence displaces it or moves anything after it.
+> **Normative.** **ADR-0227 §3's carrier is that expansion sequence restricted to the
+> records §3 already admits, under ADR-0227 §4's deduplication, and that is the
+> authoritative order.** §3's contents rule is unchanged and is not restated here in a
+> shorter form: the carrier carries *"the **distinct** records the hop resolved **that
+> the turn's supply holds after servicing**, the deduplicated-out ones included"*, and
+> this section fixes the **order** of that set and nothing about its membership. §4's
+> deduplication is likewise unchanged and is applied as written: distinct identifiers,
+> deduplicated before the cap, with the **first** occurrence keeping the place. Where
+> two labels cite one record, or one label **names** a record another label **cites**,
+> that record appears **once**, at the position of its first occurrence in the
+> expansion sequence, and no later occurrence displaces it or moves anything after it.
+
+> **Normative.** **A record ADR-0226 §6's budget cut is not in the carrier**, exactly
+> as before this ADR: the budget is spent at the servicer, a cut record is in no group
+> of the turn's supply, and §3's supply-holds test excludes it. ADR-0227 §4's rule that
+> *"the records it cut render **nothing at all**"* binds unchanged, and no expansion
+> order can reach around it. **A record a label named is never excluded by that test**,
+> because §2 above shows it is in the supply by construction — so the restriction bites
+> on truncated evidence and on nothing this ADR admits.
 
 > **Normative.** **The deduplication is what resolves the two rules where they meet,
 > and no implementation reorders to satisfy the relation after it.** A hop over labels
@@ -379,14 +391,32 @@ exchange works.
    evidence; two labels citing one record yield that record once, at its first
    position; and a hop naming an episode `E` and a belief whose evidence is `E` yields
    `E` once, ahead of the belief, per §3.
+7. **Truncation, over an expansion whose order the named record changed.** A labelled
+   belief citing more live, unheld evidence records than ADR-0226 §6's budget admits,
+   at least one of them carrying no `outcome`: the records the budget cut are in no
+   group of the supply, are **not** in the carrier, and render nothing — no bullet, no
+   phrase line, no reply line — and the ineligible one consumes no position of
+   ADR-0227 §4's cap. The named record is in the carrier throughout.
 
 ### 7. What the implementing lane owes
 
 > **Normative.** One lane, briefed from this ADR's merged text, touching
-> `src/ai_assistant/orchestration/reads.py` and `tests/orchestration/**` and nothing
-> else. It changes **no** file under `src/ai_assistant/core/`, adds no Protocol and no
-> member to one, moves no `PROTOCOL_VERSION`, and changes no file under
-> `src/ai_assistant/planning/` or `src/ai_assistant/interfaces/`.
+> `src/ai_assistant/orchestration/reads.py`, `tests/orchestration/**`, and — for
+> **docstrings alone** — `src/ai_assistant/orchestration/loop.py` and
+> `src/ai_assistant/orchestration/composing.py`. It changes **no** file under
+> `src/ai_assistant/core/`, adds no Protocol and no member to one, moves no
+> `PROTOCOL_VERSION`, and changes no file under `src/ai_assistant/planning/` or
+> `src/ai_assistant/interfaces/`.
+
+> **Normative.** **The docstring half of that fence is narrow and is owed rather than
+> permitted.** `RespondedTurn.hop_reached` and `ComposingStage.compose`'s `hop_reached`
+> parameter both document the carrier as being *"in ADR-0226 §6's order"*, which §3
+> above makes an incomplete account of it. The lane corrects those two docstrings to
+> cite this ADR's expansion-and-deduplication order, and does **nothing else** in
+> either file: no signature moves, no behaviour changes, and no statement either
+> docstring makes about supply-holds, emptiness or the supplied-never-inferred rule is
+> touched. `service_read_request`'s own docstring is corrected in the same way, in a
+> file the fence already admits.
 
 > **Normative.** The change is confined to what `_hop_records` returns and to how
 > `service_read_request` builds ADR-0227 §3's carrier from it. **No second store call
@@ -397,10 +427,11 @@ exchange works.
 > **Normative.** The lane owes **both** required lenses, adversarial and architecture:
 > the change is at the servicer seam whose division of labour ADR-0227 §3 fixes.
 
-`orchestration/composing.py` is not in the lane's fence and needs no change: it already
-takes the carrier as data, already looks each identifier up in the non-tail group, and
-already skips a record its render rules do not admit without spending a cap position.
-That the fix reaches one function is the measure of how much of ADR-0227 was right.
+**No behaviour outside `reads.py` changes.** `orchestration/composing.py` already takes
+the carrier as data, already looks each identifier up in the non-tail group, and already
+skips a record its render rules do not admit without spending a cap position; what it
+owes is the docstring correction above and no line of code. That the fix reaches one
+function is the measure of how much of ADR-0227 was right.
 
 ### 8. Scope, and what this records against earlier ADRs
 
