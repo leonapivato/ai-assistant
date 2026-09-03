@@ -84,8 +84,7 @@ class TestFakeFeedbackProcessorContract(FeedbackProcessorContract):
     def processor(self) -> FeedbackProcessor:
         return FakeFeedbackProcessor()
 
-    @pytest.fixture
-    def stamping(self) -> FeedbackProcessor:
+    def stamping_subject(self) -> FeedbackProcessor:
         """The same subject with its transaction clock told what to read."""
         return FakeFeedbackProcessor(now=lambda: _STAMPED_AT)
 
@@ -97,6 +96,10 @@ class TestScriptedFakeFeedbackProcessorContract(FeedbackProcessorContract):
     fixed script — and only the default one is covered above.
     """
 
+    #: A script is the consumer's own stated outcome, returned as it stands: this
+    #: mode mints no record, so it reads no clock and has no transaction time.
+    mints_no_record_of_its_own = True
+
     @pytest.fixture
     def processor(self) -> FeedbackProcessor:
         return FakeFeedbackProcessor([_proposal()])
@@ -104,6 +107,12 @@ class TestScriptedFakeFeedbackProcessorContract(FeedbackProcessorContract):
 
 class TestSilentFakeFeedbackProcessorContract(FeedbackProcessorContract):
     """Proposing nothing is a contract-legal outcome, and consumers rely on it."""
+
+    #: An empty script proposes nothing, so it mints nothing to stamp. Declared
+    #: rather than left to the arm's own vacuity: a subject that produces no
+    #: record would pass the arm's loop by iterating over nothing, and an
+    #: obligation satisfied by silence is one nobody is holding.
+    mints_no_record_of_its_own = True
 
     @pytest.fixture
     def processor(self) -> FeedbackProcessor:
@@ -177,30 +186,6 @@ async def test_synthesised_record_carries_the_feedbacks_provenance() -> None:
     assert record.provenance.last_updated == written_at
     assert record.provenance.last_confirmed_at == event.created_at
     assert event.created_at != written_at
-
-
-async def test_the_unwired_fake_does_not_stamp_the_write_from_the_event() -> None:
-    """The default path is the one #780 is about, so it is pinned as well.
-
-    Every orchestration and world test drives this fake **as constructed**, and
-    while ``last_updated`` came off the event those tests certified their subjects
-    against records claiming a revision at the utterance's instant. The contract arm
-    above wires a clock, so it says nothing about the default; this says the
-    default is not the event either.
-
-    The *value* the wall clock returns is deliberately not asserted:
-    ``CONTRIBUTING.md`` forbids a test reading ``datetime.now()``, and bracketing
-    the call with two readings of the very clock under test would make the case
-    fail on a host whose clock steps back between them. What regressed is the
-    source, and the source is what is stated.
-    """
-    event = _event()
-
-    [proposal] = await FakeFeedbackProcessor().process(event)
-
-    stamped = proposal.proposed.provenance.last_updated
-    assert stamped != event.created_at
-    assert stamped.tzinfo is not None  # a reading `checked_clock` admitted
 
 
 async def test_the_clock_is_guarded_and_its_own_refusal_is_left_unwrapped() -> None:

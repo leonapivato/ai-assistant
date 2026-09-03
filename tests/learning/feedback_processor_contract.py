@@ -70,22 +70,35 @@ class FeedbackProcessorContract:
             assert proposal.proposed.content.strip()
             assert proposal.rationale.strip()
 
-    @pytest.fixture
-    def stamping(self) -> FeedbackProcessor | None:
-        """Override with a subject whose clock reads :data:`_STAMPED_AT`.
+    #: Set ``True`` only by a subject that answers from a **fixed script**: it mints
+    #: no record of its own, so there is no write for a transaction time to be the
+    #: instant of, and :meth:`stamping_subject` has nothing to build.
+    #:
+    #: Left ``False`` — the default, and the direction this fails in — the suite
+    #: requires the implementation to **prove** the arm below by overriding
+    #: :meth:`stamping_subject`, and a subclass that overrides neither raises rather
+    #: than skipping. That is the whole point of the flag being a declaration: an
+    #: obligation a new implementation can decline by saying nothing is an
+    #: obligation the next implementation does not have.
+    mints_no_record_of_its_own: bool = False
 
-        A second fixture rather than a constraint on ``processor``, because the two
-        arms want opposite things: every other case wants the subject a consumer
-        actually constructs, and the arm below has to know what the subject's clock
-        was told to say. ``None`` — the default — is "this implementation mints no
-        record of its own", which is the honest answer for a double answering from
-        a fixed script: it stamps nothing, so there is no source to state.
+    def stamping_subject(self) -> FeedbackProcessor:
+        """Return this implementation, with its clock told to read :data:`_STAMPED_AT`.
+
+        A hook rather than a second ``processor`` fixture, because only the
+        implementation knows how its clock is injected, and because the arm below
+        has to know what the clock was told to say — an assertion about the
+        *source* of a stamp cannot be made against a subject whose readings the
+        suite cannot predict.
+
+        Not needed where :attr:`mints_no_record_of_its_own` is ``True``.
         """
-        return None
+        raise NotImplementedError
 
+    @pytest.mark.optional_obligation
     @pytest.mark.parametrize("memory_kind", list(MemoryKind))
     async def test_a_minted_record_is_stamped_from_the_processors_own_clock(
-        self, stamping: FeedbackProcessor | None, memory_kind: MemoryKind
+        self, memory_kind: MemoryKind
     ) -> None:
         """``last_updated`` is *our* write's instant, never the utterance's (ADR-0045 §3).
 
@@ -100,23 +113,28 @@ class FeedbackProcessorContract:
         production processor had already stopped producing.
 
         The **source** is what is asserted, and asserting it needs a clock whose
-        reading the suite knows — hence the fixture. An inequality against the
-        event's instant would not do it: an implementation stamping any fixed
-        constant satisfies that while reading no clock at all, which is a different
-        defect of the same field. Equality against :data:`_STAMPED_AT` admits only a
-        subject that read what it was given.
+        reading the suite knows — hence :meth:`stamping_subject`. An inequality
+        against the event's instant would not do it: an implementation stamping any
+        fixed constant satisfies that while reading no clock at all, which is a
+        different defect of the same field. Equality against :data:`_STAMPED_AT`
+        admits only a subject that read what it was given.
 
         ``last_confirmed_at`` is asserted beside it and *is* the event's
         (ADR-0109 §4), because the two are one decision: an implementation that
         moved both onto the clock would satisfy this arm's first line while losing
         the confirming instant, and ADR-0103 §9 is explicit that two quantities a
         live path puts microseconds apart are the ones that break silently.
+
+        Skippable only where the implementation mints nothing at all
+        (:attr:`mints_no_record_of_its_own`), which is a statement about what the
+        subject produces rather than an exemption from the obligation.
         """
-        if stamping is None:
+        if self.mints_no_record_of_its_own:
             pytest.skip("this implementation mints no record of its own to stamp")
+
         event = _event(memory_kind)
 
-        proposals = await stamping.process(event)
+        proposals = await self.stamping_subject().process(event)
 
         assert event.created_at != _STAMPED_AT  # or the arm below proves nothing
         for proposal in proposals:
