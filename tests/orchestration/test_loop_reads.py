@@ -64,6 +64,7 @@ from ai_assistant.orchestration.reads import (
     READ_AUDIT_EVENT,
     READ_BUDGET,
     Servicing,
+    StopReason,
     TriggerOutcome,
     TurnReadAudit,
     resolve_label,
@@ -485,6 +486,25 @@ def _record(captured: Sequence[MutableMapping[str, Any]]) -> Mapping[str, Any]:
     return only
 
 
+def _serviced(captured: Sequence[MutableMapping[str, Any]], ordinal: int = 0) -> Mapping[str, Any]:
+    """One servicing's entry in this turn's record (ADR-0228 §9).
+
+    §9 makes ADR-0226 §9's per-servicing counts "an ordered sequence, one entry per
+    servicing, in servicing order", each field keeping the meaning §9 gives it over
+    its own servicing. A turn that serviced nothing has an empty sequence, which is
+    asserted directly rather than through this helper.
+
+    Args:
+        captured: The events this turn logged.
+        ordinal: Which servicing, 0-based. Defaults to the first, which is the only
+            one on every turn that did not revise.
+
+    Returns:
+        That servicing's entry.
+    """
+    return _record(captured)["servicings"][ordinal]  # type: ignore[no-any-return]
+
+
 def _ids(memories: Sequence[MemoryRecord]) -> list[str]:
     return [record.id for record in memories]
 
@@ -612,14 +632,13 @@ async def test_a_sufficed_turn_pays_no_read_and_is_recorded_as_a_non_firing() ->
     record = _record(captured)
     assert record["trigger"] == TriggerOutcome.NOT_FIRED.value
     assert record["servicing"] == Servicing.NOT_ASKED.value
-    assert record["kinds"] == ()
-    assert record["returned"] == 0
-    assert record["new"] == 0
-    assert record["deduplicated"] == 0
-    assert record["labels_unresolved"] == 0
-    assert record["truncated_kinds"] == ()
-    assert record["failed"] is False
-    assert record["failed_after_read_returned"] is False
+    # ADR-0228 §9: the per-servicing counts are a sequence with one entry per
+    # servicing, so a turn that serviced nothing carries an empty one rather than an
+    # entry of zeros. The turn-level fields still say what the turn did: it made one
+    # planner call and did not iterate.
+    assert record["servicings"] == ()
+    assert record["planner_calls"] == 1
+    assert record["stop"] == StopReason.NOT_ITERATED.value
 
 
 # --------------------------------------------------------------------------- #
@@ -648,10 +667,11 @@ async def test_an_unresolvable_label_adds_nothing_and_is_recorded_as_dropped(lab
 
     assert _ids(turn.memories) == ["belief-1"]
     record = _record(captured)
+    serviced = _serviced(captured)
     assert record["trigger"] == TriggerOutcome.FIRED.value
     assert record["servicing"] == Servicing.SERVICED.value
-    assert record["labels_unresolved"] == 1
-    assert record["new"] == 0
+    assert serviced["labels_unresolved"] == 1
+    assert serviced["new"] == 0
     # §3's prohibition, asserted where it would break: no model-supplied string
     # reaches the store as an identifier, so an unresolvable label buys no read.
     assert memory.keyed == []
@@ -678,10 +698,10 @@ async def test_a_label_whose_record_is_no_longer_live_resolves_to_nothing() -> N
 
     assert _ids(planner.calls[0]) == ["belief-1"]
     assert _ids(turn.memories) == ["belief-1"], "the supply is what planning saw"
-    record = _record(captured)
-    assert record["labels_unresolved"] == 1
-    assert record["new"] == 0
-    assert record["returned"] == 0
+    serviced = _serviced(captured)
+    assert serviced["labels_unresolved"] == 1
+    assert serviced["new"] == 0
+    assert serviced["returned"] == 0
     # The cited episode is live and was never followed: the *label* resolved to
     # nothing, so there was nothing to read evidence from.
     assert await memory.get("episode-1") is not None
@@ -725,9 +745,12 @@ async def test_an_unbounded_audience_operation_services_nothing(request_: ReadRe
     record = _record(captured)
     assert record["trigger"] == TriggerOutcome.FIRED.value
     assert record["servicing"] == Servicing.DECLINED.value
-    assert record["returned"] == 0
-    assert record["new"] == 0
-    assert record["failed"] is False
+    # Nothing was serviced, so there is no entry to account (ADR-0228 §9) — and the
+    # turn did not iterate, because §2(c) admits a revision only where the request
+    # was serviced. §14 defers a revision on such an operation by name.
+    assert record["servicings"] == ()
+    assert record["planner_calls"] == 1
+    assert record["stop"] == StopReason.NOT_ITERATED.value
 
 
 # --------------------------------------------------------------------------- #
@@ -829,9 +852,9 @@ async def test_the_hop_is_serviced_before_the_query_and_the_budget_truncates_it(
     assert fourth[:4] == list(cited), "the hop's records, in the order it named them"
     assert len(fourth) == READ_BUDGET, "and exactly the remainder from the query"
     assert all(name.startswith("loose-") for name in fourth[4:])
-    record = _record(captured)
-    assert record["truncated_kinds"] == (ReadKind.SIGHTED_QUERY.value,)
-    assert record["new"] == READ_BUDGET
+    serviced = _serviced(captured)
+    assert serviced["truncated_kinds"] == (ReadKind.SIGHTED_QUERY.value,)
+    assert serviced["new"] == READ_BUDGET
 
 
 async def test_a_hop_that_exhausts_the_budget_leaves_the_query_no_slots() -> None:
@@ -858,8 +881,8 @@ async def test_a_hop_that_exhausts_the_budget_leaves_the_query_no_slots() -> Non
         ).turn
 
     assert _ids(turn.memories)[1:] == list(cited[:READ_BUDGET])
-    record = _record(captured)
-    assert record["truncated_kinds"] == (
+    serviced = _serviced(captured)
+    assert serviced["truncated_kinds"] == (
         ReadKind.CITATION_HOP.value,
         ReadKind.SIGHTED_QUERY.value,
     )
@@ -917,10 +940,10 @@ async def test_a_record_already_in_the_supply_is_deduplicated_out_of_the_fourth_
         ).turn
 
     assert _ids(turn.memories) == ["belief-1", "belief-2", "cited-1"]
-    record = _record(captured)
-    assert record["returned"] == 2
-    assert record["new"] == 1
-    assert record["deduplicated"] == 1
+    serviced = _serviced(captured)
+    assert serviced["returned"] == 2
+    assert serviced["new"] == 1
+    assert serviced["deduplicated"] == 1
 
 
 async def test_a_record_both_kinds_return_enters_the_fourth_group_once() -> None:
@@ -949,11 +972,11 @@ async def test_a_record_both_kinds_return_enters_the_fourth_group_once() -> None
     assert fourth.count("shared-1") == 1
     assert fourth[0] == "shared-1", "at the hop's position"
     assert sorted(fourth) == ["loose-1", "shared-1"]
-    record = _record(captured)
-    assert record["returned"] == 3, "the hop's one and the query's two"
-    assert record["new"] == 2
-    assert record["deduplicated"] == 1
-    assert record["truncated_kinds"] == (), "the duplicate consumed no slot"
+    serviced = _serviced(captured)
+    assert serviced["returned"] == 3, "the hop's one and the query's two"
+    assert serviced["new"] == 2
+    assert serviced["deduplicated"] == 1
+    assert serviced["truncated_kinds"] == (), "the duplicate consumed no slot"
 
 
 async def test_one_request_over_a_fixed_candidate_set_produces_one_order() -> None:
@@ -1078,12 +1101,13 @@ async def test_a_failing_first_read_degrades_the_turn_and_records_no_yield() -> 
 
     assert turn.memories == planner.calls[0][2], "the supply planning saw, byte for byte"
     record = _record(captured)
+    serviced = _serviced(captured)
     assert record["trigger"] == TriggerOutcome.FIRED.value
     assert record["servicing"] == Servicing.SERVICED.value
-    assert record["failed"] is True
-    assert record["failed_after_read_returned"] is False
-    assert record["returned"] == 0
-    assert record["new"] == 0
+    assert serviced["failed"] is True
+    assert serviced["failed_after_read_returned"] is False
+    assert serviced["returned"] == 0
+    assert serviced["new"] == 0
 
 
 async def test_a_hop_that_returned_before_the_query_raised_leaves_nothing_behind() -> None:
@@ -1106,11 +1130,11 @@ async def test_a_hop_that_returned_before_the_query_raised_leaves_nothing_behind
         ).turn
 
     assert turn.memories == planner.calls[0][2]
-    record = _record(captured)
-    assert record["failed"] is True
-    assert record["failed_after_read_returned"] is True, "the hop had already returned"
-    assert record["returned"] == 0
-    assert record["new"] == 0
+    serviced = _serviced(captured)
+    assert serviced["failed"] is True
+    assert serviced["failed_after_read_returned"] is True, "the hop had already returned"
+    assert serviced["returned"] == 0
+    assert serviced["new"] == 0
 
 
 async def test_a_later_band_raising_after_an_earlier_one_returned_is_recorded_as_partial() -> None:
@@ -1135,10 +1159,10 @@ async def test_a_later_band_raising_after_an_earlier_one_returned_is_recorded_as
 
     assert memory.calls >= 5, "the servicing reached a second band"
     assert turn.memories == planner.calls[0][2]
-    record = _record(captured)
-    assert record["failed"] is True
-    assert record["failed_after_read_returned"] is True
-    assert record["returned"] == 0
+    serviced = _serviced(captured)
+    assert serviced["failed"] is True
+    assert serviced["failed_after_read_returned"] is True
+    assert serviced["returned"] == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -1165,23 +1189,37 @@ async def test_the_audit_copies_no_text_and_carries_only_the_correlation_id() ->
     planner = FakePlanner(now=_clock, read_request=_both("marmalade zeppelin", "M1"))
 
     with structlog.testing.capture_logs() as captured, correlated_operation() as correlation:
-        turn = (
-            await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
-        ).turn
+        responded = await _loop(memory, planner=planner).respond(
+            "billing schedule", narrow=_bounded()
+        )
+        turn = responded.turn
 
     record = _record(captured)
+    serviced = _serviced(captured)
     assert record["correlation_id"] == correlation
     rendered = repr(record)
     assert "marmalade" not in rendered, "the planner's query is not copied"
     assert "stroopwafel" not in rendered, "no returned record's content is copied"
     assert "M1" not in rendered, "the labels it named are not copied"
     assert turn.plan.id not in rendered, "no pointer to the plan"
+    for plan in responded.plans:
+        assert plan.id not in rendered, "no pointer to any plan the turn produced"
+    # ADR-0228 §9: the record is **extended and not replaced**. The turn-level fields
+    # gain `planner_calls` and `stop`, and ADR-0226 §9's per-servicing counts become
+    # `servicings` — one entry per servicing, every field keeping its own meaning.
+    # Pinned as a closed set at both levels, because §9's counts-and-kinds rule binds
+    # the extension entire: a field added here is a field nobody ruled on.
     assert set(record) == {
         "event",
         "log_level",
         "correlation_id",
         "trigger",
         "servicing",
+        "planner_calls",
+        "stop",
+        "servicings",
+    }
+    assert set(serviced) == {
         "kinds",
         "returned",
         "new",
@@ -1192,7 +1230,7 @@ async def test_the_audit_copies_no_text_and_carries_only_the_correlation_id() ->
         "failed_after_read_returned",
     }
     assert record["log_level"] == "info"
-    assert record["kinds"] == (ReadKind.SIGHTED_QUERY.value, ReadKind.CITATION_HOP.value)
+    assert serviced["kinds"] == (ReadKind.SIGHTED_QUERY.value, ReadKind.CITATION_HOP.value)
 
 
 async def test_the_audit_records_a_turn_that_ran_outside_a_correlated_operation() -> None:
@@ -1420,11 +1458,11 @@ async def test_the_turn_is_not_failed_by_a_request_naming_a_record_with_no_evide
         ).turn
 
     assert _ids(turn.memories) == ["belief-1"]
-    record = _record(captured)
-    assert record["labels_unresolved"] == 0
-    assert record["returned"] == 0
-    assert record["new"] == 0
-    assert record["failed"] is False
+    serviced = _serviced(captured)
+    assert serviced["labels_unresolved"] == 0
+    assert serviced["returned"] == 0
+    assert serviced["new"] == 0
+    assert serviced["failed"] is False
 
 
 async def test_an_unbounded_audience_turn_still_narrows_before_planning() -> None:
@@ -1583,10 +1621,11 @@ async def test_a_servicing_that_returns_nothing_leaves_the_supply_identical() ->
 
     assert turn.memories == planner.calls[0][2]
     record = _record(captured)
+    serviced = _serviced(captured)
     assert record["trigger"] == TriggerOutcome.FIRED.value
-    assert record["returned"] == 1
-    assert record["deduplicated"] == 1
-    assert record["new"] == 0
+    assert serviced["returned"] == 1
+    assert serviced["deduplicated"] == 1
+    assert serviced["new"] == 0
 
 
 async def test_a_degraded_retrieval_does_not_change_what_the_servicing_owes() -> None:
@@ -1632,10 +1671,10 @@ async def test_an_expired_cited_record_is_simply_absent_from_the_fourth_group() 
         ).turn
 
     assert _ids(turn.memories) == ["belief-1", "cited-1"]
-    record = _record(captured)
-    assert record["labels_unresolved"] == 0
-    assert record["returned"] == 1
-    assert record["new"] == 1
+    serviced = _serviced(captured)
+    assert serviced["labels_unresolved"] == 0
+    assert serviced["returned"] == 1
+    assert serviced["new"] == 1
 
 
 async def test_each_turn_resolves_labels_against_its_own_supply() -> None:
@@ -1728,8 +1767,8 @@ async def test_two_turns_of_one_loop_write_two_records() -> None:
         await quiet.respond("billing schedule", narrow=_bounded())
 
     first, second = _records(captured)
-    assert first["new"] == 1
-    assert second["new"] == 0
+    assert first["servicings"][0]["new"] == 1
+    assert second["servicings"] == ()
     assert second["trigger"] == TriggerOutcome.NOT_FIRED.value
 
 
@@ -1789,10 +1828,10 @@ async def test_a_hop_and_a_query_reaching_nothing_is_not_a_failure() -> None:
         ).turn
 
     assert turn.memories == planner.calls[0][2]
-    record = _record(captured)
-    assert record["failed"] is False
-    assert record["labels_unresolved"] == 1
-    assert record["returned"] == 0
+    serviced = _serviced(captured)
+    assert serviced["failed"] is False
+    assert serviced["labels_unresolved"] == 1
+    assert serviced["returned"] == 0
 
 
 async def test_no_caller_can_raise_the_budget() -> None:
@@ -1871,11 +1910,12 @@ async def test_a_cancellation_inside_the_servicing_is_not_audited_as_a_completed
             await turn
 
     record = _record(captured)
+    serviced = _serviced(captured)
     assert record["trigger"] == TriggerOutcome.FIRED.value
     assert record["servicing"] == Servicing.SERVICED.value
-    assert record["failed"] is True
-    assert record["new"] == 0
-    assert record["returned"] == 0
+    assert serviced["failed"] is True
+    assert serviced["new"] == 0
+    assert serviced["returned"] == 0
 
 
 async def test_an_unexpected_failure_inside_the_servicing_is_recorded_as_a_failure() -> None:
@@ -1902,9 +1942,9 @@ async def test_an_unexpected_failure_inside_the_servicing_is_recorded_as_a_failu
     ):
         await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
 
-    record = _record(captured)
-    assert record["failed"] is True
-    assert record["returned"] == 0
+    serviced = _serviced(captured)
+    assert serviced["failed"] is True
+    assert serviced["returned"] == 0
 
 
 def test_the_two_postures_are_the_only_two_and_cannot_be_subclassed() -> None:
@@ -1954,11 +1994,11 @@ async def test_a_cancellation_after_the_hop_returned_records_the_partial_fact() 
         with pytest.raises(asyncio.CancelledError):
             await turn
 
-    record = _record(captured)
-    assert record["failed"] is True
-    assert record["failed_after_read_returned"] is True
-    assert record["returned"] == 0
-    assert record["new"] == 0
+    serviced = _serviced(captured)
+    assert serviced["failed"] is True
+    assert serviced["failed_after_read_returned"] is True
+    assert serviced["returned"] == 0
+    assert serviced["new"] == 0
 
 
 async def test_a_cancellation_after_a_query_band_returned_records_the_partial_fact() -> None:
@@ -1985,10 +2025,10 @@ async def test_a_cancellation_after_a_query_band_returned_records_the_partial_fa
         with pytest.raises(asyncio.CancelledError):
             await turn
 
-    record = _record(captured)
-    assert record["failed"] is True
-    assert record["failed_after_read_returned"] is True
-    assert record["returned"] == 0
+    serviced = _serviced(captured)
+    assert serviced["failed"] is True
+    assert serviced["failed_after_read_returned"] is True
+    assert serviced["returned"] == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -2197,9 +2237,9 @@ async def test_the_carrier_is_empty_where_the_hop_returned_and_the_query_then_ra
 
     assert responded.hop_reached == ()
     assert _ids(responded.turn.memories) == ["belief-1"], "the supply is as planning saw it"
-    record = _record(captured)
-    assert record["failed"] is True
-    assert record["failed_after_read_returned"] is True, "the hop had already returned"
+    serviced = _serviced(captured)
+    assert serviced["failed"] is True
+    assert serviced["failed_after_read_returned"] is True, "the hop had already returned"
 
 
 async def test_no_identifier_the_carrier_holds_reaches_the_audit() -> None:
@@ -2225,7 +2265,8 @@ async def test_no_identifier_the_carrier_holds_reaches_the_audit() -> None:
 
     assert responded.hop_reached == ("belief-1", "cited-1")
     record = _record(captured)
-    assert record["new"] == 1
+    serviced = _serviced(captured)
+    assert serviced["new"] == 1
     assert "cited-1" not in str(record), "the audit names no record"
     assert "belief-1" not in str(record), "and none of the record a label named"
     assert not any("cited-1" in str(event) for event in captured), "and neither does any log event"
@@ -2271,10 +2312,10 @@ async def test_a_named_record_spends_no_budget_and_moves_no_count() -> None:
             "billing schedule notes", narrow=_bounded()
         )
 
-    record = _record(captured)
-    assert (record["returned"], record["new"], record["deduplicated"]) == (3, 3, 0)
-    assert record["labels_unresolved"] == 0
-    assert record["truncated_kinds"] == ()
+    serviced = _serviced(captured)
+    assert (serviced["returned"], serviced["new"], serviced["deduplicated"]) == (3, 3, 0)
+    assert serviced["labels_unresolved"] == 0
+    assert serviced["truncated_kinds"] == ()
     assert _ids(responded.turn.memories) == ["belief-1", *cited], "the fourth group is unmoved"
     assert responded.hop_reached == ("belief-1", *cited), "and the carrier is what widened"
 
@@ -2414,7 +2455,7 @@ async def test_the_budget_cuts_evidence_and_never_the_record_a_label_named() -> 
             "billing schedule notes", narrow=_bounded()
         )
 
-    assert _record(captured)["truncated_kinds"] == (ReadKind.CITATION_HOP.value,)
+    assert _serviced(captured)["truncated_kinds"] == (ReadKind.CITATION_HOP.value,)
     assert _ids(responded.turn.memories) == ["belief-1", *cited[:READ_BUDGET]]
     assert responded.hop_reached == ("belief-1", *cited[:READ_BUDGET])
     prompt = await _prompt_over(responded)

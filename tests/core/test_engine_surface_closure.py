@@ -909,6 +909,20 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     member added to any of the three later would be the second limb and would owe this
     test afresh.
 
+    **ADR-0228 §6 is under the second limb and moves the version alone**, to **27**,
+    with the method set unmoved at forty-nine. ``ActionPlan`` gains ``supersedes``
+    (§5); ``ActionPlan`` is carried to a client inside ``TurnOutcome.turn.plan``;
+    ``wire/codec.py``'s projection dumps **every** field of a model, defaults
+    included; and ``ActionPlan`` sets ``extra="forbid"``. So a peer whose
+    ``ActionPlan`` predates the field fails to decode every ``TurnOutcome`` a newer
+    hub sends, on every turn rather than on a revising one. ADR-0228 §12 adds no
+    Protocol, no member to one and no parameter to any signature, which is why the
+    first limb is not reached — and §6 is explicit that no lane reads it as authority
+    for bumping on a defaulted addition *alone*: what obliges the move is the
+    conjunction, and ADR-0213 §11's no-bump ruling stands for the case it decided,
+    which the version log distinguishes on the express ground that neither type there
+    sets ``extra="forbid"``.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -917,7 +931,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (49, 26), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (49, 27), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"
