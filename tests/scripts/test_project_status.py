@@ -242,6 +242,119 @@ def test_a_punctuated_metadata_label_still_ends_the_field(tmp_path: Path) -> Non
     assert "clarification" not in row
 
 
+def test_a_padded_marker_does_not_swallow_a_sibling_field(tmp_path: Path) -> None:
+    # #519: the continuation floor is the column the marker *actually* reaches,
+    # not the two columns a canonical ``- `` would reach. Under ``-   Status:``
+    # the content column is 4, so the two-space ``- Date:`` beneath it is a
+    # sibling field and ends the value — a fixed two-column floor folded it in.
+    _make_repo(
+        tmp_path,
+        adrs=(
+            (
+                "0001-padded.md",
+                "# 1. Padded decision\n\n-   Status: Accepted\n  - Date: 2026-07-24\n",
+            ),
+        ),
+    )
+    out = _run(tmp_path)
+
+    row = _line_with(out, "Padded decision")
+    assert "Accepted" in row
+    assert "2026-07-24" not in row
+
+
+def test_a_padded_marker_still_folds_its_own_continuation(tmp_path: Path) -> None:
+    # The mirror of the case above: a line that *does* reach the padded marker's
+    # content column is continuation and must still be folded in, so the fix
+    # narrows the floor rather than disabling wrapping under a padded marker.
+    _make_repo(
+        tmp_path,
+        adrs=(
+            (
+                "0001-padded-wrap.md",
+                "# 1. Padded wrap decision\n\n"
+                "-   Status: Accepted, §4 amended by ADR-0069\n"
+                "    (enforcement widened)\n"
+                "  - Date: 2026-07-24\n",
+            ),
+        ),
+    )
+    out = _run(tmp_path)
+
+    row = _line_with(out, "Padded wrap decision")
+    assert "Accepted, §4 amended by ADR-0069 (enforcement widened)" in row
+    assert "2026-07-24" not in row
+
+
+def test_a_tab_indented_marker_measures_its_own_content_column(tmp_path: Path) -> None:
+    # A tab expands to the next four-column stop, so a marker indented by one
+    # tab has content column 6: the tab-plus-two-space wrap belongs to it, and
+    # the tab-indented ``- Date:`` at column 4 is a sibling that ends it. The
+    # replaced regex agreed here by accident rather than by measurement, so this
+    # is a regression guard on the computed column, not a mutation detector.
+    _make_repo(
+        tmp_path,
+        adrs=(
+            (
+                "0001-tab-indent.md",
+                "# 1. Tab indented decision\n\n"
+                "\t- Status: Accepted\n"
+                "\t  under review\n"
+                "\t- Date: 2026-07-24\n",
+            ),
+        ),
+    )
+    out = _run(tmp_path)
+
+    row = _line_with(out, "Tab indented decision")
+    assert "Accepted under review" in row
+    assert "2026-07-24" not in row
+
+
+def test_a_tab_padded_marker_measures_its_own_content_column(tmp_path: Path) -> None:
+    # The tab sits between the marker and the field, expanding from column 1 to
+    # the four-column stop: the four-space wrap reaches it, the two-space
+    # sibling does not.
+    _make_repo(
+        tmp_path,
+        adrs=(
+            (
+                "0001-tab-padded.md",
+                "# 1. Tab padded decision\n\n"
+                "-\tStatus: Accepted\n"
+                "    under review\n"
+                "  - Date: 2026-07-24\n",
+            ),
+        ),
+    )
+    out = _run(tmp_path)
+
+    row = _line_with(out, "Tab padded decision")
+    assert "Accepted under review" in row
+    assert "2026-07-24" not in row
+
+
+def test_padding_wider_than_a_code_block_still_ends_at_a_sibling(tmp_path: Path) -> None:
+    # CommonMark would read six columns of padding as an indented code block and
+    # pull the content column back to 2, which would fold the sibling in again.
+    # This reads a metadata field rather than rendering markdown and keeps the
+    # wider column, because ending the field early is the safe direction.
+    _make_repo(
+        tmp_path,
+        adrs=(
+            (
+                "0001-wide.md",
+                "# 1. Wide decision\n\n-      Status: Accepted\n  - Date: 2026-07-24\n",
+            ),
+        ),
+    )
+    out = _run(tmp_path)
+
+    row = _line_with(out, "Wide decision")
+    assert "Accepted" in row
+    assert "2026-07-24" not in row
+
+
 def test_single_line_status_is_unchanged(tmp_path: Path) -> None:
     # The wrap-folding must not disturb an ordinary one-line Status.
     _make_repo(tmp_path)

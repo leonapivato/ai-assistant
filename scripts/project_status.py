@@ -19,11 +19,15 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-# The Status field may wrap across continuation lines. Capture the first physical
-# line plus any following lines that are non-blank and indented to **the content
-# column of the ``- Status:`` bullet** — the bullet's own indent plus the width
-# of ``- ``; a blank line or a line shallower than that ends the field. The
-# captured value is folded into one line by :func:`_fold_status` before use.
+#: Tab stops are four columns wide, which is how CommonMark expands a tab.
+_TAB_STOP = 4
+
+# The Status field may wrap across continuation lines. The bullet is located
+# first and its **content column** computed from the marker as it was actually
+# written; the lines that follow are folded into the value only while they are
+# indented to at least that column. A blank line, or a line shallower than the
+# content column, ends the field. The captured lines are folded into one by
+# :func:`_fold_status` before use.
 #
 # Depth is the whole rule, and it is markdown's own: a line indented to the
 # bullet's content column belongs to that bullet (a wrapped prose line, or a
@@ -34,14 +38,16 @@ from pathlib import Path
 # the next field, and a metadata label may carry punctuation no field-name
 # pattern anticipates without being folded into the value.
 #
-# The floor is the content column, not "any extra whitespace at all", which is
-# why a sibling written with a *single* leading space still ends the field: one
-# space does not reach the content column, so CommonMark reads that marker as a
-# sibling of the Status bullet rather than a child of it. A lone tab does reach
-# it — CommonMark expands a tab to the next four-column stop.
-_STATUS_RE = re.compile(
-    r"^(?P<indent>[ \t]*)-[ \t]*Status:[ \t]*(?P<value>.+(?:\n(?P=indent)(?:\t|[ \t]{2,})\S.*)*)",
-    re.IGNORECASE | re.MULTILINE,
+# The column is computed rather than assumed, which is what a single regex could
+# not do (#519): a floor fixed at the bullet's indent plus two is the content
+# column of a canonical ``- `` marker only, so under a *padded* marker
+# (``-   Status:``) it sits too shallow and swallows the sibling field beneath.
+# Computing it also subsumes tabs exactly rather than approximating them: a
+# sibling written with a *single* leading space still ends the field, because one
+# space does not reach the content column, while a lone tab does reach it.
+_STATUS_LINE_RE = re.compile(
+    r"^(?P<indent>[ \t]*)-(?P<padding>[ \t]*)Status:[ \t]*(?P<value>.+)$",
+    re.IGNORECASE,
 )
 _HEADING_RE = re.compile(r"^#\s*(\d+)\.\s*(.+?)\s*$", re.MULTILINE)
 _ADR_FILE_RE = re.compile(r"^(\d+)-.*\.md$")
@@ -164,21 +170,93 @@ def protocol_names(protocols_path: Path) -> list[str]:
     ]
 
 
+def _expanded_width(text: str, start: int = 0) -> int:
+    """Return the column reached after ``text``, expanding tabs to four-column stops.
+
+    Args:
+        text: The run of characters to measure, normally an indent or a marker.
+        start: The column ``text`` begins at, since a tab's width depends on it.
+
+    Returns:
+        The column immediately after ``text``.
+    """
+    column = start
+    for char in text:
+        column = column + _TAB_STOP - column % _TAB_STOP if char == "\t" else column + 1
+    return column
+
+
+def _content_column(indent: str, padding: str) -> int:
+    """Return the content column of a ``- Status:`` bullet written with this marker.
+
+    The content column is where the field's own text begins: past the bullet's
+    indent, past the ``-``, and past whatever whitespace was written after it,
+    with tabs expanded to four-column stops. A marker with no whitespace at all
+    is not a list item under CommonMark; it is measured as the canonical ``- ``
+    it was meant to be.
+
+    CommonMark's rule that whitespace wider than four columns makes the content
+    an indented code block — pulling the content column back to one past the
+    marker — is deliberately not applied. This reads a metadata field rather
+    than rendering a document, and the wider column errs toward *ending* the
+    field: folding a sibling in corrupts the value (#519), where stopping early
+    at most truncates one, and no ADR wraps a Status under a padded marker.
+
+    Args:
+        indent: The whitespace before the ``-`` marker.
+        padding: The whitespace between the ``-`` and ``Status:``.
+
+    Returns:
+        The column a continuation line must reach to belong to the bullet.
+    """
+    marker_end = _expanded_width(indent) + 1  # the ``-`` occupies one column
+    return max(marker_end + 1, _expanded_width(padding, marker_end))
+
+
 def _fold_status(value: str) -> str:
     """Collapse a wrapped Status field into a single line.
 
-    Indented continuation lines captured by :data:`_STATUS_RE` still carry their
-    newlines and indentation; fold each whitespace run (including line breaks)
-    to a single space so the full field renders on one row. A single-line status
-    is returned trimmed and otherwise unchanged.
+    Continuation lines still carry their own indentation; fold each whitespace
+    run (including line breaks) to a single space so the full field renders on
+    one row. A single-line status is returned trimmed and otherwise unchanged.
 
     Args:
-        value: The raw captured Status value, possibly spanning several lines.
+        value: The raw Status value, possibly spanning several lines.
 
     Returns:
         The Status text on one line.
     """
     return re.sub(r"\s+", " ", value).strip()
+
+
+def _status_value(text: str) -> str | None:
+    """Return the folded Status field of an ADR, or ``None`` if it has none.
+
+    The first ``- Status:`` bullet wins, and the lines beneath it are folded in
+    while they reach the bullet's own content column (see
+    :func:`_content_column`).
+
+    Args:
+        text: The full text of an ADR.
+
+    Returns:
+        The Status value on one line, or ``None`` when no Status bullet is found.
+    """
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        match = _STATUS_LINE_RE.match(line)
+        if match is None:
+            continue
+        column = _content_column(match.group("indent"), match.group("padding"))
+        captured = [match.group("value")]
+        for following in lines[index + 1 :]:
+            stripped = following.lstrip(" \t")
+            indent = following[: len(following) - len(stripped)]
+            if not stripped or _expanded_width(indent) < column:
+                break
+            captured.append(stripped)
+        return _fold_status(" ".join(captured))
+    return None
 
 
 def adr_entries(adr_dir: Path) -> list[Adr]:
@@ -196,12 +274,12 @@ def adr_entries(adr_dir: Path) -> list[Adr]:
         if match is None:
             continue  # template.md and other non-numbered files
         text = path.read_text(encoding="utf-8")
-        status = _STATUS_RE.search(text)
+        status = _status_value(text)
         heading = _HEADING_RE.search(text)
         entries.append(
             Adr(
                 number=int(match.group(1)),
-                status=_fold_status(status.group("value")) if status else "?",
+                status=status if status is not None else "?",
                 title=heading.group(2) if heading else path.stem,
                 heading_number=int(heading.group(1)) if heading else None,
             )
