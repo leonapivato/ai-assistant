@@ -213,6 +213,26 @@ def test_the_constructor_refuses_a_source_that_is_not_a_path(value: object) -> N
         CalendarReader(value)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("field", ["window_past", "window_future", "read_timeout"])
+def test_a_hostile_repr_does_not_raise_past_a_duration_guard(field: str) -> None:
+    """Nothing but a ``ValueError`` leaves this constructor, whatever it was handed.
+
+    The duration guard is the one reached by a value of *arbitrary* type, so a
+    message built with ``repr`` would let the refused object's own ``__repr__``
+    raise straight past the refusal — turning the wrong-class escape this change
+    fixes back into a different wrong-class escape. Every message below the guard
+    may use ``repr`` freely, because by then the value is a ``timedelta``.
+    """
+
+    class Hostile:
+        def __repr__(self) -> str:
+            raise RuntimeError("a hostile __repr__ must not raise past a guard")
+
+    kwargs: dict[str, Any] = {field: Hostile()}
+    with pytest.raises(ValueError, match=f"calendar_{field} must be a timedelta, got Hostile"):
+        CalendarReader(_ABSOLUTE, **kwargs)
+
+
 @pytest.mark.parametrize("value", [None, 3, ZoneInfo("Europe/Rome")])
 def test_the_constructor_refuses_a_timezone_that_is_not_a_str(value: object) -> None:
     """The fifth site of the same rule, and the one the ``Raises:`` clause names.
