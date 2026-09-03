@@ -2,6 +2,38 @@
 
 - Status: Accepted
 - Date: 2026-08-29
+- **Note (2026-09-03): §4's rationale names a `usefixtures` mark
+  `tests/interfaces/gateway/test_gateway.py` no longer carries; read that clause as
+  naming the fixture, which still governs the module.** §4's paragraph below the
+  two normative clauses says that module binds its gateway "under
+  `pytest.mark.usefixtures("hermetic_assistant_env")` so the developer's shell
+  cannot change a verdict". **The fixture is now autouse.** PR #1987 (`eb589b47`,
+  closing #1058 and #1395) made `hermetic_assistant_env` an `autouse=True` fixture in
+  the corpus's single `tests/conftest.py` and removed the module-level marks that
+  opted into it, `test_gateway.py`'s among them — that module's `pytestmark` is
+  `pytest.mark.integration` and nothing else. **What the sentence was written to say
+  is unchanged, and is now wider**: the module does run under
+  `hermetic_assistant_env`, and so does every other module in the corpus, so the
+  developer's shell cannot change a verdict there or anywhere else. Only the spelling
+  of *how* the fixture reaches the module is stale; the rest of the sentence — the
+  free loopback port, the `FakeAssistantEngine`, and the docstring quotation "Driven
+  through a real socket rather than through the object's methods, and that is
+  deliberate" — is true of the tree as it stands.
+  **Nothing decided changes and no reader acts differently as to the decision**
+  (ADR-0070 §1, and its 2026-07-31 §1 note on what "differently" means). §4's two
+  normative clauses are untouched and neither mentions the fixture: the drive is
+  bound to a real `Gateway` on a loopback port over `ai_assistant.testing`'s
+  `FakeAssistantEngine` seeded by the test, and the browser loads the bundle from
+  that gateway and from no other origin. The stale words sit in the rationale for
+  adopting a shape that already existed, so a reader building this layer under the
+  corrected reading builds exactly what they would have built before — they name no
+  mark, because the conftest applies the fixture to them without one.
+  `tests/interfaces/gateway/browser_drive.py`'s docstring already cites the fixture
+  by name rather than by mark, so it needed nothing and this note asks for nothing.
+  This is a stale phrase in this ADR's own words, reconciled with a fact that
+  postdates it — ADR-0070 §1's second term — with no other ADR as its cause, so it is
+  recorded as this appended dated note, the ratified text below is **not** rewritten,
+  and no `Status` edit is owed (ADR-0082 §1). Refs #1988, #1058, #1395, PR #1987.
 
 ## Context
 
