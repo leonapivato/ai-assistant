@@ -602,9 +602,36 @@ against the turn's own model round trips, which it is orders of magnitude below.
 > succeeding nor failing — the one outcome §6 says a fetch never has. So the acquiring open
 > is **non-blocking** (`O_NONBLOCK`, or the platform equivalent), which costs a regular
 > file nothing because the flag does not affect one, and the kind check that follows
-> refuses **every** non-regular object the fetcher finds itself holding: a FIFO, a socket,
-> a block or character device, a directory. **A `Fetcher` whose acquisition can block on
-> the object it is acquiring does not conform**, whatever it does after the open.
+> refuses **every** non-regular object as `NOT_A_FILE`: a FIFO, a socket, a block or
+> character device, a directory. **A `Fetcher` whose acquisition can block on the object it
+> is acquiring does not conform**, whatever it does after the open.
+
+> **Normative.** **`NOT_A_FILE` is decided by what the named object is, never by which step
+> discovered it.** Some kinds cannot be held at all: opening a **Unix-domain socket** by its
+> pathname fails rather than yielding a descriptor there is anything to inspect — Linux
+> answers `ENXIO` — and a no-follow open of a symbolic link fails likewise. An
+> implementation that classifies only what it managed to open, and folds every open
+> *failure* into `UNREADABLE`, would pass the directory and the FIFO arms and mis-class the
+> socket while satisfying the sentence above word for word. So the rule is stated by
+> outcome: **where the open refuses because the named object is not of a kind that can be
+> opened as a file, the class is `NOT_A_FILE`**, and `UNREADABLE` is for a failure that is
+> not about the object's kind — a permission denial, an I/O error, a resource limit. An
+> implementation folding the first into the second does not conform. Which platform error
+> carries which meaning is the implementing lane's to establish (§13); what is fixed here is
+> where the two classes are drawn, and §14's item 4 is what fails an implementation drawing
+> them elsewhere.
+
+> **Normative.** **The root handle is a resource the composition root owns, and it is
+> released on the same path every other opened resource is.** The concrete fetcher exposes
+> a `close`; the `Fetcher` Protocol does **not**, staying free of lifecycle exactly as
+> `MemoryStore` and this system's other stores do, so the contract keeps saying what a
+> fetch is and not who shuts one down. `app/composition.py` registers that `close` among
+> the resources it has opened, which releases the handle **both** when a later construction
+> step fails and in the façade's ordered shutdown (ADR-0042 §2). A fetcher wired outside
+> that registration would pin its root's mount for the life of the process and leak a
+> descriptor per build — the failure ADR-0042 §2's *"no half-built engine leaks a
+> connection"* already forecloses for every other resource this root opens, and there is no
+> reason for this one to be the exception.
 
 > **Normative.** **The open handle, and not a stored pathname, is what "under the
 > configured root" means.** No conforming implementation re-derives the root from a
@@ -1510,7 +1537,9 @@ owns what makes them unforgeable; the **shared conformance suite** for `Fetcher`
 handles so the suite's membership clauses are not vacuous on it; the concrete local-file
 fetcher in `ai_assistant/readers/`, whose acquisition satisfies §4's race clauses; the
 PDF extraction library's evaluation and adoption under ADR-0024; and `app/composition.py`'s
-wiring, which constructs a `Fetcher` only where a root is configured.
+wiring, which constructs a `Fetcher` only where a root is configured **and registers its
+`close` among the resources it has opened**, so the root handle is released on a later
+construction failure and in the ordered shutdown alike (ADR-0042 §2).
 
 > **Normative.** Lane C1 ships the **triad** — Protocol, shared conformance suite and
 > canonical fake — **together with its primary production implementation**, under
@@ -1661,7 +1690,7 @@ same reason; this decision adds a contract, so it adds a lane.
    would be deciding from retained object identity or from display fields, both of which
    §4 forbids. Asserted at the `Fetcher` seam, because it is a
    property of the contract and not of the loop that happens to call it.
-4. **The four race transitions are refused.** Over a real filesystem, deterministically
+4. **The five race transitions are refused.** Over a real filesystem, deterministically
    sequenced so the transition lands **between** the fetcher's validation and its
    acquisition: a supported regular file replaced by a symbolic link pointing outside the
    root, which is refused `NOT_A_FILE` and reads nothing from the link's target; a file
@@ -1680,6 +1709,12 @@ same reason; this decision adds a contract, so it adds a lane.
    otherwise observe. This is the arm that fails on any implementation whose acquiring open
    is not non-blocking, and it is the one an assertion about the *returned* class cannot
    reach on its own.
+   **And a fifth arm, for the kind that cannot be held at all**: a supported regular file
+   replaced by a **Unix-domain socket**, whose open fails rather than yielding anything to
+   inspect, and which is refused `NOT_A_FILE` and **not** `UNREADABLE`. This is the arm that
+   fails on any implementation classifying only what it managed to open and folding every
+   open failure into `UNREADABLE` — which passes the directory and FIFO arms while
+   mis-classing this one.
 5. **A listing expires once either deadline passes, and on nothing else.** Four arms,
    each deterministic over fake clocks the test drives. A listing inside both deadlines is
    fetched, and one past both is refused `NOT_FOUND`. **A backward wall clock does not
@@ -1852,6 +1887,14 @@ same reason; this decision adds a contract, so it adds a lane.
     bound and nothing wider. It is the arm that fails on any implementation that retries
     the open, that probes further after the mismatch, or that reads through the start
     handle before checking it.
+23. **The root handle is released on both paths.** Three arms over `app/composition.py`:
+    a built engine's `aclose` closes the fetcher, and a construction step that fails
+    **after** the fetcher was built closes it before the error propagates. Asserted on the
+    handle itself — the descriptor the fetcher held is closed — and not on a call count, and
+    with a third arm that repeated build-and-shutdown cycles leave no descriptor
+    accumulating. This is ADR-0042 §2's *"no half-built engine leaks a connection"* asserted
+    for this resource, and it is the arm that fails on any wiring constructing a `Fetcher`
+    without registering its `close`.
 
 ### 15. Deferred, by name, each with what fires it
 
