@@ -1569,10 +1569,14 @@ def _hop_reply_lines(
     about the exclusion, in the prompt or anywhere else. That is the same silence §4
     already requires of a record ADR-0226 §6's budget cut.
 
-    **`dict.fromkeys` is §4's deduplication restated where §4 puts the cap.** The
-    servicer already hands over distinct ids; taking the cap over an order-preserving
-    deduplication of them makes "the first ten" well defined at the site that takes it
-    rather than true only because of what another module promised.
+    **The deduplication is stated ahead of the cap, where §4 puts it.**
+    ``Provenance.evidence`` carries no uniqueness constraint and two labels may name
+    records citing one episode, so a cap taken over the sequence as it stands "would
+    let ``(A, A, …, B)`` spend ten positions on one record and render one line, while
+    a deduplicate-first reading renders ten". Keying ``admitted`` by identifier would
+    make a repeat harmless anyway; writing the deduplication out is what makes the cap
+    a count of **distinct** records by construction rather than by that coincidence,
+    and it is the line a reader checks §4 against.
 
     Args:
         retrieved: The trailing group :func:`_split_conversation_tail` returned — the
