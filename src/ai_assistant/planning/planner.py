@@ -46,7 +46,8 @@ own store is not an act in the world, so nothing about selection, permission or
 execution touches it (§4). Three properties of this module carry the decision. The
 supply is **labelled** by position, ``M1``, ``M2``, … (:func:`_label`), because §3
 rules that no record identifier is rendered to a model and none is accepted from
-one; the prompt asks for the request in :data:`_READ_REQUEST_GUIDANCE`; and
+one; the prompt asks for the request in :data:`_READ_REQUEST_GUIDANCE`, with
+:data:`_ACT_RECORD_GUIDANCE` stating the one case §2 named the hop for; and
 :func:`_optional_read_request` reads one back, dropping a malformed one rather than
 spending a repair round or costing the plan.
 
@@ -399,9 +400,9 @@ remembers about the user. Most turns need none: where the memories set out in th
 next message, together with the conversation and the context, already carry what \
 the goal turns on, ask for nothing.
 
-Where they do not — the goal turns on something the user told this assistant \
-before and none of the memories below carries it — add a `read_request` to \
-whichever object you are sending:
+Where they do not — the goal turns on something said in an earlier conversation, \
+by the user or by this assistant itself, and none of the memories below carries \
+it — add a `read_request` to whichever object you are sending:
 
  "read_request": {"query": "<what to look for in the user's own memories>",
                   "labels": ["M3"]}
@@ -426,6 +427,66 @@ in `steps`. Asking for it does not change which of the two shapes you are \
 sending, and you are still answering now from what you have."""
 
 
+#: ADR-0226 §2's hop, stated as the condition it was admitted for (#1929).
+#:
+#: **The gap this closes is a factual misreading, not a reluctance to ask.** §8
+#: makes the trigger "the planner's own judgement that this turn's supply did not
+#: suffice", and the first live probe found that judgement made honestly and
+#: wrongly. The supply held a distilled belief reading *"the user asked the
+#: assistant to recommend one specific mortgage lender by name … the assistant
+#: declined"*; the question was *"which bank did you mention to me as a starting
+#: point?"*; the planner read the belief as answering it and asked for nothing. It
+#: does not answer it. The belief is a summary of the exchange written afterwards,
+#: and the bank's name exists only in the reply it summarises — the summary is in
+#: fact wrong about that reply, which named one. §2 admits the hop for exactly
+#: this case: it is "**not a search**, so the reply's vocabulary never has to match
+#: anything; and it reaches the exchange by pointer, which is the only mechanism
+#: that answers 'which lender did you recommend?'". A planner that cannot see the
+#: case never reaches the mechanism ADR-0226 bought.
+#:
+#: **It states a condition and does not argue for asking.** §8 warns that "a
+#: prompt that talked the model into asking would move the number this milestone
+#: exists to read", and the fire rate is the instrument the milestone is read by.
+#: So this block names one class of supply that does not carry one class of
+#: answer, and names the neighbouring question the same supply *does* answer — the
+#: condition cuts in both directions rather than adding weight to one, and a turn
+#: on which the summary suffices is told so in the same breath.
+#:
+#: **The judgement stays the model's, at §8's one seam.** Nothing in ``planning``
+#: inspects a record's text to decide this: the block describes the shape of a
+#: claim, the model reads its own supply against it, and the code only reads back
+#: what was emitted (:func:`_optional_read_request`). A code-side rule keyed on a
+#: record's ``kind`` or on words in its ``content`` would be a second, mechanical
+#: trigger beside the judged one, and §8 admits no second seam — "there is no
+#: separate flag, no confidence score and no second seam".
+#:
+#: A separate constant for :data:`_STATED_FACT_GUIDANCE`'s reason: the prompt test
+#: can assert it **reaches the model** without string-matching its wording.
+_ACT_RECORD_GUIDANCE = """\
+One shape of memory is easy to read as an answer it does not hold. A memory that \
+says what this assistant did or said in an earlier conversation — that it \
+recommended, named, suggested, quoted, explained or declined — is a summary of \
+that exchange, written afterwards. It records that the exchange happened and what \
+it was about. It is not a copy of what was said, and the words of the reply are \
+exactly what such a summary leaves out.
+
+So where the goal turns on the content of that act — which one was named, what \
+word was used, what was actually said — a memory of that shape does not carry the \
+answer, however complete an account of the exchange it sounds like. That holds \
+just as much when the summary says nothing was named at all, or that the request \
+was refused: "I declined" is still the summary's account of the reply and not the \
+reply, and a summary written afterwards can be wrong about what was in fact said. \
+Answering "there was no such bank" from a memory that says one was never named is \
+answering from the summary. This is what `labels` is for: name that memory's \
+label, and what comes back is the original exchange it was drawn from, in the \
+wording it actually had.
+
+None of this widens the ordinary case. Where the goal turns instead on whether \
+that exchange happened, when it was, what it was about, or what the user asked \
+for, the same memory answers it as asked, and there is nothing to ask for — even \
+though that exchange also had wording you cannot see."""
+
+
 def _system_prompt(capabilities: Sequence[str]) -> str:
     """Build the planning system prompt over the vocabulary advertised this turn.
 
@@ -444,6 +505,9 @@ def _system_prompt(capabilities: Sequence[str]) -> str:
     like. :data:`_READ_REQUEST_GUIDANCE` sits last for the same reason carried one
     step further: it adds an optional key to *both* shapes and to the choice
     between them it adds nothing, so it is read after the choice has been made.
+    :data:`_ACT_RECORD_GUIDANCE` sits below that block again, because it is a
+    condition on the read the block has just described and says nothing a reader
+    who has not met `labels` yet could use (#1929).
 
     **It is stated unconditionally, where the vocabulary is not.** ADR-0211 §6
     makes the empty vocabulary a case the prompt must speak to, because a list that
@@ -472,6 +536,8 @@ def _system_prompt(capabilities: Sequence[str]) -> str:
             _PROMPT_CLOSING,
             "",
             _READ_REQUEST_GUIDANCE,
+            "",
+            _ACT_RECORD_GUIDANCE,
         )
     )
 

@@ -39,10 +39,12 @@ from ai_assistant.core.types import (
     Provenance,
     ReadKind,
     Role,
+    SemanticMemory,
     TimeOfDay,
 )
 from ai_assistant.planning import ModelBackedPlanner
 from ai_assistant.planning.planner import (
+    _ACT_RECORD_GUIDANCE,
     _EMPTY_VOCABULARY,
     _MAX_EXTRACTION_MISSES,
     _READ_REQUEST_DROPPED,
@@ -83,10 +85,11 @@ def _counter() -> Callable[[], str]:
     return factory
 
 
-def _goal(goal_id: str = "g1") -> Goal:
+def _goal(goal_id: str = "g1", *, statement: str = "relocate to Lisbon") -> Goal:
+    """The turn's goal. ``statement`` is the user's utterance (``loop.py``'s ``_goal``)."""
     return Goal(
         id=goal_id,
-        statement="relocate to Lisbon",
+        statement=statement,
         provenance=Provenance(
             source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_WHEN
         ),
@@ -2488,3 +2491,190 @@ async def test_a_dropped_request_is_logged_without_the_text_it_dropped() -> None
     drops = [event for event in captured if event["event"] == _READ_REQUEST_DROPPED]
     assert [event["reason"] for event in drops] == ["label_count_out_of_bounds"]
     assert query not in json.dumps(drops)
+
+
+# --- #1929: an act-record belief is a pointer, not the exchange ------------
+# The milestone-1 exit probe found ADR-0226's mechanism never exercised, because
+# the trigger judged a supply sufficient that was not: the blind read returned a
+# belief summarising what the assistant *did*, the question was about what it
+# *said*, and the planner read the summary as the answer. `_ACT_RECORD_GUIDANCE`
+# states the case in the prompt; §8 leaves the judgement to the model, so what is
+# assertable here is the case's shape at this seam and the block's reach — the
+# judgement itself is measured as a fire rate over the production model, and this
+# PR reports one.
+
+#: The word that exists only in the reply — never in what the blind read returned.
+#:
+#: Asserted **absent** from the assembled prompt below, which is what makes the
+#: fixture the reply-vocabulary case rather than a supply that quietly carries its
+#: own answer. ADR-0227's amendment to §11 item 1 is the same guard one layer out:
+#: a fixture carrying in one field what production carries in another "asserts
+#: nothing about production, however faithfully the rest of the path is wired".
+_REPLY_ONLY_WORD = "Millennium BCP"
+
+#: The exchange the act record was distilled from, and what its evidence names.
+_ACT_EPISODE_ID = "conv:ca77e6b3-f7b4-427c-9f87-16cf35d55ece:12"
+
+
+def _act_record() -> SemanticMemory:
+    """#1929's belief: a summary of what the assistant did, citing the exchange.
+
+    Written from the live probe's own record. Two properties make it the case §2
+    admits the hop for: it says what the assistant *did* rather than what the user
+    holds, so the reply's own words are exactly what it leaves out; and its
+    ``Provenance.evidence`` names the episode, which is what a
+    :attr:`~ai_assistant.core.types.ReadKind.CITATION_HOP` follows once the loop
+    has resolved the label to this record.
+    """
+    fact = (
+        "the user asked the assistant to recommend one specific mortgage lender by "
+        "name for their Lisbon mortgage; the assistant declined to name one and "
+        "explained what to compare between lenders instead"
+    )
+    return SemanticMemory(
+        id="m-act",
+        content=fact,
+        fact=fact,
+        provenance=Provenance(
+            source=MemorySource.OBSERVED,
+            confidence=0.8,
+            last_updated=_WHEN,
+            evidence=(_ACT_EPISODE_ID,),
+        ),
+    )
+
+
+#: The probe's supply: the act record second, so its label is neither first nor last.
+_ACT_SUPPLY: Final = (_preference(), _act_record(), _belief(MemorySource.USER_ASSERTED, 1.0))
+
+#: The label the act record takes in that supply (ADR-0226 §3: a 1-based ordinal).
+_ACT_LABEL: Final = "M2"
+
+
+async def _planned(reply: str, statement: str) -> tuple[ActionPlan, str]:
+    """The plan for ``reply`` over the probe's supply, and the prompt it was asked on."""
+    model = FakeModelProvider(reply)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+    plan = await planner.plan(
+        _goal(statement=statement),
+        context=_context(),
+        memories=list(_ACT_SUPPLY),
+        capabilities=_VOCABULARY,
+    )
+    return plan, model.last_messages[1].content
+
+
+async def test_the_system_prompt_says_when_an_act_record_is_a_pointer() -> None:
+    """#1929's block reaches the model, below the one it is a condition on.
+
+    Asserted as ADR-0176 §4 asks and as the sibling prompt tests already are: that
+    the block is non-empty, that it *reaches the model at all*, and where it sits —
+    never by string-matching its sentences, which "fails on every rewording that
+    improves the instruction and passes on every rewording that guts it". It sits
+    below :data:`_READ_REQUEST_GUIDANCE` because it is a condition on the read that
+    block has just described, and says nothing a reader who has not met ``labels``
+    yet could use.
+    """
+    model = FakeModelProvider(_VALID_REPLY)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    await planner.plan(_goal(), context=_context(), capabilities=_VOCABULARY)
+
+    assert _ACT_RECORD_GUIDANCE.strip(), "the block decides nothing if it is empty"
+    system = next(one.content for one in model.calls[0].messages if one.role is Role.SYSTEM)
+    assert _ACT_RECORD_GUIDANCE in system
+    assert system.index(_READ_REQUEST_GUIDANCE) < system.index(_ACT_RECORD_GUIDANCE)
+
+
+async def test_the_act_records_bullet_carries_a_label_and_not_the_reply_it_summarises() -> None:
+    """The probe's own supply, as the model is actually handed it (#1929).
+
+    Two things have to be true of this fixture before any arm over it means
+    anything, and neither is true by construction — a supply assembled slightly
+    differently would satisfy the arms below while testing nothing.
+
+    **The act record is labelled**, so a hop naming it is expressible at all: §3
+    gives the model a label *instead of* an identifier, and a bullet with no label
+    is the pre-ADR-0226 rendering.
+
+    **The answer is not already in the prompt.** The bank's name exists only in the
+    reply the act record summarises; if it were in the supply the question would be
+    answerable without any hop, and every arm below would pass over a fixture that
+    had quietly removed the defect it is about.
+    """
+    _, prompt = await _planned(_VALID_REPLY, "Which bank did you mention to me?")
+
+    bullets = _bullets(prompt.splitlines())
+    assert bullets[1].startswith(f"  - {_ACT_LABEL} [semantic/")
+    assert "declined to name one" in bullets[1]
+    assert _REPLY_ONLY_WORD not in prompt
+    assert _act_record().provenance.evidence == (_ACT_EPISODE_ID,)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        pytest.param(
+            "Which bank did you mention to me as a starting point for my Lisbon mortgage?",
+            id="which-one-did-you-name",
+        ),
+        pytest.param(
+            "Quote back the exact sentence in which you told me which Portuguese bank "
+            "is a common starting point",
+            id="quote-the-sentence",
+        ),
+    ],
+)
+async def test_a_content_question_reaches_the_act_records_exchange_by_its_label(
+    statement: str,
+) -> None:
+    """#1929's two probe questions, end to end at this seam (ADR-0226 §2).
+
+    The emission names the act record's label, that label is the one *this* prompt
+    printed on *that* bullet, and it reaches the plan as a
+    :attr:`~ai_assistant.core.types.ReadKind.CITATION_HOP` — which is the whole of
+    what `planning` owes the hop. Resolving the label back to the record, following
+    its ``evidence`` and rendering what comes back are the loop's and the composing
+    stage's, and are asserted there.
+
+    **What the scripted model does not do is judge**, and no assertion here
+    pretends otherwise. ADR-0226 §8 makes the trigger "the planner's own judgement
+    that this turn's supply did not suffice", so whether a *production* model emits
+    this request on this supply is a fire rate over a population of turns and not a
+    unit-testable property — this PR measures one and reports it. What these arms
+    pin is that the case is representable and survives the seam intact: a defect
+    that dropped the hop, mislabelled the record, or let the label drift off the
+    bullet the model read would fail here, and each of those has its own way of
+    making #1929 permanent however well the model judges.
+    """
+    plan, prompt = await _planned(_envelope(labels=[_ACT_LABEL]), statement)
+
+    request = plan.read_request
+    assert request is not None, "the emission survives to the plan"
+    assert [ask.kind for ask in request.asks] == [ReadKind.CITATION_HOP]
+    assert request.asks[0].labels == (_ACT_LABEL,)
+
+    named = _bullets(prompt.splitlines())[1]
+    assert named.startswith(f"  - {_ACT_LABEL} ["), "the label names the act record's own bullet"
+    assert "declined to name one" in named
+
+
+async def test_a_question_the_act_record_answers_emits_nothing() -> None:
+    """The other direction of the same condition (ADR-0226 §11 item 2, §8).
+
+    The block #1929 adds is a condition and not an argument for asking: it names
+    one class of supply that does not carry one class of answer, and names the
+    neighbouring question the same supply *does* answer. §8 is why that half
+    matters as much as the first — the live fire rate is the instrument this
+    milestone is read by, and "a prompt that talked the model into asking would
+    move the number this milestone exists to read".
+
+    Asserted at this seam over the shape a sufficed turn takes: a reply carrying no
+    ``read_request`` key produces a plan whose field is ``None``, over the very
+    supply the arms above hop from, so nothing about that supply makes an emission
+    mandatory. Whether a production model in fact asks for nothing here is again a
+    rate, and this PR reports it for this question too.
+    """
+    plan, _ = await _planned(_VALID_REPLY, "Did I ever ask you to recommend a lender by name?")
+
+    assert plan.read_request is None
