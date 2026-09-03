@@ -2718,3 +2718,39 @@ async def test_the_carve_out_names_the_line_the_tail_actually_renders() -> None:
         "a tail record renders the line the block names (ADR-0222 §1)"
     )
     assert line not in over_the_act_record, "the retrieved group renders none of it (§2)"
+
+
+async def test_the_carve_out_excepts_a_reply_line_that_shows_only_a_prefix() -> None:
+    """ADR-0222 §4's ceiling makes the carve-out's own premise conditional.
+
+    The carve-out above rests on a rendered reply being *the* reply. §4 bounds the
+    line at :data:`_REPLY_CEILING`, and a longer one renders as ``what the
+    assistant replied (first N of M characters): …`` — a prefix, which §4 says is
+    never the whole reply. :func:`_reply_lines` draws exactly this line already:
+    "an unelided reply carries no marker, and that absence is what says the line
+    carries the reply whole". A carve-out reading the elided form as complete would
+    tell the planner that a fact it cannot see is present, which is #1929's failure
+    in a second costume — a rendering mistaken for the exchange.
+
+    Both halves are asserted, because either alone would pass over a broken pair:
+    that the block names the elided shape, and that the rendering really can hide
+    the answer past the cut. The second is the one worth having — a ceiling raised
+    above every reply this fixture can produce would leave the block warning about
+    something that no longer happens.
+    """
+    hidden = f"{'the usual comparisons apply. ' * 40}{_REPLY_ONLY_WORD} is where I would start."
+    tail = _turn(
+        "t1",
+        "Ada: which bank should I start with?",
+        outcome=hidden,
+        disposition=ExchangeDisposition.NO_ACTION_NEEDED,
+    )
+
+    lines = await _bullets_for(tail)
+    reply = _reply_line_of(lines)
+
+    assert reply.startswith(f"{_REPLY_LABEL} (first "), "§4 cut this reply"
+    assert " characters): " in reply
+    assert _REPLY_ONLY_WORD not in "\n".join(lines), "the answer is past the cut"
+    assert "(first " in _ACT_RECORD_GUIDANCE, "the block names the shape §4 renders"
+    assert " characters): " in _ACT_RECORD_GUIDANCE
