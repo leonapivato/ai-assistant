@@ -414,11 +414,16 @@ anyone reviewed.
 > iterate, whatever its audience.
 
 > **Normative.** The budget is checked with the loop's **injected clock**,
-> immediately before each additional planner call and at no other point. It is a gate
-> on **starting** an iteration and never a cancellation of one in flight: a planner
-> call already begun runs to its own completion, and a turn's total duration may
-> therefore exceed its budget by one planner call and one servicing. No lane
-> abandons, cancels or times out a planner call on the strength of this section.
+> immediately before each additional planner call and at no other point. An
+> additional call is admitted **only while the elapsed time is strictly less than the
+> budget**: at exactly the budget, and beyond it, the turn stops and records **budget
+> reached**. The boundary instant is spent, not available.
+
+> **Normative.** It is a gate on **starting** an iteration and never a cancellation
+> of one in flight: a planner call already begun runs to its own completion, and a
+> turn's total duration may therefore exceed its budget by one planner call and one
+> servicing. No lane abandons, cancels or times out a planner call on the strength of
+> this section.
 
 > **Normative.** The budget is **not a `Settings` value**, not a deployment flag and
 > not a per-request parameter. The figures above are fixed here and move only by the
@@ -449,6 +454,14 @@ ADR-0199 §1's own argument — *"Audience rather than modality, because 'voice'
 one trust level"* — is a warning against overloading a property, not a licence to
 overload this one.
 
+**The boundary is closed at the budget because §4 is a fail-closed clause
+throughout.** An undeclared budget iterates not at all; a budget already spent does
+not buy one more call. Leaving equality to the implementation would let two conforming
+loops differ on identical input — one spending a model call the other refuses, with a
+different reply, a different cost and a different audit record — over a reading of the
+word *"within"*, and an injected clock makes equality an ordinary case in a test
+rather than a measure-zero curiosity. §13's third test asserts it.
+
 **Twenty seconds is a judged figure and is labelled as one.** Nothing in this
 repository measures a planner round trip, and this ADR does not invent a measurement:
 the count in §3 is meant to be the binding guard in the ordinary case and the budget
@@ -471,13 +484,19 @@ second model call nobody budgeted.
 > every other plan it is `None`, which means **this plan replaced nothing**. No
 > implementation reads `None` as an error or as an unknown.
 
-> **Normative.** **The loop sets it, and the planner never does.** On a turn that
-> revises, the loop produces the revision as the plan the second call returned with
-> `supersedes` set to the predecessor's `id` and **every other field exactly as the
-> planner returned it**. It does this **once**, immediately on return and before any
-> other component observes the plan; there is never a moment at which a component
-> other than the loop holds the unstamped revision, and no lane sets, clears or
-> re-sets the field anywhere else.
+> **Normative.** **The loop sets it, and the planner never does.** On **every** plan
+> a planner returns, the loop takes the field for its own: it discards any value the
+> plan came back carrying, and then, on a revision and only on a revision, sets it to
+> the predecessor's `id`. Every other field is **exactly as the planner returned
+> it**. The loop does this **once** per plan, immediately on return and before any
+> other component observes it; there is never a moment at which a component other
+> than the loop holds a plan whose `supersedes` is the planner's, and no lane sets,
+> clears or re-sets the field anywhere else.
+
+> **Normative.** A value the planner supplied is **discarded silently** — not an
+> error, not a park, not a degradation of the turn, and not a count in §9's record.
+> ADR-0226 §3 takes the same posture for a label a model invents; this is that
+> posture on the one field of a plan the planner does not own.
 
 > **Normative.** **No plan identifier is rendered to a model and none is accepted
 > from one.** No lane puts a predecessor's `id` in a prompt, adds a parameter to
@@ -502,10 +521,18 @@ second model call nobody budgeted.
 > as permission.
 
 > **Normative.** **Every plan a turn produced is persisted through
-> `PlanStore.save_plan`**, oldest first, at the one site that persists a plan today.
-> A superseded plan is persisted whether or not the turn that produced it goes on to
-> succeed, and persistence order is oldest-first so that no partially-persisted turn
-> leaves a `supersedes` pointing at a plan the store does not hold.
+> `PlanStore.save_plan`**, oldest first, at the **one site that persists a plan
+> today** — so a turn that persists a plan at all persists all of them. Persistence
+> order is oldest-first, so no partially-persisted turn leaves a `supersedes`
+> pointing at a plan the store does not hold.
+
+> **Normative.** **A turn that ends before that site persists nothing, exactly as it
+> does today**, and no lane adds a second persistence site, gives `LearningLoop` a
+> `PlanStore`, or carries a plan out of a failing turn in order to write it. A turn
+> whose second planner call raises, one rejected for capacity and one that fails
+> before the planner is reached are alike in this and were alike before this ADR.
+> What such a turn still owes is §9's record, which ADR-0226 §9 conditions on
+> nothing.
 
 > **Normative.** A superseded plan **drives nothing**. It starts no execution, reaches
 > no `StepRunner`, no `ActionPolicy` and no `StepExecutor`, takes no step-execution
@@ -515,7 +542,10 @@ second model call nobody budgeted.
 > **Normative.** This adds **no failure mode and no degradation posture**. A
 > `save_plan` that raises on a superseded plan fails the turn exactly as one raising
 > on any other plan does today; no lane swallows it, and ADR-0226 §9's audit still
-> emits, because it is *"conditioned on nothing"*.
+> emits, because it is *"conditioned on nothing"*. A turn whose first plan persisted
+> and whose second raised leaves a plan with no successor, which is a complete record
+> of what that turn decided and is not a dangling reference: the link points
+> backwards.
 
 > **Normative.** **`PlanExport.schema_version` becomes `Literal[4]`**, edited rather
 > than defaulted, and **`PROTOCOL_VERSION` moves to 27** (§6).
@@ -533,6 +563,21 @@ which is the same division ADR-0223 §2 draws when the engine computes the
 externality value *"once, immediately after the turn is in hand"* and stamps it into
 a `core` model the turn produced.
 
+**Taking the field on every plan and not only on a revision is what closes the
+forgery, and the gap is worth naming because the narrower rule looks sufficient.** If
+the loop only *set* the field on a revision, a planner conforming by signature could
+return its **first** plan already carrying a same-goal predecessor's id. Nothing
+would revise, so nothing would overwrite it; `save_plan` would accept it, because the
+reference resolves; and the store would hold a durable record claiming a supersession
+that never happened — an unprovenanced identifier written into the audit chain, which
+is the very thing the clause above refuses. Discarding rather than refusing follows
+ADR-0226 §3's own posture for a model-invented label: the turn is not the place to
+punish a planner's non-conformance, and the widest possible effect of the abuse is
+that a field the planner does not own is ignored. It is not counted in §9's record
+because, unlike a dropped label, it measures a planner's conformance rather than the
+trigger's behaviour, and the shared `PlannerContract` (§12) is where conformance is
+held.
+
 **And the stamp is not an edit of a decision.** ADR-0014 §2's frozen rule exists so
 that a plan is not mutated *"out from under an in-flight execution"*; the revision at
 this moment has been persisted by nothing, driven by nothing and observed by nothing,
@@ -540,6 +585,20 @@ and every field the planner authored is byte-identical afterwards. §1's narrowe
 prohibition is what keeps that from becoming a licence: `id`, `goal_id`, `steps`,
 `rationale` and `read_request` are the planner's, `supersedes` is the loop's, and
 there is no third case.
+
+**Persisting every plan means every plan of a turn that persists one, and not a
+retroactive write from a turn that failed.** ADR-0226 §10 already settles the
+population: *"A turn whose planner did not return a plan persists none, so it is
+absent from that population exactly as §8's not-reached turns are excluded from the
+live one."* A turn whose **second** planner call raises is that turn one iteration
+later — it produced a plan, it reached no `TurnResult`, and the engine's persistence
+site is above the loop and never runs. Carrying the first plan out of a failing turn
+so that it could be written would need a second channel out of `respond` and a second
+reason for the engine to write, for a population the corpus has already excluded from
+the persisted-plan figure and which §9's record — emitted from `respond`'s `finally`,
+conditioned on nothing — already counts live. What this section requires is that a
+turn which persists a plan persists **all** of them, which is the failure a design
+persisting only the driven plan would have.
 
 **Persisting every plan is not book-keeping; it is what keeps ADR-0226 §9 true.** That
 section deliberately copies no text into the audit record, resting the retention on
@@ -1056,9 +1115,11 @@ to work.
 3. **The budget is reached and the reply says so.** An injected clock whose reading
    passes the operation's budget between the first planner call and §2's check: one
    planner call, the first plan driven, **budget reached** in the audit, §10's fact in
-   the prompt — and, separately, a turn whose planner call **overruns** the budget
-   while in flight is not abandoned, which is §4's stated cost asserted rather than
-   assumed.
+   the prompt. Three further arms, each deterministic on an injected clock: an elapsed
+   reading **exactly equal** to the budget stops the turn and records **budget
+   reached**, an elapsed reading one tick **below** it admits the second call, and a
+   turn whose planner call **overruns** the budget while in flight is not abandoned —
+   which is §4's stated cost asserted rather than assumed.
 4. **A servicing that adds nothing does not revise.** Every returned record already in
    the supply: exactly one planner call, no second store read, **not iterated** in the
    audit, and the supply byte-for-byte what one servicing left.
@@ -1085,12 +1146,16 @@ to work.
    still carries the `read_request` that was serviced; the export carries both at
    `schema_version` 4; and a document labelled 3 does not validate as a `PlanExport` at
    all.
-10. **The loop sets `supersedes` and the planner sets nothing.** The revision the turn
-    persists differs from the plan the planner returned in `supersedes` and in **no
-    other field** — asserted field by field against the planner's own return value —
-    and a planner that returns a plan already carrying a `supersedes` does not thereby
-    choose one. No plan identifier appears in any prompt the turn assembles, asserted
-    through the production renderer.
+10. **The loop sets `supersedes` and the planner sets nothing.** Four arms. The
+    revision the turn persists differs from the plan the planner returned in
+    `supersedes` and in **no other field**, asserted field by field against the
+    planner's own return value. A planner that returns its **revision** already
+    carrying some other plan's id persists the loop's value, not that one. A planner
+    that returns its **first** plan carrying a resolvable same-goal id — the spoof a
+    rule stated only over revisions would let through — persists `None`, and the turn
+    is otherwise unaffected: nothing raises, nothing parks, and §9's record carries no
+    count of it. And no plan identifier appears in any prompt the turn assembles,
+    asserted through the production renderer.
 11. **A `supersedes` that does not resolve is refused, at the store and in the
     document.** `save_plan` rejects a plan whose `supersedes` names a plan the store
     does not hold, one naming the saving plan's own `id`, and one naming a plan under a
@@ -1121,9 +1186,11 @@ to work.
     per turn carrying two servicing entries, the turn-level trigger **fired**, two
     planner calls, and the stop reason; a turn whose **second** planner call raises
     emits exactly one record still saying **fired**, with **planning failed** as its
-    stop reason and the original failure propagating unchanged; a turn that ended
-    before any plan emits one saying **not reached** with the default **not
-    iterated**; and a turn whose first plan carried a request and whose revision
+    stop reason, the original failure propagating unchanged and **no plan
+    persisted** — the engine's persistence site is above the loop and never runs,
+    which is the turn a design carrying a plan out of a failure would have written; a
+    turn that ended before any plan emits one saying **not reached** with the default
+    **not iterated**; and a turn whose first plan carried a request and whose revision
     carried none is **fired**, not **not fired**.
 16. **The audit still copies nothing.** Neither a distinctive span of a returned record
     nor either iteration's query string appears anywhere in the record; no plan
