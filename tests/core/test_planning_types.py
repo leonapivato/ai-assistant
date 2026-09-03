@@ -964,22 +964,23 @@ def test_the_kind_vocabulary_is_the_two_the_decision_admits() -> None:
 
 def test_export_is_versioned_and_defaults_to_empty() -> None:
     export = PlanExport(exported_at=_WHEN)
-    assert export.schema_version == 4
+    assert export.schema_version == 5
     assert export.goals == ()
 
 
-def test_export_pins_the_schema_version_to_exactly_four() -> None:
+def test_export_pins_the_schema_version_to_exactly_five() -> None:
     """The label is a fact about the document, not a producer's claim (ADR-0039 §10).
 
-    ``Literal[4]`` refuses an explicit ``3`` — a document of the shape this export
-    had before ``ActionPlan`` gained ``supersedes`` does not validate against this
-    contract at all (ADR-0228 §5, §6), exactly as a ``2`` stopped validating when it
-    gained ``read_request`` — and any other value, so the advertised version cannot
-    be mislabelled. The positive default is what a producer gets for free; only the
-    rejections pin it.
+    ``Literal[5]`` refuses an explicit ``4`` — a document of the shape this export
+    had before ``ReadAsk`` gained ``entry`` and ``ReadKind`` gained ``LOCAL_FILE``
+    does not validate against this contract at all (ADR-0230 §12), exactly as a
+    ``3`` stopped validating when ``ActionPlan`` gained ``supersedes`` and a ``2``
+    when it gained ``read_request`` — and any other value, so the advertised
+    version cannot be mislabelled. The positive default is what a producer gets for
+    free; only the rejections pin it.
     """
-    assert PlanExport(exported_at=_WHEN, schema_version=4).schema_version == 4
-    for stale in (1, 2, 3, 5):
+    assert PlanExport(exported_at=_WHEN, schema_version=5).schema_version == 5
+    for stale in (1, 2, 3, 4, 6):
         with pytest.raises(ValidationError):
             PlanExport(exported_at=_WHEN, schema_version=stale)  # type: ignore[arg-type]
 
@@ -1024,7 +1025,7 @@ def test_export_carries_a_whole_supersession_chain() -> None:
 
     export = PlanExport(exported_at=_WHEN, goals=(_goal(),), plans=(first, revision))
 
-    assert export.schema_version == 4
+    assert export.schema_version == 5
     assert [plan.supersedes for plan in export.plans] == [None, "p1"]
 
 
@@ -1105,7 +1106,7 @@ def test_export_round_trips_through_json() -> None:
     export = PlanExport(exported_at=_WHEN, goals=(_goal(),), plans=(plan,), executions=(execution,))
     restored = TypeAdapter(PlanExport).validate_json(export.model_dump_json())
     assert restored == export
-    assert restored.schema_version == 4
+    assert restored.schema_version == 5
     request = restored.plans[0].read_request
     assert request is not None
     assert {ask.kind for ask in request.asks} == {ReadKind.SIGHTED_QUERY, ReadKind.CITATION_HOP}

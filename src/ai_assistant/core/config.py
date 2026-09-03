@@ -3382,6 +3382,112 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return self
 
+    # --- The local-file fetch root and its bounds (ADR-0230 §4, §6) -------
+    # **Off until configured, which is what makes the standing cost zero** (§6).
+    # The root's named default is *unset*: no root, no listing, no ask, no fetch.
+    # A deployment with none pays no listing read, renders no listing block, and
+    # cannot service the kind — which is also why ADR-0230 §9's fire rate reads 0%
+    # in such a deployment, and why that is a true statement about the
+    # configuration rather than a reading of a trigger.
+    #
+    # **The root's own field carries no domain clause and the four bounds do.**
+    # Unset means the mechanism is off, so there is no out-of-range value to
+    # refuse here; what *is* refused at construction — and in the concrete
+    # fetcher rather than in `core` — is a root whose reads would leave the device
+    # (§6's two-stage eligibility). That is a property of storage rather than of
+    # configuration, so it cannot be decided from a string.
+    fetch_root_path: Path | None = Field(
+        default=None,
+        description=(
+            "Absolute path to the one directory the local-file fetcher lists and "
+            "reads; None disables the mechanism entirely (ADR-0230 §6). Its direct "
+            "children only — never a tree, and never a second root."
+        ),
+    )
+
+    @field_validator("fetch_root_path")
+    @classmethod
+    def _fetch_root_is_absolute(cls, value: Path | None) -> Path | None:
+        """Refuse a relative root, and expand ``~`` (ADR-0093 §7's split).
+
+        ``calendar_reader_path``'s validator above, unchanged and for its reasons:
+        absoluteness is a property of the *configuration* — a relative value
+        resolves against each process's working directory, so the hub started at
+        boot and a test run from a project directory would read the same setting
+        and open different directories — while what the path *is* on the
+        filesystem is a property of the world, decided against an opened handle by
+        ADR-0230 §6's two stages and never against this string.
+
+        **Not canonicalised**, for ``calendar_reader_path``'s reason and for a
+        second one this seam adds: ``realpath`` resolves symbolic links, and
+        ADR-0230 §6 requires that a symbolic link at **any** component of the
+        configured path refuse the construction rather than be followed. Resolving
+        it here would silently answer the very question the constructor exists to
+        refuse.
+        """
+        if value is None:
+            return None
+        expanded = value.expanduser()
+        if not expanded.is_absolute():
+            msg = (
+                f"fetch_root_path must be an absolute path, got {str(value)!r}; a "
+                f"relative value resolves against each process's working directory "
+                f"(ADR-0230 §6)"
+            )
+            raise ValueError(msg)
+        return expanded
+
+    # **Every one of the four below has a stated domain, and a value outside it is
+    # a load-time configuration error** (ADR-0230 §6). Zero and negative values are
+    # refused rather than given a meaning, and the refusal is `Settings`'s own — at
+    # load, before any fetcher is built and before any filesystem call — for
+    # ADR-0093 §5's reason. A zero entry cap is a mechanism that shows nothing
+    # while appearing configured, which ADR-0230 §3 rules a listing may not be made
+    # to mean; and a negative one is worse than meaningless, because the obvious
+    # Python spelling of a cap — `entries[:-1]` — quietly yields all but the *last*
+    # entry, so a bound would be defeated by a configuration value rather than
+    # enforced by one.
+    fetch_listing_ttl: _DurationSetting = Field(
+        default=timedelta(minutes=5),
+        gt=timedelta(0),
+        description=(
+            "How long a listing's authority lasts before every fetch against it is "
+            "refused (ADR-0230 §4). Strictly positive; bound into the listing's own "
+            "token on **both** a monotonic and a wall-clock deadline, either of "
+            "which expires it."
+        ),
+    )
+    fetch_listing_max_entries: _IntegerSetting = Field(
+        default=40,
+        ge=1,
+        lt=2**63,
+        description=(
+            "The most entries one listing shows — the root's most recently modified "
+            "supported children (ADR-0230 §6). At least 1: a listing that shows "
+            "nothing while appearing configured is not a state this mechanism has."
+        ),
+    )
+    fetch_max_file_bytes: _IntegerSetting = Field(
+        default=4 * 1024 * 1024,
+        ge=1,
+        lt=2**63,
+        description=(
+            "The most bytes one fetch reads from a file, enforced on the read itself "
+            "(ADR-0230 §6). A file beyond it is **refused, never truncated**."
+        ),
+    )
+    fetch_max_content_bytes: _IntegerSetting = Field(
+        default=32 * 1024,
+        ge=1,
+        lt=2**63,
+        description=(
+            "The most extracted text one fetch may put in a record, counted on the "
+            "**quoted rendering** the prompt will carry — `json.dumps` at its "
+            "default `ensure_ascii=True`, both delimiters included (ADR-0230 §6). A "
+            "file beyond it is refused, never truncated."
+        ),
+    )
+
     # --- The registered egress integration (ADR-0152 §10, ADR-0154 §6) ----
     # **Which connected account `send_email` is registered against, and where it
     # submits.** Both, or neither: a deployment that names both gets the tool
