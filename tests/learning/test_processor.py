@@ -66,8 +66,7 @@ class TestRuleBasedFeedbackProcessorContract(FeedbackProcessorContract):
     def processor(self) -> FeedbackProcessor:
         return RuleBasedFeedbackProcessor()
 
-    @pytest.fixture
-    def stamping(self) -> FeedbackProcessor:
+    def stamping_subject(self) -> FeedbackProcessor:
         """The same subject with its transaction clock told what to read."""
         return RuleBasedFeedbackProcessor(now=lambda: _STAMPED_AT)
 
