@@ -487,11 +487,30 @@ review-codex-both-start base="":
 #   4  one has no round in flight — start it, or read why it stopped
 #   *  the call itself was wrong (usage, or a malformed poll interval)
 #
+# `timeout` IS VALIDATED HERE, which the single-lens `-wait` has no need to do:
+# there the value reaches `--timeout` unread and the driver's own guard decides
+# it, and here it is first used as shell arithmetic, one deadline for the pair,
+# *before* any driver call — so the driver's guard is downstream of the failure.
+# Unvalidated, `$(( ))` reads `060` as octal 48, accepts `-1` as a deadline
+# already in the past, aborts on `08` with an arithmetic error naming no cause,
+# and under `set -u` exits 1 on `abc` (#1616). The grammar and the reason are
+# COPIED FROM THE DRIVER's `_mode_wait` rather than restated, so this recipe and
+# `--timeout` admit one set between them, and the refusal exits 2 — the status the
+# driver uses for a malformed poll interval, which is the `*` rank above.
+#
 # Last line, because `just --list` shows only that one: what this recipe runs.
 # Block up to `timeout`s on BOTH lenses' rounds for HEAD's tree, then report them
 review-codex-both-wait timeout="540" base="":
     #!/usr/bin/env bash
     set -euo pipefail
+    timeout="$1"
+    if [[ ! "$timeout" =~ ^(0|[1-9][0-9]{0,8})$ ]]; then
+        echo "just review-codex-both-wait: timeout must be a non-negative decimal" \
+             "integer of at most 9 digits with no leading zero (a shell reads a" \
+             "leading zero as octal), not '${timeout}' — it bounds the seconds this" \
+             "recipe blocks before reporting 'still running'" >&2
+        exit 2
+    fi
     rank() {
         case "$1" in
         0) echo 0 ;;
@@ -500,7 +519,7 @@ review-codex-both-wait timeout="540" base="":
         *) echo 3 ;;
         esac
     }
-    deadline=$(( $(date +%s) + $1 ))
+    deadline=$(( $(date +%s) + timeout ))
     status=0
     for persona in adversarial architecture; do
         remaining=$(( deadline - $(date +%s) ))
