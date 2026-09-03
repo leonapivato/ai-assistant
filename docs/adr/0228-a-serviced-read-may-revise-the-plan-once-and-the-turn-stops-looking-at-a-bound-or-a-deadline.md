@@ -538,6 +538,12 @@ second model call nobody budgeted.
 > What such a turn still owes is §9's record, which ADR-0226 §9 conditions on
 > nothing.
 
+> **Normative.** **Every plan of the turn is persisted before anything is driven.**
+> The whole sequence of `save_plan` calls precedes `start_execution`, so a turn whose
+> second `save_plan` raises has driven nothing: no execution is open, no capacity slot
+> is spent on a step and no side effect has been reached. No lane interleaves
+> persisting a plan with driving one.
+
 > **Normative.** A superseded plan **drives nothing**. It starts no execution, reaches
 > no `StepRunner`, no `ActionPolicy` and no `StepExecutor`, takes no step-execution
 > capacity slot, and its steps are never selected, ruled on or run. Exactly one plan
@@ -671,6 +677,15 @@ plans together and both of a turn's plans share its `goal_id`, and `clear` remov
 everything. So no interleaving leaves a live plan whose predecessor is gone. A
 durable constraint is fired by a future member that deletes plans individually, or by
 a chain that spans goals, which §1 forbids.
+
+**Persisting the whole sequence before opening an execution is what keeps a partial
+write from becoming a partial act.** The engine's order today is save the goal, save
+the plan, open the execution, drive the step; the naive extension writes each plan as
+it is produced, which would put a `save_plan` failure *after* a step had run. Nothing
+here needs that order, the plans all exist by the time the loop returns, and the
+failure a persistence error should produce is a turn that decided and recorded
+nothing — not one that acted and then lost the record of why. §13's eighteenth test
+asserts it at the engine rather than at the store.
 
 **A superseded plan drives nothing, and the clause is stated because the tempting
 implementation is a loop.** ADR-0226 §4 states the sibling rule for its own
@@ -1043,11 +1058,18 @@ what the model's output is.
 > §9's raised audit, §10's carrier to the composing stage, and the persistence of
 > every plan at the engine's existing site.
 
-> **Normative.** In `planning/`'s **production code**: nothing. The planner's prompt,
-> its emission and its parser are unchanged, and **the planner is not told which
-> iteration it is on**. No lane adds an iteration index, a "last look" instruction or
-> any other signal to the planner's input, and `Planner.plan`'s signature gains no
-> parameter.
+> **Normative.** In `planning/`'s **planner**: nothing. `planning/planner.py`'s
+> prompt, its emission and its parser are unchanged, and **the planner is not told
+> which iteration it is on**. No lane adds an iteration index, a "last look"
+> instruction or any other signal to the planner's input, and `Planner.plan`'s
+> signature gains no parameter.
+
+> **Normative.** In `planning/`'s **stores**: §5's rejection, and nothing else.
+> `planning/store.py` and `planning/sqlite_store.py` each refuse a `supersedes` that
+> does not resolve, names the saving plan's own `id`, or names a plan under a
+> different `goal_id`. Nothing else about either store moves — no member, no schema
+> column, no foreign key (§5), no change to the goal check, the id-reuse check or the
+> stored-copy rule.
 
 > **Normative.** In `core/protocols.py`: the lane **widens `Planner.plan`'s
 > documented meaning in exactly two respects and no others** — that `memories` may
@@ -1055,9 +1077,13 @@ what the model's output is.
 > requests to one planner, replacing that docstring's *"never a second request on the
 > same turn"*. It **also** widens `PlanStore.save_plan`'s documented rejection set by
 > §5's one clause. Both are **flagged as breaking changes under golden rule 5**, and
-> the compatibility fact is stated beside the flag rather than instead of it: no
-> signature moves, `supersedes` is additive and defaulted, and every existing
-> `Planner` and `PlanStore` implementation conforms exactly as it does today.
+> the two compatibility facts are stated separately because they differ. The
+> `Planner` widening breaks nothing: no signature moves, `supersedes` is additive and
+> defaulted, and every existing implementation conforms exactly as it does today. The
+> `PlanStore` widening is **source-compatible and behaviourally breaking**: a store
+> that accepts a `supersedes` naming a plan it does not hold stops conforming the
+> moment §5 binds, which is why the clause below obliges both implementations and
+> their shared suite rather than the documentation alone.
 
 > **Normative.** The lane **extends the shared `PlannerContract` conformance suite**
 > (`tests/planning/planner_contract.py`) for the widened input, so that every
@@ -1153,7 +1179,11 @@ to work.
    reading **exactly equal** to the budget stops the turn and records **budget
    reached**, an elapsed reading one tick **below** it admits the second call, and a
    turn whose planner call **overruns** the budget while in flight is not abandoned —
-   which is §4's stated cost asserted rather than assumed.
+   which is §4's stated cost asserted rather than assumed. And one arm pins the
+   budget's **origin**: a turn whose work *before* the first plan — context assembly,
+   the two relevance reads, the first planner call itself — already consumes the
+   budget starts **no** second call, which is the assertion an implementation timing
+   from the first plan's return would fail while satisfying every arm above.
 4. **A servicing that adds nothing does not revise.** Every returned record already in
    the supply: exactly one planner call, no second store read, **not iterated** in the
    audit, and the supply byte-for-byte what one servicing left.
@@ -1235,6 +1265,14 @@ to work.
     most one entry, `ActionPlan.supersedes` is `None`, and the `TurnResult` is
     constructed once.
 
+18. **A `save_plan` that raises mid-sequence loses the turn and not an act.** At the
+    engine, on a revising turn whose **first** `save_plan` succeeds and whose
+    **second** raises: the error propagates, the store holds the predecessor and no
+    successor, no execution was opened, no step-execution capacity slot was spent, no
+    step ran, and §9's record was emitted exactly once. Asserted at the engine and
+    not at the store, because what it is about is the **order** of persistence
+    against driving — an implementation that wrote each plan as it was produced and
+    drove between them would pass §13's eleventh test and fail this one.
 ### 14. Deferred, by name, each with what fires it
 
 - **The plan-driving stage, and with it a revision that follows a *driven* step's
@@ -1292,8 +1330,12 @@ to work.
 
 ### 15. Scope, and what this records against earlier ADRs
 
-**This ADR partially supersedes five ratified ADRs, in seven scopes, and no others**
-— four of ADR-0226, one each of ADR-0158, ADR-0014 and ADR-0204. That is a
+**This ADR partially supersedes five ratified ADRs, in eight scopes, and no others**
+— **five** of ADR-0226, one each of ADR-0158, ADR-0014 and ADR-0204. ADR-0226's five
+are §2's second-emission clause, §3's second-level clause, §6's one-emission clause,
+§7 (its re-planning prohibition, its evaluation-timing phrase and its three-group
+restatement, taken as **one** scope because all three are §7's and all three move for
+the one reason a turn now plans twice), and §8's trigger clause. That is a
 classification of this change and is therefore stated as prose rather than marked
 (ADR-0089 §1); what follows is the working under ADR-0070 §1's test, and for the
 clauses a reader would most expect to have moved with them and which did not.
