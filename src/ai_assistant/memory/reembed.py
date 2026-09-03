@@ -560,7 +560,10 @@ class Reembedder:
 
         Zero whenever the work store is absent, was built for a different target,
         or was started from a live store that has since changed — the three
-        conditions §2 names, all of which discard rather than adapt.
+        conditions §2 names, all of which discard rather than adapt. Zero too
+        whenever the work store records no usable cursor, which is the same
+        answer arrived at from the other direction: there is nothing to resume
+        *from*.
         """
         if not self._work.is_file():
             return 0
@@ -577,11 +580,19 @@ class Reembedder:
             )
             if not (continuable and same_target):
                 return 0
-            # Parsed here rather than trusted at resume time: an unreadable cursor
-            # makes the work store unusable, and discarding it is this method's own
-            # answer to every other way it can be unusable.
-            if _CURSOR_KEY in meta:
-                _as_int(meta[_CURSOR_KEY], f"the cursor {self._work} records")
+            # A work store with no cursor has nothing to resume from, whatever it
+            # holds. With no rows either that is its ordinary just-created state
+            # (§2: the cursor is absent until the first chunk commits) and zero is
+            # already the truth. With rows it is damage this module cannot
+            # produce — rows and cursor commit in one transaction — and resuming
+            # would restart at the first source row and collide with the rows
+            # already there, identically on every retry (#738). Unusable, so
+            # discarded, which is this method's answer to every other way a work
+            # store can be unusable.
+            if _CURSOR_KEY not in meta:
+                return 0
+            # Parsed here rather than trusted at resume time, for the same reason.
+            _as_int(meta[_CURSOR_KEY], f"the cursor {self._work} records")
             return _count(conn, "records", str(self._work))
         except MemoryStoreError:
             return 0
@@ -651,11 +662,14 @@ class Reembedder:
             conn = _connect(self._work)
             try:
                 cursor = _read_meta(conn, str(self._work)).get(_CURSOR_KEY)
-                if cursor is None:
-                    return None
-                return _as_int(cursor, f"the cursor {self._work} records")
             finally:
                 conn.close()
+            if cursor is not None:
+                return _as_int(cursor, f"the cursor {self._work} records")
+            # `_resumable` reports nothing to keep for a work store carrying no
+            # cursor, so arriving here means the file changed between the plan and
+            # this call. Fall through to the discard rather than return ``None``
+            # and copy the first source row on top of rows already present (#738).
         _discard(self._work)
         SqliteMemoryStore(
             path=self._work, embedder=self._embedder, traces_sink=_DiscardedTraces()
