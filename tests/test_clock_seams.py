@@ -1495,7 +1495,8 @@ def _refers_to(func: ast.expr, target: str, module: str, bound: dict[str, str]) 
     assertion would pass with no row driving it. Matching *any* attribute called
     ``target`` would claim an unrelated ``scheduler.checked_clock(…)``, and the
     partition assertion would fail naming a seam that does not exist. So the
-    receiver is resolved to the module that defines the target.
+    receiver is resolved to the module that defines the target, and a bare name is
+    only the target when this module imported it from there.
 
     Args:
         func: The ``func`` of an :class:`ast.Call`.
@@ -1506,11 +1507,13 @@ def _refers_to(func: ast.expr, target: str, module: str, bound: dict[str, str]) 
             re-walking the module for each of them is quadratic.
 
     Returns:
-        ``True`` for a bare name bound to ``target``, or an attribute access on a
-        receiver bound to ``module``.
+        ``True`` for a bare name this module imported from ``module``, or an
+        attribute access on a receiver bound to ``module``. A bare name that was
+        never imported from there — a local ``def checked_clock``, a vendor's — is
+        not the guard, whatever it is called.
     """
     if isinstance(func, ast.Name):
-        return func.id == target or bound.get(func.id) == f"{module}.{target}"
+        return bound.get(func.id) == f"{module}.{target}"
     if not isinstance(func, ast.Attribute) or func.attr != target:
         return False
     receiver = _dotted(func.value)
@@ -1579,21 +1582,25 @@ def test_the_roster_scans_follow_a_name_under_any_spelling_of_its_import() -> No
     builds its label at run time, which nothing static can follow: that one is
     *reported*, so the roster refuses it rather than shortening itself.
 
-    And once, in the other direction: an unrelated object with a method of the
-    guard's name is **not** the guard, and claiming it would fail the partition
-    naming a seam that does not exist.
+    And twice in the other direction, because a roster that invents a seam is as
+    unreadable as one that misses one: neither an unrelated object with a method
+    of the guard's name nor a same-named function imported from somewhere else is
+    the guard, and claiming either would fail the partition naming a seam that
+    does not exist.
     """
     source = textwrap.dedent("""
         from ai_assistant.core.clock import checked_clock
         from ai_assistant.core.clock import checked_clock as guard
         from ai_assistant.core import clock as module
         from ai_assistant.memory.traces import MemoryTraces as Emitter
+        from vendor.timing import checked_clock as vendored
         from ai_assistant.context.sources import _GrantedFacetSource as Facet
 
         a = checked_clock(now, owner="Plain")
         b = guard(now, owner="Aliased")
         c = module.checked_clock(now, owner="Qualified")
-        impostor = scheduler.checked_clock(now, owner="NotASeam")
+        impostor = scheduler.checked_clock(now, owner="NotAnAttributeSeam")
+        stranger = vendored(now, owner="NotABareSeam")
         d = guard(now, owner=type(self).__name__)
         _OWNER: Final = "Named constant"
 
