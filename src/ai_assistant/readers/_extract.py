@@ -84,21 +84,6 @@ _TEXT_SUFFIXES: Final = frozenset({".txt", ".md", ".markdown"})
 #: What the two JSON string delimiters cost, counted because §6 includes them.
 _DELIMITERS: Final = 2
 
-#: How many pages of one PDF this seam will read before refusing the document.
-#:
-#: A ceiling on **work**, not a second content bound, and it exists because a PDF's
-#: page count is not a function of its byte count: a document inside
-#: ``fetch_max_file_bytes`` can declare a page tree orders of magnitude larger than its
-#: own size by sharing one node across many entries, and a page carrying no text moves
-#: the content total not at all — so neither of §6's two bounds reaches it.
-#:
-#: Four thousand and ninety-six, which is comfortably past any document a person keeps
-#: in a notes folder — the exit's own case is "a file saved yesterday" — and far short
-#: of what an amplified page tree produces. The figure is a constant rather than a
-#: ``Settings`` field because §6's configured bounds are closed at the four it names,
-#: and a fifth would be a bound no ADR decides.
-_MAX_PDF_PAGES: Final = 4096
-
 
 class ExtractionFailedError(Exception):
     """The file is of a supported format and its text could not be decoded.
@@ -188,43 +173,43 @@ def _extract_text(data: bytes, *, max_rendered_bytes: int) -> str:
 
 
 def _extract_pdf(data: bytes, *, max_rendered_bytes: int) -> str:
-    """Extract a PDF's text a page at a time, refusing as soon as a bound passes.
+    """Extract a PDF's text a page at a time, refusing as soon as the bound passes.
 
     Page-at-a-time is what makes §6's "enforces the bound **while** extracting rather
-    than after" true: the running total is checked after each page, so a document
-    beyond the bound is refused with the pages past that point never produced.
+    than after" true of the text: the running total is checked after each page, so a
+    document beyond the bound is refused with the pages past that point never
+    extracted.
 
-    **Iterated rather than materialised, and the difference is the whole of the
-    property.** ``pypdf``'s page collection is lazy — its ``__iter__`` yields one page
-    at a time — while ``list()`` of it expands every page object first. Taking the
-    list would apply the content bound only *after* the collection had been built, so a
-    document beyond the bound would already have cost what enumerating it costs, which
-    is exactly the work the bound exists to refuse.
+    **Iterated rather than materialised.** ``list(reader.pages)`` builds every page
+    object before the loop applies any bound, so a document beyond the bound would
+    already have cost what building that collection costs. Iterating extracts one
+    page's text at a time and stops on the first page that carries the total past the
+    bound.
 
-    **And a page ceiling, because a page count is not a function of a byte count.**
-    ``fetch_max_file_bytes`` is the bound §6 states "bounds the read **and the
-    extraction's cost**", and for text and Markdown it does: the work is proportional
-    to the bytes. A PDF's page tree breaks that proportionality — a document inside the
-    byte bound can declare a page count orders of magnitude larger by sharing one node
-    across many entries, and a page carrying **no text** never moves the running total,
-    so the content bound cannot stop it. :data:`_MAX_PDF_PAGES` is how §6's stated
-    intent for the byte bound is honoured on the one format whose cost that bound does
-    not reach. It is a constant here and **not** a ``Settings`` field: §6's configured
-    bounds are closed at the four it names, and a fifth would be a bound no ADR decides.
+    **What this does *not* bound is the page tree's own traversal, and that is stated
+    rather than left to be discovered.** ``pypdf`` resolves a document's page count
+    before it will yield a page, whichever way the collection is approached, so a
+    document inside ``fetch_max_file_bytes`` that declares a page tree far larger than
+    its own bytes — by naming one shared node many times — is flattened before this
+    loop runs at all. The cost is bounded by the file's own size and is finite, and
+    closing it would mean either a page bound §6 does not decide or a page-tree walk of
+    our own in place of the library's. **#2015** carries the question; nothing here
+    pre-empts it.
     """
     try:
         reader = pypdf.PdfReader(io.BytesIO(data))
-        pages = iter(reader.pages)
+        pages = reader.pages
     except Exception as exc:  # a parser's own class is not this seam's vocabulary
         raise ExtractionFailedError(_UNDECODABLE) from exc
     produced: list[str] = []
     # The delimiters are paid once, up front, so the running comparison is against
     # the same number `rendered_length` would report for the whole.
     total = _DELIMITERS
-    for index in range(_MAX_PDF_PAGES):
+    index = 0
+    while True:
         try:
-            page = next(pages)
-        except StopIteration:
+            page = pages[index]
+        except IndexError:
             return "".join(produced)
         except Exception as exc:  # as above; every failure of extraction is one class
             raise ExtractionFailedError(_UNDECODABLE) from exc
@@ -240,7 +225,7 @@ def _extract_pdf(data: bytes, *, max_rendered_bytes: int) -> str:
         if total > max_rendered_bytes:
             raise ContentTooLargeError(_OVER_BOUND)
         produced.append(piece)
-    raise ContentTooLargeError(_TOO_MANY_PAGES)
+        index += 1
 
 
 #: Payload-free messages. Each names the class and nothing about the file: ADR-0230 §6
@@ -249,4 +234,3 @@ def _extract_pdf(data: bytes, *, max_rendered_bytes: int) -> str:
 #: an operator might see.
 _UNDECODABLE: Final = "the file could not be decoded as the format its suffix names"
 _OVER_BOUND: Final = "the extracted text's rendering is over the configured bound"
-_TOO_MANY_PAGES: Final = "the document declares more pages than this seam will read"

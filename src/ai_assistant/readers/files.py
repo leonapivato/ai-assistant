@@ -40,6 +40,20 @@ developer's own disk; ``_descent`` is the one atomic operation both stage 2 and
 every acquisition are performed by, and it is the module that says so when a
 platform has no such operation at all.
 
+**The injected clock is read on the worker thread, which is this corpus's
+established shape for a filesystem producer rather than a new demand on ADR-0026.**
+ADR-0230 §4 requires a listing's ``read_at`` to be "captured once **at acquisition**"
+and §5 requires a record's instants to be "the instant the file was read", and the
+only place those are true is beside the read itself. ``CalendarReader._read_source``
+already does exactly this, on ADR-0093 §7b's identical clause, and says why in its own
+terms: "anchoring before the read is deterministic and untrue — a capture at 10:00 that
+waits on its worker, opens a file replaced at 10:05 and reads it at 10:10 returns
+proposals describing the 10:05 file stamped 10:00". So a ``Clock`` that could not be
+read off the loop is one neither concrete reader in this tree could be given either,
+and the clause the fetch depends on is the clause the calendar reader has depended on
+since leg 6. A clock fault reaches the caller unchanged through ``asyncio.to_thread``,
+so nothing about the guard (ADR-0026 §7) or the propagation posture moves.
+
 **Blocking work runs off the event loop, and the discipline is deliberately not
 ADR-0093 §7's.** That section's daemon-thread rule exists because a reader's
 configured path "may still be a stalled mount, and every other bound sits behind an
