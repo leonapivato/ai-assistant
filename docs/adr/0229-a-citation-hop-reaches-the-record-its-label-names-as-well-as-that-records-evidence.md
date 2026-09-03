@@ -224,18 +224,28 @@ records, the same groups, the same order, the same ten slots, the same counts. W
 turn's citation hop *reached* is ADR-0227 §3's question, and that is the one thing this
 ADR widens.
 
-### 3. The named record precedes its own evidence
+### 3. The expansion sequence, and the carrier that survives deduplication
 
-> **Normative.** Within one servicing, ADR-0227 §3's carrier orders each named record
-> **immediately before that record's own evidence**, with labels in the order the ask
-> names them and each named record's evidence in the order that record stores it.
-> This extends ADR-0226 §6's order to the one element that order had nothing to say
-> about, and changes the relative order of no element §6 already placed.
+> **Normative.** Within one servicing, the servicer builds the hop's reach as an
+> **expansion sequence**, in this order and no other: labels in the order the ask names
+> them and, for each label that resolved to a live record, that record **immediately
+> followed by** its own live evidence in the order that record stores it. This is the
+> **pre-deduplication** sequence; the "immediately followed by" relation binds it and
+> binds nothing after it.
 
-> **Normative.** ADR-0227 §4's deduplication over the carrier is unchanged: the cap is
-> taken over **distinct** identifiers, deduplicated before it is applied, with the
-> **first** occurrence keeping the place. A record that is both named by one label and
-> cited by another appears once, at the earlier of the two positions.
+> **Normative.** **ADR-0227 §3's carrier is that expansion sequence under ADR-0227
+> §4's deduplication, and that is the authoritative order.** §4's rule is unchanged and
+> is applied here as written: distinct identifiers, deduplicated before the cap, with
+> the **first** occurrence keeping the place. Where two labels cite one record, or one
+> label **names** a record another label **cites**, that record appears **once**, at
+> the position of its first occurrence in the expansion sequence, and no later
+> occurrence displaces it or moves anything after it.
+
+> **Normative.** **The deduplication is what resolves the two rules where they meet,
+> and no implementation reorders to satisfy the relation after it.** A hop over labels
+> naming an episode `E` and a belief `B` whose evidence is `E` expands to `E, B, E` and
+> the carrier is `E, B` — `B` is then **not** immediately followed by its evidence, and
+> that is the required result rather than a case to repair.
 
 **The order has to be fixed because the cap is taken over it.** ADR-0227 §4 renders the
 first ten admitted records in the carrier's order and the rest not at all, so two
@@ -243,15 +253,26 @@ conforming implementations placing the named record differently would render dif
 prompts from one supply and one request. ADR-0226 §6 fixes its order for exactly this
 reason — *"given one request, one pre-servicing supply and one set of candidates, two
 conforming implementations append the same records in the same order"* — and this is
-that clause carried one element further.
+that clause carried one element further. It is stated as an expansion **then** a
+deduplication, rather than as two properties of the finished carrier, because two
+properties of the finished carrier are not jointly satisfiable on every admitted input:
+`Provenance.evidence` carries no uniqueness constraint across records and nothing stops
+one label naming what another cites, so "each named record immediately before its own
+evidence" and "each record appears once, at its first position" would contradict each
+other on exactly the overlap cases ADR-0227 §4 already admits. One sequence and one
+deduplication have neither problem — they define a total order on every input, which is
+what the cap needs and all it needs.
 
-**Before its evidence, because it is the record the planner pointed at.** Where a
-label names a belief citing several episodes, the cap could otherwise starve the very
-record the label named behind the evidence it cites; where a label names an episode,
-the record and its (empty) evidence are the same thing either way. Putting the
+**Named before its own evidence, because it is the record the planner pointed at.**
+Where a label names a belief citing several episodes, the cap could otherwise starve the
+very record the label named behind the evidence it cites; where a label names an
+episode, the record and its (empty) evidence are the same thing either way. Putting the
 destination first makes the named record the last thing a cap can cut rather than the
 first, which is the ordering ADR-0226 §6 already chose between the two kinds, for the
-same reason: the capped, pointed-at read goes ahead of the open-ended one.
+same reason: the capped, pointed-at read goes ahead of the open-ended one. Where the
+deduplication moves a named record **earlier** than its own label's position, as in the
+`E, B` case above, that serves the same end and costs nothing: the record still renders,
+still renders once, and renders sooner.
 
 ### 4. Three cases that do not move
 
@@ -266,9 +287,14 @@ same reason: the capped, pointed-at read goes ahead of the open-ended one.
 > **Normative.** **ADR-0227 §1's conversation-tail exclusion binds a named record
 > exactly as it binds an evidence-reached one.** A label naming a tail record adds no
 > second line under its bullet, consumes no position of ADR-0227 §4's cap, and
-> contributes **one** record to §5's pair. ADR-0222 §1 stays the single rule for the
-> tail, and `_split_conversation_tail` at the render site stays the single authority
-> on which group a record is in.
+> contributes **one eligible** record to §5's pair rather than two — ADR-0227 §1's own
+> words, and "eligible" is ADR-0222 §1's field test doing its work: a tail record
+> carrying a `disposition` and **no** `outcome` renders its phrase line alone and
+> contributes to neither integer of the pair, and one carrying no `disposition` renders
+> exactly as it does today. This ADR guarantees no tail record a reply line it does not
+> already have. ADR-0222 §1 stays the single rule for the tail, and
+> `_split_conversation_tail` at the render site stays the single authority on which
+> group a record is in.
 
 > **Normative.** **ADR-0227 §4's cap of ten is unchanged and is not widened.** It is
 > taken at the render site, over the carrier's order, after ADR-0227 §1's tail
@@ -339,13 +365,20 @@ exchange works.
    reaching *n* new evidence records reports `returned`, `new` and `deduplicated`
    identically to what the same servicing reports today, and the fourth group holds
    the same records in the same order.
-4. **A label naming a conversation-tail record renders exactly one reply line**, under
-   ADR-0222 §1, and contributes one record to ADR-0227 §5's pair.
+4. **A label naming a conversation-tail record changes that record's rendering not at
+   all.** Over a tail record carrying both `disposition` and `outcome`: exactly one
+   reply line, under ADR-0222 §1, contributing one eligible record to ADR-0227 §5's
+   pair. And over a tail record carrying a `disposition` and **no** `outcome`: the
+   phrase line alone, no reply line, and neither integer of the pair moved. Both
+   fixtures render byte-identically to the same turn with no hop.
 5. **A label whose record `get_many` does not return reaches nothing**, is counted in
    `labels_unresolved`, and renders no reply line although the supply still holds the
    record.
-6. **Order.** A hop over two labels places each named record immediately before its own
-   evidence, asserted over the carrier the servicer produced.
+6. **Order, including the two overlap cases.** Asserted over the carrier the servicer
+   produced: a hop over two labels expands to each named record followed by its own
+   evidence; two labels citing one record yield that record once, at its first
+   position; and a hop naming an episode `E` and a belief whose evidence is `E` yields
+   `E` once, ahead of the belief, per §3.
 
 ### 7. What the implementing lane owes
 
