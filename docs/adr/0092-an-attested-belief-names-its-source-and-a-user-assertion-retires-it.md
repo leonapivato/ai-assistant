@@ -1,6 +1,6 @@
 # 92. An attested belief names its source and its report time; a user assertion retires it
 
-- Status: Accepted, §5's reinforce-safe membership amended by ADR-0121
+- Status: Partially superseded by ADR-0230 (§3's local-substitute clause, in one scope: a source read **live**, at the instant of its report, holding no claim of its own made earlier — for such a source the fetch instant *is* the source's report time rather than a substitute for one; §3's mtime prohibition, its `reported_by` account, its ruling that a `reported_at` earlier than `last_updated` is normal and its ruling that one in our future is not refused all stand, and §§1, 2, 4–10 are untouched)
 - Date: 2026-08-02
 - Amended: 2026-08-09 by ADR-0121 — **§5's reinforce-safe class becomes
   `{OBSERVED, INFERRED, USER_ASSERTED}`; the *meaning* §5 gave the class is what
@@ -29,6 +29,40 @@
   refusal as what stops the tidy-up — is the standing rule. §4's widening, §6's id
   discipline and §§1–3, 7–10 are untouched. ADR-0121 §9 applies ADR-0070 §1's
   test and records this ruling. Refs #862, #863.
+- **Partially superseded: 2026-09-03 by ADR-0230** — one scope, and no others.
+  [ADR-0230](0230-the-planner-names-a-file-it-was-shown-and-the-loop-fetches-it-into-the-supply.md)
+  §5 mints an attested record for a file read at the instant a turn asks for it, and sets
+  `Attestation.reported_at` to that instant. §3 forbids exactly that in general: it rules
+  that `reported_at` *"is not when we read the file, not when we wrote the record, and not
+  a value we may substitute for"*, and that *"A source that supplies no report time cannot
+  be attested — there is no fallback"*. A reader holding only this ADR would refuse to
+  build it, so ADR-0070 §1's test is met and the partial form is the sanctioned tool.
+
+  **The scope is exactly the case in which the two clocks are one event**, and it reaches
+  nothing else: a source that is read **live**, at the instant of its report, and that
+  holds no claim of its own made earlier. §3's reason is that a substitute asserts *"a
+  report time the source never made"* — ADR-0073 §4's *"a true statement about us and a
+  false one about the source"* reintroduced under a different field name. Where the source
+  is asked and answers in the same instant, no such gap exists and no claim is being stood
+  in for. A **synced or cached copy** of a remote source — the `.ics` case this ADR was
+  written for — is outside the scope entirely and §3 binds it as written, as does any
+  source that declares its own instant.
+
+  **§3's mtime prohibition is untouched and is load-bearing in ADR-0230.** Its §6 forbids
+  a file's mtime reaching an attestation, and quotes §3's reason for it: an mtime *"is a
+  property of the last local write and is changed by a copy, a restore or a `touch` while
+  the source's claim stays where it was"*. §3's two further rulings — that a `reported_at`
+  earlier than `last_updated` is the normal case, and that one in our future is not
+  refused — stand and are used as given, as does its whole account of `reported_by`, which
+  ADR-0230 §5 applies as written by putting the fetcher's source-instance name there and
+  never a path. §1's `_attested_iff_attestation` validator is satisfied rather than
+  avoided, and §§1, 2, 4–10 are untouched.
+
+  **The `Status` line takes the leading `Partially superseded by` token in this change, so
+  ADR-0121's qualifier moves off it** into the 2026-08-09 note directly above, which
+  already carries that record whole. That is ADR-0082 §2's last clause, which is ADR-0080
+  §8's operation generalised; nothing is lost by the move. Appended note per ADR-0070 §1;
+  no text below is rewritten. Refs #1996, #1908.
 - **This is a contract change.** §1 adds an `Attestation` value object and an
   `attestation` field to `Provenance` in `core/types.py`, with a band-keyed
   validator — a `core` addition every subsystem reading a belief will meet. §4

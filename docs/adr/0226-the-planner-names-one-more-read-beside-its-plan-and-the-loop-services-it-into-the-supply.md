@@ -241,6 +241,51 @@
   under ADR-0082 §2 no amendment qualifier is written on it and this note is the whole
   record. Appended note per ADR-0070 §1; no text below is rewritten. Refs #1960,
   #1945, #1908.
+- Amended: 2026-09-03 by ADR-0230 — **§2's membership sentence and §6's cross-kind
+  precedence sentence, in one respect each: the enumeration gains a third member, and a
+  read this ADR did not admit is serviced ahead of the citation hop.** §2 reads *"The
+  enumeration's two members are `SIGHTED_QUERY` and `CITATION_HOP`"*, and §6 reads
+  *"**The citation hop is serviced first, and the sighted query fills what remains.**"*
+  [ADR-0230](0230-the-planner-names-a-file-it-was-shown-and-the-loop-fetches-it-into-the-supply.md)
+  §1 adds `LOCAL_FILE` — a file the planner names by pointing at a listing the loop
+  showed it — and its §7 services that read first, so a reader holding only this ADR
+  would read both sentences more widely than they now hold. That is ADR-0082 §1's test
+  met on each, and the record is owed.
+
+  **Neither ruling is replaced, and §1 is the licence the addition is taken under.**
+  §1's clause — *"A later kind is an **additive entry to this enumeration**, not a
+  second seam. An ADR admitting one adds a member and states that kind's namer, its
+  servicing, its share of §6's budget and its audit fields; it does not introduce a
+  second request object, a second servicing site, a second budget or a second audit"* —
+  is what ADR-0230 does, and §4's rule that the vocabulary *"is **added to** and never
+  renamed"* is honoured. §2's statement of what each of *its* two kinds is, its
+  at-most-one-ask-of-each-kind rule and its closure against un-ADR'd additions bind
+  entire. So does §6's **decision**: the capped read ahead of the uncapped one is not
+  merely intact but is the reason ADR-0230 §7 gives a one-record read the first
+  position, ahead of a hop bounded at ten.
+
+  **§9 is not amended and does not move.** ADR-0230 §9 adds one field per servicing —
+  the closed-enumeration class a fetch was refused for — and §9's own last clause
+  provides for exactly that: *"These are the fields milestone 2 **raises rather than
+  replaces** … it does not rename them, drop them, or start a second audit beside this
+  one."* No field is renamed or dropped, every meaning is kept, one event key and one
+  emission per turn stand, and §9's no-copy rule binds the new kind without
+  qualification — no path, no file name and no excerpt reaches the record. No sentence
+  of §9 becomes false or over-wide, so under ADR-0082 §1 there is nothing to record
+  against it.
+
+  **§12's outward-fetch deferral is discharged rather than contradicted.** §12 defers
+  *"The outward fetch"* and fires it at *"milestone 3"*, which is milestone 29 under the
+  renumbering note above; ADR-0230 takes the local-disk half and defers the web half by
+  name. Firing a deferral is the deferral working, so no record is owed for it either.
+  §3's namer rule, no-identifier rule and ordinal scheme, §5's channel scoping and
+  degradation posture, §6's budget of ten and second-budget rule, §7's fourth group,
+  whole-union deduplication, discards-nothing-by-class clause and constructed-once rule,
+  and §8's trigger all bind as ratified and are load-bearing in ADR-0230.
+
+  This ADR's `Status` line carries the leading `Partially superseded by` token, so under
+  ADR-0082 §2 no amendment qualifier is written on it and this note is the whole record.
+  Appended note per ADR-0070 §1; no text below is rewritten. Refs #1996, #1908.
 
 ## Context
 

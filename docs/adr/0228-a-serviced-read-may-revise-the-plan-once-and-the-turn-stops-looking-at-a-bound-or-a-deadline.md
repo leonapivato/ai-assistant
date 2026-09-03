@@ -1,6 +1,6 @@
 # 228. A serviced read may revise the plan once, and the turn stops looking at a bound or a deadline
 
-- Status: Accepted
+- Status: Accepted, §11's two-kinds statement amended by ADR-0230
 - Date: 2026-09-03
 - **Partially supersedes five ADRs, in eight narrowly stated scopes** — five of
   ADR-0226, one of ADR-0158, one of ADR-0014 and one of ADR-0204 — and §15 shows the
@@ -81,6 +81,35 @@
   this ADR owes is not to inherit the error. **This ADR changes no code.**
   §12 states what the implementing lane owes; nothing implements against it until it
   has merged ([ADR-0015](0015-simplify-the-agent-workflow.md) §5, golden rule 5).
+- Amended: 2026-09-03 by ADR-0230 — **§11's two-kinds statement, and that alone.** §11
+  reads *"Both kinds a revision may emit are the two that ADR admits, both terminate in
+  the owner's own `MemoryStore`"*, and
+  [ADR-0230](0230-the-planner-names-a-file-it-was-shown-and-the-loop-fetches-it-into-the-supply.md)
+  §1 admits a third — `LOCAL_FILE`, which terminates on the owner's own **disk**. A
+  reader holding only this ADR would read that sentence more widely than it now holds,
+  which is ADR-0082 §1's test met, so the record is owed.
+
+  **What §11 rules is untouched, and is obeyed.** *"This ADR adds **no kind** to
+  ADR-0226 §2's enumeration"* stays a true statement about this ADR. Its prohibition —
+  *"no lane admits an outward kind here or reads this ADR as preparing for one"* — is
+  honoured rather than worked around: ADR-0230 is taken on #1844, #1908 and ADR-0226
+  §12, and cites this ADR toward none of its permission. §11's remaining clauses bind
+  entire and are load-bearing there: a revision's request may be composed over records
+  carrying the external mark and no lane filters the fourth group on that ground; a
+  planner-composed query is a model completion with no recorded origin at **every**
+  iteration; and neither the externality value nor the withholding value is recomputed
+  from an intermediate supply. §7's monotonicity is what ADR-0230 §8 rests on.
+
+  **§11's steered-loop argument is extended, not moved.** It reads *"This ADR's loop
+  can only read the owner's own **store**, which is the rung below even that"* — "that"
+  being #1844's *"A steered loop that can only read the owner's own disk has no channel
+  out."* ADR-0230 §8 moves the loop up to exactly that rung and no further, and states
+  the containment as three properties and three things that would break it. Nothing of
+  §11's reasoning becomes wrong; what changes is which rung the loop is standing on.
+
+  This ADR's `Status` line carries no leading `Partially superseded by` token, so under
+  ADR-0082 §2 the qualifier is written on that line beside this note. Appended note per
+  ADR-0070 §1; no text below is rewritten. Refs #1996, #1908.
 
 ## Context
 
