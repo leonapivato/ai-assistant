@@ -466,6 +466,33 @@ against the turn's own model round trips, which it is orders of magnitude below.
 > that never existed — is refused whatever its other fields say, and a `Fetcher` that
 > decides membership by re-reading its caller's `name` does not conform.
 
+> **Normative.** **Membership is decided against the authenticated payload and never by
+> value equality**, and this clause is what "is among that listing's `entries`" means.
+> `fetch` establishes three things and nothing else: that **this** fetcher signed the
+> `token`, whose payload **commits to the listing's ordered sequence of entry `name`s**;
+> that the `handle` is one this fetcher minted **for that listing**, over that entry's
+> `name` and its position; and that the name stands at that position of the committed
+> sequence. It is **not** a containment test over the `entries` tuple the caller handed
+> in, and no conforming implementation performs one — a caller can put any tuple there,
+> so a test over it decides nothing.
+
+> **Normative.** **The token's commitment is what makes an authentic token useless over an
+> altered listing.** Without it, a caller keeping a real `token` and replacing `entries`
+> with `()`, with a shorter tuple, or with the same entries reordered would present a
+> value whose token and handle both verify while the entry it names is not in the listing
+> it is presented in — and would satisfy every other clause of this section. With the
+> ordered names inside the signed payload, each of those is refused `NOT_FOUND`, because
+> the sequence presented is not the sequence signed.
+
+> **Normative.** **The commitment covers the addresses and not the display**, which is the
+> other half of the same rule. The signed payload commits to the entry `name`s in order;
+> it does not commit to `size_bytes` or `modified_at`. So an entry whose display fields
+> were altered still verifies, is **accepted, and its altered fields are ignored** — by
+> the clause two below, no fetch decision consults either — while an altered `name`, an
+> altered or reordered entry sequence, and a handle minted for another listing are all
+> refused. Membership is a statement about **which file of which listing** is being named,
+> and that is exactly what is authenticated.
+
 > **Normative.** **The capability does not cross the planning seam, and that is a property
 > of the types rather than a rule a planner is trusted to keep.** The loop projects each
 > `SourceListingEntry` of the listing it holds onto a `ShownFile` — positionally, in
@@ -480,7 +507,7 @@ against the turn's own model round trips, which it is orders of magnitude below.
 
 > **Normative.** **An exactly copied authentic value is the same authority and is
 > accepted; what is refused is a value this fetcher did not mint.** Verification is over
-> the values and must be: the third required property below forbids the fetcher retaining
+> the values and must be: the fourth required property below forbids the fetcher retaining
 > anything, so a byte-identical copy of a `SourceListing` and one of its entries is
 > indistinguishable from what was minted and no conforming implementation attempts to
 > distinguish them — one that did would be deciding from retained object identity, which
@@ -624,16 +651,18 @@ attested-iff-attestation validator made for a producer that could otherwise forg
 (ADR-0092 §1) and that ADR-0226 §3 made by deriving a label from a position rather than
 from an agreement.
 
-**Three properties are required of the mechanism and its spelling is the lane's**, in
+**Four properties are required of the mechanism and its spelling is the lane's**, in
 ADR-0093 §10's own form: a token and a handle must be **unforgeable without state private
-to the fetcher**; a handle must be **bound to the listing that minted it**; and
-verification must **not depend on the fetcher retaining anything**, so that no listing's
-validity is a function of how many others have been produced since. A keyed digest — a
-per-listing random identifier signed with a key generated when the fetcher is constructed
-and never leaving it, and each handle signed over that identifier and the entry's name —
-satisfies all three, needs no table and no eviction, and carries both deadlines inside
-the same signed payload rather than in a cache. This ADR fixes the properties and names no
-construction as the required one.
+to the fetcher**; a handle must be **bound to the listing that minted it**; a token must
+**commit to its listing's ordered entry names**, so that an authentic token cannot be
+carried onto an altered listing; and verification must **not depend on the fetcher
+retaining anything**, so that no listing's validity is a function of how many others have
+been produced since. A keyed digest — a per-listing random identifier and the listing's
+ordered entry names signed together with a key generated when the fetcher is constructed
+and never leaving it, and each handle signed over that identifier, the entry's name and
+its position — satisfies all four, needs no table and no eviction, and carries both
+deadlines inside the same signed payload rather than in a cache. This ADR fixes the
+properties and names no construction as the required one.
 
 **An earlier draft of this section bounded the authority by a window of eight listings,
 and the two review lenses found it wrong from opposite sides on the same round.** Read as
@@ -1366,7 +1395,7 @@ backing chain in **both** of §6's stages — admitting the root from the platfo
 device tables with nothing under the configured path opened, then binding the opened root
 handle and refusing on a mismatch with what was admitted — in the concrete fetcher and not
 in `core`;
-§4's token-and-handle mechanism, satisfying all three of its stated properties and its
+§4's token-and-handle mechanism, satisfying all four of its stated properties and its
 expiry, **in the fetcher and not in `core`** — the types carry the values and the fetcher
 owns what makes them unforgeable; the **shared conformance suite** for `Fetcher`; the
 **canonical fake** in `ai_assistant.testing`, which mints and verifies its own tokens and
@@ -1391,9 +1420,13 @@ wiring, which constructs a `Fetcher` only where a root is configured.
 > assembles itself is refused**, and so is one built by copying a listed entry's `name`,
 > `size_bytes` and `modified_at` onto a handle of the test's own choosing, and so is a
 > listing the test assembled around a token of its own, and so is an entry of listing A
-> presented with listing B's token — while **a faithful copy of an authentic listing and
-> entry is fetched**, the clause in the other direction, which fails an implementation
-> deciding from retained object identity; **a listing past either of §4's deadlines is refused** on fake clocks the suite
+> presented with listing B's token, and so is **an authentic entry presented in a listing
+> carrying its own authentic token but an altered `entries`** — emptied, shortened,
+> reordered, or with an entry's `name` changed — which is the clause that fails any
+> implementation whose token does not commit to the ordered names; while **a faithful copy
+> of an authentic listing and entry is fetched**, and so is one whose `size_bytes` or
+> `modified_at` was altered, the two clauses in the other direction, which fail an
+> implementation deciding from retained object identity or from display fields; **a listing past either of §4's deadlines is refused** on fake clocks the suite
 > drives while one inside both is not, **a wall clock stepped backwards does not extend
 > one and a frozen monotonic source does not either**, and **producing further listings
 > invalidates none of them**; **no
@@ -1489,11 +1522,19 @@ same reason; this decision adds a contract, so it adds a lane.
    invented handle. Both are refused `NOT_FOUND`, no record is added, and the file's
    distinctive text appears nowhere in the supply or the reply. Two further arms at the
    same seam: an entry of listing A presented with listing B's token, and a `SourceListing`
-   the test assembled around a real entry but carrying a token of its own. And **one arm
-   in the other direction**: a byte-identical copy of an authentic listing and one of its
-   entries **fetches**, because the authority is the authenticated value and not the
-   object, and an implementation refusing it would be retaining what §4 forbids retaining.
-   Asserted at the `Fetcher` seam, because it is a
+   the test assembled around a real entry but carrying a token of its own. **And the
+   tamper arm the other two do not reach**: an authentic entry presented inside a listing
+   that keeps its own authentic token but whose `entries` was emptied, shortened,
+   reordered, or had an entry's `name` changed — refused `NOT_FOUND` in every case, which
+   is the arm that fails any implementation whose token does not commit to the listing's
+   ordered names, and which such an implementation would otherwise pass the whole of this
+   item on. **And two arms in the other direction**: a byte-identical copy of an authentic
+   listing and one of its entries **fetches**, and so does one whose `size_bytes` or
+   `modified_at` was altered — the record it mints being of the file `name` addresses,
+   with no field of the record taken from the altered values — because the authority is
+   the authenticated payload and not the object, and an implementation refusing either
+   would be deciding from retained object identity or from display fields, both of which
+   §4 forbids. Asserted at the `Fetcher` seam, because it is a
    property of the contract and not of the loop that happens to call it.
 4. **The three race transitions are refused.** Over a real filesystem, deterministically
    sequenced so the transition lands **between** the fetcher's validation and its
@@ -1831,7 +1872,7 @@ avoided: the record carries an attestation because it is in the attested band.
 - **A file's text reaches the configured model provider** when a planner asks for it, under
   ADR-0004 §2's permitted egress. That is a real widening of what leaves the device and §8
   discloses it.
-- **`core` gains one Protocol, three models and one enumeration, and two versions move.**
+- **`core` gains one Protocol, four models and one enumeration, and two versions move.**
   Every existing `Planner` and `Fetcher`-less deployment keeps working unchanged; a peer
   built before this ADR does not, which is what the protocol move announces.
 - **A document is not remembered.** §10 keeps nothing, so the second turn re-reads and a
