@@ -1815,8 +1815,8 @@ class SqliteAuditTrail:
 
         Raises:
             AuditError: If the decision is not a valid record, the guard rejects
-                the clock's reading, the redraw bound is spent, or the store
-                cannot be read or written.
+                the clock's reading, the redraw bound is spent, the append ordinal
+                is exhausted, or the store cannot be read or written.
             UnrecordedAuthorisationError: If the trail holds no decision under
                 that id, holds one that is not equal to it, or holds one whose
                 ruling is not ``ALLOW``.
@@ -1895,8 +1895,8 @@ class SqliteAuditTrail:
         Raises:
             AuditError: If an argument is not valid — a ``failure_kind`` with a
                 ``SUCCEEDED`` outcome among them — the guard rejects the clock's
-                reading, the redraw bound is spent, or the store cannot be read or
-                written.
+                reading, the redraw bound is spent, the append ordinal is exhausted,
+                or the store cannot be read or written.
             InvalidCompletionError: If ``claim_id`` names no recorded claim or
                 names one a completion already names.
         """
@@ -2002,9 +2002,71 @@ class SqliteAuditTrail:
 
     @staticmethod
     def _append(conn: sqlite3.Connection, row: ToolInvocation) -> None:
-        """Insert ``row``, allocating the next durable append ordinal for it."""
+        """Insert ``row``, allocating the next durable append ordinal for it.
+
+        **An ordinal SQLite cannot store is a refusal, not a leak** (#1576). The
+        allocation is ``MAX(seq) + 1`` over a column this store is not the only
+        writer of: reaching ``2**63 - 1`` through this store's own appends takes
+        9.22e18 of them, but a foreign writer of the file needs one ``INSERT``, and
+        SQLite answers that maximum's successor with a REAL rather than wrapping.
+        Binding the result then raises ``OverflowError`` — neither a
+        ``sqlite3.Error`` for :func:`~ai_assistant.permissions._transactions.transaction`
+        to translate nor an ``AssistantError`` — so it left this layer through the
+        hole ``recent`` already names for the same value at the same bound.
+
+        Refused **here**, at the ledger's own boundary, and not by widening the
+        transaction helper's arms: that helper translates the backend's
+        ``sqlite3.Error`` and passes everything else through unchanged, which is how
+        a store's own refusal reaches its caller as itself. An exhausted ordinal is
+        this store failing to write, so ADR-0192 §2 has it already — "a failure that
+        is neither a named refusal nor an argument fault — the guard rejects the
+        reading, the store cannot be read, the store cannot be written — is
+        translated at this boundary and raised as a plain ``AuditError`` carrying its
+        cause", which is ADR-0026 §4's rule for a subsystem boundary. It is the shape
+        :meth:`_mint` already takes for the other exhausted bound, and like that one
+        it is an ``AuditError`` and never one of §1's three named classes: those are
+        statements about the authorisation, and this says nothing about it. The
+        exhausted-bound arm carries no ``__cause__`` because nothing raised — the
+        store refuses before it binds, as :meth:`_mint` refuses before it inserts —
+        and the conversion arm carries the one it caught.
+
+        The bound is checked rather than the ``OverflowError`` caught, because the
+        allocation reaches this ceiling by two routes and only one of them raises:
+        an ``int`` at the maximum binds ``2**63``, and the REAL that maximum's
+        successor is converts back to the same value. One test on the value covers
+        both, and covers a foreign REAL wider than the range besides. The conversion
+        itself is guarded for the residue that arithmetic on a foreign column can
+        still produce — a non-finite REAL, which ``int`` answers with
+        ``OverflowError`` or ``ValueError`` and neither of which is this layer's to
+        emit either.
+
+        Nothing is written on the refusal: the append is the last act of the
+        enclosing transaction, and the helper rolls back on the way out of any
+        exception.
+
+        Args:
+            conn: The open transaction's connection.
+            row: The invocation to append.
+
+        Raises:
+            AuditError: If the next append ordinal is one SQLite cannot store.
+        """
         next_seq = conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM invocations").fetchone()
-        ordinal = int(next_seq[0])
+        try:
+            ordinal = int(next_seq[0])
+        except (OverflowError, ValueError) as exc:
+            msg = (
+                f"the audit trail's append ordinal is not a number to append after: "
+                f"{describe_untrusted(next_seq[0])}; no row was appended"
+            )
+            raise AuditError(msg) from exc
+        if ordinal > _MAX_SQLITE_INT:
+            msg = (
+                f"the audit trail's append ordinal is exhausted: the next ordinal after "
+                f"the largest row this store holds is {ordinal}, which is beyond the "
+                f"{_MAX_SQLITE_INT} SQLite can store; no row was appended"
+            )
+            raise AuditError(msg)
         # Only the three columns that are not derived from the blob are supplied;
         # SQLite computes the other four from `data` and refuses to be told them.
         conn.execute(
