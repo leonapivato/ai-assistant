@@ -29,7 +29,13 @@ from typing import TYPE_CHECKING, Final, cast, final
 
 import pytest
 import structlog
-from transport_contract import ENDPOINT, ByteChannelContract, OutboundTransportContract
+from transport_contract import (
+    ENDPOINT,
+    RELEASE_FAILURE_DETAIL,
+    ByteChannelContract,
+    OutboundTransportContract,
+    structlog_reports,
+)
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import TransportError
@@ -40,6 +46,9 @@ from ai_assistant.tools import egress
 from ai_assistant.tools.egress import StreamOutboundTransport
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from contextlib import AbstractContextManager
+
     from ai_assistant.core.protocols import ByteChannel, OutboundTransport
     from ai_assistant.testing.cancellation import SuspendedCall
 
@@ -99,6 +108,12 @@ class _Writer:
     levers ``ByteChannelContract`` needs: an armable connection failure and a
     suspension inside ``wait_closed``, which is where a cancellation delivered to
     ``close`` actually lands.
+
+    **Every release failure it raises says ``RELEASE_FAILURE_DETAIL``**, whichever
+    of the three sites raises it, because the contract's report case asserts that
+    what the channel logs does *not* — and a double whose failures said something
+    inconsequential would let that assertion hold over a channel that logged the
+    whole exception.
     """
 
     def __init__(self, *, ledger: _Sockets | None = None) -> None:
@@ -204,8 +219,7 @@ class _Writer:
                 draft called it outside the guard.
         """
         if self.fails_to_close and not self.releases_before_it_fails:
-            msg = "the transport was already broken"
-            raise OSError(msg)
+            raise OSError(RELEASE_FAILURE_DETAIL)
         if self.holds_the_close_waiter:
             # A far end that has stopped reading: the socket is closing and the
             # waiter stays unsettled until something drops the transport.
@@ -213,8 +227,7 @@ class _Writer:
             return
         self.give_the_socket_back()
         if self.fails_to_close:
-            msg = "the transport was already broken"
-            raise OSError(msg)
+            raise OSError(RELEASE_FAILURE_DETAIL)
 
     def give_the_socket_back(self) -> None:
         """Report this writer's release to the ledger, once, and settle the waiter.
@@ -241,8 +254,7 @@ class _Writer:
         if gate is not None:
             await gate.hold()
         if self.fails or self.fails_to_close:
-            msg = "the far end had already gone"
-            raise OSError(msg)
+            raise OSError(RELEASE_FAILURE_DETAIL)
         if self.released:
             return
         await self.close_waiter
@@ -500,7 +512,7 @@ class TestStreamChannelContract(ByteChannelContract):
         _reader_of(channel).set_exception(ConnectionResetError("the peer reset the connection"))
         _writer_of(channel).fails = True
 
-    def arm_release_failure(self, channel: ByteChannel) -> None:
+    def arm_release_failure(self, channel: ByteChannel) -> type[BaseException]:
         """Arm **both** halves of the release to fail.
 
         ``close`` is synchronous and ``wait_closed`` is not, and an earlier draft
@@ -509,10 +521,15 @@ class TestStreamChannelContract(ByteChannelContract):
 
         Args:
             channel: The subject.
+
+        Returns:
+            ``OSError``, which is what a broken transport raises here and what
+            :class:`_Writer` raises in its place.
         """
         writer = _writer_of(channel)
         writer.fails = True
         writer.fails_to_close = True
+        return OSError
 
     def suspend_next_close(self, channel: ByteChannel) -> SuspendedCall:
         """Arm the next ``close`` to suspend inside ``wait_closed``.
@@ -530,6 +547,20 @@ class TestStreamChannelContract(ByteChannelContract):
         gate = LoopSuspension()
         _writer_of(channel).close_gate = gate
         return gate
+
+    def observe_release_reports(
+        self, channel: ByteChannel
+    ) -> AbstractContextManager[Sequence[str]]:
+        """Record what the seam's channel reports about a failed release.
+
+        Args:
+            channel: The subject, whose reports are ``tools.egress``' module-level
+                logger's and need nothing taken from the object itself.
+
+        Returns:
+            The manager the suite drives, over this implementation's event name.
+        """
+        return structlog_reports("egress_channel_close_failed")
 
 
 class TestStreamOutboundTransportContract(OutboundTransportContract):

@@ -19,9 +19,11 @@ from typing import TYPE_CHECKING
 import pytest
 from transport_contract import (
     ENDPOINT,
+    RELEASE_FAILURE_DETAIL,
     UPGRADE_ENDPOINT,
     ByteChannelContract,
     OutboundTransportContract,
+    structlog_reports,
 )
 
 from ai_assistant.core.errors import TransportError
@@ -30,6 +32,9 @@ from ai_assistant.testing import FakeByteChannel, FakeOutboundTransport, Transpo
 from ai_assistant.testing.cancellation import settle
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from contextlib import AbstractContextManager
+
     from ai_assistant.core.protocols import ByteChannel, OutboundTransport
     from ai_assistant.testing.cancellation import SuspendedCall
 
@@ -99,13 +104,17 @@ class TestFakeByteChannelContract(ByteChannelContract):
         subject.fail_write_after(b"", error=TransportError("the peer reset the connection"))
         subject.fail_upgrade_with(TransportError("the endpoint declined the upgrade"))
 
-    def arm_release_failure(self, channel: ByteChannel) -> None:
+    def arm_release_failure(self, channel: ByteChannel) -> type[BaseException]:
         """Arm an ordinary release failure for ``close`` to swallow.
 
         Args:
             channel: The subject.
+
+        Returns:
+            ``OSError``, which is what this fake's release is armed to raise.
         """
-        _fake(channel).fail_release_with(OSError("the far end had already gone"))
+        _fake(channel).fail_release_with(OSError(RELEASE_FAILURE_DETAIL))
+        return OSError
 
     def suspend_next_close(self, channel: ByteChannel) -> SuspendedCall:
         """Arm the next ``close`` to suspend inside its release.
@@ -117,6 +126,20 @@ class TestFakeByteChannelContract(ByteChannelContract):
             The lever the suite drives.
         """
         return _fake(channel).suspend_next_close()
+
+    def observe_release_reports(
+        self, channel: ByteChannel
+    ) -> AbstractContextManager[Sequence[str]]:
+        """Record what the fake reports about a failed release.
+
+        Args:
+            channel: The subject, whose reports are the fake's module-level
+                logger's and need nothing taken from the object itself.
+
+        Returns:
+            The manager the suite drives, over this fake's event name.
+        """
+        return structlog_reports("fake_channel_release_failed")
 
 
 class TestFakeOutboundTransportContract(OutboundTransportContract):
