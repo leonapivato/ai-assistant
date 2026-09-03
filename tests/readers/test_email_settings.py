@@ -238,6 +238,89 @@ def test_the_constructor_refuses_a_source_that_is_not_a_path(value: object) -> N
         EmailReader(value)  # type: ignore[arg-type]
 
 
+class _Forged(timedelta):
+    """A duration that lies about itself in every way the guards below it ask.
+
+    Accepted by ``isinstance``, and then answers ``False`` to every comparison, so
+    it evades any range check that asks *it* whether it is in range; its
+    ``__repr__`` raises, so it also evades being reported. Neither question is put
+    to the caller's object: the guard canonicalises first and range-checks,
+    reports and stores the built-in ``timedelta`` it gets back (#1979).
+    """
+
+    def __lt__(self, other: object) -> bool:
+        return False
+
+    def __gt__(self, other: object) -> bool:
+        return False
+
+    def __le__(self, other: object) -> bool:
+        return False
+
+    def __ge__(self, other: object) -> bool:
+        return False
+
+    def __eq__(self, other: object) -> bool:
+        return False
+
+    def __hash__(self) -> int:
+        return 0
+
+    def __repr__(self) -> str:
+        raise RuntimeError("a hostile __repr__ must not raise past a guard")
+
+    def __sub__(self, other: object) -> timedelta:
+        return self
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("window_past", _Forged(0)),
+        ("window_past", _Forged(seconds=-1)),
+        ("window_past", _Forged(days=3651)),
+        ("read_timeout", _Forged(0)),
+        ("read_timeout", _Forged(seconds=-1)),
+    ],
+)
+def test_a_forged_duration_subclass_cannot_evade_its_bound(field: str, value: timedelta) -> None:
+    """ADR-0140 §12's bounds hold against a value that lies about being in them.
+
+    The same rule as the calendar reader's, stated at the same seam: a reader
+    whose neighbour enforces a bound the other can be talked out of is the
+    asymmetry #1057 exists to remove.
+    """
+    kwargs: dict[str, Any] = {field: value}
+    with pytest.raises(ValueError, match=f"email_{field} must be"):
+        EmailReader(_ABSOLUTE, **kwargs)
+
+
+def test_an_accepted_duration_is_stored_as_a_builtin_timedelta() -> None:
+    """The canonical value is what is kept, not the subclass that carried it."""
+    reader = EmailReader(_ABSOLUTE, window_past=_Forged(days=2), read_timeout=_Forged(seconds=5))
+
+    for attribute, expected in (
+        ("_window_past", timedelta(days=2)),
+        ("_read_timeout", timedelta(seconds=5)),
+    ):
+        stored = getattr(reader, attribute)
+        assert type(stored) is timedelta
+        assert stored == expected
+
+
+@pytest.mark.parametrize("field", ["window_past", "read_timeout"])
+def test_a_hostile_repr_does_not_raise_past_a_duration_guard(field: str) -> None:
+    """Nothing but a ``ValueError`` leaves this constructor, whatever it was handed."""
+
+    class Hostile:
+        def __repr__(self) -> str:
+            raise RuntimeError("a hostile __repr__ must not raise past a guard")
+
+    kwargs: dict[str, Any] = {field: Hostile()}
+    with pytest.raises(ValueError, match=f"email_{field} must be a timedelta, got Hostile"):
+        EmailReader(_ABSOLUTE, **kwargs)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

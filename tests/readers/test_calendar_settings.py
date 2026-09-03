@@ -234,19 +234,12 @@ def test_a_hostile_repr_does_not_raise_past_a_duration_guard(field: str) -> None
 
 
 @pytest.mark.parametrize("field", ["window_past", "window_future", "read_timeout"])
-def test_a_lying_comparison_no_longer_reaches_the_range_check(field: str) -> None:
-    """The narrowing this guard actually buys, pinned so it cannot be lost again.
+def test_a_lying_comparison_does_not_reach_the_range_check(field: str) -> None:
+    """An object that is not a duration is refused for what it is not.
 
     Before the type guard, the range check asked *any* object and accepted every
     one that answered ``False`` — so an object with nothing but comparison
-    operators constructed a reader. It is now refused for what it is not.
-
-    What a type guard cannot buy is the range itself: a ``timedelta`` **subclass**
-    answering ``False`` still evades the comparison below, because that comparison
-    asks the value about itself. Closing that means normalising the duration
-    before comparing rather than tightening acceptance, and it is #1979's
-    question for both readers at once — see this guard's docstring for why an
-    exact-type test is not the answer to it.
+    operators constructed a reader.
     """
 
     class NotEvenADuration:
@@ -265,6 +258,92 @@ def test_a_lying_comparison_no_longer_reaches_the_range_check(field: str) -> Non
     kwargs: dict[str, Any] = {field: NotEvenADuration()}
     with pytest.raises(ValueError, match=f"calendar_{field} must be a timedelta"):
         CalendarReader(_ABSOLUTE, **kwargs)
+
+
+class _Forged(timedelta):
+    """A duration that lies about itself in every way the guards below it ask.
+
+    Accepted by ``isinstance``, and then answers ``False`` to every comparison, so
+    it evades any range check that asks *it* whether it is in range; its
+    ``__repr__`` raises, so it also evades being reported. It exists to pin that
+    neither question is put to the caller's object: the guard canonicalises first
+    and range-checks, reports and stores the built-in ``timedelta`` it gets back.
+    """
+
+    def __lt__(self, other: object) -> bool:
+        return False
+
+    def __gt__(self, other: object) -> bool:
+        return False
+
+    def __le__(self, other: object) -> bool:
+        return False
+
+    def __ge__(self, other: object) -> bool:
+        return False
+
+    def __eq__(self, other: object) -> bool:
+        return False
+
+    def __hash__(self) -> int:
+        return 0
+
+    def __repr__(self) -> str:
+        raise RuntimeError("a hostile __repr__ must not raise past a guard")
+
+    def __sub__(self, other: object) -> timedelta:
+        return self
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("window_past", _Forged(seconds=-1)),
+        ("window_past", _Forged(days=3651)),
+        ("window_future", _Forged(0)),
+        ("window_future", _Forged(days=3651)),
+        ("read_timeout", _Forged(0)),
+        ("read_timeout", _Forged(seconds=-1)),
+    ],
+)
+def test_a_forged_duration_subclass_cannot_evade_its_bound(field: str, value: timedelta) -> None:
+    """ADR-0093 §7a's bounds hold against a value that lies about being in them.
+
+    A ``timedelta`` subclass passes ``isinstance`` — deliberately, because honest
+    subclasses exist and exactness would refuse them to no purpose — so the bound
+    cannot be enforced by asking the object. It is enforced by not asking it:
+    ``timedelta.__sub__`` reads the C-level slots and yields a built-in
+    ``timedelta``, which is what the range check, the message and the stored
+    field all see. Hence a hostile ``__repr__`` here reaches the *range* message
+    and still does not raise past it (#1979).
+    """
+    kwargs: dict[str, Any] = {field: value}
+    with pytest.raises(ValueError, match=f"calendar_{field} must be"):
+        CalendarReader(_ABSOLUTE, **kwargs)
+
+
+def test_an_accepted_duration_is_stored_as_a_builtin_timedelta() -> None:
+    """The canonical value is what is kept, not the subclass that carried it.
+
+    Storing the caller's object would push the same lie downstream into
+    ``read_at + window_future``, which is the arithmetic the bound exists to keep
+    representable.
+    """
+    reader = CalendarReader(
+        _ABSOLUTE,
+        window_past=_Forged(days=2),
+        window_future=_Forged(days=3),
+        read_timeout=_Forged(seconds=5),
+    )
+
+    for attribute, expected in (
+        ("_window_past", timedelta(days=2)),
+        ("_window_future", timedelta(days=3)),
+        ("_read_timeout", timedelta(seconds=5)),
+    ):
+        stored = getattr(reader, attribute)
+        assert type(stored) is timedelta
+        assert stored == expected
 
 
 @pytest.mark.parametrize("value", [None, 3, ZoneInfo("Europe/Rome")])

@@ -619,18 +619,18 @@ class EmailReader:
                 ADR-0140 §12's range.
         """
         source = _checked_path(path)
-        _check_window("email_window_past", window_past)
+        window = _checked_window("email_window_past", window_past)
         _check_count("email_max_messages", max_messages)
         _check_positive_int("email_max_bytes", max_bytes)
         _check_positive_int("email_max_content_bytes", max_content_bytes)
-        _check_duration("email_read_timeout", read_timeout)
+        timeout = _checked_timeout("email_read_timeout", read_timeout)
 
         self._path = source
         self._now = checked_clock(now, owner="EmailReader")
-        self._window_past = window_past
+        self._window_past = window
         self._max_messages = max_messages
         self._max_bytes = max_bytes
-        self._read_timeout = read_timeout
+        self._read_timeout = timeout
         self._max_content_bytes = max_content_bytes
         self._id_factory = id_factory
         self._worker = OneWorker(thread_name=f"{EMAIL_READER_NAME}-reader")
@@ -1314,25 +1314,27 @@ def _when(envelope: _Envelope) -> str:
     return f"{envelope.delivered_at:%Y-%m-%d %H:%M} (UTC)"
 
 
-def _check_window(field: str, value: timedelta) -> None:
+def _checked_window(field: str, value: object) -> timedelta:
     # **May not be zero**, unlike `calendar_window_past` — a window of zero width
     # is a reader that reads nothing while reporting health, and the neighbouring
     # field's `>= 0` is exactly what a lane inherits by copying (ADR-0140 §12).
-    _refuse_a_non_duration(field, value)
-    if value <= timedelta(0) or value > MAX_EMAIL_WINDOW:
+    duration = _checked_duration(field, value)
+    if duration <= timedelta(0) or duration > MAX_EMAIL_WINDOW:
         msg = (
-            f"{field} must be > 0 and <= {MAX_EMAIL_WINDOW}, got {value!r}; the ceiling "
+            f"{field} must be > 0 and <= {MAX_EMAIL_WINDOW}, got {duration!r}; the ceiling "
             f"is what keeps `read_at - {field}` reachable from configuration alone "
             f"(ADR-0140 §12)"
         )
         raise ValueError(msg)
+    return duration
 
 
-def _check_duration(field: str, value: timedelta) -> None:
-    _refuse_a_non_duration(field, value)
-    if value <= timedelta(0):
-        msg = f"{field} must be > 0, got {value!r}"
+def _checked_timeout(field: str, value: object) -> timedelta:
+    duration = _checked_duration(field, value)
+    if duration <= timedelta(0):
+        msg = f"{field} must be > 0, got {duration!r}"
         raise ValueError(msg)
+    return duration
 
 
 def _checked_path(value: object) -> Path:
@@ -1374,8 +1376,8 @@ def _checked_path(value: object) -> Path:
     return value
 
 
-def _refuse_a_non_duration(field: str, value: object) -> None:
-    """Refuse a value no ordering comparison below could survive.
+def _checked_duration(field: str, value: object) -> timedelta:
+    """A configured duration as a built-in ``timedelta``, or a refusal naming the field.
 
     Typed ``object`` because the guard **disbelieves the annotation, which is the
     point** — the same reason :func:`~ai_assistant.core.clock.checked_clock`
@@ -1398,13 +1400,33 @@ def _refuse_a_non_duration(field: str, value: object) -> None:
     concrete reader's constructor for, and an operator's ``TypeError`` naming
     ``NoneType`` and ``datetime.timedelta`` names neither the field nor the rule.
 
-    ``isinstance`` rather than an exact-type test, unlike the integer guards: they
-    are exact in order to exclude ``bool`` specifically, and there is no
-    ``timedelta`` subclass whose acceptance would be a mistake.
+    ``type(value).__name__`` rather than ``repr``, for :func:`_checked_path`'s
+    reason: this guard is reached by a value of *arbitrary* type, so a hostile
+    ``__repr__`` would raise straight past a refusal whose whole purpose is that
+    nothing but a ``ValueError`` leaves this constructor.
+
+    **Accepted by ``isinstance``, then canonicalised.** Acceptance stays
+    ``isinstance``, unlike the exact integer guards: they are exact to exclude
+    ``bool`` specifically, while no ``timedelta`` subclass is silently accepted
+    that way and honest ones exist. Canonicalisation is what makes the *bounds*
+    hold — a subclass overriding ``__lt__`` answers ``False`` to every comparison
+    below and one overriding ``__repr__`` raises past the range message, because
+    both ask the refused value about itself, and an exact-type test would not fix
+    that shape either. ``timedelta.__sub__`` reads the C-level slots and builds a
+    built-in ``timedelta``, immune to an override of ``__sub__``, ``days``, the
+    comparisons or ``__repr__``; it is the returned value that is range-checked,
+    reported and stored (#1057, #1979).
+
+    Returns:
+        The same duration as a built-in ``timedelta``, whatever subclass carried it.
+
+    Raises:
+        ValueError: If ``value`` is not a ``timedelta``.
     """
     if not isinstance(value, timedelta):
-        msg = f"{field} must be a timedelta, got {value!r}"
+        msg = f"{field} must be a timedelta, got {type(value).__name__}"
         raise ValueError(msg)
+    return timedelta.__sub__(value, timedelta(0))
 
 
 def _check_count(field: str, value: int) -> None:

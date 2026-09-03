@@ -402,23 +402,23 @@ class CalendarReader:
         """
         source = _checked_path(path)
         zone = _checked_zone(timezone)
-        _check_window("calendar_window_past", window_past, allow_zero=True)
-        _check_window("calendar_window_future", window_future, allow_zero=False)
+        past = _checked_window("calendar_window_past", window_past, allow_zero=True)
+        future = _checked_window("calendar_window_future", window_future, allow_zero=False)
         _check_count("calendar_max_entries", max_entries)
         _check_count("calendar_max_expansion", max_expansion)
         _check_positive_int("calendar_max_bytes", max_bytes)
         _check_positive_int("calendar_max_content_bytes", max_content_bytes)
-        _check_duration("calendar_read_timeout", read_timeout)
+        timeout = _checked_timeout("calendar_read_timeout", read_timeout)
 
         self._path = source
         self._now = checked_clock(now, owner="CalendarReader")
         self._zone: tzinfo = zone
-        self._window_past = window_past
-        self._window_future = window_future
+        self._window_past = past
+        self._window_future = future
         self._max_entries = max_entries
         self._max_bytes = max_bytes
         self._max_expansion = max_expansion
-        self._read_timeout = read_timeout
+        self._read_timeout = timeout
         self._max_content_bytes = max_content_bytes
         self._id_factory = id_factory
         self._worker = OneWorker(thread_name=f"{CALENDAR_READER_NAME}-reader")
@@ -971,8 +971,8 @@ def _checked_zone(value: object) -> ZoneInfo:
         raise ValueError(msg) from exc
 
 
-def _refuse_a_non_duration(field: str, value: object) -> None:
-    """Refuse a value no ordering comparison below could survive.
+def _checked_duration(field: str, value: object) -> timedelta:
+    """A configured duration as a built-in ``timedelta``, or a refusal naming the field.
 
     Typed ``object`` because the guard **disbelieves the annotation, which is the
     point** — the same reason :func:`~ai_assistant.core.clock.checked_clock`
@@ -985,62 +985,62 @@ def _refuse_a_non_duration(field: str, value: object) -> None:
     refuses anything that is not exactly an ``int`` while a duration reached a
     bare ``<``, so ``window_past=None`` escaped as a ``TypeError`` from an
     operator rather than as the ``ValueError`` this constructor documents
-    (#1057).
+    (#1057). ``type(value).__name__`` rather than ``repr``, for
+    :func:`_checked_path`'s reason: this guard is reached by a value of
+    *arbitrary* type, so a hostile ``__repr__`` would raise straight past a
+    refusal whose whole purpose is that nothing but a ``ValueError`` leaves this
+    constructor.
 
-    Nothing was ever silently *accepted* here — ``Settings`` refuses these at load
-    and ``mypy`` refuses them at a type-checked call site, and the one value that
-    is silently accepted for an integer, ``bool``, is already excluded by the
-    exact-type tests below (#471). What was wrong is the exception's class and
-    message at the direct-construction seam ADR-0093 §10 puts the guard at.
+    **Accepted by ``isinstance``, then canonicalised** — the two halves answer
+    different problems and neither substitutes for the other. Acceptance is
+    ``isinstance`` rather than an exact-type test, unlike the integer guards:
+    they are exact for a *reachable* reason (``bool`` is an ``int`` by
+    inheritance, so ``max_entries=True`` passes ``mypy`` and loads as a cap of
+    one — #471), while no ``timedelta`` subclass is silently accepted that way
+    and honest ones exist, so refusing a caller genuinely passing a duration
+    would buy nothing.
 
-    ``isinstance`` rather than an exact-type test, unlike the integer guards. They
-    are exact for a *reachable* reason: ``bool`` is an ``int`` by inheritance, so
-    ``max_entries=True`` passes ``mypy`` and loads as a cap of one (#471). No
-    ``timedelta`` subclass is silently accepted that way, while honest ones exist
-    — a caller handing this reader a ``pandas.Timedelta``-shaped value is passing
-    a duration, and exactness would refuse it to no purpose.
+    Canonicalisation is what makes the *bounds* hold. A subclass overriding
+    ``__lt__`` and ``__gt__`` to answer ``False`` evades every comparison below,
+    and one overriding ``__repr__`` raises past the range message that reports
+    it — because both ask the refused value about itself. An exact-type test
+    would not fix that shape either; **not comparing against the caller's object
+    at all** does. ``timedelta.__sub__`` reads the C-level slots and builds a
+    built-in ``timedelta``, so it is immune to an override of ``__sub__``,
+    ``days``, the comparisons or ``__repr__``, and it is the returned value that
+    is range-checked, reported and stored.
 
-    What exactness would *not* buy is the range: a subclass overriding ``__lt__``
-    and ``__gt__`` to answer ``False`` evades the comparison below whatever this
-    line tests, because the guard is asking the value about itself. That is not a
-    hole this check can close, and it is not the one ADR-0093 §10 opens the seam
-    for — "a test or a second composition root" reaching the constructor
-    *directly* is an honest caller making a mistake, not an object written to
-    defeat its own bound. It is also strictly narrower than what stood here
-    before, which asked any object at all and accepted every one that answered
-    ``False``. See #1979.
+    Returns:
+        The same duration as a built-in ``timedelta``, whatever subclass carried it.
 
-    ``type(value).__name__`` rather than ``repr``, for :func:`_checked_path`'s
-    reason: this is the one guard reached by a value of *arbitrary* type, so a
-    hostile ``__repr__`` would raise straight past a refusal whose whole purpose
-    is that nothing but a ``ValueError`` leaves this constructor. Every message
-    below it may use ``repr`` freely, because by then the value is a
-    ``timedelta``. (The two integer guards still conflate the type test with the
-    range test and so still format an arbitrary value — pre-existing, in both
-    readers, and filed rather than absorbed here.)
+    Raises:
+        ValueError: If ``value`` is not a ``timedelta``.
     """
     if not isinstance(value, timedelta):
         msg = f"{field} must be a timedelta, got {type(value).__name__}"
         raise ValueError(msg)
+    return timedelta.__sub__(value, timedelta(0))
 
 
-def _check_duration(field: str, value: timedelta) -> None:
-    _refuse_a_non_duration(field, value)
-    if value <= timedelta(0):
-        msg = f"{field} must be > 0, got {value!r}"
+def _checked_timeout(field: str, value: object) -> timedelta:
+    duration = _checked_duration(field, value)
+    if duration <= timedelta(0):
+        msg = f"{field} must be > 0, got {duration!r}"
         raise ValueError(msg)
+    return duration
 
 
-def _check_window(field: str, value: timedelta, *, allow_zero: bool) -> None:
-    _refuse_a_non_duration(field, value)
+def _checked_window(field: str, value: object, *, allow_zero: bool) -> timedelta:
+    duration = _checked_duration(field, value)
     floor = timedelta(0)
-    if value < floor or (value == floor and not allow_zero) or value > MAX_CALENDAR_WINDOW:
+    if duration < floor or (duration == floor and not allow_zero) or duration > MAX_CALENDAR_WINDOW:
         bound = ">= 0" if allow_zero else "> 0"
         msg = (
-            f"{field} must be {bound} and <= {MAX_CALENDAR_WINDOW}, got {value!r}; "
+            f"{field} must be {bound} and <= {MAX_CALENDAR_WINDOW}, got {duration!r}; "
             f"the ceiling is what keeps `read_at + {field}` representable (ADR-0093 §7a)"
         )
         raise ValueError(msg)
+    return duration
 
 
 def _check_count(field: str, value: int) -> None:
