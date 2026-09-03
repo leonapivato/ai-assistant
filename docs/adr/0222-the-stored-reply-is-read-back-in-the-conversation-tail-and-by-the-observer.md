@@ -16,7 +16,10 @@
   **Replaced**, in one scope: §2's first clause as it reaches a record the turn's
   citation hop resolved through a named label's `Provenance.evidence`, at
   `orchestration/composing.py`'s assembler alone. Such a record renders its `outcome`
-  beside the phrase, in §1's shape and order, under §4's ceiling and §5's elision. A
+  beside the phrase, in §1's shape and order, under §4's ceiling and §5's elision, and
+  under a cap of ten such lines per assembly that the superseding ADR states for
+  itself — `Provenance.evidence` carries no read-time length bound, so the count of
+  hop-reached records is not bounded by anything in this ADR or in `core`. A
   reader holding only this ADR would refuse to render it, which is
   [ADR-0070](0070-amendment-and-supersession-rules.md) §1's test for a change to what
   was decided.

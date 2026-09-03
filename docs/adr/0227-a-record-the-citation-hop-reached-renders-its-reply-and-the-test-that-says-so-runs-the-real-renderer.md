@@ -179,8 +179,8 @@ says so against the clauses that would otherwise be read as moved.
 > **Normative.** At `orchestration/composing.py`'s request assembler, a
 > `MemoryRecord` that **this turn's citation hop reached** and that carries both a
 > `disposition` and an `outcome` renders one further continuation line under its own
-> bullet, stating the episode's `outcome`, subject to ADR-0222 §4's ceiling and §5's
-> elision rule. The `    how it turned out: …` line ADR-0221 §3 renders is unchanged,
+> bullet, stating the episode's `outcome`, subject to ADR-0222 §4's ceiling, §5's
+> elision rule, and §4 below's cap of ten such lines per assembly. The `    how it turned out: …` line ADR-0221 §3 renders is unchanged,
 > is rendered first, and the reply line never replaces it. This is ADR-0222 §1's line,
 > in ADR-0222 §1's shape and order, over a further population.
 
@@ -290,9 +290,9 @@ system holds. §3 says how the render site comes to hold it too.
 
 > **Normative.** The set is **recorded where the kind is known** — at the servicer,
 > which is the one place `CITATION_HOP` and `SIGHTED_QUERY` are distinguishable — and
-> is carried from there to the render site as data. It carries every record the hop
+> is carried from there to the render site as data. It carries the records the hop
 > resolved that the turn's supply holds after servicing, the deduplicated-out ones
-> included (§1), and nothing else.
+> included (§1), under §4's cap and in ADR-0226 §6's order, and nothing else.
 
 > **Normative.** The set is **empty** on every turn that did not fire, on a turn whose
 > servicing ADR-0226 §5 declined, on a turn whose servicing failed or was partial —
@@ -385,32 +385,79 @@ discipline is that they are not there. The audit stays what it is.
 > span, the reply's full length in its own characters, and no head-and-tail composite.
 > This ADR states no second marker wording and permits no site to render one.
 
-**The arithmetic, stated because ADR-0222 §4 rules that a budget that is not stated is
-not a budget.** ADR-0226 §6 admits at most ten serviced records, and at most ten of
-them can be hop-reached. Ten reply lines at §4's per-line bound of 736 characters is
-**7,360 characters** of added prompt on a turn that fired and whose hop filled the
-budget with episodes carrying both fields — the true worst case for any reply text,
-because §4's ceiling is counted on the quoted rendering rather than on the source and
-is therefore immune to the twelve-characters-per-emoji expansion §4 records. The
-composing prompt's total reply-line worst case becomes §4's 14,720 for a twenty-turn
-tail plus this 7,360, or **22,080 characters**, and it is reached only on a turn that
-both has a full tail of post-ADR-0221 episodes and fired a hop that returned ten
-distinct evidence records with replies at or over the ceiling. The ordinary shape the
-replay measured is *"one or two beliefs citing one to three episodes each"*, which is
-one to three lines.
+> **Normative.** **At most ten reply lines are rendered under §1 per assembly**, which
+> is ADR-0226 §6's own figure of ten and not a second number. Where this turn's hop
+> reached more than ten records that §1 admits, the **first ten** render a reply line
+> and the rest render none, taken in ADR-0226 §6's own order — labels in the order the
+> ask names them, and each labelled record's evidence in the order that record stores
+> it. The cap is applied where §3's set is recorded, at the servicer, so that one
+> component decides it once.
 
-**Deduplicated-out records do not raise the bound.** A record the hop reached that the
-supply already held renders one reply line and consumed no slot of §6's budget, so the
-count of reply lines this section adds is bounded by the number of records the hop
-resolved rather than by the budget alone — and ADR-0226 §6's two-label cap and
-`MAX_EVIDENCE_CITATIONS` bound *that* at 128 in the pathological case. The honest
-statement is therefore that this section's worst case is **not** bounded by ten in
-full generality. It is bounded in practice by what a belief cites, and the sound bound
-is stated rather than the convenient one. A lane that finds this uncomfortable should
-file the question rather than invent a ceiling here: capping the number of *lines*
-would be a second budget of exactly the kind ADR-0222 §4's third clause forbids this
-ADR to introduce. It is named as a follow-up under Consequences and in Alternatives
-considered rather than decided here.
+> **Normative.** A record the cap excludes renders **exactly as it renders today** —
+> its bullet and its phrase line, unchanged — and **no site writes a marker, a count
+> or an "and *N* more" line about the exclusion**, in the prompt or anywhere else.
+> This is the same silence §4 already requires of a record ADR-0226 §6's budget cut.
+
+> **Normative.** The cap bounds **reply lines** and nothing else. It removes no record
+> from the supply, moves none, changes no group's membership, and is not a second
+> record budget: ADR-0226 §6's ten records are counted at the servicer after
+> deduplication and are unaffected by it.
+
+**Why a stated cap is owed at all, and why `MAX_EVIDENCE_CITATIONS` cannot supply
+one.** ADR-0226 §6's budget of ten bounds the records the servicing *admits*, and §1
+above deliberately admits a further population it does not bound: a record the hop
+reached that the supply already held is deduplicated out, keeps its position, and
+consumes no slot. So the count of reply lines is bounded by how many records the hop
+**resolved**, and `_hop_records` resolves every identifier in both labelled records'
+`Provenance.evidence` in one `get_many`. `MAX_EVIDENCE_CITATIONS` looks like the bound
+and is not one: its own docstring says it *"is enforced at the `MemoryWriter` seam and
+nowhere on this type"*, and `Provenance.evidence` carries no `max_length` deliberately,
+so a record imported under a higher ceiling or written before one existed is readable
+with any number of citations. Two labels at 64 would already be 128 lines, or 94,208
+characters at §4's per-line bound; with no read-time bound on the field there is no
+figure at all. An ADR that stated an arithmetic resting on that constant would be
+stating a bound it does not have, which is exactly what ADR-0222 §4 means by *"a
+budget that is not is not a budget"*. So the cap is written here.
+
+**Ten, because it is already this decision's neighbour's number.** ADR-0226 §6 records
+that ten *"is a prompt size this system has shipped: it is exactly what
+`EPISODIC_SUPPLEMENT_LIMIT` carried for the whole of pilot-5"*, and defends it from
+three directions on the replay's measured oracle shape — *"311/349 need **exactly one**
+belief, 29 need two, 9 need three"* and #1844's *"two to six records"*. The population
+this section bounds is drawn from that same read, so reusing §6's figure introduces no
+unmeasured number and no new constant to keep in step; a lane implementing it reads
+ADR-0226 §6's constant rather than declaring one. The ordinary shape the replay
+measured is *"one or two beliefs citing one to three episodes each"*, which is one to
+three lines, so the cap is not expected to bind at all — it exists so that the
+arithmetic below is true rather than usually true.
+
+**Order, because a cap that does not fix one is not deterministic.** ADR-0226 §6
+already fixes exactly this order for the servicing, and rules what it is for: *"given
+one request, one pre-servicing supply and one set of candidates, two conforming
+implementations append the same records in the same order"*. The cap is taken over that
+same sequence, so two conforming implementations render the same ten lines.
+
+**The arithmetic, now true.** Ten reply lines at ADR-0222 §4's per-line bound of 736
+characters is **7,360 characters** of added prompt on a turn that fired — the true
+worst case for any reply text, because §4's ceiling is counted on the quoted rendering
+rather than on the source and is therefore immune to the twelve-characters-per-emoji
+expansion §4 records. The composing prompt's total reply-line worst case becomes §4's
+14,720 for a twenty-turn tail plus this 7,360, or **22,080 characters**, and it is
+reached only on a turn that both has a full tail of post-ADR-0221 episodes and fired a
+hop that reached ten or more records with replies at or over the ceiling.
+
+**This cap is not the second budget ADR-0222 §4's third clause forbids, and the reason
+is the one ADR-0222 §6 already gave about ADR-0221 §12.** §4's third clause reads *"No
+other budget, ceiling or elision is introduced by **this ADR**"*, followed by a list of
+figures *"all unmoved"* — a statement about what ADR-0222 does, in the shape ADR-0222
+§6 read ADR-0221 §12's closing prohibition: *"It is a fence on those three lanes, which
+have merged; it is not a standing prohibition on the corpus."* Read as a standing
+prohibition it would forbid any later decision to bound any render anywhere, which no
+clause of ADR-0222 argues for and which its own §13-shaped deferrals contradict. What
+§4's third clause does bind is unmoved here: the tail depth, the retrieved group's
+size, `EPISODIC_SUPPLEMENT_LIMIT`, `observation_batch_size` and
+`observation_max_proposals` are untouched, and this ADR still introduces no character
+ceiling, no elision rule and no new constant.
 
 **Why not §6's record budget.** Counting a rendered line against a budget of records
 would mean a long reply cost a record, which is two units in one number, and it would
@@ -619,17 +666,25 @@ behaviour. This section states it once so that it is cited rather than rediscove
     record whose `outcome` contains a newline followed by `    how it turned out:` and
     a well-formed bullet renders as one line and produces no second continuation line
     and no second bullet. ADR-0098 §9's regression shape applied to the new span.
-12. **The counts are one pair over both populations.** An assembly with tail replies
+12. **The cap binds at ten, in ADR-0226 §6's order, and discloses nothing.** A hop
+    whose two labels resolve to records citing more than ten live episodes that §1
+    admits — constructed directly, since `Provenance.evidence` carries no read-time
+    length bound — renders exactly ten reply lines, over the first ten records in
+    labels-then-evidence order; the eleventh and later render their bullet and phrase
+    line unchanged and no reply line; and no marker, count or "and *N* more" line
+    appears in the prompt or in any log about the exclusion. A hop reaching exactly ten
+    renders ten.
+13. **The counts are one pair over both populations.** An assembly with tail replies
     and hop replies reports one statement whose eligible count is the sum and whose
     elided count is no greater; an assembly with eligible replies and no elision reports
     a non-zero denominator and a zero numerator; an assembly with neither reports zero
     and zero rather than staying silent; and no such statement carries reply text or a
     record identifier.
-13. **No identifier reaches a prompt, a log or the audit.** On a turn that serviced a
+14. **No identifier reaches a prompt, a log or the audit.** On a turn that serviced a
     hop, no record identifier from §3's carrier appears in the assembled prompt, in any
     emitted log event, or in ADR-0226 §9's record — which carries the correlation id and
     no other identifier, as its own test asserts.
-14. **The planner's assembler is unchanged.** `planning/planner.py`'s prompt for a turn
+15. **The planner's assembler is unchanged.** `planning/planner.py`'s prompt for a turn
     is byte-identical to today's in every case above, tail included; the planner runs
     before the servicer and renders no reply line under this ADR.
 
@@ -644,7 +699,7 @@ behaviour. This section states it once so that it is cited rather than rediscove
 > (§3); the carrier from there to `orchestration/composing.py`'s assembler through the
 > loop and the engine (§3); the render rule at that assembler (§1), emitted by the
 > caller and not by `_render_record`; the counts folded onto the one existing statement
-> (§5); §8's fourteen tests, with ADR-0226 §11 item 1's existing test **rewritten**
+> (§5); §8's fifteen tests, with ADR-0226 §11 item 1's existing test **rewritten**
 > under §7 rather than supplemented; and the docstrings this corpus expects, citing
 > this ADR by number at each site it changes.
 
@@ -809,11 +864,13 @@ as the observer can. The mitigation is the same one already in place: the span i
 quoted, the attribution is held data, and the phrase line is rendered beside it and
 never instead of it.
 
-**The prompt grows on turns that fire, by a stated and bounded amount in the ordinary
-case and by a larger one in the pathological case.** §4 states both, including the case
-it does not bound by ten. That the sound bound was written rather than the convenient
-one is deliberate; #1908's next milestone should read it before deciding whether a
-line cap is owed.
+**The prompt grows on turns that fire, by a stated and enforceable amount.** §4 caps
+the reply lines at ADR-0226 §6's own ten and states the arithmetic that follows: 7,360
+characters added at worst, and a 22,080-character worst case for the composing prompt's
+reply lines in total. The cap is not expected to bind — the replay's measured shape is
+one to three lines — and it exists so that the figure is true rather than usually true,
+because `Provenance.evidence` has no read-time length bound and so nothing else in the
+corpus supplies one.
 
 **A test-fidelity rule now exists and is citable.** §7 is stated generally because the
 failure it names is not specific to this render rule: a fixture unlike production
@@ -828,7 +885,8 @@ at the observer's act-record accuracy rather than here; a decision to admit a th
 `ReadKind`, which would owe its own answer to the question §2 above answers for the
 sighted query; and a hop whose evidence fan-out turns out in practice to be nothing like
 the *"one or two beliefs citing one to three episodes each"* the replay measured, which
-would make §4's unbounded case real rather than theoretical.
+would make §4's cap bind routinely rather than never and would be the signal that ten is
+the wrong figure for it.
 
 ## Alternatives considered
 
@@ -884,13 +942,27 @@ fact is the one that stays inside the subsystem that owns it.
 it buys a comparison no decision turns on, at the cost of ADR-0141 §6's one-statement
 discipline that ADR-0222 §5 adopts by name.
 
-**Cap the number of reply lines a serviced group may render.** Attractive because §4
-cannot bound the count by ten in full generality. Refused because ADR-0222 §4's third
-clause forbids this ADR to introduce another budget, because the bound that matters —
-what a belief actually cites — is measured at *"one or two beliefs citing one to three
-episodes each"*, and because a cap chosen with no measurement behind it is the failure
-ADR-0222 §4 declines to commit for the ceiling itself. It is named as a follow-up
-instead.
+**Leave the reply-line count unbounded, and state the bound as whatever a belief
+happens to cite.** An earlier draft of this ADR did exactly that, and both review
+lenses refused it. `MAX_EVIDENCE_CITATIONS` is *"enforced at the `MemoryWriter` seam
+and nowhere on this type"*, and `Provenance.evidence` carries no `max_length`, so there
+is no read-time bound to derive one from and the arithmetic §4 offered was false for
+records this system can lawfully read. Refused because ADR-0222 §4's own standard is
+that a budget that is not stated is not a budget, and an unbounded render on a
+mechanism whose whole justification is a marginal improvement in reach is the wrong
+side of that.
+
+**Bound it by excluding deduplicated-out records instead of capping the lines.** That
+would restore a bound of ten with no new clause, since only admitted records would
+render. Refused for §1's reason: the exact record a belief cites would render
+phrase-only whenever the supplement had already picked it up, which is #1944's failure
+on a turn that looks like a success. The cap costs one clause and loses nothing but the
+eleventh line.
+
+**Invent a new figure for the cap.** Refused because ADR-0222 §4 records the cost of an
+unmeasured number and declines to pay it twice: ADR-0226 §6's ten is defended from
+three directions on the replay's own oracle shape, bounds the same read, and is a
+prompt size this system has shipped.
 
 **Fix the test by driving the renderer harder, and write no fidelity rule.** Refused
 because the renderer was already driven: the finding is about the fixture's shape, and a
