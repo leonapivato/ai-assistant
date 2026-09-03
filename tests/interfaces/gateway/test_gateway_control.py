@@ -48,7 +48,7 @@ from ai_assistant.wire.errors import HubUnavailableError
 if TYPE_CHECKING:
     from ai_assistant.core.types import Identifier, NonBlankEncodableText, SourceGrant
 
-pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("hermetic_assistant_env")]
+pytestmark = pytest.mark.integration
 
 #: The instant every scripted value here is stamped with. Fixed rather than read
 #: from a clock: nothing here turns on time, and a wall-clock reading would be one

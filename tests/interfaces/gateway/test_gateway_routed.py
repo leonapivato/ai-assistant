@@ -66,7 +66,7 @@ from ai_assistant.testing import FakeAssistantEngine
 if TYPE_CHECKING:
     from ai_assistant.core.types import RoutedListing
 
-pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("hermetic_assistant_env")]
+pytestmark = pytest.mark.integration
 
 _AT = datetime(2026, 8, 27, 9, 0, tzinfo=UTC)
 

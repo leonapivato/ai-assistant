@@ -14,12 +14,15 @@ it is the only test in the suite whose subject is the rest of the suite.
 
 It also holds ``hermetic_assistant_env``, which closes both channels a
 ``Settings`` reads ambient configuration through -- ``ASSISTANT_*`` in the
-environment and a ``.env`` beside the working directory -- for the modules that
-build one. That belongs in a conftest
-rather than in each module because it is a property of the run rather than of any
-one test, and in *this* one because it is the only conftest the corpus has: mypy
-checks ``tests/`` with no ``__init__.py`` anywhere under it, so a second file named
-``conftest.py`` is a duplicate module and fails the gate.
+environment and a ``.env`` beside the working directory -- for every test in the
+corpus, autouse. That belongs in a conftest rather than in each module because it
+is a property of the run rather than of any one test, and in *this* one because it
+is the only conftest the corpus has: mypy checks ``tests/`` with no ``__init__.py``
+anywhere under it, so a second file named ``conftest.py`` is a duplicate module and
+fails the gate. That constraint is also why the sweep is corpus-wide rather than
+scoped to the directories that happen to build a ``Settings``: there is nowhere
+narrower to put it, and the fixture's own docstring gives the reason there should
+not be.
 
 It also registers ``--aged-store-scale``, the one option the leg-7 retrieval
 instrument needs (issue #789). It lives here because ``pytest_addoption`` is
@@ -126,7 +129,7 @@ def aged_store_scale(request: pytest.FixtureRequest) -> str:
 _SETTINGS_ENV_PREFIX = "ASSISTANT_"
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def hermetic_assistant_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Remove every ``ASSISTANT_*`` variable, so the shell cannot change the verdict.
 
@@ -159,8 +162,41 @@ def hermetic_assistant_env(monkeypatch: pytest.MonkeyPatch) -> None:
     moving the working directory, which is the narrower act and the one that says
     what it closes.
 
-    Apply it to a whole module with
-    ``pytestmark = pytest.mark.usefixtures("hermetic_assistant_env")``.
+    **It is autouse, and that is the whole of how it is applied** (issues #1058,
+    #1395). It began as a fixture a module opted into by name, and the sweep then
+    had to be kept up with by hand: at the point that changed, 45 of the 57 modules
+    that construct a ``Settings`` carried no mark -- among them the three
+    reader-settings modules #1058 was filed about, which had been carrying the
+    exposure since the fixture that fixes it was written. Two properties of the
+    exposure make opting in the wrong shape for it, rather than merely an
+    incomplete application of the right one.
+
+    It is not confined to a ``Settings(`` a test writes. Any test that reaches
+    production code which builds one is exposed identically, and no roster of
+    test-side constructions finds those: #1395's own audit names
+    ``tests/interfaces/test_cli_connections.py`` as exactly that shape -- same
+    directory and same adapter as the modules #1368 fixed, constructing no
+    ``Settings`` of its own, and exposed through the one the CLI builds. A guard
+    that could be enumerated would therefore have reported itself complete while
+    that module stayed open.
+
+    And the exposure is a property of the *run* rather than of a test. A variable
+    exported into the shell that started pytest is either reaching this process or
+    it is not; no test is a reason for it to, and a test that wanted one would be
+    asserting on a value nobody wrote down.
+
+    **Nothing opts out, because a test that is about an ambient value supplies it.**
+    This sweeps rather than locks: the deletions and the ``env_file`` override go on
+    the test's own ``monkeypatch`` stack, so a test that goes on to ``setenv`` a
+    name, or to point ``env_file`` at a file it wrote, gets exactly that -- after
+    the sweep, and undone with it. That is the better shape for such a test anyway,
+    since the value under test is then written down instead of inherited, and
+    ``tests/interfaces/test_cli_ambient_environment.py`` is the worked case: it
+    supplies both channels itself from a *module*-scoped fixture, which pytest
+    instantiates before this function-scoped one.
+
+    ``tests/test_hermetic_assistant_env.py`` pins all of that, from a module that
+    names no fixture at all.
     """
     for variable in list(os.environ):
         if variable.upper().startswith(_SETTINGS_ENV_PREFIX):

@@ -28,7 +28,6 @@ Refs #1277, #1273, #1021.
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
@@ -159,18 +158,27 @@ def test_the_example_file_generates_a_loadable_env(
     file into ``tmp_path`` and running there is the documented "copy to .env" step
     performed literally.
 
-    The environment is cleared first because environment variables outrank
-    ``env_file`` in pydantic-settings' source order, so an ambient ``ASSISTANT_*``
-    — a developer's own shell, or CI — would otherwise be what the case actually
-    loaded. It is cleared by sweeping the environment case-insensitively rather
-    than by deleting the names this module knows about, for the same reason the
-    parser is case-insensitive: a stray lower-case one holding an invalid value
-    would fail this case at construction, before the generated file was reached.
+    **This is the one case in the corpus that wants the dotenv channel open**, and
+    it says so in one line. ``tests/conftest.py``'s ``hermetic_assistant_env`` is
+    autouse and closes both channels a ``Settings`` reads ambient configuration
+    through, ``env_file`` included (#1058, #1395) — so a case whose subject *is*
+    ``env_file`` re-selects it, on the same ``monkeypatch`` stack and therefore
+    only for itself. That is the shape the guard is built for: it sweeps rather
+    than locks, and a test about an ambient channel supplies the value it reads
+    instead of inheriting one. What it may not do is reach back to the literal
+    ``".env"`` the model ships and hope the working directory is bare; the name is
+    written here because the file this case loads is the one it just wrote, three
+    lines down, in a directory of its own.
+
+    The ambient environment needs no clearing here, and the sweep this case used to
+    open with is gone with the roster it belonged to. It mattered because
+    environment variables outrank ``env_file`` in pydantic-settings' source order,
+    so an ambient ``ASSISTANT_*`` — a developer's own shell — would otherwise be
+    what the case actually loaded; the guard does that for every test now, by
+    prefix and case-insensitively, which is what this case did for itself.
     """
-    for variable in list(os.environ):
-        if variable.upper().startswith(_PREFIX):
-            monkeypatch.delenv(variable, raising=False)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(Settings.model_config, "env_file", ".env")
     Path(".env").write_text(
         "".join(f"{name}={value}\n" for name, value in _assignments()), encoding="utf-8"
     )

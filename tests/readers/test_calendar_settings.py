@@ -43,18 +43,6 @@ from ai_assistant.readers import (
 _ABSOLUTE = Path("/srv/calendars/personal.ics")
 
 
-@pytest.fixture(autouse=True)
-def _no_calendar_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep a developer's own ``.env`` out of the defaults being asserted."""
-    for name in (
-        "ASSISTANT_CALENDAR_READER_PATH",
-        "ASSISTANT_CALENDAR_READER_INTERVAL",
-        "ASSISTANT_CALENDAR_WINDOW_PAST",
-        "ASSISTANT_CALENDAR_WINDOW_FUTURE",
-    ):
-        monkeypatch.delenv(name, raising=False)
-
-
 # --- disabled by default (ADR-0093 §7) --------------------------------------
 
 

@@ -51,7 +51,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.types import Identifier, NonBlankEncodableText, SecretValue
 
-pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("hermetic_assistant_env")]
+pytestmark = pytest.mark.integration
 
 #: Every path this lane adds, with the operation ADR-0177 §1 admits it for.
 _ADDED: dict[str, str] = {

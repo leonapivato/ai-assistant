@@ -40,7 +40,6 @@ pytestmark = [
     pytest.mark.browser,
     pytest.mark.xdist_group("gateway_browser"),
     pytest.mark.asyncio(loop_scope="session"),
-    pytest.mark.usefixtures("hermetic_assistant_env"),
 ]
 
 #: When the seeded thread's last turn was recorded. A fixed instant rather than one

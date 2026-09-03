@@ -46,8 +46,6 @@ from ai_assistant.testing import FakeAssistantEngine
 if TYPE_CHECKING:
     from ai_assistant.core.types import OperationConfirmation, RoutedListing
 
-pytestmark = pytest.mark.usefixtures("hermetic_assistant_env")
-
 #: Fixed, so what a case asserts is a rendering rather than the run's clock.
 _AT = datetime(2026, 8, 27, 9, 0, tzinfo=UTC)
 

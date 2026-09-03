@@ -61,10 +61,8 @@ if TYPE_CHECKING:
 #: Relays whatever the submitted coroutine returns, so a caller keeps its type.
 _T = TypeVar("_T")
 
-#: The whole module opens SQLite databases, writes an ``.ics`` and binds a socket;
-#: and every ``Settings`` below names a data directory and an embedder, leaving the
-#: rest — the remote-hub address among them — to the shell that ran the gate (#1368).
-pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("hermetic_assistant_env")]
+#: The whole module opens SQLite databases, writes an ``.ics`` and binds a socket.
+pytestmark = pytest.mark.integration
 
 #: Long enough that a loaded machine does not fail a test about permissions, short
 #: enough that a genuinely wedged hub fails rather than hangs the suite.
