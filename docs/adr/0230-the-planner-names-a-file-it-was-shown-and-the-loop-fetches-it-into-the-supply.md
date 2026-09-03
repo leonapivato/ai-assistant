@@ -1,6 +1,6 @@
 # 230. The planner names a file it was shown, and the loop fetches it into the turn's supply
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-03
 - **Amends** [ADR-0226](0226-the-planner-names-one-more-read-beside-its-plan-and-the-loop-services-it-into-the-supply.md)
   — **§2's membership sentence and §6's cross-kind precedence sentence, in one
