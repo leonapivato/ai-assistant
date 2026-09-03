@@ -189,6 +189,12 @@ async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
 #: unbounded, so ``recent`` clamps to this before binding ``LIMIT``.
 _MAX_SQLITE_INT = 2**63 - 1
 
+#: The other end of the same range. Only the append ordinal can reach it — nothing
+#: this store computes goes negative, but that ordinal is derived from a column a
+#: writer of the *file* can put anything in, and the bound is a property of what
+#: SQLite will bind rather than of which direction a value drifted.
+_MIN_SQLITE_INT = -(2**63)
+
 #: The on-disk schema this code writes and maintains, recorded in ``meta`` so a
 #: reader has a marker to judge the file by — the seam ADR-0049 §1 describes and
 #: the ``SqlitePlanStore`` pattern this follows.
@@ -2023,22 +2029,31 @@ class SqliteAuditTrail:
         reading, the store cannot be read, the store cannot be written — is
         translated at this boundary and raised as a plain ``AuditError`` carrying its
         cause", which is ADR-0026 §4's rule for a subsystem boundary. It is the shape
-        :meth:`_mint` already takes for the other exhausted bound, and like that one
+        :meth:`_mint` already takes for its own exhausted bound, and like that one
         it is an ``AuditError`` and never one of §1's three named classes: those are
         statements about the authorisation, and this says nothing about it. The
-        exhausted-bound arm carries no ``__cause__`` because nothing raised — the
+        out-of-range arm carries no ``__cause__`` because nothing raised — the
         store refuses before it binds, as :meth:`_mint` refuses before it inserts —
         and the conversion arm carries the one it caught.
 
         The bound is checked rather than the ``OverflowError`` caught, because the
-        allocation reaches this ceiling by two routes and only one of them raises:
-        an ``int`` at the maximum binds ``2**63``, and the REAL that maximum's
-        successor is converts back to the same value. One test on the value covers
-        both, and covers a foreign REAL wider than the range besides. The conversion
-        itself is guarded for the residue that arithmetic on a foreign column can
-        still produce — a non-finite REAL, which ``int`` answers with
-        ``OverflowError`` or ``ValueError`` and neither of which is this layer's to
-        emit either.
+        allocation reaches it by several routes and only some of them raise: an
+        ``int`` at the maximum binds ``2**63``, and the REAL that maximum's successor
+        is converts back to the same value. One test on the value covers every one of
+        them.
+
+        **Both ends, and the range is the whole test.** ``seq`` has INTEGER affinity
+        but a foreign REAL survives it wherever the conversion would lose
+        information, so ``MAX(seq) + 1`` can be ``-1e300`` as easily as ``+1e300``,
+        and ``int`` converts either into a Python integer no ``INSERT`` will bind.
+        What is asked is therefore "can SQLite store this", not "did it grow too
+        large" and not "did it go negative": an ordinal *inside* the range is
+        appendable whatever its sign — a foreign row can leave the store appending
+        below zero, and that row is written, ordered and read like any other — and
+        one outside it is unwritable in either direction. The conversion itself is
+        guarded for the residue arithmetic on a foreign column can still produce — a
+        non-finite REAL, which ``int`` answers with ``OverflowError`` or
+        ``ValueError``, neither of which is this layer's to emit either.
 
         Nothing is written on the refusal: the append is the last act of the
         enclosing transaction, and the helper rolls back on the way out of any
@@ -2049,7 +2064,7 @@ class SqliteAuditTrail:
             row: The invocation to append.
 
         Raises:
-            AuditError: If the next append ordinal is one SQLite cannot store.
+            AuditError: If the next append ordinal is not a value SQLite can store.
         """
         next_seq = conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM invocations").fetchone()
         try:
@@ -2060,11 +2075,12 @@ class SqliteAuditTrail:
                 f"{describe_untrusted(next_seq[0])}; no row was appended"
             )
             raise AuditError(msg) from exc
-        if ordinal > _MAX_SQLITE_INT:
+        if not _MIN_SQLITE_INT <= ordinal <= _MAX_SQLITE_INT:
             msg = (
-                f"the audit trail's append ordinal is exhausted: the next ordinal after "
-                f"the largest row this store holds is {ordinal}, which is beyond the "
-                f"{_MAX_SQLITE_INT} SQLite can store; no row was appended"
+                f"the audit trail cannot allocate an append ordinal: the next ordinal "
+                f"after the largest row this store holds is {ordinal}, outside the "
+                f"[{_MIN_SQLITE_INT}, {_MAX_SQLITE_INT}] SQLite can store; no row was "
+                f"appended"
             )
             raise AuditError(msg)
         # Only the three columns that are not derived from the blob are supplied;

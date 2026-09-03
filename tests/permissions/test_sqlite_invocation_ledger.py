@@ -392,16 +392,20 @@ async def test_a_row_paired_with_a_record_of_another_decision_is_reported(
         await trail.export_invocations()
 
 
-# --- the append ordinal is a bound, and an exhausted bound is a refusal --------
+# --- the append ordinal is a range, and a value outside it is a refusal -------
 # ADR-0192 §2's refusal orders are "exhaustive over the classes a refusal arrives
 # in": anything that is neither a named refusal nor an argument fault — including
 # "the store cannot be written" — leaves the ledger as a plain `AuditError`. The
 # durable ordinal is `MAX(seq) + 1` over a column this store is not the only writer
-# of, so the state below is reachable, and before #1576 it left as `OverflowError`.
+# of, so every state below is reachable, and before #1576 each left as a raw
+# `OverflowError`. Both ends are taken, and a REAL beside an `int` at each: the
+# arithmetic that overflows the maximum produces a REAL, and INTEGER affinity keeps
+# a REAL a foreign writer left behind wherever converting it would lose information.
 
-#: SQLite's widest ``INTEGER``. Written out rather than imported from the store, so
-#: that moving the store's own bound moves the subject and not the assertion.
+#: SQLite's ``INTEGER`` range. Written out rather than imported from the store, so
+#: that moving the store's own bounds moves the subject and not the assertion.
 _WIDEST_SQLITE_INT = 2**63 - 1
+_NARROWEST_SQLITE_INT = -(2**63)
 
 
 def _plant_foreign_row(path: Path, seq: object) -> None:
@@ -454,7 +458,7 @@ async def test_a_claim_refuses_an_exhausted_append_ordinal(
     await trail.record(authorisation)
     _plant_foreign_row(path, _WIDEST_SQLITE_INT)
 
-    with pytest.raises(AuditError, match="append ordinal is exhausted") as caught:
+    with pytest.raises(AuditError, match="cannot allocate an append ordinal") as caught:
         await trail.claim_invocation(decision=authorisation)
 
     assert type(caught.value) is AuditError
@@ -479,7 +483,7 @@ async def test_a_completion_refuses_an_exhausted_append_ordinal(
     claim = await _claimed(trail, _allow("d-1"))
     _plant_foreign_row(path, _WIDEST_SQLITE_INT)
 
-    with pytest.raises(AuditError, match="append ordinal is exhausted") as caught:
+    with pytest.raises(AuditError, match="cannot allocate an append ordinal") as caught:
         await trail.complete_invocation(
             claim_id=claim.id,
             outcome=ToolOutcome.SUCCEEDED,
@@ -489,6 +493,36 @@ async def test_a_completion_refuses_an_exhausted_append_ordinal(
     assert type(caught.value) is AuditError
     assert [row.id for row in await trail.open_invocations(decision_id="d-1")] == [claim.id]
     assert _rows_in(path) == 2  # the claim and the planted row; no completion
+
+
+@pytest.mark.integration
+async def test_a_claim_refuses_an_ordinal_below_the_range_as_well_as_above_it(
+    trail: SqliteAuditTrail, tmp_path: Path
+) -> None:
+    """The bound is a range, so the floor is a refusal on the same ground as the ceiling.
+
+    Nothing this store computes goes negative — ``_append`` starts at 1 and steps by
+    one — but the ordinal is read off a column a writer of the file can put anything
+    in, and ``int`` converts a REAL of ``-1e300`` into a Python integer as happily as
+    it converts one of ``+1e300``. Binding either raises, so guarding only the
+    ceiling left the identical leak reachable through the symmetric door: the store
+    is being asked for an ordinal SQLite cannot store, whichever side of the range it
+    fell off.
+
+    Not to be confused with refusing a *negative* ordinal. An ordinal inside the
+    range is appendable whatever its sign, and this asserts nothing about one.
+    """
+    path = tmp_path / "audit.db"  # the file the `trail` fixture opened
+    authorisation = _allow("d-1")
+    await trail.record(authorisation)
+    _plant_foreign_row(path, -1e300)
+
+    with pytest.raises(AuditError, match="cannot allocate an append ordinal") as caught:
+        await trail.claim_invocation(decision=authorisation)
+
+    assert type(caught.value) is AuditError
+    assert str(_NARROWEST_SQLITE_INT) in str(caught.value)  # the end it fell off
+    assert _rows_in(path) == 1
 
 
 @pytest.mark.integration
