@@ -67,6 +67,7 @@ artifact without its evidence.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import re
 import shutil
@@ -500,7 +501,19 @@ def _act(
                 # recoverable in the sense the default rests on. A rename moved
                 # the link itself, and so does this.
                 os.link(path, destination, follow_symlinks=False)
-                path.unlink()
+                try:
+                    path.unlink()
+                except OSError:
+                    # The link landed and the source did not go. Left alone, the
+                    # archive would hold a copy of a file that was never swept and
+                    # the next sweep would number a second one beside it — two
+                    # copies of one artifact, from a move that failed. So undo the
+                    # half of it that succeeded, and only while the destination is
+                    # still the link just made.
+                    with contextlib.suppress(OSError):
+                        if os.path.samestat(os.lstat(path), os.lstat(destination)):
+                            destination.unlink()
+                    raise
     except (OSError, NotImplementedError) as exc:
         # `NotImplementedError` is what `link` raises where it cannot decline to
         # follow a symbolic link. It is not an `OSError`, and an uncaught one
