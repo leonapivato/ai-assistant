@@ -22,6 +22,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path as _Path
 from typing import TYPE_CHECKING
 
+import pypdf
 import pytest
 from fetch_fixtures import fetcher as build
 from pdf_fixtures import extracted_text_of, minimal_pdf
@@ -33,6 +34,7 @@ from fetcher_contract import ClockedFetcher, Dial, FetcherContract, GatedFetch, 
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import FetchRefusal
 from ai_assistant.readers import FILE_FETCHER_NAME, LocalFileFetcher
+from ai_assistant.readers import _extract as extract_module
 from ai_assistant.readers import files as files_module
 from ai_assistant.testing.cancellation import ThreadSuspension
 
@@ -578,3 +580,151 @@ async def test_a_fetch_never_blocks_the_event_loop_for_the_whole_read(root: Path
 
     assert outcome.record is not None
     assert ticks > 0
+
+
+# --- the instants a record carries (ADR-0230 §5) ----------------------------
+
+
+async def test_a_records_instants_are_taken_when_the_file_was_read(root: Path) -> None:
+    """§5: ``reported_at`` is **the instant the file was read**, not the call's.
+
+    The clock is read on the worker thread the moment the bounded read returns, so a
+    thread-pool backlog between the call and the acquisition cannot stamp the record
+    with an instant that precedes the read. §5's whole argument for admitting this
+    instant at all is that "'when the source said so' and 'when we read it' are one
+    event rather than two facts of which one stands in for the other", and a value
+    taken before the read is exactly the second of those.
+
+    Staged deterministically by advancing the clock **inside** the acquisition: the
+    dial reads one instant when ``fetch`` is entered and a later one by the time the
+    bytes are in hand, so a record stamped at either is distinguishable from a record
+    stamped at the other.
+    """
+    (root / "report.md").write_text(DISTINCTIVE, encoding="utf-8")
+    entered = datetime(2026, 3, 1, 9, 0, tzinfo=UTC)
+    acquired = datetime(2026, 3, 1, 9, 5, tzinfo=UTC)
+    dial = Dial(entered.timestamp())
+    real = files_module.acquire
+
+    def slow(*args: object, **kwargs: object) -> bytes:
+        data = real(*args, **kwargs)  # type: ignore[arg-type]
+        dial.set(acquired.timestamp())
+        return data
+
+    subject = build(root, now=lambda: wall_of(dial))
+    try:
+        listing = await subject.listing()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(files_module, "acquire", slow)
+            outcome = await subject.fetch(listing, listing.entries[0])
+    finally:
+        subject.close()
+
+    record = outcome.record
+    assert record is not None
+    attestation = record.provenance.attestation
+    assert attestation is not None
+    assert attestation.reported_at == acquired
+    assert record.provenance.last_updated == acquired
+    assert record.provenance.last_confirmed_at == acquired
+
+
+async def test_a_listings_read_at_is_taken_when_the_directory_was_read(root: Path) -> None:
+    """§4: ``read_at`` is "captured once **at acquisition**", not at the call.
+
+    The neighbouring half of the clause above, on the other member: a listing stamped
+    before the directory was read would claim a state of the root that did not exist
+    yet, and would start both expiry deadlines before the entries it vouches for were
+    observed.
+    """
+    populate(root)
+    entered = datetime(2026, 3, 1, 9, 0, tzinfo=UTC)
+    acquired = datetime(2026, 3, 1, 9, 5, tzinfo=UTC)
+    dial = Dial(entered.timestamp())
+    real = files_module.scan
+
+    def slow(*args: object, **kwargs: object) -> object:
+        listed = real(*args, **kwargs)  # type: ignore[arg-type]
+        dial.set(acquired.timestamp())
+        return listed
+
+    subject = build(root, now=lambda: wall_of(dial))
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(files_module, "scan", slow)
+            listing = await subject.listing()
+    finally:
+        subject.close()
+
+    assert listing.read_at == acquired
+
+
+# --- the extraction's own cost (ADR-0230 §6) --------------------------------
+
+
+async def test_an_over_bound_pdf_stops_without_enumerating_every_page(root: Path) -> None:
+    """§6: the bound is enforced **while** extracting, not after.
+
+    Asserted over the pages actually read rather than over the class returned, because
+    the class is what an implementation that materialised every page and *then* refused
+    would also return. What separates the two is how much work was done before the
+    refusal, and that is what this counts.
+
+    The document is well over the content bound from its second page, so a conforming
+    implementation stops within a couple of pages of a forty-page document.
+    """
+    (root / "long.pdf").write_bytes(minimal_pdf([DISTINCTIVE * 20] * 40))
+    read: list[int] = []
+    real = pypdf.PdfReader
+
+    class Counting(real):  # type: ignore[misc, valid-type]
+        @property
+        def pages(self) -> object:
+            underlying = super().pages
+
+            def watched() -> object:
+                for page in underlying:
+                    read.append(1)
+                    yield page
+
+            return watched()
+
+    subject = build(root, max_content_bytes=64)
+    try:
+        listing = await subject.listing()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(pypdf, "PdfReader", Counting)
+            outcome = await subject.fetch(listing, listing.entries[0])
+    finally:
+        subject.close()
+
+    assert outcome.refusal is FetchRefusal.TOO_LARGE
+    assert 0 < len(read) < 5, f"read {len(read)} pages of a 40-page document before refusing"
+
+
+async def test_a_document_declaring_more_pages_than_the_ceiling_is_refused(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page count is not a function of a byte count, so the byte bound cannot reach it.
+
+    §6 states that ``fetch_max_file_bytes`` "bounds the read **and the extraction's
+    cost**", which holds for text and Markdown, where the work is proportional to the
+    bytes. A PDF's page tree breaks that proportionality — a document inside the byte
+    bound can declare far more pages by sharing one node — and a page carrying **no
+    text** never moves the content total, so neither of §6's two bounds stops it.
+
+    Staged by lowering the ceiling rather than by building an amplified page tree,
+    because what is under test is that the ceiling *binds*: a fixture large enough to
+    trip the real figure would be the pathological document itself, which is a slow
+    test of a constant rather than a test of the guard.
+    """
+    (root / "many.pdf").write_bytes(minimal_pdf(["", "", "", ""]))
+    monkeypatch.setattr(extract_module, "_MAX_PDF_PAGES", 1)
+    subject = build(root)
+    try:
+        listing = await subject.listing()
+        outcome = await subject.fetch(listing, listing.entries[0])
+    finally:
+        subject.close()
+
+    assert outcome.refusal is FetchRefusal.TOO_LARGE

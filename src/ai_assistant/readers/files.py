@@ -375,13 +375,19 @@ class LocalFileFetcher:
             success**, and a root that can no longer be read produces one too — no
             consumer distinguishes them (ADR-0230 §6).
         """
-        # Read at acquisition, on the loop, so a clock fault is the caller's and not
-        # a worker thread's: ADR-0230 §4 says neither member raises "for a source
-        # reason", and a clock is not a source.
-        read_at = self._now()
-        listed = [] if self._root < 0 else await asyncio.to_thread(self._scan)
+        # **Both clocks are read at acquisition**, which is ADR-0230 §4's own word for
+        # `read_at` — "the instant **this system** listed, captured once at
+        # acquisition" — and what makes the two deadlines describe the listing rather
+        # than the moment the call was made. A worker-thread backlog between the two
+        # would otherwise stamp a listing earlier than the directory was actually read
+        # and start its window before the entries existed.
+        listed, read_at, monotonic = (
+            ([], self._now(), self._monotonic())
+            if self._root < 0
+            else await asyncio.to_thread(self._scan)
+        )
         deadlines = _Deadlines(
-            monotonic=self._monotonic() + self._listing_ttl_ns,
+            monotonic=monotonic + self._listing_ttl_ns,
             wall=_nanoseconds(read_at) + self._listing_ttl_ns,
         )
         listing_id = secrets.token_hex(16)
@@ -415,9 +421,8 @@ class LocalFileFetcher:
         suffix = self._admit(listing, entry)
         if suffix is None:
             return _refused(FetchRefusal.NOT_FOUND)
-        read_at = self._now()
         try:
-            text = await self._read(entry.name, suffix)
+            text, read_at = await self._read(entry.name, suffix)
         except _RefusalError as refusal:
             return _refused(refusal.classification)
         return FetchOutcome(record=self._mint_record(text, read_at))
@@ -451,33 +456,57 @@ class LocalFileFetcher:
             return None
         return suffix
 
-    async def _read(self, name: str, suffix: str) -> str:
+    async def _read(self, name: str, suffix: str) -> tuple[str, datetime]:
         """Acquire the file's bytes and decode them, both off the event loop.
+
+        Returns:
+            The extracted text, and **the instant the file was read** — captured on the
+            worker thread the moment the bounded read returned, which is what ADR-0230
+            §5 requires of ``reported_at``, ``last_updated`` and ``last_confirmed_at``.
+            Reading the clock before the work was dispatched would stamp the record
+            with an instant that can precede the read by however long the thread pool
+            was busy, and §5's whole argument for admitting this instant at all is that
+            "'when the source said so' and 'when we read it' are one event rather than
+            two facts of which one stands in for the other".
+
+            The instant is taken after the **acquisition** and not after the
+            extraction, because the extraction is a decoding of bytes already in hand:
+            it consults no source, so a later instant would describe this process's own
+            work rather than the source's answer.
 
         Raises:
             _RefusalError: Whichever class the acquisition or the extraction produced. The
                 two ``_extract`` classes are translated here rather than carried up,
                 so that every refusal this seam can produce is one vocabulary.
         """
-        data = await asyncio.to_thread(self._acquire, name)
+        data, read_at = await asyncio.to_thread(self._acquire, name)
         try:
-            return await asyncio.to_thread(
+            text = await asyncio.to_thread(
                 extract, data, suffix, max_rendered_bytes=self._max_content_bytes
             )
         except ContentTooLargeError as exc:
             raise _FileTooLargeError from exc
         except ExtractionFailedError as exc:
             raise _ExtractionRefusedError from exc
+        return text, read_at
 
     # --- what runs on a worker thread ------------------------------------
 
-    def _scan(self) -> list[_Listed]:
-        """List the root, blocking. See :func:`scan`."""
-        return scan(self._root, max_entries=self._listing_max_entries)
+    def _scan(self) -> tuple[list[_Listed], datetime, int]:
+        """List the root and stamp the read, blocking. See :func:`scan`.
 
-    def _acquire(self, name: str) -> bytes:
-        """Open and read one entry, blocking. See :func:`acquire`."""
-        return acquire(self._root, name, max_bytes=self._max_file_bytes)
+        Both clocks are read **here**, on the worker thread, the moment the directory
+        has been read — which is what "captured once at acquisition" means (ADR-0230
+        §4). A clock fault reaches the caller unchanged through ``asyncio.to_thread``,
+        so nothing is lost by reading it off the loop.
+        """
+        listed = scan(self._root, max_entries=self._listing_max_entries)
+        return listed, self._now(), self._monotonic()
+
+    def _acquire(self, name: str) -> tuple[bytes, datetime]:
+        """Open and read one entry, and stamp the read. Blocking. See :func:`acquire`."""
+        data = acquire(self._root, name, max_bytes=self._max_file_bytes)
+        return data, self._now()
 
     # --- the capability (ADR-0230 §4) ------------------------------------
 
