@@ -1257,7 +1257,9 @@ def test_the_page_renders_the_terminal_reply_over_what_it_accumulated() -> None:
 
     assert "composing.textContent += value.text;" in script
     assert "couldRenderOutcome(terminal.outcome, chosenAt)" in script
-    assert "renderOutcome(outcome, chosenAt);" in _functions(script)["couldRenderOutcome"]
+    assert (
+        "renderOutcome(outcome, chosenAt, provenance);" in _functions(script)["couldRenderOutcome"]
+    )
     assert "clearNode(body);" in script
 
 
@@ -1479,13 +1481,95 @@ def test_a_recording_with_no_words_and_an_unspoken_answer_are_neither_of_them_fa
     not be spoken is a **degradation**: the answer is on screen and complete, and what is
     missing is the audio — ADR-0170 §6's rule that a degraded turn is a statement and
     never silence, one stage further on.
+
+    **Neither of them, and one thing that is** (#2005). The entry does now write into the
+    fault surface, for an answer it could not put on screen at all — so what is pinned is
+    that this is the only condition it names there, rather than that it names none. A
+    quiet room and an unspoken answer becoming faults is the failure this case exists to
+    catch, and it still is one.
     """
-    rendering = _functions(_code("app.js"))["renderSpokenTurn"]
+    script = _code("app.js")
+    rendering = _functions(script)["renderSpokenTurn"]
 
     assert "saying(HEARD_NOTHING)" in rendering
     assert "turn.spoken_degraded" in rendering
     assert 'line(el("answer-body"), NOT_SPOKEN, "notice")' in rendering
-    assert "fault(" not in rendering
+    # Said in the page's own hint and in the panel, never in the fault slot.
+    for stated in ("HEARD_NOTHING", "NOT_SPOKEN"):
+        assert f"fault({stated}" not in script, stated
+    # And the one thing this entry does fault on is the answer it could not render.
+    assert _fault_calls(rendering) == ['SPOKEN_ANSWER_UNREADABLE, "console"']
+
+
+def test_a_spoken_answer_that_cannot_be_put_on_screen_is_not_played_either() -> None:
+    """#2005: the ``=== null`` pairing check is a check for ``null`` and not for shape.
+
+    ADR-0200 §4 pairs the members — "``heard`` is ``None`` **exactly when** ``outcome``
+    is ``None``, and that pair is the recording that carried no words" — and that is the
+    quiet room, which is not an error. An **absent** member is not that pair. ``readBody``
+    answers an unreadable ``2xx`` with ``{}``, so ``body.turn`` is gone before
+    ``turn.outcome`` is even read; a ``turn`` that survives may carry no ``outcome``; and
+    an ``outcome`` that is there may still not carry what ``renderOutcome`` reads. Each of
+    those walked past a check for ``null`` and threw, and the throw landed in
+    ``sendRecording``'s own ``catch``: the delivery report put back and ``GATEWAY_GONE``
+    announced — "The gateway did not answer, so it may have stopped" — about a gateway
+    that had just answered and a turn a ``200`` says ran.
+
+    **Three things the ending has to do, and each is a way of getting it wrong.** It says
+    the turn ran, which on this entry is read rather than assumed: ``_ask_spoken`` awaits
+    ``converse_spoken`` and renders afterwards, so the head is intact evidence and it is
+    the body that could not be read. It withholds the transcript, because ``heard`` comes
+    out of the same body and §4 pairs it with the outcome — disclosing it would mean
+    deciding member by member what of an unreadable body to trust, which is the
+    enumeration rounds 9 and 10 of PR #1612 refuted. And it plays nothing: ``playSpoken``
+    reads ``turn.outcome.conversation_id`` for the report a playback owes (ADR-0205 §7),
+    so a rendering started past this point would be sound the page cannot account for.
+    """
+    script = _code("app.js")
+    rendering = _functions(script)["renderSpokenTurn"]
+
+    # The member is normalised before it is read, so the pairing check decides a shape
+    # rather than throwing on an absent turn.
+    assert "const turn = asObject(read);" in rendering
+    assert rendering.index("const turn = asObject(read);") < rendering.index(
+        "turn.outcome === null"
+    )
+    # §4's pair still takes §4's branch, and it is still a check for `null` alone.
+    assert "if (turn.outcome === null) {" in rendering
+    quiet = rendering[rendering.index("if (turn.outcome === null) {") :]
+    quiet = quiet[: quiet.index("!couldRenderOutcome(")]
+    assert "saying(HEARD_NOTHING);" in quiet
+    assert "resumeInterrupted();" in quiet
+    for guessed in ("undefined", "typeof turn.outcome", "Array.isArray"):
+        assert guessed not in rendering, guessed
+    # The guard decides the rest, and it is reached **before** the transcript is
+    # disclosed rather than after it.
+    assert rendering.index("!couldRenderOutcome(turn.outcome, chosenAt)") < rendering.index(
+        "heardWas(turn.heard);"
+    )
+    ending = rendering[rendering.index("!couldRenderOutcome(turn.outcome, chosenAt)") :]
+    ending = ending[: ending.index("heardWas(turn.heard);")]
+    assert "heardWas(null);" in ending
+    assert 'fault(SPOKEN_ANSWER_UNREADABLE, "console");' in ending
+    # Nothing is played, nothing is resumed, and no delivery report is put back: the
+    # `2xx` is the hub having received the one this request carried.
+    for reached in ("playSpoken(", "resumeInterrupted()", "restoreDelivery("):
+        assert reached not in ending, reached
+
+    # What it says, and the clauses it is entitled to.
+    said = _joined(_constant(script, "SPOKEN_ANSWER_UNREADABLE"))
+    assert "could not read an outcome from the answer" in said
+    assert "what the turn did is not known" in said
+    assert "The turn itself ran" in said
+    assert "Nothing of it is shown or spoken here" in said
+    assert "Nothing was re-sent and nothing was cancelled." in said
+    assert _constant(script, "SPOKEN_ANSWER_UNREADABLE").rstrip().endswith("WHERE_TO_LOOK")
+    # And no cause it has not established: the owner stopped nothing, the gateway
+    # refused nothing, and the room was not quiet.
+    for attributed in ("You stopped waiting", "may have stopped", "I heard nothing"):
+        assert attributed not in said, attributed
+    # One declaration, one site.
+    assert script.count("SPOKEN_ANSWER_UNREADABLE") == 2
 
 
 def test_a_recorder_that_refuses_to_start_does_not_wedge_the_control() -> None:
@@ -2005,7 +2089,7 @@ def test_the_spoken_turn_is_rendered_by_the_same_renderer_as_a_typed_one() -> No
     """
     rendering = _functions(_code("app.js"))["renderSpokenTurn"]
 
-    assert "renderOutcome(turn.outcome, chosenAt)" in rendering
+    assert "couldRenderOutcome(turn.outcome, chosenAt)" in rendering
 
 
 def test_an_ask_whose_answer_never_arrives_does_not_hold_the_owners_control_for_ever() -> None:
@@ -2283,24 +2367,29 @@ def test_the_announcement_is_read_off_what_this_browser_actually_observed() -> N
     # for the reason the five above do — the turn's ending is what nobody here read, so
     # where to look for it is the whole of what is left to say — and they carry neither of
     # the two counted above it, because nothing was abandoned and no act of the owner's is
-    # being explained. The declaration and its six sites.
-    assert script.count("WHERE_TO_LOOK") == 7
+    # being explained. The declaration and its seven sites — the seventh being the spoken
+    # entry's unreadable-answer ending (#2005), which points at the listing for the same
+    # reason the other six do: the turn may have run and this browser cannot say.
+    assert script.count("WHERE_TO_LOOK") == 8
     assert "though a turn whose record " in script
     assert "could not be written does not appear there" in script
 
 
 def test_an_answer_that_cannot_be_put_on_screen_is_not_rendered_as_one() -> None:
-    """#1622: two ``renderOutcome`` callers threw on a ``2xx`` that carried no outcome.
+    """#1622, #2005 and #2006: every ``renderOutcome`` caller reaches it through the guard.
 
     ``renderOutcome`` reads the outcome's members from its first lines, so
     ``renderOutcome(undefined, …)`` is a ``TypeError`` at the call site. It is not
-    uncaught: both entries are awaited inside ``ask``'s own ``try``, whose ``catch``
+    uncaught, and where it landed is what made each entry's ending wrong in its own way.
+    The two ask entries and the spoken one are awaited inside a ``try`` whose ``catch``
     announces ``GATEWAY_GONE`` — "The gateway did not answer, so it may have stopped",
     with a restart and a fresh bootstrap value as the remedy — said of a gateway that
-    answered and a turn that ran. ADR-0139 §4 reports an act as one of exactly three
-    outcomes and never as either of the other two, so an outcome that is *not known*
-    announced as a gateway that never replied breaches it in the direction rounds 3 and 5
-    of the abandonment sentences were spent closing.
+    answered and a turn that ran. ``answerConfirmation``'s throw left a consent token
+    ``spent`` and never ``unresolved``, so every row of the park read "That park has been
+    answered from this page" for an outcome nothing had read. ADR-0139 §4 reports an act
+    as one of exactly three outcomes and never as either of the other two, and those are
+    the two other ones: not known announced as known not to have landed, and not known
+    announced as landed.
 
     **The render is the test, and that is the reading rounds 9 and 10 of PR #1612
     reached** one surface over: round 9 checked that the outcome was an object and round
@@ -2317,8 +2406,8 @@ def test_an_answer_that_cannot_be_put_on_screen_is_not_rendered_as_one() -> None
     guard = functions["couldRenderOutcome"]
 
     # The render is inside the `try`, and the `catch` is what the callers read back.
-    assert guard.index("try {") < guard.index("renderOutcome(outcome, chosenAt);")
-    assert guard.index("renderOutcome(outcome, chosenAt);") < guard.index("catch (_) {")
+    assert guard.index("try {") < guard.index("renderOutcome(outcome, chosenAt, provenance);")
+    assert guard.index("renderOutcome(outcome, chosenAt, provenance);") < guard.index("catch (_) {")
     # It renders or it reports and never leaves half: what reached the screen before the
     # throw is not an answer, so it does not stay beside a line saying so.
     assert guard.index('clearNode(el("answer-body"));') < guard.index('show("answer", false);')
@@ -2331,11 +2420,22 @@ def test_an_answer_that_cannot_be_put_on_screen_is_not_rendered_as_one() -> None
     assert "if (outcome.capture_degraded) {" in render
     for tolerated in ("if (!outcome", "outcome === null", "outcome === undefined", "asOutcome"):
         assert tolerated not in render, tolerated
-    # Both entries reach the render through it, and neither calls it directly any more.
-    for entry, passed in (("askWhole", "body.outcome"), ("askStreaming", "terminal.outcome")):
-        body = functions[entry]
-        assert f"if (!couldRenderOutcome({passed}, chosenAt)) {{" in body, entry
-        assert "renderOutcome(" not in body, entry
+    # Every entry reaches the render through it, and none calls it directly any more —
+    # which is #1622's "one check, shared" being literally every site rather than two of
+    # four. `answerConfirmation` is the one that passes a provenance (#1621), so its call
+    # is matched on its opening rather than on the whole argument list.
+    for entry, passed in (
+        ("askWhole", "body.outcome, chosenAt"),
+        ("askStreaming", "terminal.outcome, chosenAt"),
+        ("renderSpokenTurn", "turn.outcome, chosenAt"),
+        ("answerConfirmation", "body.outcome, chosenAt, unaccounted ?"),
+    ):
+        assert f"!couldRenderOutcome({passed}" in functions[entry], entry
+    # Two occurrences of the renderer's own name with brackets in the whole file — its
+    # declaration and the guard's call. `couldRenderOutcome(` carries a capital ``R`` and
+    # is not one of them, so a caller that went back to calling the renderer directly
+    # would be a third and would be read here whichever entry did it.
+    assert script.count("renderOutcome(") == 2
     # On the whole entry the abort is still decided first: a read the owner stopped is
     # already answered, so what is left for the guard is a body the gateway did not write.
     whole = functions["askWhole"]
@@ -3885,10 +3985,17 @@ def test_a_body_that_is_not_an_object_reaches_no_caller_as_one() -> None:
     assert "!Array.isArray(parsed)" in shape
     # And both readers go through it, so the shape rule has one statement. Its own
     # declaration counts as a mention: ``_functions`` attributes it to itself.
+    #
+    # ``renderSpokenTurn`` is the third and is not a reader (#2005): the two above
+    # normalise a *body*, and the spoken entry renders from a member **of** one, so an
+    # unreadable ``2xx`` reaches it as ``body.turn`` absent rather than as a body it
+    # could re-read. Applying the same rule there is what keeps the failure an absent
+    # member rather than an exception, which is the whole of what this function is for.
     assert {name for name, body in functions.items() if "asObject(" in body} == {
         "asObject",
         "readBody",
         "relay",
+        "renderSpokenTurn",
     }
     # A refusal's body is still read as far as it can be read, because a refusal that
     # carries no readable condition is one the *caller* classifies (``act``'s rule).
@@ -6234,30 +6341,44 @@ def test_a_reply_this_page_cannot_render_resolves_nothing() -> None:
     *refusal* into landed or not-known and says nothing that turns an unrenderable
     success into a resolution, so ADR-0139 §4's third outcome is what this is — and the
     ending is the one every other not-known arm takes.
+
+    **Said through ``couldRenderOutcome`` since #2006**, which is #1622's "one check,
+    shared" reaching the site the rule was worked out on. The questions are the ones the
+    inline ``try`` was pinned for and they are asked of the new shape: that the render is
+    guarded rather than reached directly, and that the four statements of this surface's
+    own ending follow a render that failed and nothing else. What is no longer here is
+    ``show("answer", false)`` — the guard hides the panel *and* clears it, which is what
+    the ``try`` named as its intent and did not do.
     """
     script = _code("app.js")
     answering = _functions(script)["answerConfirmation"]
 
-    assert "  } catch (_) {" in answering
-    assert "renderOutcome(body.outcome, chosenAt, " in answering
-    render = answering[answering.index("renderOutcome(body.outcome, chosenAt, ") :]
-    assert render[: render.index("\n")].endswith(");")
-    assert answering[: answering.index("renderOutcome(body.outcome")].rstrip().endswith("try {")
+    # The render is guarded, and the guard is what decides the branch — not a `try` this
+    # function keeps for it, and not a direct call.
+    assert "renderOutcome(" not in answering
+    assert "!couldRenderOutcome(body.outcome, chosenAt, " in answering
+    guarded = answering[answering.index("!couldRenderOutcome(body.outcome, chosenAt, ") :]
+    assert guarded[: guarded.index("\n")].endswith("null)")
     # No shape check stands in front of it: enumerating members is the thing round 10
     # refuted, so a re-introduced list would be the same defect wearing a guard.
     assert "Array.isArray(outcome)" not in answering
-    # The ending is the not-known one, in the order every other arm uses, and it clears
-    # whatever the throw left half-rendered rather than leaving it beside the sentence.
-    caught = answering[answering.index("renderOutcome(body.outcome, chosenAt, ") :]
-    caught = caught[: caught.index("readPending(true)")]
+    # The ending is the not-known one, in the order every other arm uses, and it follows
+    # the failed render rather than standing anywhere else in the function.
+    failed = guarded[: guarded.index("readPending(true)")]
     for step in (
-        'show("answer", false);',
         "strand(token);",
         "readPending(false);",
         'fault(PARK_REPLY_UNREADABLE, "confirmations");',
     ):
-        assert step in caught, step
-    assert "spent.delete" not in caught
+        assert step in failed, step
+    # In that order, because `readPending` clears this panel's fault on its way in and a
+    # sentence written before it would be wiped by the tidy-up that follows it.
+    assert failed.index("strand(token);") < failed.index("readPending(false);")
+    assert failed.index("readPending(false);") < failed.index("fault(PARK_REPLY_UNREADABLE")
+    assert "spent.delete" not in failed
+    # And the render is not reached again on the way out: the guard rendered it or it
+    # took the branch above, so there is no second call to fall through to.
+    assert answering.count("couldRenderOutcome(") == 1
 
     # Its own sentence, because the cause is its own: the gateway answered, and the
     # answer is what could not be read.
@@ -6371,11 +6492,14 @@ def test_a_re_answered_park_never_claims_the_record_is_the_answer_just_sent() ->
         assert guessed not in answering, guessed
     # The caveat is handed to the render rather than appended after it: ``renderOutcome``
     # clears its panel on the way in, and a caveat that changes how everything below it
-    # reads belongs above them.
-    assert (
-        "renderOutcome(body.outcome, chosenAt, unaccounted ? PARK_SETTLED_AFTER_UNKNOWN : null);"
-        in answering
-    )
+    # reads belongs above them. Handed **through** the guard since #2006, which carries it
+    # untouched — a guard that dropped it would render a re-answered park's outcome with
+    # nothing above it saying which of the two answers is on screen.
+    caveated = "unaccounted ? PARK_SETTLED_AFTER_UNKNOWN : null"
+    assert f"!couldRenderOutcome(body.outcome, chosenAt, {caveated})" in answering
+    guard = _functions(script)["couldRenderOutcome"]
+    assert "function couldRenderOutcome(outcome, chosenAt, provenance) {" in guard
+    assert "renderOutcome(outcome, chosenAt, provenance);" in guard
     render = _functions(script)["renderOutcome"]
     assert "function renderOutcome(outcome, chosenAt, provenance) {" in render
     assert render.index("clearNode(body);") < render.index("if (provenance) {")

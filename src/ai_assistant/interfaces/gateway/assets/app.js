@@ -993,21 +993,22 @@ function renderOutcome(outcome, chosenAt, provenance) {
   show("answer", true);
 }
 
-// **An answer this page cannot put on screen is not one it has read**, said once for the
-// two entries that render a turn (#1622). `renderOutcome` reads the outcome's members
-// from its first lines — `capture_degraded`, then `reply`, then `steps.length` — so a
-// `2xx` carrying no `outcome`, or one whose members are not the ones this page renders,
-// throws there.
+// **An answer this page cannot put on screen is not one it has read**, said once for
+// every entry that renders a turn (#1622, #2005, #2006). `renderOutcome` reads the
+// outcome's members from its first lines — `capture_degraded`, then `reply`, then
+// `steps.length` — so a `2xx` carrying no `outcome`, or one whose members are not the
+// ones this page renders, throws there.
 //
-// **Left unguarded that throw does not escape: it is caught by `ask` and announced as
-// `GATEWAY_GONE`**, which is the state that makes this worth fixing and is not the one
-// #1622 describes. A `TypeError` raised inside either entry lands in the one catch above
-// them, whose sentence is "The gateway did not answer, so it may have stopped" — said of
-// a gateway that answered, about a turn that ran, with the remedy being to restart the
-// gateway and start a session from the value it prints. That is a wrong explanation
-// rather than a missing one, which is the distinction this page keeps everywhere else,
-// and it is ADR-0139 §4 in the direction that section spends five clauses refusing: an
-// act whose outcome is *not known* reported as one that is known not to have landed.
+// **Left unguarded that throw does not escape, and where it lands is what makes each
+// entry's ending wrong in its own way.** `ask` and `sendRecording` await theirs inside
+// a `try` whose `catch` says `GATEWAY_GONE` — "The gateway did not answer, so it may
+// have stopped", with a restart and a fresh bootstrap value as the remedy — said of a
+// gateway that answered, about a turn that ran. `answerConfirmation`'s throw left a
+// consent token `spent` and never `unresolved`, so every row of the park read "That
+// park has been answered from this page" for an outcome nothing had read. Both are
+// ADR-0139 §4 in the direction that section spends five clauses refusing: an act whose
+// outcome is *not known* reported as one that is known — not to have landed on the ask
+// entries, and to have landed on the consent one.
 //
 // **The render is the test, rather than a shape check that has to enumerate what
 // renders.** This is the reading rounds 9 and 10 of PR #1612 settled one surface over:
@@ -1028,13 +1029,23 @@ function renderOutcome(outcome, chosenAt, provenance) {
 // rendering an answer-shaped nothing is the failure and the throw is not, so nothing here
 // makes the renderer tolerate one — it makes the callers answer for it.
 //
-// `answerConfirmation` states the same rule inline, in its own `try`, and is left there:
-// its `catch` also strands a consent token and gives up the park's row, and that shape is
-// the ruling #1612 spent two rounds reaching. Folding it in is filed as #2006 rather than
-// taken here.
-function couldRenderOutcome(outcome, chosenAt) {
+// **What it does *not* decide is the ending**, which is why it reports rather than
+// announces: each caller's is its own and they differ in what the evidence licenses and
+// in what else has to be given up. `askWhole`'s head proves the turn ran and
+// `askStreaming`'s does not; `renderSpokenTurn` withholds a transcript and plays no
+// rendering; `answerConfirmation` strands a consent token and gives up the park's row —
+// the shape #1612 spent rounds 9 and 10 reaching, folded in here whole (#2006) rather
+// than replaced by one this function chose.
+//
+// **`provenance` is carried through untouched** (#1621), for the reason `renderOutcome`
+// records against it: it is what the *caller* knows about where the outcome came from,
+// and one caller has such a fact. A guard that dropped it would render a re-answered
+// park's outcome without the caveat that qualifies everything under it, so this passes
+// what it is given and derives nothing. `ask`, `askStreaming` and `renderSpokenTurn`
+// pass none and get none.
+function couldRenderOutcome(outcome, chosenAt, provenance) {
   try {
-    renderOutcome(outcome, chosenAt);
+    renderOutcome(outcome, chosenAt, provenance);
   } catch (_) {
     clearNode(el("answer-body"));
     show("answer", false);
@@ -2874,10 +2885,16 @@ async function answerConfirmation(token, approved, stopping) {
   // a consent surface: the alternative on offer is not a truthful crash, it is a park
   // announced as answered on the strength of an exception.
   //
-  // `ask` and `askStreaming` reach `renderOutcome` the same unchecked way and are left
-  // alone here: neither spends a consent token, so a throw there is a console error and
-  // a panel that does not update rather than a park falsely reported as resolved. Still
-  // wrong, and filed as #1622 rather than absorbed.
+  // **Said through `couldRenderOutcome` rather than in a `try` of its own** (#2006),
+  // which is #1622's "one check, shared" reaching the site the rule was worked out on.
+  // What is shared is the test and the half of the ending that is about the screen —
+  // running the render, and clearing an answer-shaped nothing off the panel rather than
+  // leaving it beside a line saying the outcome is not known. What stays here is what
+  // is this surface's alone: a consent token given back, the park's row given up, and
+  // the fault that says so. The guard hides the panel *and* clears it, which the `try`
+  // it replaces named as the intent and did not do — an answer this page has just
+  // called unreadable is not one it keeps in a hidden node for the next render to
+  // inherit.
   //
   // **The caveat is handed to the render rather than appended after it** (#1621), because
   // it changes how everything below it is read and `renderOutcome` clears its panel on
@@ -2888,13 +2905,13 @@ async function answerConfirmation(token, approved, stopping) {
   // it does not claim which of the two it is reading, because nothing it can read tells
   // it, and it does not withhold the account either, which would be silence about a step
   // that ran.
-  try {
-    renderOutcome(body.outcome, chosenAt, unaccounted ? PARK_SETTLED_AFTER_UNKNOWN : null);
-  } catch (_) {
-    // Whatever reached the screen before the throw is not an answer, so it does not
-    // stay beside a line saying the outcome is not known — `ask`'s own move where what
-    // came back was not an answer.
-    show("answer", false);
+  if (
+    !couldRenderOutcome(body.outcome, chosenAt, unaccounted ? PARK_SETTLED_AFTER_UNKNOWN : null)
+  ) {
+    // The ending, in the order every other not-known arm of this function uses: the
+    // token back, the park's row given up, and only then the sentence — `readPending`
+    // clears this panel's fault on its way in, so a fault written before it would be
+    // wiped by the tidy-up that follows it.
     strand(token);
     readPending(false);
     fault(PARK_REPLY_UNREADABLE, "confirmations");
@@ -3914,6 +3931,35 @@ const SPOKEN_ABANDONED =
   "Holding the button again asks a new question rather than retrying that one. " +
   WHERE_TO_LOOK;
 
+// **A spoken answer this browser read a `2xx` for and cannot put on screen** (#2005),
+// which is `ANSWER_UNREADABLE`'s condition arriving on the third entry that renders a
+// turn. `readBody` answers an unreadable `2xx` with `{}`, so the `turn` member may be
+// absent; a `turn` that is there may carry no `outcome`; and an `outcome` that is there
+// may still not carry what `renderOutcome` reads. `couldRenderOutcome` finds all three,
+// and ADR-0200 §4's `=== null` pairing check is not one of them — that check is for the
+// recording that carried no words, and an absent member is not that pair.
+//
+// **It says the turn ran, which on this entry is read rather than assumed** —
+// `ANSWER_UNREADABLE`'s clause for `ANSWER_UNREADABLE`'s reason. `_ask_spoken` awaits
+// `converse_spoken` and renders the turn afterwards, so a `200` cannot come back until
+// the assistant has finished with the recording: the head is intact evidence, and it is
+// the *body* this browser could not read.
+//
+// **And it says that nothing of the turn is on screen or in the air**, which is this
+// surface's own half and the thing the two ask entries have no equivalent of. §4 makes
+// `heard` and `spoken` members of the same answer this browser has just found it cannot
+// read, so the transcript is not disclosed and the rendering is not played — an owner
+// who has just spoken is otherwise left reading a fault beside a silence they cannot
+// account for, and told nothing about why the sound they were waiting for never came.
+const SPOKEN_ANSWER_UNREADABLE =
+  "The gateway answered that recording and this browser could not read an outcome from " +
+  "the answer, so what the turn did is not known. The turn itself ran: this entry " +
+  "answers only once the assistant has finished with the recording. Nothing of it is " +
+  "shown or spoken here — what was heard and the answer's own speech are parts of the " +
+  "same answer this browser could not read. Nothing was re-sent and nothing was " +
+  "cancelled. " +
+  WHERE_TO_LOOK;
+
 // **One audio context for the page, built and resumed inside the press.**
 //
 // Adversarial review found the fix for a defect this replaces: a context created after
@@ -4705,11 +4751,26 @@ async function sendRecording(mine) {
 // **The turn inside is rendered by `renderOutcome` and by nothing else.** §4 makes it
 // "an ordinary `TurnOutcome`… This call composes a turn; it does not create a second
 // kind of one" — so a spoken answer and a typed one are the same rendering, and a
-// member added to one reaches both.
-function renderSpokenTurn(turn, chosenAt) {
+// member added to one reaches both. Reached through `couldRenderOutcome` since #2005,
+// which changes nothing about that: the guard runs the same renderer and reports
+// whether it got the answer onto the screen.
+function renderSpokenTurn(read, chosenAt) {
+  // **The four members are read off a turn this page has one of**, which a `2xx` it
+  // could not read does not give it: `readBody` answers an unreadable body with `{}`, so
+  // `body.turn` is absent and the pairing check below would throw on it rather than
+  // decide anything (#2005). `asObject` is the normalisation every entry's body already
+  // goes through, applied to the member this one renders from — and it is the same rule
+  // for the same reason: an unreadable member has to arrive as an absent one, not as an
+  // exception.
+  const turn = asObject(read);
   // §4: "`heard` is `None` **exactly when** `outcome` is `None`, and that pair is the
   // recording that carried no words". Not an error, and said where the page says
   // things about the microphone rather than in the fault surface.
+  //
+  // **A check for `null` and for nothing else**, which is what §4 states and what the
+  // guard below is here to stop it being asked to do: an absent outcome is not a quiet
+  // room, and reporting one as the other would tell an owner the assistant heard
+  // nothing about a turn it had in fact just run.
   if (turn.outcome === null) {
     heardWas(null);
     saying(HEARD_NOTHING);
@@ -4720,8 +4781,36 @@ function renderSpokenTurn(turn, chosenAt) {
     resumeInterrupted();
     return;
   }
+  // **An answer this page cannot put on screen is not one it has read** (#2005), on the
+  // third of the entries that render a turn. Left unguarded the throw does not escape
+  // here either: `sendRecording` awaits this inside its own `try`, whose `catch` puts
+  // the delivery report back and says `GATEWAY_GONE` — "The gateway did not answer, so
+  // it may have stopped", with a restart and a fresh bootstrap value as the remedy —
+  // about a gateway that had just answered and a turn a `200` says ran.
+  //
+  // **Before the transcript rather than after it.** `heard` comes from the body this
+  // page has just found it cannot read an outcome in, and §4 pairs the two members; so
+  // it is not disclosed, and disclosing it anyway would mean deciding member by member
+  // what of an unreadable body to trust — the enumeration rounds 9 and 10 of PR #1612
+  // refuted. What that costs is a transcript beside a sentence saying the turn's
+  // outcome is unknown, and what it buys is that the page states nothing it read out of
+  // a body it has called unreadable.
+  //
+  // **And nothing is played.** `playSpoken` below reads `turn.outcome.conversation_id`
+  // for the report the playback will owe (ADR-0205 §7), so a rendering started past
+  // this point would be sound this page could not name a conversation for afterwards —
+  // and, one line earlier, the read itself is the throw this guard exists to stop.
+  //
+  // **The delivery report is not put back**, which is where this ending departs from the
+  // `catch` it replaces. `restoreDelivery` is for a request the hub may never have
+  // received, and a `2xx` from this entry is the hub having run the turn the report rode
+  // in on — the same reading `!response.ok` above states in the other direction.
+  if (!couldRenderOutcome(turn.outcome, chosenAt)) {
+    heardWas(null);
+    fault(SPOKEN_ANSWER_UNREADABLE, "console");
+    return;
+  }
   heardWas(turn.heard);
-  renderOutcome(turn.outcome, chosenAt);
   if (turn.spoken !== null) {
     // **A place kept by this turn for a notice this turn's playback may owe.**
     // `playSpoken` awaits the decoder, and while it is pending the owner can ask
