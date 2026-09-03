@@ -154,7 +154,7 @@ assistant gateway
 ```
 
 ```text
-Assistant gateway listening on http://127.0.0.1:8422
+Assistant gateway at http://127.0.0.1:8422
 Bootstrap value (good once, and only for this gateway process):
 GxiDDPy-iKHkzc5led4fxv9UwGo5bFs73s-ZU9-UWms
 Live sessions: 0 of 8. For another value: kill -SIGUSR1 3941204
@@ -210,7 +210,7 @@ kill -SIGUSR1 3941204
 It prints a fresh value on its own terminal, straight away:
 
 ```text
-Assistant gateway listening on http://127.0.0.1:8422
+Assistant gateway at http://127.0.0.1:8422
 Bootstrap value (good once, and only for this gateway process):
 IznwmhTUYUKp04I8Z_BfM8_tMFKYaCrDZqcFm_wCNGQ
 Live sessions: 1 of 8. For another value: kill -SIGUSR1 3941204
