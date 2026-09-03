@@ -190,10 +190,19 @@ says so against the clauses that would otherwise be read as moved.
 > clause, applied unchanged.
 
 > **Normative.** **"Reached by the citation hop" is the whole of the test, and the
-> record's group is not part of it.** A record the hop resolved through a named
-> label's `Provenance.evidence` renders its reply whether it entered the fourth group
-> or was deduplicated out against the pre-servicing supply (ADR-0226 §7). A record
-> the hop did not reach does not render its reply, whatever group it sits in.
+> record's group is not part of it — with one exception, the conversation tail.** A
+> record the hop resolved through a named label's `Provenance.evidence` renders its
+> reply whether it entered the fourth group or was deduplicated out against the
+> pre-servicing supply (ADR-0226 §7). A record the hop did not reach does not render
+> its reply, whatever group it sits in.
+
+> **Normative.** **A record of the conversation-tail group renders its reply under
+> ADR-0222 §1 and under that clause alone, and this ADR reaches it not at all.** A hop
+> that reached such a record adds no second line under its bullet, consumes no position
+> of §4's cap, and contributes **one** eligible record to §5's pair rather than two.
+> The tail split `_split_conversation_tail` performs at the render site is the
+> authority on which group a record is in, and no second implementation of it is
+> written anywhere else.
 
 > **Normative.** **The reply line is emitted by the caller and not by
 > `_render_record`.** ADR-0222 §1's third clause binds this line word for word:
@@ -230,6 +239,17 @@ reason-shaped test has no such hole: the hop either reached the record or it did
 and the answer does not depend on what else the retrieval happened to return. It also
 keeps §6's exception argued over one population instead of two, since the ground for
 the exception is a property of how the record was fetched.
+
+**And the tail is excluded because ADR-0222 §1 already renders it, not because the
+hop's reason fails there.** A belief distilled from this very conversation cites this
+conversation's own episodes, and the tail is exactly those episodes, so a hop reaching a
+tail record is ordinary rather than exotic. It already renders its reply under ADR-0222
+§1; if this ADR reached it too, one conforming implementation would write two reply
+lines under one bullet and count one record twice in §5's pair, while another would
+write one — and the tail's rendering, which §8's test 6 requires to be byte-identical,
+would depend on whether some belief in the supply happened to cite it. The exclusion
+keeps ADR-0222 §1 the single rule for the tail, keeps §5's pair a count of **records**,
+and costs nothing: the reply is rendered either way, once.
 
 **Both kinds reaching one record is the hop reaching it.** ADR-0226 §7's union case —
 *"a belief's cited evidence that the sighted query also returns"* — enters the fourth
@@ -292,8 +312,14 @@ system holds. §3 says how the render site comes to hold it too.
 > which is the one place `CITATION_HOP` and `SIGHTED_QUERY` are distinguishable — and
 > is carried from there to the render site as data. It carries the **distinct** records
 > the hop resolved that the turn's supply holds after servicing, the deduplicated-out
-> ones included (§1), under §4's deduplication and cap and in ADR-0226 §6's order, and
-> nothing else.
+> ones included (§1), in ADR-0226 §6's order under §4's deduplication, and nothing
+> else. It is an **ordered** carrier, because §4's cap is taken over it in that order.
+
+> **Normative.** **The servicer fixes the order and the render site applies §1's tail
+> exclusion and §4's cap**, in that division and no other. The servicer does not
+> compute the conversation-tail split, and the render site does not recompute the hop's
+> order: each component states what it alone knows, and neither holds a second
+> implementation of the other's rule.
 
 > **Normative.** The set is **empty** on every turn that did not fire, on a turn whose
 > servicing ADR-0226 §5 declined, on a turn whose servicing failed or was partial —
@@ -394,11 +420,13 @@ discipline is that they are not there. The audit stays what it is.
 
 > **Normative.** **At most ten reply lines are rendered under §1 per assembly**, which
 > is ADR-0226 §6's own figure of ten and not a second number. Where this turn's hop
-> reached more than ten **distinct** records that §1 admits, the **first ten** of them
-> render a reply line and the rest render none, taken in ADR-0226 §6's own order —
-> labels in the order the ask names them, and each labelled record's evidence in the
-> order that record stores it. The cap is applied where §3's set is recorded, at the
-> servicer, so that one component decides it once.
+> reached more than ten **distinct** records that §1 admits and that §1's tail
+> exclusion leaves, the **first ten** of them render a reply line and the rest render
+> none, taken in ADR-0226 §6's own order — labels in the order the ask names them, and
+> each labelled record's evidence in the order that record stores it. The cap is
+> applied at the render site, over §3's ordered carrier with the conversation-tail
+> records removed, so that it bounds exactly the lines this section is the arithmetic
+> for.
 
 > **Normative.** A record the cap excludes renders **exactly as it renders today** —
 > its bullet and its phrase line, unchanged — and **no site writes a marker, a count
@@ -437,6 +465,14 @@ ADR-0226 §6's constant rather than declaring one. The ordinary shape the replay
 measured is *"one or two beliefs citing one to three episodes each"*, which is one to
 three lines, so the cap is not expected to bind at all — it exists so that the
 arithmetic below is true rather than usually true.
+
+**Applied at the render site, because that is the only place the tail is known.** §1's
+exclusion turns on `_split_conversation_tail`, which is the render site's own function
+and which no other component may reimplement; a cap taken at the servicer would
+therefore bound a sequence some of whose members the renderer will drop, and §4's
+arithmetic would bound the wrong quantity. What stays at the servicer is the part only
+the servicer knows — which records the **hop** reached, and in what order — and the two
+halves together are still one rule decided once.
 
 **Order, because a cap that does not fix one is not deterministic.** ADR-0226 §6
 already fixes exactly this order for the servicing, and rules what it is for: *"given
@@ -490,6 +526,12 @@ record on the ground of its class"* and takes no view of any downstream stage.
 > **Normative.** A reply rendered under §1 is **eligible** in ADR-0222 §5's sense and
 > is counted there: it contributes to the eligible count of the assembly it is
 > rendered in, and to the elided count where ADR-0222 §4's ceiling bound on it.
+
+> **Normative.** **The pair counts records, once each, and never memberships.** No
+> record contributes twice to either integer of one assembly's pair, whatever populations
+> it belongs to. A tail record a hop also reached is counted once, under ADR-0222 §1,
+> which follows from §1 above reaching it not at all; a record §4's cap excluded is not
+> eligible and is counted in neither integer.
 
 > **Normative.** `orchestration/composing.py` emits **one** statement per assembly
 > carrying **one** pair, over both populations — the conversation-tail records
@@ -658,35 +700,42 @@ behaviour. This section states it once so that it is cited rather than rediscove
 4. **A record both kinds reached renders once and renders its reply.** ADR-0226 §7's
    union case: one bullet, one reply line, and the record at the hop's position.
 5. **A deduplicated-out hop record renders its reply where it already sits.** A record
-   the episodic supplement already held and the hop also reached keeps its position and
-   grows the reply line. This is §1's third clause, and it is the case a group-shaped
-   test would miss.
+   the **episodic supplement** already held and the hop also reached keeps its position
+   and grows the reply line. This is §1's third clause over a non-tail group, and it is
+   the case a group-shaped test would miss; item 7 is the tail's opposite case.
 6. **The tail is unchanged, byte for byte.** A turn with a conversation tail and no
    emission assembles a prompt identical to today's; a turn with a tail *and* a
    serviced hop renders the tail's lines identically and adds only the hop's.
-7. **The empty cases render nothing.** A turn that did not fire, one ADR-0226 §5
+7. **A hop that reaches a tail record changes nothing about it.** A belief in the
+   supply citing an episode of this very conversation, named by the planner's label:
+   that episode renders **one** bullet with **one** reply line — ADR-0222 §1's,
+   byte-identical to the same turn without the emission — occupies no position of §4's
+   cap, and contributes one to §5's eligible count and not two. Asserted with the cap
+   otherwise saturated, so that a tail record consuming a slot would be visible as a
+   missing eleventh line.
+8. **The empty cases render nothing.** A turn that did not fire, one ADR-0226 §5
    declined, one whose servicing failed, and one whose hop resolved no live record each
    assemble a prompt byte-identical to today's, with no reply line anywhere outside the
    tail.
-8. **The retrieved group and the supplement still carry no reply**, at both request
+9. **The retrieved group and the supplement still carry no reply**, at both request
    assemblers, on a turn that serviced a hop. ADR-0222 §8's test 10 retained over the
    population §2 keeps, and asserted on the turn shape that could break it.
-9. **The benchmark harness renders no reply and no bytes move.** ADR-0222 §8's test 11
+10. **The benchmark harness renders no reply and no bytes move.** ADR-0222 §8's test 11
    binds unchanged; `render_context` over records built as `benchmarks/memory/ingest.py`'s
    `exchanges_of` builds them is byte-identical to today's, and `_render_record` called
    directly on a record carrying both fields emits no reply line.
-10. **The ceiling, the elision and the escaping bind on this line too.** ADR-0222 §8's
+11. **The ceiling, the elision and the escaping bind on this line too.** ADR-0222 §8's
     tests 3 to 8, asserted at this site over a hop-reached record: a reply whose quoted
     rendering is exactly the ceiling renders whole and unmarked, one character over
     renders a prefix with the marker and the source-length figure, astral and CJK and
     newline replies render a span of at most the ceiling, the prefix is decodable as
     JSON, the whole line is at most 736 characters, and a reply containing this
     system's own elision wording renders unmarked where it is under the ceiling.
-11. **A reply carrying this system's syntax writes no second line.** A hop-reached
+12. **A reply carrying this system's syntax writes no second line.** A hop-reached
     record whose `outcome` contains a newline followed by `    how it turned out:` and
     a well-formed bullet renders as one line and produces no second continuation line
     and no second bullet. ADR-0098 §9's regression shape applied to the new span.
-12. **The cap binds at ten distinct records, in ADR-0226 §6's order, and discloses
+13. **The cap binds at ten distinct records, in ADR-0226 §6's order, and discloses
     nothing.** A hop whose two labels resolve to records citing more than ten live
     episodes that §1 admits — constructed directly, since `Provenance.evidence` carries
     no read-time length bound — renders exactly ten reply lines, over the first ten
@@ -694,23 +743,23 @@ behaviour. This section states it once so that it is cited rather than rediscove
     their bullet and phrase line unchanged and no reply line; and no marker, count or
     "and *N* more" line appears in the prompt or in any log about the exclusion. A hop
     reaching exactly ten renders ten.
-13. **A repeated citation is one record and one line.** An `evidence` tuple holding the
+14. **A repeated citation is one record and one line.** An `evidence` tuple holding the
     same identifier many times, and two labels whose records cite one episode in
     common, each render that record **once** with **one** reply line, and the repeats
     consume no position of §4's cap — asserted by a case whose evidence is
     `(A, A, …, B)` long enough that a list-first cap would render one line where the
     decision requires two.
-14. **The counts are one pair over both populations.** An assembly with tail replies
+15. **The counts are one pair over both populations.** An assembly with tail replies
     and hop replies reports one statement whose eligible count is the sum and whose
     elided count is no greater; an assembly with eligible replies and no elision reports
     a non-zero denominator and a zero numerator; an assembly with neither reports zero
     and zero rather than staying silent; and no such statement carries reply text or a
     record identifier.
-15. **No identifier reaches a prompt, a log or the audit.** On a turn that serviced a
+16. **No identifier reaches a prompt, a log or the audit.** On a turn that serviced a
     hop, no record identifier from §3's carrier appears in the assembled prompt, in any
     emitted log event, or in ADR-0226 §9's record — which carries the correlation id and
     no other identifier, as its own test asserts.
-16. **The planner's assembler is unchanged.** `planning/planner.py`'s prompt for a turn
+17. **The planner's assembler is unchanged.** `planning/planner.py`'s prompt for a turn
     is byte-identical to today's in every case above, tail included; the planner runs
     before the servicer and renders no reply line under this ADR.
 
@@ -721,11 +770,12 @@ behaviour. This section states it once so that it is cited rather than rediscove
 > and `tests/orchestration/`. It touches no `core` file, no Protocol, no
 > `PROTOCOL_VERSION`, no `benchmarks/` file, no other subsystem, and no ADR.
 
-> **Normative.** The lane owes: the servicer recording which records the hop reached
-> (§3); the carrier from there to `orchestration/composing.py`'s assembler through the
-> loop and the engine (§3); the render rule at that assembler (§1), emitted by the
-> caller and not by `_render_record`; the counts folded onto the one existing statement
-> (§5); §8's sixteen tests, with ADR-0226 §11 item 1's existing test **rewritten**
+> **Normative.** The lane owes: the servicer recording, in ADR-0226 §6's order and
+> deduplicated by identifier, which records the hop reached (§3, §4); the carrier from
+> there to `orchestration/composing.py`'s assembler through the loop and the engine
+> (§3); the render rule at that assembler (§1), emitted by the caller and not by
+> `_render_record`, with §1's tail exclusion and §4's cap applied there over the split
+> that site already computes; the counts folded onto the one existing statement (§5); §8's seventeen tests, with ADR-0226 §11 item 1's existing test **rewritten**
 > under §7 rather than supplemented; and the docstrings this corpus expects, citing
 > this ADR by number at each site it changes.
 
