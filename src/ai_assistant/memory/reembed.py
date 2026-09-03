@@ -309,6 +309,24 @@ def _count(conn: sqlite3.Connection, table: str, what: str) -> int:
     return int(count)
 
 
+def _highest_copied(conn: sqlite3.Connection, work: Path) -> int | None:
+    """The largest ``rowid`` a work store holds, or ``None`` when it holds none.
+
+    ``_insert`` carries the source ``rowid`` across unchanged and ``_chunk`` reads
+    in ``rowid`` order, so this is the source row the last committed chunk
+    reached — the same fact the cursor records, read from the rows themselves.
+
+    Raises:
+        MemoryStoreError: If the table cannot be read.
+    """
+    try:
+        (highest,) = conn.execute("SELECT MAX(rowid) FROM records").fetchone()
+    except sqlite3.Error as exc:
+        msg = f"failed to read the highest copied rowid in {work}: {exc}"
+        raise MemoryStoreError(msg) from exc
+    return None if highest is None else int(highest)
+
+
 def _as_int(value: str, what: str) -> int:
     """Read a number out of a store's ``meta``, as this seam's error rather than a crash.
 
@@ -556,21 +574,39 @@ class Reembedder:
         )
 
     def _resumable(self) -> int:
-        """How many rows of an existing work store this run may keep (ADR-0104 §2).
+        """How many rows of an existing work store this run may keep (ADR-0104 §2)."""
+        inheritable = self._inheritable()
+        return 0 if inheritable is None else inheritable[0]
 
-        Zero whenever the work store is absent, was built for a different target,
-        or was started from a live store that has since changed — the three
-        conditions §2 names, all of which discard rather than adapt. Zero too
-        whenever the work store records no usable cursor, which is the same
-        answer arrived at from the other direction: there is nothing to resume
-        *from*.
+    def _inheritable(self) -> tuple[int, int] | None:
+        """The rows and cursor of a work store this run may continue from (ADR-0104 §2).
+
+        ``None`` whenever the work store is absent or unreadable, was built for a
+        different target, was started from a live store that has since changed, or
+        records a cursor that does not account for the rows it holds. §2 names the
+        first of those conditions and discards rather than adapts on each; the last
+        is the same answer applied to the same kind of state, and the whole of what
+        this method decides is **usable or not**.
+
+        §2 commits each chunk's rows and the cursor naming the last source ``rowid``
+        copied in one transaction, "so the recorded cursor can never claim progress
+        the work store does not hold". That invariant is checked here rather than
+        assumed, because damage from outside this module can break it and every way
+        of breaking it resumes into rows that are already there: the copy restarts
+        at a source row the work store already holds, the insert collides, and the
+        retry fails identically for as long as the file survives (#738).
+
+        Returns:
+            The row count and the cursor to continue past, or ``None`` when there
+            is nothing to continue from — an untouched work store included, whose
+            rows and cursor agree by both being absent.
         """
         if not self._work.is_file():
-            return 0
+            return None
         try:
             conn = _connect(self._work)
         except MemoryStoreError:
-            return 0
+            return None
         try:
             meta = _read_meta(conn, str(self._work))
             continuable = meta.get(_SOURCE_KEY) == _fingerprint(self._store)
@@ -579,23 +615,18 @@ class Reembedder:
                 str(self._embedder.dimensions),
             )
             if not (continuable and same_target):
-                return 0
-            # A work store with no cursor has nothing to resume from, whatever it
-            # holds. With no rows either that is its ordinary just-created state
-            # (§2: the cursor is absent until the first chunk commits) and zero is
-            # already the truth. With rows it is damage this module cannot
-            # produce — rows and cursor commit in one transaction — and resuming
-            # would restart at the first source row and collide with the rows
-            # already there, identically on every retry (#738). Unusable, so
-            # discarded, which is this method's answer to every other way a work
-            # store can be unusable.
-            if _CURSOR_KEY not in meta:
-                return 0
-            # Parsed here rather than trusted at resume time, for the same reason.
-            _as_int(meta[_CURSOR_KEY], f"the cursor {self._work} records")
-            return _count(conn, "records", str(self._work))
+                return None
+            # Parsed here rather than trusted at resume time: an unreadable cursor
+            # is one more way to be unusable, and it takes the same exit.
+            recorded = meta.get(_CURSOR_KEY)
+            cursor = (
+                None if recorded is None else _as_int(recorded, f"the cursor {self._work} records")
+            )
+            if cursor is None or cursor != _highest_copied(conn, self._work):
+                return None
+            return _count(conn, "records", str(self._work)), cursor
         except MemoryStoreError:
-            return 0
+            return None
         finally:
             conn.close()
 
@@ -649,11 +680,14 @@ class Reembedder:
         """Return the rows inherited and the cursor to continue from.
 
         The work store is created here if there is nothing to inherit. Both
-        returned figures are read from the work store as it stands at this call,
-        which is the last point before the copy begins; the caller's ``resumed``
-        is the plan's count and is used only to decide whether to look. A count
-        taken from the plan instead would mis-state ``resumed`` and every progress
-        call whenever the work store moved under it (#738).
+        returned figures come from :meth:`_inheritable`, read at this call rather
+        than taken from the plan, because this is the last point before the copy
+        begins; the caller's ``resumed`` is the plan's count and decides only
+        whether to look at all. Taking them from the plan would mis-state
+        ``resumed`` and every progress call whenever the work store moved under it
+        (#738). A plan that already found nothing to keep is honoured as it
+        stands — re-deciding it here could only turn a discard into a resume,
+        which is the direction §2 refuses to guess in.
 
         The work store is created by constructing a :class:`SqliteMemoryStore` on
         it and closing it again, rather than by repeating its DDL here. That is
@@ -669,19 +703,13 @@ class Reembedder:
         point to reach a code path that cannot use it.
         """
         if resumed:
-            conn = _connect(self._work)
-            try:
-                meta = _read_meta(conn, str(self._work))
-                cursor = meta.get(_CURSOR_KEY)
-                inherited = _count(conn, "records", str(self._work))
-            finally:
-                conn.close()
-            if cursor is not None:
-                return inherited, _as_int(cursor, f"the cursor {self._work} records")
-            # `_resumable` reports nothing to keep for a work store carrying no
-            # cursor, so arriving here means the file changed between the plan and
-            # this call. Fall through to the discard rather than return ``None``
-            # and copy the first source row on top of rows already present (#738).
+            inheritable = self._inheritable()
+            if inheritable is not None:
+                return inheritable
+            # One decision, asked again at the last moment before the copy. The plan
+            # said there was something to keep and there no longer is, so the work
+            # store moved under it; fall through to the discard rather than copy
+            # into rows that are already there (#738).
         _discard(self._work)
         SqliteMemoryStore(
             path=self._work, embedder=self._embedder, traces_sink=_DiscardedTraces()

@@ -776,6 +776,45 @@ async def test_a_work_store_with_rows_but_no_cursor_is_discarded(tmp_path: Path)
     assert len(_read(store, "SELECT rowid FROM records")) == 4
 
 
+async def test_a_work_store_whose_cursor_does_not_account_for_its_rows_is_discarded(
+    tmp_path: Path,
+) -> None:
+    """The other way for the two to disagree, and the same answer (review round 3).
+
+    ADR-0104 §2 commits the rows and the cursor naming the last source ``rowid``
+    copied in one transaction, "so the recorded cursor can never claim progress
+    the work store does not hold". External damage can break that with a cursor
+    that parses perfectly: pointing below the rows it should name, it resumes into
+    rows already present, which is the same permanent failure #738 names.
+    """
+    store = tmp_path / "memory.db"
+    await _seed(store, [_record(str(index), f"memory {index}") for index in range(4)])
+
+    broken = _CountingEmbedder(fail_after=2)
+    with pytest.raises(MemoryStoreError, match="embedder failed"):
+        await Reembedder(store=store, embedder=broken, batch_size=2).run()
+
+    work = tmp_path / f"memory.db{WORK_SUFFIX}"
+    conn = sqlite3.connect(str(work))
+    try:
+        conn.execute("UPDATE meta SET value = '0' WHERE key = 'reembed_cursor'")
+        conn.commit()
+    finally:
+        conn.close()
+    # The shape under test: a readable cursor, and rows it does not account for.
+    assert _read(work, "SELECT max(rowid) FROM records") == [(2,)]
+    assert _meta(work)["reembed_cursor"] == "0"
+
+    reembedder = Reembedder(store=store, embedder=_CountingEmbedder(), batch_size=2)
+    assert reembedder.plan().resumable == 0
+    outcome = await reembedder.run()
+
+    assert outcome.resumed == 0
+    assert outcome.embedded == 4
+    assert outcome.swapped
+    assert len(_read(store, "SELECT rowid FROM records")) == 4
+
+
 async def test_a_cursor_lost_after_the_plan_restarts_and_says_so(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
