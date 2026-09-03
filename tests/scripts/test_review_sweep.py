@@ -396,6 +396,27 @@ def test_a_numbered_name_does_not_collide_with_another_file_of_the_same_sweep(
     assert "tree=plain" in (archive / "a-3.md").read_text()
 
 
+def test_a_symlinked_artifact_is_archived_as_the_link_it_is(tmp_path: Path) -> None:
+    # `link` follows a symbolic link by default, so archiving one would put a hard
+    # link to whatever it points at under the archive and delete the link — the
+    # swept file would not be what was archived, and an external file would be
+    # held open by the archive. A rename moved the link itself; so does this.
+    repo = _repo(tmp_path)
+    outside = tmp_path / "outside.md"
+    outside.write_text(_provenance(persona="adversarial", branch="gone/lane", sha="0" * 40))
+    (repo / ".review").mkdir()
+    (repo / ".review" / "a.md").symlink_to(outside)
+
+    status, out, _ = _sweep(repo)
+
+    archived = repo / ".review" / "archive" / "a.md"
+    assert status == 0, out
+    assert archived.is_symlink()
+    assert archived.readlink() == outside
+    assert not (repo / ".review" / "a.md").is_symlink()
+    assert outside.exists()
+
+
 def test_dry_run_says_which_name_it_would_land_under(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     _artifact(repo, "a.md", persona="adversarial", branch="gone/lane", sha="0" * 40, tree="first")

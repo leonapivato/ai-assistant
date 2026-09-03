@@ -474,9 +474,10 @@ def _act(
 
     Raises:
         SweepError: If a file cannot be moved or removed — including a filesystem
-            that cannot hard-link, which fails the sweep rather than falling back
-            to a replacing rename. That is the direction every other refusal here
-            takes: what cannot be done safely is not done.
+            that cannot hard-link, and a platform whose ``link`` cannot decline to
+            follow a symbolic link. Both fail the sweep rather than falling back
+            to something that replaces or rewrites, which is the direction every
+            other refusal here takes: what cannot be done safely is not done.
     """
     if dry_run:
         return
@@ -491,9 +492,19 @@ def _act(
                 # is at the destination, and not replacing is the whole point.
                 # `link` fails with EEXIST instead, so a name that appeared since
                 # the plan was made costs this sweep rather than that file.
-                os.link(path, destination)
+                #
+                # `follow_symlinks=False` because `link` otherwise links what a
+                # symbolic link *points at*: an artifact that is a link would be
+                # archived as a hard link to its target and the link itself
+                # deleted, which is neither the file that was swept nor
+                # recoverable in the sense the default rests on. A rename moved
+                # the link itself, and so does this.
+                os.link(path, destination, follow_symlinks=False)
                 path.unlink()
-    except OSError as exc:
+    except (OSError, NotImplementedError) as exc:
+        # `NotImplementedError` is what `link` raises where it cannot decline to
+        # follow a symbolic link. It is not an `OSError`, and an uncaught one
+        # would be a traceback where every other failure here is a refusal.
         raise SweepError(f"could not sweep the review directory: {exc}") from exc
 
 
