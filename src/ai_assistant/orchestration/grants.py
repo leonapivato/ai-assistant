@@ -180,8 +180,10 @@ class GrantOperations:
                 would deduplicate that conflict away before anything could see it.
                 Entries are keyed by identity and deduplicated here, so several
                 instances of one source contribute one entry — which is the state
-                the tree is actually in, since ``build_engine`` builds two
+                the tree is actually in, since ``build_engine`` builds several
                 ``CalendarReader`` instances from one configured path (ADR-0096 §5).
+                The number is not stated here: it has already changed once, and
+                nothing pins it.
             id_factory: Mints each record's id. Injected because a store neither
                 mints ids nor reads a clock (ADR-0021 §3), and because a client
                 supplying one would be minting into a write-once store (ADR-0102
@@ -199,11 +201,19 @@ class GrantOperations:
                 produce one entry showing one location while a grant on that
                 identity authorised reads of both — §6's informed-consent property
                 defeated by a wiring detail. Giving each instance its own grantable
-                identity is the other candidate and is **foreclosed**: ADR-0093 §7
-                makes an identity declared rather than configured, and ADR-0097 §9a
-                places a named precondition on ADR-0093 §11's registry lane that "a
-                second instance of one source type may not become grantable before
-                that rule exists".
+                identity is the other candidate and is **foreclosed by ADR-0189
+                §6's first clause**, which rules the unit to be the configured
+                source: an identity names "one configured source ... and **not a**
+                ``Reader`` **object**", and every reader object the composition
+                root builds to serve one configured source carries that one
+                identity. Neither ground this entry used to cite is the live one
+                any more, and both moved in the same direction — ADR-0093 §7's
+                declared-not-configured rule is partially superseded by ADR-0190
+                §1, which admits a deployment-minted discriminator on a *second
+                configured source*, and ADR-0097 §9a's precondition was discharged
+                by ADR-0189 §7 on its own terms. Neither move reaches per-instance
+                identities, which is the near miss ADR-0190 §5 names at this
+                docstring's sibling site in ADR-0102's alternatives.
         """
         self._store = store
         self._id_factory = id_factory
