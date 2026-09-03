@@ -66,6 +66,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from adr_status import status_value
+
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Sequence
 
@@ -255,25 +257,8 @@ _MIN_PATH_SEGMENTS = 2
 #: ``Owner.member`` — the shortest qualified name a b2 citation can be.
 _QUALIFIED_PAIR = 2
 
-#: The ``Status`` field, read as a whole *field* rather than a first line:
-#: ADR-0070 §4 requires every physical line, since a legacy value may wrap. The
-#: continuation rule is markdown's own and is lifted from
-#: ``scripts/project_status.py``: a following line belongs to the bullet when it
-#: is indented to the bullet's content column.
-#:
-#: **Its indent stays permissive where the record's below does not**, and the
-#: asymmetry is the point rather than an oversight: the two fail in opposite
-#: directions. A ``Status`` this failed to find yields an empty supersessor set
-#: and therefore a *report* — the dangerous outcome — where a record this fails
-#: to find yields silence, which §6 calls benign.
-_STATUS_RE = re.compile(
-    r"^(?P<indent>[ \t]*)-[ \t]*Status:[ \t]*(?P<value>.+(?:\n(?P=indent)(?:\t|[ \t]{2,})\S.*)*)",
-    re.IGNORECASE | re.MULTILINE,
-)
-
-#: The reverse supersession record (ADR-0088 §4), read with the same wrapping
-#: rule as ``Status``. ADR-0088 ratifies this header line as "the canonical
-#: machine-readable form" of a supersession.
+#: The reverse supersession record (ADR-0088 §4). ADR-0088 ratifies this header
+#: line as "the canonical machine-readable form" of a supersession.
 #:
 #: **A header *field*, so no indent at all.** Whether ``  - Supersedes: …`` is a
 #: top-level item with two cosmetic spaces or an item nested under the ``Status``
@@ -282,6 +267,16 @@ _STATUS_RE = re.compile(
 #: its own ``Status``. §6 decides the tie: a record missed is silence, which is
 #: benign, where a nested item read as a field declares a supersession nobody
 #: wrote. All nine records on `main` sit at column zero.
+#:
+#: Its wrapping stays a pattern where ``Status``'s became a computed scan
+#: (:func:`adr_status.status_value`), and the two agree wherever this one can
+#: match at all: pinned at column zero and read for its *first* ``ADR-NNNN``
+#: only, a fixed two-column floor is the content column of the canonical ``- ``
+#: marker this line must carry, and a line folded in past the target cannot
+#: change which ADR the record names. The one shape where they part — a padded
+#: ``-   Supersedes:`` whose own value names no ADR while a sibling beneath it
+#: does — is #2018, parked rather than fixed here because #2017 scopes this
+#: pattern out.
 _SUPERSEDES_RE = re.compile(
     r"^-[ \t]*(?P<kind>Partially\s+supersedes|Supersedes):[ \t]*"
     r"(?P<value>.+(?:\n(?:\t|[ \t]{2,})\S.*)*)",
@@ -932,9 +927,27 @@ def header(text: str) -> str:
 
 
 def status_field(text: str) -> str | None:
-    """Return one ADR's whole ``Status`` field, folded onto one line."""
-    match = _STATUS_RE.search(header(text))
-    return None if match is None else _fold(match.group("value"))
+    """Return one ADR's whole ``Status`` field, folded onto one line.
+
+    ADR-0070 §4 requires every physical line, since a legacy value may wrap, so
+    this is the whole *field* rather than its first line. Where the field ends is
+    :func:`adr_status.status_value`'s rule — the same one
+    ``scripts/project_status.py`` reads, imported rather than restated (#2017):
+    the continuation floor is the ``- Status:`` bullet's content column computed
+    from the marker as it was actually written, not the two columns a canonical
+    ``- `` would reach.
+
+    The **header** is what is searched, not the whole document, because §4
+    legislates a header field: a body list item may legitimately be an
+    illustration (see :func:`header`).
+
+    Its indent stays permissive where :data:`_SUPERSEDES_RE`'s does not, and the
+    asymmetry is the point rather than an oversight: the two fail in opposite
+    directions. A ``Status`` this failed to find yields an empty supersessor set
+    and therefore a *report* — the dangerous outcome — where a record this fails
+    to find yields silence, which ADR-0088 §6 calls benign.
+    """
+    return status_value(header(text))
 
 
 def reverse_records(text: str) -> list[tuple[int, str, str]]:
