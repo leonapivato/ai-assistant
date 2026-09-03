@@ -20,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from pydantic import ValidationError
 
 from ai_assistant.core.errors import (
     AssistantError,
@@ -27,10 +28,12 @@ from ai_assistant.core.errors import (
     SpendUndeterminedError,
     UnresolvedEvidenceError,
 )
+from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     FeedbackEvent,
     FeedbackKind,
     MemoryKind,
+    ReplyChunk,
     SpokenAudio,
     SpokenAudioFormat,
     SpokenDelivery,
@@ -1070,3 +1073,136 @@ async def test_a_spend_read_answered_with_a_malformed_reply_is_a_protocol_error(
 
     assert not isinstance(caught.value, SpendUndeterminedError)
     assert not isinstance(caught.value, AssistantError)
+
+
+# --- a payload of the wrong shape is a protocol fault too (#1592) ------------
+
+
+#: A key and a value a rogue hub could put in a payload, chosen so that either one
+#: appearing in a rendered failure is unambiguous evidence of an echo.
+_PEER_KEY = "what-the-user-actually-said"
+_PEER_VALUE = "the appointment is on Tuesday at the clinic"
+
+
+def _hub_answering(
+    *replies: tuple[env.FrameKind, object],
+) -> Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]]:
+    """A hub that completes the handshake, reads one request, then sends ``replies``.
+
+    Every reply carries the request's correlation id, so nothing here trips the
+    mismatch rule (ADR-0084 §3) and each test is left driving the one condition it
+    names: a frame of the right kind, correlated correctly, carrying the wrong shape.
+    """
+
+    async def _rogue(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        connect = await _read_one(reader)
+        await _send(
+            writer,
+            env.Envelope(
+                kind=env.FrameKind.CONNECT_ACK,
+                id=connect.id,
+                payload=env.connect_ack_payload(build="rogue", max_frame_bytes=_FRAME),
+            ),
+        )
+        request = await _read_one(reader)
+        for kind, payload in replies:
+            await _send(writer, env.Envelope(kind=kind, id=request.id, payload=payload))
+
+    return _rogue
+
+
+async def test_a_result_payload_of_the_wrong_shape_is_a_protocol_error(tmp_path: Path) -> None:
+    """``_call``'s site: a well-formed ``RESULT`` the declared type refuses.
+
+    Every neighbouring breach in the same block is a ``ProtocolError`` — an
+    undecodable frame, a correlation id that does not match, a frame kind that was
+    not due — and ADR-0084 §3 puts this one in the same class: the frame decoded and
+    the kind was the one due, so what the hub broke is the shape the surface
+    declares. ADR-0085 §9 is why that cannot arrive as anything the engine declares,
+    and a bare ``ValidationError`` was neither that nor a ``TransportError``, so it
+    escaped the ``(AssistantError, TransportError)`` catch every adapter uses.
+    """
+    hub = _hub_answering((env.FrameKind.RESULT, {"turn": 1, _PEER_KEY: _PEER_VALUE}))
+
+    async with _listening(tmp_path / "hub.sock", hub) as client:
+        with pytest.raises(ProtocolError) as caught:
+            await client.converse("hello", timeout=_PATIENT)
+
+    rendered = str(caught.value)
+    assert "converse()" in rendered
+    assert "a result frame" in rendered
+    assert "extra_forbidden" in rendered
+    assert isinstance(caught.value.__cause__, ValidationError)
+    assert not isinstance(caught.value, AssistantError)
+    _assert_quotes_nothing(rendered)
+
+
+async def test_a_stream_chunk_of_the_wrong_shape_is_a_protocol_error(tmp_path: Path) -> None:
+    """``_stream_call``'s chunk site, which has the same gap and the same answer.
+
+    Driven on the first frame of the stream, so nothing but the chunk adapter can be
+    what refused: the caller asked for one value and the failure arrived instead of it.
+    """
+    hub = _hub_answering((env.FrameKind.CHUNK, {"text": 7, _PEER_KEY: _PEER_VALUE}))
+
+    async with (
+        _listening(tmp_path / "hub.sock", hub) as client,
+        closing_stream(client.converse_streaming("hello", timeout=_PATIENT)) as values,
+    ):
+        with pytest.raises(ProtocolError) as caught:
+            await anext(values)
+
+    rendered = str(caught.value)
+    assert "converse_streaming()" in rendered
+    assert "a chunk frame" in rendered
+    assert "extra_forbidden" in rendered
+    assert isinstance(caught.value.__cause__, ValidationError)
+    assert not isinstance(caught.value, AssistantError)
+    _assert_quotes_nothing(rendered)
+
+
+async def test_a_stream_terminal_result_of_the_wrong_shape_is_a_protocol_error(
+    tmp_path: Path,
+) -> None:
+    """``_stream_call``'s terminal site, reached past a chunk the adapter accepted.
+
+    The good chunk is the point: it is what makes this the *terminal* adapter's
+    refusal rather than the chunk one's, so the two sites are pinned separately
+    instead of one standing in for both.
+    """
+    hub = _hub_answering(
+        (env.FrameKind.CHUNK, {"text": "part of an answer"}),
+        (env.FrameKind.RESULT, {"turn": 1, _PEER_KEY: _PEER_VALUE}),
+    )
+
+    async with (
+        _listening(tmp_path / "hub.sock", hub) as client,
+        closing_stream(client.converse_streaming("hello", timeout=_PATIENT)) as values,
+    ):
+        assert isinstance(await anext(values), ReplyChunk)
+        with pytest.raises(ProtocolError) as caught:
+            await anext(values)
+
+    rendered = str(caught.value)
+    assert "converse_streaming()" in rendered
+    assert "a result frame" in rendered
+    assert "extra_forbidden" in rendered
+    assert isinstance(caught.value.__cause__, ValidationError)
+    assert not isinstance(caught.value, AssistantError)
+    _assert_quotes_nothing(rendered)
+
+
+def _assert_quotes_nothing(rendered: str) -> None:
+    """The failure names the method and the frame, and repeats no part of the payload.
+
+    ADR-0004 §5 keeps Tier 0/1 data out of a log, and ADR-0225 §4 states the shape a
+    failure takes under it: it "names its address and never its text". A result
+    payload is the user's own material, so a message rendered to a screen and liable
+    to be logged carries neither the peer's keys nor its values — which is also why
+    pydantic's ``loc`` path is not rendered: under ``extra="forbid"`` an
+    ``extra_forbidden`` refusal puts the peer's own key there.
+    """
+    assert _PEER_KEY not in rendered
+    assert _PEER_VALUE not in rendered
+    assert "Tuesday" not in rendered
+    assert "clinic" not in rendered

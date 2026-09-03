@@ -58,6 +58,8 @@ import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Final
 
+from pydantic import ValidationError
+
 from ai_assistant.core.types import DEFAULT_PAGE_SIZE, SpokenDeliveryState, secret_value
 from ai_assistant.wire import envelope as env
 from ai_assistant.wire.codec import (
@@ -87,6 +89,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
     from datetime import timedelta
     from pathlib import Path
+
+    from pydantic import TypeAdapter
 
     from ai_assistant.core.types import (
         AnswerOutcome,
@@ -443,14 +447,14 @@ class HubClient:
                 if reply.kind is env.FrameKind.ERROR:
                     _raise_reply_error(reply.payload)
                 if reply.kind is env.FrameKind.CHUNK:
-                    chunk = chunk_adapter(method).validate_python(reply.payload)
+                    chunk = _validated(chunk_adapter(method), reply, method=method)
                     check_payload(chunk, max_bytes=limit, subject=f"a chunk from {method}()")
                     yield chunk
                     continue
                 if reply.kind is not env.FrameKind.RESULT:
                     msg = f"the hub answered a request with a {reply.kind.value} frame"
                     raise ProtocolError(msg)
-                result = terminal_adapter(method).validate_python(reply.payload)
+                result = _validated(terminal_adapter(method), reply, method=method)
                 check_payload(result, max_bytes=limit, subject=f"the result of {method}()")
                 yield result
                 return
@@ -1114,7 +1118,7 @@ class HubClient:
             if reply.kind is not env.FrameKind.RESULT:
                 msg = f"the hub answered a request with a {reply.kind.value} frame"
                 raise ProtocolError(msg)
-            result = return_adapter(method).validate_python(reply.payload)
+            result = _validated(return_adapter(method), reply, method=method)
             # ADR-0087 §7: decode, validate, **then** measure — the same value, so
             # the same bytes and the same number the hub measured. The hub has
             # already refused an oversized result; measuring here is what makes the
@@ -1809,6 +1813,64 @@ def _raise_reply_error(payload: object) -> None:
     if isinstance(payload, dict) and payload.get("code") in env.HANDSHAKE_REFUSALS:
         _raise_handshake_error(payload)
     raise_from_payload(payload)
+
+
+def _validated(adapter: TypeAdapter[Any], reply: env.Envelope, *, method: str) -> Any:
+    """Read one reply frame's payload into its declared shape, or report the breach.
+
+    **A wrong-shaped payload is a protocol violation like the ones around it, and
+    leaves as one.** ADR-0084 §3 sorts a peer's faults into answers, and the client's
+    share of them are transport failures it raises itself; ADR-0085 §9 keeps them out
+    of the engine's vocabulary, because they "are not ``AssistantEngine`` failures and
+    no Protocol method declares them". A well-formed ``RESULT`` whose payload is not
+    the declared shape is one of those: the frame decoded, the correlation id matched
+    and the kind was the one due, so what the hub broke is the *surface's* declaration
+    — the same class of fault as the frame-kind mismatch checked immediately above
+    each call of this function, which raises :class:`ProtocolError`. Left bare, the
+    validation raised pydantic's ``ValidationError`` instead, which is neither a
+    ``TransportError`` nor an ``AssistantError`` and so escapes the
+    ``(AssistantError, TransportError)`` catch every CLI adapter uses — a traceback
+    where a rendered error was owed, for any promoted method rather than one in
+    particular (issue #1592).
+
+    **The message names the method and the frame kind, and quotes no payload.** What
+    a result carries is the user's own material — a turn's answer, a belief, a
+    transcript entry — so ADR-0004 §5's rule that Tier 0/1 data never reaches a log
+    holds it out of a message that is rendered to a screen and may be written to one.
+    ADR-0225 §4 states the same shape for the archive and cites §5 for it: "a failure
+    handling an entry names its address and never its text".
+
+    **Only pydantic's error *codes* are rendered — not the ``loc`` path that
+    ``orchestration.conversations._refusals_in`` renders beside them.** That helper's
+    ground is that a location "is a tuple of field names and indices", so it cannot
+    carry the refused value; over *these* adapters that does not hold. The promoted
+    result models are ``extra="forbid"``, so an ``extra_forbidden`` refusal puts the
+    peer's own key into ``loc``, and a refusal inside a mapping puts the peer's own
+    key there too. The code vocabulary is pydantic's own and closed, so a code names
+    how the shape was broken while carrying nothing the hub chose.
+
+    Args:
+        adapter: The validator for the shape this frame is declared to carry.
+        reply: The frame, already matched on correlation id and on kind.
+        method: The method this exchange is for, named in the failure.
+
+    Returns:
+        The payload, validated into the declared type.
+
+    Raises:
+        ProtocolError: If the payload does not satisfy that type.
+    """
+    try:
+        return adapter.validate_python(reply.payload)
+    except ValidationError as exc:
+        # ``ValidationError`` is never raised with an empty list, so this is the
+        # whole message's detail rather than a possibly-empty tail.
+        refused = ", ".join(sorted({str(each["type"]) for each in exc.errors()}))
+        msg = (
+            f"the hub answered {method}() with a {reply.kind.value} frame whose payload "
+            f"is not the shape the surface declares for it, refused as: {refused}"
+        )
+        raise ProtocolError(msg) from exc
 
 
 async def hang_up(writer: asyncio.StreamWriter) -> None:
