@@ -1,6 +1,6 @@
 # 14. Planning model: `Goal`, `ActionPlan`, and a separate `ExecutionState`
 
-- Status: Accepted, partially superseded by ADR-0041 and ADR-0211 (§6's Planner.plan input roster)
+- Status: Partially superseded by ADR-0041 and ADR-0211 (§6's Planner.plan input roster) and ADR-0228 (§2's parenthetical alone, that a re-planned plan's predecessor "stays referenced by the `ExecutionState` that ran it" — a plan superseded within a turn, before anything is driven, is referenced by no execution, so it carries the id of the plan it replaces on a new `supersedes` field and every plan a turn produced is persisted; §2's `frozen=True` rule, its "Re-planning produces a *new* `ActionPlan` with a new `id`", its capability abstraction, its `JsonValue` reasoning and its deep-freezing of `parameters` all stand, and §§1, 3-7 are untouched)
 - Date: 2026-07-19
 - Note (2026-07-21): §4's RUNNING → INDETERMINATE transition has a second
   trigger from ADR-0029 §4 — a tool that exceeds its invocation deadline, or is
@@ -127,6 +127,35 @@
   ADR-0041's pair is kept rather than restructured to ADR-0070 §4's leading-token
   form: giving it the `(<scope>)` it lacks would mean asserting what ADR-0041
   replaced, which is ADR-0041's to state. Refs #1772, #60, ADR-0211 §11.
+
+- **Partially superseded: 2026-09-03 by ADR-0228** — §2's parenthetical, and nothing
+  else of §2 or of this ADR. §2 rules that *"Re-planning produces a *new*
+  `ActionPlan` with a new `id` (the previous one stays referenced by the
+  `ExecutionState` that ran it), rather than mutating a plan out from under an
+  in-flight execution."* ADR-0228 §1 produces exactly that new plan with that new id,
+  and **relies on** `frozen=True` for the reason §2 gives — it is *"what makes the
+  plan an auditable record of a decision"*. What stops being true is the
+  parenthetical: a plan a turn revises **before anything is driven** is referenced by
+  no `ExecutionState`, because nothing ran it. A reader holding only this ADR
+  persists an orphan and loses the chain, which is ADR-0070 §1's test met on that
+  clause alone.
+
+  **Not replaced — everything else.** The new plan and new id rule, the frozen
+  guarantee and its argument, `capability` as an abstraction rather than a registry
+  key, the `planning → tool selection` boundary, the `JsonValue` reasoning and the
+  recursive deep-freeze of `parameters` all bind whole. §§1, 3, 4, 5, 6 and 7 are
+  untouched, and §1's ruling that *"a goal ('relocate to Lisbon in September')
+  outlives any one conversation"* is **load-bearing** in ADR-0228 §5: it is why the
+  revision chain is recorded on the plan rather than inferred from `goal_id` and
+  `created_at`. §5's `PlanStore` is unchanged and gains no member — a turn that
+  revises calls `save_plan` more than once, which that contract already admits.
+
+  The scope on the `Status` line names a clause and carries no `ADR-NNNN` token, so
+  ADR-0070 §4's extraction invariant holds and the pair accumulates beside ADR-0041's
+  and ADR-0211's rather than replacing either; the leading token replaces the bare
+  `Accepted` per ADR-0070 §4 and `docs/adr/template.md`. Appended note per ADR-0070
+  §1; no text below is rewritten. This note lands in the same change as ADR-0228
+  itself, which is the existence condition ADR-0082 §7 states. Refs #1908, #1952.
 
 ## Context
 
