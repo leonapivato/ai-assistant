@@ -107,15 +107,27 @@ class FakePlanner:
     turn, which is what a planner that knows nothing of the envelope does and what
     every existing consumer of this fake keeps getting.
 
-    **And a turn may call it twice** (ADR-0228 §3). Two things follow, and both are
-    the widened contract rather than a convenience. A **synthesised** plan takes a
-    fresh ``id`` on every call after the first, because ADR-0014 §2's "re-planning
-    produces a *new* ``ActionPlan`` with a new ``id``" now binds *within* one turn and
-    a fake minting one id twice would be non-conforming exactly where ADR-0228 §5's
-    chain is asserted. And ``revision`` scripts what the **second** call returns,
-    which is the hook a consumer's test takes to drive the milestone's own shape — a
-    first plan that cannot name a value and asks for it, and a second that carries it
-    — without standing a model up.
+    **And a turn may call it twice** (ADR-0228 §3), which is where a fake that
+    answered one id twice would stop conforming. ADR-0014 §2's "re-planning produces a
+    *new* ``ActionPlan`` with a new ``id``" now binds *within* one turn: the loop
+    stamps the second plan as superseding the first, and ``PlanStore.save_plan``
+    refuses a ``supersedes`` naming the saving plan's own id (ADR-0228 §5) — so a
+    consumer driving a revising turn against a fake that reused one would get a
+    ``PlanningError`` from the store for the *fake's* defect. **Every call after the
+    first therefore answers a distinct id**, on the synthesised path and the scripted
+    path alike: a scripted plan is returned exactly as scripted on the first call and
+    with a fresh ``id`` and no other change afterwards, which is the fake conforming
+    to the contract rather than disagreeing with itself — ``id`` is precisely the
+    field ADR-0014 §2 requires to move.
+
+    **``revision`` scripts what a call after the first returns**, which is the hook a
+    consumer takes to drive the milestone's own shape — a first plan that cannot name
+    a value and asks for it, and a second that carries it — without standing a model
+    up. It is **not** scoped to one turn, and cannot be: a turn boundary is a signal
+    the loop passes no more than it passes an iteration index, and ADR-0228 §12 rules
+    that the planner "is not told which iteration it is on". A consumer driving two
+    turns builds two fakes, which is what this suite's existing two-turn cases already
+    do.
 
     **It sets no ``supersedes``** (ADR-0228 §5). That field is the loop's on every
     plan a planner returns, so a fake authoring one would be scripting a value its
@@ -145,23 +157,37 @@ class FakePlanner:
                 planner that asked for no read. This is the hook a consumer's tests
                 take to drive a turn on which the trigger fired, without standing a
                 model up.
-            revision: What a turn's **second** call returns (ADR-0228 §3), or
-                ``None`` — the default, under which every call answers the same way
-                and a consumer sees exactly what it saw before this milestone. A
-                turn makes at most two calls, so this is the only other one there
-                is. Its ``supersedes`` is scripted like any other field and the loop
-                discards it (§5), which is what makes the discard assertable.
+            revision: What a call after the first returns (ADR-0228 §3), or ``None``
+                — the default, under which a synthesised plan differs only in its id
+                and a scripted one only in its id, and a consumer sees what it saw
+                before this milestone. A turn makes at most two calls, so within one
+                turn this is the only other one there is. Its ``supersedes`` is
+                scripted like any other field and the loop discards it (§5), which is
+                what makes the discard assertable.
 
         Raises:
-            ValueError: If both ``plan`` and ``read_request`` are given. A scripted
+            ValueError: If both ``plan`` and ``read_request`` are given — a scripted
                 plan carries its own ``read_request`` field, so honouring both would
-                give one value two sources that can disagree — and a fake that can
-                disagree with itself certifies nothing.
+                give one value two sources that can disagree, and a fake that can
+                disagree with itself certifies nothing. Or if ``plan`` and
+                ``revision`` share an ``id``, which is a script no conforming planner
+                could satisfy (ADR-0014 §2, ADR-0228 §5).
         """
         if plan is not None and read_request is not None:
             msg = (
                 "pass read_request only with a synthesised plan; a scripted plan carries "
                 "its own read_request field"
+            )
+            raise ValueError(msg)
+        if plan is not None and revision is not None and plan.id == revision.id:
+            # A turn persists both plans and `save_plan` refuses a `supersedes` naming
+            # the saving plan's own id (ADR-0228 §5), so a script whose two plans share
+            # an id is a script no conforming planner could satisfy — refused here
+            # rather than surfacing as a store error the consumer would blame the
+            # store for.
+            msg = (
+                f"plan and revision share the id {plan.id!r}; a turn's two plans are two "
+                "records with two ids (ADR-0014 §2, ADR-0228 §5)"
             )
             raise ValueError(msg)
         self._plan = plan
@@ -251,7 +277,14 @@ class FakePlanner:
         if self._revision is not None and ordinal > 1:
             return self._revision
         if self._plan is not None:
-            return self._plan
+            # Exactly as scripted on the first call, and with a fresh id afterwards
+            # (ADR-0014 §2, ADR-0228 §3, §5). Only `id` moves — every other field is
+            # the caller's own — because a plan reusing one is what `save_plan`
+            # refuses, and a fake that failed its consumer for its own defect would
+            # certify nothing.
+            if ordinal == 1:
+                return self._plan
+            return self._plan.model_copy(update={"id": f"{self._plan.id}-{ordinal}"})
         return ActionPlan(
             # Distinct on every call after the first (ADR-0228 §3, ADR-0014 §2). The
             # first keeps the id this fake has always minted, so nothing that named

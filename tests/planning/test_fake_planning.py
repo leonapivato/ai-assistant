@@ -19,6 +19,7 @@ from plan_store_contract import PlanStoreContract
 from planner_contract import PlannerContract
 
 from ai_assistant.core.types import (
+    ActionPlan,
     CurrentContext,
     Goal,
     MemorySource,
@@ -145,3 +146,106 @@ async def test_fake_planner_records_what_it_was_asked() -> None:
     # ADR-0211 §9 item 3: the vocabulary is recorded as handed, so a test over the
     # loop can assert what the planner was told without standing a model up.
     assert planner.calls[0][3] == ("send_email",)
+
+
+# --- ADR-0228 §3: a turn may call this fake twice ----------------------------
+
+
+def _goal_for(goal_id: str = "g1") -> Goal:
+    return Goal(
+        id=goal_id,
+        statement="relocate to Lisbon",
+        provenance=Provenance(
+            source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_fixed_now()
+        ),
+        created_at=_fixed_now(),
+    )
+
+
+def _context_for() -> CurrentContext:
+    return CurrentContext(
+        now=_fixed_now(), time_of_day=TimeOfDay.MORNING, is_weekend=False, within_working_hours=True
+    )
+
+
+async def test_a_synthesised_plan_takes_a_fresh_id_on_every_call_after_the_first() -> None:
+    """ADR-0014 §2's new-id rule, which ADR-0228 §3 makes bind within one turn.
+
+    The loop stamps a turn's second plan as superseding the first, and
+    ``PlanStore.save_plan`` refuses a ``supersedes`` naming the saving plan's own id
+    (ADR-0228 §5) — so a fake answering one id twice would fail its consumer for its
+    own defect, at the store, where the consumer would blame the store.
+
+    The **first** call keeps the id this fake has always minted, so nothing that named
+    it moves.
+    """
+    planner = FakePlanner(now=_fixed_now)
+
+    first = await planner.plan(_goal_for(), context=_context_for(), capabilities=())
+    second = await planner.plan(_goal_for(), context=_context_for(), capabilities=())
+
+    assert first.id == "g1-plan", "the id this fake has always minted"
+    assert second.id != first.id
+
+
+async def test_a_scripted_plan_also_takes_a_fresh_id_and_changes_in_nothing_else() -> None:
+    """The scripted path conforms too, and moves exactly the field the contract moves.
+
+    A consumer scripting a plan that carries a ``read_request`` drives a revising turn
+    on a budgeted operation, so this path reaches two calls as readily as the
+    synthesised one does. Returning the scripted plan unchanged would reuse its id;
+    returning it with a fresh id is the fake **conforming**, because ``id`` is
+    precisely the field ADR-0014 §2 requires to move and every other field is the
+    consumer's own.
+    """
+    scripted = ActionPlan(
+        id="scripted-1",
+        goal_id="g1",
+        steps=(),
+        created_at=_fixed_now(),
+        rationale="the consumer's own",
+        read_request=ReadRequest(asks=(ReadAsk(kind=ReadKind.CITATION_HOP, labels=("M1",)),)),
+    )
+    planner = FakePlanner(scripted, now=_fixed_now)
+
+    first = await planner.plan(_goal_for(), context=_context_for(), capabilities=())
+    second = await planner.plan(_goal_for(), context=_context_for(), capabilities=())
+
+    assert first is scripted, "exactly as scripted on the first call"
+    assert second.id != scripted.id
+    for field in ActionPlan.model_fields:
+        if field == "id":
+            continue
+        assert getattr(second, field) == getattr(scripted, field), f"{field} is unchanged"
+
+
+async def test_a_scripted_revision_answers_the_call_after_the_first() -> None:
+    """``revision`` is the hook for the milestone's own shape (ADR-0228 §13 item 1).
+
+    A first plan that cannot name a value and asks for it, and a second that carries
+    it — scripted, without standing a model up.
+    """
+    first_plan = ActionPlan(id="p1", goal_id="g1", steps=(), created_at=_fixed_now())
+    revision = ActionPlan(
+        id="p2", goal_id="g1", steps=(), created_at=_fixed_now(), rationale="the revision"
+    )
+    planner = FakePlanner(first_plan, now=_fixed_now, revision=revision)
+
+    first = await planner.plan(_goal_for(), context=_context_for(), capabilities=())
+    second = await planner.plan(_goal_for(), context=_context_for(), capabilities=())
+
+    assert first is first_plan
+    assert second is revision
+
+
+def test_a_script_whose_two_plans_share_an_id_is_refused() -> None:
+    """A script no conforming planner could satisfy is refused at construction.
+
+    A turn persists both plans and ``save_plan`` refuses a ``supersedes`` naming the
+    saving plan's own id (ADR-0228 §5), so two plans sharing one is not a fake that
+    behaves oddly — it is a fake that cannot be used at all. Refused here rather than
+    surfacing as a store error the consumer would blame the store for.
+    """
+    shared = ActionPlan(id="p1", goal_id="g1", steps=(), created_at=_fixed_now())
+    with pytest.raises(ValueError, match="two records with two ids"):
+        FakePlanner(shared, now=_fixed_now, revision=shared)
