@@ -713,19 +713,39 @@ scope is a smaller falsehood than any of those — it is, in fact, none.
 > **Normative.** Two size bounds, both `Settings` fields with named defaults, both refused
 > at load rather than at the first fetch (ADR-0093 §5): `fetch_max_file_bytes`, the file's
 > size on disk, default **4 MiB**, which bounds the read and the extraction's cost; and
-> `fetch_max_content_bytes`, the extracted text, default **32 KiB**, which bounds what
-> reaches the prompt.
+> `fetch_max_content_bytes`, the extracted text as the prompt will carry it, default
+> **32 KiB**, which bounds what reaches the prompt — roughly 32,000 characters of English,
+> about 5,400 CJK code points or about 2,700 emoji, by the clause below.
 
-> **Normative.** **Both bounds are counts of bytes, and `fetch_max_content_bytes` is the
-> UTF-8 encoded byte length of the exact value that becomes `MemoryRecord.content` — never
-> a character count.** An implementation enforces it **while extracting** rather than
-> after, so a file whose text exceeds it is refused without the whole of that text having
-> been materialised. This is the convention the corpus's other content budget already uses
-> — `calendar_max_content_bytes` is charged against encoded length — and it is stated here
-> rather than inherited because the two readings differ by up to a factor of four on
-> ordinary text: 20,000 characters outside the ASCII range are 20,000 to a character count
-> and 80 KiB on the prompt path, so an implementation reading the bound the other way would
-> send two and a half times the figure this section fixes.
+> **Normative.** **`fetch_max_content_bytes` is counted on the *quoted rendering* of the
+> extracted text — `json.dumps` at its default `ensure_ascii=True`, its two delimiters
+> included — and never on the source.** That rendering is pure ASCII, so its character
+> count and its byte count are one number and the field's name stays honest. An
+> implementation enforces the bound **while extracting** rather than after, so a file
+> beyond it is refused without the whole of its text having been materialised.
+
+> **Normative.** **No implementation bounds this on source characters or on source bytes**,
+> and the reason is ADR-0222 §4's, which ruled the same question for a rendered reply: at
+> `ensure_ascii=True` *"a newline costs two output characters, a BMP code point six and an
+> astral one — an emoji — twelve, because `json.dumps` writes it as two surrogate escapes
+> rather than one. A ceiling on **source** characters would admit a span six or twelve times
+> this long while claiming to admit this much; counted on the output there is nothing left
+> to get wrong."* A source-byte bound is the same defect one unit over: 32 KiB of emoji is
+> 8,192 code points and renders as 96 KiB of escapes, so §6's claim that this bound is what
+> reaches the prompt would be false by a factor of three on exactly the input an attacker
+> would choose.
+
+> **Normative.** **The transform is written out at the fetcher rather than imported**,
+> which is ADR-0222 §4's own instruction where three subsystems already hold their own
+> copy: what is shared is this ADR's number and that section's, not a module across a
+> boundary golden rule 1 forbids crossing. A fetcher holding a fourth copy is the
+> established shape and not a new coupling.
+
+> **Normative.** **A file beyond the bound is refused and never elided**, which is where
+> this departs from ADR-0222 §4 and the difference is the point: a reply exists and must
+> be rendered somehow, so §4 keeps its longest fitting prefix and marks the elision; a file
+> need not be fetched at all, and the refuse-never-truncate clause below says why an
+> abridged document is the worse answer.
 
 > **Normative.** **A bound is enforced by refusing, never by truncating.** A file over
 > either bound yields a refusal and no record. No implementation returns a prefix, a
@@ -1230,10 +1250,13 @@ same reason; this decision adds a contract, so it adds a lane.
    `fetch_max_file_bytes` and a file whose extracted text is over `fetch_max_content_bytes`
    each yield a refusal, add no record, fail no turn, and put no prefix of the text
    anywhere in the supply or the reply. Asserted over the supply and over the audit's
-   refusal class. **The content bound is counted in encoded bytes**, asserted with two
-   multibyte arms: text of exactly `fetch_max_content_bytes` encoded bytes made of
-   non-ASCII characters is fetched, and text one encoded byte over is refused — a pair
-   that an implementation counting characters fails on the second arm.
+   refusal class. **The content bound is counted on the quoted rendering**, asserted with
+   three arms over **astral** code points — emoji, which `json.dumps` writes as two
+   surrogate escapes each: text whose rendering is exactly `fetch_max_content_bytes` is
+   fetched; text whose rendering is one character over is refused; and, through the
+   **production renderer**, the span that at-limit record contributes to the assembled
+   prompt is within the bound. An implementation counting source characters or source
+   bytes passes the first arm and fails the other two.
 9. **Every refusal class is reachable from a real source.** One arm per `FetchRefusal`
    member, over a real filesystem: absent, a directory, unreadable by permission,
    over-size, an unsupported extension, and a corrupt file of a supported format. This is
