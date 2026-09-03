@@ -797,31 +797,41 @@ scope is a smaller falsehood than any of those — it is, in fact, none.
 > The root is a `Settings` field with a named default of **unset**, so the mechanism is
 > **off until a deployment configures it** — no root, no listing, no ask, no fetch.
 
-> **Normative.** **The root must lie on a local filesystem, and a `Fetcher` refuses to be
-> constructed on one that does not.** The check runs **when the fetcher is constructed** —
-> beside the bounds below and for their reason (ADR-0093 §5, refused at load rather than at
-> the first fetch) — and it is **fail-closed**: a filesystem whose backing the platform
-> reports as network-attached is refused, and so is one the platform will not identify at
-> all. A refused root is a configuration error that stops the deployment, never an empty
-> listing and never a `FetchRefusal`; a deployment with no root configured is unaffected,
-> because there is nothing to check.
+> **Normative.** **The root's reads must not leave the device, and a `Fetcher` refuses to
+> be constructed where that cannot be established.** The check runs **when the fetcher is
+> constructed** — beside the bounds below and for their reason (ADR-0093 §5, refused at
+> load rather than at the first fetch) — and it is **fail-closed**: what is refused is not
+> merely a root the platform reports as remote, but **every root whose locality the
+> platform does not affirmatively establish**. A refused root is a configuration error that
+> stops the deployment, never an empty listing and never a `FetchRefusal`; a deployment
+> with no root configured is unaffected, because there is nothing to check.
+
+> **Normative.** **Eligibility is decided over the whole backing chain and not over the
+> filesystem's type alone.** A filesystem type is necessary and **not sufficient**: an
+> ext4 or XFS volume on an iSCSI, NBD, NVMe-oF or otherwise network-attached block device
+> reports an ordinary local type in the platform's mount table while every read of it
+> traverses a network, and admitting it would be the same ADR-0017 §1 egress the NFS case
+> is, reached one layer down. So the eligibility a `Fetcher` requires is that **both** the
+> filesystem serving the root **and the device backing it** are established as local, and
+> a chain the platform will not report through to that conclusion is refused.
 
 > **Normative.** **The property is fixed here and the procedure is the implementing
-> lane's**, in ADR-0093 §10's form and §4's. What is required is that a root be admitted
-> only where the platform affirmatively reports its filesystem as local, so an
-> unrecognised, unreported or newly invented backing is refused rather than admitted; an
-> allow-list of filesystem types read from the platform's own mount table satisfies that,
-> and no construction is named as the required one. **The failure mode is a legitimate
-> local mount refused until its type is named** — a configuration error a deployment can
-> see and fix — and never a remote-backed mount silently admitted.
+> lane's**, in ADR-0093 §10's form and §4's — but no construction is offered here as
+> sufficient, because the obvious one is not. **The failure mode is a legitimate local
+> configuration refused until the lane can establish it** — a configuration error a
+> deployment can see and fix — and never a remote-backed one silently admitted. Where a
+> platform will not answer the question at all, this mechanism is simply unavailable on it,
+> which is the correct outcome rather than a gap to fill with an assumption.
 
 > **Normative.** **This is ADR-0017 §1 honoured, not a precaution.** Its rule is that
 > *"User data may leave the device only from `models/` or from a designated integration
-> seam inside `tools/`; every other egress is a bug"*, and a read served over NFS, SMB or a
-> FUSE-backed remote drive leaves the device from `readers/`, which is neither. ADR-0084 §1
+> seam inside `tools/`; every other egress is a bug"*, and a read served over a network —
+> NFS, SMB, a FUSE-backed remote drive, or a local filesystem sitting on a network-attached
+> block device — leaves the device from `readers/`, which is neither. ADR-0084 §1
 > settled the same question for this system's own transport — a non-loopback hop *"owes its
 > own ratified egress decision, and it cannot be reached by swapping an address family"* —
-> and a root swapped onto a network mount is that move by another route. This ADR
+> and a root swapped onto network-backed storage is that move by another route, at whichever
+> layer the swap is made. This ADR
 > pre-authorises no such egress and does not seek to; it makes the configuration that would
 > perform one unwireable.
 
@@ -1007,9 +1017,10 @@ subject.
 > conversation that reaches the egress seam is a confirmation rather than an allow"*.
 
 > **Normative.** **(b) is what §6's eligibility refusal exists to keep true**, and a
-> network-backed root is why it is a refusal rather than a documented condition. On an NFS,
-> SMB or FUSE-backed remote mount the fetch would still compose no request and name no
-> destination — but **an observer of that mount would see which entry a turn opened**, and
+> network-backed root is why it is a refusal rather than a documented condition. On a root
+> whose reads cross a network — an NFS or SMB mount, a FUSE-backed remote drive, or an ext4
+> volume on an iSCSI or NBD device — the fetch would still compose no request and name no
+> destination — but **an observer of that storage would see which entry a turn opened**, and
 > a revising turn's second ask may be composed over the first fetch's content (§7). That is
 > a data-steered signal reaching a party off this device without passing the egress seam.
 > It would be bounded — at most **which of the listing's at-most-`fetch_listing_max_entries`
@@ -1434,12 +1445,15 @@ same reason; this decision adds a contract, so it adds a lane.
     **And the fetch is not itself an egress**, asserted on the same turn: servicing the ask
     engages no `DestinationProtocol` member, requires no confirmation of its own and routes
     through no egress seam, which is §8's property (b) asserted rather than only stated.
-20. **A root that is not on a local filesystem does not wire, and neither does one the
-    platform will not classify.** Three arms at construction, over a fetcher whose view of
-    the platform's mount information the test supplies: a root the platform reports as
-    network-attached refuses; a root whose backing the platform reports as **unrecognised**
-    refuses, which is the fail-closed arm and the one that fails on any implementation
-    written as a deny-list; and a root on an ordinary local filesystem constructs. Each
+20. **A root whose reads would leave the device does not wire, and neither does one whose
+    locality is merely unproven.** Four arms at construction, over a fetcher whose view of
+    the platform's mount and device information the test supplies: a root on a filesystem
+    the platform reports as network-attached refuses; a root whose filesystem type is
+    **unrecognised** refuses, which is the fail-closed arm that fails on any implementation
+    written as a deny-list; **a root on an allow-listed local filesystem type whose backing
+    device is network-attached — ext4 on an iSCSI or NBD volume — refuses**, which is the
+    arm that fails on any implementation deciding eligibility from the mount table's type
+    alone; and a root on an ordinary local filesystem over a local device constructs. Each
     refusal is a configuration error that stops construction — no `Fetcher` exists
     afterwards — and not an empty listing, not a `FetchRefusal` and not a degraded turn.
     A deployment with no root configured constructs no fetcher and reaches no arm.
@@ -1516,14 +1530,15 @@ same reason; this decision adds a contract, so it adds a lane.
   root. A second root is a listing-composition and precedence decision; a root named in a
   turn is a model-composed address by another name and §2 forbids it. Fired by an ADR that
   decides how several address spaces are labelled and ordered.
-- **A root on a network-backed filesystem, and any widening of §6's local-filesystem
-  allow-list.** §6 refuses one at construction, fail-closed, so a legitimate local backing
-  the platform names in a way the allow-list does not yet carry is refused until it is
-  added — which is a deliberate direction of failure and not a defect. Adding a **local**
-  type to that list is an implementation change and needs no ADR. Admitting a
-  **network-attached** one is the egress decision ADR-0084 §1 says such a hop owes, and is
-  fired only by that ADR — never by a deployment finding the refusal inconvenient, and
-  never by this ADR, which pre-authorises none of it.
+- **A root whose reads would leave the device, and any widening of what §6's eligibility
+  admits.** §6 refuses one at construction, fail-closed over the whole backing chain, so a
+  legitimate local configuration the lane's procedure cannot yet establish is refused until
+  it can — a deliberate direction of failure and not a defect. Teaching that procedure to
+  establish a further **local** filesystem or device is an implementation change and needs
+  no ADR. Admitting a **network-attached** one — including one wearing a local filesystem
+  type — is the egress decision ADR-0084 §1 says such a hop owes, and is fired only by that
+  ADR: never by a deployment finding the refusal inconvenient, and never by this ADR, which
+  pre-authorises none of it.
 - **A format whose extraction declares a report time.** §5 takes the fetch instant for
   every format. A format that carries its own declared instant — a PDF's `/ModDate`, a
   document's core properties — has a claim ADR-0092 §3 would prefer, and using it needs a
@@ -1723,9 +1738,16 @@ avoided: the record carries an attestation because it is in the attested band.
   a read served over NFS leaves it from `readers/` however few bits it carries. A rule that
   admits the configuration and asks the operator not to use it has authorised the egress and
   then hoped. §6's refusal is fail-**closed** rather than fail-open, which answers the
-  guessing objection in the only direction that matters: an unrecognised backing is refused,
-  so the cost is a legitimate mount that must be named before it is used, and never a remote
-  one silently admitted.
+  guessing objection in the only direction that matters: what is not established is refused,
+  so the cost is a legitimate configuration that must be established before it is used, and
+  never a remote-backed one silently admitted.
+- **Deciding eligibility from the mount table's filesystem type alone.** §6 offered it for
+  one round as a construction that satisfied the property, and it does not: ext4 or XFS on
+  an iSCSI, NBD or NVMe-oF volume reports an ordinary local type while every read traverses
+  a network, so a type-only check admits the ADR-0017 §1 egress the NFS case is, one layer
+  down. §6 now requires the filesystem **and** its backing device to be established, names
+  no construction as sufficient, and §14's item 20 carries the arm that fails a type-only
+  implementation.
 - **Classifying a file by where it came from, so that a synced or downloaded copy is
   refused an attestation and a locally authored one is granted it.** It is the shape a scope
   stated about the *file* would need, and it is unbuildable: a filesystem records no
