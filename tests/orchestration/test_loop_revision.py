@@ -50,6 +50,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.orchestration.loop import (
+    _PLANNER_CALL_BOUND,
     _PLANNING_BUDGET,
     _PLANNING_BUDGETS,
     ConversationalOperation,
@@ -81,8 +82,7 @@ if TYPE_CHECKING:
 #: ADR-0228 §4's figure for ``converse`` and ``converse_streaming``, read off the
 #: member that declares it rather than restated — so a case that reads as "exactly at
 #: the budget" cannot drift from the figure the loop actually enforces.
-_BUDGET: Final = ConversationalOperation.CONVERSE.planning_budget
-assert _BUDGET is not None
+_BUDGET: Final[timedelta] = _PLANNING_BUDGETS[ConversationalOperation.CONVERSE]
 
 
 # --------------------------------------------------------------------------- #
@@ -117,7 +117,7 @@ class _Script:
         steps: Sequence[tuple[PlanStep, ...]] = (),
         supersedes: Sequence[str | None] = (),
         raises: int | None = None,
-        on_call: Callable[[], None] | None = None,
+        on_call: Callable[[int], None] | None = None,
     ) -> None:
         """Script one planner.
 
@@ -133,9 +133,11 @@ class _Script:
                 returns.
             raises: A 0-based call index that raises ``PlanningError`` instead of
                 answering, or ``None``. §9's fifth stop reason is about exactly this.
-            on_call: Run after answering each call, or ``None``. The hook a case takes
-                to move the injected clock **during** a planner call, which is how
-                ADR-0228 §4's overrun arm is asserted.
+            on_call: Run as each call is answered, given that call's 1-based
+                ordinal, or ``None``. The hook a case takes to move the injected clock
+                **during** a planner call, which is how ADR-0228 §4's overrun arm is
+                asserted; the ordinal is what lets a case move it during the *second*
+                call alone.
         """
         self._requests = requests
         self._steps = steps
@@ -165,7 +167,7 @@ class _Script:
             msg = "the planner is down"
             raise PlanningError(msg)
         if self._on_call is not None:
-            self._on_call()
+            self._on_call(ordinal + 1)
         return ActionPlan(
             id=f"{goal.id}-plan-{ordinal + 1}",
             goal_id=goal.id,
@@ -365,13 +367,20 @@ async def test_a_planner_call_that_overruns_the_budget_is_not_abandoned() -> Non
     """
     memory = await _seeded()
     overrun = _Elapsed(timedelta(seconds=19))
-    planner = _Script(requests=[_hop("M1"), None], steps=[(), (_step(),)])
+
+    def _overruns(ordinal: int) -> None:
+        """Push the clock far past the budget **while the second call is in flight**."""
+        if ordinal == _PLANNER_CALL_BOUND:
+            overrun.elapsed = timedelta(minutes=5)
+
+    planner = _Script(requests=[_hop("M1"), None], steps=[(), (_step(),)], on_call=_overruns)
 
     responded = await _revising(memory, planner, now=overrun)
 
-    assert len(planner.calls) == 2
+    assert len(planner.calls) == 2, "admitted one tick below the budget"
+    assert overrun() - _NOW > _BUDGET, "and the turn ran past it while that call was in flight"
     assert responded.turn.plan.steps == (_step(),), "the overrunning call's plan stands"
-    assert len(responded.plans) == 2
+    assert len(responded.plans) == 2, "and is the turn's revision, persisted beside the first"
 
 
 async def test_the_budget_runs_from_the_turns_entry_and_not_from_the_first_plan() -> None:
