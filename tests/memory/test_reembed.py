@@ -736,6 +736,79 @@ async def test_a_work_store_with_an_unreadable_cursor_is_discarded(tmp_path: Pat
     assert outcome.embedded == 4
 
 
+async def test_a_work_store_with_rows_but_no_cursor_is_discarded(tmp_path: Path) -> None:
+    """Rows no cursor accounts for are damage, not progress (#738).
+
+    The rows and the cursor commit in one transaction (ADR-0104 §2), so this
+    module cannot produce the shape and external damage to the work file is what
+    leaves it. Read as "resumable, from the beginning" it restarts at the first
+    source row and collides with the rows already there, which fails identically
+    on every retry — a permanent, opaque stall where the sibling conditions all
+    discard and restart.
+    """
+    store = tmp_path / "memory.db"
+    await _seed(store, [_record(str(index), f"memory {index}") for index in range(4)])
+
+    broken = _CountingEmbedder(fail_after=2)
+    with pytest.raises(MemoryStoreError, match="embedder failed"):
+        await Reembedder(store=store, embedder=broken, batch_size=2).run()
+
+    work = tmp_path / f"memory.db{WORK_SUFFIX}"
+    conn = sqlite3.connect(str(work))
+    try:
+        conn.execute("DELETE FROM meta WHERE key = 'reembed_cursor'")
+        conn.commit()
+    finally:
+        conn.close()
+    # The shape under test, asserted rather than assumed: rows present, and no
+    # cursor accounting for them.
+    assert _read(work, "SELECT count(*) FROM records") == [(2,)]
+    assert "reembed_cursor" not in _meta(work)
+
+    reembedder = Reembedder(store=store, embedder=_CountingEmbedder(), batch_size=2)
+    assert reembedder.plan().resumable == 0
+    outcome = await reembedder.run()
+
+    assert outcome.resumed == 0
+    assert outcome.embedded == 4
+    assert outcome.swapped
+    assert _meta(store)["dimensions"] == str(_NEW)
+    assert len(_read(store, "SELECT rowid FROM records")) == 4
+
+
+async def test_a_cursor_lost_after_the_plan_is_discarded_not_resumed_from(
+    tmp_path: Path,
+) -> None:
+    """The same rule at the second gate, where a plan can go stale (#738).
+
+    ``_resumable`` reports nothing to keep for a cursorless work store, so
+    ``_prepare_work`` reaches its own cursor read with a positive count only when
+    the file changed underneath the plan. It discards there too: returning
+    ``None`` while leaving the rows in place is the state this issue is about.
+    """
+    store = tmp_path / "memory.db"
+    await _seed(store, [_record(str(index), f"memory {index}") for index in range(4)])
+
+    broken = _CountingEmbedder(fail_after=2)
+    with pytest.raises(MemoryStoreError, match="embedder failed"):
+        await Reembedder(store=store, embedder=broken, batch_size=2).run()
+
+    work = tmp_path / f"memory.db{WORK_SUFFIX}"
+    planned = Reembedder(store=store, embedder=_CountingEmbedder(), batch_size=2)
+    resumable = planned.plan().resumable
+    assert resumable == 2
+
+    conn = sqlite3.connect(str(work))
+    try:
+        conn.execute("DELETE FROM meta WHERE key = 'reembed_cursor'")
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert planned._prepare_work(resumable) is None
+    assert _read(work, "SELECT count(*) FROM records") == [(0,)]
+
+
 async def test_a_source_written_after_verification_is_not_swapped_over(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
