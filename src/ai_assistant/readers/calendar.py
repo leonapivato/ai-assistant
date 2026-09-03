@@ -387,11 +387,18 @@ class CalendarReader:
         Raises:
             ValueError: If ``path`` is not absolute, ``timezone`` is not a known
                 IANA zone, or any figure is outside ADR-0093 §7a's range —
-                **including when the argument is of the wrong type**. Every
-                argument is typed before it is compared or called into, so a
-                direct caller's mistake is refused as a value naming the field
-                rather than escaping as an operator's ``TypeError`` or as an
-                ``AttributeError`` naming a method (#1057).
+                **including when that argument is of the wrong type**. Every
+                argument validated here is typed before it is compared or called
+                into, so a direct caller's mistake is refused as a value naming
+                the field rather than escaping as an operator's ``TypeError`` or
+                as an ``AttributeError`` naming a method (#1057).
+
+                ``now`` is deliberately **not** among them, and its absence is a
+                decision rather than a gap: a clock is a callable whose readings
+                change, so ADR-0026 has :func:`~ai_assistant.core.clock.checked_clock`
+                guard every reading instead — "validating once at startup would
+                certify a property the clock does not have". ``id_factory`` is
+                guarded at its output for ADR-0092 §6's reason, likewise not here.
         """
         source = _checked_path(path)
         zone = _checked_zone(timezone)
@@ -989,9 +996,18 @@ def _refuse_a_non_duration(field: str, value: object) -> None:
     ``isinstance`` rather than an exact-type test, unlike the integer guards: they
     are exact in order to exclude ``bool`` specifically, and there is no
     ``timedelta`` subclass whose acceptance would be a mistake.
+
+    ``type(value).__name__`` rather than ``repr``, for :func:`_checked_path`'s
+    reason: this is the one guard reached by a value of *arbitrary* type, so a
+    hostile ``__repr__`` would raise straight past a refusal whose whole purpose
+    is that nothing but a ``ValueError`` leaves this constructor. Every message
+    below it may use ``repr`` freely, because by then the value is a
+    ``timedelta``. (The two integer guards still conflate the type test with the
+    range test and so still format an arbitrary value — pre-existing, in both
+    readers, and filed rather than absorbed here.)
     """
     if not isinstance(value, timedelta):
-        msg = f"{field} must be a timedelta, got {value!r}"
+        msg = f"{field} must be a timedelta, got {type(value).__name__}"
         raise ValueError(msg)
 
 
