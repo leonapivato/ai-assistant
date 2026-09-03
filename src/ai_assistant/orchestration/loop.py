@@ -40,7 +40,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import structlog
 
@@ -58,7 +58,9 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.conversations import BELIEF_KINDS
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.reads import (
+    ServicedRead,
     Servicing,
+    StopReason,
     TriggerOutcome,
     TurnReadAudit,
     service_read_request,
@@ -67,6 +69,7 @@ from ai_assistant.orchestration.retrieval import assemble_by_band
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+    from datetime import timedelta
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
@@ -77,6 +80,7 @@ if TYPE_CHECKING:
         ToolRegistry,
     )
     from ai_assistant.core.types import (
+        ActionPlan,
         CurrentContext,
         FeedbackEvent,
         MemoryRecord,
@@ -110,7 +114,24 @@ class RespondedTurn:
 
     Attributes:
         turn: What the turn produced — goal, context, memories, plan, and whether
-            memory degraded.
+            memory degraded. Its ``plan`` is the **last** plan the turn produced:
+            on a turn that revised, the revision, which is the only plan anything
+            drives (ADR-0228 §5).
+        plans: **Every** plan the turn produced, oldest first, each already carrying
+            the ``supersedes`` this loop stamped (ADR-0228 §5). One member on every
+            turn that did not revise, two on one that did, and the last is
+            ``turn.plan``. It rides beside the ``TurnResult`` because §5 requires the
+            *whole sequence* to be persisted at the engine's existing site — "a turn
+            that persists a plan at all persists all of them" — while a superseded
+            plan is no part of what the turn produced as its **answer**, only of what
+            it decided on the way there.
+        stopped_while_asking: ADR-0228 §10's carrier: whether this turn stopped at
+            the bound (§3) or the budget (§4) **with its last plan still carrying a
+            read request**. It is the bare fact and nothing else — no count, no
+            duration, no guard name, no query and no label — because "nothing bounds
+            what a planner puts in a query, and the turn's timing is a fact about the
+            system rather than about the user's question". ``False`` on every other
+            turn, where the assembled prompt is byte-identical to what it is today.
         hop_reached: ADR-0227 §3's carrier. The **distinct** ids of the records this
             turn's citation hop reached that :attr:`turn`'s supply holds, in
             ADR-0229 §3's order: the **expansion sequence** — labels in the order the
@@ -121,11 +142,34 @@ class RespondedTurn:
             **Ordered**, because ADR-0227 §4's cap is taken over it in that order.
             Empty on every turn that did not fire, whose servicing was declined,
             whose servicing failed or was partial, and whose hop resolved no live
-            record.
+            record. **Accumulated across a turn's servicings** rather than replaced
+            by the later one (ADR-0228 §13 item 14): a record the *first* hop reached
+            still renders its reply in the prompt the turn finally assembles, and a
+            record both hops reached appears once, at its first arrival's place.
     """
 
     turn: TurnResult
     hop_reached: tuple[str, ...] = ()
+    plans: tuple[ActionPlan, ...] = ()
+    stopped_while_asking: bool = False
+
+
+#: ADR-0228 §3's bound: **at most two** calls to ``Planner.plan`` on one turn, so a
+#: turn that revises takes **one** revision and no more.
+#:
+#: "Two is read off the replay rather than chosen for tidiness": its measured shape
+#: is "10.0pt then 4.6pt on the miss set and 11.3pt then 7.4pt on the hop set", so
+#: the second read is worth roughly twice the third and the third roughly a fifth of
+#: the first. A bound of two spends one extra model round trip where the evidence
+#: says the return is largest and stops where it halves.
+#:
+#: **Not configurable, and read from this constant rather than taken as a
+#: parameter** — the same construction ``reads.READ_BUDGET`` uses for ADR-0226 §6's
+#: ten, and for the reason §3 gives one level up: a plan count is a count of model
+#: calls, so a configurable one is a configurable per-turn cost with no ceiling
+#: anyone reviewed. A keyword defaulted to this figure would be exactly such a
+#: setting, reachable by any caller in this package and by any later lane.
+_PLANNER_CALL_BOUND: Final = 2
 
 
 #: A filter over the supply one turn runs on, applied **between retrieval and
@@ -344,6 +388,114 @@ def _narrowed(
     if narrow is None:
         return context, memories
     return narrow(context, memories, retrieved_ids)
+
+
+def _stop_reason(
+    *,
+    plans: Sequence[ActionPlan],
+    serviced: ServicedRead,
+    planning_budget: timedelta | None,
+    elapsed: timedelta,
+) -> StopReason | None:
+    """Which of ADR-0228 §2's conditions stops the turn after a servicing, or ``None``.
+
+    The four conditions that can only be judged once a servicing has run — (a), (d),
+    (e), (f) and (g) — stated in one place so that the loop reads as the sequence §2
+    describes rather than as a stack of guards. ``None`` means all of them hold and a
+    revision is admissible; a value is both the answer *no* and ADR-0228 §9's reason
+    for it. Conditions (b) and (c) are decided before a servicing runs and so are the
+    loop's own.
+
+    **(f) is tested first, though §2 lists it sixth**, and that changes no outcome
+    because §2's conditions are conjunctive: what it changes is which reason is
+    recorded on a turn where more than one has failed. ADR-0228 §3 rules that case in
+    terms — "a turn that reaches the bound with its planner still asking is recorded
+    as having stopped at the bound" — and once two calls are made no other condition
+    is what stopped the turn. It can only fire after a revision, so nothing about a
+    turn that never iterated is decided by the ordering.
+
+    Args:
+        plans: The plans the turn has produced so far, oldest first. Its length is
+            how many planner calls the turn has made, which is §2(f)'s subject.
+        serviced: What the servicing just performed carried — §2(d)'s failure and
+            §2(e)'s count of records the supply did not already hold.
+        planning_budget: The operation's declared budget, or ``None`` where it
+            declared none (§2(a)).
+        elapsed: How long the turn has run, measured from its entry into the loop
+            against the injected clock (§2(g)).
+
+    Returns:
+        The reason the turn stops, or ``None`` where a revision is admissible.
+    """
+    if len(plans) >= _PLANNER_CALL_BOUND:
+        return StopReason.BOUND_REACHED
+    if planning_budget is None:
+        # §2(a). An undeclared budget is not a default, not
+        # unknown-and-therefore-permitted, and not a case to decide at run time: a
+        # lane that adds an operation and forgets to price it gets the turn the
+        # system already has, not a second model call nobody budgeted.
+        return StopReason.NOT_ITERATED
+    if serviced.failed or serviced.new == 0:
+        # §2(d) and §2(e). A failed or partial servicing left the supply as planning
+        # saw it (ADR-0226 §5), and a servicing whose every record was deduplicated
+        # out left it byte-identical — either way a second call would be handed the
+        # first call's own input, at the price of a model round trip.
+        return StopReason.NOT_ITERATED
+    if elapsed >= planning_budget:
+        # §2(g), against the injected clock. **Strictly less** is what admits a call:
+        # the boundary instant is spent, not available, because leaving equality to
+        # the implementation would let two conforming loops differ on identical input
+        # — one spending a model call the other refuses, with a different reply, a
+        # different cost and a different audit record.
+        return StopReason.BUDGET_REACHED
+    return None
+
+
+def _stamped(plan: ActionPlan, *, supersedes: str | None = None) -> ActionPlan:
+    """Take ``supersedes`` for the loop, on every plan a planner returns (ADR-0228 §5).
+
+    **The loop sets this field and the planner never does.** Whatever value the plan
+    came back carrying is discarded, and ``supersedes`` becomes what the caller
+    states: the predecessor's ``id`` on a revision, and ``None`` — "this plan
+    replaced nothing" — everywhere else. Every other field is exactly as the planner
+    returned it, which is what ``model_copy(update=...)`` gives and what §13's tenth
+    test asserts field by field.
+
+    **A value the planner supplied is discarded silently** — not an error, not a
+    park, not a degradation of the turn, and not a count in ADR-0226 §9's record.
+    ADR-0226 §3 takes the same posture for a label a model invents; this is that
+    posture on the one field of a plan the planner does not own. It is not counted
+    because, unlike a dropped label, it would measure a planner's conformance rather
+    than the trigger's behaviour, and the shared ``PlannerContract`` is where
+    conformance is held.
+
+    **Taken on every plan and not only on a revision**, because the narrower rule
+    looks sufficient and is not. A planner conforming by signature could return its
+    *first* plan already carrying a resolvable same-goal predecessor id; nothing
+    would revise, so nothing would overwrite it, ``save_plan`` would accept it
+    because the reference resolves, and the store would hold a durable record
+    claiming a supersession that never happened — an unprovenanced identifier written
+    into the audit chain, which ADR-0228 §5 refuses in terms.
+
+    **And this is not an edit of a decision.** ADR-0014 §2's frozen rule exists so
+    that a plan is not mutated "out from under an in-flight execution"; a plan at
+    this moment has been persisted by nothing, driven by nothing and observed by
+    nothing, and ADR-0228 §1 draws the line exactly here — ``id``, ``goal_id``,
+    ``steps``, ``rationale`` and ``read_request`` are the planner's, ``supersedes``
+    is the loop's, and there is no third case.
+
+    Args:
+        plan: What the planner returned, unobserved by anything else.
+        supersedes: The id of the plan this one replaces, or ``None`` where it
+            replaces nothing.
+
+    Returns:
+        The plan carrying the loop's value — the very object where it already agrees,
+        since a copy that changes no field is a copy for nothing.
+    """
+    if plan.supersedes == supersedes:
+        return plan
+    return plan.model_copy(update={"supersedes": supersedes})
 
 
 def _utcnow() -> datetime:
@@ -566,6 +718,7 @@ class LearningLoop:
         history: Sequence[MemoryRecord] = (),
         history_degraded: bool = False,
         narrow: SupplyFilter | None = None,
+        planning_budget: timedelta | None = None,
     ) -> RespondedTurn:
         """Run one turn, and record what its planner asked to have read.
 
@@ -594,11 +747,14 @@ class LearningLoop:
             history: The conversation's recent turns (:meth:`_turn`).
             history_degraded: Whether reading that history failed (:meth:`_turn`).
             narrow: The supply filter, or ``None`` (:meth:`_turn`).
+            planning_budget: This operation's planning budget, or ``None``
+                (:meth:`_turn`).
 
         Returns:
-            The turn — its goal, context, assembled memories and plan — beside
-            ADR-0227 §3's carrier naming which of those records this turn's citation
-            hop reached (:class:`RespondedTurn`).
+            The turn — its goal, context, assembled memories and last plan — beside
+            every plan it produced, ADR-0228 §10's stop fact and ADR-0227 §3's
+            carrier naming which of those records this turn's citation hop reached
+            (:class:`RespondedTurn`).
 
         Raises:
             PlanningError: As :meth:`_turn` raises it.
@@ -611,18 +767,20 @@ class LearningLoop:
                 history=history,
                 history_degraded=history_degraded,
                 narrow=narrow,
+                planning_budget=planning_budget,
                 audit=audit,
             )
         finally:
             audit.emit()
 
-    async def _turn(
+    async def _turn(  # noqa: PLR0913 — the utterance, the tail, whether reading it degraded, the supply filter, the operation's planning budget and this turn's audit record; every one is a distinct fact about the turn, and collapsing any pair would put a flag where a value belongs
         self,
         utterance: str,
         *,
         history: Sequence[MemoryRecord],
         history_degraded: bool,
         narrow: SupplyFilter | None,
+        planning_budget: timedelta | None,
         audit: TurnReadAudit,
     ) -> RespondedTurn:
         """Run one turn: intent, context, memory retrieval, planning.
@@ -718,12 +876,77 @@ class LearningLoop:
 
         **The withholding evaluation moves with the fourth group and does not run
         twice** (ADR-0226 §7, superseding ADR-0204 §2's timing clause alone).
-        ``narrow`` is applied **once** on every turn: after the servicing where one
-        was possible, and exactly where ADR-0203 §1 puts it everywhere else. A
-        second application would disjoin two evaluations' results, which §7 forbids
-        in terms; an evaluation taken before the servicing would under-fire "on
-        exactly the records the planner asked for", which is #1708's laundering path
-        reopened by a new route.
+        ``narrow`` is applied **once** on every turn: after the **last** servicing
+        where one was possible, and exactly where ADR-0203 §1 puts it everywhere
+        else. A second application would disjoin two evaluations' results, which §7
+        forbids in terms; an evaluation taken before the servicing would under-fire
+        "on exactly the records the planner asked for", which is #1708's laundering
+        path reopened by a new route. Which servicing "the last" names is the one
+        word iteration moves (ADR-0228 §7): an evaluation taken between a turn's two
+        iterations would record a value about a supply the turn did not compose over
+        — the same failure §7 moved the clause to prevent, one iteration later.
+
+        **And a turn that serviced a read may plan a second time over what came
+        back** (ADR-0228). That is the whole of this milestone: a plan whose step's
+        parameters cannot be filled until something has been read is a plan the
+        first call cannot make, so the loop calls the planner **again** over the
+        supply as it stands after the servicing — the same goal, the same
+        ``CurrentContext``, the same three groups, and the fourth group the servicing
+        appended. What comes back is a *new* plan with a new ``id`` (ADR-0014 §2),
+        never an edit of the first, and it is the plan the engine drives.
+
+        **Seven conditions, all of them, and every one a fact this method already
+        holds** (§2). The operation declared a planning budget (a); the plan carried
+        a request (b); it was serviced rather than declined under ADR-0226 §5 (c);
+        the servicing completed (d); it returned at least one record the supply did
+        not already hold, counted after deduplication (e); the turn has made fewer
+        planner calls than §3's bound (f); and it is within its budget at the moment
+        the check is made (g). None is a setting and none is a judgement — a
+        revision gated on anything a deployment tunes would make the second
+        emission's rate a property of the configuration rather than of the planner
+        — and where any fails the turn proceeds with the plan it has, exactly as it
+        does today. Nothing here retries a failed servicing, widens a request,
+        re-asks the planner on a different prompt, or substitutes a read of its own
+        for one the planner did not ask for.
+
+        **(e) is the condition that pays for itself.** A sighted query returning only
+        records already in the supply is common, and a second planner call over an
+        unchanged prompt is not merely wasted spend but a *wrong* instrument reading:
+        §9's iteration rate would count a turn that learned nothing as a turn that
+        looked again.
+
+        **Nothing else about the turn is re-run** (§1). Not the conversation tail,
+        not the retrieval, not the episodic supplement — the turn's blind reads,
+        which would return the same records for the same query — and not the context,
+        which is the situational "right now" and does not move within a turn. The
+        one exception is the **capability vocabulary**, read again immediately before
+        each call, which is not an exception to that restraint but ADR-0211 §3
+        applied as written: a plan judged against a vocabulary read before a
+        *different* call is exactly what §3 exists to prevent.
+
+        **The loop stamps ``supersedes`` and the planner never does** (§5). On every
+        plan the planner returns this method takes that field for its own — it
+        discards whatever value the plan came back carrying, and then, on a revision
+        and only on a revision, sets it to the predecessor's ``id``. Every other
+        field is exactly as the planner returned it. Taking it on *every* plan is
+        what closes the forgery a rule stated only over revisions would leave open:
+        a planner could otherwise return its **first** plan already carrying a
+        resolvable same-goal id, nothing would revise, nothing would overwrite it,
+        and the store would hold a durable claim of a supersession that never
+        happened. The discard is silent — not an error, not a park, not a
+        degradation, and not a count in §9's record — following ADR-0226 §3's own
+        posture for a label a model invents.
+
+        **The bound is two planner calls and the budget is the tail guard** (§§3-4).
+        The count is meant to bind in the ordinary case; the budget catches a turn
+        whose first phase already ran long, is measured **from this method's entry**
+        against the injected clock, and admits a call only while the elapsed time is
+        *strictly* less than it — the boundary instant is spent, not available. It
+        gates **starting** an iteration and never cancels one in flight, so a turn's
+        total duration may exceed its budget by one planner call and one servicing.
+        An operation that declares none does not iterate, whatever its audience, and
+        ``None`` is never read as a default, as unknown-and-therefore-permitted, or
+        as a case to decide at run time.
 
         Args:
             utterance: What the user said. It becomes the goal's statement
@@ -737,6 +960,18 @@ class LearningLoop:
                 separately: from the user's side both are "this answer is less
                 informed than it should have been", and a second flag would ask an
                 adapter to explain a distinction it cannot act on.
+            planning_budget: This operation's planning budget (ADR-0228 §4): a
+                duration, from this method's entry, within which an **additional**
+                planner call may be started. ``None`` where the operation declares
+                none, and such an operation does not iterate — which is the value
+                every caller that has not declared one passes, and the reason a turn
+                driven straight at this loop behaves exactly as it did before this
+                milestone. It is not a ``Settings`` value, not a deployment flag and
+                not a per-request parameter: the figures are fixed at the operations
+                that declare them (:mod:`~ai_assistant.orchestration.engine`), and it
+                is keyed on the **operation** rather than on the channel's audience,
+                because audience is the right key for what may be *said* and the
+                wrong one for how long a user waits.
             narrow: A :data:`SupplyFilter` applied between retrieval and planning,
                 or ``None`` to plan over everything the turn assembled and
                 retrieved. It is given the assembled context, all three groups of
@@ -761,8 +996,9 @@ class LearningLoop:
         audit record (ADR-0227 §3), and this method reads nothing off it.
 
         Returns:
-            The turn's goal, context, assembled memories and plan — each of them
-            over the supply ``narrow`` returned, where one was given — beside
+            The turn's goal, context, assembled memories and **last** plan — each of
+            them over the supply ``narrow`` returned, where one was given — beside
+            every plan the turn produced (ADR-0228 §5), ADR-0228 §10's stop fact and
             ADR-0227 §3's carrier.
 
         Raises:
@@ -775,6 +1011,13 @@ class LearningLoop:
                 situation the planner would then treat as fact — is worse than
                 stopping.
         """
+        # ADR-0228 §4: the budget runs "from the turn's entry into the loop", so it
+        # is read here rather than at the first plan's return. An implementation
+        # timing from the return would satisfy every other arm of §13's third test
+        # and fail the one that pins the origin: a turn whose context assembly, two
+        # relevance reads and first planner call have already spent the budget must
+        # start no second call.
+        started = self._now_utc()
         # Observed before the first await, so a caller mutating the sequence it
         # passed cannot change what the planner is shown (ADR-0065).
         recent = tuple(history)
@@ -820,61 +1063,107 @@ class LearningLoop:
             # Everything after this line, this method's own return value
             # included, runs over what it returned.
             context, memories = _narrowed(narrow, context, memories, retrieved_ids)
-        # ADR-0211 §3: read within the turn, from the registry selection resolves
-        # against, and immediately before the call — so the plan is judged against
-        # the vocabulary as it stood at this read. Nothing is withheld from it and
-        # nothing needs to be: the registry "holds configuration, not personal
-        # data" (ADR-0016 §6), so there is no record to place, no provenance to
-        # read and no class to withhold, and the vocabulary is the same on a spoken
-        # turn as on a typed one. That is why this sits *after* `narrow` rather
-        # than inside it.
-        capabilities = await self._registry.capabilities()
-        plan = await self._planner.plan(
-            goal, context=context, memories=memories, capabilities=capabilities
-        )
-        # ADR-0226 §8: the trigger *is* the emission, so the plan carrying a
-        # request is the whole of what "the trigger fired" means. Read once, above
-        # the branch, because every arm below reports it.
-        request = plan.read_request
-        audit.trigger = TriggerOutcome.NOT_FIRED if request is None else TriggerOutcome.FIRED
-        if request is not None:
-            audit.kinds = tuple(ask.kind for ask in request.asks)
+        plans: tuple[ActionPlan, ...] = ()
+        plan = _stamped(await self._planned(goal, context=context, memories=memories))
+        plans += (plan,)
+        audit.planner_calls = len(plans)
+        while True:
+            request = plan.read_request
+            # ADR-0226 §8: the trigger *is* the emission, and ADR-0228 §9 makes it a
+            # fact about the **turn** — "a turn's trigger fired if any plan that turn
+            # produced carried a read_request". Recomputed over `plans` each pass so
+            # that a revision carrying none cannot un-fire a turn whose first plan
+            # asked, which is what keeps the live fire rate a per-turn rate directly
+            # comparable to the replay's 13.6%.
+            audit.trigger = (
+                TriggerOutcome.FIRED
+                if any(one.read_request is not None for one in plans)
+                else TriggerOutcome.NOT_FIRED
+            )
+            if request is None:
+                # §2(b) fails. On a turn's *first* plan that is a turn that did not
+                # iterate, which is §9's default and says something true; after a
+                # revision it is §9's **settled** — the planner stopped asking.
+                if len(plans) > 1:
+                    audit.stop = StopReason.SETTLED
+                break
             # ADR-0226 §5: what is scoped is the **servicing** and never the
             # emission, so a planner on an unbounded-audience turn is not told
             # its request will not be serviced and nothing suppresses it — the
             # trigger goes on being measured on every channel, and the audit
             # records the emission and that it was declined.
             audit.servicing = Servicing.SERVICED if bounded_audience else Servicing.DECLINED
+            if not bounded_audience:
+                # §2(c). Nothing was serviced, so there is nothing to revise over,
+                # and ADR-0228 §14 defers a revision on such an operation by name.
+                break
+            # ADR-0226 §5: after the planner returns and before the `TurnResult` is
+            # constructed. `memories` here is the very sequence the planner was
+            # passed **on this call**, which is both §3's label space and §7's
+            # deduplication set — and ADR-0228 §8 binds that clause per call, so the
+            # same label string may name different records on a turn's two calls.
+            # The servicer *writes* its record rather than returning one, on
+            # every path out of it — including the one a cancellation carries
+            # away, which is not a `MemoryStoreError` and so reaches neither its
+            # degradation nor a `break` here. ADR-0226 §9's record is emitted
+            # from `respond`'s `finally` regardless, so a servicing that never
+            # finished must not leave one saying it completed.
+            # ADR-0227 §3: the carrier is *returned* rather than written onto
+            # the audit, because ADR-0226 §9's record "copies no text" and
+            # carries "no identifier but the correlation id" — threading a
+            # render decision through it would put record identifiers on a
+            # surface whose whole discipline is that they are not there.
+            reached = await service_read_request(
+                self._memory, request, supply=memories, audit=audit
+            )
+            serviced = audit.servicings[-1]
+            # ADR-0226 §7: appended whole after the episodic supplement, never
+            # interleaved. The three groups keep their positions, their order and
+            # their meanings, and every servicing of the turn fills **one** fourth
+            # group in servicing order (ADR-0228 §7) — there is no fifth.
+            memories += serviced.records
+            # ADR-0228 §13 item 14: the hop set accumulates rather than the later
+            # servicing replacing the earlier, so a record the first hop reached
+            # still renders its reply in the prompt the turn finally assembles.
+            # `dict.fromkeys` keeps the first arrival's place, exactly as the
+            # servicer's own deduplication does.
+            hop_reached = tuple(dict.fromkeys(hop_reached + reached))
+            # §2's remaining conditions, in one place (:func:`_stop_reason`). The
+            # clock is read **here**, immediately before the call the budget gates,
+            # and at no other point (§4).
+            stop = _stop_reason(
+                plans=plans,
+                serviced=serviced,
+                planning_budget=planning_budget,
+                elapsed=self._now_utc() - started,
+            )
+            if stop is not None:
+                audit.stop = stop
+                break
+            # Set *before* the call, so a planner that raises and a cancellation
+            # that lands between the servicing and the plan's return both leave
+            # §9's record saying **planning failed** — the fifth member exists
+            # because none of the four successful outcomes describes such a turn,
+            # and a vocabulary that forced an implementation to pick a falsehood
+            # would be a vocabulary with a hole. Every path out of the loop below
+            # this line assigns the reason again, so the value only stands where the
+            # call did not return.
+            audit.stop = StopReason.PLANNING_FAILED
+            plan = _stamped(
+                await self._planned(goal, context=context, memories=memories),
+                supersedes=plan.id,
+            )
+            plans += (plan,)
+            audit.planner_calls = len(plans)
         if bounded_audience:
-            if request is not None:
-                # ADR-0226 §5: after the planner returns and before the
-                # `TurnResult` is constructed. `memories` here is the very
-                # sequence the planner was passed, which is both §3's label space
-                # and §7's deduplication set.
-                # The servicer *writes* its record rather than returning one, on
-                # every path out of it — including the one a cancellation carries
-                # away, which is not a `MemoryStoreError` and so reaches neither its
-                # degradation nor a `return` here. ADR-0226 §9's record is emitted
-                # from `respond`'s `finally` regardless, so a servicing that never
-                # finished must not leave one saying it completed.
-                # ADR-0227 §3: the carrier is *returned* rather than written onto
-                # the audit, because ADR-0226 §9's record "copies no text" and
-                # carries "no identifier but the correlation id" — threading a
-                # render decision through it would put record identifiers on a
-                # surface whose whole discipline is that they are not there.
-                hop_reached = await service_read_request(
-                    self._memory, request, supply=memories, audit=audit
-                )
-                # §7: appended whole after the episodic supplement, never
-                # interleaved. The three groups keep their positions, their order
-                # and their meanings.
-                memories += audit.read.records
             # ADR-0226 §7, superseding ADR-0204 §2's timing clause and nothing
-            # else of §2: one evaluation, over the turn's **final** supply. On a
-            # bounded-audience operation the filter subtracts nothing (ADR-0204
-            # §4), so the planner above saw exactly what it would have seen with
-            # the filter applied ahead of it — what moves is *when* the evaluation
-            # is taken, so that it sees the group the planner asked for.
+            # else of §2: one evaluation, over the turn's **final** supply — which
+            # under iteration means after the **last** servicing the turn performed
+            # (ADR-0228 §7). On a bounded-audience operation the filter subtracts
+            # nothing (ADR-0204 §4), so every planner call above saw exactly what it
+            # would have seen with the filter applied ahead of it — what moves is
+            # *when* the evaluation is taken, so that it sees every group the turn's
+            # planners asked for.
             context, memories = _narrowed(narrow, context, memories, retrieved_ids)
         return RespondedTurn(
             turn=TurnResult(
@@ -885,6 +1174,63 @@ class LearningLoop:
                 memory_degraded=degraded or history_degraded,
             ),
             hop_reached=hop_reached,
+            plans=plans,
+            # ADR-0228 §10: the bare fact that the turn stopped looking while it was
+            # still asking, and nothing else. Stated as §10 states it — both guards,
+            # and the last plan still carrying a request — rather than inferred from
+            # the stop reason alone, so the carrier cannot come to mean "a guard
+            # fired" if a later lane admits a guard that fires on a settled turn.
+            stopped_while_asking=(
+                audit.stop in {StopReason.BOUND_REACHED, StopReason.BUDGET_REACHED}
+                and plan.read_request is not None
+            ),
+        )
+
+    async def _planned(
+        self,
+        goal: Goal,
+        *,
+        context: CurrentContext,
+        memories: Sequence[MemoryRecord],
+    ) -> ActionPlan:
+        """Read the capability vocabulary, then plan over it (ADR-0211 §3).
+
+        The two are one step because §3 requires the vocabulary to be read "within
+        the turn, from the registry selection resolves against, and **immediately
+        before the call**" — so the plan is judged against the vocabulary as it stood
+        immediately before the call that produced it. Under ADR-0228 §1 a turn may
+        make two such calls, and each reads again: a plan judged against a vocabulary
+        read before a *different* call is exactly what §3 exists to prevent, and a
+        vocabulary hoisted above the loop would be that.
+
+        Nothing is withheld from the read and nothing needs to be: the registry
+        "holds configuration, not personal data" (ADR-0016 §6), so there is no record
+        to place, no provenance to read and no class to withhold, and the vocabulary
+        is the same on a spoken turn as on a typed one. That is why it sits *after*
+        ``narrow`` rather than inside it.
+
+        Args:
+            goal: The turn's goal, minted once and the same on both calls (ADR-0228
+                §1): the goal is the user's unrewritten words and nothing about it
+                changed, and a second goal would make one turn look like two in every
+                store that holds goals.
+            context: The situational context, assembled once per turn and the same on
+                both calls (ADR-0228 §1).
+            memories: The supply **as it stands for this call** — three groups on a
+                turn's first, and those three plus the servicing's fourth on its
+                second (ADR-0228 §7).
+
+        Returns:
+            The plan, exactly as the planner returned it. ``supersedes`` is not
+            touched here: :func:`_stamped` is the one place this loop takes that
+            field, so there is one such place rather than two.
+
+        Raises:
+            PlanningError: If the planner could not produce a plan.
+        """
+        capabilities = await self._registry.capabilities()
+        return await self._planner.plan(
+            goal, context=context, memories=memories, capabilities=capabilities
         )
 
     async def learn(self, event: FeedbackEvent) -> tuple[WriteOutcome, ...]:

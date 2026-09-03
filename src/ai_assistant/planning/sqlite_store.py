@@ -1065,6 +1065,24 @@ class SqlitePlanStore:
         *reused* id keeps a plan an audit record: re-planning takes a new id
         (ADR-0014 §2). An identical re-save is idempotent, so a retry is harmless.
 
+        **A ``supersedes`` that does not resolve is refused** (ADR-0228 §5): one
+        naming a plan this store does not hold, one naming the saving plan's own
+        ``id``, and one naming a plan under a different ``goal_id``. It is checked
+        inside the same write transaction as the orphan check, against the ``plans``
+        table's own ``goal_id`` column, so a concurrent writer cannot land a
+        predecessor between the check and the insert.
+
+        **And no durable foreign key stands beneath it**, unlike the ``goal_id``
+        one — ADR-0228 §5 states the reason and ADR-0049 §1 supplies it. That
+        constraint exists to close a *cross-process* window ("one connection deletes
+        goal ``g`` between another's check and its insert"), and this reference has
+        none: both plans of a turn are written by that turn, oldest first, and this
+        store offers no way to delete a single plan — :meth:`delete_goal` removes a
+        goal's plans together and both of a turn's plans share its ``goal_id``, and
+        :meth:`clear` removes everything. A future member that deletes plans
+        individually, or a chain that spanned goals, fires that constraint; ADR-0228
+        §1 forbids the second and nothing contracts the first.
+
         Revalidated before it is persisted, for the same reason as ``save_goal``:
         a mutable ``ActionPlan`` mutated past its validators must fail at the write
         rather than poison every later decode.
@@ -1079,6 +1097,26 @@ class SqlitePlanStore:
             if conn.execute("SELECT 1 FROM goals WHERE id = ?", (plan.goal_id,)).fetchone() is None:
                 msg = f"plan {plan.id} refers to unknown goal {plan.goal_id}"
                 raise PlanningError(msg)
+            # ADR-0228 §5's three arms, read off the `plans` table's own `goal_id`
+            # column rather than by decoding the predecessor: the column is what the
+            # insert below writes, so the check and the write see one fact.
+            if plan.supersedes is not None:
+                if plan.supersedes == plan.id:
+                    msg = f"plan {plan.id} supersedes itself; a plan cannot replace the plan it is"
+                    raise PlanningError(msg)
+                predecessor = conn.execute(
+                    "SELECT goal_id FROM plans WHERE id = ?", (plan.supersedes,)
+                ).fetchone()
+                if predecessor is None:
+                    msg = f"plan {plan.id} supersedes unknown plan {plan.supersedes}"
+                    raise PlanningError(msg)
+                if predecessor[0] != plan.goal_id:
+                    msg = (
+                        f"plan {plan.id} supersedes plan {plan.supersedes}, which is under "
+                        f"goal {predecessor[0]} rather than {plan.goal_id}; a revision "
+                        "replaces a plan for the same goal"
+                    )
+                    raise PlanningError(msg)
             row = conn.execute("SELECT data FROM plans WHERE id = ?", (plan.id,)).fetchone()
             if row is not None:
                 if _decode_plan(row[0]) != plan:

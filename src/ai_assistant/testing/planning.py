@@ -106,6 +106,21 @@ class FakePlanner:
     which the trigger fired — and, left alone, the fake asks for nothing on every
     turn, which is what a planner that knows nothing of the envelope does and what
     every existing consumer of this fake keeps getting.
+
+    **And a turn may call it twice** (ADR-0228 §3). Two things follow, and both are
+    the widened contract rather than a convenience. A **synthesised** plan takes a
+    fresh ``id`` on every call after the first, because ADR-0014 §2's "re-planning
+    produces a *new* ``ActionPlan`` with a new ``id``" now binds *within* one turn and
+    a fake minting one id twice would be non-conforming exactly where ADR-0228 §5's
+    chain is asserted. And ``revision`` scripts what the **second** call returns,
+    which is the hook a consumer's test takes to drive the milestone's own shape — a
+    first plan that cannot name a value and asks for it, and a second that carries it
+    — without standing a model up.
+
+    **It sets no ``supersedes``** (ADR-0228 §5). That field is the loop's on every
+    plan a planner returns, so a fake authoring one would be scripting a value its
+    consumer discards; a test that wants to prove the discard scripts a plan carrying
+    one and asserts what was persisted.
     """
 
     def __init__(
@@ -114,6 +129,7 @@ class FakePlanner:
         *,
         now: Clock = _utcnow,
         read_request: ReadRequest | None = None,
+        revision: ActionPlan | None = None,
     ) -> None:
         """Create a planner.
 
@@ -129,6 +145,12 @@ class FakePlanner:
                 planner that asked for no read. This is the hook a consumer's tests
                 take to drive a turn on which the trigger fired, without standing a
                 model up.
+            revision: What a turn's **second** call returns (ADR-0228 §3), or
+                ``None`` — the default, under which every call answers the same way
+                and a consumer sees exactly what it saw before this milestone. A
+                turn makes at most two calls, so this is the only other one there
+                is. Its ``supersedes`` is scripted like any other field and the loop
+                discards it (§5), which is what makes the discard assertable.
 
         Raises:
             ValueError: If both ``plan`` and ``read_request`` are given. A scripted
@@ -144,6 +166,7 @@ class FakePlanner:
             raise ValueError(msg)
         self._plan = plan
         self._read_request = read_request
+        self._revision = revision
         self._clock = checked_clock(now, owner="FakePlanner")
         #: One entry per call: the goal, the context, the memories and the
         #: capability vocabulary the caller stated (ADR-0211 §9 item 3). The
@@ -190,6 +213,16 @@ class FakePlanner:
         (ADR-0211 §1) — and only frozen into a tuple, so a caller mutating the
         sequence it passed cannot rewrite what this records.
 
+        **A turn's second call is answered by ``revision`` where one was scripted**
+        (ADR-0228 §3), and by the same value as the first everywhere else — so a fake
+        constructed as every existing consumer constructs it behaves on a revising
+        turn exactly as it behaves on any other. Nothing here reads the iteration off
+        ``memories`` or changes what it emits on account of it: ADR-0228 §12 rules
+        that the planner "is not told which iteration it is on", and a fake that
+        judged the supply would be a fake with an opinion the contract leaves to an
+        implementation. The call ordinal it does read is the fake's own script
+        pointer, never an input to a decision.
+
         **The read request is scripted for the same reason and is not derived from
         ``memories``** (ADR-0226 §8). Whether this turn's supply sufficed is the
         judgement the trigger *is*, and a fake that judged it would be a fake with
@@ -214,10 +247,19 @@ class FakePlanner:
                 vocabulary is legal and changes nothing here (ADR-0211 §6).
         """
         self.calls.append((goal, context, tuple(memories), tuple(capabilities)))
+        ordinal = len(self.calls)
+        if self._revision is not None and ordinal > 1:
+            return self._revision
         if self._plan is not None:
             return self._plan
         return ActionPlan(
-            id=f"{goal.id}-plan",
+            # Distinct on every call after the first (ADR-0228 §3, ADR-0014 §2). The
+            # first keeps the id this fake has always minted, so nothing that named
+            # it moves; a revision takes a new one, because a turn persists both
+            # plans and `save_plan` refuses a `supersedes` naming the saving plan's
+            # own id (ADR-0228 §5) — a fake reusing the id would fail its consumer
+            # for the fake's own defect.
+            id=f"{goal.id}-plan" if ordinal == 1 else f"{goal.id}-plan-{ordinal}",
             goal_id=goal.id,
             steps=(),
             created_at=self._now(),
@@ -332,11 +374,34 @@ class FakePlanStore:
 
         Re-planning must take a new id so the previous plan stays an intact
         audit record; an identical re-save is idempotent (ADR-0014 §2).
+
+        **A ``supersedes`` that does not resolve is refused** (ADR-0228 §5): one
+        naming a plan this store does not hold, one naming the saving plan's own
+        ``id``, and one naming a plan under a different ``goal_id``. That is
+        ADR-0014 §5's export promise kept at write time, exactly as the orphan check
+        above keeps it for ``goal_id`` — a plan whose predecessor is missing is a
+        supersession whose subject has been lost, discovered only by whoever reads
+        the export back.
         """
         async with self._resource.held():
             if plan.goal_id not in self._goals:
                 msg = f"plan {plan.id} refers to unknown goal {plan.goal_id}"
                 raise PlanningError(msg)
+            if plan.supersedes is not None:
+                if plan.supersedes == plan.id:
+                    msg = f"plan {plan.id} supersedes itself; a plan cannot replace the plan it is"
+                    raise PlanningError(msg)
+                predecessor = self._plans.get(plan.supersedes)
+                if predecessor is None:
+                    msg = f"plan {plan.id} supersedes unknown plan {plan.supersedes}"
+                    raise PlanningError(msg)
+                if predecessor.goal_id != plan.goal_id:
+                    msg = (
+                        f"plan {plan.id} supersedes plan {plan.supersedes}, which is under "
+                        f"goal {predecessor.goal_id} rather than {plan.goal_id}; a revision "
+                        "replaces a plan for the same goal"
+                    )
+                    raise PlanningError(msg)
             existing = self._plans.get(plan.id)
             if existing is not None and existing != plan:
                 msg = (

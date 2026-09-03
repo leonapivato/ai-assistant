@@ -129,6 +129,47 @@ class Servicing(StrEnum):
     NOT_ASKED = "not_asked"
 
 
+class StopReason(StrEnum):
+    """Why a turn stopped iterating (ADR-0228 §9).
+
+    **A closed vocabulary of five**, and "no implementation, setting or later lane
+    adds a sixth without the ADR that decides it". Four describe a turn that ran to
+    its own end and the fifth describes one that did not, which is the hole §9
+    fills deliberately: a second planner call that raises still writes a record, and
+    none of the four successful outcomes describes it — labelling such a turn
+    :attr:`SETTLED` would say the planner stopped asking when it did not, and
+    :attr:`BOUND_REACHED` would say a guard fired when none did.
+
+    **It is a stop *reason* and never a turn outcome.** The original failure
+    propagates unchanged, exactly as ADR-0226 §11 item 10 requires of its own arms.
+
+    Attributes:
+        NOT_ITERATED: No revision was admissible — one of ADR-0228 §2's conditions
+            (a) to (e) failed. **The default**, so a turn that ended before it
+            reached a first plan carries it and says something true: it did not
+            iterate. What separates that turn from one that reached a plan and found
+            no revision admissible is :class:`TriggerOutcome`, **not reached**
+            against **fired** or **not fired** — the same division ADR-0226 §9 draws
+            between its own two defaults. No lane reads this as a claim that a first
+            plan existed.
+        SETTLED: The last plan carried no request. Reachable only after a revision:
+            a turn whose *first* plan carried none failed §2's condition (b) and is
+            :attr:`NOT_ITERATED`.
+        BOUND_REACHED: ADR-0228 §3's bound of two planner calls stopped the turn
+            with its planner still asking.
+        BUDGET_REACHED: ADR-0228 §4's per-operation budget was spent when the check
+            was made. The boundary instant is spent, not available.
+        PLANNING_FAILED: A planner call after the first raised, or the turn ended
+            between a servicing and the next plan's return.
+    """
+
+    NOT_ITERATED = "not_iterated"
+    SETTLED = "settled"
+    BOUND_REACHED = "bound_reached"
+    BUDGET_REACHED = "budget_reached"
+    PLANNING_FAILED = "planning_failed"
+
+
 @dataclass(frozen=True, slots=True)
 class ServicedRead:
     """What one servicing carried into the turn, and what §9 records of it.
@@ -137,7 +178,14 @@ class ServicedRead:
     every count zero and no failure — which is what a non-firing turn, a declined
     one and a turn whose planner never returned all carry.
 
+    **One of these per servicing, in servicing order** (ADR-0228 §9). Every field
+    keeps the meaning ADR-0226 §9 gives it, over its own servicing; ``kinds`` moved
+    here from the turn level when the record came to account per emission, because a
+    turn's two emissions may ask for different things.
+
     Attributes:
+        kinds: The kind of each ask this servicing's request carried, in the order
+            the request carries them.
         records: The fourth group, in §6's order: the hop's records first, then the
             sighted query's, each already deduplicated against the pre-servicing
             supply *and* against every record admitted before it (§7). Empty on a
@@ -167,6 +215,7 @@ class ServicedRead:
             failure".
     """
 
+    kinds: tuple[ReadKind, ...] = ()
     records: tuple[MemoryRecord, ...] = ()
     returned: int = 0
     new: int = 0
@@ -385,9 +434,11 @@ async def service_read_request(
             :meth:`~ai_assistant.core.protocols.Planner.plan` **on this call**, in
             order. It is both §3's label space and §7's deduplication set, and it is
             the same sequence for both because §3's label *is* a position in it.
-        audit: This turn's record. Its :attr:`TurnReadAudit.read` is written on every
-            path out of this function, and :attr:`ServicedRead.records` is the fourth
-            group the caller appends.
+        audit: This turn's record. One :class:`ServicedRead` entry is appended to
+            :attr:`TurnReadAudit.servicings` on every path out of this function, and
+            :attr:`ServicedRead.records` is what the caller appends to the fourth
+            group. A turn that services twice appends two, in servicing order
+            (ADR-0228 §9).
 
     Returns:
         ADR-0227 §3's carrier: the distinct ids of the records this turn's citation
@@ -440,6 +491,7 @@ async def service_read_request(
             if allowed < READ_BUDGET and len(found) == allowed:
                 truncated.append(ReadKind.SIGHTED_QUERY)
         completed = ServicedRead(
+            kinds=tuple(ask.kind for ask in request.asks),
             records=tuple(union.admitted),
             returned=union.returned,
             new=len(union.admitted),
@@ -475,8 +527,13 @@ async def service_read_request(
         # failing ones carry the observer's own answer to §9's second failure
         # field. Written here rather than returned, so no path can leave the turn
         # with a record describing a servicing that did not happen.
-        audit.read = completed or ServicedRead(
-            failed=True, failed_after_read_returned=reads.returned_any
+        audit.servicings += (
+            completed
+            or ServicedRead(
+                kinds=tuple(ask.kind for ask in request.asks),
+                failed=True,
+                failed_after_read_returned=reads.returned_any,
+            ),
         )
     return reached
 
@@ -531,25 +588,46 @@ class TurnReadAudit:
     denominator, and defaulting it into the denominator would let a planner outage
     read as a collapse in the fire rate.
 
+    **Extended, not replaced, when a turn came to plan twice** (ADR-0228 §9), which
+    is what ADR-0226 §9 itself provided for: "An ADR admitting a second serviced
+    emission per turn extends this record to account per emission and keeps every
+    field's meaning." One record, one turn, one event key, one ``INFO`` line, emitted
+    once and conditioned on nothing — every clause of §9 binds unchanged. What
+    changed is that the per-servicing counts became :attr:`servicings`, a sequence
+    with one entry per servicing, and that two turn-level fields were added beside
+    them.
+
     Attributes:
-        trigger: What the trigger did (§8).
-        servicing: What became of an emitted request (§5).
-        kinds: The kind of each ask, in the order the request carries them.
-        read: What the servicing carried, or the default where none ran.
+        trigger: What the trigger did (§8). **Turn-level**: a turn's trigger fired
+            if *any* plan that turn produced carried a request (ADR-0228 §9), which
+            is what keeps the live fire rate a per-turn rate directly comparable to
+            the replay's 13.6%.
+        servicing: What became of an emitted request (§5). Turn-level, and it stays
+            so: ADR-0226 §5's channel scoping is a property of the operation, and a
+            turn whose servicing is declined never iterates (ADR-0228 §2(c)), so it
+            has exactly one emission to describe.
+        servicings: One entry per servicing, in servicing order (ADR-0228 §9). Empty
+            on a turn that serviced nothing — a turn that did not fire, one that was
+            declined, and one that never reached a plan.
+        planner_calls: How many calls to ``Planner.plan`` this turn made (ADR-0228
+            §9). Zero where the turn ended before the first returned.
+        stop: Why the turn stopped iterating (:class:`StopReason`).
     """
 
     trigger: TriggerOutcome = TriggerOutcome.NOT_REACHED
     servicing: Servicing = Servicing.NOT_ASKED
-    kinds: tuple[ReadKind, ...] = ()
-    read: ServicedRead = field(default_factory=ServicedRead)
+    servicings: tuple[ServicedRead, ...] = ()
+    planner_calls: int = 0
+    stop: StopReason = StopReason.NOT_ITERATED
 
     def emit(self) -> None:
         """Write this turn's record — see :func:`emit_read_audit`."""
         emit_read_audit(
             trigger=self.trigger,
             servicing=self.servicing,
-            kinds=self.kinds,
-            read=self.read,
+            servicings=self.servicings,
+            planner_calls=self.planner_calls,
+            stop=self.stop,
         )
 
 
@@ -557,8 +635,9 @@ def emit_read_audit(
     *,
     trigger: TriggerOutcome,
     servicing: Servicing,
-    kinds: Sequence[ReadKind] = (),
-    read: ServicedRead,
+    servicings: Sequence[ServicedRead] = (),
+    planner_calls: int = 0,
+    stop: StopReason = StopReason.NOT_ITERATED,
 ) -> None:
     """Write ADR-0226 §9's record for one turn, once, at ``INFO``.
 
@@ -595,27 +674,54 @@ def emit_read_audit(
     record in the log rather than in a store, and §12's deferred durable surface is
     what a deployment that cannot accept it fires.
 
+    **The counts account per servicing and the rates stay per turn** (ADR-0228 §9).
+    ``servicings`` is an ordered sequence with one entry per servicing, each field of
+    an entry keeping the meaning §9 gives it over its own servicing; ``trigger``,
+    ``servicing``, ``planner_calls`` and ``stop`` are the turn's. **No lane divides
+    emissions by turns and calls the result a fire rate** — a turn that emits twice
+    is one turn, and counting emissions over turns would produce a figure above 100%
+    in the limit and would move for a reason that has nothing to do with the
+    planner's judgement about a first supply. The two figures this shape newly
+    supports are the **iteration rate** (the share of fired turns that revised) and
+    the **stop distribution**; neither is a precision, a recall or a novelty rate,
+    and ADR-0226 §8's prohibition on reporting precision or recall from this record
+    alone binds them too.
+
+    **Two turn-level fields and a sequence, rather than a second event.** §9 forbids
+    a second audit beside this one in terms, and the shape it prescribes — "account
+    per emission" — is a sequence. The stop reason sits at the turn level rather than
+    in the last entry so that the guard rates are readable without reconstructing
+    them: "how often does the budget fire" is a count over one field.
+
     Args:
-        trigger: What the trigger did (§8).
+        trigger: What the trigger did (§8), over the turn.
         servicing: What became of an emitted request (§5).
-        kinds: The kind of each ask, in the order the request carries them. Empty
-            where no request was emitted.
-        read: What the servicing carried, or the default ``ServicedRead`` where none
-            ran.
+        servicings: One entry per servicing, in servicing order. Empty where nothing
+            was serviced.
+        planner_calls: How many calls to ``Planner.plan`` the turn made (ADR-0228
+            §9).
+        stop: Why the turn stopped iterating (ADR-0228 §9).
     """
     _log.info(
         READ_AUDIT_EVENT,
         correlation_id=current_correlation(),
         trigger=trigger.value,
         servicing=servicing.value,
-        kinds=tuple(kind.value for kind in kinds),
-        returned=read.returned,
-        new=read.new,
-        deduplicated=read.deduplicated,
-        labels_unresolved=read.labels_unresolved,
-        truncated_kinds=tuple(kind.value for kind in read.truncated_kinds),
-        failed=read.failed,
-        failed_after_read_returned=read.failed_after_read_returned,
+        planner_calls=planner_calls,
+        stop=stop.value,
+        servicings=tuple(
+            {
+                "kinds": tuple(kind.value for kind in read.kinds),
+                "returned": read.returned,
+                "new": read.new,
+                "deduplicated": read.deduplicated,
+                "labels_unresolved": read.labels_unresolved,
+                "truncated_kinds": tuple(kind.value for kind in read.truncated_kinds),
+                "failed": read.failed,
+                "failed_after_read_returned": read.failed_after_read_returned,
+            }
+            for read in servicings
+        ),
     )
 
 

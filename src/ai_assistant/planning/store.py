@@ -126,6 +126,14 @@ class InMemoryPlanStore:
         Re-planning takes a new id (ADR-0014 §2). An identical re-save is
         idempotent, so a retry is harmless.
 
+        **A ``supersedes`` that does not resolve is refused** (ADR-0228 §5): one
+        naming a plan this store does not hold, one naming the saving plan's own
+        ``id``, and one naming a plan under a different ``goal_id``. That is
+        ADR-0014 §5's export promise kept at write time, exactly as the orphan check
+        above keeps it for ``goal_id`` — a plan whose predecessor is missing is a
+        supersession whose subject has been lost, discovered only by whoever reads
+        the export back.
+
         Stored as a copy for the same reason goals and executions are:
         ``frozen=True`` stops ``plan.goal_id = ...`` but not
         ``plan.__dict__["goal_id"] = ...``, so sharing the instance would let a
@@ -135,6 +143,21 @@ class InMemoryPlanStore:
         if plan.goal_id not in self._goals:
             msg = f"plan {plan.id} refers to unknown goal {plan.goal_id}"
             raise PlanningError(msg)
+        if plan.supersedes is not None:
+            if plan.supersedes == plan.id:
+                msg = f"plan {plan.id} supersedes itself; a plan cannot replace the plan it is"
+                raise PlanningError(msg)
+            predecessor = self._plans.get(plan.supersedes)
+            if predecessor is None:
+                msg = f"plan {plan.id} supersedes unknown plan {plan.supersedes}"
+                raise PlanningError(msg)
+            if predecessor.goal_id != plan.goal_id:
+                msg = (
+                    f"plan {plan.id} supersedes plan {plan.supersedes}, which is under goal "
+                    f"{predecessor.goal_id} rather than {plan.goal_id}; a revision replaces "
+                    "a plan for the same goal"
+                )
+                raise PlanningError(msg)
         existing = self._plans.get(plan.id)
         if existing is not None and existing != plan:
             msg = (
