@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 import pypdf
 import pytest
 from fetch_fixtures import fetcher as build
-from pdf_fixtures import extracted_text_of, minimal_pdf
+from pdf_fixtures import amplified_page_tree_pdf, extracted_text_of, minimal_pdf
 
 sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "core"))
 
@@ -718,3 +718,36 @@ async def test_a_pdf_inside_the_bound_extracts_every_page(root: Path) -> None:
 
     assert outcome.record is not None
     assert outcome.record.content == extracted_text_of(lines)
+
+
+async def test_an_amplified_page_tree_is_refused_rather_than_traversed(root: Path) -> None:
+    """The traversal bound for the one format whose page count is not a byte count.
+
+    ADR-0230 §6 says ``fetch_max_file_bytes`` "bounds the read **and the extraction's
+    cost**", which holds for text and Markdown because the work is proportional to the
+    bytes. A PDF's page tree breaks that proportionality: a document of about 1.4 KB can
+    declare 64,000,000 pages by naming one shared node twenty times at each of six
+    levels, and a page carrying no text moves ``fetch_max_content_bytes`` not at all —
+    so neither of §6's two bounds refuses it on its own.
+
+    What refuses it is the adopted library's own traversal guards —
+    ``PAGE_TREE_MAX_ENTRIES`` at 100,000 counted across the whole traversal,
+    ``PAGE_TREE_MAX_DEPTH`` at 100, and a cycle-detecting visited set — and this arm
+    exists so that is a **checked property of the pinned dependency** rather than a
+    claim a docstring makes. A future ``pypdf`` dropping a guard fails here.
+
+    Asserted under a deadline as well as on the class, because what is under test is
+    that the work stops: an assertion about the returned refusal alone cannot tell a
+    document refused in half a second from one refused after exhausting the machine.
+    """
+    (root / "amplified.pdf").write_bytes(amplified_page_tree_pdf())
+    subject = build(root)
+    try:
+        listing = await subject.listing()
+        async with asyncio.timeout(30):
+            outcome = await subject.fetch(listing, listing.entries[0])
+    finally:
+        subject.close()
+
+    assert outcome.refusal is FetchRefusal.EXTRACTION_FAILED
+    assert outcome.record is None

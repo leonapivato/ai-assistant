@@ -13,12 +13,14 @@ needs in order to drive ADR-0230 §6's disposition without a filesystem.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from fetcher_contract import ClockedFetcher, Dial, FetcherContract, GatedFetch, wall_of
 
+from ai_assistant.core.clock import ClockReadingError
 from ai_assistant.core.types import FetchRefusal
 from ai_assistant.testing import DEFAULT_FETCHER_NAME, FakeFetcher
 
@@ -110,10 +112,99 @@ async def test_every_refusal_member_is_reachable_from_the_script(
     assert outcome.record is None
 
 
-def test_a_blank_identity_is_refused_at_construction() -> None:
-    """The canonical fake must not be configurable into failing its own suite."""
-    with pytest.raises(ValueError, match="non-blank"):
-        FakeFetcher(name="   ")
+@pytest.mark.parametrize("name", ["", "   ", " files ", "files ", "files:0f3c", "a\udc80b"])
+def test_a_value_that_is_not_a_declared_name_is_refused_at_construction(name: str) -> None:
+    """ADR-0190 §4's declared-name rules, refused rather than repaired.
+
+    The canonical fake must not be configurable into failing its own suite, and a
+    **padded** name is the arm that makes the cost concrete rather than formal:
+    ``SourceListing.source`` is ``EncodableText`` and does not strip, while
+    ``Attestation.reported_by`` is an ``Identifier`` whose validator *returns*
+    ``value.strip()`` — so ``" files "`` would put one source into a listing and a
+    record under two spellings, from one fetcher, in one turn, and would make it
+    ungrantable besides (ADR-0097 §9).
+
+    The colon arm is §4's second form intruding on the first: a declared name carrying
+    one is not a declared name, and a value merely *shaped* like a discriminated
+    identity is not one either — which is why the discriminator arrives through its own
+    parameter rather than being read out of this one.
+    """
+    with pytest.raises(ValueError, match="ADR-0190 §4"):
+        FakeFetcher(name=name)
+
+
+@pytest.mark.parametrize(
+    "discriminator",
+    ["", "0f3c", "0F3C9D1A7B45E28C6D90FA3B17E4C852", "0f3c9d1a7b45e28c6d90fa3b17e4c85"],
+)
+def test_a_value_that_is_not_a_discriminator_is_refused_at_construction(
+    discriminator: str,
+) -> None:
+    """Exactly 32 lowercase hexadecimal characters, and nothing else is one (§4)."""
+    with pytest.raises(ValueError, match="ADR-0190 §4"):
+        FakeFetcher(discriminator=discriminator)
+
+
+async def test_a_discriminated_identity_reaches_the_listing_and_the_record() -> None:
+    """ADR-0190 §4's second form, composed and carried on both surfaces.
+
+    The form a deployment's **second** configured source of a type holds. A fetch root
+    takes the bare form today because a deployment configures one (ADR-0230 §6), so
+    this is the arm that keeps the fake able to stand in for the day it does not.
+    """
+    subject = FakeFetcher(
+        {"a.md": "x"}, name="files", discriminator="0f3c9d1a7b45e28c6d90fa3b17e4c852"
+    )
+
+    listing = await subject.listing()
+    outcome = await subject.fetch(listing, listing.entries[0])
+
+    assert subject.name == "files:0f3c9d1a7b45e28c6d90fa3b17e4c852"
+    assert listing.source == subject.name
+    assert outcome.record is not None
+    attestation = outcome.record.provenance.attestation
+    assert attestation is not None
+    assert attestation.reported_by == subject.name
+
+
+@pytest.mark.parametrize(
+    ("figure", "value"),
+    [
+        ("listing_ttl", timedelta(0)),
+        ("listing_ttl", timedelta(seconds=-1)),
+        ("max_entries", 0),
+        ("max_entries", -1),
+    ],
+)
+def test_a_bound_outside_its_domain_is_refused_at_construction(figure: str, value: object) -> None:
+    """ADR-0230 §6's domains, on the fake as on the concrete fetcher.
+
+    Both are values the fake could only honour by breaking its own contract. A zero
+    ``listing_ttl`` mints a listing that is **already expired**, so its own authentic
+    entry can never be fetched — a fetcher that lists what it cannot read. And a
+    negative ``max_entries`` reaches ``entries[:-1]``, which "quietly yields all but the
+    last entry, so a bound would be defeated by a configuration value rather than
+    enforced by one" — the exact reading §6 refuses.
+    """
+    configured: dict[str, Any] = {figure: value}
+
+    with pytest.raises(ValueError, match="ADR-0230 §6"):
+        FakeFetcher({"a.md": "x"}, **configured)
+
+
+def test_the_clock_is_guarded_like_every_other_seam() -> None:
+    """ADR-0026 §7 is "uniformity with **no advisory exemption**", fakes included.
+
+    "The ``testing/`` fakes are in scope for the reason they exist: they are the
+    canonical doubles consumers certify against, and a fake looser than the contract
+    certifies consumers the real implementation will reject." A naive reading must reach
+    a caller as the clock seam's own refusal rather than as an unrelated validation
+    error from whichever model happened to be constructed first.
+    """
+    subject = FakeFetcher({"a.md": "x"}, now=lambda: datetime(2026, 1, 1))  # noqa: DTZ001
+
+    with pytest.raises(ClockReadingError):
+        asyncio.run(subject.listing())
 
 
 @pytest.mark.parametrize("name", ["a/b.md", "../escape.md", "..", ".", "nul\x00.md"])

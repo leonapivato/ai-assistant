@@ -186,15 +186,23 @@ def _extract_pdf(data: bytes, *, max_rendered_bytes: int) -> str:
     page's text at a time and stops on the first page that carries the total past the
     bound.
 
-    **What this does *not* bound is the page tree's own traversal, and that is stated
-    rather than left to be discovered.** ``pypdf`` resolves a document's page count
-    before it will yield a page, whichever way the collection is approached, so a
-    document inside ``fetch_max_file_bytes`` that declares a page tree far larger than
-    its own bytes — by naming one shared node many times — is flattened before this
-    loop runs at all. The cost is bounded by the file's own size and is finite, and
-    closing it would mean either a page bound §6 does not decide or a page-tree walk of
-    our own in place of the library's. **#2015** carries the question; nothing here
-    pre-empts it.
+    **The page tree's own traversal is bounded by the library, and that is checked
+    rather than assumed.** ``pypdf`` resolves a document's page count before it will
+    yield a page, whichever way the collection is approached — so the question is what
+    stops a document inside ``fetch_max_file_bytes`` that declares a page tree far
+    larger than its own bytes, by naming one shared node many times. The answer is
+    three guards in ``pypdf._doc_common._flatten``, all present in the version this
+    project pins: ``PAGE_TREE_MAX_ENTRIES`` (100,000) counted across the **whole**
+    traversal, ``PAGE_TREE_MAX_DEPTH`` (100), and a visited set refusing a cycle. Each
+    raises, and each raise lands in this function's own ``except`` as
+    ``EXTRACTION_FAILED``.
+
+    ``tests/readers/test_local_file_fetcher.py`` builds the amplified document —
+    roughly 1.4 KB claiming 64,000,000 pages — and asserts it is refused, so this is a
+    property of the pinned dependency that a future version dropping a guard would fail
+    on rather than a claim this docstring makes on its own. That is what makes the
+    adoption's "bounded by ``fetch_max_file_bytes``" honest for a format whose page
+    count is not a function of its byte count.
     """
     try:
         reader = pypdf.PdfReader(io.BytesIO(data))
