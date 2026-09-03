@@ -273,6 +273,53 @@ async def test_a_spoken_reply_this_browser_cannot_read_at_all_reaches_the_same_e
         assert thrown == []
 
 
+async def test_a_spoken_turn_whose_answer_was_unreadable_still_spends_its_delivery_report(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """Adversarial review, round 1, ``major``. The half of this ending nothing else reads.
+
+    The report a spoken request carries is *taken* from page state before the request
+    goes out (ADR-0205 §7 — "there is exactly one place it leaves this page"), and two
+    paths put it back: a ``fetch`` that rejected, and a refusal that was not about the
+    report itself. Both are requests the hub may never have received. This ending is not
+    one of them — the ``2xx`` is the hub having run the turn the report rode in on — so
+    the report is spent, and a page that put it back would send the same measurement
+    twice for one playback.
+
+    Before this change the report *was* put back here, because the throw reached
+    ``sendRecording``'s ``catch``; that is a state no reading of the file can settle and
+    no string assertion can observe, since what it is about is what the **next** request
+    carries. So the case drives three turns and reads the requests the page sent.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        # Recording from before the first request, because what this case reads is a
+        # sequence and the first turn is what puts a report into it.
+        await _hold(drive)
+        # One answer played, then a press over it: the interrupt is what puts a report
+        # in page state, and the second request is what carries it out.
+        await drive.press()
+        await drive.page.wait_for_function("() => window.__drive.starts.length === 1")
+        await _substitute(drive, path="/ask/spoken", body=_NO_OUTCOME)
+        await drive.press()
+
+        said = await _fault(drive)
+        assert "what the turn did is not known" in said
+        assert _GATEWAY_GONE not in said
+
+        # A third turn, answered normally, and what it carries is the whole question.
+        await _stop_substituting(drive)
+        await drive.press()
+        await drive.page.wait_for_function("() => window.__drive.starts.length === 2")
+
+        asked = await _sent(drive, "/ask/spoken")
+        assert len(asked) == 3, asked
+        # The report really was pending and really did ride out on the unreadable turn —
+        # without which the assertion below would hold over a page that never had one.
+        assert "delivery" in asked[1], asked[1]
+        # And it is not sent again: that request was answered `2xx`, so the hub has it.
+        assert "delivery" not in asked[2], asked[2]
+
+
 async def test_a_parks_answer_that_cannot_be_rendered_leaves_no_half_answer_behind(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
@@ -318,8 +365,9 @@ async def test_a_parks_answer_that_cannot_be_rendered_leaves_no_half_answer_behi
         assert complaints == []
 
 
-#: Replaces one path's response **body**, after the gateway has written it — installed
-#: over ``fetch`` in the manner of ``test_browser_conversations``' own hold and
+#: One hold over ``fetch`` that does two things: it records what the page **asked**,
+#: and it replaces one path's response **body** after the gateway has written it.
+#: Installed in the manner of ``test_browser_conversations``' own hold and
 #: ``browser_drive``'s Web Audio probe, and for both of their reasons.
 #:
 #: The request really is sent, the gateway really answers it, the turn really runs and
@@ -335,12 +383,30 @@ async def test_a_parks_answer_that_cannot_be_rendered_leaves_no_half_answer_behi
 #: on this harness — measured, three cases of ninety-two seconds against ADR-0216 §3's
 #: sixty-second budget for the whole layer — which is the same cost
 #: ``test_browser_conversations`` records against the same device.
-_SUBSTITUTING = """(asked) => {
+#:
+#: **What is substituted is held in a variable rather than closed over**, so one case
+#: can substitute for one request and let the next through — which is what a case about
+#: a *sequence* of turns needs. Installing a second hold instead would leave the first
+#: one substituting underneath it.
+_HOLDING = """() => {
+  if (window.__held !== undefined) {
+    return;
+  }
+  window.__held = null;
+  window.__sent = [];
   const realFetch = window.fetch;
   window.fetch = async function (resource, options) {
-    const path = typeof resource === "string" ? resource : resource.url;
+    const path = new URL(
+      typeof resource === "string" ? resource : resource.url,
+      location.href
+    ).pathname;
+    window.__sent.push({
+      path,
+      body: options === undefined || options.body === undefined ? null : options.body,
+    });
     const answered = await realFetch.call(this, resource, options);
-    if (new URL(path, location.href).pathname !== asked.path) {
+    const asked = window.__held;
+    if (asked === null || path !== asked.path) {
       return answered;
     }
     await answered.text();
@@ -354,6 +420,11 @@ _SUBSTITUTING = """(asked) => {
 """
 
 
+async def _hold(drive: Drive) -> None:
+    """Take the hold over ``fetch``, recording from here on. Installed once."""
+    await drive.page.evaluate(_HOLDING)
+
+
 async def _substitute(drive: Drive, *, path: str, body: str) -> None:
     """Let one path's request through, then replace the body of what came back.
 
@@ -362,7 +433,28 @@ async def _substitute(drive: Drive, *, path: str, body: str) -> None:
         path: The exact request path to substitute for.
         body: What the page reads in place of the body the gateway wrote.
     """
-    await drive.page.evaluate(_SUBSTITUTING, {"path": path, "body": body})
+    await _hold(drive)
+    await drive.page.evaluate("(asked) => { window.__held = asked; }", {"path": path, "body": body})
+
+
+async def _stop_substituting(drive: Drive) -> None:
+    """Let every path's own body through again, the hold still recording."""
+    await drive.page.evaluate("() => { window.__held = null; }")
+
+
+async def _sent(drive: Drive, path: str) -> list[dict[str, object]]:
+    """Every request body the page sent to one path, parsed, in order.
+
+    Args:
+        drive: The gateway, engine and page under test.
+        path: The request path to read back.
+
+    Returns:
+        One decoded payload per request, oldest first.
+    """
+    await _hold(drive)
+    recorded = await drive.page.evaluate("() => window.__sent")
+    return [json.loads(one["body"]) for one in recorded if one["path"] == path and one["body"]]
 
 
 async def _ask(drive: Drive, question: str) -> None:
