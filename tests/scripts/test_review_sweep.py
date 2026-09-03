@@ -10,6 +10,11 @@ sweep is too eager, and "unclassifiable" is asserted to mean *kept*.
 The disposition-snapshot rule gets the same treatment: ``ship`` fails closed on a
 snapshot that is missing, so a snapshot shared with a retained artifact must
 survive.
+
+Archiving is the default *because* it is recoverable, so the archive itself is
+held to that: the tests below sweep one name twice and assert that both copies
+are still there afterwards. A rename would have replaced the first silently, and
+the module's own justification for the default would have been false (#1410).
 """
 
 from __future__ import annotations
@@ -347,6 +352,64 @@ def test_an_archived_artifact_is_invisible_to_the_ship_glob(tmp_path: Path) -> N
 
     assert list((repo / ".review").glob("*.md")) == []
     assert (repo / ".review" / "archive" / "a.md").exists()
+
+
+def test_a_name_already_in_the_archive_is_never_replaced(tmp_path: Path) -> None:
+    # The same loop reviewing the same tree against the same base again after an
+    # earlier sweep archives one name twice. `rename` replaces its destination, so
+    # the first copy would be gone — and archiving is the default *because* a
+    # local move is recoverable.
+    repo = _repo(tmp_path)
+    _artifact(repo, "a.md", persona="adversarial", branch="gone/lane", sha="0" * 40, tree="first")
+    _sweep(repo)
+    _artifact(repo, "a.md", persona="adversarial", branch="gone/lane", sha="0" * 40, tree="second")
+
+    status, out, _ = _sweep(repo)
+
+    archive = repo / ".review" / "archive"
+    assert status == 0, out
+    assert "tree=first" in (archive / "a.md").read_text()
+    assert "tree=second" in (archive / "a-2.md").read_text()
+    assert "landed as a-2.md" in out
+
+
+def test_a_numbered_name_does_not_collide_with_another_file_of_the_same_sweep(
+    tmp_path: Path,
+) -> None:
+    # `a.md` becoming `a-2.md` while `.review/a-2.md` is itself on its way to
+    # `archive/a-2.md`: the destinations are checked against each other as well as
+    # against the filesystem, or the fix would reintroduce the bug one step over.
+    repo = _repo(tmp_path)
+    archive = repo / ".review" / "archive"
+    archive.mkdir(parents=True)
+    (archive / "a.md").write_text("already archived\n")
+    _artifact(repo, "a.md", persona="adversarial", branch="gone/lane", sha="0" * 40, tree="plain")
+    _artifact(
+        repo, "a-2.md", persona="adversarial", branch="gone/lane", sha="0" * 40, tree="numbered"
+    )
+
+    status, out, _ = _sweep(repo)
+
+    assert status == 0, out
+    assert (archive / "a.md").read_text() == "already archived\n"
+    assert "tree=numbered" in (archive / "a-2.md").read_text()
+    assert "tree=plain" in (archive / "a-3.md").read_text()
+
+
+def test_dry_run_says_which_name_it_would_land_under(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _artifact(repo, "a.md", persona="adversarial", branch="gone/lane", sha="0" * 40, tree="first")
+    _sweep(repo)
+    artifact = _artifact(
+        repo, "a.md", persona="adversarial", branch="gone/lane", sha="0" * 40, tree="second"
+    )
+
+    status, out, _ = _sweep(repo, "--dry-run")
+
+    assert status == 0, out
+    assert "would land as a-2.md" in out
+    assert artifact.exists()
+    assert not (repo / ".review" / "archive" / "a-2.md").exists()
 
 
 def test_a_missing_review_directory_is_a_refusal_not_a_crash(tmp_path: Path) -> None:

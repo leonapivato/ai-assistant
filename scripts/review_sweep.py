@@ -46,7 +46,11 @@ for the local ``ship`` step, and ``.gitignore`` says so in as many words — the
 and outlives every clone. ADR-0138's aggregate is likewise carried into that
 comment at ship time. So nothing here is history, and ``--delete`` contradicts no
 ratified decision. The default is still ``--archive``, because a local move is
-recoverable and a mistaken classification then costs nothing.
+recoverable and a mistaken classification then costs nothing. **Nothing under the
+archive is ever replaced**, which is what makes that sentence true: a rename
+replaces its destination silently, so an artifact whose name is already archived
+lands beside that copy as ``<name>-2.md`` rather than over it, and the sweep says
+so (issue #1410).
 
 Both actions have the same effect on the two mechanisms above: ``.review/*.md``
 is not recursive, so an archived artifact is as invisible to them as a deleted
@@ -63,6 +67,7 @@ artifact without its evidence.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -414,43 +419,101 @@ def snapshots_to_sweep(
     return found
 
 
-def _act(paths: Sequence[Path], review: Path, *, delete: bool, dry_run: bool) -> None:
+def archive_plan(paths: Sequence[Path], review: Path) -> list[tuple[Path, Path]]:
+    """Pair each swept file with the name it lands under in the archive.
+
+    The layout is mirrored, so a swept disposition snapshot cannot collide with a
+    swept artifact of one name — but that says nothing about the *same* relative
+    name being archived twice, which is what the same loop reviewing the same tree
+    against the same base again after an earlier sweep produces. A rename replaces
+    its destination silently, so the older copy would simply be gone, falsifying
+    the reason archiving is the default at all (issue #1410).
+
+    So a name already taken is never a destination: the newcomer is numbered and
+    lands beside it. Decided for every file before any of them moves, the way this
+    script decides everything else — a plan that is wrong is then wrong before it
+    has changed anything.
+
+    Args:
+        paths: The files being swept, each under ``review``.
+        review: The review directory.
+
+    Returns:
+        One ``(source, destination)`` pair per path, in the order given.
+    """
+    archive = review / ARCHIVE_DIR
+    taken: set[Path] = set()
+    plan: list[tuple[Path, Path]] = []
+    for path in paths:
+        destination = archive / path.relative_to(review)
+        stem, suffix = destination.stem, destination.suffix
+        ordinal = 1
+        # `taken` as well as the filesystem: a numbered name can collide with
+        # another file of *this* sweep — `a.md` becoming `a-2.md` while
+        # `.review/a-2.md` is itself on its way to `archive/a-2.md`.
+        while destination in taken or destination.is_symlink() or destination.exists():
+            ordinal += 1
+            destination = destination.with_name(f"{stem}-{ordinal}{suffix}")
+        taken.add(destination)
+        plan.append((path, destination))
+    return plan
+
+
+def _act(
+    paths: Sequence[Path], plan: Sequence[tuple[Path, Path]], *, delete: bool, dry_run: bool
+) -> None:
     """Archive or delete the swept files.
 
     Args:
-        paths: The files to act on.
-        review: The review directory.
+        paths: The files to act on. Deletion needs nothing else; it has no
+            destinations to reason about.
+        plan: Where each of those files lands under the archive, from
+            :func:`archive_plan`. Empty when deleting, which computes none.
         delete: Delete rather than archive.
         dry_run: Decide everything and change nothing.
 
     Raises:
-        SweepError: If a file cannot be moved or removed.
+        SweepError: If a file cannot be moved or removed — including a filesystem
+            that cannot hard-link, which fails the sweep rather than falling back
+            to a replacing rename. That is the direction every other refusal here
+            takes: what cannot be done safely is not done.
     """
-    if dry_run or not paths:
+    if dry_run:
         return
-    archive = review / ARCHIVE_DIR
     try:
-        for path in paths:
-            if delete:
+        if delete:
+            for path in paths:
                 path.unlink()
-            else:
-                # Mirror the layout under the archive, so a swept disposition
-                # snapshot does not collide with a swept artifact of one name.
-                destination = archive / path.relative_to(review)
+        else:
+            for path, destination in plan:
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(path), str(destination))
+                # `link` then `unlink`, not `rename`: a rename replaces whatever
+                # is at the destination, and not replacing is the whole point.
+                # `link` fails with EEXIST instead, so a name that appeared since
+                # the plan was made costs this sweep rather than that file.
+                os.link(path, destination)
+                path.unlink()
     except OSError as exc:
         raise SweepError(f"could not sweep the review directory: {exc}") from exc
 
 
 def _report(
-    verdicts: Sequence[Verdict], snapshots: Sequence[Path], *, delete: bool, dry_run: bool
+    verdicts: Sequence[Verdict],
+    snapshots: Sequence[Path],
+    renamed: Sequence[tuple[Path, Path]],
+    *,
+    delete: bool,
+    dry_run: bool,
 ) -> None:
     """Print the plan or the result.
 
     Args:
         verdicts: Every artifact's classification.
         snapshots: The disposition snapshots being swept.
+        renamed: The swept files whose archived name was already taken, each with
+            the name it lands under instead. Reported rather than left to be
+            found, because the numbered name is the one thing the per-file line
+            above does not already say.
         delete: Whether the action is deletion.
         dry_run: Whether anything was actually done.
     """
@@ -459,6 +522,12 @@ def _report(
     for verdict in sorted(verdicts, key=lambda v: (v.state, v.path.name)):
         mark = verb if verdict.state in SWEEPABLE else "keep"
         print(f"{mark:>14}  {verdict.path.name}  [{verdict.state}] {verdict.detail}")
+    for path, destination in renamed:
+        lands = "would land" if dry_run else "landed"
+        print(
+            f"{'renamed':>14}  {path.name}  [taken] already under the archive; "
+            f"{lands} as {destination.name}"
+        )
     states = ("live", "merged", "stale", "unreadable")
     counts = {state: sum(1 for v in verdicts if v.state == state) for state in states}
     print(
@@ -499,8 +568,11 @@ def _sweep(args: argparse.Namespace) -> int:
     swept = [v for v in verdicts if v.state in SWEEPABLE]
     retained = [v for v in verdicts if v.state not in SWEEPABLE]
     snapshots = snapshots_to_sweep(review, swept, retained)
-    _act([v.path for v in swept] + snapshots, review, delete=args.delete, dry_run=args.dry_run)
-    _report(verdicts, snapshots, delete=args.delete, dry_run=args.dry_run)
+    sweeping = [v.path for v in swept] + snapshots
+    plan = [] if args.delete else archive_plan(sweeping, review)
+    _act(sweeping, plan, delete=args.delete, dry_run=args.dry_run)
+    renamed = [pair for pair in plan if pair[1].name != pair[0].name]
+    _report(verdicts, snapshots, renamed, delete=args.delete, dry_run=args.dry_run)
     return 0
 
 
