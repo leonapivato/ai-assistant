@@ -100,3 +100,32 @@ def _assembled(objects: list[bytes]) -> bytes:
         + b"\n%%EOF\n"
     )
     return bytes(document)
+
+
+def amplified_page_tree_pdf(*, fan: int = 20, levels: int = 6) -> bytes:
+    """A tiny document declaring an enormous page tree, for the traversal bound.
+
+    ADR-0230 §6 states that ``fetch_max_file_bytes`` "bounds the read **and the
+    extraction's cost**", which holds for text and Markdown because the work is
+    proportional to the bytes. A PDF's page tree breaks that proportionality: each node
+    here names the next ``fan`` times, so ``fan ** levels`` leaves are reachable from a
+    document of about 1.4 KB, and ``/Count`` claims exactly that.
+
+    It is a **fixture and not a fault injector**: what the test built around it asserts
+    is that the adopted library refuses such a document, so a future version dropping
+    one of its own traversal guards fails a test rather than shipping an amplification.
+    """
+    claimed = fan**levels
+    objects: dict[int, bytes] = {1: b"<< /Type /Catalog /Pages 2 0 R >>"}
+    for level in range(levels):
+        number = 2 + level
+        kid = f"{number + 1} 0 R".encode()
+        objects[number] = (
+            b"<< /Type /Pages /Count "
+            + str(claimed).encode()
+            + b" /Kids ["
+            + b" ".join([kid] * fan)
+            + b"] >>"
+        )
+    objects[2 + levels] = b"<< /Type /Page /Parent 2 0 R /MediaBox " + _MEDIA_BOX + b" >>"
+    return _assembled([objects[number] for number in sorted(objects)])

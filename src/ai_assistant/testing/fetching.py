@@ -55,6 +55,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final, final
 from uuid import uuid4
 
+from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.types import (
     Attestation,
     FetchOutcome,
@@ -98,6 +99,15 @@ _ENTRY_DOMAIN: Final = b"ai-assistant/testing/fetch/entry/v1"
 _TOKEN_FIELDS: Final = 4
 _HANDLE_FIELDS: Final = 2
 
+#: A discriminator's width and alphabet (ADR-0190 §4) — 128 bits rendered as 32
+#: lowercase hexadecimal characters, and nothing else is one. Written out here rather
+#: than imported from ``testing.readers``, on the reason ``tests/core/reader_contract``
+#: gives for the same duplication: two doubles that decided conformance by calling one
+#: another's code would report each other as conforming, and the whole value of a
+#: second independent implementation is that it is second and independent.
+_DISCRIMINATOR_WIDTH: Final = 32
+_DISCRIMINATOR_ALPHABET: Final = frozenset("0123456789abcdef")
+
 
 @final
 class FakeFetcher:
@@ -108,6 +118,7 @@ class FakeFetcher:
         files: Mapping[str, str] | None = None,
         *,
         name: str = DEFAULT_FETCHER_NAME,
+        discriminator: str | None = None,
         read_at: datetime = _DEFAULT_READ_AT,
         now: Callable[[], datetime] | None = None,
         monotonic: Callable[[], int] | None = None,
@@ -125,8 +136,14 @@ class FakeFetcher:
                 listing's — a test that writes ``{"newest.md": …, "older.md": …}``
                 gets exactly that. ``None`` and ``{}`` both mean an **empty
                 listing**, which is a success.
-            name: The declared identity. Every listing's ``source`` and every
-                attestation's ``reported_by`` is this value.
+            name: The **declared name** — non-empty, UTF-8-encodable, equal to its own
+                ``str.strip()``, and carrying no colon (ADR-0190 §4). Every listing's
+                ``source`` and every attestation's ``reported_by`` is the identity it
+                composes with ``discriminator``.
+            discriminator: The 32 lowercase hexadecimal characters a deployment mints
+                for a source configured **after** its type's first (ADR-0190 §1, §4).
+                ``None`` gives the bare form, which is what a fetch root gets today
+                because a deployment configures one (ADR-0230 §6).
             read_at: What this fake reports as the instant it listed, where no
                 ``now`` is given.
             now: A wall clock, for a suite driving the expiry clauses. Defaults to a
@@ -147,13 +164,35 @@ class FakeFetcher:
                 *choosing* an id is not a producer *deriving* one (ADR-0092 §6).
 
         Raises:
-            ValueError: If ``name`` is blank, if a scripted name is not a single path
-                component, or if ``refusals`` names a file the root does not hold.
-                Each would make this fake unable to pass its own conformance suite,
-                and the canonical fake must not be configurable into that.
+            ValueError: If ``name`` is not a declared name or ``discriminator`` is not a
+                discriminator (ADR-0190 §4); if ``listing_ttl`` is not strictly positive
+                or ``max_entries`` is below 1 (ADR-0230 §6); if a scripted name is not a
+                single path component; or if ``refusals`` names a file the root does not
+                hold. Each would make this fake unable to pass its own conformance
+                suite, and the canonical fake must not be configurable into that.
+
+                **The identity arms are not cosmetic**, which a padded name makes plain:
+                ``SourceListing.source`` is ``EncodableText`` and does not strip, while
+                ``Attestation.reported_by`` is an ``Identifier`` whose validator
+                *returns* ``value.strip()`` — so ``" files "`` would put one source into
+                a listing and a record under two different spellings, from one fetcher,
+                in one turn.
+
+                **And the bound arms are the ones ADR-0230 §6 argues for by name**: a
+                zero ``listing_ttl`` mints a listing that is already expired, so its
+                authentic entry can never be fetched; and a negative ``max_entries``
+                reaches ``entries[: -1]``, which "quietly yields all but the last entry,
+                so a bound would be defeated by a configuration value rather than
+                enforced by one".
         """
-        if not name.strip():
-            msg = "a fetcher's declared identity must be non-blank (ADR-0230 §4)"
+        _refuse_malformed_declared_name(name)
+        if discriminator is not None:
+            _refuse_malformed_discriminator(discriminator)
+        if listing_ttl <= timedelta(0):
+            msg = f"fetch_listing_ttl must be strictly positive, got {listing_ttl!r} (ADR-0230 §6)"
+            raise ValueError(msg)
+        if max_entries < 1:
+            msg = f"fetch_listing_max_entries must be at least 1, got {max_entries!r} (ADR-0230 §6)"
             raise ValueError(msg)
         scripted = dict(files or {})
         for candidate in scripted:
@@ -171,11 +210,14 @@ class FakeFetcher:
                 f"already NOT_FOUND (ADR-0230 §4)"
             )
             raise ValueError(msg)
-        self._name = name
+        self._name = name if discriminator is None else f"{name}:{discriminator}"
         self._files = scripted
         self._refusals = dict(refusals or {})
         self._read_at = read_at
-        self._now = now if now is not None else lambda: read_at
+        # Guarded like every other injected-clock seam, fakes included: ADR-0026 §7 is
+        # "uniformity with **no advisory exemption**", and a fake looser than the
+        # contract certifies consumers the real implementation will reject.
+        self._now = checked_clock(now if now is not None else lambda: read_at, owner="FakeFetcher")
         self._monotonic = monotonic if monotonic is not None else lambda: 0
         self._ttl_ns = int(listing_ttl.total_seconds() * 1_000_000_000)
         self._max_entries = max_entries
@@ -345,6 +387,54 @@ class FakeFetcher:
             topics=(),
             about_person=None,
         )
+
+
+def _refuse_malformed_declared_name(name: str) -> None:
+    """Refuse a value that is not a declared name (ADR-0190 §4).
+
+    A declared name is non-empty, UTF-8-encodable, equal to its own ``str.strip()``, and
+    **contains no colon** — and that is the whole of it. Refused rather than repaired,
+    because a fake that silently stripped would hide from its own consumers the one
+    spelling that puts a source into a store under two names.
+
+    Raises:
+        ValueError: If ``name`` is not a declared name.
+    """
+    if type(name) is not str:
+        msg = "a source identity's declared name is a built-in str (ADR-0190 §4)"
+        raise ValueError(msg)
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        msg = "a declared name must be UTF-8-encodable (ADR-0190 §4)"
+        raise ValueError(msg) from exc
+    if not name or name != name.strip() or ":" in name:
+        msg = (
+            f"a declared name is non-empty, carries no colon and equals its own strip(), "
+            f"got {name!r} (ADR-0190 §4)"
+        )
+        raise ValueError(msg)
+
+
+def _refuse_malformed_discriminator(discriminator: str) -> None:
+    """Refuse a value that is not a discriminator (ADR-0190 §4).
+
+    Exactly 32 characters drawn from ``0123456789abcdef``, and nothing else is one: a
+    bare discriminator, an uppercase one and a differently-sized one are not identities
+    at all.
+
+    Raises:
+        ValueError: If ``discriminator`` is not one.
+    """
+    if type(discriminator) is not str:
+        msg = "a source identity's discriminator is a built-in str (ADR-0190 §4)"
+        raise ValueError(msg)
+    if len(discriminator) != _DISCRIMINATOR_WIDTH or set(discriminator) - _DISCRIMINATOR_ALPHABET:
+        msg = (
+            f"a discriminator is exactly {_DISCRIMINATOR_WIDTH} lowercase hexadecimal "
+            f"characters (ADR-0190 §4)"
+        )
+        raise ValueError(msg)
 
 
 def _nanoseconds(instant: datetime) -> int:

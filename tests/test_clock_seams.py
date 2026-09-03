@@ -149,6 +149,7 @@ from ai_assistant.testing import (
     FakeDeferralStore,
     FakeEmbedder,
     FakeFeedbackProcessor,
+    FakeFetcher,
     FakeMemoryPolicy,
     FakeMemoryStore,
     FakeMemoryWriter,
@@ -392,6 +393,17 @@ class _VouchingTables:
             device=self.root.stat().st_dev,
             backing=DeviceBacking.LOCAL,
         )
+
+
+async def _fake_fetcher(now: Clock) -> None:
+    """The canonical ``Fetcher`` double's clock, guarded like the seam it stands in for.
+
+    ADR-0026 §7 is uniformity with no advisory exemption, and this module's own opening
+    says why the fakes are in scope: "they are the canonical doubles consumers certify
+    against, and a fake looser than the contract certifies consumers the real
+    implementation will reject."
+    """
+    await FakeFetcher({"note.md": "text"}, now=now).listing()
 
 
 async def _local_file_fetcher(now: Clock) -> None:
@@ -913,6 +925,7 @@ SEAMS = [
     # already handle" — and a clock fault is not a source reason, so it is not one of
     # the refusals either.
     Seam("LocalFileFetcher", _local_file_fetcher, ClockReadingError),
+    Seam("FakeFetcher", _fake_fetcher, ClockReadingError),
     Seam("EmailContextSource", _email_context_source, ClockReadingError),
     Seam("PlanExecution", _plan_execution, PlanningError),
     Seam("InMemoryPlanStore", _in_memory_plan_store, PlanningError),
@@ -1223,6 +1236,7 @@ PROPAGATED: Final[dict[str, str]] = {
         "the required ClockContextSource owes ContextError (ADR-0026 §4)"
     ),
     "EmailContextSource": "the second adapter of that one class",
+    "FakeFetcher": "the canonical double of the seam below, with its clause verbatim",
     "LocalFileFetcher": (
         "ADR-0230 §4 adds **no** error class to `core.errors` — a source failure is a "
         "`FetchRefusal` rather than a raise — and a clock fault is not a source reason, "
