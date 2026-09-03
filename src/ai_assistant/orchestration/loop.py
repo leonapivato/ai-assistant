@@ -395,7 +395,7 @@ def _stop_reason(
     plans: Sequence[ActionPlan],
     serviced: ServicedRead,
     planning_budget: timedelta | None,
-    elapsed: timedelta,
+    elapsed: Callable[[], timedelta],
 ) -> StopReason | None:
     """Which of ADR-0228 §2's conditions stops the turn after a servicing, or ``None``.
 
@@ -422,7 +422,14 @@ def _stop_reason(
         planning_budget: The operation's declared budget, or ``None`` where it
             declared none (§2(a)).
         elapsed: How long the turn has run, measured from its entry into the loop
-            against the injected clock (§2(g)).
+            against the injected clock (§2(g)). **A callable, and read only where the
+            budget check is actually reached** — §4 rules that the budget is checked
+            "immediately before each additional planner call and at no other point",
+            and a reading taken eagerly would be a clock read on a turn that had
+            already stopped for another reason. It matters beyond tidiness: the
+            guarded clock turns a non-conforming reading into a ``PlanningError``, so
+            an eager read would fail a turn on an operation that declares no budget
+            over a clock that turn never needed.
 
     Returns:
         The reason the turn stops, or ``None`` where a revision is admissible.
@@ -441,7 +448,7 @@ def _stop_reason(
         # out left it byte-identical — either way a second call would be handed the
         # first call's own input, at the price of a model round trip.
         return StopReason.NOT_ITERATED
-    if elapsed >= planning_budget:
+    if elapsed() >= planning_budget:
         # §2(g), against the injected clock. **Strictly less** is what admits a call:
         # the boundary instant is spent, not available, because leaving equality to
         # the implementation would let two conforming loops differ on identical input
@@ -1135,7 +1142,7 @@ class LearningLoop:
                 plans=plans,
                 serviced=serviced,
                 planning_budget=planning_budget,
-                elapsed=self._now_utc() - started,
+                elapsed=lambda: self._now_utc() - started,
             )
             if stop is not None:
                 audit.stop = stop

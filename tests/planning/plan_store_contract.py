@@ -93,6 +93,7 @@ def _plan(
     *,
     steps: int = 1,
     read_request: ReadRequest | None = None,
+    supersedes: str | None = None,
 ) -> ActionPlan:
     return ActionPlan(
         id=plan_id,
@@ -103,6 +104,7 @@ def _plan(
         ),
         created_at=_WHEN,
         read_request=read_request,
+        supersedes=supersedes,
     )
 
 
@@ -481,6 +483,76 @@ class PlanStoreContract:
         """Refusing the orphan here is what lets export promise integrity."""
         with pytest.raises(PlanningError):
             await store.save_plan(_plan(goal_id="ghost"))
+
+    # --- ADR-0228 §5: a `supersedes` that does not resolve is refused ---------
+    # §12 obliges this suite to carry the three arms and both implementations to
+    # satisfy them: the widening is **behavioural**, not merely documented — "a store
+    # that accepts a `supersedes` naming a plan it does not hold stops conforming the
+    # moment §5 binds" — so a suite left unextended would leave the rejection
+    # asserted by nothing.
+
+    async def test_a_plan_may_supersede_a_plan_the_store_holds(self, store: PlanStore) -> None:
+        """The positive case, which is what makes the three refusals mean something.
+
+        A revision names the plan it replaced, under the same goal, and the store
+        takes it. ``None`` — "this plan replaced nothing" — is what every other plan
+        carries and is never an error.
+        """
+        await store.save_goal(_goal())
+        await store.save_plan(_plan("p1"))
+        await store.save_plan(_plan("p2", supersedes="p1"))
+
+        stored = await store.get_plan("p2")
+        assert stored is not None
+        assert stored.supersedes == "p1"
+        first = await store.get_plan("p1")
+        assert first is not None
+        assert first.supersedes is None
+
+    async def test_a_supersedes_naming_no_stored_plan_is_refused(self, store: PlanStore) -> None:
+        """§5's first arm: the predecessor is not there.
+
+        This is ADR-0014 §5's export promise kept at write time rather than repaired
+        at read time — "every ``goal_id``/``plan_id`` referenced by an included
+        record resolves within the same export" — which is the division ADR-0049 §1
+        already records for the goal check.
+        """
+        await store.save_goal(_goal())
+        with pytest.raises(PlanningError):
+            await store.save_plan(_plan("p2", supersedes="ghost"))
+        assert await store.get_plan("p2") is None
+
+    async def test_a_plan_cannot_supersede_itself(self, store: PlanStore) -> None:
+        """§5's second arm: a plan naming its own ``id``.
+
+        A self-reference resolves — the plan is being written — so a store checking
+        only "does it resolve" would accept a durable record claiming a plan replaced
+        the plan it is. It is refused as an unknown goal already is, with the same
+        error class.
+        """
+        await store.save_goal(_goal())
+        with pytest.raises(PlanningError):
+            await store.save_plan(_plan("p1", supersedes="p1"))
+        assert await store.get_plan("p1") is None
+
+    async def test_a_supersedes_naming_a_plan_under_another_goal_is_refused(
+        self, store: PlanStore
+    ) -> None:
+        """§5's third arm: the chain does not span goals.
+
+        ADR-0228 §1 rules that "the revision carries the **same** ``goal_id`` as the
+        plan it replaces": the goal is minted once per turn from the user's
+        unrewritten words, and "a second goal would make one turn look like two in
+        every store that holds goals". A chain that spanned goals is the case a
+        durable foreign key would be owed for, and §5 forbids it here instead.
+        """
+        await store.save_goal(_goal())
+        await store.save_goal(_goal("g2"))
+        await store.save_plan(_plan("p1", "g1"))
+
+        with pytest.raises(PlanningError):
+            await store.save_plan(_plan("p2", "g2", supersedes="p1"))
+        assert await store.get_plan("p2") is None
 
     async def test_execution_needs_its_plan_to_exist(self, store: PlanStore) -> None:
         with pytest.raises(PlanningError):
