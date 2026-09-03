@@ -442,17 +442,29 @@ against the turn's own model round trips, which it is orders of magnitude below.
 > that never existed — is refused whatever its other fields say, and a `Fetcher` that
 > decides membership by re-reading its caller's `name` does not conform.
 
-> **Normative.** **A listing's authority expires, and it expires on the clock rather than
-> on what other callers did.** `fetch` refuses a listing whose `read_at` is older than
-> `fetch_listing_ttl` — a `Settings` field with a named default of **five minutes**,
-> refused at load rather than at the first fetch — decided against the fetcher's own
-> clock and the instant the listing itself carries. **No listing is invalidated by the
-> production of another**: a `Fetcher` is composed once and may serve turns that overlap,
-> so a mechanism that evicted by count would refuse a live turn's own listing for a
-> reason no operator could see and would make one label's usable target depend on
-> unrelated turns. Nothing about verification requires the fetcher to retain a listing,
-> and no conforming implementation makes a listing's validity a function of how many
-> others have been produced since.
+> **Normative.** **A listing's authority expires after `fetch_listing_ttl` of elapsed
+> time** — a `Settings` field with a named default of **five minutes**, refused at load
+> rather than at the first fetch.
+
+> **Normative.** **The expiry is decided against a monotonic deadline the fetcher bound
+> into the token, and never against a wall clock.** The fetcher reads a monotonic source
+> when it mints a listing, binds `deadline = now_monotonic + fetch_listing_ttl` into the
+> authenticated token, and at `fetch` compares a fresh reading of that same source against
+> it. `SourceListing.read_at` stays what it is — the tz-aware instant this system listed,
+> which §3 renders and ADR-0026 §1 governs — and **is not the expiry's input**: it is a
+> wall-clock value, and a wall clock that steps backwards would leave a listing minted at
+> 12:00 inside a five-minute window an hour of real time later. The signed token stops a
+> caller extending the value; only a clock that cannot be set stops the producer's own
+> clock from regressing under it. The monotonic reading is the fetcher's, is never
+> rendered, and does not outlive the process — which is the same restart behaviour the
+> clause below already states for the token itself.
+
+> **Normative.** **No listing is invalidated by the production of another.** A `Fetcher`
+> is composed once and may serve turns that overlap, so a mechanism that evicted by count
+> would refuse a live turn's own listing for a reason no operator could see and would make
+> one label's usable target depend on unrelated turns. Nothing about verification requires
+> the fetcher to retain a listing, and no conforming implementation makes a listing's
+> validity a function of how many others have been produced since.
 
 > **Normative.** **A token and a handle are never persisted, never cross a process
 > boundary, and never outlive the fetcher that minted them.** A restarted hub mints new
@@ -540,8 +552,8 @@ verification must **not depend on the fetcher retaining anything**, so that no l
 validity is a function of how many others have been produced since. A keyed digest — a
 per-listing random identifier signed with a key generated when the fetcher is constructed
 and never leaving it, and each handle signed over that identifier and the entry's name —
-satisfies all three, needs no table and no eviction, and makes the expiry a check on the
-signed `read_at` rather than on a cache. This ADR fixes the properties and names no
+satisfies all three, needs no table and no eviction, and carries the monotonic deadline
+inside the same signed payload rather than in a cache. This ADR fixes the properties and names no
 construction as the required one.
 
 **An earlier draft of this section bounded the authority by a window of eight listings,
@@ -1072,8 +1084,9 @@ wiring, which constructs a `Fetcher` only where a root is configured.
 > assembles itself is refused**, and so is one built by copying a listed entry's `name`,
 > `size_bytes` and `modified_at` onto a handle of the test's own choosing, and so is a
 > listing the test assembled, and so is an entry of listing A presented with listing B's
-> token; **a listing older than `fetch_listing_ttl` is refused** on a fake clock while a
-> younger one is not, and **producing further listings invalidates none of them**; **no
+> token; **a listing past `fetch_listing_ttl` is refused** on a fake monotonic source
+> while one inside it is not, **a wall clock stepped backwards does not extend one**, and
+> **producing further listings invalidates none of them**; **no
 > member raises for a source reason**; and a `listing()` or `fetch()` cancelled while
 > suspended re-raises `CancelledError` unchanged — checkable through the fake's suspension
 > gate (`SuspendableResource.suspend_next`), without which the clause passes vacuously.
@@ -1168,13 +1181,17 @@ same reason; this decision adds a contract, so it adds a lane.
    that grows past `fetch_max_file_bytes` after its size was observed, which is refused
    `TOO_LARGE` and puts no prefix of the grown content anywhere. Neither yields a record
    mixing one object's metadata with another's content.
-5. **A listing expires on the clock and on nothing else.** On a fake clock, a listing
-   older than `fetch_listing_ttl` is refused `NOT_FOUND` and a younger one is fetched.
-   Separately and deterministically: **nine listings are produced before any of them is
-   fetched from**, and every one of the nine then fetches its own entry successfully —
-   the arm that fails on any implementation whose validity is a function of how many
-   listings have been produced since, and it is here because an earlier draft of §4 had
-   exactly that defect.
+5. **A listing expires on elapsed time and on nothing else.** Three arms, each
+   deterministic. On a fake **monotonic** source, a listing past `fetch_listing_ttl` is
+   refused `NOT_FOUND` and one inside it is fetched. **The wall clock does not decide it:**
+   a listing is minted, the wall clock is stepped *backwards* by an hour, the monotonic
+   source is advanced past the TTL, and the listing is still refused — the arm that fails
+   on any implementation comparing `read_at` against a wall clock, and it is here because
+   an earlier draft of §4 did exactly that. And **nine listings are produced before any of
+   them is fetched from**, after which every one of the nine fetches its own entry
+   successfully — the arm that fails on any implementation whose validity is a function of
+   how many listings have been produced since, and it is here because a still earlier draft
+   had that defect.
 6. **A turn whose supply sufficed pays no fetch.** The plan carries no request, the fetcher
    is asked for no file, the supply is byte-for-byte the three groups it was, and the audit
    records a turn on which the trigger did not fire. Asserted over the audit and the supply,
