@@ -993,9 +993,22 @@ def _refuse_a_non_duration(field: str, value: object) -> None:
     exact-type tests below (#471). What was wrong is the exception's class and
     message at the direct-construction seam ADR-0093 §10 puts the guard at.
 
-    ``isinstance`` rather than an exact-type test, unlike the integer guards: they
-    are exact in order to exclude ``bool`` specifically, and there is no
-    ``timedelta`` subclass whose acceptance would be a mistake.
+    ``isinstance`` rather than an exact-type test, unlike the integer guards. They
+    are exact for a *reachable* reason: ``bool`` is an ``int`` by inheritance, so
+    ``max_entries=True`` passes ``mypy`` and loads as a cap of one (#471). No
+    ``timedelta`` subclass is silently accepted that way, while honest ones exist
+    — a caller handing this reader a ``pandas.Timedelta``-shaped value is passing
+    a duration, and exactness would refuse it to no purpose.
+
+    What exactness would *not* buy is the range: a subclass overriding ``__lt__``
+    and ``__gt__`` to answer ``False`` evades the comparison below whatever this
+    line tests, because the guard is asking the value about itself. That is not a
+    hole this check can close, and it is not the one ADR-0093 §10 opens the seam
+    for — "a test or a second composition root" reaching the constructor
+    *directly* is an honest caller making a mistake, not an object written to
+    defeat its own bound. It is also strictly narrower than what stood here
+    before, which asked any object at all and accepted every one that answered
+    ``False``. See #1979.
 
     ``type(value).__name__`` rather than ``repr``, for :func:`_checked_path`'s
     reason: this is the one guard reached by a value of *arbitrary* type, so a
