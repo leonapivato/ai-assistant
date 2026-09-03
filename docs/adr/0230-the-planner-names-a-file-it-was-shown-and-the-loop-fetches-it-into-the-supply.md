@@ -264,10 +264,18 @@ defers by name and #1908 places at a later milestone.
 
 > **Normative.** **No string a model produced is ever interpreted as a filesystem
 > address, in any form.** The loop passes the fetcher an entry the fetcher itself
-> minted (§4); it never constructs a path, never joins a model-supplied fragment to a
-> root, and never hands a model-supplied string to any filesystem call. A conforming
+> minted, carrying the capability §4 requires; it never constructs a path, never joins a
+> model-supplied fragment to a root, never assembles a `SourceListingEntry` of its own,
+> and never hands a model-supplied string to any filesystem call. A conforming
 > implementation in which a model's output reaches a path is not this decision
 > however carefully it is bounded.
+
+> **Normative.** **The resolvable set is exactly the listing the loop showed, and §4's
+> handle is what makes that enforceable at the seam.** A file under the configured root
+> that the listing's cap or its type allow-list left out is **not** fetchable on that
+> turn, and a caller that assembles an entry naming one is refused. The property is not
+> a promise about how the loop behaves; it is a condition a conforming `Fetcher`
+> enforces against every caller, this loop included.
 
 **This is ADR-0226 §3's scheme applied one sequence over, and it is taken for §3's own
 reason rather than by analogy.** That section's argument is that the label discipline
@@ -391,9 +399,10 @@ against the turn's own model round trips, which it is orders of magnitude below.
 > refusing mutation and unknown fields:
 >
 > - `SourceListingEntry` — `name: NonBlankEncodableText`, `size_bytes: int` (≥ 0),
->   `modified_at: UtcInstant`. It carries **no path, no root, no directory component
->   and no handle**: `name` is what a person calls the file and is what a prompt
->   renders.
+>   `modified_at: UtcInstant`, and `handle: EncodableText`. It carries **no path, no
+>   root and no directory component**: `name` is what a person calls the file and is
+>   what a prompt renders, and `handle` is the opaque capability of the clause below,
+>   which is never rendered anywhere.
 > - `SourceListing` — `source: EncodableText` equal to the producing fetcher's `name`,
 >   `read_at: UtcInstant` (the instant **this system** listed, captured once at
 >   acquisition), and `entries: tuple[SourceListingEntry, ...]`, possibly empty.
@@ -402,18 +411,69 @@ against the turn's own model round trips, which it is orders of magnitude below.
 > - `FetchRefusal` — a **closed** enumeration of why a fetch produced no record, whose
 >   members are fixed in §6.
 
-> **Normative.** **`fetch` re-resolves the entry against the fetcher's own current
-> configuration, and trusts nothing the entry carries.** It refuses any entry that does
-> not resolve to a regular file directly under its configured root — a name carrying a
-> directory separator or a parent reference, a symbolic link resolving outside the root,
-> a directory, a device, and anything the fetcher did not itself list. A `Fetcher` that
-> reaches outside its configured root for any entry, however that entry was constructed,
-> does not conform.
+> **Normative.** **Listing membership is a capability the fetcher mints and verifies,
+> and never a claim its caller makes.** A `Fetcher` mints a fresh, unguessable `handle`
+> for each entry of each listing it produces, and `fetch` **refuses any entry whose
+> handle this fetcher did not mint** — `NOT_FOUND`, **deliberately the same class an
+> absent file yields**, so that a refusal discloses nothing about whether a guessed name
+> exists under the root. The verification depends on state private to the fetcher and on
+> nothing the caller supplies, so a `SourceListingEntry` a caller assembled — for a file
+> the cap left out of this turn's listing, for one of an unsupported type, or for one
+> that never existed — is refused whatever its `name`, `size_bytes` and `modified_at`
+> say. A `Fetcher` that decides membership by re-reading its caller's `name` does not
+> conform.
+
+> **Normative.** **A handle is scoped to the listing that minted it.** A `Fetcher`
+> retains what it needs to verify the handles of the **eight most recent listings it
+> produced** and refuses a handle whose listing has fallen out of that window. Eight is a
+> fixed constant and **not** a `Settings` field, for `MAX_EVIDENCE_CITATIONS`'s reason —
+> a bound a deployment can raise is not a bound — and it is a window rather than a count
+> of one because a `Fetcher` is composed once and may serve turns that overlap, where a
+> single-listing window would refuse a live turn's own handle for a reason no operator
+> could see. A handle is never persisted, never crosses a process boundary, and never
+> outlives the fetcher that minted it.
+
+> **Normative.** **No handle is rendered to any model, written to any log, put in any
+> audit record, or carried on any record a fetch mints.** §3's listing rendering carries
+> `name`, `size_bytes` and `modified_at` and the `F` label the loop derives, and carries
+> the handle nowhere. A handle in a prompt would be a capability offered to a model,
+> which is the whole of what §2 exists to prevent.
+
+> **Normative.** **The membership check does not replace the root bound; both bind.**
+> `fetch` refuses any entry that does not resolve to a regular file directly under its
+> configured root — a name carrying a directory separator or a parent reference, a
+> symbolic link at the final component, a directory, a device — and a `Fetcher` that
+> reads outside its configured root for any entry, however that entry was constructed,
+> does not conform. The handle establishes *that this fetcher showed it*; the root check
+> establishes *that it is still what may be read*, and a bug in either is not covered by
+> the other.
+
+> **Normative.** **Resolution and acquisition are one operation, and no bound is decided
+> against a path the fetch then re-opens.** A conforming `Fetcher` opens the entry's file
+> from its configured root **without following a symbolic link at the final component**,
+> and then decides every remaining question — that it is a regular file, that it lies
+> under the root, and that it is within `fetch_max_file_bytes` — **against the object it
+> has open**, never against a path or a `stat` taken before the open. The root itself is
+> resolved once, when the fetcher is constructed, and is not re-resolved per fetch.
+
+> **Normative.** **The read is itself bounded, so a file that grows after its size was
+> observed is refused rather than read.** An implementation reads at most
+> `fetch_max_file_bytes` plus one byte from the open object and refuses as `TOO_LARGE`
+> where the object supplies more; it does not decide the bound from a size it observed
+> earlier and then read to end of file. `fetch_max_content_bytes` is decided the same way,
+> against the extracted text as it is produced.
+
+> **Normative.** **A file replaced between the listing and the fetch yields exactly one
+> object's answer, and never a mixture.** No implementation reports a size, a
+> modification instant, a type or a name from one object and content from another. Where
+> the open cannot be performed under the conditions above — the final component became a
+> symbolic link, a directory or a device — the outcome is `NOT_A_FILE`; where it fails for
+> any other reason, `UNREADABLE`; and neither is ever a best-effort read.
 
 > **Normative.** **Every bound is re-applied at `fetch` and none is carried from the
 > listing.** A file that grew past the size bound between the listing and the fetch is
-> refused as over-size at the fetch; one that was deleted is refused as absent. No
-> implementation reads a bound off the entry it was handed.
+> refused as over-size; one that was deleted is refused as absent. No implementation reads
+> a bound, a type or a size off the entry it was handed.
 
 > **Normative.** **Neither member raises for a source reason.** An absent file, an
 > unreadable one, an over-size one, an unsupported type and a failed extraction are
@@ -433,6 +493,38 @@ against the turn's own model round trips, which it is orders of magnitude below.
 > This is ADR-0093 §1's rule for its own reason: a producer that held a store would make
 > the scope of what a fetch can do a property of an implementation rather than of a
 > ratified seam.
+
+**The handle is what makes §2's property a property of the seam rather than of its
+caller, and an earlier draft of this section did not have one.** That draft required
+`fetch` to refuse *"anything the fetcher did not itself list"* and gave the fetcher no
+way to tell: a `SourceListingEntry` is a public frozen model carrying display metadata,
+so a caller could assemble one for any direct child of the root — including one the
+listing's cap left out, which is precisely the file a planner was **not** shown. The
+containment §2 claims is that *the resolvable set is exactly what the loop showed*, and
+an obligation the type cannot enforce is a convention, not that property. A minted,
+verified capability makes it structural, which is the same move `Provenance`'s
+attested-iff-attestation validator made for a producer that could otherwise forget
+(ADR-0092 §1) and that ADR-0226 §3 made by deriving a label from a position rather than
+from an agreement.
+
+**Two properties are required of the mechanism and its spelling is the lane's**, in
+ADR-0093 §10's own form: a handle must be **unforgeable without state private to the
+fetcher**, and it must be **bound to the listing that minted it**. A keyed digest over a
+per-listing identifier and the entry's name, under a key generated when the fetcher is
+constructed and never leaving it, satisfies both and needs the fetcher to retain only
+the window's identifiers; so does a per-listing table of random tokens. This ADR fixes
+the properties and the window and names neither construction as the required one.
+
+**Race-safe acquisition is stated because a check-then-open implementation would satisfy
+every other clause of this section and still be wrong.** A file may pass the root check
+and the size check and then be replaced by a symbolic link pointing out of the root, or
+grow past the bound, before it is opened — and the outcome would be a read outside the
+configured root or an unbounded read, both of which §§4 and 6 exist to refuse. Deciding
+every question against the object already open removes the window rather than narrowing
+it, and bounding the read itself removes the second one; both are conditions on the
+implementation because there is no way to state them as conditions on a value. §14 owes
+a test for each transition rather than for the static cases alone, which is the
+difference between asserting the property and asserting the easy half of it.
 
 **Named `Fetcher` for its product role**, as every Protocol here is (`Planner`,
 `Observer`, `Reader`). The role is fetching one named thing, now, for this turn, which
@@ -931,19 +1023,27 @@ wiring, which constructs a `Fetcher` only where a root is configured.
 > tz-aware; an **empty listing is a valid, successful listing** and every clause holds on
 > it; a `FetchOutcome` carries a record **or** a refusal and never both or neither; a
 > minted record is `SEMANTIC`, `EXTERNAL`-sourced, carries an `Attestation` whose
-> `reported_by` equals `name`, and carries an empty `evidence`; **no member raises for a
-> source reason**; and a `listing()` or `fetch()` cancelled while suspended re-raises
-> `CancelledError` unchanged — checkable through the fake's suspension gate
-> (`SuspendableResource.suspend_next`), without which the clause passes vacuously.
+> `reported_by` equals `name`, and carries an empty `evidence`; **an entry the test
+> assembles itself is refused**, and so is one built by copying a listed entry's `name`,
+> `size_bytes` and `modified_at` onto a handle of the test's own choosing; **an entry from
+> a listing nine listings ago is refused** while one from eight listings ago is not; **no
+> member raises for a source reason**; and a `listing()` or `fetch()` cancelled while
+> suspended re-raises `CancelledError` unchanged — checkable through the fake's suspension
+> gate (`SuspendableResource.suspend_next`), without which the clause passes vacuously.
+> The handle clauses are suite clauses and not the concrete fetcher's, because they are
+> decidable from `name` and two return values and they are the clauses on which §2's
+> containment rests for **every** `Fetcher` this system ever wires.
 
 > **Normative.** Four rulings are deliberately **not** suite clauses, and putting them
 > there would be the error: that the root bound is un-widenable (the Protocol takes no
 > argument that could widen it, so a generic suite has nothing to over-supply); that a
 > **real** source failure produces each refusal class (a suite cannot make an arbitrary
 > fetcher's source fail — those are the concrete fetcher's tests, and it owes one per
-> `FetchRefusal` member); that a path escaping the root is refused (a concrete fetcher's
-> test, and it owes `..`, a separator in `name`, and a symlink out of the root); and that
-> the listing is ordered most-recently-modified-first and capped. Each is named here so the
+> `FetchRefusal` member); that a path escaping the root is refused and that the two race
+> transitions of §4 are refused (a concrete fetcher's test over a real filesystem, and it
+> owes `..`, a separator in `name`, a symlink out of the root, a replacement between
+> validation and acquisition, and a growth past the bound between them); and that the
+> listing is ordered most-recently-modified-first and capped. Each is named here so the
 > lane does not read its absence from the suite as its absence from the contract.
 
 **Lane C2 — the listing across the seam and the planner's emission.** `Planner.plan`'s
@@ -1005,67 +1105,85 @@ same reason; this decision adds a contract, so it adds a lane.
    parent reference; and an entry naming a symbolic link that resolves outside the root.
    The first two are recorded as unresolved labels, the last two as refusals, and **no
    model-supplied string reaches a filesystem call in any arm**.
-3. **A turn whose supply sufficed pays no fetch.** The plan carries no request, the fetcher
+3. **A file the listing did not show is not fetchable, however the entry was built.**
+   A root holding more supported files than the cap; an entry assembled for one the
+   listing omitted, with a plausible `name`, `size_bytes` and `modified_at` and a handle
+   the test invented; and an entry that copies a *listed* entry's display fields onto that
+   invented handle. Both are refused `NOT_FOUND`, no record is added, and the file's
+   distinctive text appears nowhere in the supply or the reply. Asserted at the `Fetcher`
+   seam, because it is a property of the contract and not of the loop that happens to call
+   it, and separately over a listing eight and nine listings old to pin §4's window.
+4. **The two race transitions are refused.** Over a real filesystem, deterministically
+   sequenced so the transition lands **between** the fetcher's validation and its
+   acquisition: a supported regular file replaced by a symbolic link pointing outside the
+   root, which is refused `NOT_A_FILE` and reads nothing from the link's target; and a file
+   that grows past `fetch_max_file_bytes` after its size was observed, which is refused
+   `TOO_LARGE` and puts no prefix of the grown content anywhere. Neither yields a record
+   mixing one object's metadata with another's content.
+5. **A turn whose supply sufficed pays no fetch.** The plan carries no request, the fetcher
    is asked for no file, the supply is byte-for-byte the three groups it was, and the audit
    records a turn on which the trigger did not fire. Asserted over the audit and the supply,
    not over a mock's call count.
-4. **The label is an ordinal into the listing the loop passed.** `F2` resolves to the second
+6. **The label is an ordinal into the listing the loop passed.** `F2` resolves to the second
    entry of that turn's listing and to nothing else; the same planner output against a
    different listing resolves to a different entry; the two packages agree with no shared
    table, asserted by resolving an ask against a listing the test constructs directly; and
    the same label resolves to the same entry on **both** planner calls of a revising turn.
-5. **A file over either bound is refused, and nothing is truncated.** A file over
+7. **A file over either bound is refused, and nothing is truncated.** A file over
    `fetch_max_file_bytes` and a file whose extracted text is over `fetch_max_content_bytes`
    each yield a refusal, add no record, fail no turn, and put no prefix of the text
    anywhere in the supply or the reply. Asserted over the supply and over the audit's
    refusal class.
-6. **Every refusal class is reachable from a real source.** One arm per `FetchRefusal`
+8. **Every refusal class is reachable from a real source.** One arm per `FetchRefusal`
    member, over a real filesystem: absent, a directory, unreadable by permission,
    over-size, an unsupported extension, and a corrupt file of a supported format. This is
    the concrete fetcher's test and not the suite's (§13).
-7. **A fetched record carries the external mark, and the conversation asks thereafter.** A
+9. **A fetched record carries the external mark, and the conversation asks thereafter.** A
    bounded-audience turn that fetches captures an episode whose `derived_from_external` is
    `True`; the same turn's `SelectionOrigin` carries `planned_with_external_content`; and a
    **subsequent** turn of that conversation reaching the egress seam is a confirmation
    rather than an allow. This is the assertion standing between this rung and #1844's
    exfiltration channel, and it is asserted end to end rather than at the predicate.
-8. **The fetch is serviced before the hop and takes one slot.** A request carrying a
-   `LOCAL_FILE` ask and a `CITATION_HOP` whose evidence would fill the budget produces a
-   fourth group holding the fetched record first and exactly nine hop records after it, in
-   that order, with the truncation in the audit.
-9. **A refusal degrades nothing.** A request carrying a `LOCAL_FILE` ask that refuses and a
-   `SIGHTED_QUERY` that returns produces a fourth group holding the query's records in
-   full: the refusal takes no slot, discards nothing, and is recorded as a refusal rather
-   than as a servicing failure. This is the arm that distinguishes §6's refusal disposition
-   from ADR-0226 §5's all-or-nothing failure posture.
-10. **A serviced fetch may revise the plan.** A turn whose first plan names a file and
+10. **The fetch is serviced before the hop and takes one slot.** A request carrying a
+    `LOCAL_FILE` ask and a `CITATION_HOP` whose evidence would fill the budget produces a
+    fourth group holding the fetched record first and exactly nine hop records after it, in
+    that order, with the truncation in the audit.
+11. **A refusal degrades nothing.** A request carrying a `LOCAL_FILE` ask that refuses and a
+    `SIGHTED_QUERY` that returns produces a fourth group holding the query's records in
+    full: the refusal takes no slot, discards nothing, and is recorded as a refusal rather
+    than as a servicing failure. This is the arm that distinguishes §6's refusal disposition
+    from ADR-0226 §5's all-or-nothing failure posture.
+12. **A serviced fetch may revise the plan.** A turn whose first plan names a file and
     whose second plan, made over the fetched record, names a different one; both fetches
     are serviced, the fourth group holds both records in servicing order, and each
     servicing draws its own budget (ADR-0228 §7). Asserted over the supply and the audit's
     per-servicing entries.
-11. **An unbounded-audience operation fetches nothing.** A turn on `converse_spoken` whose
+13. **An unbounded-audience operation fetches nothing.** A turn on `converse_spoken` whose
     planner emits a `LOCAL_FILE` ask reaches the composing stage with the three groups
     ADR-0203 §1 narrowed, performs no filesystem read for the request, and records the
     emission as declined.
-12. **The audit copies no address.** A turn that fetches a file whose name carries a
-    distinctive string emits a record in which that string appears nowhere — no path, no
-    name, no extension, no size, no excerpt — the refusal field is a closed-enumeration
-    member or absent, and the ambient correlation id is the only identifier on the event.
-    Asserted over the emitted event's own fields, not over the redaction net.
-13. **The listing is bounded, ordered and declared.** A root holding more entries than the
+14. **The audit copies no address, and no handle leaves the fetcher.** A turn that
+    fetches a file whose name carries a distinctive string emits a record in which that
+    string appears nowhere — no path, no name, no extension, no size, no excerpt — the
+    refusal field is a closed-enumeration member or absent, and the ambient correlation id
+    is the only identifier on the event. Asserted over the emitted event's own fields, not
+    over the redaction net. Separately, the entry handles of that turn's listing appear in
+    **no** prompt the turn assembled, in no log line and on no field of the record the
+    fetch minted.
+15. **The listing is bounded, ordered and declared.** A root holding more entries than the
     cap lists exactly the cap, most recently modified first; a root holding unsupported
     types lists none of them; a root that cannot be read and an empty root both produce an
     empty listing, and no consumer distinguishes them.
-14. **The models refuse what §1 says they refuse**, arm for arm: a `LOCAL_FILE` ask with a
+16. **The models refuse what §1 says they refuse**, arm for arm: a `LOCAL_FILE` ask with a
     blank or whitespace-only `entry`; one carrying `entry` **and** a query; one carrying
     `entry` **and** labels; a `SIGHTED_QUERY` or `CITATION_HOP` ask carrying an `entry`; a
     `ReadRequest` with two `LOCAL_FILE` asks; a `FetchOutcome` carrying both a record and a
     refusal, and one carrying neither; and a mutation of any of them after construction.
-15. **Nothing is written.** A turn that fetches leaves the `MemoryStore` byte-for-byte as it
+17. **Nothing is written.** A turn that fetches leaves the `MemoryStore` byte-for-byte as it
     was but for the ordinary capture: no fetched record is ingested, none is retrievable on
     a later turn, and its id resolves in no store. Asserted over the store, not over a
     writer mock.
-16. **The versions moved and announce the shape.** A `PlanExport` whose plans carry a
+18. **The versions moved and announce the shape.** A `PlanExport` whose plans carry a
     `LOCAL_FILE` ask round-trips with `schema_version` 5; a document labelled 4 does not
     validate as a `PlanExport` at all; both conforming `PlanStore` implementations export
     the new version; and `PROTOCOL_VERSION` reads 28 with `wire/envelope.py`'s log naming
