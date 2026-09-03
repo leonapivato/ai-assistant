@@ -233,6 +233,40 @@ def test_a_hostile_repr_does_not_raise_past_a_duration_guard(field: str) -> None
         CalendarReader(_ABSOLUTE, **kwargs)
 
 
+@pytest.mark.parametrize("field", ["window_past", "window_future", "read_timeout"])
+def test_a_lying_comparison_no_longer_reaches_the_range_check(field: str) -> None:
+    """The narrowing this guard actually buys, pinned so it cannot be lost again.
+
+    Before the type guard, the range check asked *any* object and accepted every
+    one that answered ``False`` — so an object with nothing but comparison
+    operators constructed a reader. It is now refused for what it is not.
+
+    What a type guard cannot buy is the range itself: a ``timedelta`` **subclass**
+    answering ``False`` still evades the comparison below, because that comparison
+    asks the value about itself. Closing that means normalising the duration
+    before comparing rather than tightening acceptance, and it is #1979's
+    question for both readers at once — see this guard's docstring for why an
+    exact-type test is not the answer to it.
+    """
+
+    class NotEvenADuration:
+        def __lt__(self, other: object) -> bool:
+            return False
+
+        def __gt__(self, other: object) -> bool:
+            return False
+
+        def __le__(self, other: object) -> bool:
+            return False
+
+        def __ge__(self, other: object) -> bool:
+            return False
+
+    kwargs: dict[str, Any] = {field: NotEvenADuration()}
+    with pytest.raises(ValueError, match=f"calendar_{field} must be a timedelta"):
+        CalendarReader(_ABSOLUTE, **kwargs)
+
+
 @pytest.mark.parametrize("value", [None, 3, ZoneInfo("Europe/Rome")])
 def test_the_constructor_refuses_a_timezone_that_is_not_a_str(value: object) -> None:
     """The fifth site of the same rule, and the one the ``Raises:`` clause names.
