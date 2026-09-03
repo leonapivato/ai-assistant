@@ -185,6 +185,15 @@ _FORWARD_PATH_REPLIES: Final = frozenset({251, 551})
 #: The highest TCP port number, which is where an endpoint's port has to sit.
 _MAX_PORT: Final = 65535
 
+#: How many digits a port can be written in, derived from the bound above rather
+#: than stated beside it so the two cannot drift apart. It is not a second rule:
+#: no canonical decimal in ``1..65535`` is longer. It is checked **before** the
+#: conversion because CPython refuses ``int()`` on a string of more than 4300
+#: digits, so an endpoint whose port is five thousand digits would pass every
+#: character test and then raise ``ValueError`` out of the conversion — which is
+#: the very escape the ASCII rule below closes (#1147).
+_MAX_PORT_DIGITS: Final = len(str(_MAX_PORT))
+
 #: The reply codes RFC 5321 and RFC 4954 define for the steps this seam takes.
 #: Named rather than written inline so a reader can see that every branch below
 #: turns on a code the protocol assigns, not on a number somebody remembered.
@@ -725,7 +734,7 @@ class StreamOutboundTransport:
             # host whose IDNA encoding fails (an empty or over-long label, a
             # zero-width joiner) raises one out of ``getaddrinfo``, and
             # ``parse_smtp_endpoint`` validates the authority no further than its
-            # punctuation (#1147, #1158). Leaving that one through would break the
+            # punctuation (#1158). Leaving that one through would break the
             # shared taxonomy for a host an operator can actually configure.
             #
             # Nothing reached this frame either way, so there is nothing to
@@ -942,8 +951,15 @@ def parse_smtp_endpoint(endpoint: str) -> TransportEndpoint:
         )
         raise TransportPinError(msg)
     host, colon, port_text = authority.rpartition(":")
+    # **The separator, carried rather than dropped.** ``rpartition`` puts the whole
+    # authority in its *tail* when there is no separator, so the separator is the
+    # only thing that tells "no port was written" apart from "a port was written
+    # and is empty" — and ``_port`` was given the tail alone, which made
+    # ``smtps://host:`` indistinguishable from ``smtps://host`` and defaulted it
+    # (#1147). Only the second of the two is a port nobody wrote.
+    written_port: str | None = port_text if colon else None
     if not colon:
-        host, port_text = authority, ""
+        host = authority
     if not host or host.strip() != host:
         msg = "the bound transport endpoint names no host"
         raise TransportPinError(msg)
@@ -959,7 +975,7 @@ def parse_smtp_endpoint(endpoint: str) -> TransportEndpoint:
             "anything resolves it"
         )
         raise TransportPinError(msg)
-    port = _port(port_text, scheme)
+    port = _port(written_port, scheme)
     parsed: TransportEndpoint | None = None
     try:
         parsed = TransportEndpoint(host=host, port=port, implicit_tls=scheme == "smtps")
@@ -989,11 +1005,33 @@ def parse_smtp_endpoint(endpoint: str) -> TransportEndpoint:
     return parsed
 
 
-def _port(port_text: str, scheme: str) -> int:
-    """Read the port, or this scheme's default.
+def _port(port_text: str | None, scheme: str) -> int:
+    """Read the port the endpoint wrote, or this scheme's default.
+
+    **The grammar is one to five ASCII decimal digits with no leading zero, naming
+    a number in ``1..65535``** — which is every port, written exactly one way.
+    ``port_text.isdigit()`` was the whole of it, and each clause added here closes
+    a form it said yes to (#1147, the three cases ADR-0154 records against this
+    function):
+
+    - ``isdigit()`` is ``True`` for characters ``int()`` cannot read, so
+      ``smtps://host:²`` escaped as a bare ``ValueError`` where every caller of
+      this grammar is handling a refusal about a *binding* (ADR-0191 §4) — it
+      reached the invoker as an internal fault rather than as a refusal.
+    - ``isdigit()`` is equally ``True`` for digits ``int()`` reads perfectly well
+      in another script, so a port written as two ARABIC-INDIC DIGIT FIVE
+      (``U+0665``) was **accepted** as port 55 — a spelling that compares unequal
+      to ``:55`` as text against the registration while opening the same port.
+      ``isascii()`` closes both directions at once.
+      A leading zero is that same fold inside ASCII, so ``:0465`` is refused
+      rather than read as 465 — the grammar normalises a port exactly as much as
+      it normalises a host, which is not at all (ADR-0148 §2's exactness default).
 
     Args:
-        port_text: The text after the last colon of the authority, possibly empty.
+        port_text: The text after the authority's last colon, or ``None`` where
+            the authority carried no colon at all. ``""`` is therefore a port that
+            was written and left empty, which is refused; ``None`` is a port
+            nobody wrote, which takes the default.
         scheme: The endpoint's scheme, which supplies the default.
 
     Returns:
@@ -1004,9 +1042,15 @@ def _port(port_text: str, scheme: str) -> int:
             unreadable port is refused rather than defaulted, because defaulting
             would connect somewhere nobody wrote down.
     """
-    if not port_text:
+    if port_text is None:
         return _DEFAULT_PORTS[scheme]
-    if not port_text.isdigit() or not 1 <= int(port_text) <= _MAX_PORT:
+    written_as_a_port_number = (
+        port_text.isascii()
+        and port_text.isdigit()
+        and len(port_text) <= _MAX_PORT_DIGITS
+        and not port_text.startswith("0")
+    )
+    if not written_as_a_port_number or not 1 <= int(port_text) <= _MAX_PORT:
         msg = "the bound transport endpoint's port is not a TCP port number"
         raise TransportPinError(msg)
     return int(port_text)
