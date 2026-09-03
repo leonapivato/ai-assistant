@@ -498,12 +498,23 @@ against the turn's own model round trips, which it is orders of magnitude below.
 > the other.
 
 > **Normative.** **Resolution and acquisition are one operation, and no bound is decided
-> against a path the fetch then re-opens.** A conforming `Fetcher` opens the entry's file
-> from its configured root **without following a symbolic link at the final component**,
-> and then decides every remaining question — that it is a regular file, that it lies
-> under the root, and that it is within `fetch_max_file_bytes` — **against the object it
-> has open**, never against a path or a `stat` taken before the open. The root itself is
-> resolved once, when the fetcher is constructed, and is not re-resolved per fetch.
+> against a path the fetch then re-opens.** A conforming `Fetcher` holds an **opened
+> directory handle on its configured root**, acquired once when the fetcher is constructed
+> and held for the fetcher's life, and opens the entry's file **relative to that handle,
+> by its single final component, without following a symbolic link** —
+> `openat(dirfd, name, O_NOFOLLOW)` or the platform equivalent. It then decides every
+> remaining question — that it is a regular file, and that it is within
+> `fetch_max_file_bytes` — **against the object it has open**, never against a path or a
+> `stat` taken before the open.
+
+> **Normative.** **The open handle, and not a stored pathname, is what "under the
+> configured root" means.** No conforming implementation re-derives the root from a
+> pathname at fetch time, and none acquires an entry by joining a name onto one. A root
+> whose *pathname* is replaced after construction is not the configured root any more: the
+> handle goes on naming the directory the operator configured, and whatever now occupies
+> the pathname is never reached. Where the handle's directory has been removed or can no
+> longer be used, the listing is empty and every fetch refuses — never a read of the
+> substitute.
 
 > **Normative.** **The read is itself bounded, so a file that grows after its size was
 > observed is refused rather than read.** An implementation reads at most
@@ -586,9 +597,26 @@ grow past the bound, before it is opened — and the outcome would be a read out
 configured root or an unbounded read, both of which §§4 and 6 exist to refuse. Deciding
 every question against the object already open removes the window rather than narrowing
 it, and bounding the read itself removes the second one; both are conditions on the
-implementation because there is no way to state them as conditions on a value. §14 owes
-a test for each transition rather than for the static cases alone, which is the
-difference between asserting the property and asserting the easy half of it.
+implementation because there is no way to state them as conditions on a value.
+
+**The root is the third window, and an earlier draft of this section left it open.** That
+draft resolved the root once at construction and said only that it was not re-resolved per
+fetch — which stores a **pathname**, and a pathname is re-traversed in full at every open.
+Protecting the final component with `O_NOFOLLOW` therefore protects exactly one component
+and leaves every ancestor substitutable: list `report.txt` under the configured root, then
+rename the root away and put a symbolic link of its pathname in its place pointing at an
+outside directory holding another `report.txt`, and the next fetch follows the substituted
+root and reads the outside file — while satisfying the membership check, the deadlines,
+the final-component clause and the bounded read, every one of them. The defect is the
+traversal, not the number of components guarded, so the fix removes the traversal: an
+opened directory handle is a reference to the directory itself rather than to a name for
+it, so containment stops being a check performed against a path and becomes a property of
+where the open starts. That is also why the against-the-object list above no longer
+carries "lies under the root": with the handle, that question is answered by construction
+and there is nothing left to decide.
+
+§14 owes a test for each of the three transitions rather than for the static cases alone,
+which is the difference between asserting the property and asserting the easy half of it.
 
 **Named `Fetcher` for its product role**, as every Protocol here is (`Planner`,
 `Observer`, `Reader`). The role is fetching one named thing, now, for this turn, which
@@ -1142,10 +1170,13 @@ wiring, which constructs a `Fetcher` only where a root is configured.
 > argument that could widen it, so a generic suite has nothing to over-supply); that a
 > **real** source failure produces each refusal class (a suite cannot make an arbitrary
 > fetcher's source fail — those are the concrete fetcher's tests, and it owes one per
-> `FetchRefusal` member); that a path escaping the root is refused and that the two race
+> `FetchRefusal` member); that a path escaping the root is refused and that the three race
 > transitions of §4 are refused (a concrete fetcher's test over a real filesystem, and it
 > owes `..`, a separator in `name`, a symlink out of the root, a replacement between
-> validation and acquisition, and a growth past the bound between them); and that the
+> validation and acquisition, a growth past the bound between them, and a replacement of
+> the **root's own pathname** by a symlink to an outside directory between the listing and
+> the fetch — a generic suite cannot replace an arbitrary fetcher's root, so this arm is
+> the concrete fetcher's and not the suite's); and that the
 > listing is ordered most-recently-modified-first and capped. Each is named here so the
 > lane does not read its absence from the suite as its absence from the contract.
 
@@ -1217,13 +1248,18 @@ same reason; this decision adds a contract, so it adds a lane.
    same seam: an entry of listing A presented with listing B's token, and a `SourceListing`
    the test assembled around a real entry. Asserted at the `Fetcher` seam, because it is a
    property of the contract and not of the loop that happens to call it.
-4. **The two race transitions are refused.** Over a real filesystem, deterministically
+4. **The three race transitions are refused.** Over a real filesystem, deterministically
    sequenced so the transition lands **between** the fetcher's validation and its
    acquisition: a supported regular file replaced by a symbolic link pointing outside the
-   root, which is refused `NOT_A_FILE` and reads nothing from the link's target; and a file
+   root, which is refused `NOT_A_FILE` and reads nothing from the link's target; a file
    that grows past `fetch_max_file_bytes` after its size was observed, which is refused
-   `TOO_LARGE` and puts no prefix of the grown content anywhere. Neither yields a record
-   mixing one object's metadata with another's content.
+   `TOO_LARGE` and puts no prefix of the grown content anywhere; and **the root's own
+   pathname replaced by a symbolic link to an outside directory holding a file of the same
+   name**, between the listing and the fetch, where the fetch either reads the original
+   object through the handle it holds or refuses — and in **no** arm does the outside
+   file's distinctive text reach the supply or the reply. None of the three yields a record
+   mixing one object's metadata with another's content. The third arm is the one that fails
+   on any implementation storing the root as a pathname and re-joining a name onto it.
 5. **A listing expires once either deadline passes, and on nothing else.** Four arms,
    each deterministic over fake clocks the test drives. A listing inside both deadlines is
    fetched, and one past both is refused `NOT_FOUND`. **A backward wall clock does not
