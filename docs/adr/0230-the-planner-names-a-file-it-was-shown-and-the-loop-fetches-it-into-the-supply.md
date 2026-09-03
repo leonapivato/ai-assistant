@@ -472,9 +472,11 @@ against the turn's own model round trips, which it is orders of magnitude below.
 > `token`, whose payload **commits to the listing's ordered sequence of entry `name`s**;
 > that the `handle` is one this fetcher minted **for that listing**, over that entry's
 > `name` and its position; and that the name stands at that position of the committed
-> sequence. It is **not** a containment test over the `entries` tuple the caller handed
-> in, and no conforming implementation performs one — a caller can put any tuple there,
-> so a test over it decides nothing.
+> sequence. **The `entries` tuple the caller handed in is untrusted input rather than
+> evidence**: membership in it establishes nothing on its own, because a caller can put
+> any tuple there. What an implementation does with it is compare its ordered `name`s
+> against the sequence the signed payload commits to, and refuse on any difference — the
+> clause below. The tuple is read; it is never believed.
 
 > **Normative.** **The token's commitment is what makes an authentic token useless over an
 > altered listing.** Without it, a caller keeping a real `token` and replacing `entries`
@@ -1620,14 +1622,17 @@ same reason; this decision adds a contract, so it adds a lane.
     planner emits a `LOCAL_FILE` ask reaches the composing stage with the three groups
     ADR-0203 §1 narrowed, performs no filesystem read for the request, and records the
     emission as declined.
-15. **The audit copies no address, and no handle leaves the fetcher.** A turn that
+15. **The audit copies no address, and no capability reaches a prompt, a log, an audit or
+    a record.** A turn that
     fetches a file whose name carries a distinctive string emits a record in which that
     string appears nowhere — no path, no name, no extension, no size, no excerpt — the
     refusal field is a closed-enumeration member or absent, and the ambient correlation id
     is the only identifier on the event. Asserted over the emitted event's own fields, not
-    over the redaction net. Separately, the entry handles of that turn's listing appear in
-    **no** prompt the turn assembled, in no log line and on no field of the record the
-    fetch minted.
+    over the redaction net. Separately, the `token` and the entry handles of that turn's
+    listing appear in **no** prompt the turn assembled, in no log line and on no field of
+    the record the fetch minted — the invariant being where a capability may **go**, not
+    that it never leaves the fetcher, since §4 has the fetcher hand entries to
+    `orchestration` and take them back on `fetch`.
 16. **The listing is bounded, ordered and declared.** A root holding more entries than the
     cap lists exactly the cap, most recently modified first; a root holding unsupported
     types lists none of them; a root that cannot be read and an empty root both produce an
@@ -1939,7 +1944,7 @@ avoided: the record carries an attestation because it is in the attested band.
 - **Refusing an exact copy of an authentic listing, so that only the object the fetcher
   handed out is fetchable.** It is the stricter reading of §4's *"a listing a caller
   assembled is refused"*, and it is unavailable: distinguishing a faithful copy from the
-  original requires the fetcher to retain what it minted, which §4's third required
+  original requires the fetcher to retain what it minted, which §4's fourth required
   property forbids and which the eight-listing window already failed on from both sides.
   It also buys nothing — a copy names the same entry of the same listing inside the same
   deadlines — so the refusal rule is stated over **unminted or altered** values instead,
