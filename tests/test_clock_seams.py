@@ -399,6 +399,113 @@ async def test_no_seam_steals_a_failure_of_the_clock_itself(seam: Seam) -> None:
     assert not isinstance(caught.value, seam.error)
 
 
+@dataclass(frozen=True)
+class SwallowedSeam:
+    """A seam whose clock fault costs the *observation* and never the work.
+
+    The third posture, and the reason :data:`SEAMS` cannot state the whole set on
+    its own: ADR-0119 §5 gives the Tier 2 instrument the opposite failure rule to
+    every seam above it — "a clock that raises costs the trace and not the read".
+    So a naive reading here raises nothing at all, the crossing returns what it
+    was going to return, and the trace is emitted with **no** ``occurred_at``.
+
+    That is not an exemption from ADR-0026 §7, which is about the *guard* and not
+    about what a subsystem does with a rejection: the reading is checked, refused
+    and labelled exactly as everywhere else, and ``memory/traces.py`` then catches
+    it deliberately and logs ``trace_not_recorded``. Omitting these seams because
+    they raise nothing is what would make the table's claim untrue — a clock that
+    silently stopped being guarded here would look identical.
+
+    Attributes:
+        label: The seam, as ``owner`` names it. These two are the seams whose
+            ``owner`` is the ``MemoryTraces`` constructor's argument, so they are
+            among the labels :data:`COMPUTED_OWNERS` declares.
+        drive: Builds the emitting object over the given clock and the given sink
+            and drives one crossing of it, through the emitter's real entry point.
+    """
+
+    label: str
+    drive: Callable[[Clock, FakeTraceSink], Coroutine[None, None, None]]
+
+
+async def _ingestor_write_traces(now: Clock, sink: FakeTraceSink) -> None:
+    """The ``MEMORY_WRITE`` emitter's own clock, which is not the ingestor's.
+
+    ``traces_now`` is a second seam on the same object (ADR-0119 §3 stamps the
+    instant on the emitter, not on the store), so the ingestor's ``now`` is left
+    conforming: the reading under test is the instrument's.
+    """
+    await MemoryIngestor(
+        traces_sink=sink,
+        store=InMemoryMemoryStore(now=lambda: _AWARE),
+        policy=FakeMemoryPolicy(MemoryDecisionKind.ACCEPT),
+        now=lambda: _AWARE,
+        traces_now=now,
+    ).ingest(_proposal())
+
+
+async def _store_retrieval_traces(now: Clock, sink: FakeTraceSink) -> None:
+    """The ``RETRIEVAL`` emitter's own clock, on :func:`_ingestor_write_traces`'s rule."""
+    store = SqliteMemoryStore(
+        traces_sink=sink,
+        path=":memory:",
+        embedder=FakeEmbedder(),
+        now=lambda: _AWARE,
+        traces_now=now,
+    )
+    await store.search("coffee", limit=1)
+
+
+#: Both crossings of :class:`~ai_assistant.memory.traces.MemoryTraces`, which is
+#: the one seam in the tree whose ``owner`` is a constructor argument.
+SWALLOWING_SEAMS = [
+    SwallowedSeam("MemoryIngestor write traces", _ingestor_write_traces),
+    SwallowedSeam("SqliteMemoryStore retrieval traces", _store_retrieval_traces),
+]
+
+
+@pytest.mark.parametrize(
+    "clock", [_naive_clock, _failing_clock], ids=["a naive reading", "a clock that is down"]
+)
+@pytest.mark.parametrize("seam", SWALLOWING_SEAMS, ids=[seam.label for seam in SWALLOWING_SEAMS])
+async def test_an_instruments_clock_fault_costs_the_trace_and_not_the_work(
+    seam: SwallowedSeam, clock: Clock
+) -> None:
+    """ADR-0119 §5: the instrument's clock fault reaches the trace and stops there.
+
+    A trace with no instant is not a trace ADR-0119 §3 can order, so the emitter
+    drops the whole record rather than emitting a stamp-less one — the "absence
+    travels to ``_record``" its own docstring describes. What §5 protects is the
+    other side: the crossing completes and returns what it was going to return.
+    An instrument that failed a memory write because its own clock was
+    misconfigured would be the tail wagging the dog.
+
+    Both halves are asserted, because the first alone is satisfied by an emitter
+    that never emits anything: the same crossing is driven again over a conforming
+    clock and has to produce the trace the faulted one did not. Without that, a
+    seam whose instrumentation had been disconnected entirely would pass.
+
+    Both clocks, because §5 draws no distinction: a refused *reading* and the
+    clock's own failure are the same fact to an instrument that may not fail, and
+    a guard that let one of them through would be caught only here.
+    """
+    faulted = FakeTraceSink()
+
+    await seam.drive(clock, faulted)
+
+    assert faulted.recorded == (), (
+        f"{seam.label} emitted a trace from a clock that never produced a conforming "
+        f"reading; an unstamped trace is one ADR-0119 §3 cannot order"
+    )
+
+    conforming = FakeTraceSink()
+    await seam.drive(lambda: _AWARE, conforming)
+    assert len(conforming.recorded) == 1, (
+        f"{seam.label} emits no trace even over a conforming clock, so the assertion "
+        f"above is vacuous and this seam is no longer instrumented at all"
+    )
+
+
 #: Seams whose ``owner=`` is a run-time expression, so no scan of the source can
 #: name them: the unparsed expression maps to the labels it actually produces.
 #: Each label is driven by a row of :data:`SEAMS` above, and
@@ -436,7 +543,6 @@ UNTABLED: Final[dict[str, str]] = {
     "FakeRecipientGrants": _NOT_YET_DRIVEN,
     "FakeTranscriptArchive": _NOT_YET_DRIVEN,
     "IngestionStage": _NOT_YET_DRIVEN,
-    "MemoryIngestor write traces": _NOT_YET_DRIVEN,
     "ModelBackedObserver": _NOT_YET_DRIVEN,
     "ModelBackedPlanner": _NOT_YET_DRIVEN,
     "ObservationStage": _NOT_YET_DRIVEN,
@@ -446,7 +552,6 @@ UNTABLED: Final[dict[str, str]] = {
     "SqliteAuditTrail": _NOT_YET_DRIVEN,
     "SqliteConversationStore": _NOT_YET_DRIVEN,
     "SqliteDeferralStore": _NOT_YET_DRIVEN,
-    "SqliteMemoryStore retrieval traces": _NOT_YET_DRIVEN,
     "SqliteNotificationOutbox": _NOT_YET_DRIVEN,
     "SqliteNotificationStore": _NOT_YET_DRIVEN,
     "SqlitePlanStore": _NOT_YET_DRIVEN,
@@ -511,6 +616,7 @@ def test_the_seam_table_is_the_whole_set() -> None:
     is the half that had gone stale.
     """
     assert len({seam.label for seam in SEAMS}) == len(SEAMS)
+    assert len({seam.label for seam in SWALLOWING_SEAMS}) == len(SWALLOWING_SEAMS)
 
     literal, computed = _clock_seam_roster()
     assert literal, "the roster scan found no seam at all, so nothing below is evidence"
@@ -520,13 +626,13 @@ def test_the_seam_table_is_the_whole_set() -> None:
         f"computed has to name the labels it produces here, because no scan can read them"
     )
 
-    tabled = {seam.label for seam in SEAMS}
+    tabled = {seam.label for seam in SEAMS} | {seam.label for seam in SWALLOWING_SEAMS}
     roster = literal | {label for labels in COMPUTED_OWNERS.values() for label in labels}
     assert tabled - roster == set(), (
-        f"{sorted(tabled - roster)} is in ``SEAMS`` but reads no clock in ``src/``: a "
+        f"{sorted(tabled - roster)} is tabled here but reads no clock in ``src/``: a "
         f"label that drifted from its constructor, or a seam that has been removed"
     )
     assert roster - tabled == set(UNTABLED), (
         f"{sorted(roster - tabled - set(UNTABLED))} guards a clock in ``src/`` and is "
-        f"neither driven by ``SEAMS`` nor recorded in ``UNTABLED`` with its reason"
+        f"is driven by no table here and recorded in ``UNTABLED`` with no reason"
     )
