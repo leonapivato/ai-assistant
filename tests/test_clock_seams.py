@@ -18,13 +18,17 @@ contract certifies consumers the real implementation will reject.
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Final
 
 import pytest
 
+import ai_assistant
 from ai_assistant.context.sources import ClockContextSource
+from ai_assistant.core import clock
 from ai_assistant.core.clock import ClockReadingError
 from ai_assistant.core.errors import (
     ContextError,
@@ -395,11 +399,134 @@ async def test_no_seam_steals_a_failure_of_the_clock_itself(seam: Seam) -> None:
     assert not isinstance(caught.value, seam.error)
 
 
+#: Seams whose ``owner=`` is a run-time expression, so no scan of the source can
+#: name them: the unparsed expression maps to the labels it actually produces.
+#: Each label is driven by a row of :data:`SEAMS` above, and
+#: :func:`test_every_seam_refuses_a_naive_reading_as_its_own_error` asserts the
+#: label appears in the rejection — which is what keeps this mapping honest
+#: rather than a second declaration nothing checks.
+COMPUTED_OWNERS: Final[dict[str, tuple[str, ...]]] = {
+    "type(self).__name__": ("CalendarContextSource", "EmailContextSource"),
+    "owner": ("MemoryIngestor write traces", "SqliteMemoryStore retrieval traces"),
+}
+
+#: Seams the roster below finds in ``src/`` that :data:`SEAMS` deliberately does
+#: not drive, each with the reason it is not merely an omission. **Empty is the
+#: intended state**; an entry here is a debt with an issue behind it, and the
+#: partition assertion is what stops the list growing by accident.
+_NOT_YET_DRIVEN: Final = "#781: guarded, and its guard is not yet driven from this table"
+
+UNTABLED: Final[dict[str, str]] = {
+    "AdminListener": _NOT_YET_DRIVEN,
+    "CalendarContextSource": _NOT_YET_DRIVEN,
+    "CalendarReader": _NOT_YET_DRIVEN,
+    "ConfigurationStamp": _NOT_YET_DRIVEN,
+    "ConsolidationStage": _NOT_YET_DRIVEN,
+    "ConversationLifecycle": _NOT_YET_DRIVEN,
+    "CurrentTime": _NOT_YET_DRIVEN,
+    "EmailContextSource": _NOT_YET_DRIVEN,
+    "EmailReader": _NOT_YET_DRIVEN,
+    "FakeAuditTrail": _NOT_YET_DRIVEN,
+    "FakeConversationStore": _NOT_YET_DRIVEN,
+    "FakeDeferralStore": _NOT_YET_DRIVEN,
+    "FakeFeedbackProcessor": _NOT_YET_DRIVEN,
+    "FakeNotificationOutbox": _NOT_YET_DRIVEN,
+    "FakeNotificationStore": _NOT_YET_DRIVEN,
+    "FakeRecipientGrantStore": _NOT_YET_DRIVEN,
+    "FakeRecipientGrants": _NOT_YET_DRIVEN,
+    "FakeTranscriptArchive": _NOT_YET_DRIVEN,
+    "IngestionStage": _NOT_YET_DRIVEN,
+    "MemoryIngestor write traces": _NOT_YET_DRIVEN,
+    "ModelBackedObserver": _NOT_YET_DRIVEN,
+    "ModelBackedPlanner": _NOT_YET_DRIVEN,
+    "ObservationStage": _NOT_YET_DRIVEN,
+    "OperationTraces": _NOT_YET_DRIVEN,
+    "QuestionStage": _NOT_YET_DRIVEN,
+    "RuleBasedFeedbackProcessor": _NOT_YET_DRIVEN,
+    "SqliteAuditTrail": _NOT_YET_DRIVEN,
+    "SqliteConversationStore": _NOT_YET_DRIVEN,
+    "SqliteDeferralStore": _NOT_YET_DRIVEN,
+    "SqliteMemoryStore retrieval traces": _NOT_YET_DRIVEN,
+    "SqliteNotificationOutbox": _NOT_YET_DRIVEN,
+    "SqliteNotificationStore": _NOT_YET_DRIVEN,
+    "SqlitePlanStore": _NOT_YET_DRIVEN,
+    "SqliteRecipientGrantStore": _NOT_YET_DRIVEN,
+    "SqliteTranscriptArchive": _NOT_YET_DRIVEN,
+    "StepExecutor": _NOT_YET_DRIVEN,
+    "StepRunner": _NOT_YET_DRIVEN,
+    "StoreHealthReader": _NOT_YET_DRIVEN,
+    "UpcomingEventStage": _NOT_YET_DRIVEN,
+}
+
+
+def _clock_seam_roster() -> tuple[frozenset[str], frozenset[str]]:
+    """Every ``checked_clock`` call in ``src/``, read out of the source itself.
+
+    Parsed rather than imported, because an import-time roster would only see the
+    seams whose modules something in this test happened to load — the failure mode
+    a roster exists to prevent. ``core/clock.py`` is skipped: the ``checked_clock``
+    inside it is the definition, not a seam.
+
+    Returns:
+        The ``owner`` labels written as string literals, and the ``owner``
+        expressions computed at run time, unparsed.
+    """
+    literal: set[str] = set()
+    computed: set[str] = set()
+    definition = Path(clock.__file__)
+    for path in sorted(Path(ai_assistant.__file__).parent.rglob("*.py")):
+        if path == definition:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call):
+                continue
+            called = node.func
+            name = called.id if isinstance(called, ast.Name) else getattr(called, "attr", None)
+            if name != "checked_clock":
+                continue
+            owner = next((kw.value for kw in node.keywords if kw.arg == "owner"), None)
+            if isinstance(owner, ast.Constant) and isinstance(owner.value, str):
+                literal.add(owner.value)
+            else:
+                computed.add("<positional or absent>" if owner is None else ast.unparse(owner))
+    return frozenset(literal), frozenset(computed)
+
+
 def test_the_seam_table_is_the_whole_set() -> None:
     """A new seam that forgets the guard has to be added here to pass anything.
 
-    Not a proof — nothing can mechanically discover an unwritten guard — but it
-    keeps the enumerated set honest: the labels are the ``owner`` strings, and a
-    seam whose label drifts from its constructor fails the assertion above.
+    The labels are the ``owner`` strings, and a seam whose label drifts from its
+    constructor fails the parametrised assertions above. What this adds is the half
+    those cannot see: the seams that exist in ``src/`` and are *not* in the table.
+    Twelve rows stood against forty-nine seams for long enough that the module's
+    stated subject — "the *set*" — was true of a quarter of it (#781), because
+    nothing failed on the day the table stopped growing.
+
+    So the roster is **discovered** rather than declared: the source is parsed for
+    every ``checked_clock(owner=…)`` and the table is asserted to partition it. A
+    seam added tomorrow fails here, naming itself.
+
+    It is still not a proof of the *guard* — nothing can mechanically discover a
+    clock that was never wrapped at all — but it is a proof of the *table*, which
+    is the half that had gone stale.
     """
     assert len({seam.label for seam in SEAMS}) == len(SEAMS)
+
+    literal, computed = _clock_seam_roster()
+    assert literal, "the roster scan found no seam at all, so nothing below is evidence"
+    assert computed == frozenset(COMPUTED_OWNERS), (
+        f"the run-time ``owner=`` expressions in ``src/`` are {sorted(computed)}, but "
+        f"``COMPUTED_OWNERS`` declares {sorted(COMPUTED_OWNERS)}; a seam whose owner is "
+        f"computed has to name the labels it produces here, because no scan can read them"
+    )
+
+    tabled = {seam.label for seam in SEAMS}
+    roster = literal | {label for labels in COMPUTED_OWNERS.values() for label in labels}
+    assert tabled - roster == set(), (
+        f"{sorted(tabled - roster)} is in ``SEAMS`` but reads no clock in ``src/``: a "
+        f"label that drifted from its constructor, or a seam that has been removed"
+    )
+    assert roster - tabled == set(UNTABLED), (
+        f"{sorted(roster - tabled - set(UNTABLED))} guards a clock in ``src/`` and is "
+        f"neither driven by ``SEAMS`` nor recorded in ``UNTABLED`` with its reason"
+    )
