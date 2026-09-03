@@ -610,7 +610,11 @@ class TurnReadAudit:
             on a turn that serviced nothing — a turn that did not fire, one that was
             declined, and one that never reached a plan.
         planner_calls: How many calls to ``Planner.plan`` this turn made (ADR-0228
-            §9). Zero where the turn ended before the first returned.
+            §9). Counted when a call is **started** rather than when it returns, so a
+            turn whose second call raised reports two and its **planning failed**
+            stop reason describes a call the record admits was made. Zero only where
+            the turn ended before the planner was reached at all, which is the same
+            turn §8 records as **not reached**.
         stop: Why the turn stopped iterating (:class:`StopReason`).
     """
 

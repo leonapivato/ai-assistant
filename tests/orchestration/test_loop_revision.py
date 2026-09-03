@@ -15,6 +15,7 @@ like.
 
 from __future__ import annotations
 
+import inspect
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
@@ -48,6 +49,7 @@ from ai_assistant.core.types import (
     Role,
 )
 from ai_assistant.orchestration.composing import ComposingStage
+from ai_assistant.orchestration.loop import ConversationalOperation, LearningLoop
 from ai_assistant.orchestration.reads import (
     READ_BUDGET,
     Servicing,
@@ -71,10 +73,11 @@ if TYPE_CHECKING:
     )
     from ai_assistant.orchestration.loop import RespondedTurn
 
-#: ADR-0228 §4's figure for ``converse`` and ``converse_streaming``, stated here so
-#: a case reads as "within the budget" or "past it" rather than as arithmetic. The
-#: engine declares it; a loop-level case passes whatever it wants to prove about.
-_BUDGET: Final = timedelta(seconds=20)
+#: ADR-0228 §4's figure for ``converse`` and ``converse_streaming``, read off the
+#: member that declares it rather than restated — so a case that reads as "exactly at
+#: the budget" cannot drift from the figure the loop actually enforces.
+_BUDGET: Final = ConversationalOperation.CONVERSE.planning_budget
+assert _BUDGET is not None
 
 
 # --------------------------------------------------------------------------- #
@@ -257,7 +260,7 @@ async def _revising(
     memory: FakeMemoryStore,
     planner: _Script,
     *,
-    budget: timedelta | None = _BUDGET,
+    operation: ConversationalOperation | None = ConversationalOperation.CONVERSE,
     now: Clock = _clock,
     narrow: Any = None,
 ) -> RespondedTurn:
@@ -266,8 +269,10 @@ async def _revising(
     Args:
         memory: The store the turn reads and the servicer hops through.
         planner: The scripted planner.
-        budget: What the operation declares (ADR-0228 §4). ``None`` is an operation
-            that declares none and therefore does not iterate.
+        operation: Which operation the turn runs under (ADR-0228 §4). ``None`` names
+            no operation, which declares no budget and therefore does not iterate —
+            the identity crosses this seam and never a duration, so a case says which
+            operation it is rather than choosing a figure no ADR ruled on.
         now: The loop's injected clock.
         narrow: The supply filter, defaulting to the one ``converse`` supplies.
 
@@ -278,7 +283,7 @@ async def _revising(
     return await loop.respond(
         _ASKED,
         narrow=_bounded() if narrow is None else narrow,
-        planning_budget=budget,
+        operation=operation,
     )
 
 
@@ -565,7 +570,7 @@ async def test_a_bounded_audience_operation_that_declares_no_budget_does_not_ite
     planner = _Script(requests=[_hop("M1")])
 
     with structlog.testing.capture_logs() as captured:
-        responded = await _revising(memory, planner, budget=None)
+        responded = await _revising(memory, planner, operation=None)
 
     assert len(planner.calls) == 1
     record = _record(captured)
@@ -587,7 +592,7 @@ async def test_an_unbounded_audience_turn_fails_the_servicing_condition_too() ->
     planner = _Script(requests=[_hop("M1")])
 
     with structlog.testing.capture_logs() as captured:
-        responded = await _revising(memory, planner, budget=None, narrow=_unbounded())
+        responded = await _revising(memory, planner, operation=None, narrow=_unbounded())
 
     assert len(planner.calls) == 1
     record = _record(captured)
@@ -865,7 +870,10 @@ async def test_a_turn_whose_second_planner_call_raises_still_says_it_fired() -> 
     record = _record(captured)
     assert record["trigger"] == TriggerOutcome.FIRED.value
     assert record["stop"] == StopReason.PLANNING_FAILED.value
-    assert record["planner_calls"] == 1, "and did not return"
+    # §9 asks for how many calls the turn **made**, so a call that raised is one the
+    # turn made: a record saying one beside **planning failed** would say planning
+    # failed on a call it claims never happened.
+    assert record["planner_calls"] == 2
     assert len(record["servicings"]) == 1
 
 
@@ -890,7 +898,7 @@ async def test_a_turn_that_ended_before_any_plan_says_not_reached_and_not_iterat
     record = _record(captured)
     assert record["trigger"] == TriggerOutcome.NOT_REACHED.value
     assert record["stop"] == StopReason.NOT_ITERATED.value
-    assert record["planner_calls"] == 0
+    assert record["planner_calls"] == 1, "the call was made and it raised"
     assert record["servicings"] == ()
 
 
@@ -1186,11 +1194,80 @@ async def test_the_clock_is_read_only_where_the_budget_check_is_reached() -> Non
     """
     memory = await _seeded()
     unbudgeted = _Elapsed(timedelta(seconds=1))
-    await _revising(memory, _Script(requests=[_hop("M1")]), budget=None, now=unbudgeted)
+    await _revising(memory, _Script(requests=[_hop("M1")]), operation=None, now=unbudgeted)
 
     budgeted = _Elapsed(timedelta(seconds=1))
     await _revising(await _seeded(), _Script(requests=[_hop("M1"), None]), now=budgeted)
 
     assert budgeted.readings == unbudgeted.readings + 1, (
         "exactly one more reading: the one budget check the budgeted turn reached"
+    )
+
+
+async def test_a_turn_that_never_reached_the_planner_reports_no_calls() -> None:
+    """The other side of §9's ``planner_calls``, and what separates zero from one.
+
+    A turn that ended **before the planner was reached at all** made no calls and says
+    so; a turn whose first call raised made one. Both are §8's **not reached** on the
+    trigger — neither produced a plan, so neither reached a judgement about its supply
+    — and ``planner_calls`` is what tells an operator which happened.
+
+    A blank utterance is the shape that reaches neither: it is refused at the top of
+    the turn, before any context is assembled and before the planner exists to the
+    turn at all.
+    """
+    memory = await _seeded()
+    planner = _Script()
+    loop = _loop(memory, planner=planner)
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(PlanningError),
+    ):
+        await loop.respond("   ", narrow=_bounded(), operation=ConversationalOperation.CONVERSE)
+
+    assert planner.calls == []
+    record = _record(captured)
+    assert record["trigger"] == TriggerOutcome.NOT_REACHED.value
+    assert record["planner_calls"] == 0, "no call was made at all"
+    assert record["stop"] == StopReason.NOT_ITERATED.value
+
+
+# --------------------------------------------------------------------------- #
+# §4: the budget is the operation's, and no caller supplies a figure          #
+# --------------------------------------------------------------------------- #
+
+
+def test_the_budget_is_read_off_the_operation_and_never_supplied_by_a_caller() -> None:
+    """§4: "not a ``Settings`` value, not a deployment flag and not a per-request parameter".
+
+    What crosses :meth:`~ai_assistant.orchestration.loop.LearningLoop.respond`'s seam
+    is a member of a **closed** set whose budget this module fixes, so no caller — in
+    this package, in a test, or in a later lane — can name a figure no ADR ruled on.
+    That is the construction :data:`~ai_assistant.orchestration.reads.READ_BUDGET`
+    uses for ADR-0226 §6's ten and for the same stated reason, and the same fail-closed
+    shape ADR-0226 §5's channel scoping already has here: the loop reads a closed
+    property off what it is handed rather than taking a value a caller could
+    contradict.
+
+    **Keyed on the operation and never on the audience** (§4). ``converse`` and
+    ``converse_streaming`` are both bounded-audience and declare the same figure;
+    ``converse_spoken`` declares none. Audience decides what may be *said* (ADR-0199
+    §1, ADR-0226 §5) and never how long a user waits.
+    """
+    assert {member.value for member in ConversationalOperation} == {
+        "converse",
+        "converse_streaming",
+        "converse_spoken",
+    }
+    assert ConversationalOperation.CONVERSE.planning_budget == timedelta(seconds=20)
+    assert ConversationalOperation.CONVERSE_STREAMING.planning_budget == timedelta(seconds=20)
+    assert ConversationalOperation.CONVERSE_SPOKEN.planning_budget is None
+
+    signature = inspect.signature(LearningLoop.respond)
+    assert "planning_budget" not in signature.parameters, "no caller supplies a duration"
+    annotation = signature.parameters["operation"].annotation
+    assert "ConversationalOperation" in str(annotation)
+    assert signature.parameters["operation"].default is None, (
+        "a caller that names no operation declares no budget and does not iterate"
     )

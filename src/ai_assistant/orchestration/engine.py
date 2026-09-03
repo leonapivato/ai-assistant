@@ -163,6 +163,7 @@ from ai_assistant.orchestration.disclosure import (
     UnboundedAudienceSupply,
     notification_is_speakable,
 )
+from ai_assistant.orchestration.loop import ConversationalOperation
 from ai_assistant.orchestration.notifications import hand_off
 from ai_assistant.orchestration.origin import SelectionOrigin
 from ai_assistant.orchestration.payloads import (
@@ -1481,35 +1482,20 @@ type _Composer = Callable[
 ]
 
 
-#: ADR-0228 §4's planning budget for ``converse`` and ``converse_streaming``:
-#: **PT20S** from the turn's entry into the loop, within which an *additional*
-#: planner call may be started.
+#: Which conversational operation each pass of :meth:`Engine._run_turn` is running
+#: under (ADR-0228 §4), named here and priced in
+#: :class:`~ai_assistant.orchestration.loop.ConversationalOperation`.
 #:
-#: **Declared per operation** and never derived from the channel's audience. ADR-0199
-#: §1's audience decides whether a read request is serviced at all (ADR-0226 §5); it
-#: does not decide how long a turn may spend planning, and §4 forbids deriving one
-#: from the other — two operations of one audience have different latency tolerances,
-#: and ADR-0199 §1's own argument against overloading a property ("Audience rather
-#: than modality, because 'voice' is not one trust level") is a warning rather than a
-#: licence. ``converse_spoken`` declares **none** and passes ``None``, so no spoken
-#: turn iterates whatever its audience — which is the guard §4 builds while the case
-#: is still hypothetical, because the property keeping voice out of iteration today is
-#: an accident of which devices are declared: a worn earpiece is a *bounded*-audience
-#: channel under ADR-0199 §1, and the day such a spoke is declared only a declared
-#: budget protects it.
+#: **What crosses the seam is the identity and never a duration.** §4 rules the budget
+#: "not a ``Settings`` value, not a deployment flag and **not a per-request
+#: parameter**", so this method does not compute, hold or pass a figure: it says which
+#: operation it is, exactly as it tells the capture point which operation it is with
+#: ``spoken`` (ADR-0205 §4) rather than reading a flag. The figures are the loop's,
+#: fixed on a closed enum, and move only by the ADR that moves them.
 #:
-#: **Twenty seconds is a judged figure and is labelled as one** (§4). Nothing in this
-#: repository measures a planner round trip: the bound of two
-#: (:data:`~ai_assistant.orchestration.loop._PLANNER_CALL_BOUND`) is meant to be the
-#: binding guard in the ordinary case and this to be the tail guard for a turn whose
-#: first phase already ran long. ADR-0228 §9's record says which guard stopped each
-#: turn, so "how often does the budget actually fire" is a number from the first
-#: deploy rather than a claim.
-#:
-#: **Not a ``Settings`` value, not a deployment flag and not a per-request
-#: parameter** (§4). The figure is fixed here and moves only by the ADR that moves it,
-#: exactly as ADR-0226 §6's ten and ADR-0228 §3's two do.
-_PLANNING_BUDGET: Final = timedelta(seconds=20)
+#: A pass that names no operation declares no budget and does not iterate, which is
+#: §4's fail-closed direction for a lane that adds an operation and forgets to price
+#: it. Every conversational operation here names one.
 
 
 @dataclass(frozen=True, slots=True)
@@ -3772,12 +3758,10 @@ class Engine:
             compose=partial(self._composed_spoken, supply=supply),
             compose_routed=self._composed_routed_spoken,
             supply=supply,
-            # ADR-0228 §4: `converse_spoken` declares **none**, so no turn of it
-            # iterates, whatever its audience. That is the guard built while the case
-            # is hypothetical — ADR-0226 §5's channel scoping keeps voice out of
-            # iteration today, but only because of which devices are declared, and a
-            # worn earpiece is bounded-audience under ADR-0199 §1.
-            planning_budget=None,
+            # ADR-0228 §4: this operation declares **no** budget, so no turn of it
+            # iterates whatever its audience — stated on the member rather than as a
+            # `None` this call site chose.
+            operation=ConversationalOperation.CONVERSE_SPOKEN,
             spoken=recorded,
         )
         # Measured **before** a rendering is spent on it, because ADR-0200 §4 rules
@@ -7314,9 +7298,9 @@ class Engine:
             supply=BoundedAudienceSupply(
                 speakable_attested_sources=self._speakable_attested_sources
             ),
-            # ADR-0228 §4: this operation declares PT20S, so a turn of it may take
-            # one revision. The figure is the operation's and not the audience's.
-            planning_budget=_PLANNING_BUDGET,
+            # ADR-0228 §4: which operation this is, and nothing about how long it may
+            # spend. `ConversationalOperation.CONVERSE` prices itself.
+            operation=ConversationalOperation.CONVERSE,
         )
 
     async def _converse_streaming(
@@ -7379,11 +7363,10 @@ class Engine:
             supply=BoundedAudienceSupply(
                 speakable_attested_sources=self._speakable_attested_sources
             ),
-            # ADR-0228 §4 declares PT20S for this operation too — the same figure as
-            # :meth:`_converse`'s and stated once, because §4 keys the budget on the
-            # operation and these two differ in where the answer goes rather than in
-            # how long a user waits for it.
-            planning_budget=_PLANNING_BUDGET,
+            # ADR-0228 §4: its own member, which happens to price itself the same as
+            # `converse` — these two differ in where the answer goes rather than in
+            # how long a user waits for it, and §4 keys the budget on the operation.
+            operation=ConversationalOperation.CONVERSE_STREAMING,
         )
 
     async def _composed_whole(  # noqa: PLR0913 — :data:`_Composer`'s six, and each is a distinct fact about the pass
@@ -7478,7 +7461,7 @@ class Engine:
         compose: _Composer,
         compose_routed: _RoutedComposer,
         supply: TurnSupply,
-        planning_budget: timedelta | None,
+        operation: ConversationalOperation,
         spoken: _SpokenCapture | None = None,
     ) -> TurnOutcome:
         """Route the ask, or resolve the conversation, plan the turn and drive its step.
@@ -7577,7 +7560,7 @@ class Engine:
             history=history.records,
             history_degraded=history.degraded,
             narrow=supply,
-            planning_budget=planning_budget,
+            operation=operation,
         )
         turn = responded.turn
         hop_reached = responded.hop_reached

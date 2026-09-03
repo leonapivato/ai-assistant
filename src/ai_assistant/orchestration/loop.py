@@ -39,7 +39,8 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -69,7 +70,6 @@ from ai_assistant.orchestration.retrieval import assemble_by_band
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
-    from datetime import timedelta
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
@@ -170,6 +170,88 @@ class RespondedTurn:
 #: anyone reviewed. A keyword defaulted to this figure would be exactly such a
 #: setting, reachable by any caller in this package and by any later lane.
 _PLANNER_CALL_BOUND: Final = 2
+
+
+class ConversationalOperation(StrEnum):
+    """Which conversational operation a turn runs under, and what it may spend (§4).
+
+    **A closed set, and what crosses the seam is the operation's identity rather
+    than a duration.** ADR-0228 §4 rules that the planning budget is "**not** a
+    ``Settings`` value, not a deployment flag and **not a per-request parameter**",
+    and that "the figures above are fixed here and move only by the ADR that moves
+    them". A ``timedelta`` argument on :meth:`LearningLoop.respond` would be exactly
+    such a parameter — reachable by any caller in this package and by any later lane,
+    and able to name a figure no ADR ruled on — which is the construction
+    :data:`~ai_assistant.orchestration.reads.READ_BUDGET` refuses for ADR-0226 §6's
+    ten and refuses in the same words. So the figures live **here**, on the member,
+    and a caller says only which operation it is running.
+
+    That is the same fail-closed shape ADR-0226 §5's channel scoping already has in
+    this module: the loop is handed an object whose *type* answers a closed question
+    (:data:`~ai_assistant.orchestration.disclosure.TurnSupply`) rather than a boolean
+    the caller could contradict. A budget a caller supplies is a figure a caller can
+    contradict.
+
+    **Keyed on the operation and never on the channel's audience** (§4). ADR-0199 §1's
+    audience decides whether a request is serviced at all (ADR-0226 §5); it does not
+    decide how long a turn may spend planning, and no lane derives one from the other
+    — ``converse``, ``converse_streaming`` and a future worn-earpiece operation would
+    all be bounded-audience and would tolerate very different waits. ADR-0199 §1's own
+    argument against overloading a property ("Audience rather than modality, because
+    'voice' is not one trust level") is a warning here rather than a licence.
+
+    **A turn that names no operation declares no budget and does not iterate**, which
+    is what :meth:`LearningLoop.respond`'s default means. §4 is fail-closed
+    throughout: "a lane that adds an operation and forgets to price it should get the
+    turn the system already has, not a second model call nobody budgeted", which is
+    ADR-0199 §1's own direction for an undeclared audience taken for its own reason.
+
+    Attributes:
+        CONVERSE: The whole-answer operation. Declares **PT20S**.
+        CONVERSE_STREAMING: Its streaming twin, which differs in where the composed
+            answer goes and not in how long a user waits for it (ADR-0173 §4). The
+            same figure, stated once below rather than twice.
+        CONVERSE_SPOKEN: The spoken operation, which declares **none** and therefore
+            does not iterate, whatever its audience. That is the guard §4 builds while
+            the case is still hypothetical: ADR-0226 §5's channel scoping keeps voice
+            out of iteration today, but only because of which devices are declared —
+            a worn earpiece is a *bounded*-audience channel under ADR-0199 §1, and the
+            day such a spoke is declared only a declared budget protects it.
+    """
+
+    CONVERSE = "converse"
+    CONVERSE_STREAMING = "converse_streaming"
+    CONVERSE_SPOKEN = "converse_spoken"
+
+    @property
+    def planning_budget(self) -> timedelta | None:
+        """How long this operation may spend before starting an additional plan (§4).
+
+        A duration from the turn's entry into the loop, or ``None`` where the
+        operation declares none.
+
+        **Twenty seconds is a judged figure and is labelled as one** (§4). Nothing in
+        this repository measures a planner round trip, and ADR-0228 does not invent a
+        measurement: :data:`_PLANNER_CALL_BOUND` is meant to be the binding guard in
+        the ordinary case and this to be the tail guard for a turn whose first phase
+        already ran long. ADR-0228 §9's record says which guard stopped each turn, so
+        "how often does the budget actually fire" is a number from the first deploy
+        rather than a claim — which is ADR-0226 §8's posture, and the reason a figure
+        this soft is safe to fix here rather than defer.
+
+        Returns:
+            The budget, or ``None`` where this operation declares none.
+        """
+        if self is ConversationalOperation.CONVERSE_SPOKEN:
+            return None
+        return _PLANNING_BUDGET
+
+
+#: ADR-0228 §4's figure for the two operations that declare one. Stated once rather
+#: than per member, because §4 keys the budget on the operation and ``converse`` and
+#: ``converse_streaming`` differ in where the answer goes rather than in how long a
+#: user waits for it — two copies would be two places for one ruled figure to drift.
+_PLANNING_BUDGET: Final = timedelta(seconds=20)
 
 
 #: A filter over the supply one turn runs on, applied **between retrieval and
@@ -725,7 +807,7 @@ class LearningLoop:
         history: Sequence[MemoryRecord] = (),
         history_degraded: bool = False,
         narrow: SupplyFilter | None = None,
-        planning_budget: timedelta | None = None,
+        operation: ConversationalOperation | None = None,
     ) -> RespondedTurn:
         """Run one turn, and record what its planner asked to have read.
 
@@ -754,8 +836,8 @@ class LearningLoop:
             history: The conversation's recent turns (:meth:`_turn`).
             history_degraded: Whether reading that history failed (:meth:`_turn`).
             narrow: The supply filter, or ``None`` (:meth:`_turn`).
-            planning_budget: This operation's planning budget, or ``None``
-                (:meth:`_turn`).
+            operation: Which conversational operation this turn runs under, or
+                ``None`` (:meth:`_turn`).
 
         Returns:
             The turn — its goal, context, assembled memories and last plan — beside
@@ -774,7 +856,7 @@ class LearningLoop:
                 history=history,
                 history_degraded=history_degraded,
                 narrow=narrow,
-                planning_budget=planning_budget,
+                operation=operation,
                 audit=audit,
             )
         finally:
@@ -787,7 +869,7 @@ class LearningLoop:
         history: Sequence[MemoryRecord],
         history_degraded: bool,
         narrow: SupplyFilter | None,
-        planning_budget: timedelta | None,
+        operation: ConversationalOperation | None,
         audit: TurnReadAudit,
     ) -> RespondedTurn:
         """Run one turn: intent, context, memory retrieval, planning.
@@ -967,18 +1049,16 @@ class LearningLoop:
                 separately: from the user's side both are "this answer is less
                 informed than it should have been", and a second flag would ask an
                 adapter to explain a distinction it cannot act on.
-            planning_budget: This operation's planning budget (ADR-0228 §4): a
-                duration, from this method's entry, within which an **additional**
-                planner call may be started. ``None`` where the operation declares
-                none, and such an operation does not iterate — which is the value
-                every caller that has not declared one passes, and the reason a turn
-                driven straight at this loop behaves exactly as it did before this
-                milestone. It is not a ``Settings`` value, not a deployment flag and
-                not a per-request parameter: the figures are fixed at the operations
-                that declare them (:mod:`~ai_assistant.orchestration.engine`), and it
-                is keyed on the **operation** rather than on the channel's audience,
-                because audience is the right key for what may be *said* and the
-                wrong one for how long a user waits.
+            operation: Which conversational operation this turn runs under
+                (:class:`ConversationalOperation`), or ``None`` where the caller
+                named none. **The identity and never a duration** (ADR-0228 §4): the
+                budget is "not a ``Settings`` value, not a deployment flag and not a
+                per-request parameter", so what crosses this seam is a member of a
+                closed set whose budget this module fixes, not a figure a caller
+                chose. ``None`` declares no budget and therefore does not iterate,
+                which is the value every caller that has not declared one passes and
+                the reason a turn driven straight at this loop behaves exactly as it
+                did before this milestone.
             narrow: A :data:`SupplyFilter` applied between retrieval and planning,
                 or ``None`` to plan over everything the turn assembled and
                 retrieved. It is given the assembled context, all three groups of
@@ -1071,9 +1151,15 @@ class LearningLoop:
             # included, runs over what it returned.
             context, memories = _narrowed(narrow, context, memories, retrieved_ids)
         plans: tuple[ActionPlan, ...] = ()
+        # ADR-0228 §9 asks for "how many planner calls the turn **made**", so a call
+        # is counted when it is started and not when it returns: a turn whose second
+        # call raises made two, and a record saying one beside **planning failed**
+        # would say planning failed on a call it claims never happened. A turn that
+        # ended before the planner was reached at all still says zero, which is the
+        # distinction §9's `trigger` outcome draws for its own field.
+        audit.planner_calls += 1
         plan = _stamped(await self._planned(goal, context=context, memories=memories))
         plans += (plan,)
-        audit.planner_calls = len(plans)
         while True:
             request = plan.read_request
             # ADR-0226 §8: the trigger *is* the emission, and ADR-0228 §9 makes it a
@@ -1141,7 +1227,7 @@ class LearningLoop:
             stop = _stop_reason(
                 plans=plans,
                 serviced=serviced,
-                planning_budget=planning_budget,
+                planning_budget=None if operation is None else operation.planning_budget,
                 elapsed=lambda: self._now_utc() - started,
             )
             if stop is not None:
@@ -1156,12 +1242,12 @@ class LearningLoop:
             # this line assigns the reason again, so the value only stands where the
             # call did not return.
             audit.stop = StopReason.PLANNING_FAILED
+            audit.planner_calls += 1
             plan = _stamped(
                 await self._planned(goal, context=context, memories=memories),
                 supersedes=plan.id,
             )
             plans += (plan,)
-            audit.planner_calls = len(plans)
         if bounded_audience:
             # ADR-0226 §7, superseding ADR-0204 §2's timing clause and nothing
             # else of §2: one evaluation, over the turn's **final** supply — which
