@@ -41,6 +41,8 @@ from ai_assistant.orchestration.disclosure import (
     notification_is_speakable,
     speakable_notification_triple,
 )
+from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
+from ai_assistant.orchestration.speech import DEFAULT_MAX_SPOKEN_AUDIO_BYTES
 from ai_assistant.orchestration.upcoming import NOTIFICATION_CLASS, PRODUCER
 from ai_assistant.testing import (
     FakeAssistantEngine,
@@ -54,8 +56,9 @@ from ai_assistant.testing import (
 from ai_assistant.wire.client import HubClient
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
+    from ai_assistant.core.protocols import NotificationPolicy, NotificationStore
     from ai_assistant.orchestration.engine import Engine
 
 #: One rendering, for the validator cases that need audio and never a seam.
@@ -106,23 +109,41 @@ def _placed(  # noqa: PLR0913 — one parameter per field a case may move, and n
     )
 
 
-def _speaking(
+def _speaking(  # noqa: PLR0913 — one parameter per knob a case here varies, declared not relayed
     outbox: FakeNotificationOutbox | RecordingOutbox,
     *,
     formats: Iterable[SpokenAudioFormat] | None = None,
-    synthesizer: FakeSpeechSynthesizer | None | object = None,
-    **kwargs: object,
-) -> tuple[Engine, FakeSpeechSynthesizer | None]:
+    synthesizer: FakeSpeechSynthesizer | None = None,
+    notifications: NotificationStore | None = None,
+    notification_policy: NotificationPolicy | None = None,
+    max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+    max_spoken_audio_bytes: int = DEFAULT_MAX_SPOKEN_AUDIO_BYTES,
+) -> tuple[Engine, FakeSpeechSynthesizer]:
     """An engine with speech wired over ``outbox``, and the synthesizer it holds.
 
     Returned as a pair because almost every case here asserts on what reached the
     seam — that it was called with one exact string, or that it was not called at
     all, which is what ADR-0206 §5's "nothing is spent" means operationally.
+
+    The engine's knobs are **declared and forwarded by name** rather than relayed
+    as ``**kwargs``, because a mapping splatted into ``_wired`` puts back exactly
+    the blindness #1531 is about: mypy cannot prove a named argument is absent from
+    a mapping, so the check ``_wired`` now gets would stop at the first helper that
+    forwarded into it.
     """
     seam = FakeSpeechSynthesizer(formats=formats) if synthesizer is None else synthesizer
-    harness = Harness(transcriber=FakeSpeechTranscriber(), synthesizer=seam)  # type: ignore[arg-type]
-    engine = _wired(harness, outbox, transcriber=harness.transcriber, synthesizer=seam, **kwargs)
-    return engine, seam  # type: ignore[return-value]
+    harness = Harness(transcriber=FakeSpeechTranscriber(), synthesizer=seam)
+    engine = _wired(
+        harness,
+        outbox,
+        transcriber=harness.transcriber,
+        synthesizer=seam,
+        notifications=notifications,
+        notification_policy=notification_policy,
+        max_payload_bytes=max_payload_bytes,
+        max_spoken_audio_bytes=max_spoken_audio_bytes,
+    )
+    return engine, seam
 
 
 async def _poll_one(
@@ -130,15 +151,20 @@ async def _poll_one(
     *,
     plays: tuple[SpokenAudioFormat, ...] = EVERYTHING,
     formats: Iterable[SpokenAudioFormat] | None = None,
-    **kwargs: object,
+    synthesizer: FakeSpeechSynthesizer | None = None,
+    max_spoken_audio_bytes: int = DEFAULT_MAX_SPOKEN_AUDIO_BYTES,
 ) -> tuple[NotificationDelivery, FakeSpeechSynthesizer]:
     """Offer one candidate and poll for it, returning the delivery and the seam."""
     outbox = FakeNotificationOutbox(now=lambda: NOW)
     await outbox.offer(candidate)
-    engine, seam = _speaking(outbox, formats=formats, **kwargs)
+    engine, seam = _speaking(
+        outbox,
+        formats=formats,
+        synthesizer=synthesizer,
+        max_spoken_audio_bytes=max_spoken_audio_bytes,
+    )
     delivery = await engine.next_notification(plays=plays, budget=timedelta(0))
     assert delivery is not None
-    assert isinstance(seam, FakeSpeechSynthesizer)
     return delivery, seam
 
 
@@ -166,6 +192,28 @@ class _AnnouncingOutbox(FakeNotificationOutbox):
         """Announce that a poll has parked, then wait exactly as the fake does."""
         self.parked.set()
         return await super().wait_for_arrival(timeout)
+
+
+@pytest.mark.parametrize("helper", [_speaking, _poll_one], ids=["_speaking", "_poll_one"])
+def test_the_forwarding_helpers_declare_every_knob_they_relay(
+    helper: Callable[..., object],
+) -> None:
+    """#1531, one module over: a forwarder with ``**kwargs`` undoes ``_wired``'s check.
+
+    ``test_engine_delivery._wired`` declares its knobs so that a new required
+    ``Engine`` collaborator is reported at that call, and these two are the helpers
+    that reach it from here. A mapping splatted through either of them puts the
+    blindness back one frame earlier — mypy cannot prove a named argument is absent
+    from a mapping — so the guard is the same guard and belongs beside the helpers
+    it is about.
+    """
+    relayed = [
+        name
+        for name, parameter in inspect.signature(helper).parameters.items()
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD
+    ]
+
+    assert relayed == []
 
 
 class TestTheArgument:

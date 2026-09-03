@@ -14,6 +14,7 @@ uses, so nothing here imports a subsystem (CLAUDE.md golden rule 1).
 from __future__ import annotations
 
 import asyncio
+import inspect
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -33,7 +34,9 @@ from ai_assistant.core.types import (
     NotificationPreferences,
     NotificationReach,
 )
-from ai_assistant.orchestration.engine import Engine
+from ai_assistant.orchestration.engine import _DEFAULT_MAX_NOTIFICATION_BUDGET, Engine
+from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
+from ai_assistant.orchestration.speech import DEFAULT_MAX_SPOKEN_AUDIO_BYTES
 from ai_assistant.testing import (
     FakeAssistantEngine,
     FakeNotificationOutbox,
@@ -43,6 +46,13 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
+    from ai_assistant.core.clock import Clock
+    from ai_assistant.core.protocols import (
+        NotificationPolicy,
+        NotificationStore,
+        SpeechSynthesizer,
+        SpeechTranscriber,
+    )
     from ai_assistant.core.types import NotificationDelivery
     from ai_assistant.orchestration.delivery import DeliveryOutbox
 
@@ -74,19 +84,48 @@ def _candidate(key: str = "k1") -> NotificationCandidate:
     )
 
 
-def _wired(harness: Harness, outbox: DeliveryOutbox | None = None, **kwargs: object) -> Engine:
+def _wired(  # noqa: PLR0913 — one parameter per knob a case here varies, which is the point
+    harness: Harness,
+    outbox: DeliveryOutbox | None = None,
+    *,
+    now: Clock | None = None,
+    notifications: NotificationStore | None = None,
+    notification_policy: NotificationPolicy | None = None,
+    transcriber: SpeechTranscriber | None = None,
+    synthesizer: SpeechSynthesizer | None = None,
+    max_notification_budget: timedelta = _DEFAULT_MAX_NOTIFICATION_BUDGET,
+    max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+    max_spoken_audio_bytes: int = DEFAULT_MAX_SPOKEN_AUDIO_BYTES,
+) -> Engine:
     """A façade over ``harness``'s durable state, holding a delivery outbox.
 
-    ``now`` is the **engine's** clock, taken out of ``kwargs`` rather than declared,
-    so that every helper forwarding ``**kwargs: object`` into here keeps type-checking
-    unchanged. It is a knob because ADR-0135 §2 measures a poll's remaining wait as
-    elapsed time against the engine's own reading — so a case about a budget that has
-    run out has to be able to move it, and a fixed clock makes the elapsed time zero
-    however long the poll really waited. Defaults to the fixed :data:`AT` every other
-    case here is written against.
+    **Every knob is declared and nothing is forwarded as ``**kwargs``**, which is
+    what keeps this construction site type-checked (#1531). A helper that splatted
+    a mapping into ``Engine(...)`` gave mypy a mapping that *might* supply any
+    named argument, so ``call-arg`` was never reported here — and ``Engine`` is the
+    façade a new collaborator is injected into by ADR-0042 §2, so this was the one
+    construction site in the repository where adding a required one type-checked
+    clean and arrived as a wall of failures from a file that looks unrelated. The
+    cost of declaring them is that a knob a case wants must be added here first;
+    that is the whole benefit, stated as a cost.
+
+    ``now`` is the **engine's** clock. It is a knob because ADR-0135 §2 measures a
+    poll's remaining wait as elapsed time against the engine's own reading — so a
+    case about a budget that has run out has to be able to move it, and a fixed
+    clock makes the elapsed time zero however long the poll really waited. Defaults
+    to the fixed :data:`AT` every other case here is written against.
+
+    The remaining knobs default to whatever ``Engine`` itself defaults them to, so
+    a case that does not name one is wired exactly as it was before it was declared.
     """
-    clock = kwargs.pop("now", None)
     return Engine(
+        notifications=notifications,
+        notification_policy=notification_policy,
+        transcriber=transcriber,
+        synthesizer=synthesizer,
+        max_notification_budget=max_notification_budget,
+        max_payload_bytes=max_payload_bytes,
+        max_spoken_audio_bytes=max_spoken_audio_bytes,
         composing=_composing(),
         grant_operations=_grant_operations(),
         connection_operations=_connection_operations(),
@@ -105,9 +144,8 @@ def _wired(harness: Harness, outbox: DeliveryOutbox | None = None, **kwargs: obj
         observation=harness.observation,
         questions=harness.questions,
         notification_outbox=outbox,
-        now=(lambda: AT) if clock is None else clock,  # type: ignore[arg-type]
+        now=(lambda: AT) if now is None else now,
         archive=FakeTranscriptArchive(),
-        **kwargs,  # type: ignore[arg-type]
     )
 
 
@@ -180,6 +218,29 @@ class RecordingOutbox:
         self.waited.append(timeout)
         self.calls.append("wait")
         return False
+
+
+def test_the_wiring_helper_declares_every_knob_it_forwards() -> None:
+    """#1531: ``_wired`` takes no ``**kwargs``, so ``Engine(...)`` stays checked here.
+
+    A guard on the *shape* of the helper rather than on any behaviour, because the
+    property it protects is invisible to the suite: mypy cannot prove a named
+    argument is absent from a splatted mapping, so a ``**kwargs`` reinstated here
+    would silence ``call-arg`` at the one construction site where a new required
+    ``Engine`` collaborator (ADR-0042 §2) would otherwise be reported. The gate
+    would stay green and the change would arrive as failures in this file.
+
+    Verified directly at the time of writing: with ``reads=harness.reads`` deleted
+    from the call, ``mypy`` reports ``Missing named argument "reads" for "Engine"``
+    where before it answered ``Success: no issues found in 1 source file``.
+    """
+    relayed = [
+        name
+        for name, parameter in inspect.signature(_wired).parameters.items()
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD
+    ]
+
+    assert relayed == []
 
 
 class TestTheBudgetRange:
