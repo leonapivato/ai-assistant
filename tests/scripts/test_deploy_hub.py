@@ -19,6 +19,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -57,6 +58,23 @@ def _staged(plan: str) -> str:
     """The staged wheel path out of a rendered plan — the scp destination."""
     line = next(line for line in plan.splitlines() if line.startswith("stage   :"))
     return line.split(":")[-1]
+
+
+def _rendered(repo: Path, monkeypatch: pytest.MonkeyPatch, token: str) -> str:
+    """The plan ``--dry-run`` prints, rendered here with a chosen per-run token.
+
+    The token is drawn once per :class:`Plan`, and :func:`_dry_run` runs the script
+    as a *subprocess*, where nothing in this process can reach that draw. Two draws
+    left to chance is what issue #1492 is about: they differ with probability
+    1 - 2^-32, which is a test that passes almost always rather than a test that
+    passes. Rendering in process instead is the same ``render()`` the script's own
+    ``--dry-run`` calls on the same ``Plan``, over arguments the script's own parser
+    produced — so what is asserted is still the printed plan, and the token in it is
+    the one this call chose.
+    """
+    monkeypatch.setattr(_MODULE, "secrets", SimpleNamespace(token_hex=lambda _bytes: token))
+    parsed = _MODULE._parser().parse_args(["hub.example", "--repo", str(repo)])
+    return "\n".join(_MODULE.render(_MODULE.Plan(parsed, "w.whl"), "abc1234"))
 
 
 # --------------------------------------------------------------------------- #
@@ -341,16 +359,23 @@ def test_an_unresolvable_attested_commit_refuses(tmp_path: Path) -> None:
     assert "is not a commit in" in result.stderr
 
 
-def test_the_staged_path_is_unique_per_run(tmp_path: Path) -> None:
+def test_the_staged_path_is_unique_per_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # The staging directory is shared. A fixed name lets a second deploy of the
     # same version overwrite the first's wheel between scp and install, so one
     # build is installed while the other's commit and digest go into the marker.
+    # What makes the name safe is that it CARRIES the run's own token, which is
+    # what is asserted here — two runs differing is then a consequence rather than
+    # a coin the test tosses (issue #1492).
     repo = _repo(tmp_path)
 
-    first, second = _staged(_dry_run(repo)), _staged(_dry_run(repo))
+    first = _staged(_rendered(repo, monkeypatch, "1111aaaa"))
+    second = _staged(_rendered(repo, monkeypatch, "2222bbbb"))
 
-    assert first != second
-    assert first.startswith(f"{_MODULE.DEFAULT_STAGE_DIR}/deploy-hub-")
+    assert first == f"{_MODULE.DEFAULT_STAGE_DIR}/deploy-hub-1111aaaa/w.whl"
+    assert second == f"{_MODULE.DEFAULT_STAGE_DIR}/deploy-hub-2222bbbb/w.whl"
+    # And the script itself, run as it really is, stages under that same shape —
+    # the token it drew is unknowable from out here, but the shape is not.
+    assert _staged(_dry_run(repo)).startswith(f"{_MODULE.DEFAULT_STAGE_DIR}/deploy-hub-")
 
 
 def test_the_staged_wheel_is_removed_after_the_install(tmp_path: Path) -> None:
@@ -962,19 +987,20 @@ def test_the_marker_read_brackets_what_cat_produced(tmp_path: Path) -> None:
 
 
 def test_the_brackets_carry_this_runs_token_so_a_banner_cannot_imitate_them(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A fixed pair could simply be printed by the service user's profile, ahead
     # of the command that emits the real ones — and it is the FIRST pair that
-    # gets read.
+    # gets read. So what has to hold is that the brackets carry THIS run's token;
+    # two runs drawing different ones follows from that, and asserting it directly
+    # is what makes the test deterministic (issue #1492).
     repo = _repo(tmp_path)
 
-    first = re.findall(r"MARKER_BEGIN_(\w+)", _dry_run(repo))
-    second = re.findall(r"MARKER_BEGIN_(\w+)", _dry_run(repo))
+    first = re.findall(r"MARKER_BEGIN_(\w+)", _rendered(repo, monkeypatch, "1111aaaa"))
+    second = re.findall(r"MARKER_BEGIN_(\w+)", _rendered(repo, monkeypatch, "2222bbbb"))
 
-    assert first
-    assert second
-    assert first[0] != second[0]
+    assert first == ["1111aaaa"]
+    assert second == ["2222bbbb"]
 
 
 @pytest.mark.parametrize(

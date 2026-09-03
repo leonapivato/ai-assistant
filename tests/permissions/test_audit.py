@@ -791,6 +791,140 @@ async def test_a_version_one_database_holding_a_foreign_invocations_table_is_ref
     assert _stored_schema_version(path) == "1", "a refused open leaves the marker alone"
 
 
+_STORE_SHAPE = (
+    "CREATE TABLE decisions(id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
+    "resolves TEXT, execution_id TEXT, step_id TEXT, outcome TEXT, "
+    "expires_at_us INTEGER, data TEXT NOT NULL)"
+)
+
+
+def _seed(path: Path, *statements: str) -> None:
+    """Seed ``path`` with a ``decisions`` table of somebody else's making.
+
+    No ``meta`` marker, which is the pre-ADR-0049 file this store still opens — so
+    what the open goes on to refuse is the table's own shape and nothing else.
+    """
+    raw = sqlite3.connect(str(path))
+    try:
+        for statement in statements:
+            raw.execute(statement)
+        raw.commit()
+    finally:
+        raw.close()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "create",
+    [
+        # No primary key at all: `record` refuses a duplicate id by a checked read
+        # inside the write transaction, and the key is the net beneath it. Without
+        # one, two rows can stand under a single id — which every read that
+        # resolves an id then answers from whichever it met first.
+        pytest.param(
+            "CREATE TABLE decisions(id TEXT, decided_at_us INTEGER NOT NULL, "
+            "resolves TEXT, execution_id TEXT, step_id TEXT, outcome TEXT, "
+            "expires_at_us INTEGER, data TEXT NOT NULL)",
+            id="no primary key",
+        ),
+        # A composite key is the same hole wearing a key: `id` still reports as
+        # position 1, and one id can still appear twice as long as the second
+        # column differs.
+        pytest.param(
+            "CREATE TABLE decisions(id TEXT, decided_at_us INTEGER NOT NULL, "
+            "resolves TEXT, execution_id TEXT, step_id TEXT, outcome TEXT, "
+            "expires_at_us INTEGER, data TEXT NOT NULL, PRIMARY KEY (id, decided_at_us))",
+            id="a composite primary key",
+        ),
+        # A retyped column. `_migrate` heals a *missing* one by `ALTER TABLE ... ADD
+        # COLUMN`, so a dropped column is not the exposure; a column of the wrong
+        # declared type is, because nothing rewrites it and the blob every read
+        # decodes would come back as whatever INTEGER affinity made of it.
+        pytest.param(
+            "CREATE TABLE decisions(id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
+            "resolves TEXT, execution_id TEXT, step_id TEXT, outcome TEXT, "
+            "expires_at_us INTEGER, data INTEGER NOT NULL)",
+            id="a retyped data column",
+        ),
+        # A column this store keeps nullable, arriving NOT NULL: every ordinary
+        # decision writes NULL there, so the whole store is unwritable — refused at
+        # open rather than at the first record.
+        pytest.param(
+            "CREATE TABLE decisions(id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
+            "resolves TEXT NOT NULL, execution_id TEXT, step_id TEXT, outcome TEXT, "
+            "expires_at_us INTEGER, data TEXT NOT NULL)",
+            id="a resolves column that is NOT NULL",
+        ),
+    ],
+)
+async def test_a_foreign_decisions_table_is_refused(create: str, tmp_path: Path) -> None:
+    """``CREATE TABLE IF NOT EXISTS`` is not a migration, and this is the other table.
+
+    The same exposure the ``invocations`` check closes, on the table it could not be
+    used on: the create is a no-op against a table of that name whatever shape it
+    has, so a file arriving with a foreign ``decisions`` keeps it. The shape is what
+    the store's own invariants stand on — ADR-0036 §2's single resolution and
+    ADR-0192 §2's one id space are both decided by a checked read whose net is a
+    constraint on this table — so a shape that is not this one is refused rather
+    than written into (issue #1575).
+
+    Refused with nothing left behind: the check shares the setup transaction with
+    the creates and the migration, so the ``meta`` table this open would have made
+    rolls back with it and the file is exactly what it was.
+    """
+    path = tmp_path / "audit.db"
+    _seed(path, create)
+
+    with pytest.raises(AuditError, match="decisions table"):
+        SqliteAuditTrail(path=path)
+
+    assert _tables(path) == {"decisions"}, "a refused open leaves the file as it arrived"
+
+
+@pytest.mark.integration
+async def test_a_decisions_index_that_is_not_the_defined_one_is_refused(tmp_path: Path) -> None:
+    """The columns are only half the shape; the uniqueness is the other half.
+
+    ``CREATE UNIQUE INDEX IF NOT EXISTS`` is a no-op against an index of that name
+    however it was declared, so a file arriving with a *non-unique*
+    ``decisions_resolves`` keeps it — and ADR-0036 §2's one-resolution-per-
+    confirmation rule loses the net beneath its checked read, which is exactly what
+    a second process racing the check would then walk through.
+
+    Held by comparing the stored definition rather than by introspection, because
+    the same argument reaches ``decisions_binding_resolution``'s ``WHERE`` (ADR-0044
+    §2b) and no ``PRAGMA`` reports one.
+    """
+    path = tmp_path / "audit.db"
+    _seed(path, _STORE_SHAPE, "CREATE INDEX decisions_resolves ON decisions(resolves)")
+
+    with pytest.raises(AuditError, match="'decisions_resolves'"):
+        SqliteAuditTrail(path=path)
+
+    assert _tables(path) == {"decisions"}
+
+
+@pytest.mark.integration
+async def test_a_decisions_table_carrying_an_extra_column_still_opens(tmp_path: Path) -> None:
+    """Tolerant of what a later version of this store would add, and only of that.
+
+    Every column beside ``data`` arrived by ``ALTER TABLE ... ADD COLUMN`` for some
+    file (ADR-0044's three, ADR-0059's one), so a check that refused an unknown
+    column would refuse this store's own next shape read by this store's own
+    previous code. What it must not tolerate is a *key* it does not know about,
+    which is why the primary key is checked whole rather than only at ``id``.
+    """
+    path = tmp_path / "audit.db"
+    _seed(path, _STORE_SHAPE, "ALTER TABLE decisions ADD COLUMN whatever_comes_next TEXT")
+
+    trail = SqliteAuditTrail(path=path)
+    try:
+        assert await trail.record(decision("d-1")) == "d-1"
+        assert await trail.get("d-1") is not None
+    finally:
+        trail.close()
+
+
 @pytest.mark.integration
 async def test_a_version_one_database_that_fails_to_migrate_keeps_its_marker(
     tmp_path: Path,

@@ -247,25 +247,82 @@ _CREATE_TABLE = (
     "data TEXT NOT NULL)"
 )
 
-_INDEXES = (
+#: **Every index this store defines over ``decisions``, held to its own definition**
+#: at open (:meth:`SqliteAuditTrail._check_decisions_schema`), exactly as
+#: :data:`_INVOCATION_OBJECTS` holds the invocation objects and for the same reason:
+#: ``CREATE ... IF NOT EXISTS`` is a no-op against an object already there under
+#: that name *whatever it is*. A file arriving with a non-unique
+#: ``decisions_resolves`` keeps it, and one confirmation can then carry two
+#: resolutions (ADR-0036 §2); one arriving with a ``decisions_binding_resolution``
+#: whose ``WHERE`` matches nothing keeps that, and the per-binding net beneath the
+#: checked read in :meth:`SqliteAuditTrail._check_binding_undecided` is gone
+#: (ADR-0044 §2b).
+#:
+#: SQLite stores a definition verbatim but for ``IF NOT EXISTS``, so what it holds
+#: is compared against these very statements rather than a second copy written out
+#: by hand — and comparing the text is what reaches a partial index's ``WHERE`` at
+#: all, which no ``PRAGMA`` reports.
+#:
+#: The *table* is deliberately not held this way, and :data:`_DECISION_COLUMNS` is
+#: why: :meth:`SqliteAuditTrail._migrate` reshapes it with
+#: ``ALTER TABLE ... ADD COLUMN``, which rewrites the text SQLite stores, so it has
+#: no single definition to compare against. An index has one — nothing here alters
+#: an index, and ``ADD COLUMN`` rewrites only the table's own statement — so the
+#: weaker introspection is spent only where it must be (issue #1575).
+_INDEXES: Final[dict[str, str]] = {
     # A *unique* index, so the per-*confirmation* single-resolution rule (ADR-0036
     # §2) survives even a bug in the check below. SQLite treats NULLs as distinct,
     # so it constrains resolving rows only and leaves ordinary decisions
     # unaffected.
-    "CREATE UNIQUE INDEX IF NOT EXISTS decisions_resolves ON decisions(resolves)",
-    "CREATE INDEX IF NOT EXISTS decisions_order ON decisions(decided_at_us DESC, id ASC)",
+    "decisions_resolves": (
+        "CREATE UNIQUE INDEX IF NOT EXISTS decisions_resolves ON decisions(resolves)"
+    ),
+    "decisions_order": (
+        "CREATE INDEX IF NOT EXISTS decisions_order ON decisions(decided_at_us DESC, id ASC)"
+    ),
     # ADR-0044 §2b: a *concrete* ``(execution_id, step_id)`` binding carries at
     # most one resolution — the per-*binding* rule layered on top of the
     # per-confirmation one. Partial, over resolving rows with a concrete binding
     # only; NULLs being distinct leaves non-concrete (direct) bindings
     # unconstrained. This is the safety net beneath the checked read in
     # :meth:`_check_binding_undecided`.
-    "CREATE UNIQUE INDEX IF NOT EXISTS decisions_binding_resolution "
-    "ON decisions(execution_id, step_id) "
-    "WHERE resolves IS NOT NULL AND execution_id IS NOT NULL AND step_id IS NOT NULL",
+    "decisions_binding_resolution": (
+        "CREATE UNIQUE INDEX IF NOT EXISTS decisions_binding_resolution "
+        "ON decisions(execution_id, step_id) "
+        "WHERE resolves IS NOT NULL AND execution_id IS NOT NULL AND step_id IS NOT NULL"
+    ),
     # ADR-0044 §3: ``pending_confirmation`` finds a binding's CONFIRMs by this.
-    "CREATE INDEX IF NOT EXISTS decisions_binding ON decisions(execution_id, step_id, outcome)",
-)
+    "decisions_binding": (
+        "CREATE INDEX IF NOT EXISTS decisions_binding ON decisions(execution_id, step_id, outcome)"
+    ),
+}
+
+#: **What the ``decisions`` table must be**: declared type, ``NOT NULL``, and
+#: position in the primary key, per column — the shape :data:`_CREATE_TABLE` and
+#: :meth:`SqliteAuditTrail._migrate` between them arrive at, whichever of the two
+#: got there. Checked by introspection at open, because the table has no single
+#: stored definition to compare against (:data:`_INDEXES` says why). Extra columns
+#: are tolerated: a future ``_migrate`` adds one exactly as the ADR-0044 and
+#: ADR-0059 columns were added, and a file already carrying it is this store's own
+#: newer shape rather than a foreign one.
+#:
+#: ``id`` carries ``pk`` 1 and every other column 0: SQLite reports the *position*
+#: in the key, so a composite ``PRIMARY KEY (id, decided_at_us)`` would leave ``id``
+#: at 1 and put a second column at 2 — a key under which one id can appear twice,
+#: which the joined reads then resolve to two rows under one identifier
+#: (ADR-0192 §2). Its ``NOT NULL`` is ``False`` because SQLite's rowid tables do
+#: not imply one from a non-INTEGER primary key; that is what this store creates,
+#: so that is what is required.
+_DECISION_COLUMNS: Final[dict[str, tuple[str, bool, int]]] = {
+    "id": ("TEXT", False, 1),
+    "decided_at_us": ("INTEGER", True, 0),
+    "resolves": ("TEXT", False, 0),
+    "execution_id": ("TEXT", False, 0),
+    "step_id": ("TEXT", False, 0),
+    "outcome": ("TEXT", False, 0),
+    "expires_at_us": ("INTEGER", False, 0),
+    "data": ("TEXT", True, 0),
+}
 
 _ORDERED = "SELECT data FROM decisions ORDER BY decided_at_us DESC, id ASC"
 
@@ -400,10 +457,12 @@ _INVOCATIONS_APPEND_ONLY = (
 #: compared against these very statements rather than against a second copy of them
 #: written out by hand.
 #:
-#: The ``decisions`` table is **not** here, and that is a limit rather than an
-#: oversight: ``_migrate`` reshapes it with ``ALTER TABLE ... ADD COLUMN``, which
-#: rewrites the stored text, so it has no single definition to compare against and
-#: needs a check of a different kind (issue #1575).
+#: The ``decisions`` table is **not** here, and that is a division of labour rather
+#: than a gap: ``_migrate`` reshapes it with ``ALTER TABLE ... ADD COLUMN``, which
+#: rewrites the stored text, so it has no single definition to compare against.
+#: :data:`_DECISION_COLUMNS` holds it by introspection instead, and its indexes —
+#: which no ``ALTER`` touches, so they do have one each — are held the way these
+#: are, by :data:`_INDEXES`.
 _INVOCATION_OBJECTS: Final = {
     "invocations": _CREATE_INVOCATIONS,
     **_INVOCATION_INDEXES,
@@ -698,9 +757,10 @@ class SqliteAuditTrail:
                 conn.execute(_CREATE_TABLE)
                 self._migrate(conn)
                 conn.execute(_CREATE_INVOCATIONS)
-                for statement in (*_INDEXES, *_INVOCATION_INDEXES.values()):
+                for statement in (*_INDEXES.values(), *_INVOCATION_INDEXES.values()):
                     conn.execute(statement)
                 conn.execute(_INVOCATIONS_APPEND_ONLY)
+                self._check_decisions_schema(conn)
                 self._check_invocation_schema(conn)
                 if stored is None:
                     # Stamped *after* the create/migrate above, so the marker is
@@ -727,6 +787,69 @@ class SqliteAuditTrail:
             raise AuditError(msg) from exc
         return conn
 
+    def _check_decisions_schema(self, conn: sqlite3.Connection) -> None:
+        """Refuse a file whose ``decisions`` table is not the shape this store writes.
+
+        The sibling of :meth:`_check_invocation_schema`, run beside it under the same
+        rule and for the same reason — ``CREATE TABLE IF NOT EXISTS`` is a no-op
+        against a table of that name whatever shape it has — and split in two because
+        the two halves of that shape are knowable in different ways.
+
+        The **indexes** have a stored definition each and are held to it
+        (:data:`_INDEXES`), which is the only thing that reaches a partial index's
+        ``WHERE``. The **table** does not, because :meth:`_migrate` rewrites its text
+        with ``ALTER TABLE ... ADD COLUMN``, so its columns are introspected against
+        :data:`_DECISION_COLUMNS` instead: present, of the declared type this store
+        writes, nullable as this store writes them, and with ``id`` as the whole of
+        the primary key. Extra columns are tolerated; an extra column *in the key* is
+        not, because a composite key does not make an id unique on its own.
+
+        Run after the creates, the migration and the index statements, so a
+        version-1 file that this open legitimately brought up is judged on what it
+        now is rather than on what it arrived as — and **before** the marker is
+        written, inside the same transaction, so a refusal rolls back everything the
+        migration touched and leaves the file exactly as it arrived.
+
+        A declared type is compared case-folded: SQLite stores it verbatim, and
+        ``text`` and ``TEXT`` are one type spelled two ways rather than two shapes.
+
+        Raises:
+            AuditError: If the table or one of its indexes is not what this store
+                defines.
+        """
+        held = {
+            str(row[1]): (str(row[2]).upper(), bool(row[3]), int(row[5]))
+            for row in conn.execute("PRAGMA table_info(decisions)")
+        }
+        for name, expected in _DECISION_COLUMNS.items():
+            found = held.get(name)
+            if found == expected:
+                continue
+            detail = (
+                "is absent" if found is None else f"is declared {found!r} rather than {expected!r}"
+            )
+            msg = (
+                f"the audit trail at {self._path!r} holds a decisions table whose {name!r} "
+                f"column {detail}; its decision rows cannot be trusted to carry the "
+                f"constraints an admission is decided on, so it is not opened"
+            )
+            raise AuditError(msg)
+        extra_key = sorted(name for name, column in held.items() if column[2] and name != "id")
+        if extra_key:
+            joined = ", ".join(repr(name) for name in extra_key)
+            msg = (
+                f"the audit trail at {self._path!r} holds a decisions table whose primary "
+                f"key also covers {joined}; a composite key does not make an id unique on "
+                f"its own, so it is not opened"
+            )
+            raise AuditError(msg)
+        self._check_objects(
+            conn,
+            _INDEXES,
+            "its decision rows cannot be trusted to carry the uniqueness an admission "
+            "is decided on",
+        )
+
     def _check_invocation_schema(self, conn: sqlite3.Connection) -> None:
         """Refuse a file whose invocation objects are not the ones this store defines.
 
@@ -742,18 +865,44 @@ class SqliteAuditTrail:
         Raises:
             AuditError: If an object is missing or is not the one this store defines.
         """
+        self._check_objects(
+            conn,
+            _INVOCATION_OBJECTS,
+            "its invocation rows cannot be trusted to record what was claimed",
+        )
+
+    def _check_objects(
+        self, conn: sqlite3.Connection, objects: Mapping[str, str], consequence: str
+    ) -> None:
+        """Refuse a file holding an object under one of these names that is not this one.
+
+        SQLite stores a definition verbatim but for ``IF NOT EXISTS``, so each object
+        is compared against the very statement that defines it rather than against a
+        second copy written out by hand. An object this open created matches by
+        construction; one that was already there matches only if it is the same
+        object, which is the whole question.
+
+        Args:
+            conn: The open connection, inside the setup transaction.
+            objects: Name to defining statement, for every object to hold.
+            consequence: What a foreign object among them would cost, for the
+                refusal to say.
+
+        Raises:
+            AuditError: If an object is missing or is not the one this store defines.
+        """
         held = {
             str(name): sql
             for name, sql in conn.execute("SELECT name, sql FROM sqlite_master")
-            if name in _INVOCATION_OBJECTS
+            if name in objects
         }
-        for name, statement in _INVOCATION_OBJECTS.items():
+        for name, statement in objects.items():
             defined = statement.replace(" IF NOT EXISTS", "", 1)
             if held.get(name) != defined:
                 msg = (
                     f"the audit trail at {self._path!r} holds an object named {name!r} "
-                    f"that is not the one this store defines; its invocation rows "
-                    f"cannot be trusted to record what was claimed, so it is not opened"
+                    f"that is not the one this store defines; {consequence}, "
+                    f"so it is not opened"
                 )
                 raise AuditError(msg)
 
