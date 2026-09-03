@@ -1,7 +1,45 @@
 # 226. The planner names one more read beside its plan, and the loop services it into the supply
 
-- Status: Accepted
+- Status: Accepted, §11 item 1 amended by ADR-0227
 - Date: 2026-09-02
+- Amended: 2026-09-03 by ADR-0227 — §11 item 1's assertion *"the answer carries it"*
+  stands and is not replaced; what it gains is the **fidelity requirement** under which
+  it is discharged. Item 1 was written as an obligation to produce a test, and the test
+  written for it passed against a fixture no capture site produces: the episode carried
+  the reply's distinctive word in `content`, where every group renders it, rather than
+  in `outcome` beside a `disposition`, which is the one combination the render rules
+  turn on. The production renderer *was* on the path — the fake was the
+  `ModelProvider`, and it read the assembled prompt — so nothing about the wiring was
+  wrong; the record shape was. A reader holding only this ADR accepts that test, which
+  is [ADR-0082](0082-recording-an-amendment-on-an-earlier-adrs-status-line.md)
+  §1's test met on item 1 and on no other clause of this ADR. The added obligations are
+  recorded here in full:
+
+  > **Normative.** A required representative-input test that asserts a fact about
+  > **what a model was shown** runs the production renderer for that surface, and
+  > drives it over records **shaped as the production capture site writes them**. A
+  > fixture that carries in one field what production carries in another asserts
+  > nothing about production, however faithfully the rest of the path is wired.
+
+  > **Normative.** A test of this shape may substitute a fake `ModelProvider`, a fake
+  > store and a fake clock. It may **not** substitute the renderer whose output the
+  > assertion is about, and it may not assert over a composed reply produced by a fake
+  > that did not read the assembled prompt.
+
+  > **Normative.** §11 item 1 is subject to both of the above. Its sentence *"the
+  > answer carries it"* is unchanged and is the right assertion; what is added is that
+  > it is asserted through `orchestration/composing.py`'s production renderer, over an
+  > episode carrying the reply's distinctive word in `outcome` beside a `disposition`,
+  > with that word absent from `content`. The existing test is **rewritten** rather
+  > than supplemented.
+
+  §11's other items are untouched and bind unchanged, and so is every other section of
+  this ADR. **§7 is not amended**: it states the fourth group's construction, position,
+  deduplication, evaluation timing and consumer rules and says nothing about rendering,
+  so no sentence of it becomes false or over-wide when ADR-0227 supplies the render
+  rule — that is ADR-0082 §1's *stacked addition*, recorded in the ADR that makes it
+  and nowhere else. The clause that in fact governed the fourth group's rendering, and
+  which is superseded, is ADR-0222 §2.
 - **Supersedes three ADRs, partially, in four narrowly stated scopes** — one of
   ADR-0208, two of ADR-0204 and one of ADR-0158 — and §13 shows the working for every
   one. Scopes rather than clauses, because the second ADR-0204 scope names two clauses
