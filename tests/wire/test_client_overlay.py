@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import json
 import os
 from typing import TYPE_CHECKING, cast
@@ -330,6 +331,38 @@ async def test_a_platform_with_no_peer_credential_call_refuses_rather_than_proce
         with pytest.raises(OverlayIdentityUnavailableError) as raised:
             await agent.identify("100.64.1.7", 50084)
     assert "peer-credential" in str(raised.value)
+
+
+async def test_a_kernel_that_refuses_the_credential_read_says_so_rather_than_blaming_the_daemon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The third way not to know, and here the *message* is the property (ADR-0131 §7).
+
+    :func:`ai_assistant.wire.peer.peer_uid` raises ``OSError`` when the kernel itself
+    declines the credential read, and §7's direction is the same as for the other
+    two: "who answers there cannot be established", so refuse. Unlike the
+    ``ProtocolError`` case above, the *class* cannot carry this one — an unhandled
+    ``OSError`` would not escape, because ``_get``'s ``except (TimeoutError,
+    OSError)`` one frame up catches it and rewraps it as this package's
+    ``OverlayIdentityUnavailableError`` too. What it would lose is the cause: this
+    client would report that the agent "did not answer" and tell its user to start
+    an overlay agent that is already running and answering, instead of naming the
+    credential read that refused. So both halves are asserted — that the refusal
+    names the kernel's refusal to say, and that it is *not* that fallback.
+    """
+
+    def _kernel_refused(_sock: object) -> int:
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr("ai_assistant.wire.overlay.peer_uid", _kernel_refused)
+    async with _agent(tmp_path / "d.sock", _answers) as agent:
+        with pytest.raises(OverlayIdentityUnavailableError) as raised:
+            await agent.identify("100.64.1.7", 50084)
+        assert agent.api.requested == []  # type: ignore[attr-defined]
+    refusal = str(raised.value)
+    assert "the kernel would not say" in refusal
+    assert "Operation not permitted" in refusal
+    assert "did not answer" not in refusal
 
 
 def test_a_connection_exposing_no_socket_is_refused_rather_than_trusted() -> None:
