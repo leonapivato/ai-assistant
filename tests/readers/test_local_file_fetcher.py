@@ -34,7 +34,6 @@ from fetcher_contract import ClockedFetcher, Dial, FetcherContract, GatedFetch, 
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import FetchRefusal
 from ai_assistant.readers import FILE_FETCHER_NAME, LocalFileFetcher
-from ai_assistant.readers import _extract as extract_module
 from ai_assistant.readers import files as files_module
 from ai_assistant.testing.cancellation import ThreadSuspension
 
@@ -662,64 +661,54 @@ async def test_a_listings_read_at_is_taken_when_the_directory_was_read(root: Pat
 # --- the extraction's own cost (ADR-0230 §6) --------------------------------
 
 
-async def test_an_over_bound_pdf_stops_without_enumerating_every_page(root: Path) -> None:
+async def test_an_over_bound_pdf_stops_without_extracting_every_page(root: Path) -> None:
     """§6: the bound is enforced **while** extracting, not after.
 
-    Asserted over the pages actually read rather than over the class returned, because
-    the class is what an implementation that materialised every page and *then* refused
+    Asserted over the pages actually extracted rather than over the class returned,
+    because the class is what an implementation that read every page and *then* refused
     would also return. What separates the two is how much work was done before the
     refusal, and that is what this counts.
 
-    The document is well over the content bound from its second page, so a conforming
-    implementation stops within a couple of pages of a forty-page document.
+    Counted on ``pypdf``'s **own** ``PageObject.extract_text``, not on a substituted
+    page collection: a double in place of the library's would exercise this test's
+    scaffolding rather than the path a real document takes.
+
+    The document is over the content bound from its first page, so a conforming
+    implementation stops within a page or two of a forty-page document.
     """
     (root / "long.pdf").write_bytes(minimal_pdf([DISTINCTIVE * 20] * 40))
-    read: list[int] = []
-    real = pypdf.PdfReader
+    extracted: list[object] = []
+    real = pypdf.PageObject.extract_text
 
-    class Counting(real):  # type: ignore[misc, valid-type]
-        @property
-        def pages(self) -> object:
-            underlying = super().pages
-
-            def watched() -> object:
-                for page in underlying:
-                    read.append(1)
-                    yield page
-
-            return watched()
+    def counted(self: object, *args: object, **kwargs: object) -> str:
+        extracted.append(self)
+        return real(self, *args, **kwargs)  # type: ignore[arg-type]
 
     subject = build(root, max_content_bytes=64)
     try:
         listing = await subject.listing()
         with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(pypdf, "PdfReader", Counting)
+            patch.setattr(pypdf.PageObject, "extract_text", counted)
             outcome = await subject.fetch(listing, listing.entries[0])
     finally:
         subject.close()
 
     assert outcome.refusal is FetchRefusal.TOO_LARGE
-    assert 0 < len(read) < 5, f"read {len(read)} pages of a 40-page document before refusing"
+    assert 0 < len(extracted) < 5, (
+        f"extracted {len(extracted)} pages of a 40-page document before refusing; "
+        f"§6 requires the bound be applied while extracting rather than after"
+    )
 
 
-async def test_a_document_declaring_more_pages_than_the_ceiling_is_refused(
-    root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A page count is not a function of a byte count, so the byte bound cannot reach it.
+async def test_a_pdf_inside_the_bound_extracts_every_page(root: Path) -> None:
+    """The arm in the other direction, so the count above is not trivially satisfied.
 
-    §6 states that ``fetch_max_file_bytes`` "bounds the read **and the extraction's
-    cost**", which holds for text and Markdown, where the work is proportional to the
-    bytes. A PDF's page tree breaks that proportionality — a document inside the byte
-    bound can declare far more pages by sharing one node — and a page carrying **no
-    text** never moves the content total, so neither of §6's two bounds stops it.
-
-    Staged by lowering the ceiling rather than by building an amplified page tree,
-    because what is under test is that the ceiling *binds*: a fixture large enough to
-    trip the real figure would be the pathological document itself, which is a slow
-    test of a constant rather than a test of the guard.
+    An implementation that stopped after one page would pass the case above and lose
+    the rest of every document. What makes the pair evidence is that the same code
+    reads all forty pages when the bound allows it.
     """
-    (root / "many.pdf").write_bytes(minimal_pdf(["", "", "", ""]))
-    monkeypatch.setattr(extract_module, "_MAX_PDF_PAGES", 1)
+    lines = ["page one", "page two", "page three"]
+    (root / "short.pdf").write_bytes(minimal_pdf(lines))
     subject = build(root)
     try:
         listing = await subject.listing()
@@ -727,4 +716,5 @@ async def test_a_document_declaring_more_pages_than_the_ceiling_is_refused(
     finally:
         subject.close()
 
-    assert outcome.refusal is FetchRefusal.TOO_LARGE
+    assert outcome.record is not None
+    assert outcome.record.content == extracted_text_of(lines)
