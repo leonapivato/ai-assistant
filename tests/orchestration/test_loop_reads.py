@@ -433,13 +433,14 @@ class _RaisingRegistry(FakeToolRegistry):
         raise PlanningError(msg)
 
 
-def _loop(
+def _loop(  # noqa: PLR0913 — the store, the planner, the two budgets, the registry and the clock; every one is a fact a case varies on its own
     memory: MemoryStore,
     *,
     planner: Planner | None = None,
     retrieval_limit: int = 30,
     episodic_limit: int = 0,
     registry: FakeToolRegistry | None = None,
+    now: Clock = _clock,
 ) -> LearningLoop:
     """A loop over ``memory``, canonical everything else.
 
@@ -460,7 +461,10 @@ def _loop(
         feedback=FakeFeedbackProcessor(),
         retrieval_limit=retrieval_limit,
         episodic_limit=episodic_limit,
-        now=_clock,
+        # Injectable so ADR-0228 §4's budget is deterministic in a case rather than
+        # timing-sensitive: the loop reads this clock at entry and once immediately
+        # before each additional planner call, and nowhere else.
+        now=now,
         id_factory=lambda: "goal-1",
     )
 

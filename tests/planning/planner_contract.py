@@ -86,6 +86,25 @@ def _supply() -> tuple[EpisodicMemory, ...]:
     )
 
 
+def _fourth_group() -> tuple[EpisodicMemory, ...]:
+    """What a servicing appended, as a turn's **second** call is handed it.
+
+    ADR-0228 §7: one fourth group, appended whole after the episodic supplement and
+    never interleaved, holding the records **every** servicing of the turn returned in
+    servicing order. What it holds decides nothing here — this suite asserts that a
+    conforming planner accepts the widened input, not what it makes of it.
+    """
+    return tuple(
+        EpisodicMemory(
+            id=f"serviced-{ordinal}",
+            content=f"Ada: the read returned {ordinal}.",
+            occurred_at=_WHEN,
+            provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.8, last_updated=_WHEN),
+        )
+        for ordinal in (1, 2)
+    )
+
+
 class PlannerContract:
     """Behaviour every ``Planner`` implementation must exhibit."""
 
@@ -278,6 +297,118 @@ class PlannerContract:
             request.asks = ()
         with pytest.raises(frozen):
             request.asks[0].kind = ReadKind.SIGHTED_QUERY
+
+    # --- ADR-0228 §§1, 7, 12: the widened input --------------------------------
+    # §12 obliges this suite to cover the widening "so that every `Planner`
+    # implementation is held to it through the `Test…Contract` subclasses that already
+    # run it — a planner handed four groups plans over them and emits under the same
+    # rules". This is the obligation ADR-0226 §10 put on its own lane for its own
+    # widening, taken here for the same reason.
+
+    async def test_it_plans_over_a_fourth_group(self, planner: Planner) -> None:
+        """A turn's **second** call carries four groups, and a planner takes them.
+
+        ADR-0228 §7 partially supersedes ADR-0226 §7's three-group restatement and
+        ADR-0158 §5's clause behind it: on a turn that serviced a read, the loop may
+        call the planner again over "the three groups the first call saw and the
+        fourth group the servicing appended". The fourth group is appended whole after
+        the episodic supplement and is never interleaved, so a planner that renders
+        whatever sequence it is handed conforms exactly as it does today — which is
+        what makes the widening break nothing.
+
+        **What is asserted is acceptance**, for ADR-0211 §9 item 2's reason: which
+        envelope an implementation returns for a goal is a judgement this suite may
+        not assert, and a scripted plan and a model's plan would answer differently.
+        """
+        plan = await planner.plan(
+            _goal(),
+            context=_context(),
+            memories=_supply() + _fourth_group(),
+            capabilities=_VOCABULARY,
+        )
+        assert plan.goal_id == "g1"
+
+    async def test_a_turn_may_put_two_requests_to_one_planner(self, planner: Planner) -> None:
+        """§3's bound is two calls, so a planner may be asked twice on one turn.
+
+        ADR-0228 §3 supersedes ADR-0226 §2's second-emission clause, which this
+        contract's own docstring carried as "never a second request on the same turn".
+        Each call is an ordinary call: the planner is **not told which iteration it is
+        on** (§12), so the second is made exactly as the first is and this suite
+        passes no signal that it is one.
+
+        **And each plan is its own record.** ADR-0014 §2's "re-planning produces a
+        *new* ``ActionPlan`` with a new ``id``" binds within a turn once a turn may
+        plan twice, so two calls of one turn do not answer one id — which
+        ``PlanStore.save_plan`` refuses outright, since ADR-0228 §5 rejects a
+        ``supersedes`` naming the saving plan's own ``id``.
+        """
+        first = await planner.plan(
+            _goal(), context=_context(), memories=_supply(), capabilities=_VOCABULARY
+        )
+        second = await planner.plan(
+            _goal(),
+            context=_context(),
+            memories=_supply() + _fourth_group(),
+            capabilities=_VOCABULARY,
+        )
+        assert first.goal_id == second.goal_id == "g1"
+        assert first.id != second.id, "a turn's two plans are two records"
+
+    async def test_a_label_indexes_the_sequence_passed_on_that_call(
+        self, asking_planner: Planner | None
+    ) -> None:
+        """§8: ADR-0226 §3's scheme binds each call separately and as written.
+
+        "The label of the record at 1-based index *n* of the ``memories`` sequence
+        passed on **that call** is ``M`` followed by *n*." A planner emits over the
+        sequence it was handed and never over a sequence from an earlier call, so a
+        label it names on a call handed a fourth group is still an ordinal into
+        **that** call's sequence — within range where it names a record at all.
+
+        A label outside the shown set resolves to nothing and is discarded silently
+        by the loop (ADR-0226 §3), so what a planner owes is the *form* and the
+        origin, not a guarantee that every label lands.
+        """
+        if asking_planner is None:
+            pytest.skip("this implementation never asks for a read (ADR-0226 §4)")
+        supply = _supply() + _fourth_group()
+        plan = await asking_planner.plan(
+            _goal(), context=_context(), memories=supply, capabilities=_VOCABULARY
+        )
+        request = plan.read_request
+        assert request is not None
+        for ask in request.asks:
+            if ask.kind is not ReadKind.CITATION_HOP:
+                continue
+            for label in ask.labels:
+                assert label.startswith("M"), "the ordinal form ADR-0226 §3 fixes"
+                assert label[1:].isdigit()
+                assert label[1] != "0", "no padding, and no zeroth position"
+                assert label not in {record.id for record in supply}, (
+                    "a label is a position, never an identifier (ADR-0226 §3)"
+                )
+
+    async def test_it_sets_no_supersedes(self, planner: Planner) -> None:
+        """ADR-0228 §5: that field is the loop's, on every plan a planner returns.
+
+        "The **one** field any other component ever sets is ``supersedes``, which §5
+        gives to the loop and which is not a decision the planner is in a position to
+        make": a planner has no opinion about which plan its output replaces, and it
+        is not told which iteration it is on.
+
+        A planner that sets one is **not** non-conforming in a way that fails a turn —
+        the loop discards the value silently (§5), because "the turn is not the place
+        to punish a planner's non-conformance" — but a conforming implementation
+        leaves it alone, and this is where that is held.
+        """
+        plan = await planner.plan(
+            _goal(),
+            context=_context(),
+            memories=_supply() + _fourth_group(),
+            capabilities=_VOCABULARY,
+        )
+        assert plan.supersedes is None
 
     async def test_a_read_it_asks_for_never_becomes_a_step(
         self, asking_planner: Planner | None

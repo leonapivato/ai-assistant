@@ -991,6 +991,43 @@ def test_export_rejects_a_plan_whose_goal_is_missing() -> None:
         PlanExport(exported_at=_WHEN, plans=(orphan,))
 
 
+def test_export_rejects_a_plan_whose_superseded_plan_is_missing() -> None:
+    """ADR-0228 §5: the reference closure covers ``supersedes``.
+
+    ADR-0014 §5 rules that an export is "complete and internally consistent: every
+    ``goal_id``/``plan_id`` referenced by an included record resolves within the same
+    export", and ``supersedes`` is a ``plan_id`` referenced by an included record. So
+    a document whose ``supersedes`` names a plan the document does not carry does not
+    validate as a ``PlanExport`` at all.
+
+    Beside the dangling-``goal_id`` arm rather than in place of it: the two references
+    are independent, and a plan can be orphaned by either. What §5 supplies is the
+    *statement* that the new reference is inside ADR-0014 §5's promise, "so that the
+    existing validator's silence is not read as an exemption".
+    """
+    orphan = ActionPlan(
+        id="p2", goal_id="g1", steps=(), created_at=_WHEN, supersedes="a-plan-not-carried"
+    )
+    with pytest.raises(ValidationError, match="superseded plan is missing"):
+        PlanExport(exported_at=_WHEN, goals=(_goal(),), plans=(orphan,))
+
+
+def test_export_carries_a_whole_supersession_chain() -> None:
+    """The positive half: both plans of a revising turn, and the link between them.
+
+    A turn that revised persists two plans under one ``goal_id`` (ADR-0228 §5), and an
+    export of that store carries both — so the chain is legible to whoever reads the
+    document back, which is the whole reason the reference has to resolve.
+    """
+    first = ActionPlan(id="p1", goal_id="g1", steps=(), created_at=_WHEN)
+    revision = ActionPlan(id="p2", goal_id="g1", steps=(), created_at=_WHEN, supersedes="p1")
+
+    export = PlanExport(exported_at=_WHEN, goals=(_goal(),), plans=(first, revision))
+
+    assert export.schema_version == 4
+    assert [plan.supersedes for plan in export.plans] == [None, "p1"]
+
+
 def test_export_rejects_an_execution_whose_plan_is_missing() -> None:
     execution = ExecutionState(id="e1", plan_id="gone", steps=(), updated_at=_WHEN)
     with pytest.raises(ValidationError, match="plan is missing"):
