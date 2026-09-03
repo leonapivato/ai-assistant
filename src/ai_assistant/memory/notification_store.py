@@ -531,42 +531,6 @@ def check_notification_tuning(retention: timedelta | None, cap: object) -> None:
     _check_page_bound("cap", cap, floor=1)
 
 
-def _is_purgeable(record: HeldNotification, now: datetime) -> bool:
-    """:meth:`HeldNotification.is_purgeable_at`, with an unreachable horizon read as *not yet*.
-
-    **The predicate is still the record's** — §7 fixes that boundary half-open so
-    that two backends cannot disagree at the instant they name, and re-spelling it
-    here is how they come to. What this adds is the one input the predicate has no
-    answer for: ``ceased + retention`` raises ``OverflowError`` where the sum
-    leaves the representable datetime range, which a record that ceased recently
-    reaches under a retention of a few hundred thousand years —
-    :data:`_MAX_RETENTION` permits one, since the ceiling that bounds it is
-    SQLite's integer column rather than the calendar.
-
-    "Not purgeable" is the true answer rather than a shrug: a horizon past the end
-    of representable time has not elapsed, and will not. Letting the raw error out
-    would be worse than wrong — ``purge`` is called by ADR-0083 §7's **shared**
-    retention job, which sweeps the memory store and the deferral queue in the
-    same operation, so one such record would stop every store's retention being
-    enforced while the job logged a failure and retried forever.
-
-    The predicate itself is ``core/types.py``'s and is shared with the canonical
-    fake, which raises here too; making it overflow-safe is a contract change this
-    lane may not make, and #954 holds it.
-
-    Args:
-        record: The record to judge.
-        now: The instant to judge at.
-
-    Returns:
-        Whether retention has released it.
-    """
-    try:
-        return record.is_purgeable_at(now)
-    except OverflowError:
-        return False
-
-
 def _classes_reaching(
     previous: NotificationPreferences,
     current: NotificationPreferences,
@@ -1731,7 +1695,7 @@ class SqliteNotificationStore:
                 f"SELECT {_COLUMNS} FROM notifications WHERE retention IS NOT NULL",  # noqa: S608 — a module constant, no input
             )
             doomed = [
-                record.id for record in map(_notification_from, rows) if _is_purgeable(record, now)
+                record.id for record in map(_notification_from, rows) if record.is_purgeable_at(now)
             ]
             for notification_id in doomed:
                 conn.execute("DELETE FROM notifications WHERE id = ?", (notification_id,))
