@@ -1219,3 +1219,99 @@ def test_the_text_report_names_what_is_not_checked(tmp_path: Path) -> None:
     assert "Tier 1 — fails the change (0)" in result.stdout
     assert "Tier 2 — reported, never fails (1)" in result.stdout
     assert "bare backticked tokens (b3), section numbers, issue state" in result.stdout
+
+
+# --------------------------------------------------------------------------- #
+# #1245 — two files carrying one number, which is not a citation defect but a
+# defect in the corpus every citation is resolved against. The mapping is keyed
+# on the number, so the collision is silent by construction: the later-sorting
+# file wins and the other is invisible. These pin that it is loud instead, that
+# both files are named, and that no flag suppresses it.
+# --------------------------------------------------------------------------- #
+
+
+_COLLIDING = {
+    "0001-one.md": "# 1. One\n",
+    "0002-two.md": "# 2. Two\n",
+    "0002-two-again.md": "# 2. Two again\n",
+}
+
+
+def test_two_adrs_sharing_a_number_fail_and_both_files_are_named(tmp_path: Path) -> None:
+    """The whole defect is that the loser disappears, so the loser has to be in the message."""
+    _make_repo(tmp_path, _COLLIDING)
+
+    result = _run(tmp_path, "--no-tracker")
+
+    assert result.returncode == 2
+    assert "ADR-0002" in result.stderr
+    assert "docs/adr/0002-two.md" in result.stderr
+    assert "docs/adr/0002-two-again.md" in result.stderr
+    assert "docs/adr/0001-one.md" not in result.stderr
+
+
+def test_a_collision_produces_no_report_rather_than_an_unsound_one(tmp_path: Path) -> None:
+    """A report computed over a corpus the checker knows is broken is worse than none.
+
+    Every ``ADR-0002`` in the tree would resolve — to one of the two files — so a
+    report printed anyway would look clean while one document was invisible to it.
+    """
+    _make_repo(tmp_path, _COLLIDING)
+
+    result = _run(tmp_path, "--no-tracker")
+
+    assert result.stdout == ""
+
+
+def test_report_only_does_not_suppress_a_collision(tmp_path: Path) -> None:
+    """``--report-only`` waives a Tier 1 *finding*; a collision is why there is no report.
+
+    CI's advisory step passes the flag, so a collision failing everywhere except
+    there would be a bypass of exactly the shape ADR-0010 forbids the gate.
+    """
+    _make_repo(tmp_path, _COLLIDING)
+
+    assert _run(tmp_path, "--no-tracker", "--report-only").returncode == 2
+
+
+def test_a_collision_across_subdirectories_is_the_same_defect(tmp_path: Path) -> None:
+    """The mapping is built from ``rglob``, so nesting one of the pair hides nothing."""
+    _make_repo(tmp_path, {"0001-one.md": "# 1. One\n"})
+    _write(tmp_path / "docs" / "adr" / "archive" / "0001-one-elsewhere.md", "# 1. One\n")
+
+    result = _run(tmp_path, "--no-tracker")
+
+    assert result.returncode == 2
+    assert "docs/adr/0001-one.md" in result.stderr
+    assert "docs/adr/archive/0001-one-elsewhere.md" in result.stderr
+
+
+def test_three_files_on_one_number_name_all_three(tmp_path: Path) -> None:
+    """Naming a pair out of three would send a reader to fix half the defect."""
+    _make_repo(
+        tmp_path,
+        {"0001-a.md": "# 1. A\n", "0001-b.md": "# 1. B\n", "0001-c.md": "# 1. C\n"},
+    )
+
+    result = _run(tmp_path, "--no-tracker")
+
+    assert result.returncode == 2
+    for name in ("0001-a.md", "0001-b.md", "0001-c.md"):
+        assert f"docs/adr/{name}" in result.stderr
+
+
+def test_a_distinct_number_per_file_is_silent(tmp_path: Path) -> None:
+    """The guard's own false-positive edge.
+
+    Four digits repeated *inside* a slug are not the file's number: only the
+    leading group is, and two files may mention each other's.
+    """
+    _make_repo(
+        tmp_path,
+        {"0001-one.md": "# 1. One\n", "0002-see-0001-again.md": "# 2. Two\n"},
+    )
+
+    result = _run(tmp_path, "--no-tracker")
+
+    assert result.returncode == 0
+    assert result.stderr == ""

@@ -41,6 +41,15 @@ Two tiers, per §6:
   an append-only corpus correctly cites what the tree does not contain) and
   liveness disagreements (§4).
 
+One thing outside the two tiers can stop the run, because it is not a citation:
+**two files under ``docs/adr/`` carrying the same four digits**. The number is
+the key of the mapping every decision citation resolves against, so a collision
+makes one file invisible to the corpus and every verdict computed from that
+mapping unsound. It is raised where the mapping is built (:func:`load_adrs`),
+before a citation has been judged, and exits 2 naming every file — never
+reported as a finding, which would publish a report the checker already knew was
+computed over a corpus it had noticed was broken (#1245).
+
 Run via ``just citations`` (or ``python3 scripts/check_citations.py``). ``--root``
 points at a different checkout, which is how the tests drive it.
 """
@@ -1048,21 +1057,85 @@ def fetch_tracker_numbers(root: Path) -> frozenset[int] | None:
 # --------------------------------------------------------------------------- #
 
 
+class DuplicateAdrNumberError(Exception):
+    """Two files under ``docs/adr/`` parse to the same ADR number.
+
+    Raised by :func:`load_adrs`, and deliberately **not** a Tier 1 finding.
+    ADR-0088 §6 enumerates Tier 1 as "two things, and only two", both of them
+    citations; this is not a citation at all. It is a defect in the corpus the
+    citation checks are computed *over*, and the mapping those checks read is
+    exactly where it disappears — so it is raised where the mapping is built,
+    before any citation has been judged, rather than reported alongside them.
+
+    That placement is also what makes the report trustworthy rather than merely
+    correct. A shadowed file is invisible to :func:`_adr_documents`' consumers
+    in one direction only: its citations are still extracted and judged, while
+    the number it *is* resolves to the other file. Reporting the collision as a
+    finding would mean publishing a report every decision verdict in which was
+    computed against a corpus the checker had already noticed was unsound.
+    """
+
+
 def load_adrs(root: Path) -> dict[int, tuple[str, str]]:
-    """Return every numbered ADR: number -> (relative path, whole text)."""
+    """Return every numbered ADR: number -> (relative path, whole text).
+
+    Args:
+        root: The checkout root.
+
+    Returns:
+        Every ``docs/adr/**/NNNN-*.md``, keyed on the four digits in its name.
+
+    Raises:
+        DuplicateAdrNumberError: Two files parse to the same number, naming every
+            file involved. The mapping is a ``dict`` keyed on that number, so a
+            collision would otherwise resolve silently: the later-sorting file
+            overwrites the earlier, every ``ADR-NNNN`` citation resolves to one
+            of them, and the other is invisible to the corpus with nothing
+            objecting — not git, which sees two unrelated paths, and not the
+            gate, whose other four steps never open a file under ``docs/adr/``
+            (ADR-0088's Context). ADR-0165 §1 computes the next number from
+            ``max(main)`` plus what in-flight lanes hold, and the second input
+            is bookkeeping; §1 writes down the anti-pattern — never record a
+            next-free number — because that bookkeeping has gone wrong before.
+            This is the check that makes the result loud rather than silent
+            (#1245).
+    """
     adrs: dict[int, tuple[str, str]] = {}
     directory = root / "docs" / "adr"
     if not directory.is_dir():
         return adrs
+    seen: dict[int, list[str]] = {}
     for file in sorted(directory.rglob("*.md")):
         match = _ADR_FILENAME_RE.match(file.name)
         if match is None:
             continue
-        adrs[int(match.group(1))] = (
-            file.relative_to(root).as_posix(),
-            file.read_text(encoding="utf-8"),
-        )
+        number = int(match.group(1))
+        relative = file.relative_to(root).as_posix()
+        seen.setdefault(number, []).append(relative)
+        adrs[number] = (relative, file.read_text(encoding="utf-8"))
+    collisions = {number: paths for number, paths in seen.items() if len(paths) > 1}
+    if collisions:
+        raise DuplicateAdrNumberError(_collision_message(collisions))
     return adrs
+
+
+def _collision_message(collisions: dict[int, list[str]]) -> str:
+    """Render every colliding number and every file that carries it.
+
+    Every file is named, not just the pair — three files sharing a number is one
+    defect, and a message naming two of them would send a reader to fix half of
+    it. Sorted by number so the text is a function of the tree and not of
+    whatever order the numbers were first met in.
+    """
+    lines = [f"{len(collisions)} ADR number(s) are carried by more than one file under docs/adr/:"]
+    for number, paths in sorted(collisions.items()):
+        lines.append(f"  ADR-{number:04d} is carried by {len(paths)} files:")
+        lines.extend(f"    {path}" for path in sorted(paths))
+    lines.append(
+        "Every citation of a duplicated number resolves to exactly one of its files and "
+        "the rest are invisible to the corpus. Renumber all but one of them (#1245)."
+    )
+    return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -1151,6 +1224,11 @@ def check(root: Path, *, tracker_numbers: Iterable[int] | None) -> Report:
 
     Returns:
         The whole report, Tier 1 findings first.
+
+    Raises:
+        DuplicateAdrNumberError: Two files under ``docs/adr/`` carry the same number,
+            which makes the issued set the rest of this function is computed
+            over unsound. No report is produced rather than an unsound one.
     """
     adrs = load_adrs(root)
     targets = build_decision_targets(adrs)
@@ -1432,7 +1510,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--report-only",
         action="store_true",
-        help="always exit 0, even on a Tier 1 finding",
+        help="exit 0 on a Tier 1 finding (a duplicate ADR number still exits 2)",
     )
     return parser.parse_args(argv)
 
@@ -1441,13 +1519,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run the check and print the report.
 
     Returns:
-        1 when a Tier 1 finding exists and ``--report-only`` was not passed,
-        else 0. Tier 2 never affects the exit code (ADR-0088 §3, §6).
+        **2** when two files under ``docs/adr/`` carry the same ADR number — the
+        corpus is unsound, no report is printed, and the message on stderr names
+        every file involved. ``--report-only`` does not suppress it: that flag
+        says "always exit 0, even on a Tier 1 finding", and a collision is not a
+        finding but the reason there is no report to qualify. Otherwise **1**
+        when a Tier 1 finding exists and ``--report-only`` was not passed, else
+        **0**. Tier 2 never affects the exit code (ADR-0088 §3, §6).
     """
     args = _parse_args(argv)
     root = args.root.resolve()
     trackers = None if args.no_tracker else fetch_tracker_numbers(root)
-    report = check(root, tracker_numbers=trackers)
+    try:
+        report = check(root, tracker_numbers=trackers)
+    except DuplicateAdrNumberError as error:
+        print(error, file=sys.stderr)
+        return 2
 
     renderers = {"text": format_text, "markdown": format_markdown}
     if args.format == "json":
