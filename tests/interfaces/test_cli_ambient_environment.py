@@ -7,12 +7,16 @@ field its constructor was not given from the environment and
 then looked for the loopback instruction and found the enrolment one. CI is what
 hid it: a bare environment is the one case where the exposure cannot show.
 
-``hermetic_assistant_env`` (``tests/conftest.py``) is the fix, and the modules that
-needed it carry it as a module-level ``usefixtures`` mark. What that leaves
-unproven is the fixture itself — every module carrying it runs in an environment
-where, on CI, there is nothing to clear. So this module supplies the missing half:
-it *configures the machine the way an owner's is* for its own duration, and then
-asserts the default reading anyway.
+``hermetic_assistant_env`` (``tests/conftest.py``) is the fix, and since #1058 /
+#1395 it is **autouse** over the whole corpus rather than a mark a module opts
+into. So this module names no fixture: the guard it asserts under is the one every
+other module now gets for free, and that is deliberate — a pin that had to ask for
+the guard could not show that a module which asks for nothing is covered.
+
+What the guard leaves unproven is itself. On CI the environment is bare, so every
+module runs it where there is nothing to clear. This module supplies the missing
+half: it *configures the machine the way an owner's is* for its own duration, and
+then asserts the default reading anyway.
 
 Both channels are supplied, because a guard that closed one would move the exposure
 rather than end it. ``Settings`` reads ``ASSISTANT_*`` from the process environment
@@ -64,9 +68,6 @@ def _ambient_configuration(tmp_path_factory: pytest.TempPathFactory) -> Iterator
         )
         ambient.chdir(clone)
         yield
-
-
-pytestmark = pytest.mark.usefixtures("hermetic_assistant_env")
 
 
 def test_an_ambient_remote_hub_address_does_not_reach_a_test_built_settings(

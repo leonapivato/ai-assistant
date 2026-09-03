@@ -43,7 +43,6 @@ pytestmark = [
     pytest.mark.browser,
     pytest.mark.xdist_group("gateway_browser"),
     pytest.mark.asyncio(loop_scope="session"),
-    pytest.mark.usefixtures("hermetic_assistant_env"),
 ]
 
 #: The first answer's rendering: long enough that it is still sounding when the

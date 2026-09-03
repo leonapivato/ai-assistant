@@ -45,7 +45,7 @@ from ai_assistant.interfaces.gateway.server import _ASSISTANT_PATHS
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("hermetic_assistant_env")]
+pytestmark = pytest.mark.integration
 
 #: The two operations, as ``wire/surface.py`` reads them off the Protocol.
 _TRAIL_READS = frozenset({"recent_reads", "export_reads"})

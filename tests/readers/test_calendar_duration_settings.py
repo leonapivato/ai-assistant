@@ -52,18 +52,14 @@ Refs #1287, #1063, #981, #1283, PR #1284, PR #1289.
 
 from __future__ import annotations
 
-import os
 from datetime import timedelta
-from typing import TYPE_CHECKING, Final
+from typing import Final
 
 import pytest
 from pydantic import ValidationError
 
 from ai_assistant.core.config import Settings, load_settings
 from ai_assistant.core.errors import ConfigurationError
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 #: ``Settings.model_config``'s ``env_prefix``, in the case the loader writes it.
 _PREFIX: Final = "ASSISTANT_"
@@ -126,30 +122,6 @@ _REFUSED: Final = [
     pytest.param("15", id="bare-fifteen"),
     pytest.param("300", id="bare-three-hundred"),
 ]
-
-
-@pytest.fixture(autouse=True)
-def _only_this_case_configures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Leave the loader reading this module's environment and nothing else.
-
-    Two ambient sources outrank a case here and both are ordinary on a developer's
-    machine. Environment variables beat ``env_file`` in pydantic-settings' source
-    order, so a shell holding ``ASSISTANT_CALENDAR_READER_INTERVAL`` would be what
-    the case actually loaded; and ``model_config`` sets ``env_file=".env"``, a
-    relative path resolved against the working directory, so a repository-root
-    ``.env`` would be read by every construction below.
-
-    The sweep is case-insensitive rather than a list of the names this module
-    knows, for the reason ``tests/core/test_env_example.py`` gives: the loader
-    leaves ``case_sensitive`` at its ``False`` default, so ``assistant_calendar_
-    reader_interval`` is a live assignment in exactly the way the upper-case
-    spelling is, and one holding an invalid value would fail these cases at
-    construction with nothing pointing at why.
-    """
-    for variable in list(os.environ):
-        if variable.upper().startswith(_PREFIX):
-            monkeypatch.delenv(variable, raising=False)
-    monkeypatch.chdir(tmp_path)
 
 
 def _armed(monkeypatch: pytest.MonkeyPatch, **assignments: str) -> None:

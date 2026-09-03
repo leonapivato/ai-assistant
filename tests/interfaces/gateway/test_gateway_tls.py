@@ -36,7 +36,7 @@ from ai_assistant.testing import FakeAssistantEngine
 if TYPE_CHECKING:
     from pathlib import Path
 
-pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("hermetic_assistant_env")]
+pytestmark = pytest.mark.integration
 
 #: The overlay name the certificate is obtained for, and the one the owner configures.
 _NAME: Final = "laptop.tail2e4542.ts.net"

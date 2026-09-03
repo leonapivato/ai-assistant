@@ -33,11 +33,6 @@ from ai_assistant.core.errors import ConfigurationError
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-#: ``Settings`` reads every field a construction here does not name from the
-#: environment, so an ambient ``ASSISTANT_*`` is what these assertions would
-#: otherwise measure (#1368).
-pytestmark = pytest.mark.usefixtures("hermetic_assistant_env")
-
 #: The three amount-valued settings, which share one countability rule and differ
 #: only in their floor.
 _AMOUNTS: Final = (

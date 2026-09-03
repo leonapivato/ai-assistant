@@ -31,7 +31,6 @@ pytestmark = [
     pytest.mark.browser,
     pytest.mark.xdist_group("gateway_browser"),
     pytest.mark.asyncio(loop_scope="session"),
-    pytest.mark.usefixtures("hermetic_assistant_env"),
 ]
 
 #: The one console error a correct page produces, and it is the browser's rather

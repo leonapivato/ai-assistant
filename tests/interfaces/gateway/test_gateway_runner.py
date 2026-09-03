@@ -30,7 +30,7 @@ from ai_assistant.testing import FakeAssistantEngine
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
 
-pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("hermetic_assistant_env")]
+pytestmark = pytest.mark.integration
 
 
 #: The act a case names when it is not about how the disposition was installed.

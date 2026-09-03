@@ -37,8 +37,6 @@ if TYPE_CHECKING:
 
     from playwright.async_api import Browser
 
-pytestmark = [pytest.mark.usefixtures("hermetic_assistant_env")]
-
 # Playwright's `Browser` is a concrete class rather than a Protocol, so the two
 # stand-ins below are cast at the call rather than declared to implement it. What
 # `driving()` asks of a browser is one method, and each fake answers exactly that
