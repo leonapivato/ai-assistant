@@ -623,13 +623,11 @@ class Reembedder:
         if not plan.required:
             return ReembedOutcome(plan=plan, embedded=0, resumed=0, swapped=False, durable=True)
         started = _fingerprint(self._store)
-        cursor = self._prepare_work(plan.resumable)
-        # What this run inherits is what the cursor says, not what the plan counted.
-        # `_prepare_work` discards rather than resumes a work store that lost its
-        # cursor between the two, so a `None` cursor is a copy starting at the first
-        # source row with nothing carried over — and reporting the plan's figure
-        # there would overstate both `resumed` and every progress call (#738).
-        resumed = plan.resumable if cursor is not None else 0
+        # What this run inherits is what the work store is observed to hold when the
+        # copy is about to start, not what the plan counted a moment earlier: the
+        # plan can be stale in either direction, and `_prepare_work` may itself have
+        # discarded the store the plan was counting (#738).
+        resumed, cursor = self._prepare_work(plan.resumable)
         source = _connect(self._store)
         try:
             work = _connect(self._work)
@@ -647,8 +645,15 @@ class Reembedder:
             plan=plan, embedded=embedded, resumed=resumed, swapped=True, durable=durable
         )
 
-    def _prepare_work(self, resumed: int) -> int | None:
-        """Return the cursor to continue from, creating the work store if needed.
+    def _prepare_work(self, resumed: int) -> tuple[int, int | None]:
+        """Return the rows inherited and the cursor to continue from.
+
+        The work store is created here if there is nothing to inherit. Both
+        returned figures are read from the work store as it stands at this call,
+        which is the last point before the copy begins; the caller's ``resumed``
+        is the plan's count and is used only to decide whether to look. A count
+        taken from the plan instead would mis-state ``resumed`` and every progress
+        call whenever the work store moved under it (#738).
 
         The work store is created by constructing a :class:`SqliteMemoryStore` on
         it and closing it again, rather than by repeating its DDL here. That is
@@ -666,11 +671,13 @@ class Reembedder:
         if resumed:
             conn = _connect(self._work)
             try:
-                cursor = _read_meta(conn, str(self._work)).get(_CURSOR_KEY)
+                meta = _read_meta(conn, str(self._work))
+                cursor = meta.get(_CURSOR_KEY)
+                inherited = _count(conn, "records", str(self._work))
             finally:
                 conn.close()
             if cursor is not None:
-                return _as_int(cursor, f"the cursor {self._work} records")
+                return inherited, _as_int(cursor, f"the cursor {self._work} records")
             # `_resumable` reports nothing to keep for a work store carrying no
             # cursor, so arriving here means the file changed between the plan and
             # this call. Fall through to the discard rather than return ``None``
@@ -685,7 +692,7 @@ class Reembedder:
                 _write_meta(conn, _SOURCE_KEY, _fingerprint(self._store))
         finally:
             conn.close()
-        return None
+        return 0, None
 
     async def _copy(  # noqa: PLR0913 — one argument per collaborator this loop needs
         self,
@@ -699,10 +706,10 @@ class Reembedder:
     ) -> int:
         """Copy every record past ``cursor``, one committed chunk at a time.
 
-        ``resumed`` is what the work store actually carried in, which is the
+        ``resumed`` is what the work store was observed to carry in, which is the
         plan's figure only when the plan was still true at ``_prepare_work``;
-        progress counts from it so that the number reported can never exceed
-        ``plan.records``.
+        progress counts from it rather than from the plan so that what is reported
+        is the rows this store actually holds.
         """
         embedded = 0
         while True:

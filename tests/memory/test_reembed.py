@@ -826,6 +826,47 @@ async def test_a_cursor_lost_after_the_plan_restarts_and_says_so(
     assert len(_read(store, "SELECT rowid FROM records")) == 4
 
 
+async def test_what_is_reported_as_resumed_is_what_the_work_store_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The plan counts a moment before the copy; the work store is what is copied.
+
+    Stale the other way from the case above: the plan under-counts what the work
+    store carries. ``resumed`` and every progress call are read off the store at
+    ``_prepare_work`` rather than off the plan, so neither can report rows the
+    store does not hold or omit rows it does (review round 2).
+    """
+    store = tmp_path / "memory.db"
+    await _seed(store, [_record(str(index), f"memory {index}") for index in range(4)])
+
+    broken = _CountingEmbedder(fail_after=2)
+    with pytest.raises(MemoryStoreError, match="embedder failed"):
+        await Reembedder(store=store, embedder=broken, batch_size=2).run()
+
+    # Two rows and a cursor naming the second are on disk; the plan says one.
+    work = tmp_path / f"memory.db{WORK_SUFFIX}"
+    assert _read(work, "SELECT count(*) FROM records") == [(2,)]
+    monkeypatch.setattr(Reembedder, "_resumable", lambda _self: 1)
+
+    seen: list[tuple[int, int]] = []
+
+    def record_progress(done: int, total: int) -> None:
+        seen.append((done, total))
+
+    resumed_target = _CountingEmbedder()
+    outcome = await Reembedder(store=store, embedder=resumed_target, batch_size=2).run(
+        progress=record_progress
+    )
+
+    assert outcome.plan.resumable == 1
+    assert outcome.resumed == 2
+    assert outcome.embedded == 2
+    assert resumed_target.embedded == 2
+    assert seen == [(4, 4)]
+    assert outcome.swapped
+    assert len(_read(store, "SELECT rowid FROM records")) == 4
+
+
 async def test_a_source_written_after_verification_is_not_swapped_over(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
