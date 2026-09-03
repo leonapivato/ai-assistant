@@ -5567,6 +5567,39 @@ class ActionPlan(BaseModel):
     on by the permission gate, and never reaches ``StepExecutor`` or
     ``ExecutionState``: reading the owner's own store is not an act in the world,
     so no lane routes it through the machinery that decides acts.
+
+    **And a plan may say which plan it replaced** (ADR-0228 §5). A turn that
+    serviced a read may call the planner a **second** time over the widened supply,
+    and what comes back is a new plan with a new ``id`` — never an edit of the
+    first, because ADR-0014 §2's ``frozen=True`` is what makes a plan an auditable
+    record of a decision and a turn that revised has *two* decisions to record.
+    :attr:`supersedes` is the link between them, and ``None`` — the default, and the
+    value on every plan a turn's first call returns — means **this plan replaced
+    nothing**. No implementation reads ``None`` as an error or as an unknown.
+
+    **The loop sets it and the planner never does** (ADR-0228 §5). On every plan a
+    planner returns, the loop takes the field for its own: it discards any value the
+    plan came back carrying, and then, on a revision and only on a revision, sets it
+    to the predecessor's ``id``. Every other field is exactly as the planner returned
+    it. Taking it on *every* plan rather than only on a revision is what closes the
+    forgery — a planner returning its **first** plan already carrying a resolvable
+    same-goal id would otherwise write an unprovenanced claim of a supersession that
+    never happened into a durable audit chain, since nothing would revise and so
+    nothing would overwrite it.
+
+    **No plan identifier is rendered to a model and none is accepted from one**
+    (ADR-0228 §5). ``Identifier`` admits any non-blank encodable string, so an id a
+    model returned would be unprovenanced content in a durable record — the ground
+    ADR-0226 §9 refused to *log* ``ActionPlan.id`` on, applied to a field that is
+    *written*.
+
+    **The chain does not span goals and does not point forwards.** A revision carries
+    the same ``goal_id`` as the plan it replaces (ADR-0228 §1), and
+    ``PlanStore.save_plan`` refuses a ``supersedes`` that names no stored plan, names
+    the saving plan's own ``id``, or names a plan under a different ``goal_id``
+    (ADR-0228 §5) — which is ADR-0014 §5's export promise kept at write time rather
+    than a new invariant. :class:`PlanExport`'s reference closure covers it for the
+    same reason.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -5584,6 +5617,16 @@ class ActionPlan(BaseModel):
             "One read the planner asked for beside this plan, or None where it asked "
             "for none (ADR-0226 §4). None is never read as an error, a degradation, "
             "or an instruction to service a default read."
+        ),
+    )
+    supersedes: Identifier | None = Field(
+        default=None,
+        description=(
+            "The id of the plan this one replaced, or None where it replaced nothing "
+            "(ADR-0228 §5). Set by the loop on every plan a planner returns — a value "
+            "the planner supplied is discarded silently — and non-None only on a "
+            "turn's revision, which carries the same goal_id as its predecessor. None "
+            "is never read as an error or as an unknown."
         ),
     )
 
@@ -6113,7 +6156,8 @@ class PlanExport(BaseModel):
     internally consistent — every ``goal_id``/``plan_id`` referenced by an
     included record resolves within the same export.
 
-    **``schema_version`` is 3 because ``ActionPlan`` gained ``read_request``**
+    **``schema_version`` is 4 because ``ActionPlan`` gained ``supersedes``**
+    (ADR-0228 §5, §6), as it was 3 because that model gained ``read_request``
     (ADR-0226 §4). This document carries ``tuple[ActionPlan, ...]``, so a member of
     it changing shape is exactly what the version exists to announce (ADR-0039 §10,
     ADR-0014 §5) — the same reading that moved it to 2 for ``StepExecution`` and
@@ -6122,6 +6166,14 @@ class PlanExport(BaseModel):
     that carries it, and ``extra="forbid"`` is what makes the mislabelling
     concrete: a reader validating an older-shaped document against the new
     contract, or the reverse, rejects it.
+
+    **The reference closure covers ``supersedes``** (ADR-0228 §5). ADR-0014 §5 rules
+    that every ``goal_id``/``plan_id`` referenced by an included record resolves
+    within the same export, and ``supersedes`` is a ``plan_id`` referenced by an
+    included record — so a document whose ``supersedes`` names a plan it does not
+    carry does not validate as a ``PlanExport`` at all. That is §5's own promise
+    stated over a new reference rather than a new invariant, and the validator says
+    it so that its former silence is not read as an exemption.
 
     **No migration is owed, and not because no v2 export exists** (ADR-0226 §4).
     ``PlanStore`` offers ``export`` and no ``import``, ``restore`` or ``load``, so
@@ -6134,14 +6186,15 @@ class PlanExport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[3] = Field(
-        default=3,
+    schema_version: Literal[4] = Field(
+        default=4,
         description=(
-            "Shape of this export, pinned to exactly 3 (ADR-0039 §10, ADR-0226 §4): an "
+            "Shape of this export, pinned to exactly 4 (ADR-0039 §10, ADR-0228 §6): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[3]`` "
-            "refuses every other value — a v1 or v2 document does not validate against "
-            "this contract at all — so the advertised version cannot be mislabelled."
+            "the document rather than a producer's unchecked claim. ``Literal[4]`` "
+            "refuses every other value — a v1, v2 or v3 document does not validate "
+            "against this contract at all — so the advertised version cannot be "
+            "mislabelled."
         ),
     )
     exported_at: UtcInstant
@@ -6174,6 +6227,22 @@ class PlanExport(BaseModel):
         dangling_plans = sorted(plan.id for plan in self.plans if plan.goal_id not in goal_ids)
         if dangling_plans:
             msg = f"export has plans whose goal is missing: {', '.join(dangling_plans)}"
+            raise ValueError(msg)
+
+        # ADR-0228 §5: `supersedes` is a `plan_id` referenced by an included record,
+        # so ADR-0014 §5's completeness promise reaches it. Checked beside the
+        # dangling-`goal_id` arm rather than in place of it — the two references are
+        # independent, and a plan can be orphaned by either.
+        unresolved_supersedes = sorted(
+            plan.id
+            for plan in self.plans
+            if plan.supersedes is not None and plan.supersedes not in plan_ids
+        )
+        if unresolved_supersedes:
+            msg = (
+                "export has plans whose superseded plan is missing: "
+                f"{', '.join(unresolved_supersedes)}"
+            )
             raise ValueError(msg)
 
         dangling_executions = sorted(

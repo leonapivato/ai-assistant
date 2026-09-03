@@ -220,6 +220,7 @@ if TYPE_CHECKING:
         TranscriptArchive,
     )
     from ai_assistant.core.types import (
+        ActionPlan,
         AnswerOutcome,
         BeliefBand,
         ConnectedAccount,
@@ -1457,6 +1458,16 @@ type _RoutedComposer = Callable[[RoutedOperation, str], Awaitable["ComposedReply
 #: fact's reason: what it is about is how a record was fetched, not what channel this
 #: turn arrived on. It is **ordered**, because ADR-0227 §4's cap is taken over it in
 #: ADR-0226 §6's order.
+#:
+#: **The sixth is ADR-0228 §10's carrier**, and it travels here rather than on the
+#: turn for §10's own reason: it "is carried **inside**
+#: ``ai_assistant.orchestration``, from the component that knows it to the render
+#: site, as data", adding no field to a ``core`` type and no member to a Protocol,
+#: and it "is never inferred at the render site — not from the plan, not from the
+#: supply's length, not from the audit". It is the **bare fact** that the turn stopped
+#: looking while it was still asking: no count, no duration, no guard name, no query
+#: and no label. ``False`` on every other pass, where the assembled prompt is
+#: byte-identical to what it is today.
 type _Composer = Callable[
     [
         "TurnResult | None",
@@ -1464,9 +1475,41 @@ type _Composer = Callable[
         str,
         "Mapping[str, SpokenDelivery]",
         "Sequence[str]",
+        bool,
     ],
     Awaitable["ComposedReply | None"],
 ]
+
+
+#: ADR-0228 §4's planning budget for ``converse`` and ``converse_streaming``:
+#: **PT20S** from the turn's entry into the loop, within which an *additional*
+#: planner call may be started.
+#:
+#: **Declared per operation** and never derived from the channel's audience. ADR-0199
+#: §1's audience decides whether a read request is serviced at all (ADR-0226 §5); it
+#: does not decide how long a turn may spend planning, and §4 forbids deriving one
+#: from the other — two operations of one audience have different latency tolerances,
+#: and ADR-0199 §1's own argument against overloading a property ("Audience rather
+#: than modality, because 'voice' is not one trust level") is a warning rather than a
+#: licence. ``converse_spoken`` declares **none** and passes ``None``, so no spoken
+#: turn iterates whatever its audience — which is the guard §4 builds while the case
+#: is still hypothetical, because the property keeping voice out of iteration today is
+#: an accident of which devices are declared: a worn earpiece is a *bounded*-audience
+#: channel under ADR-0199 §1, and the day such a spoke is declared only a declared
+#: budget protects it.
+#:
+#: **Twenty seconds is a judged figure and is labelled as one** (§4). Nothing in this
+#: repository measures a planner round trip: the bound of two
+#: (:data:`~ai_assistant.orchestration.loop._PLANNER_CALL_BOUND`) is meant to be the
+#: binding guard in the ordinary case and this to be the tail guard for a turn whose
+#: first phase already ran long. ADR-0228 §9's record says which guard stopped each
+#: turn, so "how often does the budget actually fire" is a number from the first
+#: deploy rather than a claim.
+#:
+#: **Not a ``Settings`` value, not a deployment flag and not a per-request
+#: parameter** (§4). The figure is fixed here and moves only by the ADR that moves it,
+#: exactly as ADR-0226 §6's ten and ADR-0228 §3's two do.
+_PLANNING_BUDGET: Final = timedelta(seconds=20)
 
 
 @dataclass(frozen=True, slots=True)
@@ -3729,6 +3772,12 @@ class Engine:
             compose=partial(self._composed_spoken, supply=supply),
             compose_routed=self._composed_routed_spoken,
             supply=supply,
+            # ADR-0228 §4: `converse_spoken` declares **none**, so no turn of it
+            # iterates, whatever its audience. That is the guard built while the case
+            # is hypothetical — ADR-0226 §5's channel scoping keeps voice out of
+            # iteration today, but only because of which devices are declared, and a
+            # worn earpiece is bounded-audience under ADR-0199 §1.
+            planning_budget=None,
             spoken=recorded,
         )
         # Measured **before** a rendering is spent on it, because ADR-0200 §4 rules
@@ -3913,13 +3962,14 @@ class Engine:
             )
         return spoken
 
-    async def _composed_spoken(  # noqa: PLR0913 — the turn, the step, the conversation, the delivery facts, the hop's reach and the supply applier; every one is a distinct fact about the pass
+    async def _composed_spoken(  # noqa: PLR0913 — the turn, the step, the conversation, the delivery facts, the hop's reach, ADR-0228 §10's stop fact and the supply applier; every one is a distinct fact about the pass
         self,
         turn: TurnResult | None,
         step: StepOutcome | None,
         conversation: str,
         deliveries: Mapping[str, SpokenDelivery],
         hop_reached: Sequence[str],
+        stopped_while_asking: bool,
         *,
         supply: UnboundedAudienceSupply,
     ) -> ComposedReply | None:
@@ -3986,6 +4036,14 @@ class Engine:
                 dropped so that :data:`_Composer`'s shape is one shape, and passed on
                 rather than replaced with ``()`` so that no site here holds a second
                 statement of §5's scoping.
+            stopped_while_asking: Whether the turn stopped looking while still asking
+                (ADR-0228 §10). **Always ``False`` here**, and for the carrier above's
+                reason one clause further on: ADR-0228 §2(c) admits a revision only on
+                a turn whose request was *serviced*, and ADR-0226 §5 declines to
+                service one on this operation — so no turn of it reaches either guard.
+                ADR-0228 §4 makes that doubly true by declaring **no** planning budget
+                for ``converse_spoken`` (§2(a)). Accepted and passed on rather than
+                replaced with ``False``, for the same reason.
             supply: The applier this call minted, read for the bare fact of whether
                 anything was held back. Bound by :meth:`converse_spoken` rather than
                 passed by :meth:`_run_turn`, which knows nothing of disclosure.
@@ -4007,6 +4065,7 @@ class Engine:
             withheld=supply.withheld,
             deliveries=deliveries,
             hop_reached=hop_reached,
+            stopped_while_asking=stopped_while_asking,
         )
 
     async def resume(
@@ -7255,6 +7314,9 @@ class Engine:
             supply=BoundedAudienceSupply(
                 speakable_attested_sources=self._speakable_attested_sources
             ),
+            # ADR-0228 §4: this operation declares PT20S, so a turn of it may take
+            # one revision. The figure is the operation's and not the audience's.
+            planning_budget=_PLANNING_BUDGET,
         )
 
     async def _converse_streaming(
@@ -7288,15 +7350,16 @@ class Engine:
             ``chunks`` (ADR-0173 §3).
         """
 
-        async def compose(
+        async def compose(  # noqa: PLR0913 — :data:`_Composer`'s six, and each is a distinct fact about the pass
             turn: TurnResult | None,
             step: StepOutcome | None,
             conversation: str,
             deliveries: Mapping[str, SpokenDelivery],
             hop_reached: Sequence[str],
+            stopped_while_asking: bool,
         ) -> ComposedReply | None:
             return await self._compose_streaming(
-                turn, step, conversation, chunks, deliveries, hop_reached
+                turn, step, conversation, chunks, deliveries, hop_reached, stopped_while_asking
             )
 
         async def compose_routed(
@@ -7316,15 +7379,21 @@ class Engine:
             supply=BoundedAudienceSupply(
                 speakable_attested_sources=self._speakable_attested_sources
             ),
+            # ADR-0228 §4 declares PT20S for this operation too — the same figure as
+            # :meth:`_converse`'s and stated once, because §4 keys the budget on the
+            # operation and these two differ in where the answer goes rather than in
+            # how long a user waits for it.
+            planning_budget=_PLANNING_BUDGET,
         )
 
-    async def _composed_whole(
+    async def _composed_whole(  # noqa: PLR0913 — :data:`_Composer`'s six, and each is a distinct fact about the pass
         self,
         turn: TurnResult | None,
         step: StepOutcome | None,
         conversation: str,
         deliveries: Mapping[str, SpokenDelivery],
         hop_reached: Sequence[str],
+        stopped_while_asking: bool,
     ) -> ComposedReply | None:
         """Compose atomically, ignoring the conversation the streaming twin needs.
 
@@ -7342,10 +7411,63 @@ class Engine:
 
         **And so does ADR-0227 §3's carrier**, for a reason of the same shape: what it
         says is which records this turn's citation hop reached, which is a fact about
-        how those records were fetched and not about where the answer is going.
+        how those records were fetched and not about where the answer is going. So
+        does ADR-0228 §10's, which says the turn stopped looking while it was still
+        asking — a fact about this turn's own planning and not about its channel.
         """
         del conversation
-        return await self._compose(turn, step, deliveries=deliveries, hop_reached=hop_reached)
+        return await self._compose(
+            turn,
+            step,
+            deliveries=deliveries,
+            hop_reached=hop_reached,
+            stopped_while_asking=stopped_while_asking,
+        )
+
+    async def _persist_plans(self, plans: Sequence[ActionPlan]) -> None:
+        """Persist every plan the turn produced, oldest first (ADR-0228 §5).
+
+        **The one site that persists a plan**, which is what makes this a change at a
+        single place rather than a second writer: ``save_plan`` was called from
+        exactly here, once per turn, and now takes the whole sequence.
+
+        **Oldest first**, so no partially-persisted turn leaves a ``supersedes``
+        pointing at a plan the store does not hold — the successor's reference is
+        already resolvable by the time it is written, which is the order
+        ``PlanStore.save_plan``'s own rejection needs to be satisfiable.
+
+        **All of them, and not only the one the turn drove.** ADR-0226 §9 rests its
+        whole minimisation argument on one sentence — "The ask stays durable on the
+        frozen ``ActionPlan`` (§4) and the record neither copies it nor points at it"
+        — and ADR-0226 §10 rests the persisted-plan fire rate on "every turn's plan is
+        persisted". Under iteration the ask that was actually **serviced** is on the
+        *first* plan, which the turn then replaces: a design persisting only the plan
+        it drove would silently delete the record of why the turn read what it read,
+        and would make ADR-0226 §9's argument false the day this milestone ships.
+
+        **A turn that ends before this method is reached persists nothing, exactly as
+        it did before** (§5). A turn whose second planner call raised, one rejected
+        for capacity and one that failed before the planner was reached are alike in
+        that and were alike before ADR-0228 — the loop is given no ``PlanStore`` and
+        no plan is carried out of a failing turn in order to write it. What such a
+        turn still owes is ADR-0226 §9's record, which is emitted from ``respond``'s
+        ``finally`` and conditioned on nothing.
+
+        Args:
+            plans: Every plan the turn produced, oldest first — one member on a turn
+                that did not revise, two on one that did.
+
+        Raises:
+            PlanningError: As ``save_plan`` raises it. This adds no failure mode and
+                no degradation posture: a ``save_plan`` that raises on a superseded
+                plan fails the turn exactly as one raising on any other plan does
+                today, and nothing here swallows it. A turn whose first plan persisted
+                and whose second raised leaves a plan with no successor, which is a
+                complete record of what that turn decided and is not a dangling
+                reference — the link points backwards.
+        """
+        for plan in plans:
+            await self._plans.save_plan(plan)
 
     async def _run_turn(  # noqa: PLR0913 — the utterance, the budget, the conversation, the two composers, the supply filter and the spoken capture; every one is a distinct fact about the pass, and collapsing any pair would put a flag where a value belongs
         self,
@@ -7356,6 +7478,7 @@ class Engine:
         compose: _Composer,
         compose_routed: _RoutedComposer,
         supply: TurnSupply,
+        planning_budget: timedelta | None,
         spoken: _SpokenCapture | None = None,
     ) -> TurnOutcome:
         """Route the ask, or resolve the conversation, plan the turn and drive its step.
@@ -7454,9 +7577,19 @@ class Engine:
             history=history.records,
             history_degraded=history.degraded,
             narrow=supply,
+            planning_budget=planning_budget,
         )
         turn = responded.turn
         hop_reached = responded.hop_reached
+        # ADR-0228 §5: **every** plan the turn produced, oldest first, and
+        # `turn.plan` is the last of them. Read here beside the turn so that the two
+        # `save_plan` sites below take the whole sequence rather than the driven plan
+        # alone — "a turn that persists a plan at all persists all of them".
+        plans = responded.plans
+        # ADR-0228 §10's carrier, threaded to the composing stage exactly as the hop
+        # set above is and never inferred here — not from the plan, not from the
+        # supply's length, and not from the audit.
+        stopped_while_asking = responded.stopped_while_asking
         # ADR-0205 §5: the fact travels with the episode it qualifies and never
         # without it. `turn.memories` is the supply as `narrow` returned it, so
         # intersecting here is what makes a withheld record's delivery unreachable by
@@ -7493,8 +7626,10 @@ class Engine:
             # could park — so it needs no capacity slot, and its goal and plan are
             # persisted as an auditable record (ADR-0014 §2).
             await self._plans.save_goal(turn.goal)
-            await self._plans.save_plan(turn.plan)
-            composed = await compose(turn, None, conversation.id, deliveries, hop_reached)
+            await self._persist_plans(plans)
+            composed = await compose(
+                turn, None, conversation.id, deliveries, hop_reached, stopped_while_asking
+            )
             return await self._capture(
                 conversation.id,
                 turn=turn,
@@ -7524,7 +7659,15 @@ class Engine:
         handle = self._admit_and_reserve()
         try:
             await self._plans.save_goal(turn.goal)
-            await self._plans.save_plan(turn.plan)
+            # ADR-0228 §5: the **whole** sequence of `save_plan` calls precedes
+            # `start_execution`, so a turn whose second `save_plan` raises has driven
+            # nothing — no execution is open, no capacity slot is spent on a step and
+            # no side effect has been reached. The naive extension writes each plan as
+            # it is produced, which would put a `save_plan` failure *after* a step had
+            # run: the failure a persistence error should produce is a turn that
+            # decided and recorded nothing, not one that acted and then lost the
+            # record of why.
+            await self._persist_plans(plans)
             state = await self._plans.start_execution(turn.plan.id)
             # ADR-0181 §2, §4: the origin the authoriser evaluates — the value
             # hoisted above, handed on rather than recomputed here. Until ADR-0223 §2
@@ -7562,7 +7705,9 @@ class Engine:
         # (#1314) — so composing first is chosen for the reason that the capture
         # point is the single place a ``TurnOutcome`` is built, and folding one more
         # already-computed value into it beats threading a second construction site.
-        composed = await compose(turn, step, conversation.id, deliveries, hop_reached)
+        composed = await compose(
+            turn, step, conversation.id, deliveries, hop_reached, stopped_while_asking
+        )
         return await self._capture(
             conversation.id,
             turn=turn,
@@ -8313,6 +8458,7 @@ class Engine:
         *,
         deliveries: Mapping[str, SpokenDelivery],
         hop_reached: Sequence[str] = (),
+        stopped_while_asking: bool = False,
     ) -> ComposedReply | None:
         """Compose this pass's answer, or decline to on the shapes that owe none.
 
@@ -8338,7 +8484,14 @@ class Engine:
         **The undriven steps are computed here and handed over** (ADR-0170 §5): the
         stage is told which of the plan's steps were not driven rather than handed
         the plan alone and left to infer it. Until the plan-driving stage lands
-        (#242) that is every step but the one this pass drove.
+        (#242) that is every step but the one this pass drove — of the plan the turn
+        finally produced, which on a revising turn is the revision and never the plan
+        it replaced (ADR-0228 §5: a superseded plan drives nothing, so none of its
+        steps is undriven in this sense; it was never a candidate).
+
+        **ADR-0228 §10's fact defaults to ``False``**, which is what a resume driven
+        from a recovered park carries: nothing about that pass planned at all, so it
+        stopped at no guard. Every ordinary pass is told the turn's own value.
 
         Returns:
             What the stage composed, or ``None`` where no answer was owed.
@@ -8354,9 +8507,10 @@ class Engine:
             undriven=undriven,
             deliveries=deliveries,
             hop_reached=hop_reached,
+            stopped_while_asking=stopped_while_asking,
         )
 
-    async def _compose_streaming(  # noqa: PLR0913 — the turn, the step, the conversation, the chunk queue, the delivery facts and the hop's reach; each is a distinct input, as on :meth:`_compose`
+    async def _compose_streaming(  # noqa: PLR0913 — the turn, the step, the conversation, the chunk queue, the delivery facts, the hop's reach and ADR-0228 §10's stop fact; each is a distinct input, as on :meth:`_compose`
         self,
         turn: TurnResult | None,
         step: StepOutcome | None,
@@ -8364,6 +8518,7 @@ class Engine:
         chunks: asyncio.Queue[ReplyChunk],
         deliveries: Mapping[str, SpokenDelivery],
         hop_reached: Sequence[str] = (),
+        stopped_while_asking: bool = False,
     ) -> ComposedReply | None:
         """Stream this pass's answer onto ``chunks``, and report what it composed.
 
@@ -8405,6 +8560,7 @@ class Engine:
             room=self._reply_room(turn=turn, step=step, conversation_id=conversation_id),
             deliveries=deliveries,
             hop_reached=hop_reached,
+            stopped_while_asking=stopped_while_asking,
         )
         async with closing_stream(stream) as composing:
             async for produced in composing:

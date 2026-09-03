@@ -2657,10 +2657,44 @@ class Planner(Protocol):
         boundary is now a ``Planner`` contract change taking its own ADR. Both
         widenings are flagged under golden rule 5 rather than smuggled.
 
-        **``memories`` still carries exactly those three groups, and what widens is
-        the return** (ADR-0226 §7). The planner is called *before* the loop services
-        any read request and receives what it has always received, so every clause
-        above binds on this parameter word for word. What the returned
+        **A turn's *first* call carries exactly those three groups, and a turn's
+        *second* call carries a fourth** (ADR-0226 §7, partially superseded by
+        ADR-0228 §§1, 7). On the first call the planner is reached before the loop
+        services any read request and receives what it has always received, so every
+        clause above binds on this parameter word for word. On a turn that serviced
+        one, the loop may call the planner **again** over the supply as it stands
+        after that servicing — the same three groups, in the same order and the same
+        positions, followed by the records the servicing appended as a **fourth**
+        group. That group is appended whole after the episodic supplement and is
+        never interleaved (ADR-0158 §4), it only grows across a turn, and nothing is
+        removed from the supply between a turn's two calls. There is no fifth group:
+        where a turn services twice, both servicings' records form one fourth group
+        in servicing order. This is the fourth widening of this contract's documented
+        meaning and is flagged under golden rule 5 with the others; like them it
+        **breaks nothing** — no signature moves, and a planner that renders whatever
+        sequence it is handed conforms exactly as it does today.
+
+        **A turn may put two requests to one planner** (ADR-0228 §3, superseding
+        ADR-0226 §2's second-emission clause). A turn makes **at most two** calls to
+        ``plan``, so a planner may be asked twice on one turn and each emission is
+        serviced once under ADR-0226 §§5-7. Each call is an ordinary call and the
+        planner is **not told which iteration it is on** (ADR-0228 §12): no parameter
+        carries an index, no prompt says "this is your last look", and an
+        implementation neither infers one nor changes what it emits on account of
+        one. That is the fifth widening, and it breaks nothing for the same reason.
+
+        **Labels are per call, and the second level is reached only by naming it**
+        (ADR-0228 §8). ADR-0226 §3's scheme binds each call separately and as
+        written: the label of the record at 1-based index *n* of **this call's**
+        ``memories`` is ``M`` followed by *n*. The same label string may name
+        different records on a turn's two calls, which is the scheme working rather
+        than a collision to repair. A record the first servicing's hop fetched stands
+        in the supply by the second call, is labelled there, and its own stored
+        evidence is reachable by a ``CITATION_HOP`` the second plan emits — and by no
+        other route: no implementation follows evidence the model did not name, and
+        within one servicing a hop still follows exactly one level.
+
+        What the returned
         :class:`~ai_assistant.core.types.ActionPlan` may now carry is a
         ``read_request``: **at most one**, over a closed enumeration of two kinds
         (``SIGHTED_QUERY`` and ``CITATION_HOP``), stating one further read the
@@ -2673,8 +2707,10 @@ class Planner(Protocol):
         degradation (ADR-0226 §4).
 
         **A planner that emits one owes three things and no more** (ADR-0226 §§1-3).
-        It emits **at most one ask of each kind**, and never a second request on the
-        same turn — that is re-planning, which ADR-0226 §12 defers. It labels a
+        It emits **at most one ask of each kind** *per emission*, which is the clause
+        ADR-0228 leaves standing — decomposition is still not admitted (ADR-0228 §14)
+        — while the prohibition on a second request within one turn is gone with the
+        re-planning deferral it rested on. It labels a
         ``CITATION_HOP`` by **position in this call's ``memories``**: the record at
         1-based index *n* is labelled ``M`` followed by *n* in decimal with no
         padding. §3 fixes that scheme for every implementation and for both sides of
@@ -2701,10 +2737,13 @@ class Planner(Protocol):
             context: The situational context assembled for this request.
             memories: The records the pipeline assembled for this turn — the
                 conversation's recent turns in order, then the records retrieved
-                as relevant, then the episodic supplement (ADR-0158 §4). The
+                as relevant, then the episodic supplement (ADR-0158 §4), and, on a
+                turn's **second** call alone, the records its first plan's read
+                returned as a fourth group after them (ADR-0228 §7). The
                 retrieved group is composed under the assembling consumer's
                 precedence rather than as one relevance rank; see above. It is also
-                the sequence a ``CITATION_HOP`` label indexes into (ADR-0226 §3).
+                the sequence a ``CITATION_HOP`` label indexes into, per call
+                (ADR-0226 §3, ADR-0228 §8).
             capabilities: The capability vocabulary the registry advertised for
                 this turn (ADR-0211 §1) — read by the caller from the same
                 ``ToolRegistry`` object selection will resolve against, never
@@ -2714,7 +2753,10 @@ class Planner(Protocol):
         Returns:
             A frozen :class:`~ai_assistant.core.types.ActionPlan`, carrying a
             ``read_request`` where the planner asked for one more read and ``None``
-            where it did not (ADR-0226 §4).
+            where it did not (ADR-0226 §4). Its ``supersedes`` is **not the
+            planner's**: the loop takes that field on every plan a planner returns,
+            discarding any value it came back carrying (ADR-0228 §5), so an
+            implementation neither sets it nor is penalised for setting it.
 
         Raises:
             PlanningError: If no plan could be produced for the goal.
@@ -2748,8 +2790,27 @@ class PlanStore(Protocol):
     async def save_plan(self, plan: ActionPlan) -> str:
         """Persist a plan and return its id.
 
+        **A ``supersedes`` that does not resolve is refused** (ADR-0228 §5). One
+        naming a plan this store does not hold, one naming the saving plan's own
+        ``id``, and one naming a plan under a **different** ``goal_id`` are each
+        rejected as an unknown goal already is and with the same error class. This is
+        ADR-0014 §5's export promise — "every ``goal_id``/``plan_id`` referenced by
+        an included record resolves within the same export" — kept at write time
+        rather than repaired at read time, which is the division ADR-0049 §1 already
+        records for the goal check. ``None`` means the plan replaced nothing and is
+        never an error.
+
+        No durable foreign key is required for it, and ADR-0049 §1's own reason is
+        why: its ``REFERENCES`` constraints close a cross-process window, and this
+        reference has none — both plans of a turn are written by that turn, oldest
+        first, and this contract offers no way to delete a single plan
+        (:meth:`delete_goal` removes a goal's plans together, and both of a turn's
+        plans share its ``goal_id``).
+
         Raises:
-            PlanningError: If the plan's ``goal_id`` names no stored goal.
+            PlanningError: If the plan's ``goal_id`` names no stored goal, or if its
+                ``supersedes`` names no stored plan, names this plan's own ``id``, or
+                names a plan under a different ``goal_id``.
         """
         ...
 

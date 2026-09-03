@@ -870,7 +870,52 @@ from ai_assistant.wire.errors import (
 #: ADR-0225 §8 requires the CLI and *permits* a gateway page as its own later lane,
 #: so this change adds no browser route and no browser request resolves to any of the
 #: seven.
-PROTOCOL_VERSION: Final[int] = 26
+#: **27 since ADR-0228 §6**, which adds ``supersedes`` to
+#: :class:`~ai_assistant.core.types.ActionPlan` (§5) — ADR-0124 §9's **second** limb,
+#: a wire-carried type changing shape, and the first entry in this log to move the
+#: version for a *defaulted* addition. What obliges it is the **conjunction**, and
+#: each limb is checked against the tree rather than assumed:
+#:
+#: * ``ActionPlan`` is carried to a client. ``wire/client.py``'s ``converse`` and
+#:   ``resume`` return :class:`~ai_assistant.core.types.TurnOutcome`, whose ``turn``
+#:   is a :class:`~ai_assistant.core.types.TurnResult`, whose ``plan`` is an
+#:   ``ActionPlan`` — the same chain this log already reasons from for
+#:   ``TurnResult.memories``.
+#: * ``wire/codec.py``'s ``project`` renders a model with a bare ``model_dump()``:
+#:   **every** field, defaults included, with no ``exclude_defaults`` and no
+#:   ``exclude_none``. So the new field is on the wire on every turn, not only on a
+#:   revising one.
+#: * ``ActionPlan`` sets ``ConfigDict(extra="forbid", frozen=True)``, so a peer whose
+#:   ``ActionPlan`` predates the field **fails to decode** every ``TurnOutcome`` a
+#:   newer hub sends.
+#:
+#: **No lane reads this entry as authority for bumping on a defaulted addition
+#: alone.** ADR-0213 §11's no-bump ruling stands for the case it decided, and this
+#: log distinguishes it in its own terms — "Neither type sets ``extra="forbid"``, so
+#: no decode fails in either direction" — which is exactly the property ``ActionPlan``
+#: has and those types do not.
+#:
+#: **The method set does not move and stands at forty-nine.** ADR-0228 adds no
+#: method to the promoted ``AssistantEngine`` surface, no Protocol, no member to one
+#: and no parameter to any signature (§12), so ADR-0124 §9's first limb is not
+#: reached; ``tests/core/test_engine_surface_closure.py`` pins the figure beside this
+#: constant. ADR-0177 §1's browser enumeration does **not** move either and stands at
+#: thirty-one: no gateway route is added and no browser request resolves differently.
+#:
+#: **The error registry is untouched**, and nothing else under ``wire/`` changes for
+#: this bump: the framing, the connect exchange, the frame kinds, the codec's
+#: dispatch, ``surface.METHODS`` and both adapters are derived from the Protocol or
+#: unaffected by it. ``ActionPlan.supersedes`` is an ``Identifier | None`` — a string
+#: — so it mints no row in ADR-0087 §2c's scalar table.
+#:
+#: **This move covers the shape going forward and repairs nothing already
+#: released.** ``ActionPlan.read_request`` shipped at 26 without a move, on the same
+#: chain and for the same reason, so a client built before it and a hub built after
+#: it both announce 26 and disagree about the shape. ADR-0228 §6 states in terms that
+#: it "neither repairs it nor inherits it"; the window already open is #1956's, and a
+#: lane taking that issue decides what to do about a released version rather than
+#: reading this entry as having settled it.
+PROTOCOL_VERSION: Final[int] = 27
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

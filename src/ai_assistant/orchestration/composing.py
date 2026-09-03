@@ -306,6 +306,50 @@ on this channel and stop. Do not offer a partial answer, and do not apologise in
 words that reveal the subject."""
 
 
+#: How ADR-0228 §10's stop is stated to the composing stage: **that** the turn
+#: stopped looking while it was still asking, and nothing else.
+#:
+#: **The fact carries no count, no duration, no guard name, no query and no label.**
+#: It does not say which guard fired, how many times the turn looked, or how long it
+#: spent. ADR-0226 §9's counts-and-no-copy reasoning binds this carrier for the reason
+#: it binds the audit: nothing bounds what a planner puts in a query, and the turn's
+#: timing is a fact about the system rather than about the user's question. So this
+#: text is written here, by this module, out of material it was never given —
+#: :func:`_system_prompt` is handed a single boolean and could not interpolate a query
+#: if a later editor wanted it to.
+#:
+#: **One fact and not two, because the user cannot act on the difference** (§10). A
+#: reply that named the deadline would invite a retry, and a retry hits the same bound
+#: over the same supply; a reply that named the count would be telling the user about
+#: the system's budget. Which guard fired is an operator's question and ADR-0228 §9
+#: answers it.
+#:
+#: **"Degrades legibly" is a claim about the reply and it needs a fact to rest on**,
+#: because nothing else about such a turn looks degraded: it has a plan, a supply
+#: wider than the one that plan was made over, and an answer composed from all of it.
+#: The user's experience is a good answer and what is missing is invisible. The only
+#: honest degradation signal is the one the system actually holds — its planner was
+#: still asking when it stopped — and telling the stage that, and nothing else, is the
+#: construction ADR-0203 uses for a withholding rather than a filter or a rendered
+#: apology.
+#:
+#: **Appended only on such a turn**, so on every other the assembled prompt is
+#: byte-identical to what it was before ADR-0228 — the clause that keeps a new prompt
+#: input from silently moving every reply the system composes (ADR-0227 §3's own
+#: guarantee, taken here for the same reason).
+#:
+#: **Not rendered through the step account** (§10). ADR-0170 §5a's closed vocabularies
+#: gain no member and the step account continues to describe the step.
+_STOPPED_ASKING_PROMPT: Final = """\
+While answering this, you looked something up and then wanted to look again, and you \
+stopped before you could. Say so plainly, in one short clause, and answer as well as \
+what you have allows — "I could not check everything I wanted to, but here is what I \
+have" is the shape. Do not say why you stopped, how long you had, how many times you \
+looked, or what you would have looked for: you have not been told any of that. Say \
+what you can answer, say that you stopped short, and offer to look again if the user \
+asks."""
+
+
 @dataclass(frozen=True, slots=True)
 class ComposedReply:
     """What the composing stage produced for one turn (ADR-0170 §3, §8).
@@ -484,7 +528,7 @@ class ComposingStage:
         self._model = model
         self._streaming = streaming
 
-    async def compose(  # noqa: PLR0913 — the turn, the step, the undriven steps, the channel's audience, the withholding fact, the tail's delivery facts and the hop's reach; each is a distinct input this stage is given
+    async def compose(  # noqa: PLR0913 — the turn, the step, the undriven steps, the channel's audience, the withholding fact, the tail's delivery facts, the hop's reach and ADR-0228 §10's stop fact; each is a distinct input this stage is given
         self,
         *,
         turn: TurnResult,
@@ -494,6 +538,7 @@ class ComposingStage:
         withheld: bool = False,
         deliveries: Mapping[str, SpokenDelivery] = MappingProxyType({}),
         hop_reached: Sequence[str] = (),
+        stopped_while_asking: bool = False,
     ) -> ComposedReply:
         """Compose the answer for one turn, or say that composing it failed.
 
@@ -553,6 +598,14 @@ class ComposingStage:
                 not fire, whose servicing was declined, whose servicing failed, and
                 whose hop resolved no live record, and an empty carrier makes the
                 assembled prompt byte-identical to what it was before ADR-0227.
+            stopped_while_asking: Whether the turn stopped looking while it was still
+                asking — at ADR-0228 §3's bound or §4's budget, with its last plan
+                still carrying a read request (ADR-0228 §10). **Supplied, not
+                inferred**: this stage derives it from nothing, not from the plan, not
+                from the supply's length and not from the audit. It is the **bare
+                fact** and carries no count, no duration, no guard name, no query and
+                no label. ``False`` on every other turn, where it renders nothing and
+                the assembled prompt is byte-identical to what it was before ADR-0228.
 
         Returns:
             The answer, or a degraded report where the call raised a ``ModelError``
@@ -568,7 +621,10 @@ class ComposingStage:
             Message(
                 role=Role.SYSTEM,
                 content=_system_prompt(
-                    _SYSTEM_PROMPT, unbounded_audience=unbounded_audience, withheld=withheld
+                    _SYSTEM_PROMPT,
+                    unbounded_audience=unbounded_audience,
+                    withheld=withheld,
+                    stopped_while_asking=stopped_while_asking,
                 ),
             ),
             Message(
@@ -731,7 +787,7 @@ class ComposingStage:
             _log.warning("reply_composition_truncated", chunks=len(answer.published))
         yield ComposedReply(text=answer.text, degraded=stopped)
 
-    async def compose_streaming(  # noqa: PLR0913 — the turn, the step, the undriven steps, the streaming room, the tail's delivery facts and the hop's reach; each is a distinct input this stage is given
+    async def compose_streaming(  # noqa: PLR0913 — the turn, the step, the undriven steps, the streaming room, the tail's delivery facts, the hop's reach and ADR-0228 §10's stop fact; each is a distinct input this stage is given
         self,
         *,
         turn: TurnResult,
@@ -740,6 +796,7 @@ class ComposingStage:
         room: int,
         deliveries: Mapping[str, SpokenDelivery] = MappingProxyType({}),
         hop_reached: Sequence[str] = (),
+        stopped_while_asking: bool = False,
     ) -> AsyncIterator[ReplyChunk | ComposedReply]:
         """Compose the answer as it arrives, yielding chunks then one report.
 
@@ -796,6 +853,11 @@ class ComposingStage:
                 known rather than by the channel this turn arrived on.
             hop_reached: Which records this turn's citation hop reached, as
                 :meth:`compose` takes them (ADR-0227 §3).
+            stopped_while_asking: Whether the turn stopped looking while still
+                asking, as :meth:`compose` takes it (ADR-0228 §10). This operation
+                declares the same PT20S budget ``converse`` does, so a streamed turn
+                reaches the guards exactly as a whole one does and the fact is not
+                decorative here.
 
         Yields:
             Each :class:`~ai_assistant.core.types.ReplyChunk` as it is composed, and
@@ -809,7 +871,21 @@ class ComposingStage:
                 "no answer was available".
         """
         conversation = (
-            Message(role=Role.SYSTEM, content=_SYSTEM_PROMPT),
+            Message(
+                role=Role.SYSTEM,
+                # Through :func:`_system_prompt` rather than the bare constant, so
+                # that ADR-0228 §10's clause reaches a streamed answer exactly as it
+                # reaches a whole one. A streamed turn's channel audience is bounded
+                # and nothing is withheld from it, so both of the other two clauses
+                # are `False` here and the assembled prompt is byte-identical to the
+                # bare constant on every turn that did not stop while asking.
+                content=_system_prompt(
+                    _SYSTEM_PROMPT,
+                    unbounded_audience=False,
+                    withheld=False,
+                    stopped_while_asking=stopped_while_asking,
+                ),
+            ),
             Message(
                 role=Role.USER,
                 content=_render_request(
@@ -959,7 +1035,9 @@ def _routed_prompt(
     )
 
 
-def _system_prompt(base: str, *, unbounded_audience: bool, withheld: bool) -> str:
+def _system_prompt(
+    base: str, *, unbounded_audience: bool, withheld: bool, stopped_while_asking: bool = False
+) -> str:
     """The instruction for this pass, given the channel it is for and what it lost.
 
     One prompt with clauses appended rather than a family of prompts, because
@@ -977,6 +1055,12 @@ def _system_prompt(base: str, *, unbounded_audience: bool, withheld: bool) -> st
             from an argument a caller supplied (ADR-0200 §3, §7).
         withheld: Whether ADR-0199 §3 held anything back from this pass's material.
             Only ever ``True`` beside ``unbounded_audience``.
+        stopped_while_asking: Whether the turn stopped at ADR-0228 §3's bound or §4's
+            budget with its planner still asking (ADR-0228 §10). Never ``True`` beside
+            ``unbounded_audience``: ADR-0226 §5 declines to service a read request on
+            such a channel and ADR-0228 §2(c) admits a revision only where one was
+            serviced, so no turn of an unbounded-audience operation reaches either
+            guard.
 
     Returns:
         The system message's content.
@@ -986,6 +1070,8 @@ def _system_prompt(base: str, *, unbounded_audience: bool, withheld: bool) -> st
         clauses.append(_SPOKEN_CHANNEL_PROMPT)
     if withheld:
         clauses.append(_WITHHOLDING_PROMPT)
+    if stopped_while_asking:
+        clauses.append(_STOPPED_ASKING_PROMPT)
     return "\n\n".join(clauses)
 
 
