@@ -1,4 +1,4 @@
-"""Every injected-clock seam is guarded, and each raises its subsystem's error.
+"""Every injected-clock seam is guarded, and each refuses a bad reading its own way.
 
 ADR-0026 §7 is uniformity with **no advisory exemption**: a seam that produces a
 float, a seam that only stamps an export, and a seam whose instant is advisory
@@ -10,6 +10,23 @@ be. Its subject is the *set*: a new seam that forgets the guard, or an existing
 one whose translation drifts to the wrong ``AssistantError``, fails here rather
 than being noticed in review. ``tests/core/test_clock.py`` pins what the guard
 does; this pins that every seam has it.
+
+**The set is discovered, not declared.** That sentence was untrue of about three
+quarters of the tree until #781: twelve rows stood against fifty-one seams, and
+the table stopped growing without a single test failing. So ``src/`` is now
+parsed for every ``checked_clock(owner=…)`` and the tables below are asserted to
+partition the result — a seam added tomorrow fails
+:func:`test_the_seam_table_is_the_whole_set` on the day it is added, naming
+itself.
+
+**Three postures, because the tree takes three**, and they are stated rather than
+silently mixed. :data:`SEAMS` drives a seam that *raises* — the subsystem's own
+``AssistantError`` where ADR-0026 §4 assigns one, or ``ClockReadingError`` itself
+where the subsystem deliberately lets `core`'s rejection through, with the reason
+recorded per seam in :data:`PROPAGATED`. :data:`SWALLOWING_SEAMS` drives the Tier
+2 instruments, whose clock fault ADR-0119 §5 makes cost the trace and never the
+work. :data:`UNTABLED` records what neither can drive, each entry naming the
+finding behind it rather than leaving a hole nothing can see.
 
 The `testing/` fakes are in scope for the reason they exist (ADR-0026 §7): they
 are the canonical doubles consumers certify against, and a fake looser than the
@@ -826,9 +843,10 @@ async def _upcoming(now: Clock) -> None:
     ).notice()
 
 
-#: Every seam ADR-0026 §7 covers, verified against the code rather than the table:
-#: ``FakeMemoryWriter`` is an eleventh the ADR's table predates (ADR-0028), and it
-#: is in scope for §7's reason — it is a canonical double (#186).
+#: Every seam that answers a refused reading by *raising*, verified against the
+#: code rather than against ADR-0026's own table — which predates most of them.
+#: ``FakeMemoryWriter`` was the first of those (ADR-0028), in scope for §7's
+#: reason: it is a canonical double (#186).
 SEAMS = [
     Seam("ClockContextSource", _clock_source, ContextError),
     # `context`'s other two seams take the *opposite* posture, and ADR-0026 §4 is
