@@ -799,10 +799,12 @@ _STORE_SHAPE = (
 
 
 def _seed(path: Path, *statements: str) -> None:
-    """Seed ``path`` with a ``decisions`` table of somebody else's making.
+    """Run ``statements`` against ``path`` on a connection of somebody else's.
 
-    No ``meta`` marker, which is the pre-ADR-0049 file this store still opens — so
-    what the open goes on to refuse is the table's own shape and nothing else.
+    Used two ways: to write a whole ``decisions`` table this store never made — with
+    no ``meta`` marker, the pre-ADR-0049 file this store still opens, so what the
+    open goes on to refuse is the table's own shape and nothing else — and to attach
+    something to a file a previous open left behind.
     """
     raw = sqlite3.connect(str(path))
     try:
@@ -922,6 +924,29 @@ async def test_a_decisions_index_that_is_not_the_defined_one_is_refused(tmp_path
         SqliteAuditTrail(path=path)
 
     assert _tables(path) == {"decisions"}
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("table", ["meta", "decisions", "invocations"])
+async def test_a_trigger_this_store_did_not_define_is_refused(table: str, tmp_path: Path) -> None:
+    """Holding the objects a store *names* leaves the objects nothing names open.
+
+    A trigger is attached to a table rather than replacing anything on it, so it is
+    invisible to every check that compares a definition — and it is the one object
+    that decides what a write actually does. ``BEFORE INSERT ... RAISE(IGNORE)``
+    discards every row silently, and SQLite reports the ignored insert as a success:
+    without this refusal, ``record`` returns the identifier of a decision that
+    ``get`` then cannot find, which is a trail claiming a durable write that never
+    happened (ADR-0004 §7). On ``meta`` the same move eats the restamp, leaving a
+    version-1 marker over a version-2 shape — the downgrade ADR-0049 §1's marker
+    exists to make reportable.
+    """
+    path = tmp_path / "audit.db"
+    SqliteAuditTrail(path=path).close()
+    _seed(path, f"CREATE TRIGGER discard BEFORE INSERT ON {table} BEGIN SELECT RAISE(IGNORE); END")
+
+    with pytest.raises(AuditError, match="trigger 'discard'"):
+        SqliteAuditTrail(path=path)
 
 
 @pytest.mark.integration

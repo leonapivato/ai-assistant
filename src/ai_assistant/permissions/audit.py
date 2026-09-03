@@ -345,6 +345,27 @@ _DECISION_COMPARED: Final[tuple[str, ...]] = (
     "outcome",
 )
 
+#: **Every trigger this store defines, by the table it is attached to.** Holding the
+#: objects this store *names* to their definitions leaves one move open, because a
+#: trigger nothing names is attached to a table rather than replacing anything on
+#: it — and a trigger is the one object that decides what a write actually does. A
+#: file arriving with ``CREATE TRIGGER discard BEFORE INSERT ON decisions BEGIN
+#: SELECT RAISE(IGNORE); END`` passes every check over the columns, the indexes and
+#: the collations, and then discards every row silently: SQLite reports the ignored
+#: insert as a success, so :meth:`SqliteAuditTrail.record` returns the identifier of
+#: a decision that is not there. A trail that reports a durable write which never
+#: happened is the exact opposite of ADR-0004 §7's reviewable record, so a trigger
+#: this store did not define is refused wherever it is attached.
+#:
+#: ``meta`` is here for the same reason ADR-0049 §1's restamp exists: an ignored
+#: ``UPDATE`` would leave a version-1 marker standing over a version-2 shape, which
+#: is the downgrade the marker is what makes reportable.
+_TRIGGERS: Final[dict[str, frozenset[str]]] = {
+    "meta": frozenset(),
+    "decisions": frozenset(),
+    "invocations": frozenset({"invocations_append_only"}),
+}
+
 _ORDERED = "SELECT data FROM decisions ORDER BY decided_at_us DESC, id ASC"
 
 # --- the invocation rows (ADR-0192 §2) ---------------------------------------
@@ -783,6 +804,7 @@ class SqliteAuditTrail:
                 conn.execute(_INVOCATIONS_APPEND_ONLY)
                 self._check_decisions_schema(conn)
                 self._check_invocation_schema(conn)
+                self._check_no_foreign_triggers(conn)
                 if stored is None:
                     # Stamped *after* the create/migrate above, so the marker is
                     # only written for a file this open has actually brought to
@@ -982,6 +1004,35 @@ class SqliteAuditTrail:
                     f"so it is not opened"
                 )
                 raise AuditError(msg)
+
+    def _check_no_foreign_triggers(self, conn: sqlite3.Connection) -> None:
+        """Refuse a file carrying a trigger on this store's tables that it did not define.
+
+        The move the checks above cannot reach, for the reason :data:`_TRIGGERS`
+        gives: they hold every object this store *names* to its definition, and a
+        foreign trigger is named by nothing — it is simply attached, and it then
+        decides what every write to that table does.
+
+        Run beside the other two and before the marker is written, inside the same
+        transaction, so the refusal leaves the file as it arrived.
+
+        Raises:
+            AuditError: If a trigger on one of this store's tables is not one of its
+                own.
+        """
+        for name, table in conn.execute(
+            "SELECT name, tbl_name FROM sqlite_master WHERE type = 'trigger'"
+        ):
+            defined = _TRIGGERS.get(str(table))
+            if defined is None or str(name) in defined:
+                continue
+            msg = (
+                f"the audit trail at {self._path!r} holds a trigger {str(name)!r} on "
+                f"{str(table)!r} that this store did not define; a trigger decides what a "
+                f"write does, so a record this store called durable need never have "
+                f"landed — it is not opened"
+            )
+            raise AuditError(msg)
 
     def _restrict_permissions(self) -> None:
         """Make the database file and any sidecar beside it owner-only (ADR-0004 §4).
