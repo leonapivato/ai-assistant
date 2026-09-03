@@ -9,12 +9,22 @@ documented list has come to name a checked-in file.
 The cleanliness test excludes the synced files themselves — they are exactly what
 is expected to differ between clones — and that exclusion is the one that could
 quietly turn "clean" into "clean enough", so it is pinned from both sides.
+
+Both refusals are decided and then acted on, and issue #1409 is about the gap
+between the two. Three things are pinned here, each against a different actor in
+that gap: the lock is *held while the copy writes*, a second sync *waits* for it,
+and a target that stops being free between the decision and the first byte — a
+person, who holds no lock — is refused. The hooks stand in for those actors in
+one process, because what has to be observed is the ordering rather than a second
+interpreter.
 """
 
 from __future__ import annotations
 
+import fcntl
 import os
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -51,6 +61,34 @@ def _sync(source: Path, listing: Path, *args: str) -> tuple[int, str, str]:
     """Run the sync from ``source`` and return status, stdout and stderr."""
     result = run("clone_sync", ["--from", str(source), "--list", str(listing), *args])
     return result.returncode, result.stdout, result.stderr
+
+
+def _in_process(source: Path, listing: Path, *args: str) -> int:
+    """Run the sync in this interpreter, so a hook can be planted in it."""
+    return int(_MODULE.main(["--from", str(source), "--list", str(listing), *args]))
+
+
+def _open_lock(clone: Path) -> int:
+    """Open the clone's sync lock on a descriptor of this test's own."""
+    return os.open(clone / ".git" / _MODULE.LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+
+
+def _lock_is_held(clone: Path) -> bool:
+    """Whether something else holds the clone's sync lock right now.
+
+    ``flock`` is per open file description, not per process, so a descriptor
+    opened here contends with the sync's own even inside one interpreter.
+    """
+    fd = _open_lock(clone)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
 
 
 def test_copies_the_listed_files_into_a_free_sibling(tmp_path: Path) -> None:
@@ -355,3 +393,120 @@ def test_the_shipped_list_names_only_ignored_files() -> None:
     repo = Path(__file__).parents[2]
     for relative in _MODULE.read_list(_MODULE.DEFAULT_LIST):
         assert not _MODULE.is_tracked(repo, relative), relative
+
+
+def test_the_lock_is_held_while_the_copy_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The decision and the write have to be one turn per target. Asserted at the
+    # moment of the write itself, because a lock taken and released around the
+    # decision would leave exactly the window this closes.
+    source, (sibling,) = _clones(tmp_path, 2)
+    listing = _list_file(tmp_path, ".env")
+    replace = _MODULE._replace_atomically
+    held: list[bool] = []
+
+    def watching(src: Path, dst: Path) -> None:
+        held.append(_lock_is_held(sibling))
+        replace(src, dst)
+
+    monkeypatch.setattr(_MODULE, "_replace_atomically", watching)
+
+    assert _in_process(source, listing) == 0
+    assert held == [True]
+    assert not _lock_is_held(sibling)
+
+
+def test_a_second_sync_of_one_target_waits_for_the_first(tmp_path: Path) -> None:
+    # Two syncs from different source clones could each read one target as free
+    # and interleave their files, leaving it with `.env` from one and `.mcp.json`
+    # from the other. A thread rather than a second process: the lock is on the
+    # descriptor, so holding it here is holding it against the sync.
+    source, (sibling,) = _clones(tmp_path, 2)
+    listing = _list_file(tmp_path, ".env")
+    finished: list[int] = []
+    fd = _open_lock(sibling)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    waiting = threading.Thread(target=lambda: finished.append(_in_process(source, listing)))
+    try:
+        waiting.start()
+        waiting.join(0.5)
+        assert waiting.is_alive(), "the second sync did not wait for the lock"
+        assert not (sibling / ".env").exists()
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    waiting.join(30)
+    assert not waiting.is_alive()
+    assert finished == [0]
+    assert (sibling / ".env").read_text() == "ASSISTANT_X=1\n"
+
+
+def test_a_target_that_stops_being_free_before_the_write_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The lock keeps another sync out, but nobody else takes it: a person working
+    # in the target holds nothing. So the freshness test is taken again at the
+    # last moment before the first byte, and this is that moment arriving on a
+    # clone that has since become someone's.
+    source, (sibling,) = _clones(tmp_path, 2)
+    listing = _list_file(tmp_path, ".env", ".mcp.json")
+    tracked = _MODULE.is_tracked
+
+    def busying(clone: Path, relative: str) -> bool:
+        (sibling / "someones-work.txt").write_text("mid-flight\n")
+        return bool(tracked(clone, relative))
+
+    monkeypatch.setattr(_MODULE, "is_tracked", busying)
+
+    assert _in_process(source, listing) == 1
+    assert "stopped being free" in capsys.readouterr().err
+    assert not (sibling / ".env").exists()
+    assert not (sibling / ".mcp.json").exists()
+
+
+def test_a_file_of_the_same_size_but_different_bytes_is_still_copied(tmp_path: Path) -> None:
+    # The size check is a fast reject, never the answer on its own.
+    source, (sibling,) = _clones(tmp_path, 2)
+    (sibling / ".env").write_text("ASSISTANT_X=2\n")
+    listing = _list_file(tmp_path, ".env")
+
+    status, out, _ = _sync(source, listing)
+
+    assert status == 0, out
+    assert "copied .env" in out
+    assert (sibling / ".env").read_text() == "ASSISTANT_X=1\n"
+
+
+def test_a_difference_past_the_first_chunk_is_still_a_difference(tmp_path: Path) -> None:
+    source, (sibling,) = _clones(tmp_path, 2)
+    payload = b"x" * (_MODULE._COMPARE_CHUNK * 2 + 7)
+    (source / ".env").write_bytes(payload)
+    (sibling / ".env").write_bytes(payload[:-1] + b"y")
+    listing = _list_file(tmp_path, ".env")
+
+    status, out, _ = _sync(source, listing)
+
+    assert status == 0, out
+    assert "copied .env" in out
+    assert (sibling / ".env").read_bytes() == payload
+
+
+def test_deciding_not_to_copy_never_reads_either_file_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Loading two whole files into memory to conclude that nothing needs doing is
+    # a cost with no purchase: the comparison is a skip optimisation, and its
+    # worst case should not exceed the copy it avoids (issue #1409).
+    source, (sibling,) = _clones(tmp_path, 2)
+    (sibling / ".env").write_text("ASSISTANT_X=1\n")
+    listing = _list_file(tmp_path, ".env")
+
+    def refuse(self: Path) -> bytes:
+        raise AssertionError(f"{self} was read whole to decide whether to copy it")
+
+    monkeypatch.setattr(Path, "read_bytes", refuse)
+
+    assert _in_process(source, listing) == 0
+    assert "same .env" in capsys.readouterr().out
