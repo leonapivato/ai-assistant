@@ -8,7 +8,9 @@ that decision (§10's "Lane B"), and it holds three things:
 * :func:`service_read_request`, which turns one
   :class:`~ai_assistant.core.types.ReadRequest` into the records ADR-0226 §7
   appends to the supply as a **fourth group**, under §6's single budget of ten and
-  its hop-before-query precedence;
+  its hop-before-query precedence — and, since ADR-0227 §3, returns which of those
+  records the **citation hop** reached, because this is the one place the two kinds
+  are distinguishable;
 * :func:`resolve_label`, §3's whole label scheme — an ordinal into the very
   ``memories`` sequence the loop passed the planner on this call; and
 * :func:`emit_read_audit`, §9's record, written **once per turn whether or not the
@@ -248,7 +250,7 @@ async def service_read_request(
     *,
     supply: Sequence[MemoryRecord],
     audit: TurnReadAudit,
-) -> None:
+) -> tuple[str, ...]:
     """Service one emission, once, into the fourth group (ADR-0226 §§2, 6, 7).
 
     **The citation hop is serviced first and the sighted query fills what remains**
@@ -290,7 +292,10 @@ async def service_read_request(
     older reads do not have.
 
     **It writes its record rather than returning it, and that is what makes §9's
-    counts honest about a servicing that never finished.** A cancellation is not a
+    counts honest about a servicing that never finished.** (What it *returns* is
+    ADR-0227 §3's carrier, below, which a servicing that never finished has nothing
+    to say about — the supply is left as planning saw it, so the empty carrier a lost
+    return value would have produced is the same answer.) A cancellation is not a
     ``MemoryStoreError``: it passes through the degradation above and out of the
     turn, where ADR-0226 §9's record is emitted from a ``finally`` regardless. A
     function that reported by *returning* would leave that record saying a completed
@@ -299,6 +304,33 @@ async def service_read_request(
     a read it had already performed had returned records. The ``finally`` below
     writes the failure with the observer's own answer, so a hop that returned before
     a cancellation landed in the query is recorded as the partial servicing it was.
+
+    **And it returns ADR-0227 §3's carrier, which the audit deliberately does not
+    hold.** §3 rules that which records the citation hop reached is "recorded where
+    the kind is known — at the servicer, which is the one place ``CITATION_HOP`` and
+    ``SIGHTED_QUERY`` are distinguishable — and is carried from there to the render
+    site as data". This function is that place. It is **not** put on
+    :class:`ServicedRead` or on §9's record: that record "copies no text" and carries
+    "no identifier but the correlation id", and "threading a render decision through
+    it would put record identifiers on a surface whose whole discipline is that they
+    are not there".
+
+    **What the carrier holds** (ADR-0227 §3, §4): the **distinct** ids of the records
+    the hop resolved that the turn's supply holds **after** this servicing — in
+    ADR-0226 §6's order, first occurrence keeping the place. A record the hop reached
+    that the supply already held is deduplicated out of the fourth group, keeps its
+    position and **is** in the carrier (ADR-0227 §1's third clause); a record
+    ADR-0226 §6's budget cut is not in the supply at all and so is not, which is
+    ADR-0227 §4's "the records it cut render nothing at all". It is **empty** on every
+    turn that did not fire, whose servicing was declined, whose servicing failed or
+    was partial, and whose hop resolved no live record — the same all-or-nothing
+    posture §5 gives the supply.
+
+    **The order is fixed here and the tail exclusion and the cap are not**
+    (ADR-0227 §3): "the servicer fixes the order and the render site applies §1's tail
+    exclusion and §4's cap, in that division and no other". This function computes no
+    conversation-tail split and takes no view of what the renderer will do with what
+    it names.
 
     Args:
         store: The store this turn already reads. The same object the retrieval
@@ -314,10 +346,18 @@ async def service_read_request(
         audit: This turn's record. Its :attr:`TurnReadAudit.read` is written on every
             path out of this function, and :attr:`ServicedRead.records` is the fourth
             group the caller appends.
+
+    Returns:
+        ADR-0227 §3's carrier: the distinct ids of the records this turn's citation
+        hop reached that the supply holds after this servicing, in ADR-0226 §6's
+        order. Empty where nothing was serviced, where the servicing failed, and
+        where the hop reached nothing.
     """
     reads = _Reads()
     union = _Union(held={record.id for record in supply}, budget=READ_BUDGET)
     completed: ServicedRead | None = None
+    reached: tuple[str, ...] = ()
+    resolved_by_hop: tuple[MemoryRecord, ...] = ()
     hop = _ask_of(request, ReadKind.CITATION_HOP)
     query = _ask_of(request, ReadKind.SIGHTED_QUERY)
     # `ReadAsk`'s validator makes a `SIGHTED_QUERY` ask's query non-``None`` (§4),
@@ -329,6 +369,7 @@ async def service_read_request(
     try:
         if hop is not None:
             candidates, unresolved = await _hop_records(store, hop, supply=supply, reads=reads)
+            resolved_by_hop = candidates
             if union.admit(candidates):
                 truncated.append(ReadKind.CITATION_HOP)
         if statement is not None:
@@ -356,6 +397,18 @@ async def service_read_request(
             labels_unresolved=unresolved,
             truncated_kinds=tuple(truncated),
         )
+        # ADR-0227 §3's carrier, computed on the success path alone and over
+        # `union.held` — which is seeded from the pre-servicing supply and grown by
+        # every admission, so membership of it *is* "the supply holds this record
+        # after servicing". `dict.fromkeys` is ADR-0227 §4's deduplication with the
+        # first occurrence keeping ADR-0226 §6's place: `Provenance.evidence` carries
+        # no uniqueness constraint and two labelled records may cite one episode, so
+        # the sequence `_hop_records` returns can name one record more than once.
+        reached = tuple(
+            identifier
+            for identifier in dict.fromkeys(record.id for record in resolved_by_hop)
+            if identifier in union.held
+        )
     except MemoryStoreError:
         # §5's whole posture, and the archive's for the same reason ADR-0225 §2
         # gives: "a turn that answered from the supply it had is a worse turn, not
@@ -371,6 +424,7 @@ async def service_read_request(
         audit.read = completed or ServicedRead(
             failed=True, failed_after_read_returned=reads.returned_any
         )
+    return reached
 
 
 def resolve_label(label: str, supply: Sequence[MemoryRecord]) -> MemoryRecord | None:
