@@ -371,6 +371,12 @@ class ProcPlatformTables:
         current = resolved
         while current not in (devices_root, current.parent):
             subsystem = self._subsystem_of(current)
+            if subsystem is None:
+                # The node's own membership could not be read, so neither the
+                # transport check below nor the bus check can be performed on it —
+                # and walking past it to an ancestor would admit a controller whose
+                # attachment is exactly what could not be established.
+                return DeviceBacking.UNKNOWN
             transport = self._transport_of(current, subsystem)
             if transport is not None:
                 # `NETWORK` **and** `UNKNOWN` both stop the walk here, and that is
@@ -451,12 +457,32 @@ class ProcPlatformTables:
         return DeviceBacking.NETWORK if name in present else None
 
     @staticmethod
-    def _subsystem_of(node: Path) -> str:
-        """The name of the bus or class a ``sysfs`` node belongs to, or ``""``."""
+    def _subsystem_of(node: Path) -> str | None:
+        """The name of the bus or class a ``sysfs`` node belongs to.
+
+        **Three answers and not two**, for :meth:`_transport_of`'s reason one level up:
+        a node that belongs to no subsystem and a node whose membership could not be
+        read are different facts, and collapsing them lets the second be walked past.
+        That matters most on exactly the node it matters on: an NVMe-oF controller
+        whose ``subsystem`` link cannot be resolved would not be recognised as an
+        ``nvme`` node, its ``transport`` attribute would never be read, and the walk
+        would reach the ``pci`` ancestor above it and answer ``LOCAL`` — admitting a
+        network-attached device *because* its evidence was unavailable, which is the
+        inverse of what ADR-0230 §6 requires.
+
+        Returns:
+            The subsystem's name; ``""`` where the node declares none, which is the
+            ordinary case for an intermediate node and is an answer; or ``None`` where
+            the link exists and could not be resolved, which is not.
+        """
         try:
             return (node / "subsystem").resolve(strict=True).name
-        except OSError:
+        except FileNotFoundError:
+            # No `subsystem` link at all: this node belongs to no bus and no class,
+            # which is what most intermediate nodes of a device path are.
             return ""
+        except OSError:
+            return None
 
     @staticmethod
     def _combine(verdicts: Iterable[DeviceBacking]) -> DeviceBacking:

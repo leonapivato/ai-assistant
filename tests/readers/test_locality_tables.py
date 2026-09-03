@@ -433,3 +433,51 @@ def test_an_unreadable_mount_table_names_no_mount(tmp_path: Path) -> None:
     sysfs = Sysfs(tmp_path)
 
     assert sysfs.tables().claim_for(pathlib.Path("/srv/reports")) is None
+
+
+def test_a_controller_whose_subsystem_cannot_be_read_is_unknown(tmp_path: Path) -> None:
+    """The third face of the same hole, on the node's own membership.
+
+    ``_subsystem_of`` decides *which* checks apply to a node. A controller whose
+    ``subsystem`` link cannot be resolved is not recognised as an ``nvme`` node, so its
+    ``transport`` attribute is never read — and a walk that carried on would reach the
+    ``pci`` ancestor above and answer ``LOCAL``, admitting a network-attached device
+    **because** its evidence was unavailable. That is the inverse of ADR-0230 §6's rule.
+
+    The controller here really is on a fabric, so what the arm distinguishes is a
+    verdict of ``UNKNOWN`` from a verdict of ``LOCAL`` on a device that must never be
+    admitted, rather than a shade of caution on one that could be.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("a permission denial cannot be staged as root")
+    sysfs = Sysfs(tmp_path)
+    controller = _nvme(sysfs, transport="tcp")
+    controller.chmod(0o000)
+    try:
+        verdict = _backing(sysfs)
+    finally:
+        controller.chmod(0o700)
+
+    assert verdict is DeviceBacking.UNKNOWN
+
+
+def test_a_node_declaring_no_subsystem_at_all_is_walked_past(tmp_path: Path) -> None:
+    """The other half of the pair, so the refusal above is not a fail-always rule.
+
+    Most intermediate nodes of a device path declare no ``subsystem`` link, and reading
+    that absence as "could not be read" would refuse every machine — turning a
+    fail-closed rule into one that admits nothing at all. The chain here carries such a
+    node between the namespace and the bus, and still reaches ``LOCAL``.
+    """
+    sysfs = Sysfs(tmp_path)
+    sysfs.device("pci0000:00", subsystem=sysfs.bus("pci"))
+    # An intermediate node with no `subsystem` link of its own.
+    (sysfs.root / "devices" / "pci0000:00" / "nvme").mkdir(parents=True, exist_ok=True)
+    controller = sysfs.device("pci0000:00/nvme/nvme0", subsystem=sysfs.klass("nvme"))
+    (controller / "transport").write_text("pcie", encoding="utf-8")
+    namespace = sysfs.device("pci0000:00/nvme/nvme0/nvme0n1", subsystem=sysfs.klass("block"))
+    sysfs.block(namespace)
+    sysfs.mounted()
+
+    assert not (sysfs.root / "devices" / "pci0000:00" / "nvme" / "subsystem").exists()
+    assert _backing(sysfs) is DeviceBacking.LOCAL
