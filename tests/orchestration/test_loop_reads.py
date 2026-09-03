@@ -2089,6 +2089,38 @@ async def test_the_carrier_is_empty_on_every_turn_that_serviced_no_hop() -> None
     assert _ids(failed.turn.memories) == ["belief-1"], "the supply is as planning saw it"
 
 
+async def test_the_carrier_is_empty_where_the_hop_returned_and_the_query_then_raised() -> None:
+    """ADR-0227 §3's **partial** arm, which the four cases above do not reach.
+
+    §3 rules the carrier empty "on a turn whose servicing failed **or was partial** —
+    ADR-0226 §5's all-or-nothing posture leaves the supply as planning saw it". The
+    case above arms the hop's own keyed load, so the hop returned nothing and an
+    implementation that leaked its records would have had none to leak. Here the hop
+    resolves an episode and *then* a query band raises: the records are discarded with
+    the rest, and a carrier that survived the discard would name a record the supply
+    no longer holds — which at the render site is a reply line on a turn ADR-0226 §5
+    requires to be indistinguishable from one that never fired.
+
+    The fourth ``search`` is the servicing's own first band: this loop's episodic
+    supplement is off and the turn's belief composition has already read three.
+    """
+    memory = _FailSearchFrom(nth=4, now=_clock)
+    await memory.add(_belief("belief-1", "billing schedule notes", evidence=("cited-1",)))
+    await memory.add(_episode("cited-1", "an earlier exchange"))
+    planner = FakePlanner(now=_clock, read_request=_both("earlier exchange", "M1"))
+
+    with structlog.testing.capture_logs() as captured:
+        responded = await _loop(memory, planner=planner).respond(
+            "billing schedule", narrow=_bounded()
+        )
+
+    assert responded.hop_reached == ()
+    assert _ids(responded.turn.memories) == ["belief-1"], "the supply is as planning saw it"
+    record = _record(captured)
+    assert record["failed"] is True
+    assert record["failed_after_read_returned"] is True, "the hop had already returned"
+
+
 async def test_no_identifier_the_carrier_holds_reaches_the_audit() -> None:
     """ADR-0227 §8's assertion 16 at the servicer, and §3's namer rule entire.
 

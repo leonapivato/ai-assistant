@@ -46,6 +46,7 @@ from test_engine_routing import _routed_harness, _router
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     ActionPlan,
+    BeliefBand,
     EpisodicMemory,
     ExchangeDisposition,
     MemorySource,
@@ -67,7 +68,13 @@ from ai_assistant.testing import (
 if TYPE_CHECKING:
     from collections.abc import Mapping, MutableMapping, Sequence
 
-    from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord
+    from ai_assistant.core.types import (
+        CurrentContext,
+        Goal,
+        MemoryKind,
+        MemoryRecord,
+        MemorySearchResult,
+    )
 
 #: The token the assistant introduced and the user never used. §11 item 1's whole
 #: premise is that a blind read keyed on the *question's* vocabulary cannot reach
@@ -361,6 +368,13 @@ async def test_the_same_question_without_the_emission_cannot_answer() -> None:
 # --------------------------------------------------------------------------- #
 
 
+#: The statement the sighted query is composed of in the partial-servicing case.
+#: Matched exactly by :class:`_FailingQuery`, so the failure lands on the servicing's
+#: own read and never on the turn's belief composition or its episodic supplement —
+#: which a call counter could not separate, since the engine's loop runs both.
+_SIGHTED: Final = "the exchange where a lender was named"
+
+
 class _FailingKeyedLoad(FakeMemoryStore):
     """A store whose keyed load fails, so the servicing degrades (ADR-0226 §5)."""
 
@@ -368,6 +382,28 @@ class _FailingKeyedLoad(FakeMemoryStore):
         del record_ids
         msg = "fake: the keyed load is unavailable"
         raise MemoryStoreError(msg)
+
+
+class _FailingQuery(FakeMemoryStore):
+    """A store whose ``search`` fails for the sighted query's own statement.
+
+    ADR-0226 §6 services the hop first, so a store failing only on this text produces
+    the **partial** servicing §5 names: a hop that returned records, and then a read
+    that raised.
+    """
+
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        kinds: Sequence[MemoryKind] | None = None,
+        bands: Sequence[BeliefBand] | None = None,
+    ) -> MemorySearchResult:
+        if query == _SIGHTED:
+            msg = "fake: this band's read is unavailable"
+            raise MemoryStoreError(msg)
+        return await super().search(query, limit=limit, kinds=kinds, bands=bands)
 
 
 async def test_a_record_both_kinds_reached_renders_once_at_the_hops_position() -> None:
@@ -457,6 +493,15 @@ async def test_every_turn_that_serviced_no_hop_assembles_the_prompt_it_would_hav
     line anywhere, and the assembled prompt is then byte-identical to what it is
     today."
 
+    **The partial arm is the one with something to disclose**, and it is asserted
+    here as well as at the carrier: on that turn the hop *did* reach the episode by
+    pointer, and ADR-0226 §5 discarded what came back with the rest. Two independent
+    things then keep the prompt unchanged — §3 empties the carrier at the servicer
+    (``test_loop_reads.py``, which is the discriminating assertion), and the render
+    site writes a line only for a record that is in the supply it was handed. This
+    case is on the composed prompt, which is the guarantee §8's assertion 8 states and
+    the one a reader of a probe would check.
+
     Each fired arm is compared against the **same store and the same question** under
     a planner that asks for nothing, which is what "byte-identical to today's" means
     operationally: the emission changed no byte of the prompt.
@@ -470,6 +515,9 @@ async def test_every_turn_that_serviced_no_hop_assembles_the_prompt_it_would_hav
 
     async def failing() -> _FailingKeyedLoad:
         return await _seeded(_FailingKeyedLoad(now=lambda: AT))
+
+    async def partial() -> _FailingQuery:
+        return await _seeded(_FailingQuery(now=lambda: AT))
 
     async def barren() -> FakeMemoryStore:
         store = FakeMemoryStore(now=lambda: AT)
@@ -488,10 +536,18 @@ async def test_every_turn_that_serviced_no_hop_assembles_the_prompt_it_would_hav
     # of two records against a supply of one, rather than comparing two emissions.
     assert await prompt_for(await failing(), _hop("M1")) == await prompt_for(await failing(), None)
     assert await prompt_for(await barren(), _hop("M1")) == await prompt_for(await barren(), None)
+    # The **partial** arm, and the one with something to leak: the hop resolves the
+    # episode by pointer and *then* a query band raises. §5 discards what came back
+    # with the rest, so a carrier surviving the discard would render the reply of a
+    # record the supply no longer holds.
+    partial_prompt = await prompt_for(await partial(), _both(_SIGHTED, "M1"))
+    assert partial_prompt == await prompt_for(await partial(), None)
+    assert _LENDER not in partial_prompt, "a discarded read discloses nothing"
     for store, request in (
         (await _seeded_store(), None),
         (await failing(), _hop("M1")),
         (await barren(), _hop("M1")),
+        (await partial(), _both(_SIGHTED, "M1")),
     ):
         assert _reply_lines_of(await prompt_for(store, request)) == []
 
