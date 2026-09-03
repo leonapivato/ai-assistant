@@ -8,6 +8,13 @@ answering through the hop — and test **10**'s two post-plan arms are engine-le
 live in ``test_engine_read_envelope.py``, because what they assert is what happens
 *above* this method.
 
+**ADR-0227 §3's carrier is here too, and since ADR-0229 §6 so are its tests 3, 4, 6
+and 7** — each asserted over the carrier this servicer produced, which is the one
+thing no engine-level case can see. Where such a case also asserts what a model was
+shown, it renders that carrier through the production composing stage
+(:func:`_prompt_over`) rather than supplying a carrier of its own. §6's tests 1, 2
+and 5 are prompts the *engine* assembled and live in ``test_engine_read_envelope.py``.
+
 Every case here is a test over behaviour, as §11 requires: what the supply carried,
 what the audit recorded, and what the store was asked. Where a call count appears it
 is the assertion §11 names in terms — "no model-supplied string reaches ``get_many``
@@ -30,6 +37,7 @@ from ai_assistant.core.types import (
     MAX_HOP_LABELS,
     ActionPlan,
     EpisodicMemory,
+    ExchangeDisposition,
     MemoryKind,
     MemorySource,
     Placement,
@@ -40,10 +48,12 @@ from ai_assistant.core.types import (
     ReadAsk,
     ReadKind,
     ReadRequest,
+    Role,
     SemanticMemory,
     TurnResult,
 )
 from ai_assistant.orchestration import LearningLoop, MemoryWriteStage
+from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.orchestration.composing import _split_conversation_tail as compose_split
 from ai_assistant.orchestration.disclosure import (
     BoundedAudienceSupply,
@@ -67,7 +77,9 @@ from ai_assistant.testing import (
     FakeMemoryPolicy,
     FakeMemoryStore,
     FakeMemoryWriter,
+    FakeModelProvider,
     FakePlanner,
+    FakeStreamingCompleter,
     FakeToolRegistry,
 )
 
@@ -83,6 +95,7 @@ if TYPE_CHECKING:
         MemoryRecord,
         MemorySearchResult,
     )
+    from ai_assistant.orchestration.loop import RespondedTurn
     from ai_assistant.testing.cancellation import LoopSuspension
 
 _NOW: Final = datetime(2026, 9, 2, 10, 0, tzinfo=UTC)
@@ -122,12 +135,28 @@ def _belief(  # noqa: PLR0913 — one argument per field a case needs to vary
     )
 
 
-def _episode(record_id: str, content: str) -> EpisodicMemory:
-    """A captured turn, as ``orchestration.conversations`` stamps one."""
+def _episode(
+    record_id: str,
+    content: str,
+    *,
+    outcome: str | None = None,
+    disposition: ExchangeDisposition | None = None,
+) -> EpisodicMemory:
+    """A captured turn, as ``orchestration.conversations`` stamps one.
+
+    ``outcome`` and ``disposition`` default to absent, which is what every case
+    asserting over the *carrier* wants: neither field is read at this seam, and
+    ADR-0229 §1 applies "no class, kind or field test at the servicer". A case
+    asserting over a **prompt** passes both, because ADR-0227 §7's fidelity rule
+    requires the shape ``Engine._capture`` writes — the reply in ``outcome``, beside
+    a ``disposition``, and absent from ``content``.
+    """
     return EpisodicMemory(
         id=record_id,
         content=content,
         occurred_at=_NOW,
+        outcome=outcome,
+        disposition=disposition,
         provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=_NOW),
     )
 
@@ -458,6 +487,40 @@ def _record(captured: Sequence[MutableMapping[str, Any]]) -> Mapping[str, Any]:
 
 def _ids(memories: Sequence[MemoryRecord]) -> list[str]:
     return [record.id for record in memories]
+
+
+async def _prompt_over(responded: RespondedTurn) -> str:
+    """The user-turn prompt the production renderer assembles for one serviced turn.
+
+    ADR-0227 §7's fidelity rule forbids substituting "the renderer whose output the
+    assertion is about" and permits a fake ``ModelProvider``, so the production
+    :class:`~ai_assistant.orchestration.composing.ComposingStage` assembles the
+    prompt and the fake merely records it. **It is handed the carrier this servicer
+    produced**, which is what makes a case here about ADR-0229 §3: a case supplying
+    its own carrier would assert the render rule instead, and ``test_composing.py``
+    already holds that half.
+    """
+    model = FakeModelProvider("answer")
+    stage = ComposingStage(model=model, streaming=FakeStreamingCompleter())
+    await stage.compose(
+        turn=responded.turn, step=None, undriven=(), hop_reached=responded.hop_reached
+    )
+    [call] = model.calls
+    return next(one.content for one in call.messages if one.role is Role.USER)
+
+
+def _reply_lines_of(prompt: str) -> list[str]:
+    """Every reply line of a prompt, in the order it wrote them (ADR-0222 §1)."""
+    return [row for row in prompt.splitlines() if row.startswith("    what the assistant replied")]
+
+
+def _rendered_counts(captured: Sequence[MutableMapping[str, Any]]) -> list[tuple[object, object]]:
+    """ADR-0227 §5's pairs, in emission order, off a captured log."""
+    return [
+        (event["eligible"], event["elided"])
+        for event in captured
+        if event["event"] == "composing_tail_replies_rendered"
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -2166,3 +2229,198 @@ async def test_no_identifier_the_carrier_holds_reaches_the_audit() -> None:
     assert "cited-1" not in str(record), "the audit names no record"
     assert "belief-1" not in str(record), "and none of the record a label named"
     assert not any("cited-1" in str(event) for event in captured), "and neither does any log event"
+
+
+# --------------------------------------------------------------------------- #
+# ADR-0229 §6: a label names a destination, and the hop reaches it             #
+# --------------------------------------------------------------------------- #
+#
+# §6's tests 3, 4, 6 and 7 — each asserted over the carrier *this* servicer
+# produced, which is what puts them here. Where one also asserts what a model was
+# shown it renders that carrier through the production stage (:func:`_prompt_over`),
+# under ADR-0227 §7's fidelity rule entire. Tests 1, 2 and 5 are prompts the
+# **engine** assembled and live in ``test_engine_read_envelope.py``.
+
+
+async def test_a_named_record_spends_no_budget_and_moves_no_count() -> None:
+    """ADR-0229 §6 test 3: reach is not supply, and §9's record is untouched.
+
+    §2 rules that a record a label named "enters **no group** of the turn's supply",
+    is not offered to ADR-0226 §7's deduplicated union as a candidate, and consumes
+    no slot of §6's budget of ten — so ``returned``, ``new`` and ``deduplicated``
+    are what the same servicing reported before ADR-0229, and the fourth group holds
+    the same records in the same order.
+
+    **There is nothing to admit, and that is a fact about ADR-0226 §3.** The label
+    space *is* the supply, so a named record is in ``_Union``'s seen set before the
+    hop runs: feeding it through could only ever deduplicate, adding one to
+    ``returned`` and one to ``deduplicated`` "for every label that resolved, on every
+    serviced hop, deterministically". ADR-0226 §8's novelty rate would then report a
+    constant depression that "tells a reader nothing they could not compute from the
+    labels alone" — the audit measuring its own book-keeping instead of the read.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    cited = ("cited-1", "cited-2", "cited-3")
+    await memory.add(_belief("belief-1", "billing schedule notes", evidence=cited))
+    for record_id in cited:
+        await memory.add(_episode(record_id, "an earlier exchange about billing"))
+    planner = FakePlanner(now=_clock, read_request=_hop("M1"))
+
+    with structlog.testing.capture_logs() as captured:
+        responded = await _loop(memory, planner=planner).respond(
+            "billing schedule notes", narrow=_bounded()
+        )
+
+    record = _record(captured)
+    assert (record["returned"], record["new"], record["deduplicated"]) == (3, 3, 0)
+    assert record["labels_unresolved"] == 0
+    assert record["truncated_kinds"] == ()
+    assert _ids(responded.turn.memories) == ["belief-1", *cited], "the fourth group is unmoved"
+    assert responded.hop_reached == ("belief-1", *cited), "and the carrier is what widened"
+
+
+async def test_the_expansion_order_survives_both_overlap_cases() -> None:
+    """ADR-0229 §6 test 6: the expansion sequence, and the deduplication that resolves it.
+
+    Three shapes over the carrier the servicer produced. **Two labels** expand to
+    each named record followed by its own evidence. **Two labels citing one record**
+    yield that record once, "at the position of its first occurrence in the expansion
+    sequence", and "no later occurrence displaces it or moves anything after it".
+    And a hop naming an episode ``E`` beside a belief whose evidence is ``E`` expands
+    to ``E, B, E`` and carries ``E, B`` — so ``B`` is **not** immediately followed by
+    its evidence, "and that is the required result rather than a case to repair".
+
+    §3 states an expansion **then** a deduplication rather than two properties of the
+    finished carrier because two such properties are not jointly satisfiable:
+    ``Provenance.evidence`` carries no uniqueness constraint and nothing stops one
+    label naming what another cites. One sequence and one deduplication define a
+    total order on every input, which is what ADR-0227 §4's cap needs.
+    """
+    plain = FakeMemoryStore(now=_clock)
+    await plain.add(_belief("belief-1", "billing schedule notes", evidence=("cited-1",)))
+    await plain.add(_belief("belief-2", "billing notes", evidence=("cited-2",)))
+    for record_id in ("cited-1", "cited-2"):
+        await plain.add(_episode(record_id, "an earlier exchange"))
+    two_labels = await _loop(
+        plain, planner=FakePlanner(now=_clock, read_request=_hop("M1", "M2"))
+    ).respond("billing schedule notes", narrow=_bounded())
+
+    shared = FakeMemoryStore(now=_clock)
+    await shared.add(_belief("belief-1", "billing schedule notes", evidence=("cited-1",)))
+    await shared.add(_belief("belief-2", "billing notes", evidence=("cited-1",)))
+    await shared.add(_episode("cited-1", "an earlier exchange"))
+    one_citation = await _loop(
+        shared, planner=FakePlanner(now=_clock, read_request=_hop("M1", "M2"))
+    ).respond("billing schedule notes", narrow=_bounded())
+
+    crossing = FakeMemoryStore(now=_clock)
+    await crossing.add(_belief("belief-1", "billing schedule notes", evidence=("cited-1",)))
+    await crossing.add(_episode("cited-1", "billing schedule notes, as an exchange"))
+    named_and_cited = await _loop(
+        crossing, planner=FakePlanner(now=_clock, read_request=_hop("M2", "M1")), episodic_limit=1
+    ).respond("billing schedule notes", narrow=_bounded())
+
+    assert two_labels.hop_reached == ("belief-1", "cited-1", "belief-2", "cited-2")
+    assert one_citation.hop_reached == ("belief-1", "cited-1", "belief-2")
+    assert _ids(named_and_cited.turn.memories) == ["belief-1", "cited-1"], "M2 is the episode"
+    assert named_and_cited.hop_reached == ("cited-1", "belief-1"), "E, B, E carries E, B"
+
+
+async def test_a_label_naming_a_tail_record_changes_that_records_rendering_not_at_all() -> None:
+    """ADR-0229 §6 test 4: ADR-0227 §1's tail exclusion binds a named record too.
+
+    "A label naming a tail record adds no second line under its bullet, consumes no
+    position of ADR-0227 §4's cap, and contributes **one eligible** record to §5's
+    pair rather than two." Both of ADR-0222 §1's shapes are driven: a tail record
+    carrying a ``disposition`` **and** an ``outcome`` renders its one reply line, and
+    one carrying a ``disposition`` and no ``outcome`` renders its phrase line alone
+    and moves neither integer of the pair.
+
+    **The control is the same turn with no emission at all**, which is the assertion
+    §4 actually makes: "this ADR guarantees no tail record a reply line it does not
+    already have". ADR-0222 §1 stays the single rule for the tail, and
+    ``_split_conversation_tail`` at the render site stays the single authority on
+    which group a record is in.
+    """
+    reply = "The Brightpath option, in the end."
+    both = _episode(
+        "tail-1",
+        "The user asked: which lender?",
+        outcome=reply,
+        disposition=ExchangeDisposition.STEP_EXECUTED,
+    )
+    phrase_only = both.model_copy(update={"outcome": None})
+
+    for tail, expected in (
+        (both, [f'    what the assistant replied: "{reply}"']),
+        (phrase_only, []),
+    ):
+        memory = FakeMemoryStore(now=_clock)
+        await memory.add(_belief("belief-1", "billing schedule notes"))
+        # The store holds it too: ADR-0226 §3's third way of resolving to nothing is
+        # a record ``get_many`` does not return, and a tail record the store never
+        # held would land there instead of in the case this test is about.
+        await memory.add(tail)
+        named = await _loop(
+            memory, planner=FakePlanner(now=_clock, read_request=_hop("M1"))
+        ).respond("billing schedule", history=(tail,), narrow=_bounded())
+        quiet = await _loop(memory).respond("billing schedule", history=(tail,), narrow=_bounded())
+
+        assert named.hop_reached == ("tail-1",), (
+            "the servicer reached it; the render site excludes it"
+        )
+        assert quiet.hop_reached == ()
+        with structlog.testing.capture_logs() as captured:
+            fired = await _prompt_over(named)
+        assert _reply_lines_of(fired) == expected
+        assert _rendered_counts(captured) == [(len(expected), 0)], "one eligible record, or none"
+        assert fired == await _prompt_over(quiet), "byte-identical to the same turn with no hop"
+
+
+async def test_the_budget_cuts_evidence_and_never_the_record_a_label_named() -> None:
+    """ADR-0229 §6 test 7: truncation, over an expansion the named record reordered.
+
+    A labelled belief citing more live, unheld evidence than ADR-0226 §6's budget
+    admits. The records the budget cut are in no group of the supply, so ADR-0227
+    §3's supply-holds test keeps them out of the carrier and §4's "the records it cut
+    render nothing at all" binds: no bullet, no phrase line, no reply line. **The
+    named record is in the carrier throughout** — a label is a position in the
+    pre-servicing supply, so ADR-0229 §2 puts the record it names there by
+    construction, and §3's supply-holds restriction "bites on truncated evidence and
+    on nothing this ADR admits".
+
+    **The ineligible evidence record is deliberately the first one cited.** The
+    carrier is then ``belief-1`` followed by ten episodes of which the *first*
+    renders nothing, so an implementation spending ADR-0227 §4's cap on entries §1
+    does not admit writes eight lines where §4 requires nine. With the ineligible
+    record last, both readings write nine and the case would assert nothing.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    cited = tuple(f"cited-{n}" for n in range(READ_BUDGET + 2))
+    await memory.add(_belief("belief-1", "billing schedule notes", evidence=cited))
+    for position, record_id in enumerate(cited):
+        await memory.add(
+            _episode(
+                record_id,
+                f"The user asked about billing, round {position}.",
+                outcome=None if position == 0 else f"The billing answer, round {position}.",
+                disposition=ExchangeDisposition.STEP_EXECUTED,
+            )
+        )
+    planner = FakePlanner(now=_clock, read_request=_hop("M1"))
+
+    with structlog.testing.capture_logs() as captured:
+        responded = await _loop(memory, planner=planner).respond(
+            "billing schedule notes", narrow=_bounded()
+        )
+
+    assert _record(captured)["truncated_kinds"] == (ReadKind.CITATION_HOP.value,)
+    assert _ids(responded.turn.memories) == ["belief-1", *cited[:READ_BUDGET]]
+    assert responded.hop_reached == ("belief-1", *cited[:READ_BUDGET])
+    prompt = await _prompt_over(responded)
+    assert _reply_lines_of(prompt) == [
+        f'    what the assistant replied: "The billing answer, round {position}."'
+        for position in range(1, READ_BUDGET)
+    ], "nine lines: the belief and the outcome-less episode consume no position of the cap"
+    for cut in cited[READ_BUDGET:]:
+        assert cut not in prompt, "a record the budget cut renders nothing at all"
