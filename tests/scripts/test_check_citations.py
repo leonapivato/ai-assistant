@@ -999,6 +999,132 @@ def test_a_wrapped_status_field_is_read_whole(tmp_path: Path) -> None:
     assert _findings(_report(tmp_path, "--no-tracker"), "liveness") == []
 
 
+def _status_header(status_block: str, *, recorded_by: tuple[int, ...]) -> dict[str, str]:
+    """ADR-0001 carrying ``status_block``, plus one ADR recording a supersession of it.
+
+    The only thing the checker does with a ``Status`` value is ask which ADRs it
+    names *in a supersession token*, so where the field ends is observable only
+    through §4's liveness report: a recorder the field names is silence, and one
+    it does not is a finding. Every case below therefore writes the disputed line
+    beneath the ``Status`` bullet with a supersession token in it, and reads off
+    which recorders were reported.
+
+    Args:
+        status_block: ADR-0001's header lines, up to but not including ``- Date:``.
+        recorded_by: The ADR numbers that each carry ``- Supersedes: ADR-0001``.
+
+    Returns:
+        The ``_make_repo`` ADR mapping.
+    """
+    adrs = {"0001-one.md": f"# 1. One\n\n{status_block}- Date: 2026-01-01\n"}
+    for number in recorded_by:
+        adrs[f"{number:04d}-later.md"] = (
+            f"# {number}. Later\n\n- Status: Accepted\n- Supersedes: ADR-0001\n- Date: 2026-01-02\n"
+        )
+    return adrs
+
+
+def test_a_padded_marker_does_not_swallow_a_sibling_field(tmp_path: Path) -> None:
+    # #2017: the continuation floor is the column the marker *actually* reaches,
+    # not the two columns a canonical ``- `` would reach. Under ``-   Status:``
+    # the content column is 4, so the two-space ``- Note:`` beneath it is a
+    # sibling field and ends the value. The replaced regex folded it in, and its
+    # supersession token then silenced this report — so the assertion below is
+    # what the fix restores.
+    _make_repo(
+        tmp_path,
+        _status_header(
+            "-   Status: Accepted\n"
+            "  - Note: superseded by ADR-0002, whose own record is the one below\n",
+            recorded_by=(2,),
+        ),
+    )
+
+    findings = _findings(_report(tmp_path, "--no-tracker"), "liveness")
+
+    assert [f["path"] for f in findings] == ["docs/adr/0002-later.md"]
+
+
+def test_a_padded_marker_still_folds_its_own_continuation(tmp_path: Path) -> None:
+    # The mirror of the case above: a line that *does* reach the padded marker's
+    # content column is continuation and must still be folded in, so the fix
+    # narrows the floor rather than disabling wrapping under a padded marker.
+    # ADR-0002 is named by the wrapped value and is silent; ADR-0003 is named
+    # only by the sibling and is reported.
+    _make_repo(
+        tmp_path,
+        _status_header(
+            "-   Status: Accepted, and later\n"
+            "    superseded by ADR-0002\n"
+            "  - Note: superseded by ADR-0003, whose own record is the one below\n",
+            recorded_by=(2, 3),
+        ),
+    )
+
+    findings = _findings(_report(tmp_path, "--no-tracker"), "liveness")
+
+    assert [f["path"] for f in findings] == ["docs/adr/0003-later.md"]
+
+
+def test_a_tab_indented_marker_measures_its_own_content_column(tmp_path: Path) -> None:
+    # A tab expands to the next four-column stop, so a marker indented by one
+    # tab has content column 6: the tab-plus-two-space wrap belongs to it, and
+    # the tab-indented ``- Note:`` at column 4 is a sibling that ends it. The
+    # replaced regex agreed here by accident rather than by measurement, so this
+    # is a regression guard on the computed column, not a mutation detector.
+    _make_repo(
+        tmp_path,
+        _status_header(
+            "\t- Status: Accepted, and later\n"
+            "\t  superseded by ADR-0002\n"
+            "\t- Note: superseded by ADR-0003, whose own record is the one below\n",
+            recorded_by=(2, 3),
+        ),
+    )
+
+    findings = _findings(_report(tmp_path, "--no-tracker"), "liveness")
+
+    assert [f["path"] for f in findings] == ["docs/adr/0003-later.md"]
+
+
+def test_a_tab_padded_marker_measures_its_own_content_column(tmp_path: Path) -> None:
+    # The tab sits between the marker and the field, expanding from column 1 to
+    # the four-column stop: the four-space wrap reaches it, the two-space
+    # sibling does not. The replaced regex folded both in and reported neither.
+    _make_repo(
+        tmp_path,
+        _status_header(
+            "-\tStatus: Accepted, and later\n"
+            "    superseded by ADR-0002\n"
+            "  - Note: superseded by ADR-0003, whose own record is the one below\n",
+            recorded_by=(2, 3),
+        ),
+    )
+
+    findings = _findings(_report(tmp_path, "--no-tracker"), "liveness")
+
+    assert [f["path"] for f in findings] == ["docs/adr/0003-later.md"]
+
+
+def test_padding_wider_than_a_code_block_still_ends_at_a_sibling(tmp_path: Path) -> None:
+    # CommonMark would read six columns of padding as an indented code block and
+    # pull the content column back to 2, which would fold the sibling in again.
+    # This reads a metadata field rather than rendering markdown and keeps the
+    # wider column, because ending the field early is the safe direction.
+    _make_repo(
+        tmp_path,
+        _status_header(
+            "-      Status: Accepted\n"
+            "  - Note: superseded by ADR-0002, whose own record is the one below\n",
+            recorded_by=(2,),
+        ),
+    )
+
+    findings = _findings(_report(tmp_path, "--no-tracker"), "liveness")
+
+    assert [f["path"] for f in findings] == ["docs/adr/0002-later.md"]
+
+
 def test_a_body_list_item_that_looks_like_a_record_is_not_one(tmp_path: Path) -> None:
     """§4 legislates a *header* line; ADR-0070 §4 forbids reading a supersession out of prose.
 
