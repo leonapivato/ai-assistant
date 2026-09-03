@@ -249,3 +249,46 @@ def test_a_script_whose_two_plans_share_an_id_is_refused() -> None:
     shared = ActionPlan(id="p1", goal_id="g1", steps=(), created_at=_fixed_now())
     with pytest.raises(ValueError, match="two records with two ids"):
         FakePlanner(shared, now=_fixed_now, revision=shared)
+
+
+async def test_a_revision_scripted_fake_refuses_a_third_call() -> None:
+    """A scripted revision models one turn, and a third call is a second turn.
+
+    ADR-0228 §3 bounds a turn at two planner calls, so a third is a *second turn* —
+    whose opening call ought to be the first plan again, and which ``revision`` cannot
+    express. Answering it with the revision would hand that turn a plan for a goal it
+    does not have, carrying an id already spent, and the failure would surface at
+    ``save_plan`` as the store's fault.
+
+    The fake cannot see the boundary — a turn boundary is a signal the loop passes no
+    more than it passes an iteration index (ADR-0228 §12) — so it refuses and names
+    the fix rather than answering wrongly.
+    """
+    planner = FakePlanner(
+        ActionPlan(id="p1", goal_id="g1", steps=(), created_at=_fixed_now()),
+        now=_fixed_now,
+        revision=ActionPlan(id="p2", goal_id="g1", steps=(), created_at=_fixed_now()),
+    )
+    await planner.plan(_goal_for(), context=_context_for(), capabilities=())
+    await planner.plan(_goal_for(), context=_context_for(), capabilities=())
+
+    with pytest.raises(RuntimeError, match="one FakePlanner per turn"):
+        await planner.plan(_goal_for(), context=_context_for(), capabilities=())
+
+
+async def test_a_fake_without_a_scripted_revision_is_reusable_across_turns() -> None:
+    """And the refusal is scoped to the script that cannot model a second turn.
+
+    A fake with no ``revision`` says the same thing on every call but for its id, so
+    reusing it across turns is exactly what it has always been — every call answers a
+    plan for the goal it was handed, and the ids stay distinct, which is all
+    ``save_plan`` needs.
+    """
+    planner = FakePlanner(now=_fixed_now)
+
+    plans = [
+        await planner.plan(_goal_for(), context=_context_for(), capabilities=()) for _ in range(4)
+    ]
+
+    assert len({plan.id for plan in plans}) == 4
+    assert all(plan.goal_id == "g1" for plan in plans)

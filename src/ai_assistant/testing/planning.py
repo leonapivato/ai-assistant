@@ -23,7 +23,7 @@ each is its own place the resource could be handed over early (#397).
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 from uuid import uuid4
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
@@ -92,6 +92,14 @@ _LEGAL_SKIP_REASONS: dict[StepStatus, frozenset[SkipReason]] = {
 _MAX_ATTEMPTS = 3
 
 
+#: ADR-0228 §3's bound, restated here for the one thing this module needs it for:
+#: how many calls of :meth:`FakePlanner.plan` a scripted turn accounts for. It is not
+#: a second statement of the rule — the loop enforces it and
+#: :data:`~ai_assistant.orchestration.loop._PLANNER_CALL_BOUND` is where it binds —
+#: but the figure a fake scripting *one turn* must stop at.
+_CALLS_PER_TURN: Final = 2
+
+
 def _utcnow() -> datetime:
     return datetime.now(UTC)
 
@@ -120,14 +128,19 @@ class FakePlanner:
     to the contract rather than disagreeing with itself — ``id`` is precisely the
     field ADR-0014 §2 requires to move.
 
-    **``revision`` scripts what a call after the first returns**, which is the hook a
+    **``revision`` scripts what a turn's *second* call returns**, which is the hook a
     consumer takes to drive the milestone's own shape — a first plan that cannot name
     a value and asks for it, and a second that carries it — without standing a model
-    up. It is **not** scoped to one turn, and cannot be: a turn boundary is a signal
-    the loop passes no more than it passes an iteration index, and ADR-0228 §12 rules
-    that the planner "is not told which iteration it is on". A consumer driving two
-    turns builds two fakes, which is what this suite's existing two-turn cases already
-    do.
+    up. A fake scripted that way models **one turn and no more**, and says so rather
+    than guessing: ADR-0228 §3 bounds a turn at two planner calls, so a third call is
+    a *second turn*, whose first call ought to be the first plan again and which
+    ``revision`` cannot express. It would instead answer that turn's opening call with
+    the previous turn's revision — a plan for a goal that turn does not have, and an
+    id already spent. The fake cannot detect the boundary itself (a turn boundary is a
+    signal the loop passes no more than it passes an iteration index, and ADR-0228 §12
+    rules that the planner "is not told which iteration it is on"), so it refuses the
+    third call and names the fix: **a consumer driving two turns builds two fakes**,
+    which is what this suite's existing two-turn cases already do.
 
     **It sets no ``supersedes``** (ADR-0228 §5). That field is the loop's on every
     plan a planner returns, so a fake authoring one would be scripting a value its
@@ -274,8 +287,22 @@ class FakePlanner:
         """
         self.calls.append((goal, context, tuple(memories), tuple(capabilities)))
         ordinal = len(self.calls)
-        if self._revision is not None and ordinal > 1:
-            return self._revision
+        if self._revision is not None:
+            if ordinal > _CALLS_PER_TURN:
+                # ADR-0228 §3 bounds a turn at two planner calls, so this is a second
+                # turn — and a script naming one turn's revision cannot say what a
+                # later turn's *opening* plan is. Answering with the revision again
+                # would hand that turn a plan for a goal it does not have, carrying an
+                # id already spent, and the failure would surface at `save_plan` as
+                # the store's fault. Refused loudly instead, naming the fix.
+                msg = (
+                    f"this FakePlanner scripts one turn's two calls (ADR-0228 §3) and was "
+                    f"called {ordinal} times; a second turn's first call is not a revision, "
+                    "so build one FakePlanner per turn"
+                )
+                raise RuntimeError(msg)
+            if ordinal > 1:
+                return self._revision
         if self._plan is not None:
             # Exactly as scripted on the first call, and with a fresh id afterwards
             # (ADR-0014 §2, ADR-0228 §3, §5). Only `id` moves — every other field is
