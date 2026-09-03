@@ -1315,3 +1315,23 @@ def test_a_distinct_number_per_file_is_silent(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert result.stderr == ""
+
+
+def test_a_collision_is_named_even_when_one_of_the_files_cannot_be_decoded(
+    tmp_path: Path,
+) -> None:
+    """The collision is decidable from the filenames, so nothing is read to decide it.
+
+    Reading first would let an unrelated file fault crash the run before the
+    defect it could have named — on a tree where the defect needed no file
+    opened at all.
+    """
+    _make_repo(tmp_path, {"0001-one.md": "# 1. One\n", "0002-two.md": "# 2. Two\n"})
+    (tmp_path / "docs" / "adr" / "0002-two-again.md").write_bytes(b"# 2. \xff\xfe Two again\n")
+
+    result = _run(tmp_path, "--no-tracker")
+
+    assert result.returncode == 2
+    assert "docs/adr/0002-two.md" in result.stderr
+    assert "docs/adr/0002-two-again.md" in result.stderr
+    assert "UnicodeDecodeError" not in result.stderr
