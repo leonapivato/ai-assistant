@@ -66,7 +66,7 @@ import math
 import statistics
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 from typing import TYPE_CHECKING
 
 import pytest
@@ -710,6 +710,95 @@ def test_a_sized_spec_refuses_a_population_it_cannot_actually_plant() -> None:
             except ValueError:
                 continue
             assert spec.total == total, f"total={total} fraction={fraction} drifted"
+
+
+def test_a_spec_refuses_a_closed_fraction_that_is_not_a_share() -> None:
+    """Both constructors answer a non-share fraction with the ``ValueError`` they document.
+
+    ``sized`` used to do its arithmetic first, so the fraction met ``round()``
+    before it met any check: ``inf`` came back as ``OverflowError`` and ``nan`` as
+    a ``ValueError`` about converting a float, neither of which names the argument
+    at fault. The range now has one owner that both paths call, so the two
+    constructors refuse the same values with the same sentence.
+    """
+    for bad in (math.inf, -math.inf, math.nan, 1.0, -0.5):
+        with pytest.raises(ValueError, match=r"closed_fraction must be in \[0.0, 1.0\)"):
+            AgedStoreSpec.sized(total=2_000, crowding=100, closed_fraction=bad)
+        with pytest.raises(ValueError, match=r"closed_fraction must be in \[0.0, 1.0\)"):
+            AgedStoreSpec(live=200, topics=20, closed_fraction=bad)
+    # The other two shares reach `__post_init__` untouched by arithmetic, so they
+    # were never broken — asserted here so the one owner is seen to serve all three.
+    with pytest.raises(ValueError, match="absence_share must be in"):
+        AgedStoreSpec(live=200, topics=20, absence_share=math.nan)
+    with pytest.raises(ValueError, match="preference_share must be in"):
+        AgedStoreSpec(live=200, topics=20, preference_share=math.inf)
+
+
+def test_a_spec_refuses_more_topics_than_it_has_live_records() -> None:
+    """Guard the density the spec reports: no cluster it counts is empty of live records.
+
+    The live population is dealt round-robin, so ``live=10, topics=100`` fills
+    topics 0-9 and leaves ninety clusters with nothing eligible in them — while
+    ``cluster_density`` reports a uniform 0.1 and a sweep would publish a
+    measurement under a crowding no queried live cluster actually had.
+    """
+    with pytest.raises(ValueError, match="topics must not exceed live"):
+        AgedStoreSpec(live=10, topics=100, closed_fraction=0.9)
+    # `sized` derives topics from the *whole* population and live from its live
+    # part, so a fine enough crowding at a high closure reaches the same spec.
+    with pytest.raises(ValueError, match="topics must not exceed live"):
+        AgedStoreSpec.sized(total=100, crowding=1, closed_fraction=0.9)
+    # One live record per cluster is the boundary and it is allowed: every cluster
+    # still has the density reported.
+    even = AgedStoreSpec.sized(total=100, crowding=10, closed_fraction=0.9)
+    assert (even.live, even.topics) == (10, 10)
+    assert even.cluster_density == 1.0
+    # Nothing the instrument itself runs is refused: every sweep configuration
+    # leaves at least one live record per cluster.
+    for total in (profile.sweep_total for profile in _PROFILES.values()):
+        for crowding in _SWEEP_CROWDINGS:
+            for closed_fraction in _SWEEP_CLOSED_FRACTIONS:
+                spec = AgedStoreSpec.sized(
+                    total=total, crowding=crowding, closed_fraction=closed_fraction
+                )
+                assert spec.topics <= spec.live
+
+
+def test_the_instants_call_a_tzinfo_that_declines_an_offset_naive() -> None:
+    """Python's definition of aware, not the presence of a ``tzinfo`` attribute.
+
+    A ``tzinfo`` whose ``utcoffset()`` returns ``None`` leaves the instant naive
+    while ``tzinfo is not None`` reads true, so the old attribute test passed
+    exactly the value the ordering comparison below it could not compare — the
+    raw ``TypeError`` about offsets that this guard exists to replace with a
+    sentence about the timeline.
+    """
+
+    class Offsetless(tzinfo):
+        """A ``tzinfo`` that declines to say what its offset is, as ``tzinfo`` permits."""
+
+        def utcoffset(self, dt: datetime | None) -> None:
+            """Decline to give an offset — implicitly ``None``, which is the whole point.
+
+            ``tzinfo`` permits it, and a ``datetime`` carrying such a ``tzinfo`` is
+            naive by Python's definition while its ``tzinfo`` attribute is set.
+            """
+
+        def tzname(self, dt: datetime | None) -> str:
+            """Name it, so the instance is not mistaken for a broken stub."""
+            return "offsetless"
+
+        def dst(self, dt: datetime | None) -> None:
+            """No daylight rule to report; implicitly ``None``."""
+
+    ordered = _INSTANTS
+    with pytest.raises(ValueError, match="every instant must be timezone-aware; opened is not"):
+        Instants(
+            now=ordered.now,
+            written=ordered.written,
+            closed=ordered.closed,
+            opened=datetime(2026, 2, 1, tzinfo=Offsetless()),
+        )
 
 
 def test_the_instants_refuse_a_timeline_that_leaves_closed_records_live() -> None:
