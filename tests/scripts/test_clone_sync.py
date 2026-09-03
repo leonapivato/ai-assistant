@@ -512,22 +512,52 @@ def test_deciding_not_to_copy_never_reads_either_file_whole(
     assert "same .env" in capsys.readouterr().out
 
 
-def test_the_re_test_narrows_the_window_it_cannot_close(
+def test_the_freshness_test_is_taken_again_before_the_first_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The disclosure, pinned. A person working in a target holds no lock, so every
-    # check before a write is check-then-act against them: someone arriving during
-    # the copy is not caught, and the module says that rather than implying it has
-    # been closed. This fails the day the claim grows past what the code does.
+    # Ordering rather than outcome: `inspect` runs once to choose the target and
+    # again under the lock before the first byte. Both, in that order, or the
+    # second one has been dropped.
+    #
+    # The dirt this plants at the write is what the module says it cannot catch —
+    # it arrives after the last check, and the copy goes through. That is the
+    # disclosed limit, kept here beside the ordering it is a consequence of.
     source, (sibling,) = _clones(tmp_path, 2)
     listing = _list_file(tmp_path, ".env")
-    replace = _MODULE._replace_atomically
+    inspected, replace = _MODULE.inspect, _MODULE._replace_atomically
+    events: list[str] = []
 
-    def arriving(src: Path, dst: Path) -> None:
+    def recording(clone: Path, synced: list[str]) -> object:
+        events.append("inspect")
+        return inspected(clone, synced)
+
+    def writing(src: Path, dst: Path) -> None:
+        events.append("write")
         (sibling / "someones-work.txt").write_text("arrived mid-copy\n")
         replace(src, dst)
 
-    monkeypatch.setattr(_MODULE, "_replace_atomically", arriving)
+    monkeypatch.setattr(_MODULE, "inspect", recording)
+    monkeypatch.setattr(_MODULE, "_replace_atomically", writing)
 
     assert _in_process(source, listing) == 0
+    assert events == ["inspect", "inspect", "write"]
     assert (sibling / ".env").read_text() == "ASSISTANT_X=1\n"
+
+
+def test_a_lock_that_cannot_be_opened_is_a_refusal_not_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Every other failure in this script is a refusal carrying its reason, and
+    # `main` catches nothing else — an unwritable git directory must not be the
+    # one case that reaches the operator as a traceback.
+    source, (sibling,) = _clones(tmp_path, 2)
+    listing = _list_file(tmp_path, ".env")
+
+    def nowhere(clone: Path) -> Path:
+        return tmp_path / "gone"
+
+    monkeypatch.setattr(_MODULE, "_git_dir", nowhere)
+
+    assert _in_process(source, listing) == 1
+    assert "cannot open the sync lock" in capsys.readouterr().err
+    assert not (sibling / ".env").exists()
