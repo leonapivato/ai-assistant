@@ -375,15 +375,27 @@ construction. And the listing's producer is the same object as the fetcher (§4)
 what is shown and what is fetched, where a facet route would put the listing's bound in
 `context/` and the fetch's in `orchestration` with nothing keeping them equal.
 
-**Additive and defaulted, so the widening breaks nothing.** This is a `Protocol` change
-and it is flagged as a breaking change under golden rule 5 — the documented meaning of
-what `Planner.plan` receives changes and `orchestration` calls it — and this ADR does
-not argue itself out of that classification, exactly as ADR-0226 §10 declined to for the
-return. What the flag does not assert is a compatibility break: an existing `Planner`
-that ignores the parameter conforms and means what it meant. §13 binds the implementing
-lane to extend the shared `PlannerContract` for the widened input, for the reason
-ADR-0226 §10 gives — *"A canonical fake updated without the suite is an unverified
-fake"*.
+**Additive and defaulted, and it is nonetheless a compatibility break for every
+implementation.** This is a `Protocol` change flagged as a breaking change under golden
+rule 5, and this ADR does not argue itself out of that classification — exactly as
+ADR-0226 §10 declined to for the return. **Every `Planner` implementation must be widened
+to accept the keyword**, and an implementation that is not does not conform: `plan`'s
+other inputs are keyword-only, §3's clause above has the loop pass `files` on **every**
+call, and a `plan` declaring no such parameter raises `TypeError` when it is called and
+fails structurally under `mypy --strict` besides. An earlier draft of this paragraph said
+an existing `Planner` "conforms and means what it meant", and that was two claims run
+together: what survives the widening is the **semantics**, not the signature. An
+implementation that accepts the parameter and ignores its value means exactly what it
+meant, which is what `()`'s default encodes — *no file is nameable on this turn* — and is
+why nothing about an existing planner's behaviour has to change. Its declaration does.
+
+**So the widening is Lane C2's, and it reaches every implementation in the tree** —
+`planning/planner.py`'s model-backed planner, `ai_assistant.testing`'s canonical fake, and
+the planner doubles under `tests/orchestration/`. §13 binds that lane to extend the shared
+`PlannerContract` for the widened input as well, for the reason ADR-0226 §10 gives — *"A
+canonical fake updated without the suite is an unverified fake"*. The default is what makes
+a **caller** that names no file correct, not what makes an un-widened implementation
+callable; nothing here offers source compatibility to one.
 
 **One filesystem read per turn is the cost, and it is stated rather than hidden.** The
 listing is read before the planner has said whether it wants a file, so a deployment
@@ -781,7 +793,10 @@ scope is a smaller falsehood than any of those — it is, in fact, none.
 
 > **Normative.** A `Fetcher` reads from **one configured root** and from nothing else.
 > The root is a `Settings` field with a named default of **unset**, so the mechanism is
-> **off until a deployment configures it** — no root, no listing, no ask, no fetch.
+> **off until a deployment configures it** — no root, no listing, no ask, no fetch. The
+> field's documented meaning is a **local-filesystem directory**; §8 states what a
+> network-backed mount does and does not change about the containment argument, and no
+> implementation on this rung inspects a filesystem type to decide it.
 
 > **Normative.** The listing is the root's **direct children only** — no recursion, no
 > subdirectory traversal, no following of symbolic links out of the root — ordered
@@ -956,12 +971,43 @@ subject.
 > implementation detail.** (a) The address space is the listing of one root a deployment
 > configured, and the model names an **ordinal into it** — §2, under which no byte of
 > model output is ever interpreted as an address. (b) A fetch is an open, a read and a
-> close on the local filesystem: **nothing leaves the device on the fetch path**, and this
-> ADR authorises no egress, designates no seam, adds no `DestinationProtocol` member and
-> is cited toward none of those (ADR-0154 §4, §7; ADR-0017 §1). (c) The one outward path a
+> close on a filesystem: **this system composes no outward request and names no
+> destination on the fetch path**, and this ADR authorises no egress, designates no seam,
+> adds no `DestinationProtocol` member and is cited toward none of those (ADR-0154 §4, §7;
+> ADR-0017 §1). (c) The one outward path a
 > steered plan can reach is the **egress seam**, and a turn that fetched has stamped its
 > capture, so ADR-0223 §6's allow applies and *"every subsequent turn of that
 > conversation that reaches the egress seam is a confirmation rather than an allow"*.
+
+> **Normative.** **(b) is a statement about what this system composes, not about what
+> packets a mount emits, and the difference is where a network-backed root sits.** The
+> configured root is a **local-filesystem path**, and a deployment that points it at a
+> network-backed mount — NFS, SMB, a FUSE-backed remote drive — is placing this system's
+> reads on a transport its operator configured and this decision did not. The fetch is
+> still an `openat` and a bounded read: **no lane composes a request, resolves a name, or
+> names a destination**, and nothing this system authored crosses a wire. What such a mount
+> emits is its own protocol, addressed to the endpoint the operator mounted.
+
+> **Normative.** **The residual on such a root is named rather than claimed away, and it is
+> the choice among the listed entries.** A revising turn's second ask may be composed over
+> the first fetch's content (§7), so on a network-backed root an observer of that mount
+> learns at most **which of the listing's at-most-`fetch_listing_max_entries` entries a turn
+> read** — under five bits per servicing at the default of 40. It never learns a name the
+> model composed, because §2 admits no composed address; it never carries a payload this
+> system assembled, because there is no request body to put one in; and it reaches only the
+> endpoint the operator already mounted, never one a plan selected. That is a side channel
+> of the deployment's storage, bounded by the listing cap, and it is not the outward channel
+> #1844 names.
+
+> **Normative.** **No mechanical eligibility check is required of an implementation, and
+> adding one would be a guess.** Deciding "is this path local" has no portable answer:
+> `os.statvfs` reports no filesystem type, a `/proc/self/mountinfo` allow-list is
+> Linux-only and refuses a legitimate local FUSE mount while admitting the next
+> remote-backed type nobody listed, and a deny-list is worse in both directions. This is
+> §5's file-origin classifier one section over and it is refused for the same reason: a
+> classifier that guesses puts a ratified claim at the mercy of its guess. The condition is
+> stated as an **operator** condition, §15 defers the enforcement with what fires it, and
+> nothing in this ADR reads a filesystem type.
 
 > **Normative.** **Three things would break it, and each is named so that a later lane
 > meets it as a condition rather than discovers it.** A kind whose fetch itself leaves the
@@ -985,8 +1031,12 @@ denying it — a second plan's ask **is** composed over the first fetch's yield,
 under the root may hold text an attacker wrote. What that text can cause is a second
 fetch of another file under the same root, or a sighted query over the owner's own store.
 It cannot cause a fetch of anything the listing did not show, because there is no
-argument through which a name can be expressed; and it cannot cause a byte to leave the
-device on the read path, because the read path is a filesystem call.
+argument through which a name can be expressed; and it cannot cause this system to compose
+an outward request on the read path, because the read path is a filesystem call and there
+is no request to compose. Where the operator has mounted that filesystem over a network,
+the clauses above say what remains and what it is bounded by — an ordinal among the listed
+entries, to an endpoint the operator chose — and say it rather than claiming a locality
+this decision does not enforce.
 
 **What it *can* reach is an act, and the corpus already governs that, in the same words
 ADR-0228 §11 used.** A revised plan may name a step and that step may reach the egress
@@ -1439,6 +1489,15 @@ same reason; this decision adds a contract, so it adds a lane.
   root. A second root is a listing-composition and precedence decision; a root named in a
   turn is a model-composed address by another name and §2 forbids it. Fired by an ADR that
   decides how several address spaces are labelled and ordered.
+- **A mechanical eligibility check on the root, refusing a network-backed mount at load.**
+  §6 documents the field as a local-filesystem directory and §8 states the residual such a
+  mount leaves — under five bits per servicing, to an endpoint the operator mounted, with
+  no name and no payload this system composed. Enforcing it needs a portable way to decide
+  a filesystem's locality, which does not exist, and a Linux `mountinfo` allow-list is the
+  guessing classifier §5 and §8 both refuse. Fired by a portable decision procedure, or by
+  a deployment for which that residual matters stating so — and then it is a load-time
+  refusal beside §6's other bounds, with the refusal arm §14 would owe. **Not** fired by a
+  lane preferring a check to a documented condition.
 - **A format whose extraction declares a report time.** §5 takes the fetch instant for
   every format. A format that carries its own declared instant — a PDF's `/ModDate`, a
   document's core properties — has a claim ADR-0092 §3 would prefer, and using it needs a
