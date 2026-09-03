@@ -622,15 +622,20 @@ class Reembedder:
         plan = self.plan()
         if not plan.required:
             return ReembedOutcome(plan=plan, embedded=0, resumed=0, swapped=False, durable=True)
-        resumed = plan.resumable
         started = _fingerprint(self._store)
-        cursor = self._prepare_work(resumed)
+        cursor = self._prepare_work(plan.resumable)
+        # What this run inherits is what the cursor says, not what the plan counted.
+        # `_prepare_work` discards rather than resumes a work store that lost its
+        # cursor between the two, so a `None` cursor is a copy starting at the first
+        # source row with nothing carried over — and reporting the plan's figure
+        # there would overstate both `resumed` and every progress call (#738).
+        resumed = plan.resumable if cursor is not None else 0
         source = _connect(self._store)
         try:
             work = _connect(self._work)
             try:
                 columns = _source_columns(source, self._store)
-                embedded = await self._copy(source, work, cursor, plan, progress, columns)
+                embedded = await self._copy(source, work, cursor, resumed, plan, progress, columns)
                 self._finalise(source, work)
                 _verify(source, work, plan, self._embedder, columns)
             finally:
@@ -687,11 +692,18 @@ class Reembedder:
         source: sqlite3.Connection,
         work: sqlite3.Connection,
         cursor: int | None,
+        resumed: int,
         plan: ReembedPlan,
         progress: Callable[[int, int], None] | None,
         columns: str,
     ) -> int:
-        """Copy every record past ``cursor``, one committed chunk at a time."""
+        """Copy every record past ``cursor``, one committed chunk at a time.
+
+        ``resumed`` is what the work store actually carried in, which is the
+        plan's figure only when the plan was still true at ``_prepare_work``;
+        progress counts from it so that the number reported can never exceed
+        ``plan.records``.
+        """
         embedded = 0
         while True:
             rows = _chunk(source, cursor, self._batch_size, columns)
@@ -706,7 +718,7 @@ class Reembedder:
                 _write_meta(work, _CURSOR_KEY, str(cursor))
             embedded += len(rows)
             if progress is not None:
-                progress(plan.resumable + embedded, plan.records)
+                progress(resumed + embedded, plan.records)
 
     async def _embed(self, texts: Sequence[str]) -> list[Embedding]:
         """Embed a chunk, mapping any embedder misbehaviour to our error.

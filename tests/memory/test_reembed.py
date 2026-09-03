@@ -776,15 +776,17 @@ async def test_a_work_store_with_rows_but_no_cursor_is_discarded(tmp_path: Path)
     assert len(_read(store, "SELECT rowid FROM records")) == 4
 
 
-async def test_a_cursor_lost_after_the_plan_is_discarded_not_resumed_from(
-    tmp_path: Path,
+async def test_a_cursor_lost_after_the_plan_restarts_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The same rule at the second gate, where a plan can go stale (#738).
 
     ``_resumable`` reports nothing to keep for a cursorless work store, so
     ``_prepare_work`` reaches its own cursor read with a positive count only when
-    the file changed underneath the plan. It discards there too: returning
-    ``None`` while leaving the rows in place is the state this issue is about.
+    the file changed under the plan. It discards there too — and the run then
+    reports the restart it actually did: nothing carried over, and progress that
+    counts from zero rather than from a figure the work store no longer holds
+    (review round 1).
     """
     store = tmp_path / "memory.db"
     await _seed(store, [_record(str(index), f"memory {index}") for index in range(4)])
@@ -794,19 +796,34 @@ async def test_a_cursor_lost_after_the_plan_is_discarded_not_resumed_from(
         await Reembedder(store=store, embedder=broken, batch_size=2).run()
 
     work = tmp_path / f"memory.db{WORK_SUFFIX}"
-    planned = Reembedder(store=store, embedder=_CountingEmbedder(), batch_size=2)
-    resumable = planned.plan().resumable
-    assert resumable == 2
-
     conn = sqlite3.connect(str(work))
     try:
         conn.execute("DELETE FROM meta WHERE key = 'reembed_cursor'")
         conn.commit()
     finally:
         conn.close()
+    # A plan taken before the damage and acted on after it. The window between
+    # `plan()` and `_prepare_work()` is real but too narrow to hit by writing to
+    # the file, so the stale count is injected where the plan reads it.
+    monkeypatch.setattr(Reembedder, "_resumable", lambda _self: 2)
 
-    assert planned._prepare_work(resumable) is None
-    assert _read(work, "SELECT count(*) FROM records") == [(0,)]
+    seen: list[tuple[int, int]] = []
+
+    def record_progress(done: int, total: int) -> None:
+        seen.append((done, total))
+
+    resumed_target = _CountingEmbedder()
+    outcome = await Reembedder(store=store, embedder=resumed_target, batch_size=2).run(
+        progress=record_progress
+    )
+
+    assert outcome.plan.resumable == 2  # the plan as taken, not rewritten after the fact
+    assert outcome.resumed == 0  # what was actually inherited: nothing
+    assert outcome.embedded == 4
+    assert resumed_target.embedded == 4
+    assert seen == [(2, 4), (4, 4)]
+    assert outcome.swapped
+    assert len(_read(store, "SELECT rowid FROM records")) == 4
 
 
 async def test_a_source_written_after_verification_is_not_swapped_over(
