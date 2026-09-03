@@ -806,16 +806,49 @@ scope is a smaller falsehood than any of those — it is, in fact, none.
 > stops the deployment, never an empty listing and never a `FetchRefusal`; a deployment
 > with no root configured is unaffected, because there is nothing to check.
 
-> **Normative.** **The handle is opened first and locality is decided against it, never
-> against the pathname the handle was opened from.** This is §4's rule for the same reason
-> one clause earlier: a pathname probed and then re-opened leaves an interval in which the
-> configured root can be replaced — by a symlink, or by a mount landing on it — so a
-> constructor that establishes locality and *then* opens the directory can bind its
-> long-lived handle to storage it never checked. So construction opens the root directory
-> **without following a symbolic link at the final component**, decides locality **against
-> that open object and the chain backing it**, and keeps that same handle as the one §4
-> anchors every fetch to. Nothing is re-derived from the path between the two, and where
-> the probe cannot be performed against the open object the root is refused.
+> **Normative.** **Eligibility is decided in two fail-closed stages, and nothing under the
+> configured path is opened until the first stage has admitted it.** Neither half of the
+> question can be answered alone. Deciding locality against a **pathname** and then opening
+> it is the defect §4 rules out one clause earlier: the configured root can be replaced in
+> the interval — by a symlink, or by a mount landing on it — so the constructor binds its
+> long-lived handle to storage it never checked. Deciding it against the **opened handle**
+> first is right about the object and wrong about the order: the first `open` of a
+> directory on an NFS or SMB mount resolves remote filesystem metadata, and on ext4 over an
+> iSCSI or NBD volume it issues remote block I/O, so a constructor that opens before it
+> admits has performed the very read the refusal exists to prevent — no `Fetcher` survives,
+> but `readers/` has already reached the network. Both stages are required, in this order.
+
+> **Normative.** **Stage 1 — admission — reads only local information, and opens and
+> traverses nothing under the configured path.** The constructor establishes, from the
+> platform's own mount and device tables — which are local files, read without touching the
+> configured path — that the path resolves under a mount whose filesystem **and** backing
+> device are local, and refuses otherwise. Deciding **which** mount the path falls under is
+> a longest-prefix decision over those tables and not a traversal of the path, so a
+> symbolic link inside the path can make that decision wrong — which is precisely what
+> stage 2's mismatch catches, and why neither stage stands alone. A platform that cannot
+> answer the question without touching the path does not thereby make this stage optional:
+> on such a platform the mechanism is **unavailable** and the root is refused. This is the
+> stage at which a root whose reads would leave the device is refused, and it is refused
+> having been opened by nothing.
+
+> **Normative.** **Stage 2 — acquisition and binding — opens the admitted root and
+> re-establishes locality against the opened object.** Construction opens the root
+> directory **without following a symbolic link at the final component**, takes the device
+> identity of that **open object** from its handle, and **refuses unless it matches what
+> stage 1 admitted**. That same handle is the one §4 anchors every fetch to; nothing is
+> re-derived from the path afterwards, and where the property cannot be established against
+> the open object the root is refused.
+
+> **Normative.** **Stage 2's mismatch, not a pre-open probe, is what closes the replacement
+> window.** The interval between the two stages is real — the configured pathname can be
+> replaced in it by a symlink or by a mount landing on it — and a swap that lands there is
+> refused deterministically, because the object stage 2 opened is not the object stage 1
+> admitted (or, where the final component is now a symbolic link, because stage 2 will not
+> follow one). So locality is still finally decided against the open object, exactly as §4
+> requires, while a root that is remote **as configured** is refused without being opened at
+> all. What remains open to the swap is one directory open of an object substituted after
+> admission — the substitution itself, not a configuration this ADR admits — and it is
+> refused on the mismatch, read through by nothing, and survived by no handle.
 
 > **Normative.** **Eligibility is decided over the whole backing chain and not over the
 > filesystem's type alone.** A filesystem type is necessary and **not sufficient**: an
@@ -844,7 +877,10 @@ scope is a smaller falsehood than any of those — it is, in fact, none.
 > and a root swapped onto network-backed storage is that move by another route, at whichever
 > layer the swap is made. This ADR
 > pre-authorises no such egress and does not seek to; it makes the configuration that would
-> perform one unwireable.
+> perform one unwireable, and the word is meant exactly: **no `Fetcher` is constructed over
+> such a root, and no read of the configured path is performed in refusing a root that is
+> remote as configured** — stage 1 decides from the platform's own tables, so that refusal
+> costs the network nothing.
 
 > **Normative.** The listing is the root's **direct children only** — no recursion, no
 > subdirectory traversal, no following of symbolic links out of the root — ordered
@@ -1270,8 +1306,10 @@ that line, so a later lane that erodes it meets a stop rather than a silence.
 `FetchRefusal`, `ReadKind.LOCAL_FILE` and `ReadAsk.entry` with its validator arm; the
 `Settings` fields of §6 and §4 with their named defaults and their load-time refusal;
 §6's **eligibility refusal on the root**, satisfying its fail-closed property over the
-backing chain and deciding it against the opened root handle rather than a pathname, in
-the concrete fetcher and not in `core`;
+backing chain in **both** of §6's stages — admitting the root from the platform's mount and
+device tables with nothing under the configured path opened, then binding the opened root
+handle and refusing on a mismatch with what was admitted — in the concrete fetcher and not
+in `core`;
 §4's token-and-handle mechanism, satisfying all three of its stated properties and its
 expiry, **in the fetcher and not in `core`** — the types carry the values and the fetcher
 owns what makes them unforgeable; the **shared conformance suite** for `Fetcher`; the
@@ -1318,8 +1356,8 @@ wiring, which constructs a `Fetcher` only where a root is configured.
 > owes `..`, a separator in `name`, a symlink out of the root, a replacement between
 > validation and acquisition, a growth past the bound between them, a replacement of
 > the **root's own pathname** by a symlink to an outside directory between the listing and
-> the fetch, and a replacement of that pathname between the constructor's locality probe
-> and its handle acquisition (§6) — a generic suite cannot replace an arbitrary fetcher's
+> the fetch, and a replacement of that pathname between the constructor's admission of
+> the root and its acquisition of the root handle (§6) — a generic suite cannot replace an arbitrary fetcher's
 > root, so these arms are the concrete fetcher's and not the suite's); and that the
 > listing is ordered most-recently-modified-first and capped. Each is named here so the
 > lane does not read its absence from the suite as its absence from the contract.
@@ -1458,24 +1496,6 @@ same reason; this decision adds a contract, so it adds a lane.
     **And the fetch is not itself an egress**, asserted on the same turn: servicing the ask
     engages no `DestinationProtocol` member, requires no confirmation of its own and routes
     through no egress seam, which is §8's property (b) asserted rather than only stated.
-20. **A root whose reads would leave the device does not wire, and neither does one whose
-    locality is merely unproven.** Five arms at construction, over a fetcher whose view of
-    the platform's mount and device information the test supplies: a root on a filesystem
-    the platform reports as network-attached refuses; a root whose filesystem type is
-    **unrecognised** refuses, which is the fail-closed arm that fails on any implementation
-    written as a deny-list; **a root on an allow-listed local filesystem type whose backing
-    device is network-attached — ext4 on an iSCSI or NBD volume — refuses**, which is the
-    arm that fails on any implementation deciding eligibility from the mount table's type
-    alone; and a root on an ordinary local filesystem over a local device constructs. Each
-    refusal is a configuration error that stops construction — no `Fetcher` exists
-    afterwards — and not an empty listing, not a `FetchRefusal` and not a degraded turn.
-    A deployment with no root configured constructs no fetcher and reaches no arm.
-    **And a fifth arm, over a real filesystem, for the construction-time race**: the root's
-    pathname is replaced — by a symlink to a remote-backed directory, or by a mount landing
-    on it — deterministically sequenced to land **between** any locality probe and the
-    handle acquisition. Construction either refuses or holds a handle on the original local
-    directory, and in **no** arm does a listing or a fetch read through the replacement.
-    This is the arm that fails on any implementation probing a pathname and then opening it.
 11. **The fetch is serviced before the hop and takes one slot.** A request carrying a
     `LOCAL_FILE` ask and a `CITATION_HOP` whose evidence would fill the budget produces a
     fourth group holding the fetched record first and exactly nine hop records after it, in
@@ -1520,6 +1540,32 @@ same reason; this decision adds a contract, so it adds a lane.
     validate as a `PlanExport` at all; both conforming `PlanStore` implementations export
     the new version; and `PROTOCOL_VERSION` reads 28 with `wire/envelope.py`'s log naming
     this ADR.
+20. **A root whose reads would leave the device does not wire, one whose locality is
+    merely unproven does not either, and refusing one reads nothing through it.** Six arms
+    at construction, over a fetcher whose view of the platform's mount and device
+    information the test supplies. Four decide admission: a root on a filesystem the
+    platform reports as network-attached refuses; a root whose filesystem type is
+    **unrecognised** refuses, which is the fail-closed arm that fails on any implementation
+    written as a deny-list; **a root on an allow-listed local filesystem type whose backing
+    device is network-attached — ext4 on an iSCSI or NBD volume — refuses**, which is the
+    arm that fails on any implementation deciding eligibility from the mount table's type
+    alone; and a root on an ordinary local filesystem over a local device constructs. Each
+    refusal is a configuration error that stops construction — no `Fetcher` exists
+    afterwards — and not an empty listing, not a `FetchRefusal` and not a degraded turn.
+    A deployment with no root configured constructs no fetcher and reaches no arm.
+    **A fifth arm asserts that the refusal cost no access**: with the filesystem calls the
+    constructor makes instrumented, a root the platform reports as network-attached is
+    refused **and no `open`, and no other call naming the configured path or anything
+    beneath it, is issued** — the constructor reads the platform's own mount and device
+    tables and nothing else. This is §6 stage 1 asserted rather than only stated, and it is
+    the arm that fails on any implementation opening the root before admitting it.
+    **And a sixth arm, over a real filesystem, for the construction-time race**: the root's
+    pathname is replaced — by a symlink to a remote-backed directory, or by a mount landing
+    on it — deterministically sequenced to land **between** stage 1's admission and stage
+    2's acquisition. Construction refuses, on stage 2's mismatch or on the symbolic link it
+    will not follow; the interval exists and the refusal is deterministic; and in **no** arm
+    does a listing or a fetch read through the replacement. This is the arm that fails on
+    any implementation that admits a root and then binds whatever its pathname later names.
 
 ### 15. Deferred, by name, each with what fires it
 
@@ -1766,6 +1812,18 @@ avoided: the record carries an attestation because it is in the attested band.
   a network, so a type-only check admits the ADR-0017 §1 egress the NFS case is, one layer
   down. §6 now requires the filesystem **and** its backing device to be established, names
   no construction as sufficient, and §14's item 20 carries the arm that fails a type-only
+  implementation.
+- **Opening the root first and deciding locality only against the opened handle.** It was
+  this ADR's answer for one round, and it is right about the *object* the property must be
+  established over — a pathname decided and then re-opened leaves the replacement interval
+  §4 rules out. Rejected because it pays the read it exists to refuse: the first `open` of a
+  directory on an NFS or SMB mount resolves remote metadata, and on ext4 over iSCSI it
+  issues remote block I/O, so a root refused for being remote has already been reached over
+  the network from `readers/` — the ADR-0017 §1 egress performed in the act of refusing it,
+  and a rejection that asserts no `Fetcher` survives while asserting nothing about what the
+  rejection cost. §6's two stages keep what was right about it — locality is finally decided
+  against the open object — and drop what was not, that the object may be opened before it
+  has been admitted. §14's item 20 carries the instrumented arm that fails an open-first
   implementation.
 - **Classifying a file by where it came from, so that a synced or downloaded copy is
   refused an attestation and a locally authored one is granted it.** It is the shape a scope
