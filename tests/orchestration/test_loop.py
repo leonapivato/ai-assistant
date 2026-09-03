@@ -235,7 +235,7 @@ async def test_a_learned_preference_is_reused_on_a_later_turn() -> None:
     memory = FakeMemoryStore(now=_clock)
     loop = _loop(memory=memory, planner=planner)
 
-    first = await loop.respond("draft a reply to Dana")
+    first = (await loop.respond("draft a reply to Dana")).turn
     assert first.memories == ()
     assert planner.calls[0][2] == ()
 
@@ -243,7 +243,7 @@ async def test_a_learned_preference_is_reused_on_a_later_turn() -> None:
     assert outcome.result.decision.kind is MemoryDecisionKind.ACCEPT
     assert outcome.result.record_id is not None
 
-    second = await loop.respond("draft a concise reply to Dana")
+    second = (await loop.respond("draft a concise reply to Dana")).turn
 
     assert [record.id for record in second.memories] == [outcome.result.record_id]
     learned = second.memories[0]
@@ -270,7 +270,7 @@ async def test_respond_plans_against_the_assembled_context() -> None:
     planner = FakePlanner(now=_clock)
     loop = _loop(context=provider, planner=planner)
 
-    result = await loop.respond("what is on tomorrow")
+    result = (await loop.respond("what is on tomorrow")).turn
 
     assert provider.call_count == 1
     assert result.context == context
@@ -281,7 +281,7 @@ async def test_respond_plans_against_the_assembled_context() -> None:
 async def test_respond_mints_a_user_asserted_goal_from_the_utterance() -> None:
     loop = _loop()
 
-    result = await loop.respond("  book the flight  ")
+    result = (await loop.respond("  book the flight  ")).turn
 
     assert result.goal.id == "goal-1"
     assert result.goal.statement == "book the flight"
@@ -366,7 +366,7 @@ async def test_a_derived_flood_cannot_displace_an_assertion_from_the_prompt() ->
         registry=FakeToolRegistry(),
     )
 
-    result = await loop.respond("dana")
+    result = (await loop.respond("dana")).turn
 
     ids = [record.id for record in result.memories]
     assert ids[0] == "told", (
@@ -400,7 +400,7 @@ async def test_respond_retrieves_at_most_the_configured_limit() -> None:
         registry=FakeToolRegistry(),
     )
 
-    result = await loop.respond("dana")
+    result = (await loop.respond("dana")).turn
 
     assert len(result.memories) == 2
 
@@ -443,7 +443,7 @@ async def test_an_untuned_loop_reads_the_default_page_and_that_page_is_thirty() 
         registry=FakeToolRegistry(),
     )
 
-    result = await loop.respond("dana")
+    result = (await loop.respond("dana")).turn
 
     assert _DEFAULT_RETRIEVAL_LIMIT == 30
     assert len(result.memories) == _DEFAULT_RETRIEVAL_LIMIT
@@ -454,7 +454,7 @@ async def test_respond_survives_a_retrieval_failure_and_says_so() -> None:
     planner = FakePlanner(now=_clock)
     loop = _loop(memory=_failing_store(), planner=planner)
 
-    result = await loop.respond("draft a reply to Dana")
+    result = (await loop.respond("draft a reply to Dana")).turn
 
     assert result.memory_degraded
     assert result.memories == ()
@@ -1411,9 +1411,11 @@ async def test_a_derived_belief_never_reaches_the_supplement() -> None:
     await memory.add(_belief("belief-3", "dana works on billing"))
     await memory.add(_episode("episode-1", "dana works on billing"))
 
-    result = await _supplementing_loop(memory, retrieval_limit=2, episodic_limit=2).respond(
-        "dana works on billing"
-    )
+    result = (
+        await _supplementing_loop(memory, retrieval_limit=2, episodic_limit=2).respond(
+            "dana works on billing"
+        )
+    ).turn
 
     assert [record.id for record in result.memories] == ["belief-1", "belief-2", "episode-1"]
 
@@ -1432,7 +1434,7 @@ async def test_an_episode_outside_the_derived_band_never_reaches_the_supplement(
     await memory.add(_episode("episode-1", "dana works on billing"))
     await memory.add(_foreign_episode("episode-2", "dana works on billing"))
 
-    result = await _supplementing_loop(memory).respond("dana works on billing")
+    result = (await _supplementing_loop(memory).respond("dana works on billing")).turn
 
     assert [record.id for record in result.memories] == ["belief-1", "episode-1"]
 
@@ -1451,7 +1453,9 @@ async def test_the_supplement_follows_the_belief_records() -> None:
     await memory.add(_episode("episode-1", "dana works on billing"))
     tail = _episode("tail-1", "dana works on billing")
 
-    result = await _supplementing_loop(memory).respond("dana works on billing", history=(tail,))
+    result = (
+        await _supplementing_loop(memory).respond("dana works on billing", history=(tail,))
+    ).turn
 
     assert [record.id for record in result.memories] == ["tail-1", "belief-1", "episode-1"]
 
@@ -1476,7 +1480,7 @@ async def test_the_leading_episodic_run_is_exactly_the_conversations_own_turns()
     await memory.add(_episode("episode-1", "dana works on billing"))
     tail = (_episode("tail-1", "dana works on billing"), _episode("tail-2", "and on payments"))
 
-    result = await _supplementing_loop(memory).respond("dana works on billing", history=tail)
+    result = (await _supplementing_loop(memory).respond("dana works on billing", history=tail)).turn
 
     leading = list(
         itertools.takewhile(
@@ -1502,7 +1506,9 @@ async def test_an_episode_already_in_the_tail_is_not_repeated_by_the_supplement(
     await memory.add(tail)
     await memory.add(_episode("episode-1", "dana works on billing"))
 
-    result = await _supplementing_loop(memory).respond("dana works on billing", history=(tail,))
+    result = (
+        await _supplementing_loop(memory).respond("dana works on billing", history=(tail,))
+    ).turn
 
     assert [record.id for record in result.memories] == ["tail-1", "belief-1", "episode-1"]
 
@@ -1521,7 +1527,7 @@ async def test_a_failing_episodic_read_costs_the_supplement_and_nothing_else() -
     await memory.add(_belief("belief-1", "dana works on billing"))
     await memory.add(_episode("episode-1", "dana works on billing"))
 
-    result = await _supplementing_loop(memory).respond("dana works on billing")
+    result = (await _supplementing_loop(memory).respond("dana works on billing")).turn
 
     assert [record.id for record in result.memories] == ["belief-1"]
     assert not result.memory_degraded
@@ -1546,7 +1552,7 @@ async def test_the_supplement_is_dropped_when_a_tail_would_absorb_it() -> None:
     await memory.add(_episode("episode-1", "tuesday standup"))
     tail = _episode("tail-1", "tuesday standup")
 
-    result = await _supplementing_loop(memory).respond("tuesday standup", history=(tail,))
+    result = (await _supplementing_loop(memory).respond("tuesday standup", history=(tail,))).turn
 
     assert [record.id for record in result.memories] == ["tail-1"]
     assert _supplement_reads(journal) == []
@@ -1564,7 +1570,7 @@ async def test_the_supplement_is_dropped_on_the_first_turn_of_a_fresh_conversati
     memory = FakeMemoryStore(now=_clock)
     await memory.add(_episode("episode-1", "tuesday standup"))
 
-    result = await _supplementing_loop(memory).respond("tuesday standup")
+    result = (await _supplementing_loop(memory).respond("tuesday standup")).turn
 
     assert result.memories == ()
 
@@ -1581,7 +1587,9 @@ async def test_a_bound_of_zero_issues_no_supplementary_read() -> None:
     await memory.add(_belief("belief-1", "dana works on billing"))
     await memory.add(_episode("episode-1", "dana works on billing"))
 
-    result = await _supplementing_loop(memory, episodic_limit=0).respond("dana works on billing")
+    result = (
+        await _supplementing_loop(memory, episodic_limit=0).respond("dana works on billing")
+    ).turn
 
     assert [record.id for record in result.memories] == ["belief-1"]
     assert not result.memory_degraded
@@ -1608,7 +1616,7 @@ async def test_tuning_accepts_the_smallest_useful_limit() -> None:
     """1 is the smallest retrieval limit that retrieves anything at all."""
     loop = _loop_with(retrieval_limit=1)
 
-    result = await loop.respond("hello")
+    result = (await loop.respond("hello")).turn
 
     assert result.goal.statement == "hello"
 
@@ -1657,7 +1665,7 @@ async def test_tuning_accepts_an_episodic_bound_equal_to_the_belief_budget() -> 
     """The ceiling is "never exceeds", not "always below" — equality is admitted."""
     loop = _loop_with(retrieval_limit=5, episodic_limit=5)
 
-    result = await loop.respond("hello")
+    result = (await loop.respond("hello")).turn
 
     assert result.goal.statement == "hello"
 
@@ -1684,7 +1692,7 @@ async def test_a_belief_budget_below_the_default_bound_is_tuning_and_not_an_erro
     """
     loop = _loop_with(retrieval_limit=retrieval_limit)
 
-    result = await loop.respond("hello")
+    result = (await loop.respond("hello")).turn
 
     assert result.goal.statement == "hello"
     assert loop._episodic_limit == min(_DEFAULT_EPISODIC_LIMIT, retrieval_limit)
@@ -1841,7 +1849,7 @@ async def test_a_registry_advertising_nothing_reaches_the_planner_as_an_empty_vo
     """
     planner = FakePlanner(now=_clock)
 
-    turn = await _loop(planner=planner, registry=FakeToolRegistry()).respond("book a flight")
+    turn = (await _loop(planner=planner, registry=FakeToolRegistry()).respond("book a flight")).turn
 
     assert planner.calls[0][3] == ()
     assert turn.plan.goal_id == turn.goal.id

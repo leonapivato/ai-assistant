@@ -38,6 +38,7 @@ production.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -83,6 +84,45 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.writes import MemoryWriteStage, WriteOutcome
 
 _log = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class RespondedTurn:
+    """One turn, and which of its records this turn's citation hop reached (ADR-0227 §3).
+
+    **The second field is supplied, never inferred.** ADR-0227 §3 rules that which
+    records the hop reached "is **supplied to the composing stage** by the component
+    that knows it, and is never inferred at the render site" — not from a record's
+    position in ``memories``, not from a prefix length, not from
+    ``Provenance.evidence`` read back at the renderer, and not from
+    ``ActionPlan.read_request``. Each of those reconstructions is wrong in a way a
+    test would not obviously catch: the first is a second implementation of ADR-0226
+    §6's order, the second marks records on turns that fired nothing, and the third
+    marks them on turns whose servicing failed.
+
+    **It rides beside the** :class:`~ai_assistant.core.types.TurnResult` **rather
+    than on it**, which is ADR-0227 §3's own reading of golden rule 5: the fact never
+    leaves ``orchestration``, so a field on a ``core`` type would version a surface
+    for a value one subsystem's own seam carries. Nothing here copies, mutates or
+    reconstructs a ``MemoryRecord``, and ADR-0226 §7's "constructed **once**, over
+    the deduplicated union" binds the ``TurnResult`` unchanged — this object holds
+    the very one :meth:`LearningLoop._turn` built.
+
+    Attributes:
+        turn: What the turn produced — goal, context, memories, plan, and whether
+            memory degraded.
+        hop_reached: ADR-0227 §3's carrier. The **distinct** ids of the records this
+            turn's citation hop reached that :attr:`turn`'s supply holds, in ADR-0226
+            §6's order — labels in the order the ask names them, and each labelled
+            record's evidence in the order that record stores it. **Ordered**,
+            because ADR-0227 §4's cap is taken over it in that order. Empty on every
+            turn that did not fire, whose servicing was declined, whose servicing
+            failed or was partial, and whose hop resolved no live record.
+    """
+
+    turn: TurnResult
+    hop_reached: tuple[str, ...] = ()
+
 
 #: A filter over the supply one turn runs on, applied **between retrieval and
 #: planning** (ADR-0203 §2).
@@ -522,7 +562,7 @@ class LearningLoop:
         history: Sequence[MemoryRecord] = (),
         history_degraded: bool = False,
         narrow: SupplyFilter | None = None,
-    ) -> TurnResult:
+    ) -> RespondedTurn:
         """Run one turn, and record what its planner asked to have read.
 
         The turn itself is :meth:`_turn`, which this method wraps for one reason:
@@ -552,7 +592,9 @@ class LearningLoop:
             narrow: The supply filter, or ``None`` (:meth:`_turn`).
 
         Returns:
-            The turn's goal, context, assembled memories and plan.
+            The turn — its goal, context, assembled memories and plan — beside
+            ADR-0227 §3's carrier naming which of those records this turn's citation
+            hop reached (:class:`RespondedTurn`).
 
         Raises:
             PlanningError: As :meth:`_turn` raises it.
@@ -578,7 +620,7 @@ class LearningLoop:
         history_degraded: bool,
         narrow: SupplyFilter | None,
         audit: TurnReadAudit,
-    ) -> TurnResult:
+    ) -> RespondedTurn:
         """Run one turn: intent, context, memory retrieval, planning.
 
         The stage order mirrors the pipeline in ``CLAUDE.md``, and each stage
@@ -704,9 +746,19 @@ class LearningLoop:
             audit: ADR-0226 §9's record for this turn, filled in as the stages
                 run and emitted by :meth:`respond` on every exit.
 
+        **And which records the hop reached rides out beside the turn** (ADR-0227
+        §3). The servicer is the one component that can distinguish a
+        ``CITATION_HOP``'s records from a ``SIGHTED_QUERY``'s, so it states the fact
+        and this method carries it — as data, in ADR-0226 §6's order, deduplicated by
+        identifier — to :class:`~ai_assistant.orchestration.engine.Engine`, which
+        hands it to the composing stage exactly as it hands ADR-0205 §5's delivery
+        facts. No identifier in it reaches a model, a log, a trace or ADR-0226 §9's
+        audit record (ADR-0227 §3), and this method reads nothing off it.
+
         Returns:
             The turn's goal, context, assembled memories and plan — each of them
-            over the supply ``narrow`` returned, where one was given.
+            over the supply ``narrow`` returned, where one was given — beside
+            ADR-0227 §3's carrier.
 
         Raises:
             PlanningError: If ``utterance`` is blank, the injected clock's
@@ -751,6 +803,11 @@ class LearningLoop:
         # `None`, or one a test supplies — has declared no posture, and §5 refuses
         # rather than guesses, which is the same fail-closed direction.
         bounded_audience = type(narrow) is BoundedAudienceSupply
+        # ADR-0227 §3's carrier, empty until a servicing fills it — which is the
+        # value every turn that did not fire, whose servicing was declined and whose
+        # servicing failed carries out of here, and "an empty set renders no reply
+        # line anywhere".
+        hop_reached: tuple[str, ...] = ()
         if not bounded_audience:
             # ADR-0203 §1: between retrieval and planning, and applied to the
             # context as well as to the records — a facet no ADR has placed is
@@ -795,7 +852,14 @@ class LearningLoop:
                 # degradation nor a `return` here. ADR-0226 §9's record is emitted
                 # from `respond`'s `finally` regardless, so a servicing that never
                 # finished must not leave one saying it completed.
-                await service_read_request(self._memory, request, supply=memories, audit=audit)
+                # ADR-0227 §3: the carrier is *returned* rather than written onto
+                # the audit, because ADR-0226 §9's record "copies no text" and
+                # carries "no identifier but the correlation id" — threading a
+                # render decision through it would put record identifiers on a
+                # surface whose whole discipline is that they are not there.
+                hop_reached = await service_read_request(
+                    self._memory, request, supply=memories, audit=audit
+                )
                 # §7: appended whole after the episodic supplement, never
                 # interleaved. The three groups keep their positions, their order
                 # and their meanings.
@@ -807,12 +871,15 @@ class LearningLoop:
             # the filter applied ahead of it — what moves is *when* the evaluation
             # is taken, so that it sees the group the planner asked for.
             context, memories = _narrowed(narrow, context, memories, retrieved_ids)
-        return TurnResult(
-            goal=goal,
-            context=context,
-            memories=memories,
-            plan=plan,
-            memory_degraded=degraded or history_degraded,
+        return RespondedTurn(
+            turn=TurnResult(
+                goal=goal,
+                context=context,
+                memories=memories,
+                plan=plan,
+                memory_degraded=degraded or history_degraded,
+            ),
+            hop_reached=hop_reached,
         )
 
     async def learn(self, event: FeedbackEvent) -> tuple[WriteOutcome, ...]:

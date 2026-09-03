@@ -1732,7 +1732,7 @@ async def _spoken_supply(
     recorded (the evaluation, narrowed).
     """
     supply = UnboundedAudienceSupply(speakable_attested_sources=frozenset())
-    turn = await _spoken_loop(memory).respond(utterance, history=history, narrow=supply)
+    turn = (await _spoken_loop(memory).respond(utterance, history=history, narrow=supply)).turn
     return turn, supply
 
 

@@ -101,6 +101,7 @@ from ai_assistant.core.types import (
     rests_on_recorded_external_content,
 )
 from ai_assistant.orchestration.payloads import JSON_STRING_QUOTE_BYTES, encoded_text_bytes
+from ai_assistant.orchestration.reads import READ_BUDGET
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
@@ -483,7 +484,7 @@ class ComposingStage:
         self._model = model
         self._streaming = streaming
 
-    async def compose(  # noqa: PLR0913 — the turn, the step, the undriven steps, the channel's audience, the withholding fact and the tail's delivery facts; each is a distinct input this stage is given
+    async def compose(  # noqa: PLR0913 — the turn, the step, the undriven steps, the channel's audience, the withholding fact, the tail's delivery facts and the hop's reach; each is a distinct input this stage is given
         self,
         *,
         turn: TurnResult,
@@ -492,6 +493,7 @@ class ComposingStage:
         unbounded_audience: bool = False,
         withheld: bool = False,
         deliveries: Mapping[str, SpokenDelivery] = MappingProxyType({}),
+        hop_reached: Sequence[str] = (),
     ) -> ComposedReply:
         """Compose the answer for one turn, or say that composing it failed.
 
@@ -539,6 +541,16 @@ class ComposingStage:
                 withheld record takes its delivery with it. Empty on a turn whose
                 tail carries none, which is every turn until one has run on
                 ``converse_spoken``.
+            hop_reached: Which records of ``turn.memories`` this turn's **citation
+                hop** reached, in ADR-0226 §6's order (ADR-0227 §3). **Supplied, not
+                inferred**: it is stated at the servicer, which is the one component
+                that can tell a ``CITATION_HOP``'s records from a
+                ``SIGHTED_QUERY``'s, and this stage derives it from nothing — not
+                from a record's position, not from a prefix length, and not from
+                ``Provenance.evidence`` read back here. Empty on every turn that did
+                not fire, whose servicing was declined, whose servicing failed, and
+                whose hop resolved no live record, and an empty carrier makes the
+                assembled prompt byte-identical to what it was before ADR-0227.
 
         Returns:
             The answer, or a degraded report where the call raised a ``ModelError``
@@ -560,7 +572,12 @@ class ComposingStage:
             Message(
                 role=Role.USER,
                 content=_render_request(
-                    turn, step, undriven, withheld=withheld, deliveries=deliveries
+                    turn,
+                    step,
+                    undriven,
+                    withheld=withheld,
+                    deliveries=deliveries,
+                    hop_reached=hop_reached,
                 ),
             ),
         )
@@ -712,7 +729,7 @@ class ComposingStage:
             _log.warning("reply_composition_truncated", chunks=len(answer.published))
         yield ComposedReply(text=answer.text, degraded=stopped)
 
-    async def compose_streaming(
+    async def compose_streaming(  # noqa: PLR0913 — the turn, the step, the undriven steps, the streaming room, the tail's delivery facts and the hop's reach; each is a distinct input this stage is given
         self,
         *,
         turn: TurnResult,
@@ -720,6 +737,7 @@ class ComposingStage:
         undriven: Sequence[PlanStep],
         room: int,
         deliveries: Mapping[str, SpokenDelivery] = MappingProxyType({}),
+        hop_reached: Sequence[str] = (),
     ) -> AsyncIterator[ReplyChunk | ComposedReply]:
         """Compose the answer as it arrives, yielding chunks then one report.
 
@@ -774,6 +792,8 @@ class ComposingStage:
                 nothing here is withheld — but its tail can still carry a turn the
                 owner did not hear, and §5 supplies the facts wherever they are
                 known rather than by the channel this turn arrived on.
+            hop_reached: Which records this turn's citation hop reached, as
+                :meth:`compose` takes them (ADR-0227 §3).
 
         Yields:
             Each :class:`~ai_assistant.core.types.ReplyChunk` as it is composed, and
@@ -791,7 +811,12 @@ class ComposingStage:
             Message(
                 role=Role.USER,
                 content=_render_request(
-                    turn, step, undriven, withheld=False, deliveries=deliveries
+                    turn,
+                    step,
+                    undriven,
+                    withheld=False,
+                    deliveries=deliveries,
+                    hop_reached=hop_reached,
                 ),
             ),
         )
@@ -962,13 +987,14 @@ def _system_prompt(base: str, *, unbounded_audience: bool, withheld: bool) -> st
     return "\n\n".join(clauses)
 
 
-def _render_request(
+def _render_request(  # noqa: PLR0913 — one parameter per block this prompt is assembled from
     turn: TurnResult,
     step: StepOutcome | None,
     undriven: Sequence[PlanStep],
     *,
     withheld: bool,
     deliveries: Mapping[str, SpokenDelivery],
+    hop_reached: Sequence[str] = (),
 ) -> str:
     """Render the whole of what the stage was given into the user-turn prompt.
 
@@ -1003,6 +1029,8 @@ def _render_request(
         withheld: Whether ADR-0199 §3 held anything back from ``turn``.
         deliveries: What a device reported playing of each turn of the tail, keyed
             by the episode it qualifies (ADR-0205 §5).
+        hop_reached: Which records of ``turn.memories`` this turn's citation hop
+            reached, in ADR-0226 §6's order (ADR-0227 §3).
 
     Returns:
         The user-turn prompt.
@@ -1014,7 +1042,12 @@ def _render_request(
     ]
     lines += _render_context(turn.context)
     lines.append("")
-    lines += _render_memories(turn.memories, degraded=turn.memory_degraded, deliveries=deliveries)
+    lines += _render_memories(
+        turn.memories,
+        degraded=turn.memory_degraded,
+        deliveries=deliveries,
+        hop_reached=hop_reached,
+    )
     if withheld:
         lines.append("")
         lines.append(_WITHHELD_LINE)
@@ -1124,6 +1157,7 @@ def _render_memories(
     *,
     degraded: bool,
     deliveries: Mapping[str, SpokenDelivery],
+    hop_reached: Sequence[str] = (),
 ) -> list[str]:
     """Render the conversation's own turns, then what the turn retrieved.
 
@@ -1168,6 +1202,30 @@ def _render_memories(
     one did you recommend?", asked of the turn before — is a property of the
     conversation, and the conversation is the tail.
 
+    **And a record this turn's citation hop reached renders its reply too**
+    (ADR-0227 §1), wherever in the trailing group it sits. That is the same line, in
+    the same shape and the same order, over a further population — and the test is
+    *why the record is there* rather than which group it is in: "a record the hop
+    resolved through a named label's ``Provenance.evidence`` renders its reply
+    whether it entered the fourth group or was deduplicated out against the
+    pre-servicing supply". A group-shaped test would render the exact record a belief
+    cites phrase-only whenever the episodic supplement had already picked it up,
+    which is #1944's failure on a turn that looks like a success.
+
+    **The conversation tail is excluded from that rule and rendered by ADR-0222 §1
+    alone** (ADR-0227 §1's fourth clause). A hop reaching a tail record is ordinary —
+    a belief distilled from this conversation cites this conversation's episodes — and
+    if this ADR reached it too, one conforming implementation would write two reply
+    lines under one bullet and count one record twice in §5's pair. The split
+    :func:`_split_conversation_tail` performs here is the authority on which group a
+    record is in, and :func:`_hop_reply_lines` reads it rather than recomputing it.
+
+    **The sighted query's records, the retrieved group and the episodic supplement
+    all stay phrase-only** (ADR-0227 §2): a query is a relevance selection performed
+    through ``assemble_by_band`` against a key the reply is not in, so ADR-0222 §2's
+    first reason reaches it in its own words. Nothing here marks them, because
+    ``hop_reached`` names only what the hop reached.
+
     **§5's counter pair is emitted here, once per assembly, and always.** One
     statement carries both integers — the records eligible to render a reply, and how
     many §4's ceiling bound on — so the denominator and the numerator of the elision
@@ -1176,9 +1234,26 @@ def _render_memories(
     rather than staying silent, so a missing pair is distinguishable from an empty
     one, and the statement carries **no reply text** at all (ADR-0004 §5, ADR-0221
     §11's test 14). ADR-0222 §5 states why these two counts cannot ride an
-    ``OPERATION`` trace instead.
+    ``OPERATION`` trace instead. ADR-0227 §5 puts this ADR's own population on that
+    same one statement rather than beside it in a second: both populations are
+    stored ``outcome``s written by one capture site, so one share over both answers
+    the ceiling question on a larger sample, and splitting the pair would break
+    ADR-0141 §6's discipline that a figure's numerator and denominator ride one
+    emitted statement.
+
+    Args:
+        memories: The turn's supply, in the order the turn assembled it.
+        degraded: Whether the turn's memory reads degraded.
+        deliveries: What a device reported playing of each turn of the tail
+            (ADR-0205 §5).
+        hop_reached: Which records this turn's citation hop reached, in ADR-0226
+            §6's order (ADR-0227 §3).
+
+    Returns:
+        The rendered block, line by line.
     """
     turns, retrieved = _split_conversation_tail(memories)
+    hop_replies = _hop_reply_lines(retrieved, hop_reached)
     lines: list[str] = []
     eligible = elided = 0
     if turns:
@@ -1193,7 +1268,17 @@ def _render_memories(
         lines.append("")
     lines.append(_RETRIEVED_HEADING)
     if retrieved:
-        lines += [_render_record(record) for record in retrieved]
+        for record in retrieved:
+            lines.append(_render_record(record))
+            # ADR-0227 §1, emitted by the caller and never by `_render_record` —
+            # ADR-0222 §1's third clause binds this line word for word, because
+            # `benchmarks/memory/answer.py` imports the record renderer by name and
+            # a line inside it is a line the harness's prompt grows.
+            hopped = hop_replies.get(record.id)
+            if hopped is not None:
+                lines += hopped.lines
+                eligible += hopped.eligible
+                elided += hopped.elided
     else:
         lines.append("  (nothing was retrieved for this turn)")
     if degraded:
@@ -1367,9 +1452,10 @@ class _ReplyLines(NamedTuple):
         lines: The continuation line to write under the record's own bullet, or
             nothing where the record is not one §1 admits.
         eligible: ``1`` where the record was eligible to render a reply under
-            ADR-0222 §1 — a conversation-tail episode carrying a ``disposition``
-            **and** an ``outcome`` — and ``0`` otherwise. §5's denominator, per
-            record.
+            ADR-0222 §1 or ADR-0227 §1 — an episode carrying a ``disposition``
+            **and** an ``outcome``, in the conversation tail or reached by this
+            turn's citation hop — and ``0`` otherwise. ADR-0222 §5's denominator, per
+            record, over the one pair ADR-0227 §5 keeps for both populations.
         elided: ``1`` where §4's ceiling bound on that reply, ``0`` otherwise. §5's
             numerator, per record, and never greater than ``eligible``.
     """
@@ -1380,11 +1466,22 @@ class _ReplyLines(NamedTuple):
 
 
 def _reply_lines(record: MemoryRecord) -> _ReplyLines:
-    """The reply line ADR-0222 §1 adds under one **conversation-tail** record's bullet.
+    """The reply line ADR-0222 §1 adds under one record's bullet, over two populations.
 
-    **Called by the tail loop and never by :func:`_render_record`** (§1's third
-    clause). It is exactly the shape :func:`_render_delivery` already has for
-    ADR-0205 §5's delivery fact — a continuation line appended by the caller, under
+    **One renderer, two callers, and each caller owns which records it offers**
+    (ADR-0227 §1). ADR-0222 §1 puts the line under a **conversation-tail** record's
+    bullet and ADR-0227 §1 puts the same line, "in ADR-0222 §1's shape and order",
+    under a record **this turn's citation hop reached** — so the condition on the
+    record is one condition, written here once, and the two populations are decided by
+    :func:`_render_memories`'s tail loop and by :func:`_hop_reply_lines`. This
+    function takes no view of which group a record is in, which is what keeps
+    ADR-0227 §1's "one bullet, one reply line" true of a tail record a hop also
+    reached: it is offered here once, by the tail loop, and never by the other.
+
+    **Called by those two and never by :func:`_render_record`** (ADR-0222 §1's third
+    clause, which ADR-0227 §1 binds word for word). It is exactly the shape
+    :func:`_render_delivery` already has for ADR-0205 §5's delivery fact — a
+    continuation line appended by the caller, under
     the record's own bullet, unreachable from the record renderer — and the reason is
     the same one §1 gives: ``benchmarks/memory/answer.py`` imports
     ``planner._render_record`` by name, so a line put inside a record renderer is a
@@ -1397,11 +1494,15 @@ def _reply_lines(record: MemoryRecord) -> _ReplyLines:
     while this line states what the user was actually shown. Either alone is a
     half-truth, so no site trades one for the other.
 
-    **The retrieved group gets none of this** (§2), which is why this is called from
-    the tail loop and not from the retrieved one. It is the same line ADR-0205 §5
-    drew at this very site for the delivery fact, and for the same reason: "the
+    **The retrieved group, the episodic supplement and the sighted query's records
+    get none of this** (ADR-0222 §2, ADR-0227 §2), which is why neither caller offers
+    a record merely because it is in the trailing group. It is the same line ADR-0205
+    §5 drew at this very site for the delivery fact, and for the same reason: "the
     retrieved group carries none, because §5 supplies the facts off the replay tail
-    and a record retrieved by relevance is not one of those rows".
+    and a record retrieved by relevance is not one of those rows". ADR-0227 §6 argues
+    the exception it does make from ADR-0222 §2's own three reasons: the hop "selects
+    nothing by relevance: it is a **keyed load**", so there is no search key for the
+    reply's vocabulary to fail to match, and the record was fetched *for* the reply.
 
     **The marker is held data and sits outside the quoted span** (§5, ADR-0098 §2).
     A marker written *inside* the quoted reply is a string the reply itself could
@@ -1412,10 +1513,14 @@ def _reply_lines(record: MemoryRecord) -> _ReplyLines:
     line carries the reply whole.
 
     Args:
-        record: One record of the conversation-tail group.
+        record: One record either caller admits — of the conversation-tail group
+            (ADR-0222 §1), or one this turn's citation hop reached (ADR-0227 §1).
 
     Returns:
         The line to write under its bullet, and §5's two counts for this record.
+        ``eligible`` is ``0`` — and the lines empty — for a record neither §1 admits:
+        one that is not an episode, and one carrying no ``disposition`` or no
+        ``outcome``.
     """
     if not isinstance(record, EpisodicMemory):  # pragma: no cover — the tail is episodic
         return _ReplyLines([], eligible=0, elided=0)
@@ -1432,6 +1537,69 @@ def _reply_lines(record: MemoryRecord) -> _ReplyLines:
         eligible=1,
         elided=1,
     )
+
+
+def _hop_reply_lines(
+    retrieved: Sequence[MemoryRecord], hop_reached: Sequence[str]
+) -> dict[str, _ReplyLines]:
+    """Which non-tail records render a reply line under ADR-0227 §1, and what it says.
+
+    **The two halves of one rule, decided where each is known** (ADR-0227 §3). The
+    servicer fixed the order — ADR-0226 §6's labels-then-evidence order, deduplicated
+    by identifier — and this function applies the two things only the render site
+    knows: §1's **tail exclusion** and §4's **cap**. It computes neither the hop's
+    order nor the conversation-tail split of its own; ``retrieved`` is what
+    :func:`_split_conversation_tail` returned at the one call site, so a record of the
+    conversation tail simply is not here and renders its reply under ADR-0222 §1
+    alone, once, exactly as it does on a turn with no emission.
+
+    **The cap counts lines and not records** (ADR-0227 §4). It is taken over the
+    distinct records the hop reached "that §1 admits and that §1's tail exclusion
+    leaves", so a hop-reached belief, a hop-reached episode with no ``outcome``, and a
+    record a supply filter removed after the servicing consume no position of it: none
+    of them would render a line, and a cap that counted them would bound something
+    other than the lines §4 is the arithmetic for. What it admits is capped at
+    :data:`~ai_assistant.orchestration.reads.READ_BUDGET` — **read** from ADR-0226
+    §6's own constant rather than restated, because §4 introduces "no new ceiling, no
+    new constant and no new elision rule" and ten is "already this decision's
+    neighbour's number".
+
+    **A record the cap excludes renders exactly as it renders today** — its bullet and
+    its phrase line — and no site writes a marker, a count or an "and *N* more" line
+    about the exclusion, in the prompt or anywhere else. That is the same silence §4
+    already requires of a record ADR-0226 §6's budget cut.
+
+    **`dict.fromkeys` is §4's deduplication restated where §4 puts the cap.** The
+    servicer already hands over distinct ids; taking the cap over an order-preserving
+    deduplication of them makes "the first ten" well defined at the site that takes it
+    rather than true only because of what another module promised.
+
+    Args:
+        retrieved: The trailing group :func:`_split_conversation_tail` returned — the
+            supply with the conversation tail removed.
+        hop_reached: ADR-0227 §3's carrier: which records this turn's citation hop
+            reached, in ADR-0226 §6's order.
+
+    Returns:
+        The reply line and §5's two counts for each record that renders one, keyed by
+        record id. Empty where the hop reached nothing this section admits, which
+        makes the assembled prompt byte-identical to what it was before ADR-0227.
+    """
+    if not hop_reached:
+        return {}
+    by_id = {record.id: record for record in retrieved}
+    admitted: dict[str, _ReplyLines] = {}
+    for identifier in dict.fromkeys(hop_reached):
+        record = by_id.get(identifier)
+        if record is None:
+            continue
+        reply = _reply_lines(record)
+        if not reply.eligible:
+            continue
+        admitted[identifier] = reply
+        if len(admitted) == READ_BUDGET:
+            break
+    return admitted
 
 
 def _split_conversation_tail(

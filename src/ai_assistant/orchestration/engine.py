@@ -1438,8 +1438,8 @@ type _RoutedComposer = Callable[[RoutedOperation, str], Awaitable["ComposedReply
 
 
 #: How an ordinary pass composes its answer: what the turn produced, what became of the
-#: step it drove, the conversation the streaming ceiling is measured against, and the
-#: tail's delivery facts.
+#: step it drove, the conversation the streaming ceiling is measured against, the
+#: tail's delivery facts, and which records this turn's citation hop reached.
 #:
 #: **The fourth member is ADR-0205 §5's supplied fact**, keyed by the episode it
 #: qualifies, and it is an argument rather than a member of the turn for the reason §5
@@ -1448,12 +1448,22 @@ type _RoutedComposer = Callable[[RoutedOperation, str], Awaitable["ComposedReply
 #: ``converse`` whose tail carries a delivery is a real case, the owner who speaks, is
 #: interrupted, and then types — because the facts are about the tail's deliveries and
 #: not about this turn's channel.
+#:
+#: **The fifth is ADR-0227 §3's carrier and travels for the same reason**: it is a
+#: supplied *input* to the composing stage, stated at the servicer — "the one place
+#: ``CITATION_HOP`` and ``SIGHTED_QUERY`` are distinguishable" — and never inferred at
+#: the render site, which §3 refuses on three named reconstructions each of which is
+#: unsound rather than merely inelegant. It reaches every composer for the delivery
+#: fact's reason: what it is about is how a record was fetched, not what channel this
+#: turn arrived on. It is **ordered**, because ADR-0227 §4's cap is taken over it in
+#: ADR-0226 §6's order.
 type _Composer = Callable[
     [
         "TurnResult | None",
         StepOutcome | None,
         str,
         "Mapping[str, SpokenDelivery]",
+        "Sequence[str]",
     ],
     Awaitable["ComposedReply | None"],
 ]
@@ -3903,12 +3913,13 @@ class Engine:
             )
         return spoken
 
-    async def _composed_spoken(
+    async def _composed_spoken(  # noqa: PLR0913 — the turn, the step, the conversation, the delivery facts, the hop's reach and the supply applier; every one is a distinct fact about the pass
         self,
         turn: TurnResult | None,
         step: StepOutcome | None,
         conversation: str,
         deliveries: Mapping[str, SpokenDelivery],
+        hop_reached: Sequence[str],
         *,
         supply: UnboundedAudienceSupply,
     ) -> ComposedReply | None:
@@ -3967,6 +3978,14 @@ class Engine:
             conversation: Accepted and dropped, as :meth:`_composed_whole` drops it.
             deliveries: What a device reported playing of each surviving turn of the
                 tail, keyed by the episode it qualifies (ADR-0205 §5).
+            hop_reached: Which records this turn's citation hop reached (ADR-0227
+                §3). **Always empty here**: ADR-0226 §5 declines to service a read
+                request on an operation whose output channel's audience is unbounded,
+                so this operation's supply stays the three groups ADR-0203 §1
+                narrowed and no hop has reached anything. It is accepted rather than
+                dropped so that :data:`_Composer`'s shape is one shape, and passed on
+                rather than replaced with ``()`` so that no site here holds a second
+                statement of §5's scoping.
             supply: The applier this call minted, read for the bare fact of whether
                 anything was held back. Bound by :meth:`converse_spoken` rather than
                 passed by :meth:`_run_turn`, which knows nothing of disclosure.
@@ -3987,6 +4006,7 @@ class Engine:
             unbounded_audience=True,
             withheld=supply.withheld,
             deliveries=deliveries,
+            hop_reached=hop_reached,
         )
 
     async def resume(
@@ -7273,8 +7293,11 @@ class Engine:
             step: StepOutcome | None,
             conversation: str,
             deliveries: Mapping[str, SpokenDelivery],
+            hop_reached: Sequence[str],
         ) -> ComposedReply | None:
-            return await self._compose_streaming(turn, step, conversation, chunks, deliveries)
+            return await self._compose_streaming(
+                turn, step, conversation, chunks, deliveries, hop_reached
+            )
 
         async def compose_routed(
             routed: RoutedOperation, conversation: str
@@ -7301,6 +7324,7 @@ class Engine:
         step: StepOutcome | None,
         conversation: str,
         deliveries: Mapping[str, SpokenDelivery],
+        hop_reached: Sequence[str],
     ) -> ComposedReply | None:
         """Compose atomically, ignoring the conversation the streaming twin needs.
 
@@ -7315,9 +7339,13 @@ class Engine:
         the owner speaks, is interrupted, and then types — and an answer that was not
         heard is one no turn should build on, whatever channel the next turn arrives
         by. The facts are about the tail's deliveries, not about this turn's channel.
+
+        **And so does ADR-0227 §3's carrier**, for a reason of the same shape: what it
+        says is which records this turn's citation hop reached, which is a fact about
+        how those records were fetched and not about where the answer is going.
         """
         del conversation
-        return await self._compose(turn, step, deliveries=deliveries)
+        return await self._compose(turn, step, deliveries=deliveries, hop_reached=hop_reached)
 
     async def _run_turn(  # noqa: PLR0913 — the utterance, the budget, the conversation, the two composers, the supply filter and the spoken capture; every one is a distinct fact about the pass, and collapsing any pair would put a flag where a value belongs
         self,
@@ -7416,12 +7444,19 @@ class Engine:
                 spoken=spoken,
             )
         history = await self._conversations.history(conversation.id)
-        turn = await self._loop.respond(
+        # ADR-0227 §3: the turn and, beside it, which of its records this turn's
+        # citation hop reached. Supplied by the loop — the servicer under it is the
+        # one component that can distinguish the two kinds — and carried to the
+        # composing stage exactly as the delivery facts below are, never inferred
+        # here and never read off `turn.memories`.
+        responded = await self._loop.respond(
             utterance,
             history=history.records,
             history_degraded=history.degraded,
             narrow=supply,
         )
+        turn = responded.turn
+        hop_reached = responded.hop_reached
         # ADR-0205 §5: the fact travels with the episode it qualifies and never
         # without it. `turn.memories` is the supply as `narrow` returned it, so
         # intersecting here is what makes a withheld record's delivery unreachable by
@@ -7459,7 +7494,7 @@ class Engine:
             # persisted as an auditable record (ADR-0014 §2).
             await self._plans.save_goal(turn.goal)
             await self._plans.save_plan(turn.plan)
-            composed = await compose(turn, None, conversation.id, deliveries)
+            composed = await compose(turn, None, conversation.id, deliveries, hop_reached)
             return await self._capture(
                 conversation.id,
                 turn=turn,
@@ -7527,7 +7562,7 @@ class Engine:
         # (#1314) — so composing first is chosen for the reason that the capture
         # point is the single place a ``TurnOutcome`` is built, and folding one more
         # already-computed value into it beats threading a second construction site.
-        composed = await compose(turn, step, conversation.id, deliveries)
+        composed = await compose(turn, step, conversation.id, deliveries, hop_reached)
         return await self._capture(
             conversation.id,
             turn=turn,
@@ -8277,6 +8312,7 @@ class Engine:
         step: StepOutcome | None,
         *,
         deliveries: Mapping[str, SpokenDelivery],
+        hop_reached: Sequence[str] = (),
     ) -> ComposedReply | None:
         """Compose this pass's answer, or decline to on the shapes that owe none.
 
@@ -8313,16 +8349,21 @@ class Engine:
             () if step is None else tuple(one for one in turn.plan.steps if one.id != step.step_id)
         )
         return await self._composing.compose(
-            turn=turn, step=step, undriven=undriven, deliveries=deliveries
+            turn=turn,
+            step=step,
+            undriven=undriven,
+            deliveries=deliveries,
+            hop_reached=hop_reached,
         )
 
-    async def _compose_streaming(
+    async def _compose_streaming(  # noqa: PLR0913 — the turn, the step, the conversation, the chunk queue, the delivery facts and the hop's reach; each is a distinct input, as on :meth:`_compose`
         self,
         turn: TurnResult | None,
         step: StepOutcome | None,
         conversation_id: str,
         chunks: asyncio.Queue[ReplyChunk],
         deliveries: Mapping[str, SpokenDelivery],
+        hop_reached: Sequence[str] = (),
     ) -> ComposedReply | None:
         """Stream this pass's answer onto ``chunks``, and report what it composed.
 
@@ -8363,6 +8404,7 @@ class Engine:
             undriven=undriven,
             room=self._reply_room(turn=turn, step=step, conversation_id=conversation_id),
             deliveries=deliveries,
+            hop_reached=hop_reached,
         )
         async with closing_stream(stream) as composing:
             async for produced in composing:
@@ -8517,6 +8559,11 @@ class Engine:
         # told nothing about delivery, which is not the same as being told the tail
         # was heard — the renderer writes a line only where it has a fact, and asserts
         # nothing where it has none.
+        # **And no hop reach either, for the same reason** (ADR-0227 §3). A resume
+        # runs no planner, emits no request and services no read, so there is nothing
+        # this turn's citation hop reached; the parked ``TurnResult`` is recovered
+        # rather than reassembled, and §3's carrier is empty on every turn that did
+        # not fire.
         composed = await self._compose(parked.turn, step, deliveries={})
         return await self._capture_resumption(parked, step, composed)
 

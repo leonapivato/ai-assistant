@@ -542,7 +542,7 @@ async def test_a_sufficed_turn_pays_no_read_and_is_recorded_as_a_non_firing() ->
     supply = _bounded()
 
     with structlog.testing.capture_logs() as captured:
-        turn = await _loop(memory).respond("dana works on billing", narrow=supply)
+        turn = (await _loop(memory).respond("dana works on billing", narrow=supply)).turn
 
     assert _ids(turn.memories) == ["belief-1"]
     assert memory.keyed == []
@@ -579,9 +579,9 @@ async def test_an_unresolvable_label_adds_nothing_and_is_recorded_as_dropped(lab
     planner = FakePlanner(now=_clock, read_request=_hop(label))
 
     with structlog.testing.capture_logs() as captured:
-        turn = await _loop(memory, planner=planner).respond(
-            "dana works on billing", narrow=_bounded()
-        )
+        turn = (
+            await _loop(memory, planner=planner).respond("dana works on billing", narrow=_bounded())
+        ).turn
 
     assert _ids(turn.memories) == ["belief-1"]
     record = _record(captured)
@@ -609,9 +609,9 @@ async def test_a_label_whose_record_is_no_longer_live_resolves_to_nothing() -> N
     planner = _DeletingPlanner(memory, "belief-1", _hop("M1"))
 
     with structlog.testing.capture_logs() as captured:
-        turn = await _loop(memory, planner=planner).respond(
-            "dana works on billing", narrow=_bounded()
-        )
+        turn = (
+            await _loop(memory, planner=planner).respond("dana works on billing", narrow=_bounded())
+        ).turn
 
     assert _ids(planner.calls[0]) == ["belief-1"]
     assert _ids(turn.memories) == ["belief-1"], "the supply is what planning saw"
@@ -652,7 +652,9 @@ async def test_an_unbounded_audience_operation_services_nothing(request_: ReadRe
     supply = _unbounded()
 
     with structlog.testing.capture_logs() as captured:
-        turn = await _loop(memory, planner=planner).respond("dana works on billing", narrow=supply)
+        turn = (
+            await _loop(memory, planner=planner).respond("dana works on billing", narrow=supply)
+        ).turn
 
     assert _ids(turn.memories) == ["belief-1"]
     assert memory.keyed == []
@@ -703,7 +705,7 @@ async def test_a_serviced_record_sets_the_value_the_capture_records(
     planner = FakePlanner(now=_clock, read_request=_hop("M1"))
     supply = _bounded()
 
-    turn = await _loop(memory, planner=planner).respond("billing schedule", narrow=supply)
+    turn = (await _loop(memory, planner=planner).respond("billing schedule", narrow=supply)).turn
 
     assert _ids(planner.calls[0][2]) == ["belief-1"], "the planner saw three groups"
     assert _ids(turn.memories) == ["belief-1", "secret-1"], "nothing was dropped"
@@ -722,7 +724,7 @@ async def test_the_same_supply_without_the_servicing_records_no_withholding() ->
     await memory.add(_belief("secret-1", "the appointment on thursday", about_person="Sam"))
     supply = _bounded()
 
-    turn = await _loop(memory).respond("billing schedule", narrow=supply)
+    turn = (await _loop(memory).respond("billing schedule", narrow=supply)).turn
 
     assert _ids(turn.memories) == ["belief-1"]
     assert supply.withheld is False
@@ -754,9 +756,11 @@ async def test_the_hop_is_serviced_before_the_query_and_the_budget_truncates_it(
     planner = FakePlanner(now=_clock, read_request=_both("unfiled billing note", "M1"))
 
     with structlog.testing.capture_logs() as captured:
-        turn = await _loop(memory, planner=planner, retrieval_limit=1).respond(
-            "billing schedule", narrow=_bounded()
-        )
+        turn = (
+            await _loop(memory, planner=planner, retrieval_limit=1).respond(
+                "billing schedule", narrow=_bounded()
+            )
+        ).turn
 
     fourth = _ids(turn.memories)[1:]
     assert fourth[:4] == list(cited), "the hop's records, in the order it named them"
@@ -784,9 +788,11 @@ async def test_a_hop_that_exhausts_the_budget_leaves_the_query_no_slots() -> Non
     planner = FakePlanner(now=_clock, read_request=_both("billing note", "M1"))
 
     with structlog.testing.capture_logs() as captured:
-        turn = await _loop(memory, planner=planner, retrieval_limit=1).respond(
-            "billing schedule", narrow=_bounded()
-        )
+        turn = (
+            await _loop(memory, planner=planner, retrieval_limit=1).respond(
+                "billing schedule", narrow=_bounded()
+            )
+        ).turn
 
     assert _ids(turn.memories)[1:] == list(cited[:READ_BUDGET])
     record = _record(captured)
@@ -818,9 +824,11 @@ async def test_a_servicing_whose_candidates_exceed_ten_returns_ten() -> None:
         await memory.add(_belief(record_id, "an earlier billing exchange"))
     planner = FakePlanner(now=_clock, read_request=_hop("M1"))
 
-    turn = await _loop(memory, planner=planner, retrieval_limit=1).respond(
-        "billing schedule", narrow=_bounded()
-    )
+    turn = (
+        await _loop(memory, planner=planner, retrieval_limit=1).respond(
+            "billing schedule", narrow=_bounded()
+        )
+    ).turn
 
     assert _ids(turn.memories)[1:] == list(cited[:READ_BUDGET])
 
@@ -841,7 +849,9 @@ async def test_a_record_already_in_the_supply_is_deduplicated_out_of_the_fourth_
     planner = FakePlanner(now=_clock, read_request=_hop("M1"))
 
     with structlog.testing.capture_logs() as captured:
-        turn = await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+        turn = (
+            await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+        ).turn
 
     assert _ids(turn.memories) == ["belief-1", "belief-2", "cited-1"]
     record = _record(captured)
@@ -866,9 +876,11 @@ async def test_a_record_both_kinds_return_enters_the_fourth_group_once() -> None
     planner = FakePlanner(now=_clock, read_request=_both("unfiled billing", "M1"))
 
     with structlog.testing.capture_logs() as captured:
-        turn = await _loop(memory, planner=planner, retrieval_limit=1).respond(
-            "schedule notes", narrow=_bounded()
-        )
+        turn = (
+            await _loop(memory, planner=planner, retrieval_limit=1).respond(
+                "schedule notes", narrow=_bounded()
+            )
+        ).turn
 
     fourth = _ids(turn.memories)[1:]
     assert fourth.count("shared-1") == 1
@@ -898,8 +910,8 @@ async def test_one_request_over_a_fixed_candidate_set_produces_one_order() -> No
     planner = FakePlanner(now=_clock, read_request=_both("unfiled billing note", "M1"))
     loop = _loop(memory, planner=planner, retrieval_limit=1)
 
-    first = await loop.respond("billing schedule", narrow=_bounded())
-    second = await loop.respond("billing schedule", narrow=_bounded())
+    first = (await loop.respond("billing schedule", narrow=_bounded())).turn
+    second = (await loop.respond("billing schedule", narrow=_bounded())).turn
 
     assert _ids(first.memories) == _ids(second.memories)
     assert _ids(first.memories) == ["belief-1", "cited-1", "cited-2", "loose-1"]
@@ -926,11 +938,13 @@ async def test_the_fourth_group_is_appended_whole_and_the_planner_never_saw_it()
     await memory.add(_episode("cited-1", "the exchange the note came from"))
     planner = FakePlanner(now=_clock, read_request=_hop("M2"))
 
-    turn = await _loop(memory, planner=planner, episodic_limit=5).respond(
-        "billing",
-        history=(_episode("tail-1", "the user asked about billing"),),
-        narrow=_bounded(),
-    )
+    turn = (
+        await _loop(memory, planner=planner, episodic_limit=5).respond(
+            "billing",
+            history=(_episode("tail-1", "the user asked about billing"),),
+            narrow=_bounded(),
+        )
+    ).turn
 
     planned = _ids(planner.calls[0][2])
     assert planned == ["tail-1", "belief-1", "supp-1"], "three groups, in order"
@@ -947,7 +961,9 @@ async def test_a_turn_that_serviced_nothing_hands_the_planner_and_the_result_one
     await memory.add(_belief("belief-1", "billing schedule notes"))
     planner = FakePlanner(now=_clock)
 
-    turn = await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+    turn = (
+        await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+    ).turn
 
     assert turn.memories == planner.calls[0][2]
 
@@ -993,7 +1009,9 @@ async def test_a_failing_first_read_degrades_the_turn_and_records_no_yield() -> 
     planner = FakePlanner(now=_clock, read_request=_hop("M1"))
 
     with structlog.testing.capture_logs() as captured:
-        turn = await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+        turn = (
+            await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+        ).turn
 
     assert turn.memories == planner.calls[0][2], "the supply planning saw, byte for byte"
     record = _record(captured)
@@ -1020,7 +1038,9 @@ async def test_a_hop_that_returned_before_the_query_raised_leaves_nothing_behind
     planner = FakePlanner(now=_clock, read_request=_both("earlier exchange", "M1"))
 
     with structlog.testing.capture_logs() as captured:
-        turn = await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+        turn = (
+            await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+        ).turn
 
     assert turn.memories == planner.calls[0][2]
     record = _record(captured)
@@ -1046,7 +1066,9 @@ async def test_a_later_band_raising_after_an_earlier_one_returned_is_recorded_as
     planner = FakePlanner(now=_clock, read_request=_query("billing schedule notes"))
 
     with structlog.testing.capture_logs() as captured:
-        turn = await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+        turn = (
+            await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+        ).turn
 
     assert memory.calls >= 5, "the servicing reached a second band"
     assert turn.memories == planner.calls[0][2]
@@ -1080,7 +1102,9 @@ async def test_the_audit_copies_no_text_and_carries_only_the_correlation_id() ->
     planner = FakePlanner(now=_clock, read_request=_both("marmalade zeppelin", "M1"))
 
     with structlog.testing.capture_logs() as captured, correlated_operation() as correlation:
-        turn = await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+        turn = (
+            await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+        ).turn
 
     record = _record(captured)
     assert record["correlation_id"] == correlation
@@ -1247,7 +1271,7 @@ async def test_a_turn_with_no_supply_filter_services_nothing() -> None:
     planner = FakePlanner(now=_clock, read_request=_hop("M1"))
 
     with structlog.testing.capture_logs() as captured:
-        turn = await _loop(memory, planner=planner).respond("billing schedule")
+        turn = (await _loop(memory, planner=planner).respond("billing schedule")).turn
 
     assert _ids(turn.memories) == ["belief-1"]
     assert memory.keyed == []
@@ -1269,9 +1293,11 @@ async def test_the_servicing_reads_the_belief_kinds_the_retrieval_stage_reads() 
     await memory.add(_belief("loose-1", "an unfiled billing note"))
     planner = FakePlanner(now=_clock, read_request=_query("unfiled billing note"))
 
-    turn = await _loop(memory, planner=planner, retrieval_limit=1).respond(
-        "billing schedule", narrow=_bounded()
-    )
+    turn = (
+        await _loop(memory, planner=planner, retrieval_limit=1).respond(
+            "billing schedule", narrow=_bounded()
+        )
+    ).turn
 
     assert _ids(turn.memories) == ["belief-1", "loose-1"]
 
@@ -1289,7 +1315,9 @@ async def test_the_hop_follows_only_the_labelled_records_own_evidence() -> None:
     await memory.add(_belief("deeper-1", "an exchange behind that one"))
     planner = FakePlanner(now=_clock, read_request=_hop("M1"))
 
-    turn = await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+    turn = (
+        await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+    ).turn
 
     assert _ids(turn.memories) == ["belief-1", "cited-1"]
 
@@ -1304,7 +1332,9 @@ async def test_a_second_labels_evidence_is_followed_in_the_order_the_ask_names_t
         await memory.add(_belief(record_id, "an earlier exchange"))
     planner = FakePlanner(now=_clock, read_request=_hop("M2", "M1"))
 
-    turn = await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+    turn = (
+        await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+    ).turn
 
     assert _ids(turn.memories)[2:] == ["b-1", "a-1", "a-2"]
 
@@ -1322,7 +1352,9 @@ async def test_the_turn_is_not_failed_by_a_request_naming_a_record_with_no_evide
     planner = FakePlanner(now=_clock, read_request=_hop("M1"))
 
     with structlog.testing.capture_logs() as captured:
-        turn = await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+        turn = (
+            await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+        ).turn
 
     assert _ids(turn.memories) == ["belief-1"]
     record = _record(captured)
@@ -1346,7 +1378,7 @@ async def test_an_unbounded_audience_turn_still_narrows_before_planning() -> Non
     planner = FakePlanner(now=_clock)
     supply = _unbounded()
 
-    turn = await _loop(memory, planner=planner).respond("billing schedule", narrow=supply)
+    turn = (await _loop(memory, planner=planner).respond("billing schedule", narrow=supply)).turn
 
     assert _ids(planner.calls[0][2]) == ["belief-1"], "withheld before planning"
     assert _ids(turn.memories) == ["belief-1"]
@@ -1433,9 +1465,11 @@ async def test_the_servicer_is_reachable_through_no_registry() -> None:
     registry = FakeToolRegistry()
     planner = FakePlanner(now=_clock, read_request=_hop("M1"))
 
-    turn = await _loop(memory, planner=planner, registry=registry).respond(
-        "billing schedule", narrow=_bounded()
-    )
+    turn = (
+        await _loop(memory, planner=planner, registry=registry).respond(
+            "billing schedule", narrow=_bounded()
+        )
+    ).turn
 
     assert _ids(turn.memories) == ["belief-1", "cited-1"]
     assert registry.lookups == [], "no tool was looked up for the read"
@@ -1456,9 +1490,11 @@ async def test_a_request_naming_a_query_that_reads_like_a_tool_call_reaches_no_r
     planner = FakePlanner(now=_clock, read_request=_query("send_email to dana"))
     registry = FakeToolRegistry()
 
-    turn = await _loop(memory, planner=planner, registry=registry, retrieval_limit=1).respond(
-        "billing schedule", narrow=_bounded()
-    )
+    turn = (
+        await _loop(memory, planner=planner, registry=registry, retrieval_limit=1).respond(
+            "billing schedule", narrow=_bounded()
+        )
+    ).turn
 
     assert turn.plan.steps == ()
     assert _ids(turn.memories) == ["belief-1", "loose-1"]
@@ -1478,7 +1514,9 @@ async def test_a_servicing_that_returns_nothing_leaves_the_supply_identical() ->
     planner = FakePlanner(now=_clock, read_request=_query("billing schedule notes"))
 
     with structlog.testing.capture_logs() as captured:
-        turn = await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+        turn = (
+            await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+        ).turn
 
     assert turn.memories == planner.calls[0][2]
     record = _record(captured)
@@ -1501,11 +1539,13 @@ async def test_a_degraded_retrieval_does_not_change_what_the_servicing_owes() ->
     await memory.add(_belief("cited-1", "an earlier exchange"))
     planner = FakePlanner(now=_clock, read_request=_hop("M1"))
 
-    turn = await _loop(memory, planner=planner).respond(
-        "billing schedule",
-        history_degraded=True,
-        narrow=_bounded(),
-    )
+    turn = (
+        await _loop(memory, planner=planner).respond(
+            "billing schedule",
+            history_degraded=True,
+            narrow=_bounded(),
+        )
+    ).turn
 
     assert turn.memory_degraded is True
     assert _ids(turn.memories) == ["belief-1", "cited-1"]
@@ -1524,7 +1564,9 @@ async def test_an_expired_cited_record_is_simply_absent_from_the_fourth_group() 
     planner = FakePlanner(now=_clock, read_request=_hop("M1"))
 
     with structlog.testing.capture_logs() as captured:
-        turn = await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+        turn = (
+            await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+        ).turn
 
     assert _ids(turn.memories) == ["belief-1", "cited-1"]
     record = _record(captured)
@@ -1549,8 +1591,8 @@ async def test_each_turn_resolves_labels_against_its_own_supply() -> None:
     planner = FakePlanner(now=_clock, read_request=_hop("M1"))
     loop = _loop(memory, planner=planner, retrieval_limit=1)
 
-    billing = await loop.respond("billing schedule", narrow=_bounded())
-    roster = await loop.respond("roster notes", narrow=_bounded())
+    billing = (await loop.respond("billing schedule", narrow=_bounded())).turn
+    roster = (await loop.respond("roster notes", narrow=_bounded())).turn
 
     assert _ids(billing.memories) == ["belief-1", "cited-1"]
     assert _ids(roster.memories) == ["belief-2", "cited-2"]
@@ -1679,7 +1721,9 @@ async def test_a_hop_and_a_query_reaching_nothing_is_not_a_failure() -> None:
     planner = FakePlanner(now=_clock, read_request=_both("nothing matches this", "M4"))
 
     with structlog.testing.capture_logs() as captured:
-        turn = await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+        turn = (
+            await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
+        ).turn
 
     assert turn.memories == planner.calls[0][2]
     record = _record(captured)
