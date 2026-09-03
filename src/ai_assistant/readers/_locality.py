@@ -322,12 +322,16 @@ class ProcPlatformTables:
             return DeviceBacking.UNKNOWN
         if resolved.name.startswith(_NETWORK_BLOCK_PREFIXES):
             return DeviceBacking.NETWORK
-        slaves = sorted(self._slaves(resolved))
+        slaves = self._slaves(resolved)
+        if slaves is None:
+            # The stack could not be read, so what is under this device is not a
+            # question this platform answered. Not a leaf.
+            return DeviceBacking.UNKNOWN
         if slaves:
-            return self._combine(self._walk(slave, depth=depth + 1) for slave in slaves)
+            return self._combine(self._walk(slave, depth=depth + 1) for slave in sorted(slaves))
         return self._classify_ancestry(resolved)
 
-    def _slaves(self, resolved: Path) -> list[Path]:
+    def _slaves(self, resolved: Path) -> list[Path] | None:
         """The devices a stacked device sits on — LVM, dm-crypt, software RAID.
 
         §6 decides eligibility "over the whole backing chain", and a
@@ -335,12 +339,21 @@ class ProcPlatformTables:
         iSCSI LUN reports ``dm-0`` in the mount table and says nothing about the
         network underneath it. Walking the slaves is what reaches the layer the
         question is actually about.
+
+        Returns:
+            The stacked layers, empty for a leaf device, or ``None`` where the
+            directory exists and could not be read — which is a chain the platform
+            did not report through and is refused rather than treated as a leaf.
         """
         holder = resolved / "slaves"
         try:
             return [entry for entry in holder.iterdir() if entry.is_dir()]
-        except OSError:
+        except FileNotFoundError:
+            # A device with no `slaves` directory is a leaf, which is an answer
+            # rather than a failure to answer.
             return []
+        except OSError:
+            return None
 
     def _classify_ancestry(self, resolved: Path) -> DeviceBacking:
         """Walk a leaf block device's ``sysfs`` ancestry for a bus or a transport.
@@ -358,39 +371,84 @@ class ProcPlatformTables:
         current = resolved
         while current not in (devices_root, current.parent):
             subsystem = self._subsystem_of(current)
-            if self._is_network_transport(current, subsystem):
-                return DeviceBacking.NETWORK
+            transport = self._transport_of(current, subsystem)
+            if transport is not None:
+                # `NETWORK` **and** `UNKNOWN` both stop the walk here, and that is
+                # the fail-closed half. A node whose transport evidence could not be
+                # read is a node this platform did not report through, and walking
+                # past it to a `pci` ancestor above would convert "we could not tell"
+                # into "local" — admitting an NVMe-oF or iSCSI device on a transient
+                # permission or I/O failure, which is exactly the egress §6 exists to
+                # refuse.
+                return transport
             if subsystem in _LOCAL_BUSES:
                 return DeviceBacking.LOCAL
             current = current.parent
         return DeviceBacking.UNKNOWN
 
-    def _is_network_transport(self, node: Path, subsystem: str) -> bool:
-        """Whether this ancestor is a SCSI or NVMe host reached over a network.
+    def _transport_of(self, node: Path, subsystem: str) -> DeviceBacking | None:
+        """What this ancestor's transport says, or ``None`` where it says nothing.
 
-        An iSCSI or FCoE initiator publishes its host under
-        ``/sys/class/iscsi_host`` or ``/sys/class/fc_host``; an NVMe controller
-        publishes a ``transport`` file reading something other than ``pcie`` —
-        ``rdma``, ``tcp``, ``fc``. Both are the "ext4 on a network-attached block
-        device" case §6 names, and both are invisible to the mount table's type.
+        An iSCSI or FCoE initiator publishes its host under ``/sys/class/iscsi_host``
+        or ``/sys/class/fc_host``; an NVMe controller publishes a ``transport`` file
+        reading something other than ``pcie`` — ``rdma``, ``tcp``, ``fc``. Both are the
+        "ext4 on a network-attached block device" case §6 names, and both are invisible
+        to the mount table's type.
 
-        The ``transport`` read is scoped to an ``nvme`` node rather than tried on
-        every ancestor, so that an unrelated file of that name elsewhere in the
-        device tree cannot be read as a verdict.
+        **A verdict this cannot reach is ``UNKNOWN`` and never silence**, which is the
+        distinction the whole method turns on. ``Path.exists()`` answers ``False`` for
+        *both* "there is no such host" and "the directory holding it could not be
+        read", and a ``transport`` file that raises answers nothing at all — so a
+        method returning a boolean would let a transient permission or I/O failure on a
+        network-attached controller fall through to a ``pci`` ancestor and be admitted
+        as local. §6 refuses "**every** root whose locality the platform does not
+        affirmatively establish", so an unreadable answer is refused exactly as a
+        remote one is.
+
+        The ``transport`` read is scoped to an ``nvme`` node rather than tried on every
+        ancestor, so an unrelated file of that name elsewhere in the device tree cannot
+        be read as a verdict.
+
+        Returns:
+            :attr:`DeviceBacking.NETWORK` where a network transport is established,
+            :attr:`DeviceBacking.UNKNOWN` where the evidence exists and could not be
+            read, and ``None`` where this node carries no transport evidence at all —
+            which is the ordinary case for every ancestor that is not a host.
         """
         for kind in ("iscsi_host", "fc_host"):
-            if (self._sysfs / "class" / kind / node.name).exists():
-                return True
+            hosts = self._hosts_of(kind, node.name)
+            if hosts is not None:
+                return hosts
         if subsystem != "nvme":
-            return False
+            return None
         try:
-            return (node / "transport").read_text(encoding="utf-8").strip() != "pcie"
+            declared = (node / "transport").read_text(encoding="utf-8").strip()
         except OSError:
-            # An NVMe controller that will not say what it is attached over is a
-            # chain the platform has not reported through, which is not this
-            # method's verdict to give: `UNKNOWN` is reached by returning False
-            # here and finding no local bus above.
-            return False
+            # Including `FileNotFoundError`: an NVMe controller with no `transport`
+            # attribute is one this kernel will not say the attachment of, and §6's
+            # failure mode is "a legitimate local configuration refused until the lane
+            # can establish it" rather than a remote-backed one admitted.
+            return DeviceBacking.UNKNOWN
+        return None if declared == "pcie" else DeviceBacking.NETWORK
+
+    def _hosts_of(self, kind: str, name: str) -> DeviceBacking | None:
+        """Whether ``name`` is a host of a network transport class, if that is readable.
+
+        Returns:
+            :attr:`DeviceBacking.NETWORK` where the class holds this host,
+            :attr:`DeviceBacking.UNKNOWN` where the class directory exists and could
+            not be listed, and ``None`` where the class does not exist at all — which
+            means this kernel has no such transport, and is an answer rather than a
+            failure to answer.
+        """
+        directory = self._sysfs / "class" / kind
+        try:
+            present = {entry.name for entry in directory.iterdir()}
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return DeviceBacking.UNKNOWN
+        return DeviceBacking.NETWORK if name in present else None
 
     @staticmethod
     def _subsystem_of(node: Path) -> str:
