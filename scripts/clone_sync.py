@@ -24,11 +24,21 @@ Two refusals, and they are the whole safety story:
 A clone named explicitly on the command line but not free fails the run; one
 merely *found* by the default scan is reported and skipped, because a busy clone
 is the ordinary state of a batch mid-flight.
+
+Both refusals are decided **under an exclusive lock on the target**, and the
+freshness test is taken again under that lock immediately before the first byte
+is written (issue #1409). Deciding and then copying is a window: two syncs from
+different source clones could each read one target as free and interleave, leaving
+it with ``.env`` from one and ``.mcp.json`` from the other, and a person can start
+working in a target after it was found free. The lock closes the first, the
+re-test closes the second, and neither is load-bearing on its own.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import os
 import re
 import shutil
@@ -39,7 +49,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Iterator, Sequence
 
 #: The list of per-clone files, relative to this script.
 DEFAULT_LIST = Path(__file__).with_name("clone_sync_files.txt")
@@ -49,6 +59,12 @@ FREE_BRANCH = "main"
 _SIBLING_SUFFIX = re.compile(r"-(\d+)$")
 #: What an explicit selector on the command line may be, and nothing else.
 _CLONE_NUMBER = re.compile(r"\d+")
+#: The per-target lock file, in the target's git directory rather than its work
+#: tree: a lock file beside the code would be untracked, and the *next* run's
+#: cleanliness test would read the target as dirty because of it.
+LOCK_NAME = "clone-sync.lock"
+#: How much of two files is compared at a time when deciding whether to copy.
+_COMPARE_CHUNK = 1 << 16
 
 
 class SyncError(Exception):
@@ -186,6 +202,71 @@ def inspect(clone: Path, synced: Sequence[str]) -> Clone:
     return Clone(clone, None)
 
 
+def _git_dir(clone: Path) -> Path | None:
+    """Return the directory git keeps ``clone``'s state in.
+
+    Args:
+        clone: The clone's root.
+
+    Returns:
+        ``.git`` for an ordinary clone, the linked directory it names for a
+        worktree, or ``None`` when there is no ``.git`` at all.
+    """
+    marker = clone / ".git"
+    if marker.is_dir():
+        return marker
+    if not marker.exists():
+        return None
+    # A linked worktree keeps `.git` as a *file* naming the real directory. Asked
+    # rather than parsed — and asked only here, because `git rev-parse` run in a
+    # directory that is not a clone walks up and answers about an enclosing one.
+    try:
+        return Path(_git("rev-parse", "--absolute-git-dir", cwd=clone))
+    except SyncError:
+        return None
+
+
+@contextlib.contextmanager
+def _target_lock(target: Path) -> Iterator[None]:
+    """Hold an exclusive lock on ``target`` for the block.
+
+    Everything decided about a clone — its branch, its dirt, what git tracks in
+    it — is read before anything is written, so two syncs from different source
+    clones could each read one target as free and then interleave their files
+    (issue #1409). The lock makes deciding and copying one turn per target.
+
+    ``fcntl`` rather than a dependency, the way ``service/lock.py`` and the
+    embedding-artifact cache already take a lock. The kernel drops it when the
+    descriptor closes, so a sync killed mid-copy releases it rather than leaving
+    the next one waiting on a lock nobody holds.
+
+    Args:
+        target: The clone being copied into.
+
+    Yields:
+        Nothing; the lock is held for the duration of the block.
+    """
+    directory = _git_dir(target)
+    if directory is None:
+        # Not a clone: `inspect` refuses it, nothing is ever written to it, and
+        # there is nowhere outside its work tree to put a lock file anyway.
+        yield
+        return
+    fd = os.open(directory / LOCK_NAME, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # Say so before blocking. The wait is another sync holding this one
+            # target and is bounded by it, but a silent pause reads as a hang.
+            # On stderr: stdout carries the report, and this is not part of it.
+            print(f"{target}: waiting for another clone-sync to finish here...", file=sys.stderr)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 def sibling_root(source: Path) -> tuple[Path, str]:
     """Return the directory siblings live in and the name they share.
 
@@ -283,8 +364,9 @@ def copy_into(source: Path, target: Path, synced: Sequence[str], *, dry_run: boo
         One report line per path considered.
 
     Raises:
-        SyncError: If a path is tracked in the target, or the destination would
-            resolve outside it.
+        SyncError: If a path is tracked in the target, the destination would
+            resolve outside it, or the target stopped being free while the
+            refusals were being decided.
     """
     # EVERY refusal is decided before the first byte is written. Checking as it
     # copies would leave a target half-synced when a later path is refused — the
@@ -300,6 +382,20 @@ def copy_into(source: Path, target: Path, synced: Sequence[str], *, dry_run: boo
             )
         _refuse_to_escape(target, relative)
 
+    # The freshness test again, at the last moment before the first byte. The
+    # lock keeps another sync out, but nobody else takes it: a person or an agent
+    # can start working in a target between the moment it was found free and now,
+    # and what makes that safe is re-asking rather than the lock (issue #1409). A
+    # dry run writes nothing, so it has nothing to guard — the plan it prints is
+    # the one `inspect` decided a moment ago, under the same lock.
+    if not dry_run:
+        busy = inspect(target, synced)
+        if busy.reason is not None:
+            raise SyncError(
+                f"{target}: stopped being free while the sync was deciding — "
+                f"{busy.reason}.\nNothing was copied."
+            )
+
     lines: list[str] = []
     for relative in synced:
         src = source / relative
@@ -307,7 +403,7 @@ def copy_into(source: Path, target: Path, synced: Sequence[str], *, dry_run: boo
         if not src.is_file():
             lines.append(f"  skip {relative}: absent in {source}")
             continue
-        if dst.is_file() and dst.read_bytes() == src.read_bytes():
+        if _has_same_bytes(src, dst):
             lines.append(f"  same {relative}")
             continue
         verb = "would copy" if dry_run else "copied"
@@ -316,6 +412,35 @@ def copy_into(source: Path, target: Path, synced: Sequence[str], *, dry_run: boo
             dst.parent.mkdir(parents=True, exist_ok=True)
             _replace_atomically(src, dst)
     return lines
+
+
+def _has_same_bytes(src: Path, dst: Path) -> bool:
+    """Report whether ``dst`` already holds exactly the bytes in ``src``.
+
+    Size first, then a chunked comparison that stops at the first difference —
+    rather than ``read_bytes()`` on both, which loads two whole files into memory
+    to conclude that nothing needs doing (issue #1409). The list is *documented*
+    to hold small per-clone configuration, but nothing enforces that, and this is
+    a skip optimisation: its worst case should not exceed the copy it avoids.
+
+    Args:
+        src: The file being copied from.
+        dst: Where it would go.
+
+    Returns:
+        True when ``dst`` is a regular file of the same size and the same content.
+    """
+    if not dst.is_file():
+        return False
+    if src.stat().st_size != dst.stat().st_size:
+        return False
+    with src.open("rb") as left, dst.open("rb") as right:
+        while True:
+            here, there = left.read(_COMPARE_CHUNK), right.read(_COMPARE_CHUNK)
+            if here != there:
+                return False
+            if not here:
+                return True
 
 
 def _replace_atomically(src: Path, dst: Path) -> None:
@@ -376,17 +501,21 @@ def _sync(args: argparse.Namespace) -> int:
         return 0
 
     status = 0
+    named = bool(args.numbers)
     for target in targets:
-        clone = inspect(target, synced)
-        if clone.reason is not None:
-            named = bool(args.numbers)
-            print(f"{target}: SKIPPED — {clone.reason}", file=sys.stderr if named else sys.stdout)
-            if named:
-                status = 1
-            continue
-        print(f"{target}:")
-        for line in copy_into(source, target, synced, dry_run=args.dry_run):
-            print(line)
+        # Held across deciding *and* copying: a decision made outside it would be
+        # about a target another sync could then take (issue #1409).
+        with _target_lock(target):
+            clone = inspect(target, synced)
+            if clone.reason is not None:
+                stream = sys.stderr if named else sys.stdout
+                print(f"{target}: SKIPPED — {clone.reason}", file=stream)
+                if named:
+                    status = 1
+                continue
+            print(f"{target}:")
+            for line in copy_into(source, target, synced, dry_run=args.dry_run):
+                print(line)
     return status
 
 
