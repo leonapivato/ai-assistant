@@ -472,6 +472,16 @@ sending, and you are still answering now from what you have."""
 #: ``test_the_carve_out_names_the_line_the_tail_actually_renders`` is what keeps
 #: the two from drifting apart silently.
 #:
+#: **And the carve-out has its own exception, because §4's ceiling makes the line
+#: a prefix.** A reply longer than :data:`_REPLY_CEILING` renders as ``what the
+#: assistant replied (first N of M characters): ...``, and ADR-0222 §4 is explicit
+#: that the prefix is not the reply. :func:`_reply_lines` already draws exactly
+#: this line — "an unelided reply carries no marker, and that absence is what says
+#: the line carries the reply whole" — so a carve-out that read the elided form as
+#: complete would tell the planner a fact it cannot see is present, which is
+#: #1929's own failure in a second costume: a rendering mistaken for the exchange.
+#: The block names the elided shape too and says what it is worth.
+#:
 #: A separate constant for :data:`_STATED_FACT_GUIDANCE`'s reason: the prompt test
 #: can assert it **reaches the model** without string-matching its wording.
 _ACT_RECORD_GUIDANCE = """\
@@ -500,7 +510,11 @@ there is nothing to ask for — even though that exchange also had wording you \
 cannot see. And where a bullet below is printed with a `what the assistant \
 replied:` line under it, that line is the reply itself in the words it was sent, \
 not a summary of it: a question about its content is answered from it, and asking \
-for the exchange it is already showing you would buy nothing."""
+for the exchange it is already showing you would buy nothing. That one has its own \
+exception. A line reading `what the assistant replied (first 200 of 900 \
+characters): ...` is showing you the opening of the reply and not the reply, so \
+what the goal turns on may be in the part you cannot read, and the label is still \
+the way to it."""
 
 
 def _system_prompt(capabilities: Sequence[str]) -> str:
