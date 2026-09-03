@@ -125,19 +125,22 @@ def _rendered(root: Path, output_format: str, *args: str) -> str:
     return result.stdout
 
 
-def _fake_gh(directory: Path, numbers: list[int], *, marker: Path | None = None) -> dict[str, str]:
+def _fake_gh(directory: Path, numbers: list[int], *, before: str = "") -> dict[str, str]:
     """Put a ``gh`` on PATH that reports ``numbers`` and never touches the network.
 
     Args:
         directory: Where to write the shim; it is prepended to ``PATH``.
         numbers: The issue/PR numbers the shim reports.
-        marker: A path the shim creates before answering, so a test can assert
-            from its *absence* that the fetch never happened at all.
+        before: One ``/bin/sh`` line run before the shim answers. It is how a
+            test observes *that* the fetch happened — touch a file and look for
+            it — and how it mutates the checkout *while* it is happening, which
+            is the only deterministic way to pin what the fetch may be ordered
+            between.
     """
     script = directory / "gh"
     body = "\n".join(str(n) for n in numbers)
-    touch = "" if marker is None else f': > "{marker}"\n'
-    script.write_text(f'#!/bin/sh\n{touch}cat <<"EOF"\n{body}\nEOF\n', encoding="utf-8")
+    hook = "" if not before else f"{before}\n"
+    script.write_text(f'#!/bin/sh\n{hook}cat <<"EOF"\n{body}\nEOF\n', encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     env = dict(os.environ)
     env["PATH"] = f"{directory}{os.pathsep}{env.get('PATH', '')}"
@@ -1399,7 +1402,7 @@ def test_a_collision_is_decided_before_the_tracker_is_fetched(tmp_path: Path) ->
     """
     _make_repo(tmp_path, _COLLIDING)
     marker = tmp_path / "gh-was-run"
-    env = _fake_gh(tmp_path, [1, 2, 3], marker=marker)
+    env = _fake_gh(tmp_path, [1, 2, 3], before=f'touch "{marker}"')
 
     result = _run(tmp_path, env=env)
 
@@ -1412,9 +1415,36 @@ def test_the_tracker_is_still_fetched_when_the_corpus_is_sound(tmp_path: Path) -
     """The guard against fixing the latency by never fetching at all."""
     _make_repo(tmp_path, {"0001-one.md": "# 1. One\n\nSee #3 and #9.\n"})
     marker = tmp_path / "gh-was-run"
-    env = _fake_gh(tmp_path, [1, 2, 3], marker=marker)
+    env = _fake_gh(tmp_path, [1, 2, 3], before=f'touch "{marker}"')
 
     report = _report(tmp_path, env=env)
 
     assert marker.exists()
     assert _citations(report, "tracker") == ["#9"]
+
+
+def test_an_adr_arriving_during_the_tracker_fetch_is_not_reported_missing(
+    tmp_path: Path,
+) -> None:
+    """The issued set and the documents judged against it come from one pass.
+
+    Deciding the collision early is worth nothing if the mapping it built is
+    then reused for the report, because that puts a call allowed 120 seconds
+    between the pass that fixes the issued set and the pass that reads the
+    corpus. An ADR arriving in that window is read as a document while the set
+    it belongs to was fixed without it, so every citation naming it fails —
+    against a file that is right there. ADR-0088 §6 ranks that confident wrong
+    finding above every miss, which is why the early check re-reads the
+    filenames rather than handing its mapping down.
+
+    The shim writes the arriving ADR itself, so the window is entered exactly
+    once and the test is deterministic rather than timed.
+    """
+    _make_repo(tmp_path, {"0001-one.md": "# 1. One\n\nSee ADR-0002.\n"})
+    arriving = tmp_path / "docs" / "adr" / "0002-two.md"
+    env = _fake_gh(tmp_path, [1], before=f'printf "# 2. Two\\n" > "{arriving}"')
+
+    report = _report(tmp_path, env=env)
+
+    assert arriving.exists()
+    assert _citations(report, "decision") == []

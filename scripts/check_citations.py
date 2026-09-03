@@ -1123,8 +1123,33 @@ def load_adrs(root: Path) -> dict[int, tuple[str, str]]:
     decidable from the filenames alone, so reading first would let an unrelated
     file fault — a non-UTF-8 byte, a permission — crash the run before the defect
     it could have named, on a tree where the defect was determinable without
-    opening anything. The two passes are that guarantee: the first decides, the
-    second reads.
+    opening anything. :func:`numbered_adr_files` is that first pass, whole and
+    separable: it decides, and this function reads what it returned.
+    """
+    return {
+        number: (path.relative_to(root).as_posix(), path.read_text(encoding="utf-8"))
+        for number, path in numbered_adr_files(root).items()
+    }
+
+
+def numbered_adr_files(root: Path) -> dict[int, Path]:
+    """Return number -> path for every numbered ADR file, reading none of them.
+
+    This is :func:`load_adrs`' first pass on its own, and it is the whole of the
+    duplicate-number decision: which numbers exist, and whether any is carried
+    twice, is answerable from the directory listing. :func:`main` runs it before
+    it fetches anything so that a collision — which ends the run with no report —
+    is not made to wait out a 120-second ``gh`` call it was never going to use
+    (#2000).
+
+    Args:
+        root: The checkout root.
+
+    Returns:
+        Every ``docs/adr/**/NNNN-*.md``, keyed on the four digits in its name.
+
+    Raises:
+        DuplicateAdrNumberError: Two files parse to the same number.
     """
     directory = root / "docs" / "adr"
     if not directory.is_dir():
@@ -1141,13 +1166,7 @@ def load_adrs(root: Path) -> dict[int, tuple[str, str]]:
     }
     if collisions:
         raise DuplicateAdrNumberError(_collision_message(collisions))
-    return {
-        number: (
-            files[0].relative_to(root).as_posix(),
-            files[0].read_text(encoding="utf-8"),
-        )
-        for number, files in found.items()
-    }
+    return {number: files[0] for number, files in found.items()}
 
 
 def _collision_message(collisions: dict[int, list[str]]) -> str:
@@ -1244,12 +1263,7 @@ def _adr_documents(root: Path) -> list[tuple[str, str]]:
     ]
 
 
-def check(
-    root: Path,
-    *,
-    tracker_numbers: Iterable[int] | None,
-    adrs: dict[int, tuple[str, str]],
-) -> Report:
+def check(root: Path, *, tracker_numbers: Iterable[int] | None) -> Report:
     """Run every check ADR-0088 §6 permits over one checkout.
 
     Args:
@@ -1257,16 +1271,25 @@ def check(
         tracker_numbers: Every issue/PR number that exists, or ``None`` when the
             tracker could not be read — in which case tracker citations are
             unevaluable and pass silently (§6).
-        adrs: The corpus :func:`load_adrs` returned. It is the caller's rather
-            than this function's because a collision in it means there is no
-            report to compute at all, and :func:`main` therefore has to settle
-            it before it does anything expensive — see the note there. Passing
-            the loaded mapping in is what keeps that ordering from walking
-            ``docs/adr/`` twice (#2000).
 
     Returns:
         The whole report, Tier 1 findings first.
+
+    Raises:
+        DuplicateAdrNumberError: Two files under ``docs/adr/`` carry the same number,
+            which makes the issued set the rest of this function is computed
+            over unsound. No report is produced rather than an unsound one.
+
+    **The issued set and the documents judged against it come from one pass.**
+    :func:`load_adrs` and :func:`_adr_documents` walk ``docs/adr/`` back to back
+    here, and nothing slow may be moved between them: a file arriving in the gap
+    is read as a document while the set it belongs to has already been fixed
+    without it, so every citation naming it is reported missing though it exists.
+    That is the confident wrong finding §6 ranks as the worst outcome available
+    to this tool, and it is why :func:`main`'s early collision check re-reads the
+    filenames rather than handing its mapping down here (#2000).
     """
+    adrs = load_adrs(root)
     targets = build_decision_targets(adrs)
     known_trackers = None if tracker_numbers is None else frozenset(tracker_numbers)
     definitions = build_definition_index(root)
@@ -1563,24 +1586,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         when a Tier 1 finding exists and ``--report-only`` was not passed, else
         **0**. Tier 2 never affects the exit code (ADR-0088 §3, §6).
 
-    **The corpus is loaded before the tracker is fetched.** A collision is
-    decidable from the filenames alone and ends the run with no report, so any
-    tracker numbers gathered first would be gathered only to be discarded —
-    while ``gh api --paginate`` carries a 120-second timeout, which is how long
-    a purely local, purely deterministic diagnostic could be made to wait on a
-    stalled network before it was printed (#2000). The loaded mapping is then
-    handed to :func:`check` rather than reloaded there, so deciding early costs
-    no second walk of ``docs/adr/``.
+    **The collision is decided before the tracker is fetched.** It is decidable
+    from the filenames alone and ends the run with no report, so any tracker
+    numbers gathered first would be gathered only to be discarded — while ``gh
+    api --paginate`` carries a 120-second timeout, which is how long a purely
+    local, purely deterministic diagnostic could be made to wait on a stalled
+    network before it was printed (#2000).
+
+    What runs early is :func:`numbered_adr_files`, which opens nothing, and its
+    mapping is deliberately **not** handed down to :func:`check`. Reusing it
+    would put the ``gh`` call between the pass that fixes the issued set and the
+    pass that reads the documents judged against it, so an ADR arriving during
+    the fetch would be reported missing by every citation naming it — a
+    confident wrong finding, which ADR-0088 §6 ranks above every miss. The
+    second walk that avoids that costs one directory listing and no file read.
     """
     args = _parse_args(argv)
     root = args.root.resolve()
     try:
-        adrs = load_adrs(root)
+        numbered_adr_files(root)
+        trackers = None if args.no_tracker else fetch_tracker_numbers(root)
+        report = check(root, tracker_numbers=trackers)
     except DuplicateAdrNumberError as error:
         print(error, file=sys.stderr)
         return 2
-    trackers = None if args.no_tracker else fetch_tracker_numbers(root)
-    report = check(root, tracker_numbers=trackers, adrs=adrs)
 
     renderers = {"text": format_text, "markdown": format_markdown}
     if args.format == "json":
