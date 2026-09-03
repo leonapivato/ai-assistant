@@ -588,10 +588,23 @@ against the turn's own model round trips, which it is orders of magnitude below.
 > directory handle on its configured root**, acquired once when the fetcher is constructed
 > and held for the fetcher's life, and opens the entry's file **relative to that handle,
 > by its single final component, without following a symbolic link** —
-> `openat(dirfd, name, O_NOFOLLOW)` or the platform equivalent. It then decides every
-> remaining question — that it is a regular file, and that it is within
+> `openat(dirfd, name, O_NOFOLLOW | O_NONBLOCK)` or the platform equivalent. It then
+> decides every remaining question — that it is a regular file, and that it is within
 > `fetch_max_file_bytes` — **against the object it has open**, never against a path or a
 > `stat` taken before the open.
+
+> **Normative.** **The acquiring open never blocks, because the object's kind is not known
+> until it is open.** A listed regular file can be replaced between the listing and the
+> fetch by a **named pipe**, and an ordinary read-mode open of a FIFO with no writer
+> **blocks until a writer arrives**. An implementation that opens and only then asks what
+> it is holding would therefore wedge on exactly the transition this section's race clauses
+> already admit is possible, returning neither a record nor a refusal and neither
+> succeeding nor failing — the one outcome §6 says a fetch never has. So the acquiring open
+> is **non-blocking** (`O_NONBLOCK`, or the platform equivalent), which costs a regular
+> file nothing because the flag does not affect one, and the kind check that follows
+> refuses **every** non-regular object the fetcher finds itself holding: a FIFO, a socket,
+> a block or character device, a directory. **A `Fetcher` whose acquisition can block on
+> the object it is acquiring does not conform**, whatever it does after the open.
 
 > **Normative.** **The open handle, and not a stored pathname, is what "under the
 > configured root" means.** No conforming implementation re-derives the root from a
@@ -612,8 +625,9 @@ against the turn's own model round trips, which it is orders of magnitude below.
 > **Normative.** **A file replaced between the listing and the fetch yields exactly one
 > object's answer, and never a mixture.** No implementation reports a size, a
 > modification instant, a type or a name from one object and content from another. Where
-> the open cannot be performed under the conditions above — the final component became a
-> symbolic link, a directory or a device — the outcome is `NOT_A_FILE`; where it fails for
+> the open cannot be performed under the conditions above, or the object it yields is not
+> a regular file — the final component became a symbolic link, a directory, a named pipe,
+> a socket or a device — the outcome is `NOT_A_FILE`; where it fails for
 > any other reason, `UNREADABLE`; and neither is ever a best-effort read.
 
 > **Normative.** **Every bound is re-applied at `fetch` and none is carried from the
@@ -1554,7 +1568,9 @@ wiring, which constructs a `Fetcher` only where a root is configured.
 > `FetchRefusal` member); that a path escaping the root is refused and that the three race
 > transitions of §4 are refused (a concrete fetcher's test over a real filesystem, and it
 > owes `..`, a separator in `name`, a symlink out of the root, a replacement between
-> validation and acquisition, a growth past the bound between them, a replacement of
+> validation and acquisition, a replacement by a **named pipe with no writer** between
+> them, which must refuse under a deadline rather than block on the open, a growth past
+> the bound between them, a replacement of
 > the **root's own pathname** by a symlink to an outside directory between the listing and
 > the fetch, and — at construction — a mount landing on the mount root between the tables'
 > read and its open, and a mount landing on an intermediate component mid-resolution
@@ -1645,7 +1661,7 @@ same reason; this decision adds a contract, so it adds a lane.
    would be deciding from retained object identity or from display fields, both of which
    §4 forbids. Asserted at the `Fetcher` seam, because it is a
    property of the contract and not of the loop that happens to call it.
-4. **The three race transitions are refused.** Over a real filesystem, deterministically
+4. **The four race transitions are refused.** Over a real filesystem, deterministically
    sequenced so the transition lands **between** the fetcher's validation and its
    acquisition: a supported regular file replaced by a symbolic link pointing outside the
    root, which is refused `NOT_A_FILE` and reads nothing from the link's target; a file
@@ -1657,6 +1673,13 @@ same reason; this decision adds a contract, so it adds a lane.
    file's distinctive text reach the supply or the reply. None of the three yields a record
    mixing one object's metadata with another's content. The third arm is the one that fails
    on any implementation storing the root as a pathname and re-joining a name onto it.
+   **And a fourth arm, for the transition that would hang rather than mis-read**: a
+   supported regular file replaced by a **named pipe with no writer**, where the fetch
+   refuses `NOT_A_FILE` **within the turn** rather than blocking on the open — asserted
+   under a deadline the test fails on, since a hang is not a wrong answer this suite could
+   otherwise observe. This is the arm that fails on any implementation whose acquiring open
+   is not non-blocking, and it is the one an assertion about the *returned* class cannot
+   reach on its own.
 5. **A listing expires once either deadline passes, and on nothing else.** Four arms,
    each deterministic over fake clocks the test drives. A listing inside both deadlines is
    fetched, and one past both is refused `NOT_FOUND`. **A backward wall clock does not
