@@ -622,7 +622,7 @@ against the turn's own model round trips, which it is orders of magnitude below.
 > a bound, a type or a size off the entry it was handed.
 
 > **Normative.** **Neither member raises for a source reason.** An absent file, an
-> unreadable one, an over-size one, an unsupported type and a failed extraction are
+> unreadable one, an over-size one and a failed extraction are
 > `FetchRefusal` members and never exceptions; an unreadable root is an empty listing.
 > This ADR adds **no error class** to `core/errors.py`, because there is no failure a
 > caller would handle differently from a refusal it must already handle.
@@ -1016,9 +1016,21 @@ scope is a smaller falsehood than any of those — it is, in fact, none.
 > default of **40**, and restricted to the readable types below.
 
 > **Normative.** **The first rung reads plain text, Markdown and PDF, and nothing else.**
-> Any other file is not listed and, if named, is refused as an unsupported type. A later
-> format is admitted by the ADR that decides it, states what its extraction is, and says
-> whether that extraction declares a report time (§5).
+> Any other file is **not listed**, and there is therefore no authentic entry naming one:
+> an entry a caller assembles for a `.docx` under the root is refused `NOT_FOUND` by §4's
+> membership clause, exactly as an entry for a file the cap left out or for one that never
+> existed is. A later format is admitted by the ADR that decides it, states what its
+> extraction is, and says whether that extraction declares a report time (§5).
+
+> **Normative.** **There is no `UNSUPPORTED_TYPE` refusal, and its absence is a decision
+> rather than an omission.** The type allow-list is applied where the listing is built, so
+> the only caller who can name an unsupported file is one presenting an entry this fetcher
+> never minted — and §4 rules that refusal `NOT_FOUND`, *"deliberately the same class an
+> absent file yields, so that it discloses nothing about whether a guessed name exists
+> under the root"*. A distinct class for the unsupported case would be that disclosure
+> restored: it would answer *a file of that name is there, and it is a `.docx`* to a caller
+> holding nothing but a guess. So the class is not carried, and the general rule is the
+> clause below.
 
 > **Normative.** Two size bounds, both `Settings` fields with named defaults, both refused
 > at load rather than at the first fetch (ADR-0093 §5): `fetch_max_file_bytes`, the file's
@@ -1077,9 +1089,18 @@ scope is a smaller falsehood than any of those — it is, in fact, none.
 > records a truncation flag in place of refusing.
 
 > **Normative.** `FetchRefusal`'s members are `NOT_FOUND`, `NOT_A_FILE`, `UNREADABLE`,
-> `TOO_LARGE`, `UNSUPPORTED_TYPE` and `EXTRACTION_FAILED`. The enumeration is closed and
-> no lane adds a seventh without the ADR that decides it. A refusal names a **class** and
-> carries no path, no name, no excerpt and no message from an underlying library.
+> `TOO_LARGE` and `EXTRACTION_FAILED`. The enumeration is closed and no lane adds a sixth
+> without the ADR that decides it. A refusal names a **class** and carries no path, no
+> name, no excerpt and no message from an underlying library.
+
+> **Normative.** **Every member is reachable over a real filesystem from an authentic
+> entry, and a class no authenticated fetch could produce is not carried.** Each of the
+> five is reached through the seam §4 permits — a listed file deleted, replaced by a
+> directory, made unreadable, or grown past the bound between the listing and the fetch,
+> and a listed file of a supported format whose extraction fails — which is why §6
+> re-applies every bound at `fetch` and carries none from the listing. §14's item 9
+> asserts the five arm for arm, and the clause is stated because an enumeration is where
+> a decision most easily acquires a member that only its own prose can reach.
 
 > **Normative.** **A refusal is a resolved outcome and never a failure.** It adds no
 > record, fails no turn, degrades no servicing and discards no other kind's records: the
@@ -1484,6 +1505,21 @@ wiring, which constructs a `Fetcher` only where a root is configured.
 > case §2 exists for. Splitting it would land a `Fetcher` no implementation had been
 > written against, which is the failure `CONTRIBUTING.md` → "Adding a Protocol" names.
 
+> **Normative.** **The primary production implementation here is the concrete fetcher and
+> not the servicer, and the reading is ADR-0137's own.** §5 of that ADR quotes the sentence
+> §2 widens — a triad *"stays a small diff because it is a contract and its guardrails,
+> with no **production** implementation attached (the canonical fake is an implementation,
+> but a test-only one)"* — so what §2 attaches to the triad is the implementation the fake
+> stands in for. §2's *"the consumer whose demands shape the contract, not the one that is
+> cheapest to write"* chooses **among** such implementations rather than naming a caller,
+> and on this contract the demands that shape it are §4's unforgeable token and handle and
+> §6's two-stage locality refusal — both the fetcher's, and neither exercisable by
+> `orchestration`. Pairing C3 in instead would put new machinery into a third subsystem,
+> which §1 forbids and §2 declines to license (*"any other cross-subsystem pairing remains
+> outside the exception"*); and C3 is **adaptation** under §1 in any case, because
+> `orchestration/reads.py` already holds the one servicer and the two existing kinds'
+> branches and this kind adds a third under the same budget and the same audit.
+
 > **Normative.** The conformance suite holds the clauses expressible **without a source**:
 > `name` is stable and non-empty; a `SourceListing`'s `source` equals `name`; `read_at` is
 > tz-aware; an **empty listing is a valid, successful listing** and every clause holds on
@@ -1662,10 +1698,15 @@ same reason; this decision adds a contract, so it adds a lane.
    **production renderer**, the span that at-limit record contributes to the assembled
    prompt is within the bound. An implementation counting source characters or source
    bytes passes the first arm and fails the other two.
-9. **Every refusal class is reachable from a real source.** One arm per `FetchRefusal`
-   member, over a real filesystem: absent, a directory, unreadable by permission,
-   over-size, an unsupported extension, and a corrupt file of a supported format. This is
-   the concrete fetcher's test and not the suite's (§13).
+9. **Every refusal class is reachable from a real source, through an authentic entry.**
+   One arm per `FetchRefusal` member, over a real filesystem, each reached from an entry
+   the fetcher itself minted: a listed file deleted before the fetch; one replaced by a
+   directory; one made unreadable by permission; one grown past `fetch_max_file_bytes`; and
+   a listed file of a supported format whose extraction fails. This is the concrete
+   fetcher's test and not the suite's (§13). **And the arm in the other direction**: a
+   `.docx` under the root appears in no listing, and an entry assembled for it is refused
+   `NOT_FOUND` and not by a class of its own — which is item 3's seam asserted for the
+   unsupported case and the arm that fails any implementation carrying a sixth member.
 10. **A fetched record carries the external mark, and the conversation asks thereafter.** A
     bounded-audience turn that fetches captures an episode whose `derived_from_external` is
     `True`; the same turn's `SelectionOrigin` carries `planned_with_external_content`; and a
@@ -1776,17 +1817,18 @@ same reason; this decision adds a contract, so it adds a lane.
     This is the arm that fails on any implementation walking the path as a sequence of
     checks and opens, however each of them is guarded, and it is the one that distinguishes
     an atomic descent from a careful one.
-    **And a ninth arm, bounding the one open the owner's ruling scopes**: in the sixth arm's
-    substituted-mount sequence, with every filesystem call the constructor makes
-    instrumented, the calls that reach the substituted filesystem are **exactly one directory
-    open of the mount root and nothing else** — no read through it, no directory listing, no
-    `openat` of any component of the configured path, no `stat` of anything beneath it, and
-    no second attempt after the mismatch — and construction ends holding no handle and
-    building no `Fetcher`. This is the arm that keeps the residual §6 discloses at the size
-    §6 states it at, which is the size the ruling of 2026-09-03 (#1996, comment 5532194014)
-    scopes out of ADR-0017 §1; it asserts that bound and nothing wider. It is the arm that
-    fails on any implementation that retries the open, that probes further after the
-    mismatch, or that reads through the start handle before checking it.
+    **And a ninth arm, bounding the one open the owner's ruling scopes**: in the sixth
+    arm's substituted-mount sequence, with every filesystem call the constructor makes
+    instrumented, the calls that reach the substituted filesystem are **exactly one
+    directory open of the mount root and nothing else** — no read through it, no
+    directory listing, no `openat` of any component of the configured path, no `stat` of
+    anything beneath it, and no second attempt after the mismatch — and construction
+    ends holding no handle and building no `Fetcher`. This is the arm that keeps the
+    residual §6 discloses at the size §6 states it at, which is the size the ruling of
+    2026-09-03 (#1996, comment 5532194014) scopes out of ADR-0017 §1; it asserts that
+    bound and nothing wider. It is the arm that fails on any implementation that retries
+    the open, that probes further after the mismatch, or that reads through the start
+    handle before checking it.
 
 ### 15. Deferred, by name, each with what fires it
 
@@ -2039,6 +2081,14 @@ avoided: the record carries an attestation because it is in the attested band.
   down. §6 now requires the filesystem **and** its backing device to be established, names
   no construction as sufficient, and §14's item 22 carries the arm that fails a type-only
   implementation.
+- **A distinct `UNSUPPORTED_TYPE` refusal for a file of a format the first rung does not
+  read.** It was this ADR's sixth member for twenty rounds and it is unreachable: §6 keeps
+  unsupported files out of the listing, so the only caller who can name one presents an
+  entry the fetcher never minted, and §4 rules that `NOT_FOUND`. Making it reachable would
+  mean either listing files the planner cannot use, or answering a guessed name with the
+  fact that a file of that name exists — which is the disclosure §4's same-class rule was
+  written to refuse. Dropped in §6, with §14's item 9 asserting the five that remain and the
+  arm that fails an implementation carrying a sixth.
 - **Refusing an exact copy of an authentic listing, so that only the object the fetcher
   handed out is fetchable.** It is the stricter reading of §4's *"a listing a caller
   assembled is refused"*, and it is unavailable: distinguishing a faithful copy from the
