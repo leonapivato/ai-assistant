@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
-from feedback_processor_contract import FeedbackProcessorContract
+from feedback_processor_contract import _STAMPED_AT, FeedbackProcessorContract
 from pydantic import ValidationError
 
 from ai_assistant.core.clock import ClockReadingError
@@ -83,6 +83,11 @@ class TestFakeFeedbackProcessorContract(FeedbackProcessorContract):
     @pytest.fixture
     def processor(self) -> FeedbackProcessor:
         return FakeFeedbackProcessor()
+
+    @pytest.fixture
+    def stamping(self) -> FeedbackProcessor:
+        """The same subject with its transaction clock told what to read."""
+        return FakeFeedbackProcessor(now=lambda: _STAMPED_AT)
 
 
 class TestScriptedFakeFeedbackProcessorContract(FeedbackProcessorContract):
@@ -174,26 +179,28 @@ async def test_synthesised_record_carries_the_feedbacks_provenance() -> None:
     assert event.created_at != written_at
 
 
-async def test_the_default_clock_is_the_wall_clock_and_the_event_never_stamps_the_write() -> None:
-    """Unwired, the fake stamps *now* — the defect #780 records was the default path.
+async def test_the_unwired_fake_does_not_stamp_the_write_from_the_event() -> None:
+    """The default path is the one #780 is about, so it is pinned as well.
 
-    A consumer that wires no clock is the case the issue is about: every
-    orchestration and world test drives this fake as constructed, and while
-    ``last_updated`` came off the event those tests certified their subjects
-    against records claiming a revision at the utterance's instant. Bracketing the
-    call is what states "the processing instant" without naming a value, and it is
-    available here — where the suite cannot — because this case owns the
-    construction.
+    Every orchestration and world test drives this fake **as constructed**, and
+    while ``last_updated`` came off the event those tests certified their subjects
+    against records claiming a revision at the utterance's instant. The contract arm
+    above wires a clock, so it says nothing about the default; this says the
+    default is not the event either.
+
+    The *value* the wall clock returns is deliberately not asserted:
+    ``CONTRIBUTING.md`` forbids a test reading ``datetime.now()``, and bracketing
+    the call with two readings of the very clock under test would make the case
+    fail on a host whose clock steps back between them. What regressed is the
+    source, and the source is what is stated.
     """
     event = _event()
 
-    before = datetime.now(UTC)
     [proposal] = await FakeFeedbackProcessor().process(event)
-    after = datetime.now(UTC)
 
     stamped = proposal.proposed.provenance.last_updated
-    assert before <= stamped <= after
     assert stamped != event.created_at
+    assert stamped.tzinfo is not None  # a reading `checked_clock` admitted
 
 
 async def test_the_clock_is_guarded_and_its_own_refusal_is_left_unwrapped() -> None:
