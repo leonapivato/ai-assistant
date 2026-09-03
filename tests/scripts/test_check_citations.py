@@ -1448,3 +1448,98 @@ def test_an_adr_arriving_during_the_tracker_fetch_is_not_reported_missing(
 
     assert arriving.exists()
     assert _citations(report, "decision") == []
+
+
+# --------------------------------------------------------------------------- #
+# #2003 — the other half of the ``is_file()`` filter: symlinks.
+#
+# ``_markdown_files`` filters on ``is_file()`` rather than ``not is_dir()``, and
+# its docstring states the consequence: "a symlinked ADR is still an ADR, and a
+# dangling one is skipped rather than faulting on the read". The directory cases
+# above are green under either spelling, so on their own they would let a
+# rewrite to ``not is_dir()`` through — which turns a dangling ``*.md`` symlink
+# from skipped into a phantom collision and a traceback. These four pin both
+# halves: two that a symlink is followed, two that a broken one is not.
+#
+# No platform guard, deliberately. ``Path.symlink_to`` is already called
+# unguarded by a dozen tests in this corpus — ``test_adr_ratify.py`` and
+# ``test_clone_sync.py`` in this very directory among them — so a filesystem
+# without symlink support fails the suite long before it reaches here, and a
+# skip on these four alone would buy nothing while claiming otherwise.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_symlinked_adr_is_read_through_the_link(tmp_path: Path) -> None:
+    """The positive half: ``is_file()`` follows the link, so the target is a document.
+
+    The target is planted *outside* ``docs/adr`` so that neither discovery pass
+    can reach its bytes any other way — the citation below is in the report only
+    if the symlink itself was followed and read. The finding is located at the
+    link's own path, which is what a reader of the report is told to go and fix.
+    """
+    _make_repo(tmp_path, {"0001-one.md": "# 1. One\n"})
+    target = tmp_path / "elsewhere" / "0002-two.md"
+    _write(target, "# 2. Two\n\nSee ADR-0009.\n")
+    (tmp_path / "docs" / "adr" / "0002-two.md").symlink_to(target)
+
+    report = _report(tmp_path, "--no-tracker")
+
+    assert _citations(report, "decision") == ["ADR-0009"]
+    assert _findings(report, "decision")[0]["path"] == "docs/adr/0002-two.md"
+
+
+def test_a_symlinked_adr_carrying_a_taken_number_is_a_real_collision(
+    tmp_path: Path,
+) -> None:
+    """A followed link is an ADR in the collision pass too, not only in the read pass.
+
+    Two names for one document is exactly the defect ``DuplicateAdrNumberError``
+    exists to name: every ``ADR-0001`` resolves to one of them and the other is
+    invisible to the corpus. That the second name happens to be a symlink
+    changes nothing about it, so the alias has to appear in the message.
+    """
+    _make_repo(tmp_path, {"0001-one.md": "# 1. One\n"})
+    (tmp_path / "docs" / "adr" / "0001-one-alias.md").symlink_to("0001-one.md")
+
+    result = _run(tmp_path, "--no-tracker")
+
+    assert result.returncode == 2
+    assert "docs/adr/0001-one.md" in result.stderr
+    assert "docs/adr/0001-one-alias.md" in result.stderr
+
+
+def test_a_dangling_symlink_is_not_a_second_file_on_that_number(tmp_path: Path) -> None:
+    """The negative half in the collision pass — and where ``not is_dir()`` would fail.
+
+    ``Path.is_dir()`` is False for a broken link just as it is for a real file,
+    so under that spelling this link is counted as a second file carrying
+    ADR-0001: the run exits 2 naming a collision between one real ADR and a name
+    with nothing behind it, and prints no report at all. ADR-0088 §6 ranks that
+    false report above every miss.
+    """
+    _make_repo(tmp_path, {"0001-one.md": "# 1. One\n\nSee ADR-0002.\n"})
+    (tmp_path / "docs" / "adr" / "0001-one-gone.md").symlink_to("0001-one-target.md")
+
+    result = _run(tmp_path, "--no-tracker")
+
+    assert result.returncode == 1, result.stderr
+    assert result.stderr == ""
+    assert _citations(json.loads(result.stdout), "decision") == ["ADR-0002"]
+
+
+def test_a_dangling_symlink_is_not_a_document_to_read(tmp_path: Path) -> None:
+    """The negative half in the read pass: skipped, not ``FileNotFoundError``.
+
+    ``notes-gone.md`` carries no ADR number, so the collision pass never looks at
+    it and it reaches the pass that reads every document under ``docs/adr``.
+    Under ``not is_dir()`` it is handed to ``read_text``, which follows the link
+    to nothing and kills the whole run on a traceback.
+    """
+    _make_repo(tmp_path, {"0001-one.md": "# 1. One\n\nSee ADR-0002.\n"})
+    (tmp_path / "docs" / "adr" / "notes-gone.md").symlink_to("notes-target.md")
+
+    result = _run(tmp_path, "--no-tracker")
+
+    assert result.returncode == 1, result.stderr
+    assert "FileNotFoundError" not in result.stderr
+    assert _citations(json.loads(result.stdout), "decision") == ["ADR-0002"]
