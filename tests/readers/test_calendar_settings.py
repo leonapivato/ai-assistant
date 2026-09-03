@@ -21,6 +21,7 @@ from __future__ import annotations
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from pydantic import ValidationError
@@ -198,6 +199,34 @@ def test_the_constructor_refuses_an_unknown_timezone() -> None:
         CalendarReader(_ABSOLUTE, timezone="Mars/Olympus_Mons")
 
 
+@pytest.mark.parametrize("value", [None, "/srv/calendars/personal.ics", 3, b"/srv/c.ics"])
+def test_the_constructor_refuses_a_source_that_is_not_a_path(value: object) -> None:
+    """The type is checked before anything is called on it (#1057).
+
+    A ``str`` has no ``is_absolute`` and ``None`` has no attributes at all, so an
+    unguarded call turned a direct caller's mistake into an ``AttributeError``
+    naming a *method* rather than the ``ValueError`` naming the field. The string
+    case is the one a second composition root actually writes — it is the one
+    value that looks correct.
+    """
+    with pytest.raises(ValueError, match="must be a Path"):
+        CalendarReader(value)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("value", [None, 3, ZoneInfo("Europe/Rome")])
+def test_the_constructor_refuses_a_timezone_that_is_not_a_str(value: object) -> None:
+    """The fifth site of the same rule, and the one the ``Raises:`` clause names.
+
+    ``ZoneInfo`` raises its own ``TypeError`` — "expected str, bytes or
+    os.PathLike object, not NoneType" — which names neither this reader's field
+    nor the rule. An already-resolved ``ZoneInfo`` is the plausible mistake here,
+    and it is refused rather than accepted: a reader may not take its zone from a
+    second source, so there is one spelling of the parameter (ADR-0026).
+    """
+    with pytest.raises(ValueError, match="must be a str"):
+        CalendarReader(_ABSOLUTE, timezone=value)  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -215,9 +244,33 @@ def test_the_constructor_refuses_an_unknown_timezone() -> None:
         # `Settings` already state at the seam a direct caller reaches (#471).
         ("max_entries", True),
         ("max_bytes", True),
+        # And a value of the wrong type is refused as a value rather than
+        # escaping as an operator's `TypeError` from the comparison below it
+        # (#1057). The durations are the half that had no type guard:
+        # `_check_count` is exact-typed to exclude `bool`, so the integers were
+        # covered by the rule they got for a different reason.
+        ("window_past", None),
+        ("window_past", 3600),
+        ("window_future", None),
+        ("window_future", 3600),
+        ("read_timeout", None),
+        ("read_timeout", 10),
+        # `bool` is not an `int`'s problem alone: `True <= timedelta(0)` is the
+        # same unsupported comparison, so the duration guard states it too.
+        ("read_timeout", True),
+        ("max_entries", None),
+        ("max_bytes", "8388608"),
     ],
 )
 def test_the_constructor_refuses_a_figure_outside_its_range(field: str, value: object) -> None:
+    """Refused at construction, as a ``ValueError`` naming the field it refused.
+
+    ADR-0093 §10 puts this seam's guard here because the constructor "is a second
+    seam a test or a second composition root reaches directly" — and what such a
+    caller needs from a refusal is the field's name and the rule. A ``TypeError``
+    reading ``'<' not supported between instances of 'NoneType' and
+    'datetime.timedelta'`` names neither (#1057).
+    """
     kwargs: dict[str, Any] = {field: value}
-    with pytest.raises(ValueError, match=field):
+    with pytest.raises(ValueError, match=f"calendar_{field}"):
         CalendarReader(_ABSOLUTE, **kwargs)
