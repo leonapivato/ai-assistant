@@ -37,8 +37,10 @@
   §7's monotonicity is what §8 rests on.
 - **Partially supersedes**
   [ADR-0092](0092-an-attested-belief-names-its-source-and-a-user-assertion-retires-it.md) — **§3's
-  local-substitute clause, in exactly one scope: a source that is read live, at the
-  instant of its report, and that holds no claim of its own made earlier.** §3 rules
+  local-substitute clause, in exactly one scope, stated about the producer rather than
+  about the file: a source this system interrogates directly, whose answer is produced at
+  the instant of the read rather than replayed from an answer another source gave
+  earlier.** §3 rules
   that `reported_at` *"is not when we read the file, not when we wrote the record, and
   not a value we may substitute for"*, and that *"A source that supplies no report
   time cannot be attested — there is no fallback"*. §5 below rules that where our
@@ -657,15 +659,24 @@ fetchable, or fetchable but never shown, is a bug in a place no test would look.
 > and `last_confirmed_at` carry that same instant. `Attestation.extent` is `None`: this
 > producer states no position for the file in the source's own world (ADR-0117 §2).
 
-> **Normative.** **`reported_at` is the fetch instant because our clock and the source's
-> report are one event, and this is the scope in which ADR-0092 §3's local-substitute
-> clause is superseded.** A fetcher asks a source that holds no earlier claim of its own
-> and the source answers in the same instant, so "when the source said so" and "when we
-> read it" are not two facts of which one stands in for the other. The scope is exactly
-> that: a source read **live**, at the instant of its report, holding no claim made
-> earlier. **It reaches nothing else.** A source that declares its own report time uses
-> that time; a synced or cached copy of a remote source is outside this scope entirely
-> and ADR-0092 §3 binds it as written.
+> **Normative.** **The attested source is the configured root itself, and never whatever
+> wrote the document.** `reported_by` names the fetcher's own source instance, and no
+> implementation attributes a fetched record to a system a file may have arrived from — not
+> a vendor, not a sender, not a service that synced it. What the record attributes to that
+> source is the **current content of a document the root holds**, and it makes no claim at
+> all about who composed that content or when.
+
+> **Normative.** **`reported_at` is the fetch instant because the root is interrogated
+> live and answers in the same instant, and this is the scope in which ADR-0092 §3's
+> local-substitute clause is superseded.** The scope is a property of **the producer** and
+> not of the file it reads: a source this system interrogates **directly**, whose answer is
+> produced at the instant of the read rather than replayed from an answer some other source
+> gave earlier. A configured local root is that by construction — the filesystem is asked
+> what a document holds now and answers now — so "when the source said so" and "when we read
+> it" are one event rather than two facts of which one stands in for the other.
+> **It reaches nothing else.** A source that declares its own report time uses that time;
+> and a kind whose fetch retrieves a remote source's earlier answer, or replays one from a
+> cache of its own, is outside this scope entirely and ADR-0092 §3 binds it as written.
 
 > **Normative.** **The file's mtime is never read into an attestation.** ADR-0092 §3's
 > prohibition on it is untouched and is the rule here: an mtime *"is a property of the
@@ -707,6 +718,50 @@ already accepted the cost in terms: in a deployment with a reader enabled it
 *"approaches 'every outward call in a conversation asks'"*. This decision enlarges the
 population of such deployments to those with a fetch root configured, and accepts it on
 ADR-0223's own reasoning rather than re-arguing it.
+
+**The scope is a property of the producer because no scope stated about the file is
+decidable, and an earlier draft of this section stated it about the file.** That draft
+superseded §3 for *"a source read live, at the instant of its report, holding no claim made
+earlier"* — which reads as a fact about the document, and §6 admits every supported direct
+child of the root without distinction. A note the owner typed yesterday and a PDF a service
+synced this morning sit alike inside that population, and no `Fetcher` can tell them apart:
+there is no source-origin field on a file and nothing in the contract that could carry one.
+A scope an implementation cannot decide is not a scope, and both review lenses reached that
+from opposite sides on the same round — one that an ordinary existing file *does* hold an
+earlier claim and so falls outside the stated scope while the rule still applies to it, the
+other that the fetcher has no classification by which to keep a synced copy out.
+
+**The repair is not a classifier, and adding one would be the wrong move.** What was
+mis-stated is not the boundary but the identity of the thing being attested. This record
+does not say the *document* reported anything at the fetch instant, and it does not say the
+document's author did; it says the **root** — "the owner's documents folder" — reported, at
+that instant, what the document it holds now contains. That is equally true of a file typed
+yesterday and of one synced this morning, which is why the boundary can be drawn where an
+implementation can see it: at what the producer *is*, which the fetcher knows by
+construction, rather than at where a file came from, which it cannot know at all. A
+classifier over file origin would be a guess dressed as a fact, and it would put the
+attestation's honesty at the mercy of it.
+
+**This is why the mtime is still forbidden and why the read instant is not the same
+mistake.** ADR-0092 §3's failure mode is *"a true statement about us and a false one about
+the source"* — a value that is *nearly* right. An mtime claims the source's claim was made
+at the last local write, and a copy, a restore or a `touch` falsifies that while the claim
+stays where it was. The read instant claims the root answered when we asked it, and nothing
+can falsify that: it is not a proxy for the source's clock, it **is** the source's clock,
+because the source is the local filesystem and the report is the answer to this system's
+own call. What §3 forbids is substituting a local timestamp for an answer another source
+produced at a time we do not know; here there is no other source and no earlier time being
+stood in for. The read instant is, uniquely among the candidates, true by construction
+rather than by luck.
+
+**What the record therefore does not carry, and where the honest gap is.** Nothing in this
+decision says when a document's *words* were composed. That fact exists, the mtime is not
+it, no format on this rung is required to declare one, and this ADR invents none: a
+consumer asking "when did the folder tell you this?" is answered exactly, and one asking
+"when was it written?" is answered by nothing on the record — which is the correct answer
+rather than a missing one, on §3's own reasoning that *"the capability is bounded by what
+sources can actually say"*. §15 defers a format-declared instant by name, with the consumer
+that would fire it.
 
 **The supersession is narrow and it is the smallest instrument that reaches the case.**
 Three alternatives were available and each is worse. **Requiring a format-declared
@@ -1282,6 +1337,14 @@ same reason; this decision adds a contract, so it adds a lane.
    different listing resolves to a different entry; the two packages agree with no shared
    table, asserted by resolving an ask against a listing the test constructs directly; and
    the same label resolves to the same entry on **both** planner calls of a revising turn.
+   **And no listing survives its turn**, asserted over **two consecutive turns** of one
+   conversation whose roots have changed between them, with the second turn beginning
+   **inside** `fetch_listing_ttl` of the first — the interval in which a retained listing
+   would still verify, so the arm turns on §3's discipline and not on the expiry. Turn 2
+   renders its own listing, `F1` on turn 2 fetches turn 2's first entry, and turn 1's
+   entries, token and handles appear in no prompt, no ask resolution and no fetch of turn 2.
+   This is the arm that fails on an implementation caching a listing across turns, which §15
+   names as the residual a turn identity on the contract would close.
 8. **A file over either bound is refused, and nothing is truncated.** A file over
    `fetch_max_file_bytes` and a file whose extracted text is over `fetch_max_content_bytes`
    each yield a refusal, add no record, fail no turn, and put no prefix of the text
@@ -1455,13 +1518,18 @@ alongside its dated note (ADR-0082 §2).
 
 **ADR-0092 §3's local-substitute clause is partially superseded, in one scope, and this is
 the heaviest instrument in this ADR.** §3 rules that `reported_at` *"is not when we read the
-file"* and admits no fallback; §5 above sets it to the fetch instant for a source read live
-at the moment of its report. A reader holding only ADR-0092 would refuse to build that, so
-ADR-0070 §1's test is met and §3's partial form is the sanctioned tool. **The scope is
-exactly the case where the two clocks are one event** and reaches no other: a synced or
-cached copy of a remote source is untouched, a source that declares its own instant uses
-it, and §3's reason — that a substituted value asserts *"a report time the source never
-made"* — is why the scope is drawn there and nowhere wider. **§3's mtime prohibition, its
+file"* and admits no fallback; §5 above sets it to the fetch instant for a source this
+system interrogates directly, whose answer is produced at the instant of the read. A reader
+holding only ADR-0092 would refuse to build that, so ADR-0070 §1's test is met and §3's
+partial form is the sanctioned tool. **The scope is exactly the case where the two clocks
+are one event**, it is a property of the producer rather than of the file — which is what
+makes it decidable at all, since no `Fetcher` can classify where a file came from — and it
+reaches no other: a kind that retrieves a remote source's earlier answer or replays one
+from a cache is untouched, a source that declares its own instant uses it, and §3's
+reason — that a substituted value asserts *"a report time the source never made"* — is why
+the scope is drawn there and nowhere wider. What the record attributes to the source is the
+document's **current content**, never a claim about who composed it or when.
+**§3's mtime prohibition, its
 `reported_by` account, its ruling that a `reported_at` earlier than `last_updated` is
 normal, and its ruling that one in our future is not refused all stand and are used as
 given.** ADR-0092 §1's `_attested_iff_attestation` validator is satisfied rather than
@@ -1558,6 +1626,14 @@ avoided: the record carries an attestation because it is in the attested band.
   It fires the same external mark and needs no supersession of ADR-0092 §3, which makes it
   genuinely tempting. Rejected in §5 because it is false: `DERIVED` means we worked it out
   and can re-derive it, and a verbatim document excerpt is neither.
+- **Classifying a file by where it came from, so that a synced or downloaded copy is
+  refused an attestation and a locally authored one is granted it.** It is the shape a scope
+  stated about the *file* would need, and it is unbuildable: a filesystem records no
+  source-origin, nothing in the contract could carry one, and any implementation would be
+  guessing from an extension, a directory or a download-marker convention. §5 draws the
+  scope at what the producer *is* instead, which the fetcher knows by construction, and
+  makes the root — not the document's author — the source the record attributes its report
+  to.
 - **Requiring a format-declared report time, so only PDFs are readable.** The most faithful
   reading of ADR-0092 §3 — *"The capability is bounded by what sources can actually say,
   which is the honest place for the boundary"* — and rejected in §5 because it would define
