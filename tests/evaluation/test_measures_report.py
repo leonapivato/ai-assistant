@@ -8,6 +8,7 @@ and that no identifier of any kind reaches the page.
 
 from __future__ import annotations
 
+import re
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -157,6 +158,35 @@ class TestRendering:
         assert "the window entire" in rendered
         assert "part 1 of 2" in rendered
         assert "part 2 of 2" in rendered
+
+    async def test_the_repeated_explanation_rate_is_labelled_a_lower_bound(self) -> None:
+        """ADR-0121 §7: "The report labels the repeated-explanation rate as a lower bound".
+
+        Both halves of the clause are on test — that agreement "is judged by exact
+        restatement" and "that a paraphrase is not counted" — beside that figure in
+        every block, and beside no other figure: the bound is a property of §1's
+        predicate, and no other measure on the page is computed from one.
+
+        The paraphrase half is matched as a *negated* clause rather than as the word,
+        because the word alone passes on a caveat asserting the opposite of §7 — a
+        label reading "a paraphrase is counted" carries every token this test would
+        otherwise look for. The words between are left free: what is pinned is that
+        the negation attaches to the paraphrase, not the sentence that says so.
+        """
+        result = await report(
+            configuration(when=at(days=1), metrics={"observation_batch_size": 25}),
+            configuration(when=at(days=10), metrics={"observation_batch_size": 50}),
+        )
+        lines = result.render().splitlines()
+        figures = [n for n, line in enumerate(lines) if "repeated-explanation rate (§6)" in line]
+        assert len(figures) == 3  # the window entire, and each of its two parts
+        for n in figures:
+            caveat = " ".join(lines[n + 1 : n + 3])
+            assert "lower bound" in caveat
+            assert "exact restatement" in caveat
+            assert re.search(r"paraphrase\b[^.]*\bis not counted\b", caveat)
+        carriers = {n for n, line in enumerate(lines) if "lower bound" in line}
+        assert carriers == {n + 1 for n in figures}
 
     async def test_an_empty_stream_renders_only_that(self) -> None:
         result = await compute(FakeTraceStore([]), start=START, end=END, settling=SETTLING)
