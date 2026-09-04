@@ -320,7 +320,7 @@ async def test_a_response_framed_by_the_close_is_read_to_the_end() -> None:
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("status", [300, 301, 302, 307, 308, 399])
+@pytest.mark.parametrize("status", [300, 301, 302, 304, 307, 308, 399])
 async def test_a_redirect_is_a_refusal_and_never_a_second_request(status: int) -> None:
     """ADR-0231 §5: "it **follows no redirect**", stated over the whole class.
 
@@ -907,3 +907,47 @@ async def test_a_field_value_keeps_its_interior_spacing_and_loses_its_edges() ->
     answer = await subject.get(origin=ORIGIN, target=TARGET)
 
     assert answer.headers == (("content-type", "text/html; charset=utf-8"),)
+
+
+@pytest.mark.parametrize(
+    ("octets", "status"),
+    [
+        pytest.param(
+            b"HTTP/1.1 204 No Content\r\nContent-Length: 3\r\n\r\nbad", 204, id="204-with-a-length"
+        ),
+        pytest.param(b"HTTP/1.1 204 No Content\r\n\r\n", 204, id="204-with-no-framing-at-all"),
+        pytest.param(
+            b"HTTP/1.1 204 No Content\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\nx",
+            204,
+            id="204-framed-two-ways-at-once",
+        ),
+    ],
+)
+async def test_a_status_that_admits_no_content_is_framed_by_the_header_section(
+    octets: bytes, status: int
+) -> None:
+    """RFC 9112 §6.3's first rule, which decides the framing before any field does.
+
+    "Any response to a HEAD request and any response with a 1xx, 204, or 304 status
+    code is always terminated by the first empty line after the header fields,
+    **regardless of the header fields present** in the message." So the octets
+    after the header section are not this response's body, and returning them would
+    hand a caller bytes it would read as provider payload — which is what
+    adversarial round 3 found.
+
+    The two-framings arm is here deliberately: on such a status the standard states
+    the framing itself, so there is nothing to resolve and nothing to refuse — the
+    refusal for a body framed two ways governs a response that *has* one.
+
+    **Only ``204`` is driven here, and the other two members of §6.3's list are
+    covered where they are actually refused**: an interim status is a malformed
+    shape (above), and ``304`` is inside the ``3xx`` class this seam refuses whole,
+    which the redirect row asserts for it by name. A test driving a ``304`` through
+    the body reader would be asserting over a path no response can take.
+    """
+    channel = far_end(octets)
+    subject, _ = exchange(channel)
+
+    answer = await subject.get(origin=ORIGIN, target=TARGET)
+
+    assert (answer.status, answer.body) == (status, b"")
