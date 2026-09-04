@@ -2198,6 +2198,30 @@ _MAX_CHUNK_SIZE_DIGITS: Final = 16
 #: the text is checked before it is converted rather than after.
 _HEX_DIGITS: Final = frozenset(string.hexdigits)
 
+#: RFC 9110 §5.6.4's ``qdtext``: what a quoted string may carry **unescaped**. It
+#: is the field-value set less the two characters that would end the string or
+#: begin an escape, which is why it is written as that set minus them rather than
+#: enumerated a second time — a quoted chunk extension carrying a ``"`` or a ``\``
+#: reaches here as a ``quoted-pair`` and never as text.
+_QUOTED_TEXT_CHARACTERS: Final = _FIELD_VALUE_CHARACTERS - {'"', "\\"}
+
+#: RFC 9110 §5.6.3's ``BWS`` — "bad" whitespace, which a sender must not generate
+#: and which §5.6.3 nonetheless directs a recipient to "parse for such bad
+#: whitespace and remove it". It is skipped rather than refused for exactly that
+#: reason: a chunk extension spaced around its separators is a far end nobody
+#: would call malformed, and what this seam refuses is an extension matching no
+#: grammar at all.
+_BAD_WHITESPACE: Final = frozenset(" \t")
+
+#: The one refusal every ill-formed chunk extension is raised with, named once
+#: because :func:`_check_chunk_extension` and :func:`_past_chunk_extension_value`
+#: are one grammar read in two pieces and no caller can act on the difference. It
+#: names the defect and never the octets: a far end's text is a third party's, and
+#: a refusal reaches a log.
+_CHUNK_EXTENSION_DEFECT: Final = (
+    "the far end sent a chunk extension that RFC 9112 §7.1.1 does not admit"
+)
+
 
 @final
 @dataclass(frozen=True, slots=True)
@@ -2988,18 +3012,33 @@ def _chunk_size(line: bytes) -> int:
     far end could declare a size in a spelling no other reader agrees on. The
     length is checked before the conversion, for :func:`_port`'s reason (#1147).
 
+    **A chunk extension is read and then discarded, which is not the same as being
+    ignored.** RFC 9112 §7.1.1 says a recipient "MUST ignore unrecognized chunk
+    extensions", so refusing extensions outright would refuse a conforming far end;
+    what is refused is an **ill-formed** one. Dropping the tail unread would have
+    made the chunk-size line the one place arbitrary octets were admitted — the
+    same leniency the header section, the reason phrase and the trailer are each
+    refused under, and the one adversarial round 7 found here.
+
     Args:
-        line: The chunk-size line, without its terminator. A chunk extension —
-            everything from the first ``;`` — is dropped, which RFC 9112 §7.1.1
-            allows a recipient to do.
+        line: The chunk-size line, without its terminator. Everything from the
+            first ``;`` is the ``chunk-ext``: it is read under
+            :func:`_check_chunk_extension` and then dropped.
 
     Returns:
         The size, in octets.
 
     Raises:
-        MalformedHttpResponseError: If the line declares no hexadecimal size.
+        MalformedHttpResponseError: If the line declares no hexadecimal size, or
+            carries a chunk extension that is not one.
     """
-    size = line.partition(b";")[0]
+    size, extended, extension = line.partition(b";")
+    if extended:
+        _check_chunk_extension(extension)
+        # The ``BWS`` of §7.1.1's first repetition sits between the size and the
+        # ``;``, so it is admitted **only** where an extension follows it. A line
+        # reading ``1 `` declares no extension and is not a chunk size.
+        size = size.rstrip(b" \t")
     if (
         not size
         or len(size) > _MAX_CHUNK_SIZE_DIGITS
@@ -3008,6 +3047,108 @@ def _chunk_size(line: bytes) -> int:
         msg = "the far end declared a chunk size that is not a hexadecimal number"
         raise MalformedHttpResponseError(msg)
     return int(size, 16)
+
+
+def _check_chunk_extension(extension: bytes) -> None:
+    """Read a ``chunk-ext`` under RFC 9112 §7.1.1's grammar, and keep nothing.
+
+    The grammar is ``*( BWS ";" BWS chunk-ext-name [ BWS "=" BWS chunk-ext-val ] )``
+    with ``chunk-ext-name`` a ``token`` and ``chunk-ext-val`` a ``token`` or a
+    ``quoted-string``; the first ``;`` has already been taken by :func:`_chunk_size`,
+    so what arrives here is one repetition and any that follow it. ``obs-text`` is
+    not admitted inside a quoted value, for the reason :func:`_field_of` refuses a
+    non-ASCII field line: a far end sending one is sending octets this seam has no
+    encoding for.
+
+    Nothing is returned, because nothing is kept — an extension names a coding this
+    seam does not read, and reading one would be Lane 3's business at the earliest.
+
+    Args:
+        extension: The line's octets after its first ``;``, without a terminator.
+
+    Raises:
+        MalformedHttpResponseError: If the octets are not a ``chunk-ext``.
+    """
+    if not extension.isascii():
+        raise MalformedHttpResponseError(_CHUNK_EXTENSION_DEFECT)
+    text = extension.decode("ascii")
+    position = 0
+    while True:
+        position = _past_bad_whitespace(text, position)
+        named = position
+        while position < len(text) and text[position] in _FIELD_NAME_CHARACTERS:
+            position += 1
+        if position == named:
+            # An empty name is what a lone ``;``, a ``;;`` and a ``;=value`` all
+            # reach here as, and §7.1.1 admits none of them: the name is not
+            # optional and only the value is.
+            raise MalformedHttpResponseError(_CHUNK_EXTENSION_DEFECT)
+        position = _past_bad_whitespace(text, position)
+        if position < len(text) and text[position] == "=":
+            position = _past_bad_whitespace(text, position + 1)
+            position = _past_bad_whitespace(text, _past_chunk_extension_value(text, position))
+        if position == len(text):
+            return
+        if text[position] != ";":
+            raise MalformedHttpResponseError(_CHUNK_EXTENSION_DEFECT)
+        position += 1
+
+
+def _past_chunk_extension_value(text: str, position: int) -> int:
+    """The offset just past the ``chunk-ext-val`` beginning at ``position``.
+
+    RFC 9112 §7.1.1 makes it a ``token`` or a ``quoted-string``. The quoted form is
+    scanned rather than split on, because RFC 9110 §5.6.4's ``quoted-pair`` means a
+    ``"`` inside one is not its end and a ``;`` inside one does not begin the next
+    extension — which is why this cannot be written as "split on ``;``".
+
+    Args:
+        text: The extension's characters.
+        position: Where the value begins.
+
+    Returns:
+        The offset just past the value.
+
+    Raises:
+        MalformedHttpResponseError: If no value begins there, or a quoted one is
+            never closed.
+    """
+    if position < len(text) and text[position] == '"':
+        position += 1
+        while position < len(text):
+            character = text[position]
+            if character == '"':
+                return position + 1
+            if character == "\\":
+                position += 1
+                if position == len(text) or text[position] not in _FIELD_VALUE_CHARACTERS:
+                    break
+            elif character not in _QUOTED_TEXT_CHARACTERS:
+                break
+            position += 1
+        raise MalformedHttpResponseError(_CHUNK_EXTENSION_DEFECT)
+    valued = position
+    while position < len(text) and text[position] in _FIELD_NAME_CHARACTERS:
+        position += 1
+    if position == valued:
+        raise MalformedHttpResponseError(_CHUNK_EXTENSION_DEFECT)
+    return position
+
+
+def _past_bad_whitespace(text: str, position: int) -> int:
+    """The offset just past any ``BWS`` at ``position`` (RFC 9110 §5.6.3).
+
+    Args:
+        text: The characters being read.
+        position: Where to start.
+
+    Returns:
+        The offset of the first character at or after ``position`` that is neither
+        a space nor a horizontal tab, which is ``len(text)`` where there is none.
+    """
+    while position < len(text) and text[position] in _BAD_WHITESPACE:
+        position += 1
+    return position
 
 
 __all__ = [
