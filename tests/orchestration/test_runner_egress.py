@@ -975,3 +975,70 @@ async def test_a_resumed_call_carries_the_coverage_that_was_approved() -> None:
     assert rebound.binding.coverage is SpanCoverage.MODEL_ON_EVERY_PATH
     assert rebound.binding == approved.egress_binding
     assert len(harness.invoker.invocations) == 1
+
+
+# --- ADR-0233 §6: the fail-closed value, handed over rather than softened -----
+
+
+async def test_a_fail_closed_coverage_is_forwarded_unchanged_and_refused_at_the_seam() -> None:
+    """ADR-0233 §6 through this stage: ``_bound`` hands the value over, it is refused.
+
+    ADR-0155 §3's **second** clause is the absolute one — a span may not carry
+    covered content some covered path of which contains no model call — and ADR-0233
+    §6 gives it its mechanism by making the binding refuse ``PATH_WITHOUT_MODEL`` at
+    construction. What this pins is the one stage-level link in that chain: the
+    runner *forwards* the caller's ``coverage`` onto the carrier it hands the seam,
+    so the refusal is reached and the call ends as ``EGRESS_UNBINDABLE`` before the
+    policy is asked anything.
+
+    **What this fails that the two cases above cannot.** They exercise
+    ``NOT_COVERED`` and ``MODEL_ON_EVERY_PATH``, the only two states
+    :meth:`~ai_assistant.orchestration.origin.SelectionOrigin.over` can produce — so
+    a regression in :meth:`~ai_assistant.orchestration.runner.StepRunner._bound` that
+    normalised the fail-closed value on its way onto ``CarriedProvenance`` would
+    leave both of them passing while a call ADR-0155 §3 forbids absolutely reached
+    the policy and a confirmation. The refusal itself is pinned at the model
+    (``tests/core/test_span_coverage``) and at the seam (``EgressBinderContract``);
+    what is missing without this is that the stage between them hands it over.
+
+    The binder is the **same** one the neighbouring cases park a confirmation
+    through, and the step's arguments are the same, so the caller's ``origin`` is the
+    only thing that differs and the only thing that can account for the refusal. The
+    value is reachable here only by direct construction of a ``SelectionOrigin``:
+    ``over`` never produces it, because this package supplies the planner's model
+    call every covered path of its arguments runs through.
+
+    Committing nothing is asserted the way the ``EGRESS_UNBINDABLE`` cases above
+    assert it, plus the standing question: no ``pending_confirmation`` is left
+    against the binding, so nothing is awaiting an answer to a call that may not be
+    made at all.
+    """
+    tool = _tool(egress=True)
+    binder = _bound_binder(tool)
+    harness = _Harness(tool=tool, binder=binder)
+    state = await _an_execution(harness.plans, _step())
+    before = await _stored(harness.plans, state)
+
+    result = await harness.runner.run(
+        state,
+        STEP,
+        timeout=PATIENT,
+        origin=SelectionOrigin(
+            planned_with_external_content=False, coverage=SpanCoverage.PATH_WITHOUT_MODEL
+        ),
+    )
+
+    assert result.disposition is Disposition.EGRESS_UNBINDABLE
+    assert result.decision_id is None
+    policy = harness.policy
+    assert isinstance(policy, _RecordingPolicy)
+    assert policy.decided == [], "the refusal is reached before the policy is asked"
+    assert policy.resolutions == []
+    assert await harness.trail.get("d-1") is None
+    assert (
+        await harness.trail.pending_confirmation(execution_id=state.id, step_id=STEP)
+    ) is None, "nothing may be left awaiting an answer to a call that cannot be made"
+    assert harness.invoker.invocations == []
+    after = await _stored(harness.plans, state)
+    assert after.status is StepStatus.PENDING
+    assert after.model_dump(mode="json") == before.model_dump(mode="json")
