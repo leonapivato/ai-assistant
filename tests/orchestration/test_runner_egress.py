@@ -37,10 +37,12 @@ from ai_assistant.core.types import (
     ProvisioningState,
     Reversibility,
     RiskLevel,
+    SemanticMemory,
     SpanCoverage,
     StepStatus,
     ToolCost,
     ToolDefinition,
+    Validity,
 )
 from ai_assistant.orchestration import StepExecutor, StepRunner
 from ai_assistant.orchestration.origin import NOTHING_EXTERNAL, SelectionOrigin
@@ -864,3 +866,112 @@ async def test_resuming_a_confirmation_whose_origin_was_never_recorded_is_refuse
     assert await harness.trail.get("d-2") is None
     stored = await _stored(harness.plans, state)
     assert stored.status is StepStatus.AWAITING_APPROVAL
+
+
+# --- ADR-0233 §5, §15: the coverage the composing pass computed --------------
+
+
+def _selected_belief() -> SemanticMemory:
+    """A record this system obtained from its own store, carrying no externality mark.
+
+    ADR-0155 §3's first clause makes covered content "a value any component obtained
+    from a store this system keeps under ``Settings.data_dir``", and this is one —
+    which is the whole of what makes a call composed over it covered. The mark is
+    deliberately absent so the case cannot pass by reading ``coverage`` off
+    ``planned_with_external_content``.
+    """
+    return SemanticMemory(
+        id="rec-1",
+        content="the roof needs looking at before winter",
+        fact="the roof needs looking at before winter",
+        validity=Validity(),
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.8, last_updated=AT),
+    )
+
+
+@pytest.mark.parametrize(
+    ("selected", "expected"),
+    [
+        pytest.param((_selected_belief(),), SpanCoverage.MODEL_ON_EVERY_PATH, id="memory-drawn"),
+        pytest.param((), SpanCoverage.NOT_COVERED, id="turn-content-only"),
+    ],
+)
+async def test_the_binding_carries_the_coverage_the_composing_pass_computed(
+    selected: tuple[SemanticMemory, ...], expected: SpanCoverage
+) -> None:
+    """ADR-0233 §15's first two representative inputs, at the site §15 names.
+
+    A body composed by a model that was shown this system's own records carries
+    ``MODEL_ON_EVERY_PATH``; one composed from turn content only carries
+    ``NOT_COVERED``. Both are asserted on the **recorded** decision as well as on the
+    request the policy ruled over, because that is the value ADR-0233 §4 actually
+    carries to the ruling and the one ``authorises`` compares.
+
+    **The arguments are byte-identical across the two runs**, which is what makes
+    this a case about the composing pass's own selection rather than about anything
+    the stage could have recovered from the payload — ADR-0233 §5's second clause
+    forbids deriving it from an argument's value, its field or its shape, and a stage
+    that did would answer the same on both.
+    """
+    tool = _tool(egress=True)
+    harness = _Harness(tool=tool, binder=_bound_binder(tool))
+    state = await _an_execution(harness.plans, _step())
+
+    parked = await harness.runner.run(
+        state, STEP, timeout=PATIENT, origin=SelectionOrigin.over(selected)
+    )
+
+    assert parked.disposition is Disposition.AWAITING_CONFIRMATION
+    policy = harness.policy
+    assert isinstance(policy, _RecordingPolicy)
+    ruled = policy.decided[0].egress_binding
+    assert ruled is not None
+    assert ruled.coverage is expected
+    assert parked.decision_id is not None
+    recorded = await harness.trail.get(parked.decision_id)
+    assert recorded is not None
+    assert isinstance(recorded.egress_binding, EgressBinding)
+    assert recorded.egress_binding.coverage is expected
+
+
+async def test_a_resumed_call_carries_the_coverage_that_was_approved() -> None:
+    """ADR-0233 §4's sixth clause, exercised where a recompute would refuse the send.
+
+    ``resume`` takes no ``origin`` at all — there is no selection set on the resuming
+    path, plausibly no surviving turn, and ADR-0233 §4 therefore has ``rebind``
+    transcribe the value from ``approved`` rather than re-derive it. An
+    implementation that re-derived would answer ``NOT_COVERED``, compare unequal to
+    the approved binding, and refuse exactly the call the user was shown and
+    approved — so the disposition is the assertion that matters, and the equality is
+    what says *why*.
+    """
+    tool = _tool(egress=True)
+    binder = _WatchingBinder(_bound_binder(tool))
+    harness = _Harness(tool=tool, binder=binder)
+    state = await _an_execution(harness.plans, _step())
+    parked = await harness.runner.run(
+        state, STEP, timeout=PATIENT, origin=SelectionOrigin.over((_selected_belief(),))
+    )
+    assert parked.disposition is Disposition.AWAITING_CONFIRMATION
+    assert parked.decision_id is not None
+    approved = await harness.trail.get(parked.decision_id)
+    assert approved is not None
+    assert isinstance(approved.egress_binding, EgressBinding)
+    assert approved.egress_binding.coverage is SpanCoverage.MODEL_ON_EVERY_PATH
+
+    resumed = await harness.runner.resume(
+        parked.state,
+        STEP,
+        confirmation_id=str(parked.decision_id),
+        approved=True,
+        timeout=PATIENT,
+    )
+
+    assert resumed.disposition is Disposition.EXECUTED, (
+        "a re-derived coverage would have made the binding compare unequal and refused this"
+    )
+    rebound = binder.returned[-1]
+    assert rebound is not None
+    assert rebound.binding.coverage is SpanCoverage.MODEL_ON_EVERY_PATH
+    assert rebound.binding == approved.egress_binding
+    assert len(harness.invoker.invocations) == 1
