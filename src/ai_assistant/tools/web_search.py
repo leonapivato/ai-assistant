@@ -318,6 +318,17 @@ _IMF_MONTHS: Final = (
 #: How long an IMF-fixdate is: ``Sun, 06 Nov 1994 08:49:37 GMT``.
 _IMF_LENGTH: Final = 29
 
+#: How deeply a documented response may nest. Public, so the boundary case that keeps
+#: this figure honest reads it rather than restating it. The provider's answer is an object
+#: holding an object holding an array of objects — four levels — so a bound two orders
+#: of magnitude above that refuses nothing a documented answer carries while sitting
+#: far below the depth at which ``json``'s scanner exhausts the interpreter's stack.
+MAX_JSON_DEPTH: Final = 100
+
+#: The octets that open a JSON structure, and those that close one.
+_JSON_OPENERS: Final = frozenset(b"[{")
+_JSON_CLOSERS: Final = frozenset(b"]}")
+
 #: RFC 3986 §2.3's unreserved set, the characters a request target may carry
 #: unescaped. Everything else this integration writes into one is percent-encoded
 #: (:func:`_percent_encoded`).
@@ -468,17 +479,66 @@ def _decoded_object(body: bytes) -> dict[str, FrozenJson] | None:
     Args:
         body: The response's octets, as the exchange read them under its bound.
 
+    **A response the decoder cannot descend is one of the shapes, and it is refused
+    here rather than left to leave.** ``json``'s scanner descends one level per open
+    bracket, so a *well-formed* body nested deeply enough exhausts the interpreter's
+    stack instead of failing to parse — which is reachable well inside
+    ``search_max_response_bytes``' default megabyte, and is therefore a response a
+    provider can actually send. ADR-0231 §17 says this member raises for no source
+    reason, and a body a provider sent is exactly a source reason.
+
+    **The guard is a bound on the nesting rather than a caught ``RecursionError``**,
+    and that is the difference between refusing and hoping: a stack that has already
+    overflowed is not one an ``except`` clause can be relied on to unwind, which is
+    what the first attempt at this discovered. So the depth is counted off the octets
+    **before** the decoder is entered, and a body past the bound is refused without
+    being parsed at all — the same posture ADR-0231 §5 takes for the response bound
+    one seam over, where "nothing is parsed" is what makes an over-large response
+    yield no value.
+
     Returns:
-        The object, or ``None`` where the octets are not UTF-8, are not JSON, or are
-        JSON that is not an object. All three are one operator fact — the provider
-        answered something this integration does not read — so they are one answer
-        rather than three.
+        The object, or ``None`` where the octets are not UTF-8, are not JSON, are
+        nested past :data:`MAX_JSON_DEPTH`, or are JSON that is not an object. All
+        four are one operator fact — the provider answered something this integration
+        does not read — so they are one answer rather than four.
     """
+    if _too_deep(body):
+        return None
     try:
         decoded = json.loads(body.decode("utf-8"))
-    except UnicodeDecodeError, json.JSONDecodeError:
+    except ValueError:
+        # `ValueError` and not the two concrete classes: `UnicodeDecodeError` and
+        # `json.JSONDecodeError` are both subclasses of it, and naming the base keeps
+        # a third `ValueError` from this one call from leaving a member that returns
+        # refusals.
         return None
     return decoded if isinstance(decoded, dict) else None
+
+
+def _too_deep(body: bytes) -> bool:
+    """Whether ``body`` nests structures past what this integration will decode.
+
+    Counted over the octets rather than over a parse, because the point is to decide
+    it **before** the decoder is entered: see :func:`_decoded_object`. It is an
+    over-count and deliberately so — every ``[`` and ``{`` counts, including one
+    inside a string literal — which errs towards refusing a response no documented
+    answer carries, and cannot admit one the decoder would then fail on.
+
+    Args:
+        body: The response's octets.
+
+    Returns:
+        Whether the running depth ever passes :data:`MAX_JSON_DEPTH`.
+    """
+    depth = 0
+    for octet in body:
+        if octet in _JSON_OPENERS:
+            depth += 1
+            if depth > MAX_JSON_DEPTH:
+                return True
+        elif octet in _JSON_CLOSERS:
+            depth -= 1
+    return False
 
 
 def _provider_results(body: bytes) -> tuple[Mapping[str, FrozenJson], ...] | None:
@@ -1159,6 +1219,7 @@ class WebSearchEgress:
 
 
 __all__ = [
+    "MAX_JSON_DEPTH",
     "ORIGIN_ARGUMENT",
     "QUERY_ARGUMENT",
     "WEB_SEARCH",
