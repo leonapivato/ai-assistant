@@ -183,6 +183,7 @@ if TYPE_CHECKING:
         RecordedInvocation,
         ReplyChunk,
         RoutedOperationRecord,
+        SearchOutcome,
         SecretName,
         SecretValue,
         ShownFile,
@@ -2891,6 +2892,191 @@ class QueryComposer(Protocol):
                 conforming-looking implementation could satisfy every other clause
                 and still get it wrong. It is the **only** exception that leaves
                 this member.
+        """
+        ...
+
+
+@runtime_checkable
+class WebSearcher(Protocol):
+    """Asks one connected search account a question, and mints what it answers.
+
+    The **search** seam (ADR-0231 §17): it proposes the act — an
+    :class:`~ai_assistant.core.types.ActionRequest` for a composed query — and,
+    once that act has been authorised, performs it and returns the records the
+    provider's answer transcribes. Named for its product role, as every Protocol
+    here is: the role is *asking the world this turn's question*.
+
+    **Three members, and the split between the first two is the whole design.**
+    :meth:`request` is the proposal and reaches no authorisation conclusion;
+    :meth:`search` takes a :class:`~ai_assistant.core.types.ToolCall`, whose own
+    validator has already run ADR-0021 §1's ``authorises``, so **an unauthorised
+    search is unconstructable at the type level** — ``ToolInvoker.invoke``'s
+    guarantee obtained without ``ToolInvoker``. Between them stand the binder, the
+    policy and the trail, none of which this contract names (ADR-0231 §6).
+
+    **It is not a registered tool and this seam is why.** ADR-0231 §5 registers
+    the search integration at the egress seam against a connected account and in
+    **no** ``ToolRegistry``, so it is absent from
+    :meth:`ToolRegistry.capabilities` and :meth:`ToolRegistry.all_tools`,
+    unreachable by any plan step, and un-invocable through :class:`ToolInvoker`.
+    A planner cannot name it, so the failure mode ADR-0170 §5a and ADR-0208 §1
+    both argue against — a turn driving a tool whose result is a payload with no
+    per-span provenance — is unreachable rather than forbidden.
+
+    **No member takes a store, a supply or a policy.** Not a
+    :class:`~ai_assistant.core.types.MemoryRecord`, not a :class:`MemoryStore`,
+    not an :class:`ActionPolicy`, not an :class:`AuditTrail`, not a
+    :class:`RecipientGrants` — and **no later lane adds one that does**
+    (ADR-0231 §17). What :meth:`request` is handed is one composed query and
+    nothing else, which is ADR-0231 §11's tenth clause at the second seam: the
+    string it receives is byte-identical to the one that servicing's
+    :class:`~ai_assistant.core.types.QueryOutcome` carried, and a caller holding a
+    record's content has no parameter to put it in.
+
+    **A ``WebSearcher`` holds the credential and this contract never carries
+    one.** ADR-0231 §5 puts the ``Secrets`` read at ``SecretScope.INTEGRATION``
+    *inside* :meth:`search`, after ADR-0231 §6's three checks have passed — which
+    is ADR-0148 §7's positional gate with one word changed. No credential crosses
+    this seam in either direction, and no component outside ``tools/`` holds one
+    on account of this decision.
+
+    **Neither acting member raises for a source reason** (ADR-0231 §17). A refused
+    admission, a failed transport, a provider that answered something else, an
+    over-large response, an unattested one and an empty one are
+    :class:`~ai_assistant.core.types.SearchRefusal` members and never exceptions,
+    for :class:`Fetcher`'s and :class:`QueryComposer`'s reason: a closed refusal
+    enumeration makes the non-yield a value the audit can count and the turn can
+    ignore, where an exception would make ADR-0226 §5's degradation posture the
+    servicer's problem to catch correctly at every call site. ADR-0231 adds **no**
+    error class to ``core/errors.py``.
+
+    **It carries no lifecycle member, deliberately**, exactly as :class:`Fetcher`
+    does: a concrete searcher holding an opened resource exposes a ``close``, and
+    ``app/composition.py`` registers that ``close`` among the resources it has
+    opened (ADR-0042 §2). The contract keeps saying what a search *is* and not who
+    shuts one down.
+
+    Cancelling either acting member is governed by this module's cancellation
+    clause (ADR-0060), with the one consequence ADR-0231 §17 spells out because it
+    is where a conforming-looking implementation could satisfy every other clause
+    and still get it wrong: a call cancelled from outside while suspended
+    re-raises ``CancelledError`` and is converted into neither an outcome nor a
+    refusal.
+    """
+
+    @property
+    def name(self) -> str:
+        """The identity of the **configured source** this searcher serves.
+
+        In :attr:`Reader.name`'s and :attr:`Fetcher.name`'s own form — a ``str``,
+        which keeps #667's one-identifier-contract question exactly where it is —
+        and it is what a minted record's
+        :attr:`~ai_assistant.core.types.Attestation.reported_by` carries
+        (ADR-0231 §10).
+
+        **The attested source is the search source instance** — "the owner's web
+        search" — and never a vendor, never an origin, never a URL and never a
+        credential (ADR-0092 §3). What it reports is *what its index returns for
+        this query now*: not that a page is accurate, not that its author said
+        anything at a particular time, and not that a snippet is a faithful
+        excerpt of one.
+
+        **Stable across calls, non-blank, and a value
+        :data:`~ai_assistant.core.types.Identifier` accepts unchanged** —
+        ``name.strip() == name`` (ADR-0231 §17). The stability is
+        :attr:`Fetcher.name`'s clause for its reason: an identity that moved under
+        a turn would scatter one source's records across two ``reported_by``
+        values no later fold could bring back together. The stripping clause is
+        this seam's own, and it is stated rather than left implicit because §10
+        requires ``reported_by`` and this value to be **equal**: ``reported_by``
+        is typed ``Identifier``, which refuses a blank value *and strips the one
+        it accepts*, so a searcher naming itself ``" search "`` would be
+        conforming and yet mint a record whose ``reported_by`` is ``"search"`` —
+        an equality this ADR asserts that no implementation could then satisfy.
+        """
+        ...
+
+    async def request(self, query: NonBlankEncodableText, /) -> ActionRequest | None:
+        """Propose the search this query would make, or answer that there is none.
+
+        **The parameter is positional-only, and that is a decision**
+        (ADR-0231 §17), for :meth:`QueryComposer.compose`'s reason: no keyword
+        name of it exists for a caller to pass a second value under, and no
+        implementation may rename it into a wider one.
+
+        **It reads no store, mints no identifier, opens no channel and reaches no
+        authorisation conclusion** (ADR-0231 §17). Everything between this member
+        and :meth:`search` — the binding, the ruling, the audit record and the
+        construction of the ``ToolCall`` — belongs to the caller (ADR-0231 §6),
+        and an implementation deciding any of it here would be answering a
+        question the policy has not been asked.
+
+        Args:
+            query: The query one composition wrote for this turn, carried byte for
+                byte from that servicing's
+                :attr:`~ai_assistant.core.types.QueryOutcome.query` (ADR-0231
+                §11). Non-blank and UTF-8-encodable. It is the whole of what an
+                implementation is given.
+
+        Returns:
+            The request to rule on — carrying this searcher's own declaration as
+            :attr:`~ai_assistant.core.types.ActionRequest.tool`, exactly the origin
+            and the query as
+            :attr:`~ai_assistant.core.types.ActionRequest.parameters`, and ``None``
+            for ``step_id``, ``execution_id`` and ``egress_binding`` (ADR-0231 §17;
+            a ``WEB_SEARCH`` decision has no plan step and no execution, §6). Or
+            ``None`` where the deployment has connected no search account, which is
+            a configuration fact and never a failure.
+
+        Raises:
+            CancelledError: Re-raised unchanged when the call is cancelled from
+                outside while suspended (ADR-0060, ADR-0231 §17).
+        """
+        ...
+
+    async def search(self, call: ToolCall, /) -> SearchOutcome:
+        """Perform the authorised search, and mint what its answer transcribes.
+
+        **It takes a ``ToolCall`` and never an ``ActionRequest``**, so an
+        unauthorised search is unconstructable at the type level (ADR-0231 §17).
+        Construction is the first line and not the only one: ADR-0231 §6 requires
+        this member to revalidate and detach the call, compare its definition
+        against the searcher's **own registered declaration** — the authoritative
+        original here, standing where ADR-0029 §2 puts the registry's, because
+        this integration has an egress registration and no registry entry — and
+        re-evaluate ``PermissionDecision.authorises`` against that same detached
+        copy, in that order and before the credential is read or any channel is
+        opened.
+
+        **What else the implementation owes, in ADR-0231's own order**: the
+        invocation deadline of ADR-0029 §4; ADR-0194 §3's spend admission, after
+        those three checks and before the ledger claim, over the ``ToolCost`` on
+        the revalidated copy; ADR-0192's claim and completion around the send, on
+        every exit it observes; ADR-0148 §6's one-step credential read and its
+        post-read discard; and ADR-0231 §10's transcription and minting. None of
+        it is visible in this signature, which is why §6 states it.
+
+        Args:
+            call: The authorised call, whose ``request`` carries this searcher's
+                declaration, the origin and the query, and whose ``decision`` is
+                the recorded ``ALLOW`` that authorises them. Read only through the
+                revalidated copy the implementation makes of it, never as handed.
+
+        Returns:
+            One outcome carrying records **or** a refusal, never both and never
+            neither — a condition
+            :class:`~ai_assistant.core.types.SearchOutcome` enforces itself. A
+            successful search mints at most ``search_max_results`` ``SEMANTIC``
+            records, in the order the provider returned the results they
+            transcribe, each ``EXTERNAL``-sourced with an empty ``evidence`` and an
+            :class:`~ai_assistant.core.types.Attestation` whose ``reported_by`` is
+            this searcher's :attr:`name` and whose ``reported_at`` is the instant
+            **the provider's response declared** (ADR-0231 §10, ADR-0092 §3).
+
+        Raises:
+            CancelledError: Re-raised unchanged when the call is cancelled from
+                outside while suspended, and converted into neither an outcome nor
+                a refusal (ADR-0060, ADR-0231 §17).
         """
         ...
 

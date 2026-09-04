@@ -6187,6 +6187,220 @@ class QueryOutcome(BaseModel):
         return self
 
 
+# --- tools: what one web search produced (ADR-0231 §10, §17) -----------------
+# The `WebSearcher` seam's return value and its refusal vocabulary. `core`'s
+# because they cross that seam (ADR-0231 §13); the mapping from a refusal to the
+# servicer's own disposition is `orchestration`'s and lives there.
+
+
+class SearchRefusal(StrEnum):
+    """Why a search produced no record (ADR-0231 §10, §17).
+
+    A **closed** enumeration with exactly six members, each valued by its
+    lower-cased name. The vocabulary is **added to and never renamed**, and no
+    later lane adds a member without the ADR that decides it — ADR-0221 §5's
+    pattern for its own reason: a vocabulary that grows by implementation grows
+    without anyone having decided what the new member means.
+
+    **Every member is returned and none is raised.**
+    :meth:`~ai_assistant.core.protocols.WebSearcher.search` raises for no source
+    reason, so a non-yield is a value the audit can count and the turn can ignore
+    rather than an exception every call site must catch correctly. That is
+    ADR-0230 §4's posture on the fetch seam and ADR-0231 §3's on the composing
+    one, and ADR-0231 adds no error class to ``core/errors.py`` for it.
+
+    **Five of the six are carried across one for one into the servicer's own
+    disposition** (ADR-0231 §13), and :attr:`NO_RESULT` deliberately is not: a
+    search that reached the provider and yielded nothing is a *completed*
+    servicing whose returned count is zero, which ADR-0226 §9 already records, and
+    calling it a disposition would double-count it.
+
+    **A refusal names a class and carries nothing else** — no query, no fragment
+    of one, no origin, no address, no provider message, no exception type. The
+    whole value is one of these members, so there is nowhere for one to sit.
+    """
+
+    SPEND_REFUSED = "spend_refused"
+    """A configured ceiling would have been crossed (ADR-0231 §15, ADR-0194 §4).
+
+    The gate is consulted after ADR-0231 §6's three checks and **before** the
+    ledger claim, so this outcome reads no credential, opens no channel, appends
+    no claim and appends no completion. It is a disposition and never a retry."""
+
+    TRANSPORT_FAILED = "transport_failed"
+    """The channel could not be opened, verified or continued (ADR-0191 §1).
+
+    A statement about this system's own reach — a refused connection, a TLS
+    failure, a channel closed mid-response, an expired deadline — and never about
+    what the provider said, which is :attr:`PROVIDER_REFUSED`. A redirect belongs
+    here too: ADR-0231 §5 makes one a refusal and never a second request."""
+
+    PROVIDER_REFUSED = "provider_refused"
+    """The provider answered, and its answer is not one a search can be read from.
+
+    A non-success status, a body that is not the shape the provider documents
+    (ADR-0231 §10), or a bound account that moved under the credential read —
+    ADR-0148 §6's discard limb, whose refusal ADR-0231 §5 names as this member."""
+
+    RESPONSE_TOO_LARGE = "response_too_large"
+    """The response passed ``search_max_response_bytes`` (ADR-0231 §5).
+
+    The read stopped one byte past the bound, the channel was closed, **nothing
+    was parsed** and no record was minted. Distinct from
+    :attr:`PROVIDER_REFUSED` because the provider may have answered perfectly
+    well: what happened is that this system declined to buy the answer."""
+
+    UNATTESTED = "unattested"
+    """The response declared no report instant, or none that can be read (§10).
+
+    ADR-0092 §3 binds as written: ``reported_at`` is the instant the provider's
+    own response declares, and there is **no substitute** — not the instant we
+    sent, not the instant we received, not a clock this system read. A value in
+    that position which cannot be read as an instant is not a declared one, so it
+    lands here rather than licensing a fallback."""
+
+    NO_RESULT = "no_result"
+    """The response carried no result, or ADR-0231 §10 dropped every one it did.
+
+    One member for both, because an operator acts on neither: the search reached
+    the provider, was attested, and yielded nothing this system will carry. The
+    drops §10 states — a result over ``search_max_result_chars``, one whose
+    address is absent, one whose title, address or snippet carries an ASCII line
+    break, and one whose span the provider supplied as a non-string — all end
+    here where they take the last result with them."""
+
+
+def _check_minted_by_a_search(record: MemoryRecord, *, reported_at: datetime | None) -> None:
+    """Refuse a record ADR-0231 §10's minting clause would not have produced.
+
+    Written out here rather than inside :class:`SearchOutcome`'s validator so that
+    each condition is one branch a reader can find, and so that the validator
+    itself stays one statement of the exactly-one rule.
+
+    Args:
+        record: One record the outcome carries.
+        reported_at: The outcome's own report instant.
+
+    Raises:
+        ValueError: If the record is not ``SEMANTIC``, is not ``EXTERNAL``-sourced,
+            carries evidence, or is attested to another instant.
+    """
+    if record.kind != "semantic":
+        msg = f"a search mints SEMANTIC records; got a {record.kind!r} one"
+        raise ValueError(msg)
+    provenance = record.provenance
+    if provenance.source is not MemorySource.EXTERNAL:
+        msg = f"a search mints EXTERNAL-sourced records; got {provenance.source}"
+        raise ValueError(msg)
+    if provenance.evidence:
+        # ADR-0231 §10: `evidence` is empty. A minted record is supply for one turn
+        # and resolves in no store (§16), so a citation on it would point at nothing
+        # a later reader could reach.
+        msg = "a search mints records carrying no evidence"
+        raise ValueError(msg)
+    attestation = provenance.attestation
+    if attestation is None or reported_at is None or attestation.reported_at != reported_at:
+        # The clause ADR-0092 §3 rests on: the record's instant is *the response's*,
+        # so a producer that reached for a clock of its own cannot construct the
+        # value at all.
+        msg = (
+            "every record a search mints is attested to the outcome's own report "
+            "instant (ADR-0231 §10, ADR-0092 §3)"
+        )
+        raise ValueError(msg)
+
+
+class SearchOutcome(BaseModel):
+    """What one search produced: records, or a refusal (ADR-0231 §10, §17).
+
+    **Exactly one of the two, enforced here rather than by a caller.** Neither
+    both nor neither: a value carrying both would be two answers wearing one
+    outcome's name, and one carrying neither would be the outcome ADR-0231 §10
+    says a search never has. Stating the conditions on the model rather than on
+    its producers is what makes them decidable in any process and true of every
+    ``WebSearcher`` this system ever wires, the canonical fake included.
+
+    **Every condition below is *structural* — over this value's own fields** — so
+    none of them reaches for a bound, a clock, a store or a configuration.
+    ``search_max_results`` and ``search_max_result_chars`` are ``Settings`` fields
+    the *configured searcher* enforces (ADR-0231 §17): this model carries neither
+    and validates identically in every deployment, which is what makes the type
+    shareable by two searchers configured differently in one process.
+
+    **The attestation equality is the load-bearing one.** A record whose
+    ``Attestation.reported_at`` is not the outcome's own is a record attested to
+    an instant this response did not declare, which is exactly the substitute
+    ADR-0092 §3 forbids — so a ``SearchOutcome`` carrying one is
+    **unconstructable** rather than merely irregular, and an implementation that
+    reached for a local clock fails at the value rather than at a review.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reported_at: UtcInstant | None = Field(
+        default=None,
+        description=(
+            "The instant the provider's own response declared, on the provider's "
+            "own clock (ADR-0231 §10, ADR-0092 §3). Never the instant we sent, the "
+            "instant we received, or any clock this system read. ``None`` where the "
+            "search was refused."
+        ),
+    )
+    records: tuple[MemoryRecord, ...] = Field(
+        default=(),
+        description=(
+            "The records this search minted, in the order the provider returned "
+            "the results they transcribe (ADR-0231 §10). Empty where the search "
+            "was refused."
+        ),
+    )
+    refusal: SearchRefusal | None = Field(
+        default=None,
+        description=(
+            "Why no record was produced (ADR-0231 §10). ``None`` where records "
+            "were. A **class** and nothing else: no query, no origin, no address, "
+            "no provider message."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _records_or_a_refusal(self) -> SearchOutcome:
+        """Refuse an outcome that half-says two things (ADR-0231 §17).
+
+        Raises:
+            ValueError: If a refusal is paired with a record or a report instant,
+                or if no refusal is paired with no report instant or no record.
+        """
+        if self.refusal is not None:
+            if self.records:
+                msg = "a search outcome carries records or a refusal, never both"
+                raise ValueError(msg)
+            if self.reported_at is not None:
+                msg = "a refused search declares no report instant"
+                raise ValueError(msg)
+            return self
+        if self.reported_at is None:
+            msg = "a search outcome that carries no refusal declares a report instant"
+            raise ValueError(msg)
+        if not self.records:
+            msg = "a search outcome carries records or a refusal, never neither"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _every_record_is_an_attested_external_semantic(self) -> SearchOutcome:
+        """Refuse a record ADR-0231 §10 would not have minted.
+
+        Raises:
+            ValueError: If any record is not ``SEMANTIC``, is not
+                ``EXTERNAL``-sourced, carries evidence, or is attested to an
+                instant other than this outcome's own.
+        """
+        for record in self.records:
+            _check_minted_by_a_search(record, reported_at=self.reported_at)
+        return self
+
+
 # --- planning: the step-status vocabulary (ADR-0014 §4) ----------------------
 # The statuses, and the sets drawn over them. Only the sets live here: the
 # transition *graph* is `planning`'s, because it is not intrinsic to the type
