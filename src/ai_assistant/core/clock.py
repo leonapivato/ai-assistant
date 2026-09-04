@@ -24,13 +24,10 @@ a flat margin, never ``Settings.timezone``) and no failure policy (`core` raises
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
 
 from ai_assistant.core.types import UtcInstant, canonical_utc, describe_untrusted
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 type Clock = Callable[[], UtcInstant]
 """A zero-argument callable returning an aware instant, in UTC and localizable.

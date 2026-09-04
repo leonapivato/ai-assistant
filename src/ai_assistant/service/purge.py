@@ -66,11 +66,12 @@ import sqlite3
 import stat
 import sys
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, assert_never
 
-from ai_assistant.app import build_connection_purger
+from ai_assistant.app import OpenedConnections, build_connection_purger
 from ai_assistant.core.config import load_settings
 from ai_assistant.core.errors import (
     AssistantError,
@@ -90,9 +91,8 @@ from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 from ai_assistant.service.refusal import RefusalError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Iterator, Sequence
 
-    from ai_assistant.app import OpenedConnections
     from ai_assistant.core.types import ConnectedAccount
     from ai_assistant.service.enrolment import Enrolment
 

@@ -37,6 +37,7 @@ acts an implementation could interleave.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -48,7 +49,7 @@ from ai_assistant.service.overlay import MAX_OVERLAY_IDENTITY_BYTES
 from ai_assistant.wire.credential import mint_credential, verifier_for, verifies
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Sequence
     from pathlib import Path
 
 _log = structlog.get_logger(__name__)

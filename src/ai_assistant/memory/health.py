@@ -52,6 +52,7 @@ import heapq
 import math
 import sqlite3
 import statistics
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -65,7 +66,7 @@ from ai_assistant.core.types import BeliefBand, MemoryKind, band_of, describe_un
 from ai_assistant.memory.sqlite_store import _ADAPTER, _VEC_KNN_MAX_K
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Iterator, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import MemoryRecord
