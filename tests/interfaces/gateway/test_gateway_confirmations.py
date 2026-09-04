@@ -43,6 +43,7 @@ from ai_assistant.core.types import (
     SpanCoverage,
     StepOutcome,
     TurnOutcome,
+    UtcInstant,
 )
 from ai_assistant.interfaces.gateway.http import Request
 from ai_assistant.interfaces.gateway.records import RequestClass
@@ -672,10 +673,16 @@ class _Recording(FakeAssistantEngine):
         *,
         approved: bool,
         timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, as the Protocol declares it
+        remember_recipients_until: UtcInstant | None = None,
     ) -> TurnOutcome:
         """Record the budget, then answer as the fake does."""
         self.budgets.append(timeout)
-        return await super().resume(token, approved=approved, timeout=timeout)
+        return await super().resume(
+            token,
+            approved=approved,
+            timeout=timeout,
+            remember_recipients_until=remember_recipients_until,
+        )
 
 
 async def test_the_token_is_relayed_byte_for_byte_and_the_answer_is_approved() -> None:
@@ -793,6 +800,7 @@ class _Unknown(FakeAssistantEngine):
         *,
         approved: bool,
         timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, as the Protocol declares it
+        remember_recipients_until: UtcInstant | None = None,
     ) -> TurnOutcome:
         """Refuse the way ADR-0084 §7 requires: never as a denial."""
         self.calls.append(("resume", {"token": token.handle, "approved": approved}))

@@ -60,7 +60,12 @@ from typing import TYPE_CHECKING, Any, Final, NamedTuple
 from pydantic import ValidationError
 
 from ai_assistant.core.clock import checked_clock
-from ai_assistant.core.errors import InvalidRecipientGrantError, RecipientGrantError
+from ai_assistant.core.errors import (
+    DuplicateRecipientGrantError,
+    InvalidRecipientGrantError,
+    RecipientGrantCeilingError,
+    RecipientGrantError,
+)
 from ai_assistant.core.types import (
     BoundAccount,
     CanonicalDestination,
@@ -723,7 +728,13 @@ class SqliteRecipientGrantStore:
                 f"account and destination set; a second is one the user could not revoke, "
                 f"because revoking either would leave the other standing (ADR-0193 §1)"
             )
-            raise InvalidRecipientGrantError(msg)
+            # **The discriminator ADR-0235 §4 adds**, and it is a subclass rather
+            # than a reason member: the base class still catches this ground, so
+            # ADR-0193 §1's one-handler benefit is preserved rather than traded. A
+            # user whose subject already stands needs **no** act at all, which is
+            # what makes this recourse different from every ground that keeps the
+            # base class.
+            raise DuplicateRecipientGrantError(msg)
         if len(outstanding) >= self._max_outstanding:
             msg = (
                 f"the recipient-grant store holds {len(outstanding)} outstanding grants and "
@@ -731,7 +742,12 @@ class SqliteRecipientGrantStore:
                 f"is evicted, narrowed or expired to make room, and the recourse is to "
                 f"revoke a grant you hold (ADR-0193 §1)"
             )
-            raise InvalidRecipientGrantError(msg)
+            # **The second discriminator** (ADR-0235 §4). ADR-0193 §1's ceiling
+            # clause obliges a surface offering the establishing act to name *that*
+            # the ceiling was reached, and a surface names a reason it was told —
+            # so the ground is read from the refusal's own type and never from this
+            # message, a count the caller took, or a listing read afterwards.
+            raise RecipientGrantCeilingError(msg)
 
     def _check_revocation(self, conn: sqlite3.Connection, revocation: RecipientGrant) -> None:
         """Enforce ADR-0193 §1's invariant on a revoking record.

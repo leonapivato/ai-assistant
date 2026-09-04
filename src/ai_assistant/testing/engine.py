@@ -42,9 +42,11 @@ from typing import TYPE_CHECKING, Final, assert_never, cast
 from ai_assistant.core.errors import (
     GrantError,
     InvalidGrantError,
+    InvalidRecipientGrantError,
     NotificationBudgetError,
     OversizedValueError,
     PlanningError,
+    UngrantableActError,
     UngrantableSourceError,
     UnknownContinuationError,
     UnknownConversationError,
@@ -65,6 +67,7 @@ from ai_assistant.core.types import (
     ConversationSummary,
     CurrentContext,
     Disposition,
+    EgressBinding,
     ExecutionState,
     Goal,
     GrantableSource,
@@ -77,12 +80,18 @@ from ai_assistant.core.types import (
     NotificationDelivery,
     ObservationReport,
     OperationConfirmation,
+    PermissionDecision,
+    PermissionOutcome,
+    PermissionRuling,
     Placement,
     PlacementReach,
     PlacementSetter,
     Provenance,
     Question,
     QuestionState,
+    RecipientGrant,
+    RecipientGrantNotEstablished,
+    RecipientGrantOutcome,
     RecordedInvocation,
     ReplyChunk,
     Retirement,
@@ -134,6 +143,10 @@ from ai_assistant.orchestration.payloads import (
     page_argument,
     positive_page_argument,
 )
+from ai_assistant.orchestration.recipient_grants import (
+    record_the_grant,
+    rides_an_establishing_act,
+)
 from ai_assistant.orchestration.speech import SPOKEN_PARK_SENTENCE
 from ai_assistant.testing.archive import FakeTranscriptArchive
 from ai_assistant.testing.connections import FakeConnectionProvisioner
@@ -144,6 +157,7 @@ from ai_assistant.testing.notifications import (
 )
 from ai_assistant.testing.permissions import FakeAuditTrail
 from ai_assistant.testing.reads import FakeSourceReadTrail
+from ai_assistant.testing.recipient_grants import FakeRecipientGrantStore
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Sequence
@@ -152,20 +166,20 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         ConnectedAccount,
         ConnectionAct,
-        EgressBinding,
+        DurableIdentifier,
         EncodableText,
         FeedbackEvent,
         HeldNotification,
         Identifier,
         NonBlankEncodableText,
         NotificationPreferences,
-        PermissionDecision,
         RoutedListing,
         SecretValue,
         SourceReadRecord,
         TranscriptArchiveSize,
         TranscriptEntry,
         TranscriptHit,
+        UtcInstant,
     )
 
 #: A fixed instant, so a fake engine's output is deterministic without a clock.
@@ -534,6 +548,34 @@ class FakeAssistantEngine:
         #: contract a suite can hold the surface to. Replaceable, so a case can
         #: substitute a conforming trail that logs its reads or fails on demand.
         self.reads: SourceReadTrail = FakeSourceReadTrail()
+        #: The recipient-grant store ADR-0235 §7's two listings and its revocation
+        #: relay, public and replaceable for :attr:`trail`'s reason: the states that
+        #: matter here — a store at its ceiling, one already holding this subject,
+        #: one that cannot be written — are facts about the **store**, and a fake
+        #: engine holding a list of grants could only hand back what a test had
+        #: already assembled. Seed it with ``hold`` or ``fail_writes``, or replace it
+        #: with one built at a smaller ``max_outstanding``.
+        #:
+        #: **A whole ``RecipientGrantStore`` and never a ``RecipientGrants``**
+        #: (ADR-0193 §1, ADR-0235 §4): the establishing act needs ``record``, and a
+        #: fake offering the policy's narrow face would let a consumer's test
+        #: authorise a send through an adapter.
+        self.recipient_grants = FakeRecipientGrantStore()
+        #: What stamps ``decided_at`` on an answer this engine records for an
+        #: establishing act, and what ADR-0235 §1's expiry is compared against.
+        #: Scriptable on :attr:`grant_clock`'s reason and **separate from it**,
+        #: because recipient grants and source grants are two vocabularies and never
+        #: one (ADR-0235 §7) — one clock over two stores is the shape that invites a
+        #: test to reason about one from the other.
+        self.recipient_grant_clock: Callable[[], datetime] = lambda: _AT
+        #: The recorded ``CONFIRM`` each park stands for, by handle, where a test
+        #: has bound one with :meth:`hold_confirmation_decision`. ``Confirmation``
+        #: carries the **reduced** ``ConfirmationEgress`` and not the binding
+        #: (ADR-0178 §5), and the establishing act transcribes its account and
+        #: destination set from the binding — so the decision is *bound* rather than
+        #: reconstructed here, since a fake assembling a call-level fact would be
+        #: rendering the unobtainable bound ADR-0098 §6 forbids.
+        self._parked_decisions: dict[str, PermissionDecision] = {}
         #: Every call, in order, as ``(method, arguments)`` — so a test can assert
         #: what reached the engine without reaching into its state.
         #:
@@ -815,6 +857,7 @@ class FakeAssistantEngine:
         *,
         approved: bool,
         timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, as the Protocol declares it
+        remember_recipients_until: UtcInstant | None = None,
     ) -> TurnOutcome:
         """Answer a parked confirmation, restate an answer already given, or refuse.
 
@@ -843,12 +886,34 @@ class FakeAssistantEngine:
             token=token,
             approved=approved,
             timeout=timeout,
+            remember_recipients_until=remember_recipients_until,
         )
         self.calls.append(("resume", {"token": token.handle, "approved": approved}))
         if token.handle in self.routed_parked:
+            if remember_recipients_until is not None and approved:
+                # A routed park records no ``PermissionDecision`` and carries no
+                # egress binding, so there is nothing for a grant to be transcribed
+                # from (ADR-0235 §2). Refused **before** the park is claimed, so the
+                # operation may still be asked for again.
+                msg = (
+                    "this token names a routed operation rather than a confirmation about "
+                    "an outbound call, so answering it establishes no standing recipient "
+                    "grant; nothing was claimed (ADR-0235 §2)"
+                )
+                raise UngrantableActError(msg)
             return await self._resume_routed(token.handle, approved=approved)
         if token.handle not in self.parked:
+            # **A restatement establishes nothing and consults the argument no more
+            # than it consults ``approved``** (ADR-0198 §§1-3, ADR-0235 §4): it drives
+            # nothing, so its outcome carries ``recipient_grant`` ``None``.
             return self._restate(token.handle)
+        # **The act's two refusals fire before anything is answered** (ADR-0235 §1,
+        # §2), so the park survives them and the same token answers it again without
+        # the argument.
+        establishing_at: datetime | None = None
+        if remember_recipients_until is not None and approved:
+            self._check_establishable(token.handle)
+            establishing_at = self._establishing_instant(remember_recipients_until)
         confirmation = self.parked.pop(token.handle)
         # **A denial is a result, not an exception** (ADR-0042 §4): the adapter
         # conveys consent, the policy rules on it, and the engine records and
@@ -896,11 +961,140 @@ class FakeAssistantEngine:
                 disposition=resolved.disposition,
             ),
         )
+        recipient_grant = await self._establish_recipients(
+            token.handle,
+            approved=approved,
+            remember_recipients_until=remember_recipients_until,
+            establishing_at=establishing_at,
+        )
         # ``turn`` is ``None`` here because this engine parks nothing from a live
         # turn — the shape a **recovered** park produces after a restart, which
         # ADR-0052 §3 ratifies. The *step* is what a resume is for and is always
         # present (ADR-0085 §4).
-        return self._checked(TurnOutcome(turn=None, step=resolved), "resume")
+        return self._checked(
+            TurnOutcome(turn=None, step=resolved, recipient_grant=recipient_grant), "resume"
+        )
+
+    def hold_confirmation_decision(self, handle: str, decision: PermissionDecision) -> None:
+        """Bind a recorded ``CONFIRM`` to a park, so an establishing act can ride it.
+
+        **A lever, because no sequence of surface calls reaches the state**, which is
+        :meth:`park`'s own reason one record over. ADR-0235 §2 has the act ride *the
+        answer to a recorded ``CONFIRM``*, and
+        :meth:`~ai_assistant.core.types.RecipientGrant.established_from` transcribes
+        the grant's ``tool``, ``account`` and destination set **from that decision**
+        — while a :class:`~ai_assistant.core.types.Confirmation` carries the reduced
+        ``ConfirmationEgress`` and no binding at all (ADR-0178 §5). So a test that
+        means to drive the act hands over the decision it recorded, rather than
+        having this fake assemble a call-level fact it was never given (ADR-0098 §6).
+
+        The decision is **not** appended to :attr:`trail` here: a park that wrote a
+        row would change what ``recent_decisions`` says for every consumer that never
+        asked about recipient grants. A test that wants it in the trail — which the
+        establishing path needs, because the answer ``resolves`` it — records it
+        there itself, exactly as it seeds every other row.
+
+        Args:
+            handle: The continuation handle the park is answered by.
+            decision: The recorded ``CONFIRM``, as the trail holds it.
+        """
+        self._parked_decisions[handle] = decision
+
+    def _check_establishable(self, handle: str) -> None:
+        """Refuse an establishing act on a park it may not ride (ADR-0235 §2).
+
+        The same two conditions §3 places on the recorded population, on the held
+        one, and refused before anything is answered — so the park survives and the
+        same token answers it again without the argument.
+
+        Raises:
+            UngrantableActError: If no recorded ``CONFIRM`` is bound to this park, if
+                its ``egress_binding`` is not an
+                :class:`~ai_assistant.core.types.EgressBinding`, or if that binding
+                carries ``planned_with_external_content``.
+        """
+        confirmed = self._parked_decisions.get(handle)
+        binding = None if confirmed is None else confirmed.egress_binding
+        if not isinstance(binding, EgressBinding):
+            msg = (
+                "this confirmation records no egress call whose recipients could be made "
+                "standing, so this answer establishes no recipient grant; the confirmation "
+                "is unaffected and may still be answered (ADR-0235 §2)"
+            )
+            raise UngrantableActError(msg)
+        if binding.planned_with_external_content:
+            msg = (
+                "this confirmation records a call planned over external content; you may "
+                "approve such a call, and may not in that act make its recipients standing "
+                "(ADR-0193 §2, §4; ADR-0235 §2)"
+            )
+            raise UngrantableActError(msg)
+
+    def _establishing_instant(self, remember_recipients_until: datetime) -> datetime:
+        """Read the clock once, and refuse an expiry that is not strictly after it.
+
+        ADR-0235 §1: one reading, used for both the comparison and the answer this
+        engine records, because two reads admit an expiry that passes the check and
+        fails ``established_from``'s constructor.
+
+        Raises:
+            UngrantableActError: If the chosen instant is at or before that reading.
+                The message names the instant it was compared against.
+        """
+        decided_at = self.recipient_grant_clock()
+        if remember_recipients_until <= decided_at:
+            msg = (
+                f"a standing recipient grant expires strictly after the answer that "
+                f"establishes it; {remember_recipients_until.isoformat()} is at or before "
+                f"{decided_at.isoformat()}, the instant this answer would carry, so nothing "
+                f"was recorded (ADR-0235 §1)"
+            )
+            raise UngrantableActError(msg)
+        return decided_at
+
+    async def _establish_recipients(
+        self,
+        handle: str,
+        *,
+        approved: bool,
+        remember_recipients_until: datetime | None,
+        establishing_at: datetime | None,
+    ) -> RecipientGrantOutcome | None:
+        """Perform the act this ``resume`` collected, and say what became of it.
+
+        Reached **after** the answer is settled, so nothing here raises and
+        everything here is reported on the carrier (ADR-0235 §6). The three refusing
+        members are read from the **type** of the refusal ``record`` raised and from
+        nothing else — no message is parsed, no count taken, and no listing read
+        afterwards (ADR-0235 §11).
+        """
+        if remember_recipients_until is None:
+            return None
+        if not approved or establishing_at is None:
+            # The one member that never reaches the store (ADR-0235 §4): the answer
+            # was recorded as a ``DENY`` and no grant could be established from it.
+            return RecipientGrantOutcome(not_established=RecipientGrantNotEstablished.DECLINED)
+        confirmed = self._parked_decisions[handle]
+        answer = PermissionDecision.from_confirmation(
+            confirmed,
+            PermissionRuling(
+                outcome=PermissionOutcome.ALLOW,
+                reason="the fake engine records the answer the user gave",
+            ),
+            id=f"decision-{handle}-answer",
+            decided_at=establishing_at,
+        )
+        await self.trail.record(answer)
+        grant = RecipientGrant.established_from(
+            confirmed,
+            answer,
+            id=f"recipient-grant-{handle}",
+            expires_at=remember_recipients_until,
+        )
+        # **The mapping is reached for rather than restated** (ADR-0235 §4, §11): a
+        # second copy of "which member does this refusal mean" would let a
+        # consumer's tests certify against a hub that answers differently.
+        return await record_the_grant(self.recipient_grants, grant)
 
     def _retain(self, handle: str, settled: _Settled) -> None:
         """Record one answered binding under its handle, within ADR-0198 §4's bound.
@@ -1817,6 +2011,205 @@ class FakeAssistantEngine:
         by_id = sorted(live, key=lambda record: record.id)
         ordered = sorted(by_id, key=lambda record: record.decided_at, reverse=True)
         return self._checked(tuple(ordered), "standing_grants")
+
+    # --- the recipient-grant surface (ADR-0235 §3, §7) ---------------------
+
+    async def grantable_decisions(
+        self, *, limit: int = DEFAULT_PAGE_SIZE
+    ) -> tuple[PermissionDecision, ...]:
+        """List the recorded ``CONFIRM``s an establishing act may ride (ADR-0235 §3).
+
+        **The conditions and the window rule are implemented rather than assumed
+        away**, which is what a canonical fake owes: the shared suite holds this
+        class to the same clauses it holds every other implementation to, and a fake
+        that returned whatever a test had seeded would certify a consumer against a
+        hub answering a different question. In particular a decision sharing the
+        oldest returned row's ``decided_at`` is **not** offered on an incomplete
+        window, and a decision a park holds — one carrying a ``step_id`` or an
+        ``execution_id`` — is never offered at all.
+        """
+        positive_page_argument(limit, name="limit")
+        check_arguments("grantable_decisions", max_bytes=self._max_payload_bytes, limit=limit)
+        self.calls.append(("grantable_decisions", {"limit": limit}))
+        rows = await self.trail.recent(limit=limit)
+        now = self.recipient_grant_clock()
+        resolved = {row.resolves for row in rows if row.resolves is not None}
+        complete = len(rows) < limit
+        oldest = rows[-1].decided_at if rows else None
+        offerable = [
+            row
+            for row in rows
+            if rides_an_establishing_act(row, now=now)
+            and row.id not in resolved
+            and (complete or oldest is None or row.decided_at > oldest)
+        ]
+        return self._checked(tuple(offerable), "grantable_decisions")
+
+    async def establish_recipient_grant(
+        self, decision_id: DurableIdentifier, *, expires_at: UtcInstant
+    ) -> RecipientGrant:
+        """Answer a recorded ``CONFIRM`` no park holds and record the grant.
+
+        The seven availability conditions in ADR-0235 §3's own order, so that where
+        more than one fails the first is the one named. This engine holds no
+        ``ActionPolicy``, so the ruling it records is the ``ALLOW`` an approving
+        answer produces — a client's ``PermissionDeniedError`` path is reached by
+        seeding a decision the policy would decline in a hub, and is not something
+        this double invents a lever for.
+        """
+        named = identifier(decision_id, name="decision_id")
+        check_arguments(
+            "establish_recipient_grant",
+            max_bytes=self._max_payload_bytes,
+            decision_id=named,
+            expires_at=expires_at,
+        )
+        self.calls.append(
+            ("establish_recipient_grant", {"decision_id": named, "expires_at": expires_at})
+        )
+        confirmed = await self._offerable_decision(named)
+        decided_at = self.recipient_grant_clock()
+        if expires_at <= decided_at:
+            msg = (
+                f"a standing recipient grant expires strictly after the answer that "
+                f"establishes it; {expires_at.isoformat()} is at or before "
+                f"{decided_at.isoformat()}, the instant this answer would carry, so nothing "
+                f"was recorded (ADR-0235 §1)"
+            )
+            raise UngrantableActError(msg)
+        answer = PermissionDecision.from_confirmation(
+            confirmed,
+            PermissionRuling(
+                outcome=PermissionOutcome.ALLOW,
+                reason="the fake engine records the answer the user gave",
+            ),
+            id=f"decision-{named}-answer",
+            decided_at=decided_at,
+        )
+        await self.trail.record(answer)
+        grant = RecipientGrant.established_from(
+            confirmed, answer, id=f"recipient-grant-{named}", expires_at=expires_at
+        )
+        await self.recipient_grants.record(grant)
+        return self._checked(grant, "establish_recipient_grant")
+
+    async def standing_recipient_grants(self) -> tuple[RecipientGrant, ...]:
+        """List every standing recipient grant that is live now (ADR-0235 §7).
+
+        Read from :attr:`recipient_grants` and from nothing else, so liveness is the
+        store's and is never re-derived from the history — the substitution ADR-0235
+        §7 forbids at every surface.
+        """
+        self.calls.append(("standing_recipient_grants", {}))
+        return self._checked(
+            tuple(await self.recipient_grants.standing()), "standing_recipient_grants"
+        )
+
+    async def recent_recipient_grants(
+        self, *, limit: int = DEFAULT_PAGE_SIZE
+    ) -> tuple[RecipientGrant, ...]:
+        """List the recipient-grant store's own history, newest first (ADR-0235 §7).
+
+        Granting and revoking records alike, and **no liveness**: a record here says
+        an act happened, never that it still stands.
+        """
+        positive_page_argument(limit, name="limit")
+        check_arguments("recent_recipient_grants", max_bytes=self._max_payload_bytes, limit=limit)
+        self.calls.append(("recent_recipient_grants", {"limit": limit}))
+        return self._checked(
+            tuple(await self.recipient_grants.recent(limit=limit)), "recent_recipient_grants"
+        )
+
+    async def revoke_recipient_grant(self, grant_id: DurableIdentifier) -> RecipientGrant | None:
+        """Withdraw one standing recipient grant, or report there was none (ADR-0235 §7).
+
+        The revoking record transcribes the outstanding record's ``tool``,
+        ``account`` and ``destinations`` verbatim, and a refusal met while the grant
+        is no longer outstanding answers ``None`` — this method's own second branch
+        reached late rather than a third outcome.
+        """
+        named = identifier(grant_id, name="grant_id")
+        check_arguments("revoke_recipient_grant", max_bytes=self._max_payload_bytes, grant_id=named)
+        self.calls.append(("revoke_recipient_grant", {"grant_id": named}))
+        outstanding = await self.recipient_grants.outstanding(named)
+        if outstanding is None:
+            return None
+        record = RecipientGrant(
+            id=f"revocation-{named}",
+            tool=outstanding.tool,
+            account=outstanding.account,
+            destinations=outstanding.destinations,
+            decided_at=self.recipient_grant_clock(),
+            expires_at=outstanding.expires_at,
+            revokes=outstanding.id,
+        )
+        try:
+            await self.recipient_grants.record(record)
+        except InvalidRecipientGrantError:
+            if await self.recipient_grants.outstanding(named) is None:
+                return None
+            raise
+        return self._checked(record, "revoke_recipient_grant")
+
+    async def _offerable_decision(self, decision_id: str) -> PermissionDecision:
+        """Read the named decision and refuse it unless all seven conditions hold.
+
+        In ADR-0235 §3's stated order, so the refusal is deterministic where more
+        than one fails.
+
+        Raises:
+            UngrantableActError: If any condition fails.
+        """
+        confirmed = await self.trail.get(decision_id)
+        if confirmed is None:
+            msg = (
+                f"the permission trail holds no decision {decision_id!r}, so there is no "
+                f"recorded confirmation for an establishing act to ride (ADR-0235 §3)"
+            )
+            raise UngrantableActError(msg)
+        if confirmed.ruling.outcome is not PermissionOutcome.CONFIRM:
+            msg = (
+                f"decision {decision_id!r} ruled {confirmed.ruling.outcome} and was never shown "
+                f"as a question, so an answer to it establishes nothing (ADR-0235 §3)"
+            )
+            raise UngrantableActError(msg)
+        if confirmed.step_id is not None or confirmed.execution_id is not None:
+            msg = (
+                f"decision {decision_id!r} belongs to a step of an execution, so a park holds "
+                f"it and its answer rides resume rather than this operation (ADR-0235 §3)"
+            )
+            raise UngrantableActError(msg)
+        rows = await self.trail.recent(limit=DEFAULT_PAGE_SIZE)
+        resolution = next((row for row in rows if row.resolves == decision_id), None)
+        if resolution is not None:
+            msg = (
+                f"decision {decision_id!r} was already answered by decision {resolution.id!r}; a "
+                f"confirmation has one answer, so this one is spent (ADR-0044 §2b, ADR-0235 §3)"
+            )
+            raise UngrantableActError(msg)
+        now = self.recipient_grant_clock()
+        if confirmed.expires_at is not None and confirmed.expires_at <= now:
+            msg = (
+                f"decision {decision_id!r} stopped being answerable at "
+                f"{confirmed.expires_at.isoformat()}, which is at or before {now.isoformat()} "
+                f"(ADR-0059 §1, ADR-0235 §3)"
+            )
+            raise UngrantableActError(msg)
+        binding = confirmed.egress_binding
+        if not isinstance(binding, EgressBinding):
+            msg = (
+                f"decision {decision_id!r} records no egress call whose recipients could be "
+                f"made standing (ADR-0235 §3)"
+            )
+            raise UngrantableActError(msg)
+        if binding.planned_with_external_content:
+            msg = (
+                f"decision {decision_id!r} records a call planned over external content; you "
+                f"may approve such a call, and may not in that act make its recipients "
+                f"standing (ADR-0193 §2, §4; ADR-0235 §3)"
+            )
+            raise UngrantableActError(msg)
+        return confirmed
 
     # --- the connection surface (ADR-0151 §1) ------------------------------
 

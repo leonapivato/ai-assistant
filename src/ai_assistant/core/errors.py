@@ -1393,6 +1393,82 @@ class InvalidRecipientGrantError(RecipientGrantError):
     one that predates the grant it revokes: ``decided_at`` is caller-supplied and
     this store reads no clock on the write path, so a host clock corrected
     backwards would otherwise make a grant permanently unrevokable (ADR-0193 §1).
+
+    **Two of those grounds now have subclasses**, and ADR-0235 §4 partially
+    supersedes the "one class rather than several" limb above to give them names —
+    scoped to exactly the two on which the caller's recourse is *not* identical.
+    :class:`RecipientGrantCeilingError` and :class:`DuplicateRecipientGrantError`
+    are below; every other ground keeps raising this class unchanged, and this
+    class still catches all of them, so a caller wanting one handler keeps it.
+    """
+
+
+class RecipientGrantCeilingError(InvalidRecipientGrantError):
+    """A granting record would take the outstanding count above the ceiling (ADR-0235 §4).
+
+    The first of the two discriminators ADR-0235 §4 adds, and it exists because
+    ADR-0193 §1's own ceiling clause obliges a surface offering the establishing
+    act to refuse it *"with a reason visible to the user, naming that the ceiling
+    was reached"*. A surface names a reason it was **told**, and the type of the
+    refusal is what tells it: no lane parses this class's message, takes a count
+    of its own, or reads :meth:`~ai_assistant.core.protocols.RecipientGrantStore.standing`
+    after the refusal to work out which ground it was (ADR-0235 §11).
+
+    The user's recourse is to **revoke a grant they hold**, which is what makes
+    this ground different from the base class's others: reading the store and
+    constructing a different record — ADR-0193 §1's stated recourse — is exactly
+    what a user at the ceiling should not do.
+
+    **A revoking record is never refused on this ground**, whatever the count: a
+    ceiling that could block a revocation would trap a user above it with no way
+    down (ADR-0193 §1).
+    """
+
+
+class DuplicateRecipientGrantError(InvalidRecipientGrantError):
+    """A granting record duplicates an outstanding grant's subject (ADR-0235 §4).
+
+    The second discriminator: a **granting** record whose ``tool``, ``account``
+    and ``destinations`` all equal those of an **outstanding** granting record
+    (ADR-0193 §1). It is named apart from the base class because the user needs
+    **no act at all** — what they asked for is already true — where the base
+    class's remaining grounds all leave them with a record to rebuild.
+
+    Not the duplicate **id** refusal, which is a different fact about a different
+    field and keeps the base class: an id already recorded is a caller reusing an
+    identifier, not a user asking for something that already stands.
+    """
+
+
+class UngrantableActError(AssistantError):
+    """The establishing act was refused before any answer was recorded (ADR-0235 §3).
+
+    One class over every refusal of the act that leaves **no answer recorded** on
+    either operation — ADR-0235 §3's seven availability conditions, whether they
+    fail at the check or the fourth of them fails late against the trail's own
+    resolution invariant; §2's binding refusal on a held confirmation; and §1's
+    expiry refusal on both. The message names which condition failed and **no lane
+    branches on the message**; where more than one fails, the first in the order §3
+    states is the one named, so the refusal is deterministic across
+    implementations.
+
+    **One type rather than one per condition**, because every one of them has the
+    same user-visible consequence — the act was not performed, nothing was
+    recorded, nothing was sent, and the call may still be answered without the
+    standing request — and a client needs one handler for exactly that.
+
+    **An** :class:`AssistantError` **and not a bare** ``ValueError``, for the
+    reason ADR-0042 §7 fixes: a ``ValueError`` is not an ``AssistantError``, so it
+    would escape a command's ``except (AssistantError, TransportError)`` boundary
+    as an uncaught traceback with no controlled exit code. ``ValueError`` stays
+    where ADR-0235 already puts it — a non-positive ``limit``, and
+    :meth:`~ai_assistant.core.types.PermissionDecision.from_confirmation`'s
+    construction refusals — both of which are caller argument errors rather than
+    outcomes of the act.
+
+    **Distinct from the two** :class:`InvalidRecipientGrantError` **subclasses
+    above**, which name a refusal the store makes *after* the answer was recorded
+    rather than one an operation makes before it.
     """
 
 

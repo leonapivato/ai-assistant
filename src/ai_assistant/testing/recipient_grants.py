@@ -45,7 +45,12 @@ from typing import TYPE_CHECKING, Final, NamedTuple, final
 from uuid import uuid4
 
 from ai_assistant.core.clock import checked_clock
-from ai_assistant.core.errors import InvalidRecipientGrantError, RecipientGrantError
+from ai_assistant.core.errors import (
+    DuplicateRecipientGrantError,
+    InvalidRecipientGrantError,
+    RecipientGrantCeilingError,
+    RecipientGrantError,
+)
 from ai_assistant.core.types import (
     BoundAccount,
     CanonicalDestination,
@@ -498,8 +503,12 @@ class _RecipientGrantLog:
         have revoked nothing.
 
         Raises:
-            InvalidRecipientGrantError: If an outstanding grant has the same
-                declaration, account and destination set.
+            DuplicateRecipientGrantError: If an outstanding grant has the same
+                declaration, account and destination set. The discriminator
+                ADR-0235 §4 adds, raised here so the fake and the durable store
+                answer one type: a user whose subject already stands needs **no**
+                act, where every ground keeping the base class leaves them a record
+                to rebuild.
         """
         standing = next(
             (
@@ -517,7 +526,7 @@ class _RecipientGrantLog:
                 f"account and destination set; a second is one the user could not revoke, "
                 f"because revoking either would leave the other standing (ADR-0193 §1)"
             )
-            raise InvalidRecipientGrantError(msg)
+            raise DuplicateRecipientGrantError(msg)
 
     def _check_room(self, grant: RecipientGrant) -> None:
         """Refuse a granting record that would breach the ceiling (ADR-0193 §1).
@@ -531,8 +540,11 @@ class _RecipientGrantLog:
         grant is minted in its place.
 
         Raises:
-            InvalidRecipientGrantError: If the store already holds the configured
-                maximum of outstanding granting records.
+            RecipientGrantCeilingError: If the store already holds the configured
+                maximum of outstanding granting records. ADR-0235 §4's second
+                discriminator, so that a surface can name *that* the ceiling was
+                reached — ADR-0193 §1's own obligation — from the refusal's type
+                rather than from its message or a count of its own.
         """
         held = len(self._outstanding())
         if held >= self._max_outstanding:
@@ -542,7 +554,7 @@ class _RecipientGrantLog:
                 f"evicted to make room, and the recourse is to revoke a grant you hold "
                 f"(ADR-0193 §1)"
             )
-            raise InvalidRecipientGrantError(msg)
+            raise RecipientGrantCeilingError(msg)
 
     def _check_revocation(self, revocation: RecipientGrant) -> None:
         """Enforce ADR-0193 §1's invariant on a revoking record.

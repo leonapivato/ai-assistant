@@ -11389,6 +11389,116 @@ class PermissionDecision(BaseModel):
             egress_binding=None if binding is None else binding.model_copy(deep=True),
         )
 
+    @classmethod
+    def from_confirmation(
+        cls,
+        confirmed: PermissionDecision,
+        ruling: PermissionRuling,
+        *,
+        id: DurableIdentifier,  # noqa: A002 — names the field it fills; ADR-0235 §4's signature
+        decided_at: UtcInstant,
+    ) -> PermissionDecision:
+        """Bind ``ruling`` to a recorded ``CONFIRM`` no park holds (ADR-0235 §4).
+
+        **A pure transcribing constructor**, and it is :meth:`from_request`'s shape
+        for the same reason: everything describing *what was ruled on* is copied by
+        ``core`` rather than asserted by whoever collected the act. It reads no
+        clock, no store and no seam, and performs no I/O.
+
+        It exists because the resuming constructor needs a request no trail row can
+        supply. :meth:`from_request` transcribes ``tool``, ``parameters_digest``,
+        ``step_id`` and ``execution_id`` from an :class:`ActionRequest`, which
+        carries the call's ``parameters``; a recorded decision carries a
+        ``parameters_digest`` and nothing to rebuild them from, so a caller holding
+        a trail row and nothing else has no route through that constructor
+        (ADR-0235 §3).
+
+        **It accepts no ``tool``, no ``parameters_digest``, no ``egress_binding``,
+        no ``step_id``, no ``execution_id`` and no ``resolves`` from its caller**, so
+        a caller has no parameter through which to substitute a subject or point the
+        answer at a different question. That removes the capability rather than
+        forbidding it, which is ADR-0021 §3's move and ADR-0193 §2's after it — and
+        it is what closes the ``AuditTrail.record`` "answered about a different
+        subject" ground *by construction* on the one operation that reaches here
+        (ADR-0235 §3).
+
+        **``expires_at`` is set to ``None``**, which is the only value this record's
+        existing lifetime validator admits on a decision that is not a ``CONFIRM``:
+        a lifetime belongs to an open question, and this decision answers one.
+
+        **It authors no ruling.** The :class:`PermissionRuling` it is handed comes
+        from ``ActionPolicy.resolve`` and from nowhere else, so ADR-0021 §3's split
+        — only a policy may author a ruling — is untouched. The ruling, the tool and
+        the binding are deep-copied for :meth:`from_request`'s reason exactly: an
+        already-valid model instance passes through pydantic uncopied, so the
+        decision would otherwise hold the *same* objects the confirmation does.
+
+        **It lives on** :class:`PermissionDecision` **and nowhere else** (ADR-0235
+        §4). No lane moves it into ``permissions``, ``orchestration`` or
+        ``interfaces``, and none adds a second construction path beside it.
+
+        Args:
+            confirmed: The recorded ``CONFIRM`` being answered. Its ``tool``,
+                ``parameters_digest``, ``egress_binding``, ``step_id`` and
+                ``execution_id`` are transcribed by value, and its ``id`` becomes
+                this decision's ``resolves``.
+            ruling: What the policy said, from ``ActionPolicy.resolve``.
+            id: This decision's own id, minted by the caller that records.
+            decided_at: When the answer was decided; timezone-aware, and at or after
+                ``confirmed``'s own ``decided_at`` — which is the ordering
+                ``AuditTrail.record`` enforces between a resolution and the question
+                it answers, checked here so a caller does not meet it at the store.
+
+        Returns:
+            The resolving decision, ready to record.
+
+        Raises:
+            ValueError: If ``confirmed``'s ruling was not a ``CONFIRM``; if
+                ``confirmed`` carries a ``step_id`` or an ``execution_id``; if
+                ``decided_at`` is before ``confirmed.decided_at``; or if the record
+                the transcription produces fails any of this model's own validators.
+        """
+        if confirmed.ruling.outcome is not PermissionOutcome.CONFIRM:
+            msg = (
+                f"a resolving decision answers a recorded CONFIRM; decision "
+                f"{confirmed.id!r} ruled {confirmed.ruling.outcome} (ADR-0235 §4)"
+            )
+            raise ValueError(msg)
+        if confirmed.step_id is not None or confirmed.execution_id is not None:
+            # **The refusal that keeps this constructor off every path that
+            # executes a call** (ADR-0235 §4). A confirmation carrying either field
+            # belongs to a step of an execution, and its answer must be built from a
+            # rebound request through :meth:`from_request` (ADR-0152 §7, ADR-0148
+            # §1); a confirmation carrying neither belongs to no step, so there is
+            # nothing to rebind and nothing to run.
+            msg = (
+                f"decision {confirmed.id!r} belongs to a step of an execution "
+                f"(step_id={confirmed.step_id!r}, execution_id={confirmed.execution_id!r}), so "
+                f"its answer is the resuming one and is built from a rebound request "
+                f"(ADR-0235 §4)"
+            )
+            raise ValueError(msg)
+        if decided_at < confirmed.decided_at:
+            msg = (
+                f"a resolution is decided at or after the confirmation it answers, got "
+                f"decided_at={decided_at!r} for a confirmation decided at "
+                f"{confirmed.decided_at!r} (ADR-0235 §4)"
+            )
+            raise ValueError(msg)
+        binding = confirmed.egress_binding
+        return cls(
+            id=id,
+            ruling=ruling.model_copy(deep=True),
+            tool=confirmed.tool.model_copy(deep=True),
+            parameters_digest=confirmed.parameters_digest,
+            decided_at=decided_at,
+            step_id=confirmed.step_id,
+            execution_id=confirmed.execution_id,
+            resolves=confirmed.id,
+            expires_at=None,
+            egress_binding=None if binding is None else binding.model_copy(deep=True),
+        )
+
     def authorises(self, request: ActionRequest) -> bool:
         """Whether this decision authorises performing ``request``.
 
@@ -12212,6 +12322,139 @@ class RecipientGrant(BaseModel):
             expires_at=expires_at,
             established_by=confirmed.id,
         )
+
+
+class RecipientGrantNotEstablished(StrEnum):
+    """Why an attempted establishing act ended with no grant (ADR-0235 §4, §6).
+
+    **Five members, and between them they name every way the act can end without a
+    grant.** Four of them are read from the **type of the refusal**
+    :meth:`~ai_assistant.core.protocols.RecipientGrantStore.record` raised and from
+    nothing else; the fifth names the case where that method was never called at
+    all. No lane parses a message, takes a count of its own, or reads a listing
+    after the refusal to work out which member applies (ADR-0235 §11).
+
+    **Not ordered**, for :class:`GrantScope`'s reason: five outcomes of one act are
+    not ranked, and an order would invite a comparison that means nothing.
+    """
+
+    CEILING_REACHED = "ceiling_reached"
+    """The store is at ``Settings.recipient_grant_max_outstanding`` (ADR-0193 §1).
+
+    Read from :class:`~ai_assistant.core.errors.RecipientGrantCeilingError`. It is
+    a member of its own because ADR-0193 §1 obliges a surface offering the act to
+    name **that** reason in terms, with the recourse — revoke a grant you hold —
+    beside it. Nothing already recorded was evicted, narrowed, expired or truncated
+    to make room, and no looser grant was minted in its place.
+    """
+
+    ALREADY_STANDING = "already_standing"
+    """An outstanding grant already carries this tool, account and destination set.
+
+    Read from :class:`~ai_assistant.core.errors.DuplicateRecipientGrantError`, the
+    duplicate-**subject** refusal ADR-0193 §1 makes ``record`` perform. The user
+    needs no act at all: what they asked for is already true.
+    """
+
+    REFUSED = "refused"
+    """The store refused the record on any other ground (ADR-0235 §4).
+
+    Every other :class:`~ai_assistant.core.errors.InvalidRecipientGrantError` that
+    operation can raise — the duplicate-id check and the revocation invariants —
+    which no surface distinguishes, because ADR-0193 §1 gives a user no different
+    act for them. A surface renders this **naming no cause it was not given**, and
+    never guesses at one.
+    """
+
+    STORE_UNAVAILABLE = "store_unavailable"
+    """The grant store could not be written, which is not a refusal of the request.
+
+    Read from a :class:`~ai_assistant.core.errors.RecipientGrantError` that is
+    **not** an ``InvalidRecipientGrantError`` — ``core/errors.py``'s own split, *"a
+    recipient-grant store could not be read or written"* against *"a store refused
+    the record it was handed"*. The store wrote nothing, because ``record`` is
+    atomic (ADR-0193 §1), so no grant stands from this act. It is its own member
+    rather than folded into :attr:`REFUSED` because a surface reporting a disk
+    fault as a refusal would be telling the user their request was declined when it
+    was not (ADR-0235 §4).
+    """
+
+    DECLINED = "declined"
+    """The resolving ruling was not an ``ALLOW``, so the store was never reached.
+
+    A declining answer, or a policy ``DENY`` on an approving one (ADR-0235 §2). The
+    answer **is** recorded — ADR-0042 §4's guarantee is preserved whole — and no
+    grant could be established from it (ADR-0193 §2). It is distinct from
+    :attr:`REFUSED` because the store refused nothing, and it is a member rather
+    than an absent carrier so that a surface can tell "the act was collected and the
+    answer went against it" from "no act was collected".
+    """
+
+
+class RecipientGrantOutcome(BaseModel):
+    """What became of a standing request collected beside an answer (ADR-0235 §4, §6).
+
+    The carrier ``resume`` needs and a listing cannot stand in for. ADR-0193 §1
+    obliges a surface offering the establishing act to name a ceiling refusal to the
+    user, and on a **held** confirmation the call has already been sent by the time
+    ``record`` is asked — so ``resume`` returns its :class:`TurnOutcome` rather than
+    raising, and this is what that outcome carries to say what the act did.
+
+    **A read-back cannot replace it, and that is the reason it exists rather than a
+    preference.** Three outcomes collapse into one
+    ``standing_recipient_grants`` listing — a ceiling refusal, a grant established
+    with an expiry ADR-0193 §1 admits an instant after the answer and therefore
+    already not live, and the duplicate-subject refusal — and
+    :class:`Confirmation` carries no decision id, so no correlation on
+    :attr:`RecipientGrant.established_by` is available and no difference between two
+    reads separates the three (ADR-0235 §6).
+
+    **Exactly one of the two members is set.** ``established`` on an act that
+    recorded a grant, ``not_established`` on one that did not, and a value setting
+    both or neither is refused, as ADR-0170 §4's own invariants are stated. It
+    composes, filters and enriches nothing, reads no clock and no store, and the
+    :class:`RecipientGrant` it carries on the establishing arm is the record the
+    store accepted, detached as every other promoted read's is (ADR-0018 §3).
+
+    **The arm is called ``not_established`` rather than ``refusal``**, because a
+    store fault is not a refusal of the user's request and a declining ruling is not
+    a refusal by the store. The two arms stay one carrier rather than two: whatever
+    the member, the surface's act is the same — say that no standing authorisation
+    was created, name only what it was told, and leave the call's own result
+    untouched.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    established: RecipientGrant | None = Field(
+        default=None, description="The grant the store accepted, where one was recorded."
+    )
+    not_established: RecipientGrantNotEstablished | None = Field(
+        default=None, description="Why no grant was recorded, where none was."
+    )
+
+    @model_validator(mode="after")
+    def _exactly_one_arm(self) -> RecipientGrantOutcome:
+        """Refuse a carrier setting both members or neither (ADR-0235 §4).
+
+        **Both directions**, as ADR-0170 §4's own invariants are stated. A carrier
+        setting both would say a grant was recorded *and* say why none was, and a
+        surface reading either half would report something false. A carrier setting
+        neither is the absent carrier under another name — and the absent carrier
+        already means "no act was collected", which is a different fact from "an act
+        was collected and this is what became of it".
+
+        Raises:
+            ValueError: If both members are set, or neither is.
+        """
+        if (self.established is None) == (self.not_established is None):
+            msg = (
+                "a recipient-grant outcome carries exactly one of established and "
+                f"not_established, got established={self.established!r}, "
+                f"not_established={self.not_established!r} (ADR-0235 §4)"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class ReadOutcome(StrEnum):
@@ -15482,6 +15725,29 @@ class TurnOutcome(BaseModel):
             An adapter renders this **in addition to** any composed reply, never
             instead of it, and where the two disagree the routed account is correct
             by construction (ADR-0197 §10).
+        recipient_grant: What became of a standing recipient request collected beside
+            an answer, or ``None`` on a call that collected none (ADR-0235 §4, §6).
+            ADR-0235 is the decision that added it, as ADR-0197 is :attr:`routed`'s
+            and ADR-0170 §3 is :attr:`reply`'s.
+
+            **``None`` on every outcome of a call that performed no establishing
+            act** — every ``converse``, every ``resume`` supplying no
+            ``remember_recipients_until``, and ADR-0198 §1's **restatement**, which
+            drives nothing and therefore establishes nothing. That adds a value to
+            ADR-0198 §2's enumeration without changing any value it fixes.
+
+            **A widening rather than a change**, which is ADR-0197's move exactly:
+            ADR-0170 §4 fixes the three shapes on which :attr:`reply` is ``None`` and
+            the one on which :attr:`reply_degraded` is ``True``, and a
+            ``None``-defaulting member alters neither, so no clause of ADR-0170 is
+            superseded, narrowed or read more widely.
+
+            **A surface states the standing outcome from this member and from
+            nothing else** (ADR-0235 §6). It asserts no grant this does not carry,
+            it does not stay silent on a refusal — a user told nothing about a
+            request they made concludes it was granted — and it never derives the
+            answer from a ``standing_recipient_grants`` read taken afterwards or
+            from ``resume`` having returned normally.
 
     Note:
         ADR-0085 §4's Group A table lists this type's four fields as promoted; the
@@ -15514,6 +15780,10 @@ class TurnOutcome(BaseModel):
     )
     routed: RoutedOperation | None = Field(
         default=None, description="What the operation-routing stage did (ADR-0197 §8)."
+    )
+    recipient_grant: RecipientGrantOutcome | None = Field(
+        default=None,
+        description="What became of a standing recipient request, if one was made (ADR-0235 §4).",
     )
 
     @model_validator(mode="after")

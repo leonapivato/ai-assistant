@@ -122,6 +122,7 @@ from ai_assistant.orchestration import (
     MemoryWriteStage,
     ObservationStage,
     QuestionStage,
+    RecipientGrantOperations,
     SearchServicer,
     StepExecutor,
     StepRunner,
@@ -549,6 +550,16 @@ async def _engine(now: Clock) -> None:
             store=FakeSourceGrantStore(),
             sources=(),
             id_factory=lambda: "grant-1",
+            clock=lambda: _AWARE,
+        ),
+        # The recipient-grant operations read a clock of their own — the instant an
+        # establishing answer carries (ADR-0235 §1) — so this module wires it from
+        # the same seam every other one here comes from.
+        recipient_grant_operations=RecipientGrantOperations(
+            store=FakeRecipientGrantStore(),
+            trail=FakeAuditTrail(),
+            policy=FakeActionPolicy(),
+            id_factory=lambda: "recipient-grant-1",
             clock=lambda: _AWARE,
         ),
         # No clock seam of its own: a connection record carries no instant at all

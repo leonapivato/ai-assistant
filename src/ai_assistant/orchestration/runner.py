@@ -45,7 +45,7 @@ is this package's own.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -58,12 +58,14 @@ from ai_assistant.core.errors import (
     EgressBindingError,
     PermissionDeniedError,
     PlanningError,
+    UngrantableActError,
 )
 from ai_assistant.core.types import (
     ActionRequest,
     CarriedProvenance,
     CoverageUnrecordedBinding,
     Disposition,
+    EgressBinding,
     ExecutionState,
     OriginUnrecordedBinding,
     PermissionDecision,
@@ -90,7 +92,6 @@ if TYPE_CHECKING:
     )
     from ai_assistant.core.types import (
         BoundEgressCall,
-        EgressBinding,
         FrozenJsonMapping,
         ParameterViolation,
         PermissionRuling,
@@ -267,6 +268,40 @@ def _requested(
 
 
 @dataclass(frozen=True, slots=True)
+class EstablishingAnswer:
+    """The two records a standing recipient grant is transcribed from (ADR-0235 §2).
+
+    Carried out of :meth:`StepRunner.resume` on the one path that collected an
+    establishing act, so the engine can build the grant with
+    :meth:`~ai_assistant.core.types.RecipientGrant.established_from` and record it.
+    Both are the **trail's own copies** — the confirmation this stage read back and
+    the resolving decision it recorded and read back — so nothing downstream
+    transcribes a subject from a value a caller supplied.
+
+    **The engine and not this stage performs the act**, because ADR-0235 §12 puts
+    the ``RecipientGrantStore``'s whole face on ``Engine`` and nowhere else. What
+    this stage owes is the pair, the two refusals that must fire before any ruling
+    is sought (ADR-0235 §1's expiry, §2's binding), and the guarantee that
+    ``answer`` carries the very instant the expiry was compared against.
+
+    An `orchestration`-local dataclass and **not** promoted surface, exactly as
+    :class:`StepDisposition` is: no public method returns it and no promoted field
+    reaches it, so ADR-0085 §5's walk never gets to it.
+
+    Attributes:
+        confirmed: The recorded ``CONFIRM`` the answer rode, read back from the
+            trail.
+        answer: The resolving decision this stage recorded, read back from the
+            trail. Its ruling is the policy's and may be a ``DENY``: what became of
+            the standing request is the engine's to report (ADR-0235 §6), and this
+            stage draws no conclusion from it.
+    """
+
+    confirmed: PermissionDecision
+    answer: PermissionDecision
+
+
+@dataclass(frozen=True, slots=True)
 class StepDisposition:
     """What one pass of :class:`StepRunner` did with a step (ADR-0037 §4).
 
@@ -311,6 +346,12 @@ class StepDisposition:
             Orchestration-local for ``tied_candidates``' reason: carrying them to
             a client is an additive wire change with its own Tier question, which
             ADR-0145 §14 files as #1106.
+        establishing: The pair a standing recipient grant would be transcribed from,
+            on the one path that collected an establishing act — a
+            :meth:`StepRunner.resume` carrying ``remember_recipients_until`` beside
+            ``approved=True`` that reached a recorded answer (ADR-0235 §2). ``None``
+            everywhere else, including on a ``resume`` that collected the act and
+            was refused before any ruling was sought, which raises instead.
     """
 
     disposition: Disposition
@@ -320,6 +361,7 @@ class StepDisposition:
     decision: PermissionDecision | None = None
     tied_candidates: tuple[str, ...] = ()
     violations: tuple[ParameterViolation, ...] = ()
+    establishing: EstablishingAnswer | None = None
 
 
 class StepRunner:
@@ -572,7 +614,7 @@ class StepRunner:
         # `PENDING → SKIPPED`/`APPROVAL_DENIED`, naming the recorded `DENY`.
         return await self._deny(state, step, decision, tool)
 
-    async def resume(
+    async def resume(  # noqa: PLR0913 — the execution, the step, the confirmation, the answer, the budget, and ADR-0235 §2's one instant; each is a distinct fact about the act
         self,
         state: ExecutionState,
         step_id: str,
@@ -580,6 +622,7 @@ class StepRunner:
         confirmation_id: str | None = None,
         approved: bool,
         timeout: timedelta,  # noqa: ASYNC109 — passed through to the seam, which owns the deadline (ADR-0029 §4)
+        remember_recipients_until: datetime | None = None,
     ) -> StepDisposition:
         """Answer a parked ``CONFIRM`` and continue the step (ADR-0037 §4).
 
@@ -623,14 +666,32 @@ class StepRunner:
                 policy — not this object — is what turns it into a ruling
                 (ADR-0021 §3, ADR-0036 §1).
             timeout: Passed through to the executor, as in :meth:`run`.
+            remember_recipients_until: The instant the user asked the call's
+                recipients be remembered until, or ``None`` — the default and the
+                ordinary case — where they asked for nothing standing (ADR-0235
+                §2). Honoured **only** beside ``approved=True``; supplied beside a
+                declining answer it establishes nothing and changes nothing else,
+                so the ``DENY`` is recorded exactly as it is today and ADR-0042
+                §4's guarantee is preserved whole.
 
         Returns:
             ``EXECUTED`` or ``DENIED``, and the durable state after it. A
             resolving ruling can be nothing else: ``ActionPolicy.resolve`` may
             not return ``CONFIRM``, and a resolving decision that was one is
-            unconstructable (``PermissionDecision``'s own validator).
+            unconstructable (``PermissionDecision``'s own validator). Where an
+            establishing act was collected and an answer was recorded, the
+            disposition also carries the :class:`EstablishingAnswer` pair the grant
+            is transcribed from; the engine performs the act and reports what became
+            of it (ADR-0235 §6).
 
         Raises:
+            UngrantableActError: If ``remember_recipients_until`` was supplied
+                beside ``approved=True`` and the act may not ride this confirmation
+                (:meth:`_check_establishable`), or if the instant is not strictly
+                after the one that would stamp the answer (ADR-0235 §1). Raised
+                **before any ruling is sought**, in the shape this method already
+                uses for a binding it may not resume, so nothing is written and the
+                step stays parked and answerable without the argument.
             AuditError: If the confirmation is absent from the trail, is not the
                 record ``confirmation_id`` names (:meth:`_recorded`), if the
                 trail refuses the resolving decision, or if it does not hand back
@@ -673,6 +734,19 @@ class StepRunner:
             raise PermissionDeniedError(msg)
         self._check_parked(opened, step, confirmed.tool.id, confirmation_id=confirmed.id)
         self._check_fresh(confirmed)
+        # **The establishing act's own two refusals, before every other one that can
+        # still record an answer** (ADR-0235 §1, §2). They run ahead of the two
+        # binding refusals below because §12 requires all four shapes those refuse —
+        # ``None``, an origin-unrecorded binding, a coverage-unrecorded one, and an
+        # ``EgressBinding`` planned over external content — to reach a caller that
+        # supplied the argument as ``UngrantableActError``, which is the act's own
+        # refusal, rather than as the ``PermissionDeniedError`` a resume without the
+        # argument would meet. Both fire before any ruling is sought, so nothing is
+        # written and the step stays durably parked and answerable.
+        establishing_at: datetime | None = None
+        if remember_recipients_until is not None and approved:
+            self._check_establishable(confirmed)
+            establishing_at = self._establishing_instant(remember_recipients_until)
         approved_binding = confirmed.egress_binding
         if isinstance(approved_binding, OriginUnrecordedBinding):
             # ADR-0184 §8's fourth clause: narrow the union and refuse rather than
@@ -726,10 +800,96 @@ class StepRunner:
         # Its own copy again, for `run`'s reason: `confirmed.id` is read after
         # this returns, and it is what `resolves` will point at.
         ruling = await self._policy.resolve(confirmed.model_copy(deep=True), approved=approved)
-        decision = await self._record(request, ruling, resolves=confirmed.id)
+        decision = await self._record(request, ruling, resolves=confirmed.id, at=establishing_at)
         if decision.ruling.outcome is PermissionOutcome.ALLOW:
-            return await self._execute(state, step, request, decision, timeout=timeout)
-        return await self._deny(state, step, decision, confirmed.tool)
+            disposition = await self._execute(state, step, request, decision, timeout=timeout)
+        else:
+            disposition = await self._deny(state, step, decision, confirmed.tool)
+        if establishing_at is None:
+            return disposition
+        # An answer **was** recorded, so what became of the standing request is a
+        # thing the engine reports on the outcome rather than a raise (ADR-0235 §6).
+        # The pair travels whatever the ruling: a policy ``DENY`` on an approving
+        # answer is `DECLINED` there, and only the engine holds the store that could
+        # say anything more.
+        return replace(
+            disposition, establishing=EstablishingAnswer(confirmed=confirmed, answer=decision)
+        )
+
+    def _check_establishable(self, confirmed: PermissionDecision) -> None:
+        """Refuse an establishing act on a binding it may not ride (ADR-0235 §2).
+
+        The same two conditions ADR-0235 §3 places on the recorded population, on
+        the held one, and refused **before any ruling is sought** so nothing is
+        written and the step stays parked and answerable without the argument.
+
+        **All four shapes reach one refusal, and the ``None`` arm is the one a
+        roster would omit** — it is the arm that would otherwise record an ``ALLOW``
+        and send the call before
+        :meth:`~ai_assistant.core.types.RecipientGrant.established_from` refused a
+        binding that is not there.
+
+        Args:
+            confirmed: The recorded ``CONFIRM`` the answer would ride.
+
+        Raises:
+            UngrantableActError: If the confirmation's ``egress_binding`` is not an
+                :class:`~ai_assistant.core.types.EgressBinding`, or is one carrying
+                ``planned_with_external_content``.
+        """
+        binding = confirmed.egress_binding
+        if not isinstance(binding, EgressBinding):
+            msg = (
+                f"decision {confirmed.id!r} records no egress call whose recipients could be "
+                f"made standing, so this answer cannot establish a recipient grant; the "
+                f"confirmation is unaffected and may still be answered (ADR-0235 §2)"
+            )
+            raise UngrantableActError(msg)
+        if binding.planned_with_external_content:
+            msg = (
+                f"decision {confirmed.id!r} records a call planned over external content; a "
+                f"user answering such a confirmation may approve the call, and may not in "
+                f"that act make its recipients standing (ADR-0193 §2, §4; ADR-0235 §2)"
+            )
+            raise UngrantableActError(msg)
+
+    def _establishing_instant(self, remember_recipients_until: datetime) -> datetime:
+        """Read the clock once, and refuse an expiry that is not strictly after it.
+
+        ADR-0235 §1: the instant compared against is **the one this stage will stamp
+        on the answer**, chosen once here and used for both, because two clock reads
+        admit an expiry that passes the check and fails
+        :meth:`~ai_assistant.core.types.RecipientGrant.established_from`'s
+        constructor — which is the failure the clause exists to remove rather than
+        to narrow. So this reading is threaded into :meth:`_record` as ``at`` and no
+        second reading is taken between here and the append.
+
+        Refused **here** rather than at the constructor for the reason §1 gives: an
+        operation that did not check would record the answer and only then meet a
+        construction refusal, leaving a decision in the trail, no grant, and a user
+        told nothing they could act on.
+
+        Args:
+            remember_recipients_until: The instant the user chose.
+
+        Returns:
+            The clock reading the answer will carry.
+
+        Raises:
+            UngrantableActError: If the chosen instant is at or before that reading.
+                The message **names the instant it was compared against**.
+            PlanningError: If the injected clock's reading is not a conforming one.
+        """
+        decided_at = self._now()
+        if remember_recipients_until <= decided_at:
+            msg = (
+                f"a standing recipient grant expires strictly after the answer that "
+                f"establishes it; {remember_recipients_until.isoformat()} is at or before "
+                f"{decided_at.isoformat()}, the instant this answer would carry, so nothing "
+                f"was recorded and the confirmation may still be answered (ADR-0235 §1)"
+            )
+            raise UngrantableActError(msg)
+        return decided_at
 
     async def _bound(
         self, tool: ToolDefinition, parameters: FrozenJsonMapping, origin: SelectionOrigin, /
@@ -1044,6 +1204,7 @@ class StepRunner:
         ruling: PermissionRuling,
         *,
         resolves: str | None = None,
+        at: datetime | None = None,
     ) -> PermissionDecision:
         """Bind ``ruling`` to ``request``, append it, and return the trail's copy.
 
@@ -1102,6 +1263,23 @@ class StepRunner:
         ``from_request`` takes it as a parameter rather than transcribing it,
         and why the policy stays clock-free (ADR-0036 §1, ADR-0021 §3).
 
+        **``at`` is the one caller-supplied reading and it exists for ADR-0235 §1.**
+        An establishing act compares the user's chosen expiry against *the instant
+        this answer will carry*, and §1 forbids a second clock read between that
+        comparison and this append — "two reads admit an expiry that passes the
+        check and fails the constructor". So :meth:`resume` reads the clock once,
+        refuses there, and hands the same reading down. It is this stage's own
+        guarded reading either way (:meth:`_establishing_instant`), never a value
+        that reached the engine from a client, and ``None`` — every other call —
+        reads the clock here exactly as before.
+
+        Args:
+            request: The action ruled on.
+            ruling: What the policy said about it.
+            resolves: The recorded ``CONFIRM`` this decision answers, if any.
+            at: The reading to stamp, where a caller has already taken and used one
+                (ADR-0235 §1); ``None`` to read the clock here.
+
         Raises:
             AuditError: If the trail refused the append — a duplicate id, or a
                 ``resolves`` pointer that failed its invariant — or if it does
@@ -1112,7 +1290,7 @@ class StepRunner:
         # One clock reading, used for both the stamp and the deadline derived
         # from it: two reads could put `expires_at` a tick off `decided_at + ttl`
         # and make the record describe a lifetime nobody configured.
-        decided_at = self._now()
+        decided_at = self._now() if at is None else at
         decision = PermissionDecision.from_request(
             request,
             ruling,

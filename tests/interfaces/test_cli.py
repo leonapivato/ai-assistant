@@ -120,6 +120,7 @@ from ai_assistant.orchestration import (
     MemoryWriteStage,
     ObservationStage,
     QuestionStage,
+    RecipientGrantOperations,
     StepExecutor,
     StepRunner,
 )
@@ -140,6 +141,7 @@ from ai_assistant.testing import (
     FakeModelProvider,
     FakeObserver,
     FakePlanStore,
+    FakeRecipientGrantStore,
     FakeSourceGrantStore,
     FakeSourceReadTrail,
     FakeStreamingCompleter,
@@ -156,6 +158,7 @@ from ai_assistant.wire.address import sun_path_limit
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
+    from ai_assistant.core.protocols import ActionPolicy, AuditTrail
     from ai_assistant.core.types import FrozenJson, MemoryRecord, ShownFile, SourceGrant
 
 
@@ -191,6 +194,30 @@ def _grant_operations(sources: Sequence[HeldSource] = ()) -> GrantOperations:
     return GrantOperations(
         store=FakeSourceGrantStore(),
         sources=sources,
+        id_factory=_grant_ids(),
+        clock=lambda: AT,
+    )
+
+
+def _recipient_grant_operations(
+    *,
+    store: FakeRecipientGrantStore | None = None,
+    trail: AuditTrail | None = None,
+    policy: ActionPolicy | None = None,
+) -> RecipientGrantOperations:
+    """The recipient-grant collaborator every ``Engine`` needs (ADR-0235 §4).
+
+    Required rather than optional on the façade, on ``_grant_operations``' reason
+    exactly: the five methods are on the Protocol, so an engine that could be built
+    without them is one whose surface is conditionally present. The three seams
+    default to fresh fakes — an empty store, a trail nothing has been recorded to,
+    and a policy that allows — which is what a case not about the establishing act
+    wants.
+    """
+    return RecipientGrantOperations(
+        store=FakeRecipientGrantStore() if store is None else store,
+        trail=FakeAuditTrail() if trail is None else trail,
+        policy=FakeActionPolicy() if policy is None else policy,
         id_factory=_grant_ids(),
         clock=lambda: AT,
     )
@@ -355,6 +382,7 @@ def _engine(
     return Engine(
         composing=composing if composing is not None else _composing(),
         grant_operations=_grant_operations(),
+        recipient_grant_operations=_recipient_grant_operations(),
         connection_operations=_connection_operations(),
         loop=loop,
         runner=runner,
@@ -4037,6 +4065,7 @@ def _conversation_engine(
     engine = Engine(
         composing=composing if composing is not None else _composing(),
         grant_operations=_grant_operations(),
+        recipient_grant_operations=_recipient_grant_operations(),
         connection_operations=_connection_operations(),
         loop=loop,
         runner=runner,

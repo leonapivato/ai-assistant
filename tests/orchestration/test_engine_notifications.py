@@ -18,7 +18,14 @@ from datetime import datetime, time, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
-from test_engine import AT, Harness, _composing, _connection_operations, _grant_operations
+from test_engine import (
+    AT,
+    Harness,
+    _composing,
+    _connection_operations,
+    _grant_operations,
+    _recipient_grant_operations,
+)
 
 from ai_assistant.core.correlation import current_correlation
 from ai_assistant.core.errors import ConfigurationError
@@ -62,6 +69,7 @@ def _wired(
     return Engine(
         composing=_composing(),
         grant_operations=_grant_operations(),
+        recipient_grant_operations=_recipient_grant_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,

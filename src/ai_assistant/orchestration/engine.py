@@ -104,6 +104,7 @@ from ai_assistant.core.errors import (
     SpeechError,
     TraceStoreError,
     TranscriptionFailedError,
+    UngrantableActError,
     UnknownContinuationError,
 )
 from ai_assistant.core.streams import closing_stream
@@ -233,6 +234,7 @@ if TYPE_CHECKING:
         Conversation,
         ConversationDigest,
         DeferralAdmission,
+        DurableIdentifier,
         EncodableText,
         FeedbackEvent,
         FrozenJsonMapping,
@@ -248,6 +250,8 @@ if TYPE_CHECKING:
         ObservationReport,
         PermissionDecision,
         Question,
+        RecipientGrant,
+        RecipientGrantOutcome,
         RecordedInvocation,
         RoutedListing,
         SecretValue,
@@ -259,6 +263,7 @@ if TYPE_CHECKING:
         TranscriptArchiveSize,
         TranscriptEntry,
         TranscriptHit,
+        UtcInstant,
     )
     from ai_assistant.orchestration.composing import ComposingStage
     from ai_assistant.orchestration.connections import ConnectionOperations
@@ -273,9 +278,14 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.loop import LearningLoop
     from ai_assistant.orchestration.observation import ObservationRunReport, ObservationStage
     from ai_assistant.orchestration.questions import QuestionStage
+    from ai_assistant.orchestration.recipient_grants import RecipientGrantOperations
     from ai_assistant.orchestration.recovery import RecoveryScan
     from ai_assistant.orchestration.routing import RoutedRoute
-    from ai_assistant.orchestration.runner import StepDisposition, StepRunner
+    from ai_assistant.orchestration.runner import (
+        EstablishingAnswer,
+        StepDisposition,
+        StepRunner,
+    )
     from ai_assistant.orchestration.upcoming import UpcomingEventStage
     from ai_assistant.orchestration.writes import WriteOutcome
 
@@ -1881,6 +1891,7 @@ class Engine:
         observation: ObservationStage,
         questions: QuestionStage,
         grant_operations: GrantOperations,
+        recipient_grant_operations: RecipientGrantOperations,
         connection_operations: ConnectionOperations,
         calendar_ingestion: IngestionStage | None = None,
         email_ingestion: IngestionStage | None = None,
@@ -2128,6 +2139,27 @@ class Engine:
                 in this package, and ADR-0102 §2 records that reusing a word for a
                 different type one constructor over is how two things come to be
                 confused at a glance.
+            recipient_grant_operations: The five recipient-grant operations
+                (ADR-0235 §3, §7) — the **only** object in this package holding a
+                :class:`~ai_assistant.core.protocols.RecipientGrantStore`, which is
+                the face ADR-0193 §1 withholds from the policy and from the trail and
+                which ``app/composition.py``'s own comment already anticipated
+                passing *"whole to whatever performs it"*. The façade delegates
+                ``grantable_decisions``, ``establish_recipient_grant``,
+                ``standing_recipient_grants``, ``recent_recipient_grants`` and
+                ``revoke_recipient_grant`` to it, and hands it the pair a ``resume``
+                carrying ``remember_recipients_until`` collected.
+
+                **Required, on ``grant_operations``' argument exactly**: these five
+                are ``AssistantEngine`` methods and the shared conformance suite runs
+                against this class, so an engine that could be built without them is
+                one whose surface is conditionally present.
+
+                **A second object rather than members on ``grant_operations``**,
+                because recipient grants and source grants are two vocabularies and
+                never one (ADR-0235 §7): one object over two stores that cannot
+                substitute for each other is the shape that invites a control
+                revoking across both.
             connection_operations: The five connection operations (ADR-0151 §1,
                 §10) — the **only** object in this package holding a
                 :class:`~ai_assistant.core.protocols.ConnectionProvisioner`. The
@@ -2453,6 +2485,7 @@ class Engine:
         self._observation = observation
         self._questions = questions
         self._grants = grant_operations
+        self._recipient_grants = recipient_grant_operations
         self._connections = connection_operations
         self._calendar_ingestion = calendar_ingestion
         self._email_ingestion = email_ingestion
@@ -4076,6 +4109,7 @@ class Engine:
         *,
         approved: bool,
         timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, threaded to the seam (ADR-0029 §4)
+        remember_recipients_until: UtcInstant | None = None,
     ) -> TurnOutcome:
         """Answer a parked confirmation and continue its step (ADR-0042 §3, §4).
 
@@ -4123,6 +4157,13 @@ class Engine:
                 policy may still refuse; ``False`` is a decision that yields
                 ``DENY``.
             timeout: The per-attempt budget, as :meth:`converse`.
+            remember_recipients_until: The instant the user asked this call's
+                recipients be remembered until, supplied **in the same act** as the
+                answer (ADR-0193 §2, ADR-0235 §1). ``None`` — the default and the
+                ordinary outcome — is a user who approved a call and asked for
+                nothing standing. Honoured only beside ``approved=True`` and only on
+                a resolving ``ALLOW``; what became of it is on the outcome's
+                ``recipient_grant`` and is never read off a later listing.
 
         Returns:
             The resumed turn: the parked turn's own result, the step's resolved
@@ -4149,6 +4190,12 @@ class Engine:
                 not state (ADR-0198 §2).
             PermissionDeniedError: If the recorded decision is not a ``CONFIRM``
                 about this parked step (``StepRunner`` refuses it).
+            UngrantableActError: If ``remember_recipients_until`` was supplied beside
+                ``approved=True`` and the act may not ride this confirmation, or the
+                instant is not strictly after the one the answer would carry. Raised
+                before any ruling is sought, so nothing is recorded, nothing is
+                executed, and the step stays parked and answerable (ADR-0235 §1, §2,
+                §6).
             AuditError, ToolBindingError: As the stages raise.
         """
         self._reject_if_closing()
@@ -4158,9 +4205,17 @@ class Engine:
             token=token,
             approved=approved,
             timeout=timeout,
+            remember_recipients_until=remember_recipients_until,
         )
         return await self._tracked(
-            self._resume(token, approved=approved, timeout=timeout), "resume", checked=True
+            self._resume(
+                token,
+                approved=approved,
+                timeout=timeout,
+                remember_recipients_until=remember_recipients_until,
+            ),
+            "resume",
+            checked=True,
         )
 
     async def learn(self, event: FeedbackEvent) -> LearnOutcome:
@@ -6403,6 +6458,157 @@ class Engine:
         """
         self._reject_if_closing()
         return await self._tracked(self._grants.standing_grants(), "standing_grants", checked=True)
+
+    # --- the recipient-grant surface (ADR-0235 §3, §7) ----------------------
+
+    async def grantable_decisions(
+        self, *, limit: int = DEFAULT_PAGE_SIZE
+    ) -> tuple[PermissionDecision, ...]:
+        """List the recorded ``CONFIRM``s an establishing act may ride (ADR-0235 §3).
+
+        ``limit`` is refused when it is **not strictly positive**, on
+        ``recent_decisions``' reason and in every implementation (ADR-0186 §3): it
+        bounds the trail rows read as well as the rows returned, so a non-positive
+        one reaches ``AuditTrail.recent`` as an unbounded read of a Tier 1 store.
+
+        **This is history and never a queue.** Nothing it returns is a park, holds a
+        turn, blocks anything or expires under a sweep, and no surface presents one
+        as outstanding work (ADR-0231 §9's third limb, ADR-0235 §3).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            TypeError: If ``limit`` is not an integer, or is a ``bool``.
+            ValueError: If ``limit`` is not in ``[1, 2**63)``.
+            AuditError: If the trail cannot be read.
+            PlanningError: If the injected clock's reading is not conforming.
+            OversizedValueError: If the page exceeds the contract limit.
+        """
+        self._reject_if_closing()
+        positive_page_argument(limit, name="limit")
+        check_arguments("grantable_decisions", max_bytes=self._max_payload_bytes, limit=limit)
+        return await self._tracked(
+            self._recipient_grants.grantable_decisions(limit=limit),
+            "grantable_decisions",
+            checked=True,
+        )
+
+    async def establish_recipient_grant(
+        self, decision_id: DurableIdentifier, *, expires_at: UtcInstant
+    ) -> RecipientGrant:
+        """Answer a recorded ``CONFIRM`` no park holds and record the grant (ADR-0235 §3).
+
+        ``decision_id`` undergoes :data:`~ai_assistant.core.types.Identifier`
+        validation before any I/O, as every identifier argument on this surface does
+        (ADR-0085 §3c) — it both refuses a blank value and strips the one the
+        implementation then uses, so a client cannot make ``" id "`` and ``"id"``
+        disagree at the seam.
+
+        **This resumes nothing and services nothing.** The ``ALLOW`` it records
+        authorises a call that has already been abandoned; no lane executes it,
+        re-composes the turn it belonged to, or treats the recorded answer as making
+        anything runnable (ADR-0231 §9's first limb).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``decision_id`` is blank or unwritable.
+            UngrantableActError: If the act may not ride this decision — any of
+                ADR-0235 §3's seven conditions, at the check or late against the
+                trail's own resolution invariant, or an expiry that is not strictly
+                after the instant the answer would carry. **No answer is recorded.**
+            PermissionDeniedError: If the policy answered other than an ``ALLOW``.
+                That answer **is** recorded and the confirmation is thereby settled.
+            AuditError: If the trail cannot be read or refused the answer.
+            InvalidRecipientGrantError: If the store refused the grant. The answer
+                stays recorded and nothing is evicted to make room.
+            RecipientGrantError: If the grant store cannot be written.
+            OversizedValueError: If the arguments or the record exceed the limit.
+        """
+        self._reject_if_closing()
+        named = identifier(decision_id, name="decision_id")
+        check_arguments(
+            "establish_recipient_grant",
+            max_bytes=self._max_payload_bytes,
+            decision_id=named,
+            expires_at=expires_at,
+        )
+        return await self._tracked(
+            self._recipient_grants.establish_recipient_grant(named, expires_at=expires_at),
+            "establish_recipient_grant",
+            checked=True,
+        )
+
+    async def standing_recipient_grants(self) -> tuple[RecipientGrant, ...]:
+        """List every standing recipient grant that is live now (ADR-0235 §7).
+
+        Delegated whole; what this layer adds is the drain tracking and the result
+        measurement. **It takes no ``limit``**, for ``standing_grants``' reason one
+        store over: a truncated answer to "what do I authorise" is a false answer
+        rather than a partial one, so a live set that does not fit the frame is an
+        ``OversizedValueError`` and no set at all.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            RecipientGrantError: If the grant store cannot be read.
+            OversizedValueError: If the live set does not fit the contract limit.
+        """
+        self._reject_if_closing()
+        return await self._tracked(
+            self._recipient_grants.standing_recipient_grants(),
+            "standing_recipient_grants",
+            checked=True,
+        )
+
+    async def recent_recipient_grants(
+        self, *, limit: int = DEFAULT_PAGE_SIZE
+    ) -> tuple[RecipientGrant, ...]:
+        """List the recipient-grant store's own history, newest first (ADR-0235 §7).
+
+        Granting and revoking records alike, and **no liveness**: a record here says
+        an act happened, never that it still stands. ``limit`` is refused when it is
+        not strictly positive, on ``recent_grants``' reason and in every
+        implementation.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            TypeError: If ``limit`` is not an integer, or is a ``bool``.
+            ValueError: If ``limit`` is not in ``[1, 2**63)``.
+            RecipientGrantError: If the grant store cannot be read.
+            OversizedValueError: If the page exceeds the contract limit.
+        """
+        self._reject_if_closing()
+        positive_page_argument(limit, name="limit")
+        check_arguments("recent_recipient_grants", max_bytes=self._max_payload_bytes, limit=limit)
+        return await self._tracked(
+            self._recipient_grants.recent_recipient_grants(limit=limit),
+            "recent_recipient_grants",
+            checked=True,
+        )
+
+    async def revoke_recipient_grant(self, grant_id: DurableIdentifier) -> RecipientGrant | None:
+        """Withdraw one standing recipient grant, or report there was none (ADR-0235 §7).
+
+        **Never refused for the ceiling**, whatever the outstanding count: a ceiling
+        that could block a revocation would trap a user above it with no way down
+        (ADR-0193 §1). It is the recourse the ceiling's own refusal names, so nothing
+        stands between the user and it.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``grant_id`` is blank or unwritable.
+            InvalidRecipientGrantError: If the store refused the revoking record on
+                any ground other than the grant having been revoked in the interval.
+            RecipientGrantError: If the grant store cannot be read or written.
+            PlanningError: If the injected clock's reading is not conforming.
+            OversizedValueError: If the argument or the record exceeds the limit.
+        """
+        self._reject_if_closing()
+        named = identifier(grant_id, name="grant_id")
+        check_arguments("revoke_recipient_grant", max_bytes=self._max_payload_bytes, grant_id=named)
+        return await self._tracked(
+            self._recipient_grants.revoke_recipient_grant(named),
+            "revoke_recipient_grant",
+            checked=True,
+        )
 
     # --- the connection surface (ADR-0151 §1) -------------------------------
 
@@ -8656,6 +8862,7 @@ class Engine:
         *,
         approved: bool,
         timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
+        remember_recipients_until: UtcInstant | None = None,
     ) -> TurnOutcome:
         """Reload the parked execution and continue its step.
 
@@ -8692,11 +8899,34 @@ class Engine:
         as a ``PermissionDeniedError``, and its ``turn`` is ``None`` for ADR-0197 §8's
         reason rather than ADR-0052 §3's.
         """
+        if (
+            remember_recipients_until is not None
+            and approved
+            and token.handle in self._routed_parks
+        ):
+            # **A routed park carries no egress confirmation to ride** (ADR-0235 §2).
+            # It records no `PermissionDecision` at all — ADR-0197 §7 rules that a
+            # routed refusal is returned rather than ruled on — so there is nothing
+            # for `RecipientGrant.established_from` to transcribe an account and a
+            # destination set from. Refused **before** the park is claimed, which is
+            # what leaves the operation askable again: `_answer_routed_park` claims
+            # atomically and a claimed routed park is never re-minted.
+            msg = (
+                "this token names a routed operation rather than a confirmation about an "
+                "outbound call, so answering it establishes no standing recipient grant; "
+                "nothing was claimed and the operation may be asked for again (ADR-0235 §2)"
+            )
+            raise UngrantableActError(msg)
         answered = await self._answer_routed_park(token, approved=approved)
         if answered is not None:
             park, routed = answered
             return await self._compose_and_capture_routed(park, routed)
-        parked, step = await self._resolve_park(token, approved=approved, timeout=timeout)
+        parked, step, establishing = await self._resolve_park(
+            token,
+            approved=approved,
+            timeout=timeout,
+            remember_recipients_until=remember_recipients_until,
+        )
         if parked is None:
             # A **restatement** (ADR-0198 §§1-3), and it ends here rather than
             # continuing down this method: it composes nothing — the answer was
@@ -8721,8 +8951,49 @@ class Engine:
         # this turn's citation hop reached; the parked ``TurnResult`` is recovered
         # rather than reassembled, and §3's carrier is empty on every turn that did
         # not fire.
+        # **The act is performed after the answer was recorded and the call executed**
+        # (ADR-0235 §6), and everything it can do is reported on the carrier rather
+        # than raised: by the time `record` is asked the egress has gone out, so a
+        # raise would report a failure for a call nobody can un-send while discarding
+        # the outcome the surface needs in order to say what that call did.
+        recipient_grant = await self._establish_recipients(
+            establishing, approved=approved, remember_recipients_until=remember_recipients_until
+        )
         composed = await self._compose(parked.turn, step, deliveries={})
-        return await self._capture_resumption(parked, step, composed)
+        return await self._capture_resumption(
+            parked, step, composed, recipient_grant=recipient_grant
+        )
+
+    async def _establish_recipients(
+        self,
+        establishing: EstablishingAnswer | None,
+        *,
+        approved: bool,
+        remember_recipients_until: UtcInstant | None,
+    ) -> RecipientGrantOutcome | None:
+        """Say what became of a standing request, or that none was collected.
+
+        Three states and no fourth (ADR-0235 §4, §6). No act collected — every
+        ``resume`` supplying no ``remember_recipients_until`` — carries ``None``, and
+        a surface then says nothing about standing grants at all. An act collected
+        beside a declining answer carries ``DECLINED``: the ``DENY`` is recorded
+        exactly as it is today and the store is never reached. An act collected
+        beside an approving answer carries whatever the store did.
+
+        ``establishing`` is ``None`` on one further path the runner reaches without
+        recording an answer — a resumed call whose egress binding could no longer be
+        derived (``EGRESS_UNBINDABLE``, ADR-0152 §7). Nothing was ruled on, nothing
+        was sent and nothing was recorded there, so there is no outcome of an act to
+        report and the carrier stays absent; the disposition the outcome already
+        carries is what says what happened.
+        """
+        if remember_recipients_until is None:
+            return None
+        if establishing is None:
+            return None if approved else self._recipient_grants.declined()
+        return await self._recipient_grants.establish_from_answer(
+            establishing, expires_at=remember_recipients_until
+        )
 
     async def _resolve_park(
         self,
@@ -8730,7 +9001,8 @@ class Engine:
         *,
         approved: bool,
         timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
-    ) -> tuple[_Parked | None, StepOutcome]:
+        remember_recipients_until: UtcInstant | None = None,
+    ) -> tuple[_Parked | None, StepOutcome, EstablishingAnswer | None]:
         """Record the answer and drive it, or restate an answer already recorded.
 
         Runs under ``_recovery_lock`` so a resolution is mutually exclusive with a
@@ -8756,16 +9028,24 @@ class Engine:
         decision — a direct retry re-enters resolution, and a recovery enumeration
         running in between may reconcile the binding away under ADR-0052 §2.
 
+        **A restatement establishes nothing and consults the argument no more than
+        it consults ``approved``** (ADR-0198 §§1-3, ADR-0235 §4). It drives no
+        runner, so the two refusals the act owes never arise and no answer is
+        recorded for a grant to ride; the third member below is ``None`` there, and
+        the outcome carries ``recipient_grant`` ``None``.
+
         Returns:
-            The parked entry this token named and what became of its step, or
-            ``None`` beside the restated step where the token named a **settled**
-            record. ``None`` is what tells :meth:`_resume` to stop: a restatement
-            drives no runner, composes nothing and captures nothing.
+            The parked entry this token named, what became of its step, and — on a
+            ``resume`` that collected an establishing act and reached a recorded
+            answer — the pair that answer's grant is transcribed from (ADR-0235 §2).
+            The first is ``None`` beside the restated step where the token named a
+            **settled** record, which is what tells :meth:`_resume` to stop: a
+            restatement drives no runner, composes nothing and captures nothing.
         """
         async with self._recovery_lock:
             parked = self._parked.get(token.handle)
             if parked is None:
-                return None, await self._restate(token)
+                return None, await self._restate(token), None
             state = await self._plans.get_execution(parked.execution_id)
             if state is None:
                 msg = f"the store no longer holds execution {parked.execution_id!r} for this token"
@@ -8776,6 +9056,7 @@ class Engine:
                 confirmation_id=parked.confirmation_id,
                 approved=approved,
                 timeout=timeout,
+                remember_recipients_until=remember_recipients_until,
             )
             # A resolving disposition is EXECUTED or DENIED, never AWAITING_CONFIRMATION,
             # so no new handle is needed here.
@@ -8796,7 +9077,7 @@ class Engine:
                     disposition=disposition.disposition,
                 ),
             )
-            return parked, step
+            return parked, step, disposition.establishing
 
     def _retain(self, handle: str, settled: _Settled) -> None:
         """Record one answered binding under its handle, within §4's bound.
@@ -8933,7 +9214,12 @@ class Engine:
         )
 
     async def _capture_resumption(
-        self, parked: _Parked, step: StepOutcome, composed: ComposedReply | None
+        self,
+        parked: _Parked,
+        step: StepOutcome,
+        composed: ComposedReply | None,
+        *,
+        recipient_grant: RecipientGrantOutcome | None = None,
     ) -> TurnOutcome:
         """Record the resolution in the conversation that parked, or say it was not.
 
@@ -8962,6 +9248,7 @@ class Engine:
                 capture_degraded=True,
                 reply=None if composed is None else composed.text,
                 reply_degraded=composed is not None and composed.degraded,
+                recipient_grant=recipient_grant,
             )
         return await self._capture(
             origin.conversation_id,
@@ -8969,6 +9256,11 @@ class Engine:
             step=step,
             resumed=True,
             composed=composed,
+            # **The act's outcome is carried, never re-derived** (ADR-0235 §6). It is
+            # a fact about the act this pass performed and nothing about the capture
+            # touches it: an episode that failed to write leaves the standing outcome
+            # exactly as true as it was, which is why it rides both return paths here.
+            recipient_grant=recipient_grant,
             # **No user words**, and this is ADR-0225 §1's own clause rather than an
             # absence of data: the parked turn is right here, and its utterance was
             # archived at its own address by the pass that parked. Repeating it here
@@ -9018,6 +9310,7 @@ class Engine:
         routed: RoutedOperation | None = None,
         utterance: str | None = None,
         spoken: _SpokenCapture | None = None,
+        recipient_grant: RecipientGrantOutcome | None = None,
     ) -> TurnOutcome:
         """Record the exchange and fold what became of it into the outcome (§3, §9).
 
@@ -9161,6 +9454,7 @@ class Engine:
             reply=None if composed is None else composed.text,
             reply_degraded=composed is not None and composed.degraded,
             routed=routed,
+            recipient_grant=recipient_grant,
         )
 
     async def _learn(self, event: FeedbackEvent) -> LearnOutcome:

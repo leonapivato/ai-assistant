@@ -19,7 +19,14 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
-from test_engine import AT, Harness, _composing, _connection_operations, _grant_operations
+from test_engine import (
+    AT,
+    Harness,
+    _composing,
+    _connection_operations,
+    _grant_operations,
+    _recipient_grant_operations,
+)
 
 from ai_assistant.core.errors import (
     ConfigurationError,
@@ -128,6 +135,7 @@ def _wired(  # noqa: PLR0913 — one parameter per knob a case here varies, whic
         max_spoken_audio_bytes=max_spoken_audio_bytes,
         composing=_composing(),
         grant_operations=_grant_operations(),
+        recipient_grant_operations=_recipient_grant_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,

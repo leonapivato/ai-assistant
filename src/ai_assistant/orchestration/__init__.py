@@ -224,6 +224,7 @@ from ai_assistant.orchestration.payloads import (
 )
 from ai_assistant.orchestration.questions import QuestionStage, question_state
 from ai_assistant.orchestration.reads import SearchServicer
+from ai_assistant.orchestration.recipient_grants import RecipientGrantOperations
 from ai_assistant.orchestration.recovery import RecoveryScan
 from ai_assistant.orchestration.routing import RoutedRoute, RoutingStage
 from ai_assistant.orchestration.runner import StepDisposition, StepRunner
@@ -254,6 +255,7 @@ __all__ = [
     "ObservationRunReport",
     "ObservationStage",
     "QuestionStage",
+    "RecipientGrantOperations",
     "RecoveryScan",
     "RoutedRoute",
     "RoutingStage",

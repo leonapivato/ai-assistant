@@ -85,6 +85,7 @@ from ai_assistant.core.types import (
     RoutableOperation,
     SpanCoverage,
     TurnOutcome,
+    UtcInstant,
 )
 from ai_assistant.testing import FakeAssistantEngine
 
@@ -735,9 +736,15 @@ class _SteplessEngine(FakeAssistantEngine):
         *,
         approved: bool,
         timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, as the Protocol declares it
+        remember_recipients_until: UtcInstant | None = None,
     ) -> TurnOutcome:
         """Resolve the park and hand back nothing to render."""
-        await super().resume(token, approved=approved, timeout=timeout)
+        await super().resume(
+            token,
+            approved=approved,
+            timeout=timeout,
+            remember_recipients_until=remember_recipients_until,
+        )
         return TurnOutcome(turn=None)
 
 

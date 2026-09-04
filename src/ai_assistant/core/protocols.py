@@ -9657,6 +9657,7 @@ class AssistantEngine(Protocol):
         *,
         approved: bool,
         timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, threaded to the seam that owns the deadline (ADR-0029 §4)
+        remember_recipients_until: UtcInstant | None = None,
     ) -> TurnOutcome:
         """Answer a parked confirmation and continue the step it belongs to.
 
@@ -9751,12 +9752,85 @@ class AssistantEngine(Protocol):
         retained for it, and a second presentation of its token resolves nothing and
         raises.
 
+        **The establishing act rides this call where a park holds the confirmation**
+        (ADR-0235 §2), and it rides no second operation: ``remember_recipients_until``
+        is the user's answer and their standing request supplied **together**, which
+        is ADR-0193 §2's *"in the same act"* read as a contract. An act split across
+        two calls is one a client can half-perform, and the half that survives is an
+        approval the user believed was standing.
+
+        **It is honoured only where ``approved`` is true and the policy's resolving
+        ruling is an ``ALLOW``.** Supplied beside ``approved=False`` it establishes
+        nothing and changes nothing else: the answer is recorded as a ``DENY``
+        exactly as it is today, the step is denied, and no grant is written —
+        ADR-0042 §4's guarantee is preserved whole, and this argument states no
+        exception to it. Where the policy answers a ``DENY`` to an approving answer,
+        that ``DENY`` is recorded, no grant is established, and the outcome carries
+        :attr:`~ai_assistant.core.types.RecipientGrantNotEstablished.DECLINED`.
+
+        **The whole call is refused, before any ruling is sought and before anything
+        is recorded**, where ``remember_recipients_until`` is supplied, ``approved``
+        is true, and the confirmation's ``egress_binding`` is not an
+        :class:`~ai_assistant.core.types.EgressBinding` whose
+        ``planned_with_external_content`` is ``False`` — the same two conditions
+        :meth:`establish_recipient_grant` places on the recorded population, on the
+        held one. The step stays durably parked and answerable, no answer and no
+        execution follow, and the user may answer again without the standing request.
+        The refusal is :class:`~ai_assistant.core.errors.UngrantableActError` and it
+        takes the shape a binding that may not be resumed already takes (ADR-0184 §8,
+        ADR-0233 §14).
+
+        **And the same refusal answers an expiry that is not strictly after the
+        instant that will stamp the answer**, on an answer that is going to be an
+        ``ALLOW``, naming the instant it was compared against (ADR-0235 §1). Without
+        it the answer would be recorded and the grant constructor would *then* refuse,
+        leaving a decision in the trail, no grant, and a user told nothing they could
+        act on. The instant is chosen **once** and used for both the comparison and
+        the record, because two reads admit an expiry that passes the check and fails
+        the constructor.
+
+        **The asymmetry between the two is deliberate and no lane repairs it into
+        consistency** (ADR-0235 §2). A decline carries ADR-0042 §4's guarantee that
+        the ``DENY`` is recorded, so the answer is recorded and the argument
+        establishes nothing; an approving answer carries no such guarantee, the park
+        survives a refusal, and the user may answer again. So the refusal costs a
+        second call where recording would cost an egress call nobody can un-send.
+
+        **One rule governs when this raises and it is stated over the answer rather
+        than over the send: it raises only where no answer was recorded, and returns
+        wherever one was** (ADR-0235 §6). The raising cases are exactly the two above,
+        both of which fire before any ruling is sought. Wherever an answer *was*
+        recorded it returns, whatever followed — including a
+        :class:`~ai_assistant.core.errors.RecipientGrantError` from the store, which
+        is caught at the establishing step, rendered as
+        :attr:`~ai_assistant.core.types.RecipientGrantNotEstablished.STORE_UNAVAILABLE`
+        and never allowed to destroy the outcome of an egress that has already gone
+        out.
+
+        **What became of the standing request is carried on the outcome**
+        (:attr:`~ai_assistant.core.types.TurnOutcome.recipient_grant`), and a surface
+        states it from there and from nothing else. A ceiling refusal in particular is
+        **not** discoverable from a ``standing_recipient_grants`` read afterwards:
+        three outcomes collapse into one listing and :class:`Confirmation` carries no
+        decision id to correlate on (ADR-0235 §6).
+
+        **A restatement consults it no more than it consults ``approved``** (ADR-0198
+        §§1-3): it drives nothing, so it establishes nothing, and its outcome carries
+        ``recipient_grant`` ``None``.
+
         Args:
             token: The opaque continuation the engine minted. Relayed, never
                 interpreted or re-derived by the adapter (ADR-0042 §4).
             approved: The human's answer. The adapter collects it; it never authors
                 the permission outcome itself.
             timeout: The budget for continuing the step.
+            remember_recipients_until: The instant past which the standing recipient
+                grant this answer establishes ceases to be live, or ``None`` — the
+                default, and the ordinary outcome — where the user asked for nothing
+                standing. **Stated by the user and by nobody else** (ADR-0235 §1): no
+                surface, adapter, gateway or engine defaults it, derives it, extends
+                it, rounds it, offers it pre-filled, or supplies one where the user
+                supplied none, and no ``Settings`` value dates it.
 
         Returns:
             What the resumption produced.
@@ -9819,6 +9893,14 @@ class AssistantEngine(Protocol):
                 describes, and it is what this change codifies.
             AuditError: If the resolution could not be recorded.
             ToolBindingError: If the selected tool could not be bound.
+            UngrantableActError: If ``remember_recipients_until`` was supplied
+                beside ``approved=True`` and the act may not ride this confirmation
+                (ADR-0235 §1, §2) — its ``egress_binding`` is not an
+                ``EgressBinding`` whose ``planned_with_external_content`` is
+                ``False``, or the supplied instant is not strictly after the one
+                that would stamp the answer. Raised **before any ruling is sought**,
+                so nothing is written, nothing is executed, and the step stays
+                durably parked and answerable without the standing request.
         """
         ...
 
@@ -10882,6 +10964,401 @@ class AssistantEngine(Protocol):
         Raises:
             GrantError: If the grant store could not be read, or holds two live
                 grants for one source.
+        """
+        ...
+
+    # --- the recipient-grant surface (ADR-0235 §3, §7) -----------------------
+    #
+    # Five operations, and each is here because a surface cannot obtain it
+    # otherwise (ADR-0235 §4). Without :meth:`grantable_decisions` an adapter would
+    # read ``recent_decisions`` and join rows to find which confirmations are
+    # unanswered, which is business logic in `interfaces`. Without
+    # :meth:`standing_recipient_grants` there is no surface showing the user what
+    # they currently authorise, and ADR-0193 §9's revocation right has nowhere to
+    # sit. Without :meth:`recent_recipient_grants` an expired grant occupies a slot
+    # against the ceiling and appears in no listing, so ADR-0193 §1's stated
+    # recourse names an act the user cannot perform. Without
+    # :meth:`revoke_recipient_grant` the only exit from a grant is ``clear`` on a
+    # store no surface holds.
+    #
+    # **Recipient grants and source grants are two vocabularies and never one**
+    # (ADR-0235 §7). No operation, command, route, view or listing answers one with
+    # the other, presents a recipient grant among source grants or the reverse,
+    # offers a control that revokes across both, or names a combined total.
+    # :meth:`grant`, :meth:`revoke`, :meth:`recent_grants`, :meth:`standing_grants`
+    # and :meth:`grantable_sources` stay ``SourceGrant`` operations and gain
+    # nothing. The two authorisations are things the corpus keeps apart at every
+    # other seam — ADR-0097 §7 forbids a source grant from ever being cited as
+    # ``PermissionRuling.authorised_by``, and ADR-0186 §10 makes the same move for
+    # the two trails — and their *acts* differ too: a source grant is established
+    # from a list of sources and has no expiry, and a recipient grant can be
+    # established only from a confirmation about a real call and must carry one.
+    #
+    # **The names qualify with ``recipient`` deliberately.** On this Protocol
+    # "grant" already has a referent and it is ``SourceGrant``, so ADR-0186 §1's
+    # naming rule — the shorter name is right only where the word has one referent
+    # on the surface — comes out the other way here (ADR-0235 §7).
+    #
+    # **No ``interfaces`` adapter holds a store behind any of them** (ADR-0235 §4).
+    # A surface is given records by these operations and reads no
+    # :class:`RecipientGrantStore`, :class:`RecipientGrants` or
+    # :class:`RecipientGrantResolution`: a renderer given the store face would hold
+    # ``record`` and ``clear``, and a remote client could not perform the read at
+    # all.
+    #
+    # **Every one is cancellable under this module's cancellation clause
+    # (ADR-0060), observes no caller-owned container (ADR-0065), and returns a
+    # detached snapshot** — the tuple, the records in it, and everything mutable
+    # those reach (ADR-0018 §3), as every neighbouring promoted read does.
+
+    async def grantable_decisions(
+        self, *, limit: int = DEFAULT_PAGE_SIZE
+    ) -> tuple[PermissionDecision, ...]:
+        """List the recorded ``CONFIRM``s an establishing act may ride (ADR-0235 §3).
+
+        The read that makes the act reachable without a surface joining trail rows
+        for itself. It returns, most recent first under ADR-0186 §2's order, those
+        of the trail's most recent ``limit`` decisions meeting **every** condition
+        :meth:`establish_recipient_grant` requires.
+
+        **It offers history and never outstanding work** (ADR-0235 §3). A decision
+        this returns is not a park, holds no turn, blocks nothing, expires under no
+        sweep and is reclaimed by nothing; no surface presents one as a task, a
+        queue, a to-do, a badge, an unread count, an alert, or anything a reader
+        could take as owed. It is deliberately **not** named "confirmations":
+        :meth:`pending_confirmations` returns
+        :class:`~ai_assistant.core.types.Confirmation` records and names outstanding
+        work, and the collision is precisely where this distinction has to be
+        sharpest. A decision a park holds is never returned here, and one returned
+        here is never returned by :meth:`pending_confirmations`.
+
+        **``limit`` bounds the rows read and therefore also the rows returned**, so
+        a grantable decision older than the window is not offered and this makes no
+        unbounded read of a Tier 1 store. The recourse is a larger ``limit``. This
+        mints no filtered, indexed or per-kind read of the trail and adds no member
+        to :class:`AuditTrail`.
+
+        **A decision is offered only where the window read is *complete for it***,
+        which holds when the read returned fewer rows than ``limit``, and otherwise
+        when that decision's ``decided_at`` is **strictly after** the ``decided_at``
+        of the oldest row the read returned. A decision at that boundary instant is
+        **not** offered, whatever else it satisfies, and the recourse is a larger
+        ``limit``.
+
+        That rule is what makes "the trail holds no decision resolving it"
+        decidable from the window, and it rests on two clauses of the
+        :class:`AuditTrail` contract and on nothing else: :meth:`AuditTrail.record`
+        refuses a resolution whose confirmation was decided *after* it, so a
+        resolution's ``decided_at`` is at or after its confirmation's, **equal
+        timestamps included**; and :meth:`AuditTrail.recent` returns the newest rows
+        by ``decided_at`` descending, ties broken by ``id`` ascending. So a
+        candidate strictly newer than the boundary has any resolution of it inside
+        the window too, while a candidate *sharing* the boundary instant may have
+        one tie-broken just outside it — and offering that one would be offering a
+        confirmation the user has already answered.
+
+        Args:
+            limit: How many trail rows to read, and thereby the most this can
+                return. Defaults to
+                :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`, and an
+                implementation called without it behaves as though it had been
+                passed.
+
+        Returns:
+            A detached snapshot of the offerable decisions, most recent first.
+            Empty means none is offerable, never that the trail could not be read.
+
+        Raises:
+            ValueError: If ``limit`` is not strictly positive, or is outside
+                ``[0, 2**63)`` — refused rather than clamped or passed through, for
+                the reason ADR-0021 §4 gives and ADR-0186 §3 restates. Refused
+                **locally and before any I/O**, in every implementation.
+            TypeError: If ``limit`` is not an integer, or is a ``bool``.
+            AuditError: If the trail could not be read.
+        """
+        ...
+
+    async def establish_recipient_grant(
+        self, decision_id: DurableIdentifier, *, expires_at: UtcInstant
+    ) -> RecipientGrant:
+        """Perform the establishing act on a recorded ``CONFIRM`` no park holds.
+
+        The second door, and it exists because the population it serves is
+        **history rather than work** (ADR-0235 §3). Such a decision is not a
+        :class:`~ai_assistant.core.types.PlanStep`, reaches neither an executor nor
+        an execution state, carries neither a ``step_id`` nor an ``execution_id``,
+        and the turn it belonged to composed and finished. Answering it is an act
+        on a record; answering a park is an act on work, and that is what makes one
+        door insufficient.
+
+        It reads the named decision from the :class:`AuditTrail`, obtains the
+        resolving ruling from ``ActionPolicy.resolve`` with ``approved=True``, and —
+        where that ruling is an ``ALLOW`` and the expiry check below passes —
+        records that answer, builds the grant with
+        :meth:`~ai_assistant.core.types.RecipientGrant.established_from`, records
+        the grant, and returns it.
+
+        **It resumes nothing and services nothing.** The ``ALLOW`` it records
+        authorises a call that has already been abandoned: no lane executes it,
+        re-composes the turn it belonged to, re-plans, re-services a read, or treats
+        the recorded answer as making anything runnable (ADR-0231 §9's first limb,
+        binding entire).
+
+        **It is available on a decision meeting all seven of the following, and is
+        refused on any other**, in this order:
+
+        1. the trail holds it;
+        2. its ruling is a ``CONFIRM``;
+        3. its ``step_id`` **and** its ``execution_id`` are both unset;
+        4. the trail holds no decision resolving it;
+        5. its ``expires_at`` is unset or is strictly after the instant of the call
+           (ADR-0059 §1);
+        6. its ``egress_binding`` is an
+           :class:`~ai_assistant.core.types.EgressBinding` — never ``None``, never
+           an :class:`~ai_assistant.core.types.OriginUnrecordedBinding`, never a
+           :class:`~ai_assistant.core.types.CoverageUnrecordedBinding`;
+        7. and that binding's ``planned_with_external_content`` is ``False``.
+
+        The third is what keeps the two populations apart and is **structural
+        rather than a rule to remember**: a confirmation carrying either binding
+        field belongs to a step of an execution, whose answer is the resuming one,
+        and :meth:`resume` is the only door to it. No lane relaxes it and no lane
+        reaches this operation from a park by clearing either field.
+
+        The sixth is stated over the binding's **type** and refused here rather than
+        inherited: ``ActionPolicy.resolve`` returns no ``ALLOW`` on either
+        unrecorded epoch, so the act could not complete in any case, and refusing
+        before the trail is asked keeps the act from being offered on a row it can
+        never ride.
+
+        The seventh is ADR-0193 §2's third clause read at this surface, and it is
+        **refused here rather than left to the constructor** because the constructor
+        runs too late: ``resolve`` returns an ``ALLOW`` on an approved confirmation
+        carrying ``planned_with_external_content``, so an operation that checked
+        nothing would record the answer and *then* meet ``established_from``'s
+        refusal — leaving an ``ALLOW`` in the trail, no grant, and a user told
+        nothing they could act on.
+
+        **Where the answer is going to be an ``ALLOW``, an ``expires_at`` that is
+        not strictly after the instant that will stamp that answer is refused**,
+        after the policy has ruled and **before** that answer is recorded, naming
+        the instant it was compared against (ADR-0235 §1). The instant is chosen
+        once and used for both, because two clock reads admit an expiry that passes
+        the check and fails the constructor.
+
+        **That check is scoped to the establishing path and reaches no other
+        outcome.** Where the policy answers other than an ``ALLOW`` — which its
+        second obligation expressly permits for a confirmation answered long after
+        it was asked — **that answer is recorded**, the supplied instant is not
+        consulted, and this raises
+        :class:`~ai_assistant.core.errors.PermissionDeniedError`. Suppressing the
+        record would be the failure ADR-0042 §4's guarantee exists to prevent, one
+        operation over. Because a confirmation has one answer (ADR-0044 §2b) the
+        decision is thereby settled, and condition 4 then keeps the act from being
+        offered on it again.
+
+        Raising ``PermissionDeniedError`` here does **not** breach the shared
+        conformance suite's "a refusal is a result and not an exception": that
+        clause is stated over :meth:`resume`, whose ``TurnOutcome`` carries a
+        disposition a refusal can be reported *in*. This method's return **is** the
+        grant, there is no disposition to carry, and the ruling is recorded in the
+        trail — so nothing about the refusal is hidden, and what the raise reports
+        is that no grant exists, which is true.
+
+        **Condition 4 can also fail late, and the outcome is decided rather than
+        left to an implementation** (ADR-0235 §3). This reads the trail, finds no
+        resolution, and only then awaits ``resolve``; a second caller may resolve
+        the same ``CONFIRM`` inside that interval, and :meth:`AuditTrail.record`
+        then refuses **this** answer. Where ``record`` refuses with
+        :class:`~ai_assistant.core.errors.InvalidResolutionError`, this reads the
+        trail **once more** for a resolution of the named confirmation and raises
+        :class:`~ai_assistant.core.errors.UngrantableActError` where one is now
+        recorded — condition 4 failing late, reported as the same type it is
+        reported as when it fails at the check. Where no resolution is recorded the
+        ``InvalidResolutionError`` **propagates unchanged**, and so does every other
+        :class:`~ai_assistant.core.errors.AuditError` in every case: a fault is not
+        a settled decision, and converting one into the other would hide it.
+
+        The race is **settled and never retried**. No lane re-reads and re-attempts
+        the act, composes a second answer, waits and tries again, or reports the
+        loss as a fault. The confirmation now has its one answer, condition 4 keeps
+        it out of :meth:`grantable_decisions` for good, and the user's recourse is
+        to make the **next** such call standing.
+
+        **The engine composes no answer of its own.** ``ActionPolicy.resolve``
+        authors every ruling, the trail records it, ``core`` transcribes the grant
+        through
+        :meth:`~ai_assistant.core.types.PermissionDecision.from_confirmation` and
+        :meth:`~ai_assistant.core.types.RecipientGrant.established_from`, and the
+        store admits it; this operation sequences those four and supplies the ids
+        and instants a caller that records supplies. It reaches no
+        :class:`RecipientGrants` query face, evaluates no coverage, and reads no
+        ``authorised_by``.
+
+        Args:
+            decision_id: The recorded ``CONFIRM`` to answer, from **this surface's
+                own** :meth:`grantable_decisions` listing. Undergoes
+                :data:`~ai_assistant.core.types.Identifier` validation before any
+                I/O, as every identifier argument on this surface does.
+            expires_at: The instant past which the grant ceases to be live, **stated
+                by the user and by nobody else** (ADR-0235 §1): no surface, adapter,
+                gateway or engine defaults it, derives it, extends it, rounds it,
+                offers it pre-filled, or supplies one where the user supplied none.
+
+        Returns:
+            A detached snapshot of the grant the store accepted.
+
+        Raises:
+            ValueError: If ``decision_id`` is blank or has no UTF-8 encoding.
+                Refused locally, before any I/O.
+            UngrantableActError: If any of the seven conditions above fails, at the
+                check or late against the trail's own invariant, or if the expiry
+                check refuses. **No answer is recorded** in any of these cases,
+                nothing is sent, and the call may still be answered elsewhere
+                without the standing request.
+            PermissionDeniedError: If the policy answered other than an ``ALLOW``.
+                That answer **is** recorded and the decision is thereby settled.
+            AuditError: If the trail could not be read, or refused the answer on any
+                ground other than a resolution recorded in the interval.
+            InvalidRecipientGrantError: If the store refused the grant — the ceiling
+                (:class:`~ai_assistant.core.errors.RecipientGrantCeilingError`), a
+                duplicate subject
+                (:class:`~ai_assistant.core.errors.DuplicateRecipientGrantError`),
+                or any other ground. The answer **stays recorded**: the trail is
+                append-only and nothing retracts it, nothing already in the grant
+                store is removed, narrowed, expired, evicted or truncated to make
+                room, and no looser grant is minted in its place.
+            RecipientGrantError: If the grant store could not be written. It
+                propagates unchanged here, where nothing has been sent and there is
+                no outcome to destroy.
+        """
+        ...
+
+    async def standing_recipient_grants(self) -> tuple[RecipientGrant, ...]:
+        """List every **live** standing recipient grant (ADR-0235 §7).
+
+        What the user currently authorises, read from
+        :meth:`RecipientGrantStore.standing` — every live grant, evaluated by the
+        store against one clock read (ADR-0193 §1, §9). It composes, filters,
+        projects, enriches and summarises nothing, and reads no other store.
+
+        **It takes no ``limit``**, for :meth:`connected_accounts`' stated reason: a
+        truncated answer to "what do I authorise" is a false answer rather than a
+        partial one.
+
+        **This is what states liveness, and no surface derives it from
+        :meth:`recent_recipient_grants` or from an audit row** (ADR-0235 §7). A
+        record in that listing says an **act happened**, never that it still stands;
+        a revoking record in it is the record of a withdrawal and never a live
+        grant. A view that has not read this says the state is unread.
+
+        **It never answers a source-grant question and is never answered by one.**
+        No surface presents a recipient grant among source grants or the reverse,
+        and no control revokes across both.
+
+        Returns:
+            A detached snapshot of every live grant. Empty means none is live, never
+            that the store could not be read.
+
+        Raises:
+            RecipientGrantError: If the grant store could not be read.
+        """
+        ...
+
+    async def recent_recipient_grants(
+        self, *, limit: int = DEFAULT_PAGE_SIZE
+    ) -> tuple[RecipientGrant, ...]:
+        """List the recipient-grant store's own history, newest first (ADR-0235 §7).
+
+        Granting and revoking records alike, in the store's own order — ``decided_at``
+        descending, ties broken by ``id`` ascending — read from
+        :meth:`RecipientGrantStore.recent`. It evaluates no liveness and reads no
+        clock.
+
+        **It is here because ADR-0193 §1's stated recourse would otherwise name an
+        act the user cannot perform**, and not for completeness. The ceiling counts
+        **outstanding** granting records, which includes expired ones;
+        :meth:`standing_recipient_grants` correctly omits those, because it states
+        what the user currently authorises. Without this read a user at the ceiling
+        could hold an expired grant occupying a slot, see it in no listing, and have
+        no id to pass to :meth:`revoke_recipient_grant`.
+
+        **Bounded by its ``limit``, and it states no liveness.** A grant older than
+        the window is not in it and the recourse is a larger ``limit``; this mints
+        no complete read of the store for a surface, and
+        :meth:`revoke_recipient_grant` is what authoritatively answers whether a
+        record is still outstanding.
+
+        Args:
+            limit: How many records to return. Defaults to
+                :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`, and an
+                implementation called without it behaves as though it had been
+                passed.
+
+        Returns:
+            A detached snapshot of the most recent records, newest first.
+
+        Raises:
+            ValueError: If ``limit`` is not strictly positive, or is outside
+                ``[0, 2**63)``. Refused locally and before any I/O, in every
+                implementation, on :meth:`recent_grants`' reason.
+            TypeError: If ``limit`` is not an integer, or is a ``bool``.
+            RecipientGrantError: If the grant store could not be read.
+        """
+        ...
+
+    async def revoke_recipient_grant(self, grant_id: DurableIdentifier) -> RecipientGrant | None:
+        """Withdraw one standing recipient grant, or report there was none.
+
+        Appends a revoking record naming the grant and returns it, or returns
+        ``None`` where the store holds no outstanding granting record with that id
+        (ADR-0235 §7). The revoking record is built from the outstanding record the
+        store holds, transcribing its ``tool``, ``account`` and ``destinations`` by
+        value, with the caller supplying the record's own ``id`` and instants.
+
+        **Revocation is whole**: no operation narrows a grant, re-scopes one,
+        extends one, or edits one in place. Changing what a user has authorised is a
+        revocation followed by a new grant, and a new grant needs a fresh
+        confirmation about a real call.
+
+        **Never refused for the ceiling**, whatever the outstanding count, which is
+        ADR-0193 §1's clause read at the surface that performs it: a ceiling that
+        could block a revocation would trap a user above it with no way down.
+
+        **A concurrent revocation is lost gracefully, and this is decided rather
+        than left to an implementation** (ADR-0235 §7). Two callers may both read
+        the same outstanding grant and both build a revoking record; the first is
+        appended and the second meets ``record``'s revocation invariant. Where
+        ``record`` refuses a revoking record this operation built, it re-reads
+        :meth:`RecipientGrantStore.outstanding` and returns ``None`` where the id is
+        now absent — which is this method's own second branch reached late rather
+        than a third outcome — and the error **propagates unchanged** where the
+        grant is still outstanding, because the refusal was then not the race.
+
+        ``None`` is the honest answer to the loser and not a swallowed error: by the
+        time that call completes the store holds no outstanding granting record with
+        that id, which is exactly what ``None`` means here. **The user's recourse
+        succeeded** — the grant they asked to revoke is revoked — and ADR-0193 §1's
+        *"the recourse is to revoke a grant they hold"* would be undischarged by an
+        operation that failed spuriously on the one act the ceiling makes users
+        perform. No lane retries, appends a second revoking record, or reports the
+        loss as a fault.
+
+        Args:
+            grant_id: The id either recipient-grant listing renders. Undergoes
+                :data:`~ai_assistant.core.types.Identifier` validation before any
+                I/O.
+
+        Returns:
+            A detached snapshot of the revoking record that was appended, or
+            ``None`` where the store held no outstanding grant with that id.
+
+        Raises:
+            ValueError: If ``grant_id`` is blank or has no UTF-8 encoding. Refused
+                locally, before any I/O.
+            InvalidRecipientGrantError: If the store refused the revoking record on
+                any ground other than the grant having been revoked in the interval.
+            RecipientGrantError: If the grant store could not be read or written.
         """
         ...
 

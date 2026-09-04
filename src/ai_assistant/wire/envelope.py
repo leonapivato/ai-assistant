@@ -1068,7 +1068,67 @@ from ai_assistant.wire.errors import (
 #: released**, on the chain every entry above it is on: #1956's window stays open,
 #: and ADR-0231 §16 states in terms that this decision "neither repairs nor inherits"
 #: it.
-PROTOCOL_VERSION: Final[int] = 30
+#:
+#: **31 since ADR-0235 §10**, and it is the first entry obliged by **three** grounds
+#: at once rather than one. ADR-0235 §10 states them and requires all three to be
+#: recorded here rather than folded into one:
+#:
+#: * ADR-0124 §9's **first** limb, the one that decided 3, 4, 6 and 12: the promoted
+#:   method set grows by **five** — ``grantable_decisions``,
+#:   ``establish_recipient_grant``, ``standing_recipient_grants``,
+#:   ``recent_recipient_grants`` and ``revoke_recipient_grant`` (ADR-0235 §4) — so a
+#:   version 30 hub answers a version 31 client's ``standing_recipient_grants`` with
+#:   a failure it did not ask for. ``wire/surface.METHODS`` is derived from the
+#:   Protocol, so the refusal lands at the handshake rather than inside a call.
+#: * The same limb again on ``resume``, whose **declared arguments grow by one**:
+#:   ``remember_recipients_until`` (§2). A version 31 client sending it to a version
+#:   30 hub is a member that hub's argument adapter does not know.
+#: * ADR-0124 §9's **second** limb, the one that decided 5, 8, 10, 11, 13 and 29: a
+#:   wire-carried ``core`` type gains a member. ``TurnOutcome`` gains
+#:   ``recipient_grant`` (§4), and ``TurnOutcome`` crosses on **every** turn call's
+#:   result payload — ``converse``, ``converse_streaming``'s terminal frame,
+#:   ``converse_spoken`` and ``resume``.
+#:
+#: **The third limb is the one that bites both ways, and the tree is what shows
+#: it.** ``TurnOutcome`` sets ``extra="forbid"`` and ``wire.codec``'s ``project``
+#: renders a model by ``model_dump()``, which **includes** a ``None`` member rather
+#: than omitting it — exactly as at 10, at 13 and at 29. So a version 31 hub emits
+#: ``recipient_grant`` on every turn result, present whatever it holds, and a
+#: version 30 client fails ``extra_forbidden`` on the first one. The other direction
+#: is quiet rather than absent: the field is additive with a ``None`` default, so a
+#: version 31 client decoding a version 30 hub's ``TurnOutcome`` gets that default
+#: instead of ``missing``. Each of the three grounds obliges the move on its own,
+#: and a peer at 30 and a peer at 31 do not agree about the surface on any of them.
+#:
+#: **The number was read rather than assumed.** ADR-0235 §10 fixes no figure and
+#: says why — "any figure written here is a fact about a tree that may move again
+#: before the lane does" — so the lane read the constant at 30 as ADR-0231's Lane 4
+#: left it and moved it by one. ``tests/core/test_engine_surface_closure.py`` pins
+#: the pair beside this constant.
+#:
+#: **The method set moves to fifty-four**, and ADR-0177 §1's browser enumeration
+#: does **not** move and stands at thirty-one: ADR-0235 §9 leaves the browser to a
+#: later consumer lane with its own ratified decision, none of the five new
+#: operations resolves from a browser request, and ``resume``'s new argument is
+#: admitted by §1's fourth clause as an argument the promoted surface declares
+#: rather than by a change to the enumeration.
+#:
+#: **No row is minted in ADR-0087 §2c's scalar table**, and nothing else under
+#: ``wire/`` changes but the client's six methods (five new, and ``resume``'s new
+#: argument) — the exception ADR-0151 §11 and the entry at 12 both record, since
+#: ``wire/client.py`` is hand-written where ``METHODS``, both adapters and the error
+#: registry are derived. The connect exchange gains no member, no frame's encoding
+#: changes, no :class:`FrameKind` is added, and a result payload takes the shape of
+#: the method's own declared return annotation (ADR-0085 §10), so ``RecipientGrant``
+#: and ``PermissionDecision`` cross without a second declaration. The error registry
+#: is derived from ``core.errors``, so ADR-0235's three new classes reach it with no
+#: edit. None of the five joins ``wire/server.py``'s ``CONNECTION_METHODS``: both
+#: listeners carry all five, as both carry ADR-0186 §5's two.
+#:
+#: **This move covers the shape going forward and repairs nothing already
+#: released**, on the chain every entry above it is on: #1956's window stays open,
+#: and this entry neither repairs it nor inherits it.
+PROTOCOL_VERSION: Final[int] = 31
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a
