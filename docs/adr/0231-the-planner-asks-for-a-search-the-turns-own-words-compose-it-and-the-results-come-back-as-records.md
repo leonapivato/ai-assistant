@@ -1918,10 +1918,14 @@ for less.
    implementation that guards the title and forgets the snippet passes a single-span
    test. **Absence is asserted by each of the four forms §10 admits** — the field
    omitted, `null`, `""`, and a string of whitespace alone — over each of the three
-   spans: an absent title or snippet omits its line and no other byte moves, an absent
-   address drops the result, and a present span of one space is transcribed as that
-   space. An implementation that reads `""` as a title mints a record one line longer
-   than a conforming one over the same response and fails here. Each arm asserts the offending result is absent, that its siblings are minted
+   spans: an absent title or snippet omits its line and no other byte moves, and an
+   absent address drops the result — a title of `" "` among them, which is absent
+   because §10's rule is over every character. **Presence is asserted beside it, on the
+   case that rule comes closest to swallowing**: a title of `" x "` is present and is
+   transcribed with both surrounding spaces intact, which fails an implementation that
+   trims a span on its way to deciding whether one is absent. An implementation that
+   reads `""` as a title mints a record one line longer than a conforming one over the
+   same response and fails here. Each arm asserts the offending result is absent, that its siblings are minted
    in the order the provider returned them, and that a response every result of which
    is dropped for any of the three reasons is `NO_RESULT` rather than an empty success.
    An implementation that transcribes a break passes every other test here and fails
