@@ -336,6 +336,24 @@ declared argument is admitted by that clause rather than by a change to it (§13
 > `RecipientGrant.established_from`, records the grant, and returns it. The clauses
 > below say what it does on every other outcome.
 
+> **Normative.** Every pre-record refusal of the act on **both** operations — §3's
+> seven availability conditions below, §2's binding refusal, and §1's expiry refusal —
+> raises `UngrantableActError`, one new `AssistantError` subclass this ADR mints and
+> the only one it mints. The message names which condition failed and **no lane
+> branches on the message**; where more than one fails, the first in the order §3
+> states is the one named, so the refusal is deterministic across implementations.
+
+> **Normative.** One type rather than one per condition, because every one of them has
+> the same user-visible consequence — the act was not performed, nothing was recorded,
+> nothing was sent, and the call may still be answered without the standing request —
+> and a client needs one handler for exactly that. It is an `AssistantError` and not a
+> bare `ValueError` for `_page_argument`'s stated reason: a `ValueError` is not an
+> `AssistantError`, so it would escape a command's `except (AssistantError,
+> TransportError)` boundary as an uncaught traceback with no controlled exit code,
+> which ADR-0042 §7 forbids. `ValueError` stays where this ADR already puts it — a
+> non-positive `limit` (§3, §7) and `from_confirmation`'s construction refusals (§4),
+> both of which are caller argument errors rather than outcomes of the act.
+
 > **Normative.** It is available on a decision meeting **all seven** of the
 > following, and is refused on any other: the trail holds it; its ruling is a
 > `CONFIRM`; its `step_id` **and** its `execution_id` are both unset; the trail holds
@@ -509,13 +527,17 @@ class TurnOutcome(BaseModel):                          # core/types.py
 
 class RecipientGrantOutcome(BaseModel):                # core/types.py
     established: RecipientGrant | None = None                  # §6
-    refusal: RecipientGrantRefusal | None = None               # §6
+    not_established: RecipientGrantNotEstablished | None = None  # §6
 
 
-class RecipientGrantRefusal(StrEnum):                  # core/types.py
+class RecipientGrantNotEstablished(StrEnum):           # core/types.py
     CEILING_REACHED = "ceiling_reached"                        # §6
     ALREADY_STANDING = "already_standing"                      # §6
     REFUSED = "refused"                                        # §6
+    STORE_UNAVAILABLE = "store_unavailable"                    # §6
+
+
+class UngrantableActError(AssistantError): ...         # core/errors.py, §1/§2/§3
 
 
 class PermissionDecision(BaseModel):                   # core/types.py
@@ -532,20 +554,35 @@ class PermissionDecision(BaseModel):                   # core/types.py
 
 > **Normative.** `RecipientGrantOutcome` is the carrier §6 requires, and it carries
 > **exactly one** of its two members: `established` on an act that recorded a grant,
-> `refusal` on one that did not, and a value setting both or neither is refused by a
+> `not_established` on one that did not, and a value setting both or neither is refused by a
 > `model_validator(mode="after")`, as ADR-0170 §4's own invariants are stated. It
 > composes, filters and enriches nothing, reads no clock and no store, and the
 > `RecipientGrant` it carries on the establishing arm is the record the store
 > accepted, detached as every other promoted read's is (ADR-0018 §3).
 
-> **Normative.** `RecipientGrantRefusal` names the reasons a surface must be able to
-> tell apart, and `CEILING_REACHED` is here because ADR-0193 §1 obliges a surface to
-> name **that** reason in terms. `ALREADY_STANDING` is the duplicate-**subject**
-> refusal ADR-0193 §1 makes `record` perform, and `REFUSED` is every other
-> `InvalidRecipientGrantError` that operation can raise — the duplicate-id check and
-> the revocation invariants — which no surface distinguishes because ADR-0193 §1 gives
-> a user no different act for them. A lane adds no fourth member without deciding what
-> a surface says about it.
+> **Normative.** `RecipientGrantNotEstablished` names, in four members, every way an
+> attempted act ends with no grant. `CEILING_REACHED` is here because ADR-0193 §1
+> obliges a surface to name **that** reason in terms. `ALREADY_STANDING` is the
+> duplicate-**subject** refusal ADR-0193 §1 makes `record` perform. `REFUSED` is every
+> other `InvalidRecipientGrantError` that operation can raise — the duplicate-id check
+> and the revocation invariants — which no surface distinguishes, because ADR-0193 §1
+> gives a user no different act for them.
+
+> **Normative.** `STORE_UNAVAILABLE` is the fourth, and it is **not a refusal of the
+> user's request**: it is a `RecipientGrantError` that is not an
+> `InvalidRecipientGrantError` — `core/errors.py`'s own split, *"a recipient-grant
+> store could not be read or written"* against *"a store refused the record it was
+> handed"* — raised by `record` after the call has been sent. The store wrote nothing,
+> because `record` is atomic (ADR-0193 §1), so no grant stands from this act. It is
+> named as its own member rather than folded into `REFUSED` because a surface that
+> reported a disk fault as a refusal would be telling the user their request was
+> declined when it was not, and the type is what the enum member is derived from
+> rather than a judgement the engine makes.
+
+> **Normative.** The arm is called `not_established` rather than `refusal` for that
+> reason, and the two arms stay one carrier rather than two: whatever the member, the
+> surface's act is the same — say that no standing authorisation was created, name
+> only what it was told, and leave the call's own result untouched.
 
 > **Normative.** `TurnOutcome` **gains exactly one field**, `recipient_grant`, typed
 > `RecipientGrantOutcome | None` and defaulting to `None`, and its docstring names
@@ -604,8 +641,10 @@ class PermissionDecision(BaseModel):                   # core/types.py
 
 > **Normative.** This ADR adds **no Protocol**, no member to `ActionPolicy`,
 > `AuditTrail`, `EgressBinder`, `RecipientGrants`, `RecipientGrantResolution` or
-> `RecipientGrantStore`, no `Settings` field, no error class, and no member to
-> `RoutableOperation`. What it **does** add to `core/types.py` is the carrier above —
+> `RecipientGrantStore`, no `Settings` field, and no member to
+> `RoutableOperation`. It mints **one** error class and no second —
+> `UngrantableActError` (§3), whose reason is stated there — and adds no member to any
+> existing one. What it **does** add to `core/types.py` is the carrier above —
 > one field on `TurnOutcome` and the two values it is typed over — and nothing else:
 > no field on `RecipientGrant`, `PermissionDecision`, `Confirmation` or
 > `ConfirmationEgress`, and no second construction path for any of them.
@@ -767,8 +806,9 @@ holds.
 > **Normative.** On population (a), `resume` **does not raise on a ceiling refusal**.
 > It returns the `TurnOutcome` for the call it approved and executed, and that outcome
 > **carries a `RecipientGrantOutcome` naming what became of the standing request**
-> (§4): `established` where a grant was recorded, and otherwise `refusal` carrying
-> `CEILING_REACHED`, `ALREADY_STANDING` or `REFUSED`. A raise is refused here because
+> (§4): `established` where a grant was recorded, and otherwise `not_established` carrying
+> `CEILING_REACHED`, `ALREADY_STANDING`, `REFUSED` or `STORE_UNAVAILABLE`. A raise is
+> refused here because
 > by the time `record` is asked the call has been sent, so it would report a failure
 > for an egress nobody can un-send — breaching this section's own bar below on
 > *"presenting it as a fault of the call that was confirmed"* — while discarding the
@@ -792,9 +832,18 @@ holds.
 > **Normative.** What governs `resume` across this ADR is therefore **one rule and not
 > two: it raises where nothing has been sent, and returns where something has.** §1's
 > expiry refusal and §2's binding refusal both fire before any ruling is sought, so
-> they raise and the step stays durably parked and answerable; the ceiling fires after
-> the call has gone out, so it returns. No lane reads the three as inconsistent, and
-> none repairs any of them into another.
+> they raise and the step stays durably parked and answerable; everything `record` can
+> do — refuse on the ceiling, refuse the duplicate subject, refuse otherwise, or fail
+> to write at all — happens after the call has gone out, so all four return and are
+> carried. No lane reads them as inconsistent, and none repairs any into another.
+
+> **Normative.** **`RecipientGrantError` does not escape `resume` once the call has
+> been sent.** It is caught at the establishing step, rendered as
+> `STORE_UNAVAILABLE`, and the `TurnOutcome` is returned; a store fault propagating
+> from there would destroy the outcome of an executed egress for a reason that is not
+> about the egress at all. It propagates from `establish_recipient_grant` unchanged,
+> where nothing has been sent and there is no outcome to destroy — the same rule, on
+> a population where raising states the whole truth (§3).
 
 > **Normative.** A surface that collected the act on population (a) **states the
 > standing outcome from the carrier and from nothing else**, and states it on the same
@@ -1022,7 +1071,12 @@ which is what "a product surface with a user action behind it" describes.
 > the ceiling was reached and that the recourse is to revoke a grant they hold"*
 > discharged on the shipping surface; on `ALREADY_STANDING` it says the recipients
 > were already authorised and points at `assistant recipient-grants`; on `REFUSED` it
-> says no standing authorisation was created and names no cause it was not given.
+> says no standing authorisation was created and names no cause it was not given; and
+> on `STORE_UNAVAILABLE` it says the grant store could not be written and that the
+> call itself was unaffected, never that the request was declined. A refusal of the
+> act **before** the answer — §1's expiry, §2's binding, §3's seven — reaches the
+> terminal as `UngrantableActError` and is rendered at the command's own error
+> boundary, with the call left answerable.
 
 > **Normative.** The history command is what makes ADR-0193 §1's recourse performable
 > on the shipping surface, so it is named here rather than left to the lane: a user
@@ -1120,8 +1174,8 @@ in it, which is the disclosure ADR-0199 exists to refuse.
 
 > **Normative.** Beyond the marked clauses §14 enumerates, this ADR decides nothing.
 > It registers no tool, designates no seam, adds no `DestinationProtocol` member, adds
-> no `Settings` field, mints no error class, and attests, relaxes or adds no condition
-> of ADR-0017 §3 or ADR-0154 §4.
+> no `Settings` field, mints no error class but the one §3 names, and attests, relaxes
+> or adds no condition of ADR-0017 §3 or ADR-0154 §4.
 
 > **Normative.** It decides nothing about `SourceGrant`, `SourceGrants` or
 > `SourceGrantStore`. ADR-0097 §7 stands verbatim: a source grant may never be cited
@@ -1198,8 +1252,9 @@ rule 5, ADR-0015 §5).
 
 **Lane 1 — the contract, the engine and the terminal, in one change.** It lands
 `PermissionDecision.from_confirmation`; the five new `AssistantEngine` members of §4, the
-changed signature of `resume`, and §4's two new `core/types.py` values with the
-`TurnOutcome` field that carries one of them, with their entries in the shared
+changed signature of `resume`, §4's two new `core/types.py` values with the
+`TurnOutcome` field that carries one of them, and §3's `UngrantableActError`, with
+their entries in the shared
 `AssistantEngine` conformance suite and in
 `FakeAssistantEngine` (`ai_assistant.testing`); the engine implementation, including
 the store's whole face reaching `Engine` from `app/composition.py`; the
@@ -1222,8 +1277,8 @@ enumeration in its own text (§9).
 > answer the trail refuses leaves the grant store empty.
 
 > **Normative.** Lane 1 ships a test for **each** of §3's seven availability
-> conditions, asserting the refusal **by type** rather than that something was
-> raised: a `decision_id` the trail does not hold; a decision whose ruling is not a
+> conditions, asserting the refusal is **`UngrantableActError`** — the type §3 names,
+> not merely that something was raised, and not a type an implementation chose: a `decision_id` the trail does not hold; a decision whose ruling is not a
 > `CONFIRM`; one carrying a `step_id`; one carrying an `execution_id`; one the trail
 > already holds a resolution for; one whose `expires_at` has passed; one for each of
 > `None`, `OriginUnrecordedBinding` and `CoverageUnrecordedBinding` on
@@ -1234,7 +1289,8 @@ enumeration in its own text (§9).
 
 > **Normative.** Lane 1 ships the expiry pair, on **both** operations and in each
 > case **over a confirmation the policy rules `ALLOW` on**: an expiry at or before the
-> instant the answer would carry records neither the answer nor the grant and raises,
+> instant the answer would carry records neither the answer nor the grant and raises
+> `UngrantableActError`,
 > and one strictly after it establishes the grant. The first fails against an
 > implementation that let the record's own validator do the refusing, which is the
 > outcome §1's clause forbids. Neither arm is stated over a non-`ALLOW` ruling, which
@@ -1246,7 +1302,8 @@ enumeration in its own text (§9).
 > `EgressBinding` carrying `planned_with_external_content` — and not for the last
 > alone. Each asserts that a `resume` carrying `remember_recipients_until` on such a
 > durably parked confirmation seeks no ruling, records no answer, executes nothing,
-> raises, and leaves the step `AWAITING_APPROVAL` with its `CONFIRM` unresolved,
+> raises `UngrantableActError`, and leaves the step `AWAITING_APPROVAL` with its
+> `CONFIRM` unresolved,
 > after which the same token answers it without the argument. The `None` arm is the
 > one a roster would omit and the one that would otherwise record an `ALLOW` and send
 > the call before `established_from` refused a binding that is not there.
@@ -1288,7 +1345,7 @@ enumeration in its own text (§9).
 > no grant. On population (a) a `resume` carrying `remember_recipients_until` in the
 > same condition leaves the answer recorded, **executes the call**, **returns its
 > `TurnOutcome` and raises nothing**, and carries a `RecipientGrantOutcome` whose
-> `refusal` is `CEILING_REACHED` and whose `established` is unset, over a grant store
+> `not_established` is `CEILING_REACHED` and whose `established` is unset, over a grant store
 > left unchanged — the arm that fails against the shape §6 rejects, which would have
 > raised over an egress that had already gone out. Both assert that nothing was
 > evicted, narrowed, expired or
@@ -1300,7 +1357,7 @@ enumeration in its own text (§9).
 > **Normative.** Lane 1 ships the **carrier** tests, which are the ones round 9 of
 > this review showed a listing cannot stand in for. Over one `resume` carrying
 > `remember_recipients_until` in each case: a successful act carries `established`
-> holding the recorded grant and no `refusal`; a ceiling refusal carries
+> holding the recorded grant and no `not_established`; a ceiling refusal carries
 > `CEILING_REACHED`; a duplicate-subject refusal carries `ALREADY_STANDING`; and every
 > call that collected no act — an `ask`, a `resume` without the argument, and
 > ADR-0198 §1's restatement — carries `recipient_grant` as `None`. Each asserts the
@@ -1316,6 +1373,17 @@ enumeration in its own text (§9).
 > **Normative.** Lane 1 ships the `RecipientGrantOutcome` validator test in **both**
 > directions, as ADR-0170 §4's own invariants are stated: a value carrying both
 > members is refused, and so is one carrying neither.
+
+> **Normative.** Lane 1 ships the **store-fault** pair, arranged over a
+> `RecipientGrantStore.record` raising a `RecipientGrantError` that is **not** an
+> `InvalidRecipientGrantError`. On population (a), after the step has executed,
+> `resume` **returns** its `TurnOutcome` carrying `STORE_UNAVAILABLE` and raises
+> nothing, and the answer stays recorded. On population (b),
+> `establish_recipient_grant` **raises** it unchanged. The first fails against an
+> implementation that let the store fault propagate and destroy the outcome of an
+> egress that had already gone out; the second against one that swallowed a fault on
+> the population where nothing was sent. Neither arm asserts `REFUSED`, which is the
+> misreport §4 names.
 
 > **Normative.** Lane 1 ships the test pinning §6's **settlement**, on both
 > populations and by name rather than by a roster: after a ceiling refusal the same
@@ -1487,8 +1555,9 @@ Unmarked; a record of route rather than an obligation.
 
 This ADR is marked under ADR-0089: the block-quoted clauses are the whole of what it
 obliges. It is contract-surface — §4 adds five members to `AssistantEngine`, one
-argument to a sixth, one classmethod to a `core/types.py` record, and one field to
-`TurnOutcome` with the two `core/types.py` values it is typed over — so both required
+argument to a sixth, one classmethod to a `core/types.py` record, one field to
+`TurnOutcome` with the two `core/types.py` values it is typed over, and one
+`core/errors.py` class — so both required
 reviews apply under ADR-0015 §1: adversarial and architecture, green on one tree. It
 is drafted, reviewed and revised as `Proposed`, and its status is flipped
 only once both required reviews have returned clean on one tree, by the one-line
