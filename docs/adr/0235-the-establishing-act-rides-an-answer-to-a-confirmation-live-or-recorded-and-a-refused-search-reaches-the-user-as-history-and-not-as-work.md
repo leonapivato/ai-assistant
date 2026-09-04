@@ -213,10 +213,19 @@ lane's own decision.**
 
 > **Normative.** `remember_recipients_until` is honoured **only** where `approved` is
 > true and the policy's resolving ruling is an `ALLOW`. Supplied beside
-> `approved=False` it is a refusal, not a no-op: the call is refused before anything
-> is recorded, and no answer and no grant are written. A user cannot decline a call
-> and make its recipients standing in one breath, and a surface that let them ask
-> would be collecting an act ADR-0193 §2 has no shape for.
+> `approved=False` it **establishes nothing and changes nothing else**: the answer is
+> recorded as a `DENY` exactly as it is today, the step is denied, and no grant is
+> written. ADR-0042 §4's guarantee that `approved=False` yields `DENY` is preserved
+> whole and this ADR states no exception to it — a user who declines has *decided*,
+> and an argument that could suppress the record of a decision would be the failure
+> that obligation exists to prevent.
+
+> **Normative.** **No surface offers the standing control beside a declining
+> answer.** The shape above is therefore unreachable from a conforming surface, and
+> the clause exists so that the Protocol has a defined answer for a client that sends
+> it anyway. A surface that has collected a decline states, if it says anything at
+> all, that a declined call establishes nothing (ADR-0193 §2) — never that the
+> standing request was recorded, deferred, remembered or will be offered again.
 
 > **Normative.** Where the policy answers a `DENY` to an `approved=True` resume —
 > which `ActionPolicy.resolve`'s second obligation expressly permits — the `DENY` is
@@ -250,12 +259,14 @@ declared argument is admitted by that clause rather than by a change to it (§13
 > from `ActionPolicy.resolve` with `approved=True`, records that answer, builds the
 > grant with `RecipientGrant.established_from`, records the grant, and returns it.
 
-> **Normative.** It is available on a decision meeting **all six** of the following,
-> and is refused on any other: the trail holds it; its ruling is a `CONFIRM`; its
-> `step_id` **and** its `execution_id` are both unset; the trail holds no decision
-> resolving it; its `expires_at` is unset or is strictly after the instant of the
-> call (ADR-0059 §1); and its `egress_binding` is an `EgressBinding` — never `None`,
-> never an `OriginUnrecordedBinding`, never a `CoverageUnrecordedBinding`.
+> **Normative.** It is available on a decision meeting **all seven** of the
+> following, and is refused on any other: the trail holds it; its ruling is a
+> `CONFIRM`; its `step_id` **and** its `execution_id` are both unset; the trail holds
+> no decision resolving it; its `expires_at` is unset or is strictly after the
+> instant of the call (ADR-0059 §1); its `egress_binding` is an `EgressBinding` —
+> never `None`, never an `OriginUnrecordedBinding`, never a
+> `CoverageUnrecordedBinding`; and that binding's `planned_with_external_content` is
+> `False`.
 
 > **Normative.** The third condition is the one that keeps the two populations apart,
 > and it is **structural rather than a rule to remember**. A confirmation carrying a
@@ -270,6 +281,17 @@ declared argument is admitted by that clause rather than by a change to it (§13
 > act could not complete in any case; refusing before the trail is asked keeps the
 > act from being offered on a row it can never ride, and keeps this operation's
 > answer to *"may I establish from this?"* decidable from the row alone.
+
+> **Normative.** The seventh condition is ADR-0193 §2's third clause read at this
+> surface, and it is **refused here rather than left to the constructor** because the
+> constructor runs too late. `ActionPolicy.resolve` returns an `ALLOW` on an approved
+> confirmation carrying `planned_with_external_content` — ADR-0181 §5's fourth clause
+> requires only that `approved` be true — so an operation that checked nothing would
+> record the answer and *then* meet `established_from`'s refusal, leaving an `ALLOW`
+> in the trail, no grant, and a user told nothing they could act on. A user answering
+> such a confirmation may approve the call; they may not, in that act, make the
+> recipients standing (ADR-0193 §2, §4), and the surface must know that before it
+> offers the act rather than after it has collected one.
 
 > **Normative.** The operation **resumes nothing and services nothing**. The
 > `ALLOW` it records authorises a call that has already been abandoned: no lane
@@ -334,7 +356,7 @@ fact, which is the unobtainable bound ADR-0098 §6's second clause forbids"*. A 
 would also put a user-typed provider string where ADR-0148 §2's canonicaliser has to
 meet it, reopening from the surface a question the seam has closed.
 
-### 4. The `core` surface: four engine members, one argument, one transcribing constructor
+### 4. The `core` surface: five engine members, one argument, one transcribing constructor
 
 > **Normative.** This ADR decides the following `core` surface and lands none of it.
 > A contract that adds a member, widens an argument or changes a return is changing
@@ -362,6 +384,10 @@ class AssistantEngine(Protocol):                       # core/protocols.py
 
     async def standing_recipient_grants(                       # §7
         self,
+    ) -> tuple[RecipientGrant, ...]: ...
+
+    async def recent_recipient_grants(                         # §7
+        self, *, limit: int = DEFAULT_PAGE_SIZE
     ) -> tuple[RecipientGrant, ...]: ...
 
     async def revoke_recipient_grant(                          # §7
@@ -443,10 +469,12 @@ and the revocation reachable, and each member is here because a surface cannot
 obtain it otherwise.** Without `grantable_decisions` an adapter would have to read
 `recent_decisions` and join rows to find which confirmations are unanswered, which
 is business logic in `interfaces/`. Without `standing_recipient_grants` there is no
-surface that shows the user their grants, and ADR-0193 §9's revocation right —
-*"a user may revoke a grant from any surface that shows them their grants"* — has
-nowhere to sit. Without `revoke_recipient_grant` the only exit from a grant is
-`clear` on a store no surface holds. And `from_confirmation` exists because the
+surface that shows the user what they currently authorise, and ADR-0193 §9's
+revocation right — *"a user may revoke a grant from any surface that shows them
+their grants"* — has nowhere to sit. Without `recent_recipient_grants` an expired
+grant occupies a slot against the ceiling and appears in no listing, so §6's stated
+recourse names an act the user cannot perform. Without `revoke_recipient_grant` the
+only exit from a grant is `clear` on a store no surface holds. And `from_confirmation` exists because the
 resuming constructor needs a request no trail row can supply.
 
 **`from_confirmation` was the alternative to widening `established_from`, and it is
@@ -519,7 +547,7 @@ on the row, both forms, as `core` derived them. A surface that papered over the
 difference by reconstructing arguments would be showing the user something no store
 holds.
 
-### 6. The order of the two records, and the residue when the ceiling refuses
+### 6. The order of the two records, and where the ceiling is enforced
 
 > **Normative.** The **answer is recorded before the grant is**, on both populations,
 > which is ADR-0193 §2's clause binding unchanged: the decision passed to
@@ -530,29 +558,46 @@ holds.
 > to the grant store on a resolution the trail declined, and no surface reports the
 > act as performed.
 
-> **Normative.** The engine reads the store's outstanding count against
-> `Settings.recipient_grant_max_outstanding` **before it records the answer**, and
-> refuses the whole call — writing neither the answer nor the grant — where the
-> ceiling is already reached. That is ADR-0193 §1's *"The ceiling **fails closed at
-> the establishing act**"* discharged at the first moment it can be, and its refusal
-> names the ceiling and names the recourse: revoke a grant they hold.
+> **Normative.** The ceiling is enforced **where ADR-0193 §1 puts it and nowhere
+> else** — inside `RecipientGrantStore.record`, atomically, counted over outstanding
+> granting records. This ADR mandates **no pre-write count**, and the reason is that
+> the declared store surface supplies none: `standing()` answers over **live**
+> records and so undercounts an outstanding set that includes expired ones,
+> `recent(limit)` is bounded and carries revoking records too, `outstanding(grant_id)`
+> answers about one id, and `export()` is the unbounded read ADR-0193 §1 expressly
+> declines to bound. A mandated pre-read would therefore either widen ADR-0193 §1's
+> exact surface or make every establishing act perform an unbounded read of a Tier 1
+> store, and neither is a price this decision pays for a check that could not be
+> authoritative anyway.
 
-> **Normative.** The pre-read narrows the window and does not close it, and the
-> residue is stated rather than engineered away. `record` is where the ceiling is
-> enforced atomically (ADR-0193 §1), so a grant recorded from elsewhere between the
-> read and the write leaves an act whose answer is recorded and whose grant is not.
-> Where that happens the operation **raises with the store's own reason**, the answer
-> stays recorded — the trail is append-only and nothing retracts it — and the surface
-> states both facts to the user: what was recorded, and that the standing
-> authorisation was not established. It is not dropped silently, which is what
-> ADR-0193 §1's clause forbids.
+> **Normative.** **No lane substitutes a live count for the outstanding count**, at
+> the engine, at a surface, or in a store implementation's own fast path. The two
+> differ by exactly the expired-but-unrevoked records ADR-0193 §1 says still occupy a
+> slot, so a check over the live set passes acts the store will refuse and would
+> report the wrong reason for the refusal when it came.
 
-> **Normative.** On population (a) that residue leaves a call approved and executed
-> under a route-(a) answer, which is the outcome the user asked for minus the
-> standing part. On population (b) it leaves an `ALLOW` that authorises nothing and
-> established nothing. Neither is repaired by minting a looser grant, by retrying
-> with a different expiry, by evicting a grant to make room, or by narrowing the
-> destination set (ADR-0193 §1, §2).
+> **Normative.** Where `record` refuses on the ceiling, the operation **raises with
+> the store's own `InvalidRecipientGrantError`**, and it returns no value a caller
+> could mistake for an established grant. The answer stays recorded — the trail is
+> append-only and nothing retracts it — and nothing already recorded in the grant
+> store is removed, narrowed, expired, evicted or truncated to make room, and no
+> looser grant is minted in its place (ADR-0193 §1, §2).
+
+> **Normative.** A surface offering the act **states that refusal to the user at the
+> moment it happens**, naming that the ceiling was reached and that the recourse is
+> to revoke a grant they hold, and **not** presenting it as a fault of the call that
+> was confirmed. That is ADR-0193 §1's clause discharged in the words it uses; what
+> that clause forbids is offering the act and then **dropping** it, and a refusal the
+> user is shown, named and given a recourse for is not dropped. Its own next
+> sentence is what the outcome then is: *"The confirmation itself is unaffected — the
+> user may still approve **that** call; what they cannot do is make it standing."*
+
+> **Normative.** On population (a) that leaves a call approved and executed under a
+> route-(a) answer, which is the outcome the user asked for minus the standing part.
+> On population (b) it leaves an `ALLOW` that authorises nothing and established
+> nothing. Neither is repaired by retrying with a different expiry, by narrowing the
+> destination set, or by any of the moves the clause above forbids; the recourse is
+> the revocation §7 makes reachable, after which the act may be performed again.
 
 > **Normative.** No lane makes the two writes one transaction, coordinates the two
 > stores, or claims an ordering stronger than the one stated here. ADR-0193 §9
@@ -561,13 +606,32 @@ holds.
 
 ### 7. Listing and revocation: a second vocabulary, and why not one
 
-> **Normative.** `AssistantEngine` gains `standing_recipient_grants()`, reading
-> `RecipientGrantStore.standing` — every **live** grant, evaluated by the store
-> against one clock read (ADR-0193 §1, §9) — and `revoke_recipient_grant(grant_id)`,
-> which appends a revoking record naming the grant and returns it, or returns `None`
-> where the store holds no outstanding granting record with that id. Neither
-> composes, filters, projects, enriches or summarises what the store returns, and
-> neither reads any other store.
+> **Normative.** `AssistantEngine` gains three members here.
+> `standing_recipient_grants()` reads `RecipientGrantStore.standing` — every **live**
+> grant, evaluated by the store against one clock read (ADR-0193 §1, §9).
+> `recent_recipient_grants(*, limit: int = DEFAULT_PAGE_SIZE)` reads
+> `RecipientGrantStore.recent` — the store's own history, granting and revoking
+> records alike, in its own order, with a non-positive `limit` raising `ValueError`.
+> `revoke_recipient_grant(grant_id)` appends a revoking record naming the grant and
+> returns it, or returns `None` where the store holds no outstanding granting record
+> with that id. None of the three composes, filters, projects, enriches or summarises
+> what the store returns, and none reads any other store.
+
+> **Normative.** `recent_recipient_grants` is what makes ADR-0193 §1's stated
+> recourse reachable, and it is here for that reason rather than for completeness.
+> The ceiling counts **outstanding** granting records, which includes expired ones;
+> `standing_recipient_grants` correctly omits those, because it states what the user
+> currently authorises. Without a history read a user at the ceiling could hold an
+> expired grant occupying a slot, see it in no listing, and have no id to pass to
+> `revoke_recipient_grant` — so ADR-0193 §1's *"the recourse is to revoke a grant
+> they hold"* and ADR-0193 §9's *"a user may revoke a grant from any surface that
+> shows them their grants"* would both be undischarged.
+
+> **Normative.** `recent_recipient_grants` is bounded by its `limit` and states no
+> liveness. A grant older than the window is not in it and the recourse is a larger
+> `limit`, which is `assistant grants --limit`'s own shape one store over; this ADR
+> mints no complete read of the store for a surface (§11), and `revoke_recipient_grant`
+> is what authoritatively answers whether a record is still outstanding.
 
 > **Normative.** The revoking record is built by the engine from the outstanding
 > record the store holds, transcribing its `tool`, `account` and `destinations` by
@@ -595,8 +659,10 @@ holds.
 > and for its reason: a page that shows two things at once is the layout that invites
 > one answer to be read off the other.
 
-> **Normative.** No surface derives liveness from `RecipientGrantStore.recent` or
-> from an audit row. `standing_recipient_grants` is what states what the user
+> **Normative.** No surface derives liveness from `recent_recipient_grants` or from
+> an audit row. A record that listing carries says an **act happened**, never that it
+> still stands; a revoking record in it is the record of a withdrawal and never a
+> live grant (ADR-0193 §9). `standing_recipient_grants` is what states what the user
 > currently authorises, and a view that has not read it says the state is unread
 > (ADR-0177 §6's fifth clause, read one store over).
 
@@ -611,8 +677,8 @@ only from a confirmation about a real call and must carry one. One noun over two
 records that cannot substitute for each other is how a user comes to believe that
 revoking one revoked the other.
 
-**Naming.** `standing_recipient_grants` and `revoke_recipient_grant` qualify the
-existing nouns because on this Protocol "grant" already has a referent and it is
+**Naming.** `standing_recipient_grants`, `recent_recipient_grants` and
+`revoke_recipient_grant` qualify the existing nouns because on this Protocol "grant" already has a referent and it is
 `SourceGrant`; ADR-0186 §1's naming rule — that the shorter name is right only where
 the word has one referent on the surface — comes out the other way here.
 `grantable_decisions` names what it returns, follows `grantable_sources`' adjective,
@@ -771,11 +837,15 @@ Named individually:
   is what discharges ADR-0004 §6 for this store and it reaches no operation here.
   ADR-0186 §9 reserves the bare `assistant export` for ADR-0004 §6's
   whole-installation artifact, and #1502 holds it. **Fires** with that lane.
-- **`RecipientGrantStore.recent` as a promoted read.** The act's history is
-  answerable from the audit trail today — a route-(b) `ALLOW` names the grant it
-  rested on (ADR-0193 §11) — and a second history surface with no consumer is the
-  shape ADR-0185 §12 refused. **Fires** on a surface that needs the revoked and
-  expired records `standing_recipient_grants` correctly omits.
+- **A bounded read over the store's *outstanding* records.** §7 discharges ADR-0193
+  §1's recourse with the store's own bounded history, which is what the declared
+  surface supplies; what it does not supply is a read answering "which granting
+  records still occupy a slot", so a user at the ceiling widens a `limit` rather than
+  asking one question. Closing that would mean a member on `RecipientGrantStore`, and
+  ADR-0193 §1 rules that *"a contract that adds a member, widens an argument or
+  changes a return is changing this decision rather than implementing it"* — so it is
+  an ADR partially superseding that clause, not a lane's repair. **Fires** on a
+  measurement that a real user reaches the ceiling and cannot find the record.
 - **Renewing a grant.** Nothing here extends, re-dates or re-scopes a grant, because
   ADR-0193 §1's store is append-only and its §9 makes changing an authorisation a
   revocation followed by a new grant. A new grant needs a fresh confirmation about a
@@ -811,7 +881,7 @@ the obligations (ADR-0089 §3).
 rule 5, ADR-0015 §5).
 
 **Lane 1 — the contract, the engine and the terminal, in one change.** It lands
-`PermissionDecision.from_confirmation`; the four new `AssistantEngine` members of §4 and the
+`PermissionDecision.from_confirmation`; the five new `AssistantEngine` members of §4 and the
 changed signature of `resume`, with their entries in the shared `AssistantEngine` conformance suite and in
 `FakeAssistantEngine` (`ai_assistant.testing`); the engine implementation, including
 the store's whole face reaching `Engine` from `app/composition.py`; the
@@ -833,25 +903,46 @@ enumeration in its own text (§9).
 > grant is recorded only after `AuditTrail.record` has accepted the answer, and an
 > answer the trail refuses leaves the grant store empty.
 
-> **Normative.** Lane 1 ships a test for **each** of §3's six availability
+> **Normative.** Lane 1 ships a test for **each** of §3's seven availability
 > conditions, asserting the refusal **by type** rather than that something was
 > raised: a `decision_id` the trail does not hold; a decision whose ruling is not a
 > `CONFIRM`; one carrying a `step_id`; one carrying an `execution_id`; one the trail
-> already holds a resolution for; one whose `expires_at` has passed; and one for each
-> of `None`, `OriginUnrecordedBinding` and `CoverageUnrecordedBinding` on
-> `egress_binding`. Each asserts that **no** answer and **no** grant were recorded.
+> already holds a resolution for; one whose `expires_at` has passed; one for each of
+> `None`, `OriginUnrecordedBinding` and `CoverageUnrecordedBinding` on
+> `egress_binding`; and one whose `EgressBinding` carries
+> `planned_with_external_content` as `True`. Each asserts that **no** answer and
+> **no** grant were recorded, and each asserts that `grantable_decisions` does not
+> return the decision either.
 
-> **Normative.** Lane 1 ships the pair that separates §2's two refusal grounds: a
-> `resume` carrying `remember_recipients_until` beside `approved=False` records
-> nothing at all, and a `resume` carrying it beside `approved=True` on which the
-> policy answers `DENY` records the `DENY` and establishes no grant.
+> **Normative.** The last of those is owed **by name and not by a roster**, because
+> it is the one an implementation reaches through a green path: `ActionPolicy.resolve`
+> answers `ALLOW` on such a confirmation when `approved` is true, so an operation
+> missing the condition records the answer and only then meets
+> `RecipientGrant.established_from`'s refusal. The test fails against exactly that
+> implementation and passes against no other.
 
-> **Normative.** Lane 1 ships the test pinning §6's ceiling behaviour in both
-> directions: an act refused by the pre-read records neither the answer nor the
-> grant, and an act whose `RecipientGrantStore.record` refuses after the answer was
-> recorded leaves the answer recorded, raises, and evicts, narrows and truncates
-> nothing. The second is the residue §6 states, and the ADR is falsified rather than
-> the test adjusted if it cannot be written.
+> **Normative.** Lane 1 ships the pair that separates §2's two non-establishing
+> answers: a `resume` carrying `remember_recipients_until` beside `approved=False`
+> records the `DENY` exactly as a `resume` without the argument does and establishes
+> no grant — asserted over the trail's contents, so it fails against an
+> implementation that suppressed the record — and a `resume` carrying it beside
+> `approved=True` on which the policy answers `DENY` records that `DENY` and
+> establishes no grant.
+
+> **Normative.** Lane 1 ships the test pinning §6's ceiling behaviour: an act whose
+> `RecipientGrantStore.record` refuses on the ceiling leaves the answer recorded,
+> raises `InvalidRecipientGrantError`, returns no grant, and evicts, narrows,
+> expires and truncates nothing. It is arranged over a store already holding the
+> configured maximum of **outstanding** records at least one of which is **expired**,
+> so it fails against an implementation that counted the live set instead — which is
+> the substitution §6 forbids.
+
+> **Normative.** Lane 1 ships the test that pins §7's recourse end to end: a store at
+> the ceiling whose slots are held partly by expired grants yields those records from
+> `recent_recipient_grants` and none of them from `standing_recipient_grants`,
+> `revoke_recipient_grant` on one of them appends a revoking record, and the act
+> then succeeds. It is the assertion that ADR-0193 §1's stated recourse is an act the
+> user can actually perform.
 
 > **Normative.** Lane 1 ships a test asserting that `from_confirmation` **accepts no
 > parameter naming a subject** — by introspecting its signature, as
@@ -865,10 +956,10 @@ enumeration in its own text (§9).
 > `pending_confirmations`. It fails against an implementation that filtered on
 > `resolves` alone.
 
-> **Normative.** Lane 1 ships **detachment** tests for `grantable_decisions` and
-> `standing_recipient_grants`: a caller mutating a returned tuple's contents, a
-> returned record through its `__dict__`, or anything mutable those reach, changes
-> nothing a later call returns.
+> **Normative.** Lane 1 ships **detachment** tests for `grantable_decisions`,
+> `standing_recipient_grants` and `recent_recipient_grants`: a caller mutating a
+> returned tuple's contents, a returned record through its `__dict__`, or anything
+> mutable those reach, changes nothing a later call returns.
 
 > **Normative.** Lane 1 ships a test asserting that no `interfaces/` module imports
 > or holds a `RecipientGrantStore`, a `RecipientGrants` or a
@@ -922,7 +1013,7 @@ obligation (ADR-0089 §1).
   reader of either document can find the other.
 
 - **ADR-0177 — neither amended nor superseded, and §9 is what makes that true.** §1's
-  enumeration is not widened: none of §4's four new members resolves from a browser
+  enumeration is not widened: none of §4's five new members resolves from a browser
   request, so the figure ADR-0200 §12(a) left at thirty-one is unmoved and every clause
   of §1 reads as it did. `resume`'s new argument is admitted by §1's fourth clause as
   written — an operation is reached "with the arguments the promoted surface declares
@@ -984,7 +1075,7 @@ obligation (ADR-0089 §1).
 Unmarked; a record of route rather than an obligation.
 
 This ADR is marked under ADR-0089: the block-quoted clauses are the whole of what it
-obliges. It is contract-surface — §4 adds four members to `AssistantEngine`, one
+obliges. It is contract-surface — §4 adds five members to `AssistantEngine`, one
 argument to a fifth, and one classmethod to a `core/types.py` record — so both
 required reviews apply under ADR-0015 §1: adversarial and architecture, green on one
 tree. It is drafted, reviewed and revised as `Proposed`, and its status is flipped
@@ -1020,11 +1111,16 @@ against §4 until this has merged (ADR-0015 §5, golden rule 5).
   visibly apart. The alternative — one noun over two records that cannot substitute
   for each other — is how someone comes to believe that revoking a source grant
   stopped a send.
+- **The ceiling becomes visible where it bites, and only there.** §6 leaves it
+  exactly where ADR-0193 §1 put it — inside `record`, atomic, over the outstanding
+  set — and adds the obligation that its refusal reach the user with the ceiling
+  named and a recourse beside it. What §7 adds is the listing that makes the recourse
+  performable, which is a read the corpus had built and never promoted.
 - **A voice-only deployment cannot establish a grant at all.** Every send stays a
   confirmation on a screen, and a user with no screen is where ADR-0207 already left
   them. That is disclosed here rather than discovered.
 - **The browser gains a wire it does not yet use.** `resume`'s new argument crosses
-  to a browser that has no control for it until Lane 2, and the four new operations do
+  to a browser that has no control for it until Lane 2, and the five new operations do
   not cross at all. A user of the page sees no change from this ADR, which is the
   sequencing §9 chose and not an oversight.
 
@@ -1055,9 +1151,21 @@ against §4 until this has merged (ADR-0015 §5, golden rule 5).
   Rejected on ADR-0186 §6's precedent and its reason: the card is under active change
   for ADR-0233 §8, the exit is measurable on the terminal, and the enumeration should
   be widened by the lane that has a surface argument for each operation it admits.
-- **Promoting `RecipientGrantStore.recent` and `export` beside `standing`.** Rejected
-  as surface with no consumer (ADR-0185 §12's shape): the act's history is answerable
-  from the trail today, and the export is #1502's whole-installation artifact.
+- **Promoting `standing` alone and leaving the store's history unpromoted.**
+  Rejected on review: the ceiling counts outstanding records and an expired one is
+  outstanding but not live, so a user at the ceiling would hold a record that appears
+  in no listing and have no id to revoke — ADR-0193 §1's stated recourse naming an act
+  they cannot perform. §7 promotes `recent` for exactly that, and only that.
+- **Promoting `RecipientGrantStore.export` beside them.** Rejected: it is the
+  unbounded read ADR-0193 §1 declines to bound, and ADR-0186 §9 reserves the bare
+  `assistant export` for ADR-0004 §6's whole-installation artifact, which #1502 holds.
+- **A mandatory pre-write count of outstanding grants, so the act fails before the
+  answer is recorded.** Rejected on review, because the declared store surface
+  supplies no such count: `standing()` is live-only and undercounts, `recent(limit)`
+  is bounded and mixes in revocations, and `export()` is the unbounded read. The
+  choices were to widen ADR-0193 §1's exact surface or to make every act read a Tier 1
+  store whole, for a check `record` would have to repeat anyway — so §6 puts the
+  ceiling where ADR-0193 §1 already put it and rules what the surface must say.
 - **A `Settings` default lifetime for a grant, so a surface could offer one.**
   Rejected in §1: ADR-0193 §9 puts the instant in the user's act, and a configured
   default is the grant-minted-from-configuration shape ADR-0097 §8 refuses.
