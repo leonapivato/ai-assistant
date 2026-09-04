@@ -698,6 +698,15 @@ def test_a_sized_spec_refuses_a_population_it_cannot_actually_plant() -> None:
     for crowding in (0, -5):
         with pytest.raises(ValueError, match=r"crowding must be an integer >= 1"):
             AgedStoreSpec.sized(total=2_000, crowding=crowding, closed_fraction=0.5)
+    # A non-integer `crowding` collapsed the store the same silent way a negative
+    # one did, and for the same reason: `topics` is `max(1, total // crowding)`,
+    # and `nan` loses that comparison while `inf` floors to zero, so both landed
+    # on a single topic. `100.0` instead made `topics` the float `20.0`.
+    for bad_crowding in (math.nan, math.inf, 100.0):
+        with pytest.raises(ValueError, match=r"crowding must be an integer >= 1"):
+            AgedStoreSpec.sized(
+                total=2_000, crowding=cast("int", bad_crowding), closed_fraction=0.5
+            )
     # `total` is vetted by the same owner as `__post_init__`'s counts, and before
     # the arithmetic: it reaches `round()` while no spec exists yet, so a
     # non-finite one surfaced as an `OverflowError` about converting a float and
