@@ -22,6 +22,14 @@ quotes, because a quoted name is a promise deferred to a resolver that may never
 run — and because ``ruff``'s own ``TC001`` reads a quoted reference as
 typing-only and would otherwise ask for the import back.
 
+**A generic alias hides a name in a third place.** ``type Bucket[T: Hidden] =
+list[T]`` resolves its value to ``list[T]`` without ever touching ``Hidden``:
+the bound, the constraints and the default of a PEP 695 type parameter are each
+evaluated as lazily as the value is, and each raises on first read. Nothing in
+``src/`` is generic today, so this arm guards no live defect — it is here so the
+first alias that is generic does not arrive unchecked, which is the same reason
+the walk exists at all.
+
 **The exposure is real rather than theoretical**, because the reader is never
 this repository's own code. ``typing.get_type_hints`` resolves aliases it meets;
 so does pydantic when a model comes to hold one; so would a documentation
@@ -74,6 +82,7 @@ from typing import (
     Final,
     ForwardRef,
     Literal,
+    NoDefault,
     TypeAliasType,
     get_args,
     get_origin,
@@ -211,14 +220,49 @@ def _resolve_reference(
     _resolve(evaluated, namespace, seen, errors)
 
 
+#: The attributes of a PEP 695 type parameter that are evaluated lazily, exactly
+#: as an alias's value is — so each one is a second place a hidden name can sit
+#: and a fourth thing that raises long after the module imported cleanly.
+_LAZY_TYPE_PARAMETER_ATTRIBUTES: Final = ("__bound__", "__constraints__", "__default__")
+
+
+def _resolve_type_parameters(
+    alias: TypeAliasType, namespace: dict[str, object], seen: list[object], errors: list[str]
+) -> None:
+    """Follow the bound, constraints and default of each of ``alias``'s parameters.
+
+    ``type Bucket[T: Hidden] = list[T]`` resolves its *value* to ``list[T]``
+    without touching ``Hidden`` at all, so an alias can pass the value check and
+    still raise on the first read of ``__type_params__[0].__bound__``. Same
+    defect, one attribute further in. Nothing in ``src/`` is generic today; this
+    is here so that the first alias that is does not arrive unguarded.
+
+    ``getattr``'s default swallows ``AttributeError`` and nothing else, which is
+    what is wanted: a parameter kind that carries no such attribute is not a
+    finding, and a ``NameError`` raised *by* the attribute is.
+    """
+    for parameter in alias.__type_params__:
+        for attribute in _LAZY_TYPE_PARAMETER_ATTRIBUTES:
+            try:
+                carried: object = getattr(parameter, attribute, None)
+            except Exception as exc:  # the failure *is* the finding
+                errors.append(f"{parameter!r}.{attribute} — {type(exc).__name__}: {exc}")
+                continue
+            if carried is None or carried == () or carried is NoDefault:
+                continue
+            _resolve(carried, namespace, seen, errors)
+
+
 def _resolve_alias(alias: TypeAliasType, seen: list[object], errors: list[str]) -> None:
-    """Read one alias's value, and follow it in *its own* module's namespace."""
+    """Read one alias's value and its parameters, in *its own* module's namespace."""
+    namespace = _namespace_of(alias)
+    _resolve_type_parameters(alias, namespace, seen, errors)
     try:
         value: object = alias.__value__
     except Exception as exc:  # the failure *is* the finding
         errors.append(f"{alias.__name__} — {type(exc).__name__}: {exc}")
         return
-    _resolve(value, _namespace_of(alias), seen, errors)
+    _resolve(value, namespace, seen, errors)
 
 
 def _resolve(
@@ -390,6 +434,13 @@ def test_the_check_catches_a_type_checking_only_name(tmp_path: Path) -> None:
       references at all — a ``Literal`` value and ``Annotated`` metadata — and
       round 3 found the resolver reporting exactly those as undefined names.
       None of the three may be reported.
+    * ``Bounded``, ``Constrained`` and ``Defaulted`` are round 4's shape, one
+      per lazily-evaluated attribute a PEP 695 type parameter carries. Each
+      resolves its *value* to ``list[T]`` without touching the hidden name, so
+      the value check alone passes all three; the failure waits in
+      ``__type_params__[0]``. ``Generic`` is their control — the same shape with
+      a bound the module can see — so that a walk which reported every generic
+      alias would fail here.
     * ``Fine`` names nothing at all.
     """
     source = tmp_path / "hidden_name_alias.py"
@@ -403,6 +454,10 @@ def test_the_check_catches_a_type_checking_only_name(tmp_path: Path) -> None:
         "type Later = tuple['DefinedLater', int]\n"
         "type Format = Literal['json', 'yaml']\n"
         "type Tagged = Annotated[int, 'metadata']\n"
+        "type Bounded[T: Sequence[int]] = list[T]\n"
+        "type Constrained[T: (Sequence[int], int)] = list[T]\n"
+        "type Defaulted[T = Sequence[int]] = list[T]\n"
+        "type Generic[T: int] = list[T]\n"
         "type Fine = tuple[int, ...]\n"
         "class DefinedLater: ...\n",
         encoding="utf-8",
@@ -420,11 +475,16 @@ def test_the_check_catches_a_type_checking_only_name(tmp_path: Path) -> None:
             "Later",
             "Format",
             "Tagged",
+            "Bounded",
+            "Constrained",
+            "Defaulted",
+            "Generic",
             "Fine",
         }
         failures = unresolved(module)
     finally:
         del sys.modules[spec.name]
-    assert set(failures) == {"Hidden", "Nested"}
+    assert set(failures) == {"Hidden", "Nested", "Bounded", "Constrained", "Defaulted"}
     assert "Callable" in failures["Hidden"][0]
-    assert "Sequence" in failures["Nested"][0]
+    for name in ("Nested", "Bounded", "Constrained", "Defaulted"):
+        assert "Sequence" in failures[name][0], name
