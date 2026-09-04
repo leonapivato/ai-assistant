@@ -129,6 +129,23 @@ _RESOURCES: Final = "/Resources"
 #: happen*, which is the same question the resource context decides.
 _MAX_XFORM_INVOCATIONS: Final = 5_000
 
+#: How many members an array-based ``/Contents`` may carry before the adopted
+#: extraction refuses it. ``ContentStream.__init__`` compares the array's length
+#: against this **before it resolves or decodes a single member** and raises, so a
+#: page over it is one whose extraction parses nothing at all — and a walk charging
+#: its members first would answer ``TOO_LARGE`` for a document the extraction refuses
+#: as malformed, which is the class confusion ADR-0232 §4 exists to prevent. The walk
+#: therefore asks the same question in the same place.
+#:
+#: **Pinned by a test rather than asserted here**, exactly as the invocation cap above
+#: is: ``tests/readers/test_decoded_bound.py`` fails if
+#: ``pypdf.generic._data_structures.CONTENT_STREAM_ARRAY_MAX_LENGTH`` stops being this
+#: number, in either direction. Mirroring it is not the reliance ADR-0232 §6 forbids —
+#: what it decides is only *which parses happen*, the same question the resource
+#: context and the invocation cap decide, and the bound this module states as its own
+#: is still ``fetch_max_decoded_bytes``.
+_MAX_CONTENT_ARRAY_MEMBERS: Final = 10_000
+
 
 class ExtractionFailedError(Exception):
     """The file is of a supported format and its text could not be decoded.
@@ -332,15 +349,33 @@ def _content_of(
     key, a null, an object with no data — leaves that object's extraction returning
     the empty string, and a parse that does not happen costs nothing to charge for.
 
+    **An array over the library's own cardinality guard is the one shape that is not
+    an answer**, and it is asked about here because here is where the extraction asks:
+    ``ContentStream.__init__`` compares ``len`` against
+    :data:`_MAX_CONTENT_ARRAY_MEMBERS` before it resolves a member, so the extraction
+    parses nothing at all for such a page. Charging the members first would refuse a
+    malformed document as ``TOO_LARGE`` — a document over *both* is refused either
+    way, so the divergence is one of class, but §4's own reasoning about sending an
+    operator to their bounds when the answer is a corrupt file applies unchanged. The
+    guard costs a ``len`` on an array already resolved and decodes nothing, which is
+    what makes mirroring it affordable where mirroring the ``/ToUnicode`` parse is not
+    (:func:`_establish_font`).
+
     Returns:
         The object to parse, and the streams the extraction will decode in the order
         it decodes them. Both empty where nothing is parsed.
+
+    Raises:
+        ExtractionFailedError: Where an array-based ``/Contents`` carries more members
+            than the extraction's own parser admits.
     """
     try:
         content = obj[_CONTENTS].get_object() if is_page else obj
     except AttributeError, KeyError:
         return None, []
     if isinstance(content, ArrayObject):
+        if len(content) > _MAX_CONTENT_ARRAY_MEMBERS:
+            raise ExtractionFailedError(_UNPARSEABLE_CONTENT_ARRAY)
         members = [part.get_object() for part in content]
         return content, [part for part in members if isinstance(part, StreamObject)]
     if isinstance(content, StreamObject):
@@ -544,7 +579,10 @@ def _charge_parse(obj: DictionaryObject, walk: _Walk, *, is_page: bool) -> None:
 
     Raises:
         ContentTooLargeError: The moment the running total passes the bound.
-        ExtractionFailedError: Where a resource context is present and unreadable.
+        ExtractionFailedError: Where a resource context is present and unreadable,
+            where a font the extraction cannot build precedes the content charge, or
+            where an array-based ``/Contents`` is over the parser's own cardinality
+            guard — each a page whose extraction parses nothing at all.
     """
     resources = _resource_context(obj)
     if resources is None:
@@ -749,3 +787,4 @@ _UNDECODABLE: Final = "the file could not be decoded as the format its suffix na
 _OVER_BOUND: Final = "the extraction is over a configured bound"
 _UNREADABLE_CONTEXT: Final = "a resource context is present and cannot be read"
 _UNBUILDABLE_FONT: Final = "a font in the resource context could not be built"
+_UNPARSEABLE_CONTENT_ARRAY: Final = "a content array carries more members than can be parsed"
