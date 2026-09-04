@@ -950,6 +950,14 @@ class FakeAssistantEngine:
         # further path that collects no act: a declining answer on a park this
         # engine holds no recorded ``CONFIRM`` for, which is the state below.
         confirmation = self.parked.pop(token.handle)
+        # **The binding is released with the park it was bound to**, and here rather
+        # than at :meth:`hold_confirmation_decision`'s own scope: a handle is a park's
+        # name and not a lifetime, so a decision left behind by a settled park would
+        # be found by the *next* park minted under that handle — and an act riding it
+        # would transcribe an unrelated call's account and destination set into a
+        # standing grant. Released **after** the refusals above, so a park that
+        # survived one keeps its binding and the same token answers it again.
+        self._parked_decisions.pop(token.handle, None)
         # **The reference names the decision that actually cleared the step**, where
         # this path recorded one (ADR-0004 §7, ADR-0014 §4). Before ADR-0235 nothing
         # on this fake's resume recorded a decision at all, so the reference resolved

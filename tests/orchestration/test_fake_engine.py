@@ -1530,3 +1530,40 @@ async def test_a_nonconforming_recipient_grant_clock_does_not_prevent_a_decline(
     answers = [row for row in await engine.trail.export() if row.resolves == confirmed.id]
     assert [row.ruling.outcome for row in answers] == [PermissionOutcome.DENY]
     assert [row.decided_at for row in answers] == [_RECIPIENT_AT]
+
+
+async def test_a_settled_park_releases_the_confirmation_it_was_bound_to() -> None:
+    """A handle is a park's name and not a lifetime (ADR-0198 §1, ADR-0235 §2).
+
+    ``hold_confirmation_decision`` binds a recorded ``CONFIRM`` under the handle its
+    park is answered by, and a settled park is retained under that same handle. A
+    binding left behind by one would therefore be found by the **next** park minted
+    under it, and an act riding that park would transcribe an unrelated call's
+    account and destination set into a standing grant — from a confirmation whose own
+    answer was recorded long before, and about a call this park is not about.
+
+    So the release is asserted from the outside: the second park carries no egress at
+    all, and the act on it is refused as §2's first shape rather than establishing the
+    first park's recipients. The trail is asserted too, because the failing
+    implementation records a *second* answer resolving the first confirmation.
+    """
+    engine = FakeAssistantEngine()
+    binding = _binding()
+    confirmed = _recorded_confirm(binding)
+    await engine.trail.record(confirmed)
+    engine.hold_confirmation_decision("park-1", confirmed)
+    first = engine.park("park-1", egress=binding)
+    await engine.resume(first.token, approved=True, timeout=timedelta(seconds=30))
+
+    reused = engine.park("park-1")
+
+    with pytest.raises(UngrantableActError, match="no recorded CONFIRM"):
+        await engine.resume(
+            reused.token,
+            approved=True,
+            timeout=timedelta(seconds=30),
+            remember_recipients_until=_RECIPIENT_AT + timedelta(days=1),
+        )
+
+    assert await engine.recipient_grants.export() == []
+    assert [row.id for row in await engine.trail.export()] == [confirmed.id]
