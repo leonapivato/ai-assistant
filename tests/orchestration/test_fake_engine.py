@@ -1386,47 +1386,72 @@ async def test_a_declined_act_records_the_deny_the_carrier_claims() -> None:
     assert await engine.recipient_grants.export() == []
 
 
-async def test_a_park_bound_to_no_confirmation_refuses_the_act_whatever_the_answer() -> None:
-    """The one state this fake refuses where a hub does not, and why (ADR-0235 §2, §4).
+async def test_an_approving_answer_on_a_park_bound_to_no_confirmation_is_refused() -> None:
+    """ADR-0235 §2's binding refusal, on its first shape as this fake reaches it.
 
-    ADR-0235 §2 governs "the answer to a **held confirmation**", and every durable
-    park a hub holds has a recorded ``CONFIRM``. A park with none is this fake's own
-    state — :meth:`FakeAssistantEngine.park` mints one and
-    ``hold_confirmation_decision`` was never called — so no clause covers it, and
-    **neither carrier §4 offers is true of it**: ``DECLINED`` asserts that the answer
-    was recorded and nothing was recorded, while an absent carrier says "no act was
-    collected" and one was. So the act is refused rather than reported in terms that
-    are false, on **both** answers, and the park survives it: nothing is answered,
-    nothing is executed, and the same token then answers it without the argument.
-
-    The declining arm is the one that would otherwise pass, because ``approved=True``
-    is already refused by §2's binding conditions.
+    A park no recorded ``CONFIRM`` is bound to has no ``EgressBinding`` for
+    ``established_from`` to transcribe from, which is the first of the four shapes §2
+    refuses. Refused before anything is answered, so the park survives it: nothing
+    recorded, nothing executed, and the same token then answers it without the
+    argument.
     """
-    for approved in (True, False):
-        engine = FakeAssistantEngine()
-        parked = engine.park("park-1")
+    engine = FakeAssistantEngine()
+    parked = engine.park("park-1")
 
-        with pytest.raises(UngrantableActError, match="no recorded CONFIRM"):
-            await engine.resume(
-                parked.token,
-                approved=approved,
-                timeout=timedelta(seconds=30),
-                remember_recipients_until=_RECIPIENT_AT + timedelta(days=1),
-            )
-
-        assert await engine.trail.export() == []
-        assert await engine.recipient_grants.export() == []
-        assert [held.token.handle for held in await engine.pending_confirmations()] == ["park-1"]
-
-        resumed = await engine.resume(
-            parked.token, approved=approved, timeout=timedelta(seconds=30)
+    with pytest.raises(UngrantableActError, match="no recorded CONFIRM"):
+        await engine.resume(
+            parked.token,
+            approved=True,
+            timeout=timedelta(seconds=30),
+            remember_recipients_until=_RECIPIENT_AT + timedelta(days=1),
         )
 
-        assert resumed.step is not None
-        assert resumed.step.disposition is (
-            Disposition.EXECUTED if approved else Disposition.DENIED
-        )
-        assert resumed.recipient_grant is None
+    assert await engine.trail.export() == []
+    assert await engine.recipient_grants.export() == []
+    assert [held.token.handle for held in await engine.pending_confirmations()] == ["park-1"]
+
+    resumed = await engine.resume(parked.token, approved=True, timeout=timedelta(seconds=30))
+
+    assert resumed.step is not None
+    assert resumed.step.disposition is Disposition.EXECUTED
+    assert resumed.recipient_grant is None
+
+
+async def test_a_declining_answer_on_a_park_bound_to_no_confirmation_collects_no_act() -> None:
+    """The other answer, and the carrier ADR-0235 §6 gives it.
+
+    §2 rules that the argument supplied beside ``approved=False`` "establishes nothing
+    and changes nothing else: the answer is recorded as a ``DENY`` exactly as it is
+    today, the step is denied, and no grant is written" — ADR-0042 §4's guarantee,
+    which §2 states no exception to, and which is why a **refusal** here would be the
+    exception it declines to state. So this answer is not refused, and it is what a
+    ``resume`` without the argument is, byte for byte: a park with no bound ``CONFIRM``
+    has nothing for an answer to resolve, so nothing was recorded then and nothing is
+    recorded now.
+
+    The carrier is **absent** rather than ``DECLINED``, which §4 makes an *assertion*
+    that the answer was recorded: §6 gives the absent carrier to "every call that
+    collected no act", and a park holding no confirmation offers the act nothing to
+    ride. A consumer reaching this state through ``AssistantEngine`` therefore meets
+    the same denied outcome the concrete engine returns, and never an exception it
+    does not raise.
+    """
+    engine = FakeAssistantEngine()
+    parked = engine.park("park-1")
+
+    resumed = await engine.resume(
+        parked.token,
+        approved=False,
+        timeout=timedelta(seconds=30),
+        remember_recipients_until=_RECIPIENT_AT + timedelta(days=1),
+    )
+
+    assert resumed.step is not None
+    assert resumed.step.disposition is Disposition.DENIED
+    assert resumed.recipient_grant is None
+    assert await engine.trail.export() == []
+    assert await engine.recipient_grants.export() == []
+    assert await engine.pending_confirmations() == ()
 
 
 async def test_a_declining_answer_on_a_confirmation_with_no_binding_is_recorded_not_refused() -> (
