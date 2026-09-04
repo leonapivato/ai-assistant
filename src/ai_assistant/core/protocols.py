@@ -176,6 +176,7 @@ if TYPE_CHECKING:
         PermissionRuling,
         Placement,
         PlanExport,
+        QueryOutcome,
         Question,
         RecipientGrant,
         RecordChunk,
@@ -2783,6 +2784,113 @@ class Fetcher(Protocol):
             CancelledError: Re-raised unchanged when the call is cancelled from
                 outside, and converted into neither an outcome nor a refusal
                 (ADR-0230 §4).
+        """
+        ...
+
+
+@runtime_checkable
+class QueryComposer(Protocol):
+    """Turns the turn's own utterance into one web-search query (ADR-0231 §3).
+
+    The **composing** seam: it is handed the unrewritten user text for the turn
+    being planned, and it answers with the query a search would be made with, or
+    with the reason none was composed. Named for its product role, as every
+    Protocol here is: the role is *writing the question this turn would ask the
+    world*.
+
+    **One member, one positional argument, and that is the safety claim.** The
+    whole claim of the utterance-only route is that *no store value is in view when
+    the query is written*, and a claim of that shape is worth exactly what makes it
+    true. Two things could: a rule that implementations must not pass records, or a
+    contract with no parameter for them. This corpus has already ruled which is
+    worth having — ADR-0093 §10 gave :meth:`Reader.read` no arguments *by decision*,
+    on the ground that "a caller able to widen the read is a caller able to defeat
+    the bound", and ADR-0230 §4 built the ``Fetcher`` bound the same way. So the
+    property here is **decidable from the signature**: an implementation that wanted
+    store content would have to acquire it out of band, which is a different defect
+    in a different place, and one a reviewer of ``planning/`` is looking straight at.
+
+    **No later lane adds a parameter, a keyword, a second member, or a constructor
+    dependency on a store seam** (§3) — not a
+    :class:`~ai_assistant.core.types.MemoryRecord`, not a
+    :class:`MemoryStore`, not a :class:`ContextProvider`, not a
+    :class:`ConversationStore`, not a :class:`TranscriptArchive`, not any other.
+    The conformance suite checks the one-positional-parameter half against the
+    runtime signature, because it is the clause on which §3's safety claim rests for
+    **every** ``QueryComposer`` this system ever wires.
+
+    **What the argument is, and what it is not.** It is the turn's own utterance as
+    `orchestration` already holds it, and no implementation is passed — or may be
+    passed — a record, a supply, a context facet, a listing, a plan, a rationale, a
+    prior turn, a conversation tail, an episode, a capability set, or any value
+    obtained from a store under ``Settings.data_dir``. There is no parameter through
+    which one could arrive.
+
+    **Why that keeps the query outside ADR-0155 §3** (§4). That section defines
+    covered content as a value obtained from a store this system keeps under
+    ``Settings.data_dir``, and the output of any operation supplied covered content.
+    The utterance is a value this system **received from its user** and obtained
+    from no store, so the composer's model call is supplied no covered content and
+    its output is not covered content either — neither §3's second clause nor its
+    third has a subject. Nothing here relaxes, narrows or scopes any clause of
+    ADR-0155 §3, and no lane cites this Protocol toward the fork §3 reserves.
+
+    **A composer holds a ``ModelProvider`` and nothing else that reads** (§3). It
+    may not hold a store, may not read a belief, and may not decide the fate of
+    anything it composes. `orchestration` reaches the production composer through
+    this Protocol and by no other route, and imports no name from `planning` on
+    account of it (golden rule 1).
+
+    **The bound is the implementation's, never this contract's.**
+    ``search_query_max_chars`` is a ``Settings`` field a configured composer
+    enforces; :class:`~ai_assistant.core.types.QueryOutcome` carries no bound and
+    validates identically in every deployment (ADR-0230 §6's division, ADR-0093 §5).
+
+    ADR-0065's input-observation clause is **vacuous here**, and the reason is the
+    signature rather than an implementation's care: the one argument is a ``str``,
+    which is immutable all the way down, so there is no version of it a caller could
+    change under a suspended call.
+    """
+
+    async def compose(self, utterance: NonBlankEncodableText, /) -> QueryOutcome:
+        """Write the query this turn would search with, or refuse to (ADR-0231 §3).
+
+        **The parameter is positional-only, and that is a decision** (§3). No
+        keyword name of it exists for a caller to pass a second value under, and no
+        implementation may rename it into a wider one. It takes one positional
+        argument and no other.
+
+        **A refusal is a return value and never an exception** (§3). Every member of
+        :class:`~ai_assistant.core.types.QueryRefusal` is *returned*: a composer
+        that raised would make ADR-0226 §5's degradation posture the servicer's
+        problem to catch correctly at every call site, where a closed refusal
+        enumeration makes the non-yield a value the audit can count and the turn can
+        ignore. That is ADR-0230 §4's reasoning on the fetch seam, and ADR-0231 adds
+        no error class to ``core/errors.py`` for it.
+
+        **A composition over ``search_query_max_chars`` is refused and never
+        truncated** (§3), with :attr:`~ai_assistant.core.types.QueryRefusal.TOO_LONG`.
+
+        Args:
+            utterance: The unrewritten user text for the turn being planned, as
+                `orchestration` holds it — non-blank and UTF-8-encodable. It is the
+                whole of what an implementation is given.
+
+        Returns:
+            One outcome carrying a query **or** a refusal, never both and never
+            neither — a condition
+            :class:`~ai_assistant.core.types.QueryOutcome` enforces itself, so a
+            composer cannot emit an unreadable outcome and a consumer never has to
+            decide which half to believe.
+
+        Raises:
+            CancelledError: Re-raised unchanged when the call is cancelled from
+                outside while suspended, and converted into neither a query nor a
+                refusal — this module's cancellation clause (ADR-0060) with the one
+                consequence ADR-0231 §3 spells out, because it is the place a
+                conforming-looking implementation could satisfy every other clause
+                and still get it wrong. It is the **only** exception that leaves
+                this member.
         """
         ...
 
