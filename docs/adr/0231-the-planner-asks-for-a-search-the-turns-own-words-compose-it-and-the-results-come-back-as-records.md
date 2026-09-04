@@ -600,11 +600,26 @@ the other's input.
 > arguments: an **origin**, carrying `x-egress-destination: "https"` and
 > `x-egress-tier: "operational"`, and a **query**, carrying neither keyword.
 
-> **Normative.** The credential is read by the seam itself, from
-> `Secrets.get` at `SecretScope.INTEGRATION` (ADR-0125 §1, §2), inside the call the
-> ruling authorised — ADR-0148 §7's positional gate, unchanged and not restated. **No
-> credential crosses the `QueryComposer` or `WebSearcher` seams in either direction**,
-> and no component outside `tools/` holds one on account of this decision.
+> **Normative.** The credential is read by the seam itself, from `Secrets.get` at
+> `SecretScope.INTEGRATION` (ADR-0125 §1, §2), **inside `WebSearcher.search` and after
+> §6's three checks have passed** — which is ADR-0148 §7's positional gate with one
+> word changed, the position being this member rather than a callable
+> `ToolInvoker.invoke` reached, and the property it states unchanged: no component
+> reads one to decide whether it may be read, to construct a client for a call not yet
+> ruled on, to canonicalise a destination, to build a payload description, or on any
+> path a refusal can reach. **No credential crosses the `QueryComposer` or
+> `WebSearcher` seams in either direction**, and no component outside `tools/` holds
+> one on account of this decision.
+
+> **Normative.** **ADR-0148 §6's post-read discard clause binds this callable
+> verbatim.** After the credential is in hand and **before any byte is transmitted**,
+> the searcher re-reads the recorded identity, revision and provisioning state and
+> **discards the credential without transmitting** unless the record is still active,
+> the identity still equals the one the binding carries, and the revision equals the
+> one read before the credential read; a read that cannot be answered is treated as a
+> changed one. The refusal is `SearchRefusal.PROVIDER_REFUSED`. Nothing about this
+> clause is relaxed by the send leaving through a different member, and no lane reads
+> §6 of this ADR as having moved it.
 
 **The registration-without-a-registry-entry is the hinge of this whole design, and it
 is a fact about the tree rather than a device invented here.**
@@ -892,7 +907,8 @@ honesty clause. And ADR-0154 §6's residency clause binds this registering lane:
 > at all involving a path, a query or a fragment, which are not part of a destination.
 
 > **Normative.** The canonicaliser **refuses** rather than canonicalises a supplied
-> form that: names a scheme other than `https` after ASCII case-folding; carries
+> form that: names a scheme other than `https` after ASCII case-folding; states a
+> port separator with no port after it, which is **not** an omitted port; carries
 > userinfo, a path other than the empty one, a query or a fragment; has an empty host;
 > has a host carrying any character outside ASCII letters, digits, `-` and `.`; has a
 > host with a leading, trailing or doubled `.`, a label longer than 63 characters, a
@@ -948,9 +964,11 @@ widening a grant nobody widened.
 > On any other outcome — a `CONFIRM`, a `DENY`, an `EgressBinder` that refused or
 > raised, an `ActionPolicy` that raised, or an `AuditTrail` that could not record the
 > decision — no channel is opened, no credential is read, no record is minted, the
-> read budget is untouched, and the servicing of this kind yields nothing. **Each of
-> those outcomes has its own `SearchDisposition` member** (§13), so none is reported
-> as another and none is omitted.
+> read budget is untouched, and the servicing of this kind yields nothing. **Every one
+> of them is recorded, and the `SearchDisposition` member it is recorded under names
+> the stage that produced it** (§13) — so no stage's outcome is reported as another
+> stage's and none is omitted, while two outcomes of one stage that an operator would
+> act on identically may share a member, which §13 states in terms.
 
 > **Normative.** **The servicer asks the user nothing and parks nothing.** ADR-0226
 > §5's clause binds unchanged: a servicing that did not yield leaves the supply as
@@ -1830,7 +1848,9 @@ for less.
     canonicalise identically; and each of §8's refusals is refused, one assertion per
     form — a non-`https` scheme, userinfo, a query, a fragment, an empty host, a
     non-ASCII host, a trailing dot, a doubled dot, an over-long label, a hyphen-edged
-    label, an IP literal, a port with a leading zero, and a port outside 1–65535.
+    label, an IP literal, an **empty stated port** (`https://example.com:`, and its
+    trailing-slash form where the parse reaches one), a port with a leading zero, a
+    non-numeric port, and a port outside 1–65535.
     **A path-bearing form is refused and yields no destination at all**:
     `https://example.com/a` and `https://example.com/b` are each refused independently,
     and no test asserts that they canonicalise to anything — an assertion that they were
@@ -1867,6 +1887,14 @@ for less.
     over a call whose `request.tool` was replaced with a **valid but different**
     definition, which the second check refuses against the searcher's own registered
     declaration. Both fail an implementation that trusted construction.
+13aa. **A bound account that moves under the credential read sends nothing.** The
+    searcher's own test, over a `Secrets` fake the harness suspends inside `get`: the
+    bound connection record is reprovisioned — and, in a second arm, disconnected —
+    while the read is suspended, and on release **no byte is written to the channel**,
+    the credential is discarded, and the outcome is `PROVIDER_REFUSED`. A third arm
+    over a record whose read cannot be answered asserts the same, which is ADR-0148
+    §6's fail-closed limb. An implementation that reads the credential and transmits
+    passes every other test here and fails these.
 13b. **The three bounds are tested at the boundary and not only over it.** A response
     of exactly `search_max_response_bytes` is read whole and mints records, and one of
     that plus one byte is refused `RESPONSE_TOO_LARGE` with nothing parsed; a result
