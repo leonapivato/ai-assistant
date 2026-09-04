@@ -676,6 +676,11 @@ async def _fake_notification_outbox(now: Clock) -> None:
     await FakeNotificationOutbox(now=now).claim()
 
 
+async def _fake_notification_store(now: Clock) -> None:
+    """The retention purge reads the clock, as the durable store's does (#1964)."""
+    await FakeNotificationStore(now=now).purge()
+
+
 async def _fake_recipient_grant_store(now: Clock) -> None:
     """The standing listing reads the clock to judge which grants are still live."""
     await FakeRecipientGrantStore(now=now).standing()
@@ -952,6 +957,7 @@ SEAMS = [
     Seam("FakeDeferralStore", _fake_deferral_store, DeferralStoreError),
     Seam("FakeFeedbackProcessor", _fake_feedback_processor, ClockReadingError),
     Seam("FakeNotificationOutbox", _fake_notification_outbox, NotificationOutboxError),
+    Seam("FakeNotificationStore", _fake_notification_store, NotificationStoreError),
     Seam("FakeRecipientGrantStore", _fake_recipient_grant_store, ClockReadingError),
     Seam("FakeRecipientGrants", _fake_recipient_grants, ClockReadingError),
     Seam("FakeTranscriptArchive", _fake_transcript_archive, TranscriptArchiveError),
@@ -1469,11 +1475,6 @@ UNTABLED: Final[dict[str, str]] = {
         "same type — so it fails ``test_no_seam_steals_a_failure_of_the_clock_itself``"
     ),
     "EmailReader": "#1963: the second reader, with ``CalendarReader``'s clause verbatim",
-    "FakeNotificationStore": (
-        "#1964: translates into ``NotificationStoreError`` correctly but replaces the "
-        "guard's message with a constant, so the ``owner`` label the seam paid for is "
-        "not in the rejection this module asserts on"
-    ),
 }
 
 
