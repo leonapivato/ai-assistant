@@ -96,7 +96,7 @@ cited toward one.
 
 ### What the approver is shown today, read rather than assumed
 
-Read at `origin/main` = `50c6373b`. This subsection is an account of the tree and is
+Read at `origin/main` = `e66caa85`. This subsection is an account of the tree and is
 **not normative** (ADR-0089 §1).
 
 **The description holds no content, and that half of ADR-0155 §3's premise is exact.**
@@ -130,9 +130,14 @@ confirmation must answer the question that was asked"*.
 
 **What no component does is read where an argument's text came from.**
 `DiscloserProvenance` has two members, `USER_AUTHORED` and `SYSTEM_SELECTED`, and
-neither is "obtained from this system's own store". `AttemptRunner._bound` in
+neither is "obtained from this system's own store". `StepRunner._bound` in
 `orchestration/runner.py` still passes `CarriedProvenance(spans={}, …)`, so every
-span the seam describes today is `SYSTEM_SELECTED` regardless of who wrote it. And
+span the seam describes today is `SYSTEM_SELECTED` regardless of who wrote it.
+(ADR-0154, ADR-0155 and ADR-0181 each call that method `AttemptRunner._bound`. No
+such class exists or ever has — the class has been `StepRunner` since the commit
+that introduced it, `95ffaac3`. This ADR names what is in the tree; correcting the
+three standing texts is #2036, and nothing decided on top of the old name is
+affected, because the site it points at is the right one.) And
 the one content-shaped check after the ruling is by length:
 `SmtpEgressTransport._check_spans_cover` compares a **multiset of code-point counts**
 against the description's extents, which the neighbouring docstring in
@@ -1063,7 +1068,12 @@ This section is direction for the lanes that build it, and it binds them as mark
 > in its own PR: `SpanCoverage`; `coverage` on `EgressBinding`, `CarriedProvenance` and
 > `ConfirmationEgress`; `EgressBinding`'s construction refusal; and
 > `CoverageUnrecordedBinding` with the widened union and the private base chain §14
-> decides. Golden rule 5 and ADR-0015 §5 govern the sequencing.
+> decides. Golden rule 5 and ADR-0015 §5 govern the sequencing. Because `coverage` is
+> required with no default, that PR also passes the fail-closed `PATH_WITHOUT_MODEL`
+> at every existing construction site, so that the tree it lands on is green. Passing
+> a constant is not implementing §5 — nothing is computed, read or inferred — which is
+> why that adaptation does not breach this clause's first sentence, and it is the only
+> thing outside `core` the PR may touch.
 
 > **Normative.** `PROTOCOL_VERSION` moves, because `ConfirmationEgress` gains a member
 > and that value crosses the wire (ADR-0178 §6's rule).
@@ -1074,11 +1084,14 @@ This section is direction for the lanes that build it, and it binds them as mark
 > return annotation changed.
 
 > **Normative.** `coverage` is written by the component that composes a call's
-> arguments, in the same lane that adds the field. A lane that adds the field and
-> leaves nothing writing it has built a seam that answers `PATH_WITHOUT_MODEL` and
-> refuses every send — which is the fail-closed direction working, and is still an
-> incomplete lane. `AttemptRunner._bound`'s empty `CarriedProvenance(spans={}, …)` is
-> the site.
+> arguments, in the lane that **follows** the `core` change and not in the `core`
+> change itself. `StepRunner._bound`'s `CarriedProvenance(spans={}, …)` in
+> `orchestration/runner.py` is the site: the `core` PR leaves it passing the
+> fail-closed constant its own clause allows, and this lane makes it compute. The
+> corpus stops there at its peril — a field that lands with nothing writing it leaves
+> a seam answering `PATH_WITHOUT_MODEL` and refusing every send, which is the
+> fail-closed direction working and an unfinished job, so a batch that defers this
+> lane files the issue that owns it rather than leaving it unowned.
 
 > **Normative.** Each surface's lane pins §8's rendering floor with tests over that
 > surface's own output: every span's value appears, whole and untruncated, before the
