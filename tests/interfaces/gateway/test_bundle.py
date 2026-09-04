@@ -5585,6 +5585,17 @@ def test_a_confirmation_that_cannot_be_shown_whole_is_not_shown_at_all() -> None
     assert "cannot be shown here in full" in _joined(
         script[script.index("const CONFIRMATION_NOT_WHOLE") :]
     )
+    # **The test is a type test and not an equality against one value** (adversarial
+    # review, round 1). Nothing validates the body this page was handed, so a `value`
+    # that is absent, a number or an object is as unrendered as one that is `null` —
+    # and a check for `null` alone lets `undefined` through to be rendered as the word
+    # "undefined" where the bytes should be. Text is the whole of what a located value
+    # can be, because the gateway spells every one of them.
+    assert (
+        _functions(script)["unlocated"]
+        .strip()
+        .endswith('return typeof span.value !== "string";\n}')
+    )
 
 
 def test_the_call_carries_one_coverage_line_in_every_state_core_has() -> None:

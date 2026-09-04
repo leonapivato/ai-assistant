@@ -25,10 +25,12 @@ binding, and the fake's helper fixes the first — which is
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 import pytest
 from browser_drive import DESKTOP, PHONE, driving
+from test_browser_answers import _substitute
 
 from ai_assistant.core.types import (
     Confirmation,
@@ -40,6 +42,7 @@ from ai_assistant.core.types import (
     EgressSpan,
     SpanCoverage,
 )
+from ai_assistant.interfaces.gateway.server import _confirmation_view
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -579,4 +582,55 @@ async def test_a_confirmation_whose_value_cannot_be_located_is_not_put_at_all(
         # the reason, and not a control to answer it with.
         assert _BODY not in said, said
         assert "Send an email." not in said, said
+        assert await card.locator("button").count() == 0
+
+
+@pytest.mark.parametrize(
+    ("fault", "replacement"),
+    [("omitted", None), ("a number", 12), ("an object", {"text": "hello"})],
+    ids=["an omitted value", "a numeric value", "an object value"],
+)
+async def test_a_span_whose_value_is_not_text_is_refused_as_hard_as_a_missing_one(
+    gateway_browser: Browser, tmp_path: Path, fault: str, replacement: object
+) -> None:
+    """Adversarial review, round 1, ``major``: the fail-closed test is a type test.
+
+    ``null`` is what *this* gateway sends for a span its arguments do not locate, and
+    a check for it alone reads the body this page was handed as though something had
+    validated it. Nothing did: the page parses the response with ``JSON.parse`` and
+    reads named members, so a ``value`` that is **absent** is ``undefined``, which is
+    not ``null`` — and under the narrower check the card was built and
+    ``valueBlock`` put the word ``undefined`` on the screen as the bytes being
+    approved.
+
+    So the three shapes are driven, not argued about: the request really goes to the
+    gateway, the gateway really answers it, and only the **body** is replaced — the
+    condition #1622 names, and the same device ``test_browser_answers.py`` uses for
+    its own unreadable answers. What is read back is the refusal, whole: the notice,
+    and no control to answer with.
+
+    Args:
+        gateway_browser: The one browser this run launched.
+        tmp_path: The case's data directory.
+        fault: What is wrong with the span's value, for the case's own name.
+        replacement: What stands where the located text should be. ``None`` removes
+            the key, which is the shape a check for ``null`` alone lets through.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.parked["h-1"] = _email()
+        view = _confirmation_view(_email())
+        if replacement is None:
+            del view["egress"]["spans"][1]["value"]
+        else:
+            view["egress"]["spans"][1]["value"] = replacement
+        await _substitute(drive, path="/confirmations", body=json.dumps({"confirmations": [view]}))
+
+        await drive.page.click("#confirmations-button")
+        await drive.page.wait_for_selector("#confirmation-list .confirmation-row")
+        card = drive.page.locator("#confirmation-list .confirmation-row")
+
+        said = await card.inner_text()
+        assert "cannot be shown here in full" in said, (fault, said)
+        assert _BODY not in said, (fault, said)
+        assert "undefined" not in said, (fault, said)
         assert await card.locator("button").count() == 0
