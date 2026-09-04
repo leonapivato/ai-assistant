@@ -1127,9 +1127,9 @@ This section is direction for the lanes that build it, and it binds them as mark
 > it. Two things it does
 > **not** carry, and they are what the first sentence is for: the composer's
 > computation of the value, which is the lane below, and any change to a rendering
-> surface, which is §8's lanes. A lane that finds a fifth thing the contract makes
+> surface, which is §8's lanes. A lane that finds a further thing the contract makes
 > unavoidable carries it under this test and records that it did, rather than reading
-> the five as exhaustive.
+> these five as exhaustive.
 
 > **Normative.** `PROTOCOL_VERSION` moves, because `ConfirmationEgress` gains a member
 > and that value crosses the wire (ADR-0178 §6's rule).
