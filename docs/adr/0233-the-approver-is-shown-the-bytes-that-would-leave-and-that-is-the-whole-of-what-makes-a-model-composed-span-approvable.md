@@ -18,8 +18,8 @@
   running. And the **prohibition sentence itself** acquires the exception §9 below
   states: a call meeting all four of §9's conditions may carry content of that class, so
   a reader holding only ADR-0155 would read "may not carry" more widely than it now
-  holds. ADR-0082 §1's test is met on those two sentences and on nothing else in
-  ADR-0155.
+  holds. Within §3, ADR-0082 §1's test is met on those two sentences and on nothing
+  else; the one further clause of ADR-0155 it is met on is §4's, below.
   **The clause's own reservation is not a licence to record this as a discharge.** §3
   reserves the *route* — under arm (b) "a relaxation **could then be considered**" —
   and says relaxation "requires the commissioned ADR and its approval surface,
@@ -68,9 +68,11 @@
   second sibling and a version, in its own text". §4 below is that member and §14 makes
   that choice: **a second sibling**, because a version key names a schema and supplies
   no representable value for a row lacking a required field. Adding a member to
-  `EgressBinding` and a third shape to the union moves six sentences, each named here
-  because ADR-0082 §1 puts the naming in this ADR's text, and each stated in its
-  repaired form in §14 or §15:
+  `EgressBinding` and a third shape to the union moves the sentences enumerated below —
+  enumerated rather than counted, because a total restated beside a list is the drift
+  §16 records this document correcting twice. Each is named here because ADR-0082 §1
+  puts the naming in this ADR's text, and each is stated in its repaired form in §14 or
+  §15:
   **§1** recognises a row by its carrying "every member `EgressBinding` requires
   **except** `planned_with_external_content`" — an exception list that must now carry
   two names, since a genuine pre-origin row lacks `coverage` as well, and which read
