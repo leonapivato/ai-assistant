@@ -2097,13 +2097,29 @@ _MAX_STATUS: Final = 599
 _MIN_REDIRECT: Final = 300
 _MAX_REDIRECT: Final = 399
 
-#: RFC 9112 §6.3: a response with one of these statuses "is always terminated by
-#: the first empty line after the header fields, **regardless of the header fields
-#: present** in the message". A ``1xx`` is in that list too and never reaches the
-#: body reader, since :meth:`HttpsExchange._response` refuses an interim status
-#: outright, so these two are the whole of it here. Adversarial review found a
-#: ``204`` carrying a ``Content-Length`` being read as provider payload on round 3.
-_NO_CONTENT_STATUSES: Final = frozenset({204, 304})
+#: The statuses whose responses carry no content, so that the header section is
+#: what terminates them and the octets after it are not a body this exchange hands
+#: back. Two sources, named separately because they are different kinds of rule:
+#:
+#: - **RFC 9112 §6.3**, a *recipient's framing* rule: a response with a ``1xx``,
+#:   ``204`` or ``304`` status "is always terminated by the first empty line after
+#:   the header fields, **regardless of the header fields present** in the
+#:   message". Of those three only ``204`` can reach the body reader — an interim
+#:   status and the whole ``3xx`` class are refused by
+#:   :meth:`HttpsExchange._response` before it is called — so the other two are
+#:   left out rather than carried here as unreachable members.
+#: - **RFC 9110 §15.3.6**, a rule about the *message*: "a server MUST NOT generate
+#:   content in a ``205`` response", which that section states because the status
+#:   "implies that no additional content will be provided". A ``205`` carrying a
+#:   length, a coding or bare octets is a server breaking that, and the honest
+#:   reading of the message is still that it has no content — so this exchange
+#:   declines those octets rather than handing them back as though a provider had
+#:   sent a payload.
+#:
+#: Nothing is desynchronised by leaving the octets on the channel either way,
+#: because ``Connection: close`` means there is no next response on it. Adversarial
+#: review found the ``204`` on round 3 and the ``205`` on round 4.
+_NO_CONTENT_STATUSES: Final = frozenset({204, 205})
 
 #: The first class RFC 9110 §15.2 defines, which is *interim*: a client is meant
 #: to keep reading for the real response. This exchange sends no ``Expect``, so a
@@ -2790,14 +2806,12 @@ async def _body_of(
 ) -> bytes:
     """The payload's octets, with any chunked framing removed.
 
-    **A status with no content is framed by the header section and by nothing
-    else**, which is RFC 9112 §6.3's first rule and the reason this takes a status
-    at all. §6.3 decides it "regardless of the header fields present in the
-    message", so a ``Content-Length`` or a ``Transfer-Encoding`` on a ``204`` or a
-    ``304`` is neither read nor resolved: the standard states the framing, and
-    reading a body such a response does not have would hand a caller octets it
-    would take for provider payload. Nothing is desynchronised by leaving them,
-    because ``Connection: close`` means there is no next response on this channel.
+    **A status that carries no content is terminated by its header section and by
+    nothing else**, which is why this takes a status at all; the two rules behind
+    that, and their two different sources, are on :data:`_NO_CONTENT_STATUSES`. A
+    ``Content-Length`` or a ``Transfer-Encoding`` on such a response is neither
+    read nor resolved: reading a body the response does not have would hand a
+    caller octets it would take for provider payload.
 
     Otherwise three framings, in §6.3's own precedence and no other: a
     ``Transfer-Encoding``, a ``Content-Length``, or the connection's close — which
