@@ -769,7 +769,9 @@ def test_a_spec_refuses_a_live_count_that_is_not_a_whole_number() -> None:
     refusal asserted below — ``nan``, ``inf`` and the two finite floats because
     nothing is raised at all, and ``-inf`` and the sub-one counts because what is
     raised is the old sentence, which names both fields rather than the one at
-    fault.
+    fault. The exact-type half is mutation-checked too: weakening it to "refuse
+    ``bool``, otherwise ``isinstance``" fails on the subclass below and on
+    nothing else here.
     """
     for bad in (math.nan, math.inf, -math.inf, 2.5, 200.0):
         with pytest.raises(ValueError, match=r"live must be an integer >= 1"):
@@ -778,14 +780,26 @@ def test_a_spec_refuses_a_live_count_that_is_not_a_whole_number() -> None:
     for below_one in (0, -5):
         with pytest.raises(ValueError, match=r"live must be an integer >= 1"):
             AgedStoreSpec(live=below_one, topics=1)
-    # The type test is exact, so an `int` *subclass* is refused as well — and
-    # `bool` is the one the standard library ships, which makes this the
-    # regression test for the whole class. A subclass reaches `value < 1` and the
-    # `topics > live` comparison with its own operators: one whose `__lt__`
-    # returns `False` would plant a zero-record population under a spec that
-    # documents at least one.
-    with pytest.raises(ValueError, match=r"live must be an integer >= 1"):
-        AgedStoreSpec(live=True, topics=1)
+
+    # The type test is exact, so an `int` *subclass* is refused as well. `bool` is
+    # the one the standard library ships; the subclass below is the one that shows
+    # why the test is exact rather than an `isinstance`. It answers `value < 1`
+    # with `False`, and — being the subclass — answers the reflected
+    # `topics > live` comparison too, so under `isinstance` it planted a
+    # zero-record population under a spec documenting at least one live record.
+    # Both are asserted, because refusing only `bool` would pass every other case
+    # here while leaving that hole open.
+    class Deceptive(int):
+        """An ``int`` that loses no ordered comparison, however small it is."""
+
+        __slots__ = ()
+
+        def __lt__(self, other: int, /) -> bool:
+            return False
+
+    for subclass_count in (True, Deceptive(0)):
+        with pytest.raises(ValueError, match=r"live must be an integer >= 1"):
+            AgedStoreSpec(live=subclass_count, topics=1)
 
 
 def test_a_spec_refuses_a_topic_count_that_is_not_a_whole_number() -> None:
