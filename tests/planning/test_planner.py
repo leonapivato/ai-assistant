@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 import structlog
+from _int_str_digits import pinned_int_str_digits
 from benchmarks.memory.answer import RETRIEVED_HEADING, render_context
 from planner_contract import PlannerContract
 from pydantic import ValidationError
@@ -1556,14 +1557,30 @@ async def test_deeply_nested_json_becomes_planning_error() -> None:
 
 
 async def test_oversized_integer_becomes_planning_error() -> None:
-    """An over-limit integer literal raises a plain ValueError; it is still bounded."""
-    big = "1" * (sys.get_int_max_str_digits() + 100)
-    reply = '{"steps":[{"intent":"x","capability":"do_x","parameters":{"n":' + big + "}}]}"
-    model = FakeModelProvider(reply)
-    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+    """An over-limit integer literal raises a plain ValueError; it is still bounded.
 
-    with pytest.raises(PlanningError):
-        await planner.plan(_goal(), context=_context(), capabilities=_VOCABULARY)
+    The digit limit is *pinned* rather than read off the ambient interpreter, because
+    it can be disabled outright — ``PYTHONINTMAXSTRDIGITS=0`` or ``-X
+    int_max_str_digits=0`` makes ``sys.get_int_max_str_digits()`` return ``0``. A
+    literal derived from that is a hundred ``1``s, which parses; the reply is an
+    ordinary plan, no ``PlanningError`` is raised, and the ``ValueError``-as-a-miss
+    path this case exists to pin goes unexercised (#2048). Pinning holds that path
+    reachable whatever the ambient setting is. The sibling case at
+    ``test_an_over_limit_integer_miss_does_not_discard_a_later_envelope`` pins for the
+    same reason.
+    """
+    with pinned_int_str_digits():
+        big = "1" * (sys.get_int_max_str_digits() + 100)
+        reply = '{"steps":[{"intent":"x","capability":"do_x","parameters":{"n":' + big + "}}]}"
+        model = FakeModelProvider(reply)
+        planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+        with pytest.raises(PlanningError):
+            await planner.plan(_goal(), context=_context(), capabilities=_VOCABULARY)
+
+    # The repair round is what distinguishes the miss this case is about from a reply
+    # that simply parsed: with the limit disabled the ambient-limit form of this test
+    # planned successfully on the first call.
     assert model.call_count == 2
 
 
