@@ -41,6 +41,16 @@ departs from ADR-0222 §4 and the difference is the point: a reply exists and mu
 rendered somehow, so §4 keeps its longest fitting prefix and marks the elision; a file
 need not be fetched at all, and a model handed the first 32 KiB of a 90-page report
 answers *about the report*, in the assistant's own voice, having seen a third of it.
+
+**The text bound is not the only one, because the text is not the only cost**
+(ADR-0232). ``fetch_max_content_bytes`` is counted on what reaches the prompt, which
+for a compressed format exists only once the whole stream has been parsed — so it is
+checked *after* the work it would have refused. ``fetch_max_decoded_bytes`` is the
+third quantity with the third consumer: the decoded bytes the extraction **parses,
+summed once per parse**, compared before each decoded stream is parsed. Plain text and
+Markdown have no decoding step and count zero for it, so a ``.txt`` file larger than
+that figure and inside ``fetch_max_file_bytes`` is fetched rather than refused;
+:func:`_extract_pdf` is where the count is real.
 """
 
 from __future__ import annotations
@@ -48,9 +58,21 @@ from __future__ import annotations
 import io
 import json
 import logging
-from typing import Final
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Final
 
 import pypdf
+from pypdf.generic import (
+    ArrayObject,
+    ContentStream,
+    DictionaryObject,
+    NameObject,
+    StreamObject,
+    is_null_or_none,
+)
+
+if TYPE_CHECKING:
+    from pypdf.generic import PdfObject
 
 # **`pypdf`'s own logging is silenced, and that is ADR-0004 §5 rather than tidiness.**
 # The library reports a malformed document by logging it — "invalid pdf header",
@@ -83,6 +105,28 @@ _TEXT_SUFFIXES: Final = frozenset({".txt", ".md", ".markdown"})
 
 #: What the two JSON string delimiters cost, counted because §6 includes them.
 _DELIMITERS: Final = 2
+
+#: The keys the walk reads from a page and from a form. Spelled once, because a
+#: typo in either would silently make the walk charge nothing.
+_CONTENTS: Final = "/Contents"
+_RESOURCES: Final = "/Resources"
+
+#: How many Form XObject invocations the adopted extraction performs for one page
+#: before it stops descending. Past this ``PageObject._extract_text__xform``
+#: returns the empty string and **skips** the form — it does not raise — so
+#: invocations past it are parses that never happen, and a walk charging them would
+#: refuse a document ADR-0232 §2's stated quantity requires this seam to fetch (§3).
+#:
+#: **Pinned by a test rather than asserted here** (ADR-0232 §6, and Lane C1's own
+#: shape for the page-tree guards): ``tests/readers/test_decoded_bound.py`` fails if
+#: ``pypdf._page.MAX_XFORM_INVOCATIONS_PER_EXTRACTION`` stops being this number, in
+#: either direction — a lowered cap would make this walk over-charge and a raised one
+#: would make it under-charge. Mirroring the exit is **not** the reliance ADR-0232 §6
+#: forbids: that clause forbids leaning on a dependency's limit *as a bound this
+#: system states as its own*, and the bound here is ``fetch_max_decoded_bytes``,
+#: which this module enforces. What this figure decides is only *which parses
+#: happen*, which is the same question the resource context decides.
+_MAX_XFORM_INVOCATIONS: Final = 5_000
 
 
 class ExtractionFailedError(Exception):
@@ -125,23 +169,31 @@ def _rendered_body_length(text: str) -> int:
     return len(json.dumps(text)) - _DELIMITERS
 
 
-def extract(data: bytes, suffix: str, *, max_rendered_bytes: int) -> str:
-    """The text ``data`` encodes, refused if its rendering passes the bound.
+def extract(data: bytes, suffix: str, *, max_rendered_bytes: int, max_decoded_bytes: int) -> str:
+    """The text ``data`` encodes, refused if either bound passes.
 
     Args:
         data: The file's bytes, already bounded by ``fetch_max_file_bytes``.
         suffix: The entry's lowercased suffix, one of :data:`SUPPORTED_SUFFIXES`.
-        max_rendered_bytes: ``fetch_max_content_bytes``.
+        max_rendered_bytes: ``fetch_max_content_bytes``, on the quoted rendering.
+        max_decoded_bytes: ``fetch_max_decoded_bytes``, on the decoded bytes this
+            extraction **parses**, summed once per parse (ADR-0232 §2). **Plain text
+            and Markdown count zero for it and never consult it**: their extraction
+            has no decoding step — the extractor parses the file's own bytes, which
+            ``fetch_max_file_bytes`` already bounds at the read — so there is no
+            ratio between bytes read and bytes parsed for the bound to refuse (§3).
 
     Returns:
         The file's text, verbatim, whose :func:`rendered_length` is at most
         ``max_rendered_bytes``.
 
     Raises:
-        ExtractionFailedError: If the bytes are not the format the suffix names, or
-            the library cannot decode them.
-        ContentTooLargeError: If the rendering passes the bound. Raised as soon as it
-            does, so no more of the text is produced than was needed to know.
+        ExtractionFailedError: If the bytes are not the format the suffix names, if
+            the library cannot decode them, or if the walk cannot establish what the
+            extraction will parse (ADR-0232 §3's one fail-closed branch).
+        ContentTooLargeError: If either bound passes. Raised as soon as it does, so
+            no more of the text is produced — and no more of the document parsed —
+            than was needed to know.
         ValueError: If ``suffix`` is not supported. Unreachable from the fetch — the
             listing shows no other type, and ``fetch`` re-checks — and stated so that
             a future caller does not read a silent empty string as an answer.
@@ -149,7 +201,11 @@ def extract(data: bytes, suffix: str, *, max_rendered_bytes: int) -> str:
     if suffix in _TEXT_SUFFIXES:
         return _extract_text(data, max_rendered_bytes=max_rendered_bytes)
     if suffix == ".pdf":
-        return _extract_pdf(data, max_rendered_bytes=max_rendered_bytes)
+        return _extract_pdf(
+            data,
+            max_rendered_bytes=max_rendered_bytes,
+            max_decoded_bytes=max_decoded_bytes,
+        )
     msg = f"no extraction is defined for the {suffix!r} suffix"
     raise ValueError(msg)
 
@@ -172,8 +228,293 @@ def _extract_text(data: bytes, *, max_rendered_bytes: int) -> str:
     return text
 
 
-def _extract_pdf(data: bytes, *, max_rendered_bytes: int) -> str:
-    """Extract a PDF's text a page at a time, refusing as soon as the bound passes.
+class _Budget:
+    """The running total of decoded bytes this fetch's extraction will parse.
+
+    One object for the whole fetch, so the bound is a total across pages rather than
+    a per-page ceiling: "a per-page bound would admit an unbounded document made of
+    bounded pages, which is the defect ``fetch_max_content_bytes`` is already summed
+    to avoid" (ADR-0232 §3).
+
+    Every charge is followed **immediately** by the comparison, which is what puts a
+    refusal before the *next* decode rather than after a page's streams have been
+    summed. That is §3's own correction to the repair this walk descends from: a
+    page's ``/Contents`` may be an array, and summing before comparing materialises
+    every stream of it at the adopted library's 75 MB per-stream ceiling.
+    """
+
+    __slots__ = ("_limit", "total")
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        #: What has been charged so far. Read by nothing in production; a test's
+        #: window onto the running total.
+        self.total = 0
+
+    def charge(self, count: int) -> None:
+        """Add ``count`` decoded bytes, and refuse the moment the total passes.
+
+        Raises:
+            ContentTooLargeError: As soon as the total is over ``max_decoded_bytes``.
+        """
+        self.total += count
+        if self.total > self._limit:
+            raise ContentTooLargeError(_OVER_BOUND)
+
+
+@dataclass(slots=True)
+class _Walk:
+    """One page's walk: what it charges to, and what it has to remember.
+
+    ``pypdf`` builds one traversal state per :meth:`pypdf.PageObject.extract_text`
+    call and threads it through the whole descent, so its invocation count is
+    aggregate over a page's forms rather than per form and starts again at the next
+    page, while its cycle guard is a **path** — added on the way down and discarded on
+    the way back up — so a *re-entrant* form is skipped and five hundred *sequential*
+    invocations of one form are five hundred parses. Both are mirrored here, which is
+    what makes the walk stop charging exactly where the extraction stops descending.
+
+    Attributes:
+        pdf: The reader every indirect object resolves against — the extraction's own,
+            so the walk sees the same cached objects it will.
+        budget: The running total for the whole fetch, which refuses as it passes.
+        performed: How many form invocations this page's extraction has performed.
+        path: The forms currently being walked, held by identity.
+    """
+
+    pdf: object
+    budget: _Budget
+    performed: int = 0
+    path: list[PdfObject] = field(default_factory=list)
+
+
+def _resource_context(obj: DictionaryObject) -> DictionaryObject | None:
+    """The inherited ``/Resources`` the extraction will resolve, or ``None``.
+
+    ``PageObject._extract_text`` reads ``get_inherited(/Resources)`` and returns the
+    empty string **before it touches the content stream** where the answer is absent
+    or empty, on the ground that no resources means no font and so no text. So a page
+    carrying megabytes of compressed operators and no resource context parses *zero*
+    bytes, and charging it would refuse a document ADR-0232 §2's stated quantity
+    requires this seam to fetch (§3).
+
+    Returns:
+        The resource dictionary, or ``None`` where the extraction parses nothing from
+        this object. ``None`` is **an answer** — the walk asked, and no parse
+        follows — and never a failure to establish.
+
+    Raises:
+        ExtractionFailedError: Where the context is *present but structurally
+            unreadable* — an entry that is not a dictionary. That is §3's one
+            fail-closed branch, and the line it draws is between a question answered
+            "none" and a question the walk could not ask at all: the first two fetch
+            with nothing charged, and only the third refuses. A document refused here
+            is one the extraction was about to spend an unknown amount on.
+    """
+    resources = obj.get_inherited(_RESOURCES, None)
+    if is_null_or_none(resources):
+        return None
+    resolved = resources.get_object()
+    if not isinstance(resolved, DictionaryObject):
+        raise ExtractionFailedError(_UNREADABLE_CONTEXT)
+    return resolved or None
+
+
+def _content_of(
+    obj: DictionaryObject, *, is_page: bool
+) -> tuple[PdfObject | None, list[StreamObject]]:
+    """What the extraction will hand to its content-stream parser, and its streams.
+
+    ``_extract_text`` takes a page's ``/Contents`` and an XObject *itself*, resolves
+    it, and hands it to ``ContentStream``, which concatenates an array's members and
+    skips a member that is not a stream. Anything it cannot use at all — an absent
+    key, a null, an object with no data — leaves that object's extraction returning
+    the empty string, and a parse that does not happen costs nothing to charge for.
+
+    Returns:
+        The object to parse, and the streams the extraction will decode in the order
+        it decodes them. Both empty where nothing is parsed.
+    """
+    try:
+        content = obj[_CONTENTS].get_object() if is_page else obj
+    except AttributeError, KeyError:
+        return None, []
+    if isinstance(content, ArrayObject):
+        members = [part.get_object() for part in content]
+        return content, [part for part in members if isinstance(part, StreamObject)]
+    if isinstance(content, StreamObject):
+        return content, [content]
+    return None, []
+
+
+def _charged_font_program(font: PdfObject) -> StreamObject | None:
+    """The embedded font program this font's extraction will decode, if any.
+
+    ``pypdf._cmap._parse_to_unicode``'s own condition for entering
+    ``_type1_alternative``, key for key: no ``/ToUnicode``, ``/Subtype`` equal to
+    ``/Type1``, and a ``/FontDescriptor`` carrying a ``/FontFile``. Each is a property
+    of the font dictionary the walk has already resolved, so the charge is decided
+    **before anything is decoded** and is the extraction's own condition rather than a
+    forecast of it (ADR-0232 §3). ``Font.from_font_resource`` resolves a
+    ``/FontFile*`` with ``get_object()``, which does **not** decode, so a font with a
+    normal ``/ToUnicode`` and a large ``/FontFile2`` is charged nothing — a bound
+    counting those unconditionally would refuse on bytes the extraction never reads.
+
+    **It is complete only because ``fontTools`` is absent from this environment**, so
+    ``pypdf._font.py``'s conditional decode cannot execute and ``_type1_alternative``
+    is the only font-program decode ``extract_text`` reaches (ADR-0232 §6).
+    ``tests/readers/test_decoded_bound.py`` fails if that stops being true.
+
+    Returns:
+        The stream whose decoded length is charged, or ``None`` where the extraction
+        decodes no program for this font.
+    """
+    if not isinstance(font, DictionaryObject):
+        return None
+    if "/ToUnicode" in font or font.get("/Subtype", "") != "/Type1":
+        return None
+    if "/FontDescriptor" not in font:
+        return None
+    descriptor = font["/FontDescriptor"]
+    if not isinstance(descriptor, DictionaryObject):
+        return None
+    program = descriptor.get("/FontFile")
+    if program is None or is_null_or_none(program):
+        return None
+    resolved = program.get_object()
+    return resolved if isinstance(resolved, StreamObject) else None
+
+
+def _charge_font_programs(resources: DictionaryObject, budget: _Budget) -> None:
+    """Charge every font program this one parse will decode, one decode at a time.
+
+    Charged **per parse** rather than per distinct program, because the adopted
+    extraction rebuilds a stream's fonts on every ``_extract_text`` call while
+    ``get_data`` caches only the decompression: what repeats is the scan of the
+    program's clear part, once per page. "A quantity charged once when the extraction
+    pays it many times is not a bound" (ADR-0232 §3) — a 0.217 MiB document of 2,000
+    content-free pages sharing a 40 MB program **fetched** after 257 s when it was
+    measured, with a bound on instructions alone standing at zero throughout.
+    """
+    fonts = resources.get("/Font")
+    if fonts is None or is_null_or_none(fonts):
+        return
+    resolved = fonts.get_object()
+    if not isinstance(resolved, DictionaryObject):
+        return
+    for name in list(resolved):
+        try:
+            font = resolved[name]
+        except AttributeError, TypeError, KeyError:
+            # `_extract_text` swallows exactly this while building its fonts, so a
+            # font it cannot resolve is a font it decodes no program for.
+            continue
+        program = _charged_font_program(font)
+        if program is not None:
+            budget.charge(len(program.get_data()))
+
+
+def _invoked_form(resources: DictionaryObject, operands: list[PdfObject]) -> StreamObject | None:
+    """The Form XObject a ``Do`` descends into, resolved where the extraction does.
+
+    The operand is resolved against the **inherited** ``/Resources`` of the object
+    whose stream is being walked — a page's for a page's content stream, a form's own
+    for a form's — because that is where ``_extract_text__xform`` resolves it. An
+    operand naming no entry there adds nothing, **and that is soundness rather than
+    optimism**: a name that is not there for the walk is not there for the extraction,
+    the descent does not happen, and a parse that does not happen costs nothing to
+    charge for (ADR-0232 §3). An ``/Image`` is not a form and is not parsed.
+
+    Returns:
+        The form's stream, or ``None`` where the extraction descends nowhere.
+    """
+    try:
+        xobjects = resources["/XObject"]
+        if not isinstance(xobjects, DictionaryObject):
+            return None
+        form = xobjects[operands[0]]
+        if not isinstance(form, StreamObject):
+            return None
+        is_image = form["/Subtype"] == NameObject("/Image")
+    except Exception:
+        # `_extract_text` catches exactly this around its own descent, logs it, and
+        # carries on with no form parsed — including a form with no `/Subtype` at
+        # all. The walk agrees with the extraction about which parses happen or it
+        # is not a bound on what the extraction parses.
+        return None
+    return None if is_image else form
+
+
+def _charge_parse(obj: DictionaryObject, walk: _Walk, *, is_page: bool) -> None:
+    """Charge one parse and everything reached from it, refusing as the bound passes.
+
+    ADR-0232 §3's named construction, which is required to have the property rather
+    than to be this shape: resolve the inherited resources and **stop there, charging
+    nothing, where the extraction would**; otherwise add each decoded stream's length
+    and compare, add each charged font program's length and compare, then parse the
+    stream **with the adopted library's own content-stream parser**, take the ``Do``
+    operations it reports, resolve each against those same resources, and recurse.
+
+    **The library's own parser rather than a second grammar**, which costs an admitted
+    document a second parse and is the price of agreement. A stream can carry the
+    literal text ``(Do)`` with no form anywhere, and a walk scanning bytes would charge
+    a descent that never happens; a walk resolving operands somewhere other than where
+    the extraction resolves them gets the inherited case wrong in the other direction.
+    The doubling is bounded by the bound, which is what makes it affordable.
+
+    Args:
+        obj: The page or form whose parse is being charged.
+        walk: This page's reader, running total, invocation count and path.
+        is_page: Whether ``obj``'s stream is named by ``/Contents`` (a page) or is
+            ``obj`` itself (a form).
+
+    Raises:
+        ContentTooLargeError: The moment the running total passes the bound.
+        ExtractionFailedError: Where a resource context is present and unreadable.
+    """
+    resources = _resource_context(obj)
+    if resources is None:
+        return
+    content, streams = _content_of(obj, is_page=is_page)
+    for stream in streams:
+        walk.budget.charge(len(stream.get_data()))
+    _charge_font_programs(resources, walk.budget)
+    if content is None:
+        return
+    for operands, operator in ContentStream(content, walk.pdf, "bytes").operations:
+        if operator != b"Do":
+            continue
+        form = _invoked_form(resources, operands)
+        if form is None or any(walked is form for walked in walk.path):
+            continue
+        if walk.performed >= _MAX_XFORM_INVOCATIONS:
+            # The extraction returns the empty string and **skips** the form past
+            # this point rather than raising, so these are parses that never happen.
+            continue
+        walk.performed += 1
+        walk.path.append(form)
+        try:
+            _charge_parse(form, walk, is_page=False)
+        finally:
+            walk.path.pop()
+
+
+def _charge_page(page: pypdf.PageObject, budget: _Budget) -> None:
+    """Charge everything this page's extraction will parse, before it is entered.
+
+    Whether the whole of a page's count is established before ``extract_text`` is
+    entered is not a choice this seam has: the extraction follows a ``Do`` into a form
+    and parses it inside the same call, so there is no seam between that form's decode
+    and its parse to sit in. The count is therefore established for the page and every
+    parse reached from it before the page's extraction begins — which is the same
+    shape as the page loop one level up, and is why this is a bound on an *input*
+    rather than an observation of work in progress (ADR-0232 §5).
+    """
+    _charge_parse(page, _Walk(pdf=page.pdf, budget=budget), is_page=True)
+
+
+def _extract_pdf(data: bytes, *, max_rendered_bytes: int, max_decoded_bytes: int) -> str:
+    """Extract a PDF's text a page at a time, refusing as soon as a bound passes.
 
     Page-at-a-time is what makes §6's "enforces the bound **while** extracting rather
     than after" true of the text: the running total is checked after each page, so a
@@ -200,39 +541,81 @@ def _extract_pdf(data: bytes, *, max_rendered_bytes: int) -> str:
     ``tests/readers/test_local_file_fetcher.py`` builds the amplified document —
     roughly 1.4 KB claiming 64,000,000 pages — and asserts it is refused, so this is a
     property of the pinned dependency that a future version dropping a guard would fail
-    on rather than a claim this docstring makes on its own. That is what makes the
-    adoption's "bounded by ``fetch_max_file_bytes``" honest for a format whose page
-    count is not a function of its byte count.
+    on rather than a claim this docstring makes on its own.
 
-    **What is *not* bounded here, and why this seam cannot bound it** (issue #2022).
-    A page's content stream arrives Flate compressed, and a run of one repeated
-    operator compresses about 340:1. So a **47 KB** document, well inside the 4 MiB
-    default, holds 16 MB of operators, and parsing them into ``pypdf``'s own objects
-    cost **313 s** and **737 MB** of resident memory when it was measured on this
-    branch — superlinearly: 1 MB of operators took 6 s and 4 MB took 29 s. Neither of
-    §6's figures reaches it. The file bound is satisfied by the compressed bytes, and
-    ``fetch_max_content_bytes`` is counted on extracted *text*, which exists only once
-    the whole stream has been parsed.
+    **What the parse costs is bounded before the parse, and by a figure of its own**
+    (ADR-0232, closing issue #2022). A page's content stream arrives Flate compressed,
+    and a run of one repeated operator compresses about 340:1. So a **47 KB** document,
+    well inside the 4 MiB default, holds 16 MB of operators, and parsing them into
+    ``pypdf``'s own objects cost **313 s** and **737 MB** of resident memory when it was
+    measured — superlinearly: 1 MB of operators took 6 s and 4 MB took 29 s. Neither of
+    ADR-0230 §6's figures reaches it. The file bound is satisfied by the *compressed*
+    bytes, and ``fetch_max_content_bytes`` is counted on extracted *text*, which exists
+    only once the whole stream has been parsed.
 
-    **The memory half is bounded by the pinned library and the time half is not.**
-    ``pypdf`` 6.16.2 decodes a Flate stream through ``_decompress_with_limit``, capped
-    at ``ZLIB_MAX_OUTPUT_LENGTH`` (75,000,000 bytes) and raising ``LimitReachedError``
-    past it, with the same 75 MB ceiling on ``LZW``, ``RunLength``, ``JBIG2`` and the
-    array-based path — so a single stream cannot materialise more than that, and the
-    raise lands in this function's ``except`` as ``EXTRACTION_FAILED``. Nothing bounds
-    the **parse** of what was decoded.
+    So :func:`_charge_page` establishes what a page's extraction will parse **before**
+    ``extract_text`` is entered for it, against ``fetch_max_decoded_bytes`` — a running
+    total over the whole fetch, compared after each decoded stream and before the next
+    is decoded, and refused as ``TOO_LARGE``. The same 47 KB document is refused in a
+    hundredth of a second.
 
-    **Bounding it is a decision this lane may not take.** The obvious repair — a
-    running total of *decoded* content bytes refused against ``fetch_max_file_bytes``
-    — was written, measured (the 47 KB document then refuses in 0.01 s) and **removed
-    again** at review round 9, because it is an unratified refusal criterion: §6
-    defines that field as "the file's **size on disk**" and scopes ``TOO_LARGE`` to
-    its two configured bounds, and a 4 MiB PDF of vector artwork sits inside both
-    while carrying far more than 4 MiB of operators. Refusing it would change the
-    ``Fetcher`` outcome contract, which ADR-0015 puts in an ADR rather than in an
-    implementation. §6 is inconsistent here rather than silent — "the file's size on
-    disk" and "bounds the read **and the extraction's cost**" cannot both hold for a
-    compressed format — and #2022 carries the question.
+    **What is counted, established against ``pypdf`` 6.16.2 rather than recalled**
+    (ADR-0232 §6 requires this record at the code, and requires a later lane to
+    re-establish it against whatever ``uv.lock`` then fixes):
+
+    * **Every content stream the extraction parses, once per parse.** A page's own,
+      and every Form XObject reached from it, once for each ``Do`` that invokes it.
+      ``PageObject._extract_text__xform`` follows each ``Do`` into the named form and
+      parses it as a content stream of its own, so a **12,453 B** document whose
+      ``/Contents`` decodes to **ten bytes** cost **33.9 s**; and the descent is per
+      *invocation*, its cycle guard refusing only a **re-entrant** form, so a
+      **1,173 B** file invoking one 100 KB form five hundred times has 105 KB of
+      *distinct* decoded bytes and cost **126.6 s**.
+    * **The embedded font program of each font the extraction re-parses per page** —
+      ``_cmap._parse_to_unicode``'s own three keys, in :func:`_charged_font_program`.
+      The extraction rebuilds a stream's fonts on every ``_extract_text`` call and
+      ``get_data`` caches only the decompression, so the scan of the program's clear
+      part repeats once per page: a **0.217 MiB** document of 2,000 content-free pages
+      sharing a 40 MB program **fetched** after **257 s** with nothing refusing it.
+
+    **What is decoded and is *not* charged, which is a boundary rather than a gap**
+    (ADR-0232 §2, §3, and deferred by name in §10). A compressed **object stream**
+    (``/ObjStm``) is decoded whole by ``PdfReader._get_object_from_stream`` during
+    ordinary indirect-object resolution — before any per-page loop, so before any
+    total exists — and a font's **``/ToUnicode`` CMap** is decoded once. Each is read
+    **once and cached**, so no per-parse multiplier acts on either, and that absence is
+    the whole of the ground: not their cost per byte, and not any limit the library
+    happens to carry. Neither is bounded by anything this system owns, and
+    ``fetch_max_file_bytes`` does not bound them — it bounds the bytes **read from
+    disk**, and a small ``/ObjStm`` can expand to tens of MiB.
+
+    **The residual this leaves is stated rather than hidden.** Obtaining a stream's
+    decoded length requires decoding it, and the adopted library's interface decodes
+    whole streams, so one stream's decoded bytes are materialised before the comparison
+    that refuses them. What bounds *that* is ``pypdf``'s own ceiling and not this
+    system: 6.16.2 caps a Flate decode at ``ZLIB_MAX_OUTPUT_LENGTH`` (75,000,000 bytes)
+    and raises past it, with the same ceiling on ``LZW``, ``RunLength``, ``JBIG2`` and
+    the array-based path, and each raise lands in this function's ``except`` as
+    ``EXTRACTION_FAILED``. That is **evidence about a resolved version and never a
+    bound this system relies on** (ADR-0232 §6); ``pypdf`` is adopted ranged, so
+    nothing this project declares carries it.
+
+    **Measuring the length costs the extraction nothing**, which is why the comparison
+    can sit before the parse rather than being a second decode: ``pypdf`` caches a
+    stream's decoded bytes on the object, so the ``extract_text()`` that follows reads
+    the same bytes. That is a property of the adopted version, and it is why the check
+    is cheap — never why it is correct.
+
+    **The visitor route was tried first and does not work**, which is worth recording so
+    it is not tried again: ``extract_text(visitor_text=…)`` reports a fragment per
+    *text-block flush* — ``BT``/``ET``/``cm``/``Tf`` — not per operator, so a single
+    ``BT … ET`` block holding 90,909 ``Tj`` operators calls it exactly twice, and both
+    calls come after the parse the cost is in. Measured with the guard in place, the
+    47 KB document's numbers did not move. **And no deadline replaces it** (ADR-0232
+    §5): the 313 s is spent inside one uninterruptible call on a *single-page*
+    document, so a clock could only be read where the byte total already is, and it
+    would make the outcome a function of machine load where ADR-0230 §6 requires the
+    extraction to be deterministic for a given file.
     """
     try:
         reader = pypdf.PdfReader(io.BytesIO(data))
@@ -243,6 +626,9 @@ def _extract_pdf(data: bytes, *, max_rendered_bytes: int) -> str:
     # The delimiters are paid once, up front, so the running comparison is against
     # the same number `rendered_length` would report for the whole.
     total = _DELIMITERS
+    # One budget for the whole document: the decoded bound is a running total across
+    # pages, never a per-page ceiling (ADR-0232 §3).
+    budget = _Budget(max_decoded_bytes)
     index = 0
     while True:
         try:
@@ -250,6 +636,15 @@ def _extract_pdf(data: bytes, *, max_rendered_bytes: int) -> str:
         except IndexError:
             return "".join(produced)
         except Exception as exc:  # as above; every failure of extraction is one class
+            raise ExtractionFailedError(_UNDECODABLE) from exc
+        try:
+            _charge_page(page, budget)
+        except ContentTooLargeError, ExtractionFailedError:
+            # Both are already this seam's vocabulary: the first is the bound
+            # refusing, the second is §3's fail-closed branch. Neither is a library
+            # class to translate, and neither may be swallowed by the clause below.
+            raise
+        except Exception as exc:  # as above
             raise ExtractionFailedError(_UNDECODABLE) from exc
         try:
             page_text = page.extract_text()
@@ -271,4 +666,5 @@ def _extract_pdf(data: bytes, *, max_rendered_bytes: int) -> str:
 #: an underlying library", and these strings are the only text that reaches a traceback
 #: an operator might see.
 _UNDECODABLE: Final = "the file could not be decoded as the format its suffix names"
-_OVER_BOUND: Final = "the extracted text's rendering is over the configured bound"
+_OVER_BOUND: Final = "the extraction is over a configured bound"
+_UNREADABLE_CONTEXT: Final = "a resource context is present and cannot be read"
