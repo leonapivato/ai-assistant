@@ -1,6 +1,6 @@
 # 148. An egress call is authorised as one whole, and nothing in it moves after the ruling
 
-- Status: Partially superseded by ADR-0192 (§9's third clause, as it reaches where an attempt's outcome is recorded and not which four outcomes there are)
+- Status: Partially superseded by ADR-0192 (§9's third clause, as it reaches where an attempt's outcome is recorded and not which four outcomes there are) and ADR-0231 (§1's first clause, §7's first clause and §9's first, second and fourth clauses, each only as it reaches a `WEB_SEARCH` servicing's send: ADR-0231 §6 is a second route to the seam for that one kind, ADR-0231 §5 reads the credential inside `WebSearcher.search` after ADR-0029 §2's same three checks, `PermissionDecision.step_id` is `None` on such a decision and nothing reconciles a claim left open — while §1's prohibition on adding a route by configuration, by a declaration or by an integration constructing its own client, §7's remaining five clauses, §9's third clause and its four outcomes, and every other section of this ADR stand entire)
 - Date: 2026-08-13
 - Partially superseded: 2026-08-24 by ADR-0192 — **one clause of §9, on *where* an
   attempt's outcome is recorded.** §9's third clause rules that "The four outcomes
@@ -82,10 +82,20 @@
   ratification (§13).
 - Requires **new `core` contract surface** and lands none of it (§11). Flagged
   under golden rule 5.
-- Amended: 2026-09-04 by ADR-0231 — **§1's single-route clause, §7's first clause and
-  §9's first, second and fourth clauses, in the single scope of a `WEB_SEARCH`
-  servicing's send.**
-  §1 routes every send through `ToolInvoker.invoke`.
+- Partially superseded: 2026-09-04 by ADR-0231 — **§1's first clause, §7's first
+  clause and §9's first, second and fourth clauses, each only as it reaches a
+  `WEB_SEARCH` servicing's send.** Each states a rule a lane would apply to that send
+  and would apply differently from ADR-0231, so what moves is what this ADR **decided**
+  and not merely how widely a sentence of it reads: ADR-0070 §1 sends a changed
+  decision to a superseding ADR, partially where the scope is narrow (ADR-0070 §3), and
+  ADR-0082 §1 — which decides only whether a record is owed — says in terms that it
+  does not draw that line. ADR-0231 §20 works every one of its scopes through both
+  tests.
+  §1's first clause routes every send through `ToolInvoker.invoke` and rules that
+  *"There is no second route to the seam"*. **Its prohibition on the vehicles is
+  untouched and binds entire**: no route is added *"by configuration, by a declaration,
+  or by an integration constructing its own client"*, and ADR-0231's is added by none
+  of the three but by a ratified ADR, for one kind.
   [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
   §6 shows why that route is
   unavailable to a planner-emitted web search: `ToolInvoker`'s contract is that *"An id
@@ -98,8 +108,9 @@
   decision"*, and its fourth that a pending attempt is reconciled by ADR-0014 §4's
   recovery scan; a `WEB_SEARCH` servicing is not a plan step and has none.
 
-  **The property those clauses buy is kept, in the same change, and that is why this is
-  an amendment and not a supersession.** ADR-0017 §3's condition 12 — an attempt
+  **The property those clauses buy is kept in the same change, which is why the
+  supersession is this narrow and why the seam's designation still stands — it is not a
+  reason the record would be an amendment.** ADR-0017 §3's condition 12 — an attempt
   identifier carrying an explicit outcome — is borne by ADR-0192's invocation ledger,
   whose `claim_invocation(*, decision: PermissionDecision)` is keyed on the authorising
   decision rather than on a step, and whose completion carries one of ADR-0029 §3's
@@ -111,7 +122,7 @@
   clause is already partially superseded by ADR-0192 on *where* an outcome is recorded,
   and ADR-0231 neither extends nor narrows that record.
 
-  **§7's first clause is amended in the same single scope, and every prohibition it
+  **§7's first clause is superseded in the same single scope, and every prohibition it
   states is kept.** That clause reads an `INTEGRATION`-scoped credential only from
   *"inside a callable reached by `ToolInvoker.invoke` on a `ToolCall`, and only after
   ADR-0029 §2's three seam checks have passed"*. ADR-0231 §5 puts the read inside
@@ -147,10 +158,10 @@
   is relaxed: one route is added beside one, for one kind, under conditions ADR-0231
   §6 states.
 
-  This ADR's `Status` line carries the leading `Partially superseded by` token, so
-  under ADR-0082 §2 no amendment qualifier is written on it and this note is the whole
-  record. Appended note per ADR-0070 §1; no text below is rewritten. Refs #1996,
-  #1908.
+  This is a partial supersession, so ADR-0231 is named on the `Status` line above
+  beside ADR-0192, accumulating under ADR-0070 §4's grammar; ADR-0082 §2 governs an
+  **amendment** qualifier on a leading-token line and is not reached. Appended note per
+  ADR-0070 §1; no text below is rewritten. Refs #1996, #1908.
 
 ## Context
 

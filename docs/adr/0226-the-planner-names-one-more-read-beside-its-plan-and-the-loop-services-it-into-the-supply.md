@@ -309,6 +309,19 @@
   kind whose servicing **is** an act in the world, and it is the sentence a later lane
   should read before widening it further.
 
+  **All three are amendments and not supersessions, and ADR-0070 §1's test is why.**
+  §2's membership sentence undercounts an enumeration §1's own additive-entry clause
+  licenses a later ADR to grow, so the growth is this ADR's own rule being used and the
+  sentence is the stale phrase ADR-0070 §1 enumerates. §6's precedence sentence states
+  a position **derived** by a rule — the capped read ahead of the uncapped one — which
+  ADR-0231 §11 applies rather than replaces. And §4's clause is about the **`ReadAsk`**:
+  a `WEB_SEARCH` ask is still not ruled on by the permission gate, and what ADR-0231 §9
+  puts in front of `ActionPolicy` is the **send** its servicing performs, which no kind
+  this ADR was written over had. A reader acting on each of the three sentences acts
+  identically before and after; only the reach changes. Where ADR-0231 does change what
+  an earlier ADR decided — ADR-0148 §1, §7 and §9, and ADR-0154 §2 — it records a
+  partial supersession instead, and ADR-0231 §20 shows the working for both.
+
   **§5 is not amended and is load-bearing.** Its ask-nothing, park-nothing,
   never-fail-the-turn posture is what ADR-0231 §9's decline rests on, and its channel
   scoping binds the new kind unchanged. **§9 is not amended either**: ADR-0231 §13

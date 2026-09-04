@@ -1,6 +1,6 @@
 # 154. The `tools/` egress seam is designated, and the fourteen conditions are attested in code
 
-- Status: Partially superseded by ADR-0193 (§4's standing-authorisation floor, item (ii)'s first clause, in the single respect that a user-established recipient grant may cover an egress call at this seam)
+- Status: Partially superseded by ADR-0193 (§4's standing-authorisation floor, item (ii)'s first clause, in the single respect that a user-established recipient grant may cover an egress call at this seam) and ADR-0231 (§2's second clause, only as it reaches a `WEB_SEARCH` servicing's send, and only in the limb restating ADR-0148 §1's single route through `ToolInvoker.invoke`: that send leaves by the route ADR-0231 §6 states, while the clause's other limbs, §1's designation of this module and no other, §2's remaining clauses, §4's fourteen attestations including its actuator clause, §6's residues and residency clause and §7's `DestinationProtocol` reservation all stand entire)
 - Date: 2026-08-14
 - **Note (2026-08-26): §4's condition 3 is re-attested, and now holds by both
   limbs of ADR-0017 §3's disjunct rather than by the first alone.** ADR-0193's
@@ -132,11 +132,17 @@
   it is *satisfied* here, not replaced — and the single edit this change makes to
   ADR-0017 is one appended dated note, its `Status` line being left alone under
   ADR-0082 §2 (§5). Refs #93, #1096.
-- Amended: 2026-09-04 by ADR-0231 — **§2's second clause, in the single scope of a
-  `WEB_SEARCH` servicing's send.** That clause reads *"Every send remains subject to
-  ADR-0148's per-call machinery whole: §1's single route through
-  `ToolInvoker.invoke`, …"*, and it is stated over **every send**, so ADR-0082 §1's
-  test is met the moment a send leaves this seam by another route.
+- Partially superseded: 2026-09-04 by ADR-0231 — **§2's second clause, only as it
+  reaches a `WEB_SEARCH` servicing's send.** That clause reads *"Every send remains
+  subject to ADR-0148's per-call machinery whole: §1's single route through
+  `ToolInvoker.invoke`, …"*, and it is stated over **every send**: a lane holding only
+  this ADR would route that one through the invoker, which ADR-0231 §6 rules out. That
+  is a change to what was **decided** rather than a sentence merely read too widely, so
+  ADR-0070 §1 puts it on the supersession side — partially, ADR-0070 §3's first-class
+  form — exactly as it does for ADR-0148 §1, the clause this one restates. **Every
+  other limb of the same clause binds on a search request unchanged**: ADR-0148 §3's
+  recipient authorisation, §4's whole-set rule, §7's credential gate as ADR-0231 §5
+  states it, and §8's approver and its floors.
   [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
   §6 is that
   route and states why the invoker's is unavailable; the record on ADR-0148 carries
@@ -169,10 +175,10 @@
   by ADR-0231 §8, which is the ratified contract ADR ADR-0150 §3 requires, and not
   moved.
 
-  This ADR's `Status` line carries the leading `Partially superseded by` token, so
-  under ADR-0082 §2 no amendment qualifier is written on it and this note is the whole
-  record. Appended note per ADR-0070 §1; no text below is rewritten. Refs #1996,
-  #1908.
+  ADR-0231 is named on the `Status` line above beside ADR-0193, accumulating under
+  ADR-0070 §4's grammar; ADR-0082 §2 governs an **amendment** qualifier on a
+  leading-token line and is not reached. Appended note per ADR-0070 §1; no text below
+  is rewritten. Refs #1996, #1908.
 
 ## Context
 

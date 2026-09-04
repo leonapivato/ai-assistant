@@ -22,7 +22,18 @@
   amendment is confined to the one kind whose servicing **is** an act in the world;
   and §5's channel scoping, no-tool clause and degradation posture, §6's budget of
   ten and second-budget rule, §7's fourth group and whole-union deduplication, §8's
-  trigger and §9's audit all bind as ratified. ADR-0226's `Status` line carries the
+  trigger and §9's audit all bind as ratified.
+  **All three of these are amendments and not supersessions, and ADR-0070 §1's test is
+  why.** §2's membership sentence undercounts an enumeration §1's own additive-entry
+  clause licenses a later ADR to grow, so the growth is ADR-0226's rule being used and
+  the sentence is the stale phrase ADR-0070 §1 enumerates. §6's precedence sentence
+  states a position **derived** by a rule — the capped read ahead of the uncapped one —
+  and §11 below applies that rule rather than replacing it. §4's not-ruled-on clause is
+  about the **`ReadAsk`**, and a `WEB_SEARCH` ask is still not ruled on by the
+  permission gate; what §9 below puts in front of `ActionPolicy` is the **send** its
+  servicing performs, which no kind ADR-0226 was written over had. A reader acting on
+  each of the three sentences acts identically before and after; only the reach
+  changes. ADR-0226's `Status` line carries the
   leading `Partially superseded by` token, so this record lives in its appended dated
   note and not on that line (ADR-0082 §2).
 - **Amends** [ADR-0230](0230-the-planner-names-a-file-it-was-shown-and-the-loop-fetches-it-into-the-supply.md)
@@ -38,11 +49,28 @@
   from a cache of its own, is outside this scope entirely and ADR-0092 §3 binds it as
   written"*, which §10 obeys rather than extends; and §15's first entry, which leaves
   this lane its questions open and which §1, §2 and §5 below answer one by one.
-- **Amends** [ADR-0148](0148-an-egress-call-is-authorised-as-one-whole-and-nothing-in-it-moves-after-the-ruling.md)
-  — **§1's single-route clause, §7's first clause and §9's first, second and fourth
-  clauses, in the single scope of a `WEB_SEARCH` servicing's send, and nothing else.**
-  §1 routes every send through `ToolInvoker.invoke`; §6 below shows why that route is
-  unavailable to this send and what replaces it. §7's first clause reads a credential
+  **This too is an amendment on ADR-0070 §1's test**: §7 orders by cap and §11 below
+  places this kind by that same rule, so a reader who reads §7's own reason reaches
+  §11's answer and acts identically before and after.
+- **Partially supersedes** [ADR-0148](0148-an-egress-call-is-authorised-as-one-whole-and-nothing-in-it-moves-after-the-ruling.md)
+  — **§1's first clause, §7's first clause and §9's first, second and fourth clauses,
+  each only as it reaches a `WEB_SEARCH` servicing's send, and nothing else.**
+  **These are supersessions and not amendments, and ADR-0070 §1's test is what makes
+  them so**: each states a rule a lane would apply to this send and would apply
+  *differently* from this ADR, so what moves is what ADR-0148 **decided** rather than
+  how widely one of its sentences reads. ADR-0082 §1 decides whether a record is owed
+  on the earlier ADR and says in terms that the amend-versus-supersede line is *"§1's,
+  and this ADR does not touch that line"*; ADR-0070 §1 draws it, and ADR-0070 §3 makes
+  the partial form a first-class one. §20 works every scope of this ADR through both
+  tests and shows which come out on the other side.
+  §1's first clause rules that no component transmits through the seam except from a
+  callable reached by `ToolInvoker.invoke`, and that *"There is no second route to the
+  seam"*; §6 below is a second route for this one kind and shows why the invoker's is
+  unavailable. **That clause's prohibition on the vehicles is untouched and binds
+  entire**: no route is added *"by configuration, by a declaration, or by an
+  integration constructing its own client"*, and this one is added by none of the
+  three but by a ratified ADR, for one kind, under conditions §6 states.
+  §7's first clause reads a credential
   only from *"inside a callable reached by `ToolInvoker.invoke` on a `ToolCall`, and
   only after ADR-0029 §2's three seam checks have passed"*; §5 below moves that
   position to `WebSearcher.search` after those same three checks and keeps every
@@ -54,22 +82,31 @@
   buy — ADR-0017 §3's condition 12, an attempt identifier carrying an explicit
   outcome — through ADR-0192's invocation ledger, whose claim is keyed on a
   `PermissionDecision` rather than on a step, and shows why a servicing that produces
-  one record has nothing to reconcile. §9's **third** clause is already partially
+  one record has nothing to reconcile. **The property surviving is why the supersession
+  is this narrow; it is not a reason the record would be an amendment**, because those
+  clauses state a mechanism and §6 states a different one for this send. §9's **third**
+  clause is already partially
   superseded by ADR-0192 on *where* an outcome is recorded, and this ADR neither
   extends nor narrows that record. **Everything else in ADR-0148 binds entire and is
   load-bearing here**: §2's canonical destination set, §3's recipient authorisation
   tracing to a user act and its refusal of every near-miss, §4's whole-set rule, §6's
-  determinism, §7's remaining five clauses — its fourth among them, which is what
+  determinism and its one-step and post-read discard clauses, §7's remaining five
+  clauses — its fourth among them, which is what
   reconciles §6's discard with its first — §8's approver and its three floors,
   §9's four outcomes with *pending* among them, and §9's prohibition on resolving a
-  pending attempt by guessing. No clause of ADR-0148 is relaxed; one route is added
-  beside one, under conditions §6 states.
-- **Amends** [ADR-0154](0154-the-tools-egress-seam-is-designated-and-the-fourteen-conditions-are-attested-in-code.md)
-  — **§2's second clause, in the same single scope and for the same reason.** That
-  clause reads *"Every send remains subject to ADR-0148's per-call machinery whole:
-  §1's single route through `ToolInvoker.invoke`, …"*, and it is stated over **every
-  send**, so ADR-0082 §1's test is met the moment a send leaves the seam by another
-  route. **ADR-0154 is otherwise untouched and this ADR rests on it entire**: §1's
+  pending attempt by guessing. Nothing outside the three scopes named above moves, and
+  no clause outside them is relaxed.
+- **Partially supersedes** [ADR-0154](0154-the-tools-egress-seam-is-designated-and-the-fourteen-conditions-are-attested-in-code.md)
+  — **§2's second clause, only as it reaches the same send, and for the same reason.**
+  That clause reads *"Every send remains subject to ADR-0148's per-call machinery
+  whole: §1's single route through `ToolInvoker.invoke`, …"*, and it is stated over
+  **every send**: a lane holding only ADR-0154 would route this one through the
+  invoker, which §6 below rules out, so ADR-0070 §1's test comes out on the
+  supersession side exactly as it does for the clause ADR-0154 is restating. **Every
+  other limb of that same clause binds on a search request unchanged** — ADR-0148 §3's
+  recipient authorisation, §4's whole-set rule, §7's credential gate as §5 below states
+  it, and §8's approver and its floors. **ADR-0154 is otherwise untouched and this ADR
+  rests on it entire**: §1's
   designation is the ground of §5 below and no second seam is designated; §2's
   remaining clauses bind — this ADR registers no tool in any registry the turn path
   selects from, approves no destination on the strength of designation, lifts no
@@ -256,7 +293,7 @@ Read rather than recalled. Each of these is load-bearing below.
   is exactly what `ActionRequest` is for — it carries the definition by value so no
   registry is consulted — and a declaration may be registered at the egress seam
   without being in any registry the turn path selects from (above). What is genuinely
-  unavailable is `ToolInvoker.invoke`, and §6 states the amendment that costs.
+  unavailable is `ToolInvoker.invoke`, and §6 states what that costs.
 - **"A search result's `Provenance` names the URL."** #1908 and the lane brief both
   say so; no field on `Provenance` or `Attestation` can carry an address, and
   ADR-0230 §5 deliberately keeps the address off the record. §10 puts the provider's
@@ -801,7 +838,7 @@ for this kind, and this ADR chooses which to move: the route, which is a mechani
 rather than the capability boundary, which is a property #1908, ADR-0170 §5a and
 ADR-0208 §1 all rest on.
 
-**What the amendment costs, and what it does not.** It moves `ToolInvoker`'s three
+**What moving the route costs, and what it does not.** It moves `ToolInvoker`'s three
 pre-execution checks onto the seam, which is why they are a marked clause above rather
 than a remark: `ToolCall`'s own validator runs `PermissionDecision.authorises` at
 construction and that is deliberately **not sufficient**, because `object.__setattr__`
@@ -1073,7 +1110,14 @@ under it, makes a search fire without the user having authorised the recipient.
 > for the result, and the result's **snippet**, one per line, separated by a single
 > `\n`, with no other byte added. Where the provider supplied no title or no snippet
 > the line is omitted and the remaining lines keep their order; a result for which the
-> provider supplied **no address** is dropped. This form is fixed here so that two
+> provider supplied **no address** is dropped. **A result any of whose three spans
+> carries an ASCII line break — `\n` or `\r`, at any position — is dropped whole**, and
+> for this clause's own reason: the line structure is the only thing keeping the three
+> spans apart, so a span carrying a break would have to be altered, which would stop it
+> being verbatim, or would produce a record whose lines no reader can assign to a span.
+> Dropping is the one answer that keeps both properties, it is the answer this section
+> already gives an over-long result and an address-less one, and §13's audit counts it
+> with those. This form is fixed here so that two
 > conforming implementations over one response produce byte-identical records; it adds
 > no word of this system's, and is a **transcription** rather than a rendering in
 > exactly the sense ADR-0230 §5 gives for a decoding.
@@ -1541,7 +1585,7 @@ than a new one.** That survey's third subject is what caps *"what the world may
 cost"*, and ADR-0194 built the cap: a gate consulted *"the instant before the act"*,
 reading the declared cost, the configured values, the clock and the rows, and *"no
 caller-controlled value"*. Routing the search past `ToolInvoker.invoke` (§6) would have
-dropped that gate on the floor, which is exactly the kind of loss an amendment makes
+dropped that gate on the floor, which is exactly the kind of loss a moved clause makes
 silently; naming the gate here and putting it inside the seam keeps it. And the
 declaration's `cost` being `UNKNOWN` where the operator configured no figure is what
 makes the whole thing hold together: an unpriced provider confirms rather than runs
@@ -1732,7 +1776,11 @@ close among the resources it has opened (ADR-0042 §2).
 
 > **Normative.** The conformance suite holds the clauses expressible **without a
 > provider**: a `SearchOutcome` carries records **or** a refusal and never both or
-> neither; at most **the result count the implementation under test was configured
+> neither; **`name` is non-blank and is the same string on every access and across
+> every call**, read before, between and after a call that succeeds and a call that
+> refuses, which is what keeps one connected source from fragmenting into several
+> provenance instances a reader would take for different sources; at most **the result
+> count the implementation under test was configured
 > with**, supplied by the harness for the same reason; every minted record is
 > `SEMANTIC`,
 > `EXTERNAL`-sourced, carries an `Attestation` whose `reported_by` equals `name`,
@@ -1855,7 +1903,15 @@ for less.
 9. **A result over the content bound is dropped and its siblings are minted**, and a
    response every one of whose results is over the bound yields nothing. A response
    carrying more results than the configured count mints exactly that many, in the
-   order the provider returned them.
+   order the provider returned them. **The other two drops §10 states are asserted the
+   same way**: a result the provider supplied no address for, and a result whose title,
+   address or snippet carries `\n` or `\r` — one arm per span and per character, since
+   an implementation that guards the title and forgets the snippet passes a single-span
+   test. Each arm asserts the offending result is absent, that its siblings are minted
+   in the order the provider returned them, and that a response every result of which
+   is dropped for any of the three reasons is `NO_RESULT` rather than an empty success.
+   An implementation that transcribes a break passes every other test here and fails
+   these, because its record's line count no longer says which span is which.
 9a. **The three vocabularies are complete and the mapping is total.** `QueryRefusal`
     holds exactly its four members, `SearchRefusal` exactly its six, and
     `SearchDisposition` exactly its fifteen; every `QueryRefusal` member and every
@@ -2005,36 +2061,71 @@ for less.
 
 ### 20. Scope, and what this records against earlier ADRs
 
-**This ADR amends four ratified ADRs — ADR-0226 in three scopes, ADR-0230, ADR-0148
-in three scopes and ADR-0154 in one each — and supersedes none.** That is a
-classification of this change and is therefore stated as prose rather than marked
-(ADR-0089 §1). The header carries each record; what follows is the working under
-ADR-0082 §1's test, and the clauses a reader would most expect to have moved and which
-did not.
+**This ADR partially supersedes two ratified ADRs and amends two more: ADR-0148 in
+three scopes and ADR-0154 in one are partial supersessions, and ADR-0226 in three
+scopes and ADR-0230 in one are amendments.** That is a classification of this change
+and is therefore stated as prose rather than marked (ADR-0089 §1). The header carries
+each record; what follows is the working, scope by scope, and the ADRs a reader would
+most expect to have moved and which did not.
 
-**Why every record is an amendment and none is a supersession.** ADR-0070 §1's test is
-whether a reader acting on the earlier text today does the wrong thing. On every clause
-below the answer is no: ADR-0226 §2's membership sentence undercounts a closed
-enumeration a reader can read off `ReadKind`; §4's not-ruled-on clause is true of the
-three kinds it was written about and of every kind whose servicing reads the owner's
-own store; §6's and ADR-0230 §7's precedence sentences state an order that is still
-correct on the reads they name; ADR-0148 §1's single route, §7's position and §9's
-claimed step are true of every tool call, which is every send this system makes today; and ADR-0154 §2's
-restatement is true of every send at the seam until Lane 3 lands. A reader holding only
-the earlier text would in each case read a sentence **more widely than it now holds** —
-ADR-0082 §1's test — and would not be led into an error. So each is a record on the
-earlier ADR and none replaces a ruling.
+**Two tests run, in this order, and conflating them is the error this section exists to
+avoid.** ADR-0082 §1 decides **whether a record is owed** on the earlier ADR: would a
+reader holding only that ADR now act differently, or read one of its clauses more
+widely than it now holds? Every scope below meets that test, so every one of them is
+recorded. ADR-0082 §1 then says in terms that the amend-versus-supersede line is not
+its to draw — *"§1 decides which, and this ADR does not touch that line"* — and
+ADR-0070 §1 draws it: an edit that **changes no decision** is an amendment, while
+*"Any change to what was decided requires a new ADR that supersedes the old one —
+wholly, or partially"*. Reading a sentence more widely than it holds is not by itself a
+changed decision; applying the earlier rule and getting an answer this ADR forbids is.
+ADR-0070 §1's own 2026-07-31 note is explicit on that asymmetry — *"a reader does
+something observably different"* is not by itself sufficient to force a supersession,
+and the question is always whether the earlier ADR **decided** the thing being
+changed — and ADR-0082 §1 is explicit that *"The test controls, not the label"*, in
+both directions.
 
-**ADR-0148 §9 is the one a reviewer should press, and the answer is that the property
-moved bearers rather than being narrowed.** Its clauses exist to satisfy ADR-0017 §3's
-condition 12, which ADR-0154 §4 attested; and ADR-0154 §4's own clause says a change
-falsifying a subsection's property removes designation's ground unless the lane
-*"restores the property in the same change"*. §6 restores it in the same change, on
-ADR-0192's ledger, whose claim is keyed on the `PermissionDecision` an egress call
-already has. What would have been a supersession is a change of bearer, and the
-alternative — synthesising a plan step for a read, so that a clause about steps would
-have a subject — is refused in §6 because it would put a `ReadAsk` in front of
-`StepExecutor`, which ADR-0226 §4 forbids and which this ADR does not amend.
+**Four scopes change what was decided, so they are partial supersessions.** ADR-0148
+§1's first clause says *"There is no second route to the seam"* and §6 above is a
+second one; §7's first clause fixes the credential read inside a callable reached by
+`ToolInvoker.invoke` and §5 reads it inside `WebSearcher.search`; §9's first and second
+clauses put every egress inside a claimed step with `PermissionDecision.step_id` set,
+and §6 sets it `None`; §9's fourth names ADR-0014 §4's recovery scan as the
+reconciliation path where §6 rules that nothing reconciles. ADR-0154 §2's second clause
+restates ADR-0148 §1 over *"every send"* and falls with it. In each case a lane holding
+only the earlier text would route, read, stamp or reconcile as that text says and this
+ADR forbids — ADR-0070 §1's supersession side, however narrow the scope. ADR-0070 §3
+makes the partial form first-class rather than a discouraged one, each record names its
+clause and its one scope on the earlier ADR's `Status` line, and nothing outside those
+scopes moves.
+
+**Four scopes change no decision, so they are amendments.** ADR-0226 §2's membership
+sentence undercounts an enumeration §1's own **additive-entry clause** licenses a later
+ADR to grow — the growth is ADR-0226's own rule being used, and the sentence is the
+stale phrase ADR-0070 §1 enumerates among the permitted amendments. §6's precedence
+sentence and ADR-0230 §7's servicing order state a position **derived** by a rule —
+*"the capped read ahead of the uncapped one"* — and §11 above applies that rule rather
+than replacing it, so a reader who reads the reason reaches this ADR's answer.
+ADR-0226 §4's not-ruled-on clause is about the **`ReadAsk`**, and a `WEB_SEARCH` ask is
+still not ruled on by the permission gate, not selected against the capability
+vocabulary, not resolved to a tool, and never at `StepExecutor` or `ExecutionState`;
+what §9 above puts in front of `ActionPolicy` is the **send** the servicing performs,
+which no kind ADR-0226 was written over had. A reader acting on each of those four
+sentences acts identically before and after, and only the sentence's reach changes —
+which is why ADR-0230 recorded the first and the third of them the same way and was
+ratified doing it.
+
+**ADR-0148 §9 is the scope a reviewer should press hardest, and the answer is that the
+clauses are superseded while the property they were written for is kept.** They exist
+to satisfy ADR-0017 §3's condition 12, which ADR-0154 §4 attested; and ADR-0154 §4's
+own clause says a change falsifying a subsection's property removes designation's
+ground unless the lane *"restores the property in the same change"*. §6 restores it in
+the same change, on ADR-0192's ledger, whose claim is keyed on the `PermissionDecision`
+an egress call already has. **That is what keeps the seam's designation standing; it is
+not what would make the record an amendment**, because the clauses state a mechanism
+and §6 states a different one for this send. The alternative — synthesising a plan step
+for a read, so that a clause about steps would have a subject — is refused in §6
+because it would put a `ReadAsk` in front of `StepExecutor`, which ADR-0226 §4 forbids
+and which this ADR does not move.
 
 **Four ADRs a reader would expect to have moved, and did not.**
 
@@ -2120,8 +2211,8 @@ is that statement, and it answers #95 for nothing else.
 - **Register the search as an ordinary tool and let the planner name a step.**
   Rejected by #1908's own sentence, by ADR-0170 §5a (*"a tool's result is a JSON payload
   with no per-span provenance"*) and by ADR-0208 §1. It is also the shape that would
-  have needed no amendment at all, which is worth naming: the amendments in §6 are the
-  price of keeping records-not-payloads, and they are cheaper than the thing they buy.
+  have moved no ratified clause at all, which is worth naming: the scopes §6 supersedes
+  are the price of keeping records-not-payloads, and they are cheaper than what they buy.
 - **Service the search last, after the citation hop and the sighted query.** Rejected in
   §11: it would make the kind's availability a function of how full the budget happened
   to be, and would put the weakest-cap read ahead of the strongest namer.
