@@ -403,6 +403,14 @@ def _stage(directory: Path, names: list[str], download: Download, created: list[
     when this raises partway through. ``directory`` itself is not recorded, and
     nothing above it is: ``_vendor/`` is shared with every other artifact a build
     acquires, so it is not this call's to remove.
+
+    A manifest entry may name a path rather than a bare file, so both the staging
+    target and the destination get their parent created (issue #2082). The
+    vendored manifest is flat today; a re-pin that nested a file used to fail
+    acquisition with a bare ``FileNotFoundError``, outside this module's own
+    failure contract — which is also what the unlisted-file refusal's advice to
+    "record them in the manifest if they are meant to ship" would have produced
+    for a nested file.
     """
     directory.mkdir(parents=True, exist_ok=True)
     named = set(ARTIFACT_MANIFEST)
@@ -412,6 +420,7 @@ def _stage(directory: Path, names: list[str], download: Download, created: list[
         staged = Path(staging)
         for name in names:
             target = staged / name
+            target.parent.mkdir(parents=True, exist_ok=True)
             download(
                 repo_id=ARTIFACT_REPO_ID,
                 filename=name,

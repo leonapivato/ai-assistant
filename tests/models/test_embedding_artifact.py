@@ -376,6 +376,65 @@ def test_a_failed_verification_keeps_what_was_already_there(
     )
 
 
+def test_a_nested_path_is_staged_into_its_own_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A manifest entry may name a path, and staging has to create it (#2082).
+
+    The vendored manifest is flat, so nothing else exercises this — but a re-pin
+    that nested a file would have failed acquisition with a bare
+    ``FileNotFoundError``, and the unlisted-file refusal tells a maintainer to
+    record such a file in the manifest. ``speech_artifact`` already does this;
+    its suite's version of this test is the one mirrored here.
+    """
+    nested = _SyntheticArtifact({"sub/dir/model_optimized.onnx": b"nested weights\n"})
+    monkeypatch.setattr(embedding_artifact, "ARTIFACT_MANIFEST", MappingProxyType(nested.manifest))
+    downloader = _Downloader(nested)
+
+    with network_denied():
+        ensure_artifact(tmp_path, download=downloader)
+
+    staged = tmp_path / "sub" / "dir" / "model_optimized.onnx"
+    assert staged.read_bytes() == b"nested weights\n"
+    verify_artifact(tmp_path)
+
+
+def test_a_rolled_back_nested_acquisition_leaves_no_directory_it_created(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Staging a nested entry creates directories as well as writing files, so the
+    # rollback (#2081) has to take those with it or the destination is not as the
+    # build found it.
+    nested = _SyntheticArtifact({"sub/dir/model_optimized.onnx": b"nested weights\n"})
+    monkeypatch.setattr(embedding_artifact, "ARTIFACT_MANIFEST", MappingProxyType(nested.manifest))
+    (tmp_path / "left-behind.onnx").write_bytes(b"from an earlier pin")
+
+    with network_denied(), pytest.raises(ArtifactError, match="does not name"):
+        ensure_artifact(tmp_path, download=_Downloader(nested))
+
+    assert not (tmp_path / "sub").exists()
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["left-behind.onnx"]
+
+
+def test_a_rollback_keeps_a_directory_that_was_already_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Rolling back what staging created must not become rolling back what it
+    # merely *used*: an empty directory that was in the destination before the
+    # build is not the build's to remove, even once the file it staged into it is
+    # gone again.
+    nested = _SyntheticArtifact({"sub/model_optimized.onnx": b"nested weights\n"})
+    monkeypatch.setattr(embedding_artifact, "ARTIFACT_MANIFEST", MappingProxyType(nested.manifest))
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "left-behind.onnx").write_bytes(b"from an earlier pin")
+
+    with network_denied(), pytest.raises(ArtifactError, match="does not name"):
+        ensure_artifact(tmp_path, download=_Downloader(nested))
+
+    assert (tmp_path / "sub").is_dir(), "a pre-existing directory was removed"
+    assert not (tmp_path / "sub" / "model_optimized.onnx").exists(), "the staged file survived"
+
+
 def test_a_symlinked_parent_cannot_carry_the_artifact_out_of_its_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
