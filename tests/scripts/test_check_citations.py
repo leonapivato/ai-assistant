@@ -1125,6 +1125,81 @@ def test_padding_wider_than_a_code_block_still_ends_at_a_sibling(tmp_path: Path)
     assert [f["path"] for f in findings] == ["docs/adr/0002-later.md"]
 
 
+def _record_pair(record: str) -> dict[str, str]:
+    """ADR-0001, plainly ``Accepted``, and ADR-0002 whose header carries ``record``.
+
+    ADR-0001's Status names no supersessor, so §4 reports every record that
+    reaches it: silence below means the record named no ADR at all, and a
+    finding means it named ADR-0001. That is the only thing the checker does
+    with a reverse record's value, so where the value ends is observable
+    exactly here.
+
+    Args:
+        record: ADR-0002's header lines below its ``Status``.
+
+    Returns:
+        The ``_make_repo`` ADR mapping.
+    """
+    return {
+        "0001-one.md": "# 1. One\n\n- Status: Accepted\n- Date: 2026-01-01\n",
+        "0002-two.md": f"# 2. Two\n\n- Status: Accepted\n{record}",
+    }
+
+
+def test_a_padded_record_does_not_swallow_a_sibling_field(tmp_path: Path) -> None:
+    # #2018: a record's continuation floor is the column its marker *actually*
+    # reaches, not the two columns a canonical ``- `` would reach. Under
+    # ``-   Supersedes:`` the content column is 4, so the two-space ``- Date:``
+    # beneath it is a sibling field and ends the value. The record's own value
+    # names no ADR, so §4 skips it in silence — where the replaced pattern
+    # folded the sibling in and reported a disagreement against an ADR the
+    # record never named, which is §6's forbidden direction rather than a
+    # benign miss. This is the case that fails against the fixed floor.
+    _make_repo(
+        tmp_path, _record_pair("-   Supersedes: the earlier decision\n  - Date: see ADR-0001\n")
+    )
+
+    assert _findings(_report(tmp_path, "--no-tracker"), "liveness") == []
+
+
+def test_a_padded_record_still_folds_its_own_continuation(tmp_path: Path) -> None:
+    # The mirror of the case above: a line that *does* reach the padded marker's
+    # content column is continuation and must still be folded in, so the fix
+    # narrows the floor rather than disabling wrapping under a padded marker.
+    # ADR-0001 is named only by the wrapped line, and reporting it is proof the
+    # line was read as part of the record.
+    _make_repo(
+        tmp_path, _record_pair("-   Supersedes: the earlier decision,\n    namely ADR-0001\n")
+    )
+
+    findings = _findings(_report(tmp_path, "--no-tracker"), "liveness")
+
+    assert [f["path"] for f in findings] == ["docs/adr/0002-two.md"]
+
+
+def test_a_canonical_record_reads_exactly_as_before(tmp_path: Path) -> None:
+    # A canonical ``- `` marker has content column 2, which is where the
+    # replaced pattern's fixed floor sat: the two-space wrap belongs to the
+    # record, as it always did. All nine records on `main` are canonical, so
+    # this is the shape the fix must leave untouched.
+    _make_repo(tmp_path, _record_pair("- Supersedes: the earlier decision,\n  namely ADR-0001\n"))
+
+    findings = _findings(_report(tmp_path, "--no-tracker"), "liveness")
+
+    assert [f["path"] for f in findings] == ["docs/adr/0002-two.md"]
+
+
+def test_a_single_space_line_does_not_reach_a_canonical_record(tmp_path: Path) -> None:
+    # One column short of the content column ends the field, so the record's own
+    # value names no ADR and §4 says nothing. The replaced pattern agreed here —
+    # this is a regression guard on the computed column, not a mutation
+    # detector — and it is the clause that makes the column a measurement rather
+    # than "any indent at all".
+    _make_repo(tmp_path, _record_pair("- Supersedes: the earlier decision,\n namely ADR-0001\n"))
+
+    assert _findings(_report(tmp_path, "--no-tracker"), "liveness") == []
+
+
 def test_a_body_list_item_that_looks_like_a_record_is_not_one(tmp_path: Path) -> None:
     """§4 legislates a *header* line; ADR-0070 §4 forbids reading a supersession out of prose.
 
