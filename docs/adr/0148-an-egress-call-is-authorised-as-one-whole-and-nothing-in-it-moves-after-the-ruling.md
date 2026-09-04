@@ -82,8 +82,9 @@
   ratification (§13).
 - Requires **new `core` contract surface** and lands none of it (§11). Flagged
   under golden rule 5.
-- Amended: 2026-09-04 by ADR-0231 — **§1's single-route clause and §9's first,
-  second and fourth clauses, in the single scope of a `WEB_SEARCH` servicing's send.**
+- Amended: 2026-09-04 by ADR-0231 — **§1's single-route clause, §7's first clause and
+  §9's first, second and fourth clauses, in the single scope of a `WEB_SEARCH`
+  servicing's send.**
   §1 routes every send through `ToolInvoker.invoke`.
   [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
   §6 shows why that route is
@@ -110,6 +111,28 @@
   clause is already partially superseded by ADR-0192 on *where* an outcome is recorded,
   and ADR-0231 neither extends nor narrows that record.
 
+  **§7's first clause is amended in the same single scope, and every prohibition it
+  states is kept.** That clause reads an `INTEGRATION`-scoped credential only from
+  *"inside a callable reached by `ToolInvoker.invoke` on a `ToolCall`, and only after
+  ADR-0029 §2's three seam checks have passed"*. ADR-0231 §5 puts the read inside
+  `WebSearcher.search`, after those same three checks, and restates the prohibitions
+  there in terms: no component reads one to decide whether it may be read, to construct
+  a client for a call not yet ruled on, to canonicalise a destination, or to build a
+  payload description. The one prohibition it does not restate — not to resolve a
+  destination while a request is being built — has **no subject** here, for the same
+  reason §7's **second** clause is left without one: this decision resolves no name,
+  and ADR-0231 §8's canonicaliser is string work that looks nothing up. §7's **third**
+  clause binds unchanged — the decision authorising the send is the gate on the read and
+  the record ADR-0004 §7 requires, and no second decision is sought — and §7's
+  **fourth** binds here as it binds there, which ADR-0231 §5 cites as what reconciles
+  its restatement of the prohibitions with §6's discard clause; that clause it restates
+  verbatim, together with §6's one-step rule, as binding `WebSearcher.search`. §7's
+  fifth and sixth clauses are untouched. **The property the first clause buys is kept
+  by the mechanism it was bought with**: ADR-0017 §3's first failure-path test, that a
+  denial performs no credential read and no network I/O, holds because a non-`ALLOW`
+  constructs no `ToolCall` (ADR-0029 §2), so nothing on the far side of the position —
+  wherever the position is — runs at all.
+
   **Everything else of this ADR binds entire and is load-bearing in ADR-0231**: §2's
   canonical destination set, over which ADR-0231 §8 defines a second protocol's
   canonical form; §3's recipient authorisation tracing to a user act, its refusal of
@@ -117,10 +140,12 @@
   a configured base URL or host, an allowlist the system assembled"* — and its route
   (a)/(b) partition, which is the whole of ADR-0231 §9; §4's whole-set rule, which
   holds over a singleton set; §6's determinism, which is why ADR-0231 §11 composes the
-  query before the binding is derived; §7's positional credential gate; and §8's
-  approver and its three floors, including the disclosure floor that makes every search
-  a `CONFIRM` until a standing grant covers its origin. No clause is relaxed: one route
-  is added beside one, for one kind, under conditions ADR-0231 §6 states.
+  query before the binding is derived; §6's one-step and post-read discard clauses,
+  which ADR-0231 §5 restates verbatim as binding its own callable; §7's remaining five
+  clauses; and §8's approver and its three floors, including the disclosure floor that
+  makes every search a `CONFIRM` until a standing grant covers its origin. No clause
+  is relaxed: one route is added beside one, for one kind, under conditions ADR-0231
+  §6 states.
 
   This ADR's `Status` line carries the leading `Partially superseded by` token, so
   under ADR-0082 §2 no amendment qualifier is written on it and this note is the whole
