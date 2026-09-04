@@ -15,6 +15,7 @@ Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 
 from __future__ import annotations
 
+import inspect
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -295,14 +296,22 @@ class PlannerContract:
                 assert ask.query is None
                 assert 1 <= len(ask.labels) <= MAX_HOP_LABELS
                 assert ask.entry is None
-            else:
+            elif ask.kind is ReadKind.LOCAL_FILE:
                 # ADR-0230 §1: "one entry label and nothing else" — one file, never
                 # two, and no argument belonging to another kind.
-                assert ask.kind is ReadKind.LOCAL_FILE
                 assert ask.entry is not None
                 assert ask.entry.strip()
                 assert ask.query is None
                 assert ask.labels == ()
+            else:
+                # ADR-0231 §1: "a ``WEB_SEARCH`` ask states its kind and nothing
+                # else". Written as its own arm rather than left to the fall-through
+                # so that a fifth kind admitted without an arm here fails this suite
+                # instead of being silently checked against this one's rules.
+                assert ask.kind is ReadKind.WEB_SEARCH
+                assert ask.query is None
+                assert ask.labels == ()
+                assert ask.entry is None
 
     async def test_a_request_it_returns_cannot_be_edited(
         self, asking_planner: Planner | None
@@ -548,6 +557,96 @@ class PlannerContract:
         )
         assert "/" not in ask.entry
         assert "\\" not in ask.entry
+
+    # --- ADR-0231 §1, §17: the ask that carries nothing ------------------------
+    # §17's Lane 4 owes "the extension of the shared `PlannerContract` … so the
+    # model-backed planner and the canonical fake are both held to it", which is the
+    # obligation ADR-0226 §10 and ADR-0230 §3 each put on their own lane, taken here
+    # for the same reason: a canonical fake updated without the suite is an unverified
+    # fake. `Planner.plan`'s signature does **not** move for this kind — nothing is
+    # shown for it — so unlike ADR-0230's widening this is no compatibility break, and
+    # a `Planner` that never asks for a search conforms exactly as it always did.
+
+    @pytest.fixture
+    def search_asking_planner(self) -> Planner | None:
+        """The same implementation, arranged to ask for a search — or ``None``.
+
+        Optional for ``asking_planner``'s reason: ADR-0231 §1 makes the kind an
+        additive member of an already-defaulted field, so a ``Planner`` that never
+        asks for a search conforms exactly as one that never asks for a read does. A
+        suite requiring an emission would refuse it.
+
+        Returns:
+            A planner of the implementation under test that asks for a search, or
+            ``None`` where the implementation never asks for one.
+        """
+        return None
+
+    async def test_a_search_it_asks_for_carries_no_argument(
+        self, search_asking_planner: Planner | None
+    ) -> None:
+        """ADR-0231 §1, asserted over what a planner actually emitted.
+
+        "A ``WEB_SEARCH`` ask carries no ``query``, no ``labels`` and no ``entry``.
+        ``ReadAsk`` gains **no field** for this kind … A ``WEB_SEARCH`` ask states its
+        kind and nothing else."
+
+        **The condition is the model's, and that is exactly why it is re-asserted
+        here.** ``model_construct`` skips validation, and an implementation
+        assembling a request by hand could ship an ask carrying a query that no
+        ``core`` test would ever see. Bound on the emission, the clause is what §1
+        says it is — "a property of the type rather than a rule an implementation is
+        trusted to keep" — for every ``Planner`` this system ever wires.
+        """
+        if search_asking_planner is None:
+            pytest.skip("this implementation never asks for a search (ADR-0231 §1)")
+        plan = await search_asking_planner.plan(
+            _goal(), context=_context(), memories=_supply(), capabilities=_VOCABULARY
+        )
+        request = plan.read_request
+        assert request is not None, "the fixture promises an implementation that asks"
+
+        searches = [ask for ask in request.asks if ask.kind is ReadKind.WEB_SEARCH]
+        assert searches, "the fixture promises a WEB_SEARCH ask"
+        assert len(searches) == 1, "at most one ask of each kind (ADR-0226 §2)"
+        [ask] = searches
+        assert ask.query is None
+        assert ask.labels == ()
+        assert ask.entry is None
+
+    async def test_the_planner_is_told_nothing_about_whether_a_search_is_possible(
+        self, planner: Planner
+    ) -> None:
+        """ADR-0231 §17: "``Planner.plan``'s signature is **unchanged**".
+
+        "Nothing is shown for this kind, so nothing crosses the seam, and a planner
+        is not told whether a search will be serviced — ADR-0226 §5's scoping posture
+        applied, and the reason this lane needs no contract change at all." §5 is the
+        clause behind it: "a planner on such a turn is not told that its request will
+        not be serviced … what is scoped is the **servicing**, so the trigger goes on
+        being measured on every channel".
+
+        **Asserted against the runtime signature, because that is the only place an
+        implementation can break it.** A planner that grew a ``search_available``, a
+        ``search_connected`` or a listing of reachable sources would be one whose
+        emission is conditioned on the far side of the seam — and ADR-0226 §8's fire
+        rate, which is read against the replay's own figure, would then be measuring
+        a different judgement on every deployment that wired the input differently.
+        It is the clause on which §17's "no contract change at all" rests, so it is
+        held for **every** ``Planner`` this system wires rather than for the one this
+        lane happened to edit.
+
+        Nothing here fixes the parameter set for its own sake: what it refuses is a
+        *widening*, and the names below are exactly the ones ADR-0014 §6, ADR-0211 §1
+        and ADR-0230 §3 already push in.
+        """
+        pushed = {"goal", "context", "memories", "capabilities", "files"}
+        taken = set(inspect.signature(planner.plan).parameters)
+
+        assert taken <= pushed, (
+            f"a planner takes what the loop pushes and nothing more; {taken - pushed} "
+            "would condition the emission on something ADR-0231 §17 does not show it"
+        )
 
     async def test_it_sets_no_supersedes(self, planner: Planner) -> None:
         """ADR-0228 §5: that field is the loop's, on every plan a planner returns.

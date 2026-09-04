@@ -939,6 +939,20 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     returned by no promoted method, so widening its union changes no value a peer
     emits or decodes.
 
+    **ADR-0231 §16 is under the second limb and moves the version alone**, to
+    **30**, with the method set unmoved at forty-nine. ``ReadKind`` gains
+    ``WEB_SEARCH`` (§1); a ``ReadAsk`` is carried to a client inside
+    ``TurnOutcome.turn.plan``; and the projection renders an ``Enum`` as its
+    ``value``, so the string ``"web_search"`` crosses to a peer whose enumeration is
+    closed against it. **What it does *not* rest on is the limb the two entries above
+    share**: §1 gives this kind no field at all, so there is no defaulted member for
+    ``extra="forbid"`` to refuse, and the closed enumeration is the whole of the
+    break. ADR-0231 §17's Lane 4 adds no Protocol, no method and no gateway route,
+    which is why the first limb is not reached — and the two Protocols ADR-0231
+    decides, :class:`~ai_assistant.core.protocols.QueryComposer` and
+    :class:`~ai_assistant.core.protocols.WebSearcher`, are on neither the promoted
+    surface nor any earlier bump's ground.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -947,7 +961,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (49, 29), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (49, 30), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

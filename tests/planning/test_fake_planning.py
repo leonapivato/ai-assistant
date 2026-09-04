@@ -121,6 +121,29 @@ class TestFakePlannerContract(PlannerContract):
             ),
         )
 
+    @pytest.fixture
+    def search_asking_planner(self) -> Planner | None:
+        """The fake arranged to ask for a search, so ADR-0231 §1's arms bind on it.
+
+        All four kinds at once, which is now the widest emission the envelope admits
+        — one ask of each (ADR-0226 §2, unwidened by ADR-0231 §1). The search ask is
+        scripted through the same ``read_request`` hook as the other three and carries
+        nothing, which is the whole of what a planner emits for this kind: no query is
+        authored here, because §3 gives the query to a ``QueryComposer`` on the far
+        side of a seam this fake does not reach.
+        """
+        return FakePlanner(
+            now=_fixed_now,
+            read_request=ReadRequest(
+                asks=(
+                    ReadAsk(kind=ReadKind.WEB_SEARCH),
+                    ReadAsk(kind=ReadKind.LOCAL_FILE, entry="F2"),
+                    ReadAsk(kind=ReadKind.CITATION_HOP, labels=("M1", "M2")),
+                    ReadAsk(kind=ReadKind.SIGHTED_QUERY, query="which lender did you recommend?"),
+                )
+            ),
+        )
+
 
 async def test_a_fresh_fake_does_not_reuse_a_prior_instances_execution_id() -> None:
     """The fake matches ``InMemoryPlanStore``'s cross-restart non-reuse (#280).

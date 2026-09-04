@@ -5693,23 +5693,24 @@ class FetchOutcome(BaseModel):
 
 
 class ReadKind(StrEnum):
-    """What a planner's read request asks to have read (ADR-0226 §2, ADR-0230 §1).
+    """What a planner's read request asks to have read (ADR-0226 §2, ADR-0231 §1).
 
-    A **closed** enumeration with exactly three members. ADR-0226 §1 rules that no
-    implementation, setting or later lane adds a fourth without the ADR that
+    A **closed** enumeration with exactly four members. ADR-0226 §1 rules that no
+    implementation, setting or later lane adds a fifth without the ADR that
     decides it, and that no lane widens an admitted kind's meaning to carry a read
     the ADR that admitted it did not describe. §4 adds that the vocabulary is
     **added to and never renamed**: no later ADR removes a member, renames one,
     gives one a second spelling, or replaces this enum with a differently-named one
     for the same question.
 
-    **The third member is ADR-0230 §1's additive entry** under ADR-0226 §1's own
-    licence, and it is an entry rather than a second seam: it adds no second
-    request object, no second servicing site, no second budget and no second
-    audit. ADR-0226 §2's membership sentence — "The enumeration's two members are
-    ``SIGHTED_QUERY`` and ``CITATION_HOP``" — is what ADR-0230 amends, in that one
-    respect; §2's statement of what each named kind *is*, its at-most-one-ask-of-
-    each-kind rule and its closure against un-ADR'd additions all bind entire.
+    **The third and fourth members are additive entries** under ADR-0226 §1's own
+    licence — ADR-0230 §1's and ADR-0231 §1's — and each is an entry rather than a
+    second seam: neither adds a second request object, a second servicing site, a
+    second budget or a second audit. ADR-0226 §2's membership sentence — "The
+    enumeration's two members are ``SIGHTED_QUERY`` and ``CITATION_HOP``" — is what
+    those two ADRs amend, in that one respect each; §2's statement of what each
+    named kind *is*, its at-most-one-ask-of-each-kind rule and its closure against
+    un-ADR'd additions all bind entire.
 
     The pattern is ADR-0221 §5's, for its reason: a vocabulary that grows by
     implementation grows without anyone deciding what the new member means.
@@ -5738,6 +5739,24 @@ class ReadKind(StrEnum):
     follows a reference out of a fetched file, or fetches a file it was not asked
     for; there is no depth, no recursion and no traversal of any kind."""
 
+    WEB_SEARCH = "web_search"
+    """One search of the web, whose query is composed from the turn's own utterance
+    and from nothing else (ADR-0231 §1, §3). **The ask carries no argument at all**
+    — no query, no labels, no entry — which is this kind's whole safety mechanism
+    and a property of the type rather than a rule an implementation is trusted to
+    keep: "a field the planner cannot write is a field that cannot carry covered
+    content" (§1), so ADR-0155 §3's prohibition on covered content reaching an
+    egress span cannot be reached by anything a planner emits.
+
+    **The namer is the user** (§2). The planner is pointing outward and naming
+    nothing; what is named is composed from the user's own words, so no address of
+    any sort crosses the seam in either direction.
+
+    **One ask is one search, which is this kind's bound** (§1). No implementation
+    issues two requests for one ask, follows a link out of a result, requests a
+    further page of results, or retries a refused or failed request inside the
+    turn; there is no pagination, no depth and no traversal of any kind."""
+
 
 #: ADR-0226 §6's cap on how many labels one ``CITATION_HOP`` ask may name.
 #:
@@ -5750,15 +5769,24 @@ MAX_HOP_LABELS: Final = 2
 
 
 class ReadAsk(BaseModel):
-    """One kind's part of a planner's read request (ADR-0226 §4, ADR-0230 §1).
+    """One kind's part of a planner's read request (ADR-0226 §4, ADR-0231 §1).
 
-    A discriminated triple rather than three models: a ``SIGHTED_QUERY`` ask
+    A discriminated quadruple rather than four models: a ``SIGHTED_QUERY`` ask
     carries a non-blank ``query`` and nothing else, a ``CITATION_HOP`` ask carries
-    one or two ``labels`` and nothing else, and a ``LOCAL_FILE`` ask carries one
-    non-blank ``entry`` and nothing else. **Each of those conditions is enforced
-    here rather than by a caller** (§4) — an emission that fails any of them is not
-    a request ADR-0226 admits, and the planner that emitted it is not owed a
-    partial reading of it.
+    one or two ``labels`` and nothing else, a ``LOCAL_FILE`` ask carries one
+    non-blank ``entry`` and nothing else, and a ``WEB_SEARCH`` ask carries **none
+    of the three**. **Each of those conditions is enforced here rather than by a
+    caller** (§4) — an emission that fails any of them is not a request ADR-0226
+    admits, and the planner that emitted it is not owed a partial reading of it.
+
+    **The empty arm is a safety mechanism and not a gap** (ADR-0231 §1). A
+    ``WEB_SEARCH`` ask "states its kind and nothing else", and this model gains
+    **no field** for it: the query a search sends is composed by a
+    ``QueryComposer`` from the turn's own utterance (§3), so a planner-writable
+    argument here would put covered content back on the wrong side of an egress
+    seam, "where it would depend on a model's compliance and on a reviewer
+    noticing". There is no such field, so there is nothing to comply with — and no
+    later lane adds one without the ADR that decides it.
 
     **``entry`` is a field of its own rather than a reuse of ``labels``, because
     the two name different sequences** (ADR-0230 §1). A ``CITATION_HOP`` label is
@@ -5792,6 +5820,10 @@ class ReadAsk(BaseModel):
             nothing else. Non-blank, and carried byte for byte — the loop parses
             its ordinal and indexes the very sequence it passed on this call
             (ADR-0230 §2).
+
+    Note:
+        A ``WEB_SEARCH`` ask has no attribute of its own, which is ADR-0231 §1's
+        decision rather than an omission from this list.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -5825,18 +5857,55 @@ class ReadAsk(BaseModel):
         choice ADR-0226 gives nobody. An ask carrying none asks for nothing while
         occupying the one slot its kind has.
 
-        **Three arms since ADR-0230 §1**, and the ``entry`` refusal is stated for
-        the two older kinds as its own clause rather than folded into each: a
-        ``SIGHTED_QUERY`` and a ``CITATION_HOP`` ask carry no ``entry``, and a
-        ``LOCAL_FILE`` ask carries a non-blank one, no ``query`` and no ``labels``.
+        **Four arms since ADR-0231 §1**, and each kind's refusal of the others is
+        stated as its own clause rather than folded into the neighbours: a
+        ``SIGHTED_QUERY`` and a ``CITATION_HOP`` ask carry no ``entry``, a
+        ``LOCAL_FILE`` ask carries a non-blank one, no ``query`` and no ``labels``,
+        and a ``WEB_SEARCH`` ask carries none of the three.
+
+        **The fourth arm is written out rather than left to the fall-through**, and
+        that is the point of it. The dispatch below is a chain of identity tests
+        with ``_only_labels`` at the end, so a member added without an arm would be
+        read as a ``CITATION_HOP`` and refused for naming no label — a message
+        about the wrong kind, and an emission ADR-0231 §1 admits rejected by a
+        default nobody chose.
         """
-        if self.kind is ReadKind.LOCAL_FILE:
+        if self.kind is ReadKind.WEB_SEARCH:
+            self._nothing_at_all()
+        elif self.kind is ReadKind.LOCAL_FILE:
             self._only_an_entry()
         elif self.kind is ReadKind.SIGHTED_QUERY:
             self._only_a_query()
         else:
             self._only_labels()
         return self
+
+    def _nothing_at_all(self) -> None:
+        """A ``WEB_SEARCH`` ask carries no argument at all (ADR-0231 §1).
+
+        "A ``WEB_SEARCH`` ask carries no ``query``, no ``labels`` and no ``entry``.
+        ``ReadAsk`` gains **no field** for this kind, and no later lane adds one
+        without the ADR that decides it. A ``WEB_SEARCH`` ask states its kind and
+        nothing else."
+
+        **Every one of the three is refused separately**, because each would be a
+        different mistake with a different fix: a ``query`` is a planner composing
+        what §3 gives the composer, ``labels`` and an ``entry`` are arguments of
+        other kinds arriving under this one's name. A single "carries no argument"
+        message would name none of them.
+
+        Raises:
+            ValueError: If a query, labels or an entry ride on the ask.
+        """
+        if self.query is not None:
+            msg = "a web_search ask must not carry a query"
+            raise ValueError(msg)
+        if self.labels:
+            msg = "a web_search ask must not carry labels"
+            raise ValueError(msg)
+        if self.entry is not None:
+            msg = "a web_search ask must not carry an entry"
+            raise ValueError(msg)
 
     def _only_an_entry(self) -> None:
         """A ``LOCAL_FILE`` ask carries a non-blank entry and nothing else (ADR-0230 §1).
@@ -5921,15 +5990,18 @@ class ReadRequest(BaseModel):
     the plan.
 
     Attributes:
-        asks: One or two asks, at most one of each :class:`ReadKind`. Their order
-            here decides nothing: ADR-0226 §6 fixes the servicing order as the hop
-            first and then the sighted query, whatever order they arrive in.
+        asks: At least one ask, and at most one of each :class:`ReadKind` — the
+            count is the enumeration's and is not restated here, because a member
+            has been added to it twice (ADR-0230 §1, ADR-0231 §1) and a figure
+            written out is a claim that goes stale silently. Their order here
+            decides nothing: ADR-0226 §6 fixes the servicing order, whatever order
+            the asks arrive in, and ADR-0231 §11 places the fourth kind in it.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     asks: tuple[ReadAsk, ...] = Field(
-        description="One or two asks, at most one of each kind (ADR-0226 §1, §4)."
+        description="At least one ask, at most one of each kind (ADR-0226 §1, §4)."
     )
 
     @model_validator(mode="after")
@@ -6912,19 +6984,29 @@ class PlanExport(BaseModel):
     internally consistent — every ``goal_id``/``plan_id`` referenced by an
     included record resolves within the same export.
 
-    **``schema_version`` is 5 because ``ActionPlan``'s ``read_request`` changed
-    shape** (ADR-0230 §12): ``ReadAsk`` gained ``entry`` and ``ReadKind`` gained
-    ``LOCAL_FILE``, so a plan carrying either is a plan an earlier reading of this
-    document refuses. It was 4 because ``ActionPlan`` gained ``supersedes``
-    (ADR-0228 §5, §6) and 3 because that model gained ``read_request``
-    (ADR-0226 §4). This document carries ``tuple[ActionPlan, ...]``, so a member of
-    it changing shape is exactly what the version exists to announce (ADR-0039 §10,
-    ADR-0014 §5) — the same reading that moved it to 2 for ``StepExecution`` and
-    moved ``ConversationExport``'s for a member gaining one field (ADR-0212 §8). A
+    **``schema_version`` is 6 because ``ActionPlan``'s ``read_request`` changed
+    shape again** (ADR-0231 §16): ``ReadKind`` gained ``WEB_SEARCH`` and ``ReadAsk``
+    gained the arm that admits it, so a plan carrying such an ask is a plan an
+    earlier reading of this document refuses. It was 5 for the same field's previous
+    move — ``ReadAsk`` gaining ``entry`` and ``ReadKind`` gaining ``LOCAL_FILE``
+    (ADR-0230 §12) — 4 because ``ActionPlan`` gained ``supersedes`` (ADR-0228 §5,
+    §6) and 3 because that model gained ``read_request`` (ADR-0226 §4). This
+    document carries ``tuple[ActionPlan, ...]``, so a member of it changing shape
+    is exactly what the version exists to announce (ADR-0039 §10, ADR-0014 §5) —
+    the same reading that moved it to 2 for ``StepExecution`` and moved
+    ``ConversationExport``'s for a member gaining one field (ADR-0212 §8). A
     defaulted field on a frozen model is still a shape change to every document
     that carries it, and ``extra="forbid"`` is what makes the mislabelling
     concrete: a reader validating an older-shaped document against the new
     contract, or the reverse, rejects it.
+
+    **An added enum member is a shape change on the same footing**, and this move is
+    the first of these to rest on one alone. ``ReadAsk`` gains no field for
+    ``WEB_SEARCH`` (ADR-0231 §1), so what an older reader refuses is not a defaulted
+    ``null`` it has no field for but the string ``"web_search"`` its own ``ReadKind``
+    does not admit — a narrower population than the previous move's, since it is
+    every document carrying such an ask rather than every document carrying a request
+    at all, and a refusal just as total on it.
 
     **The reference closure covers ``supersedes``** (ADR-0228 §5). ADR-0014 §5 rules
     that every ``goal_id``/``plan_id`` referenced by an included record resolves
@@ -6945,15 +7027,15 @@ class PlanExport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[5] = Field(
-        default=5,
+    schema_version: Literal[6] = Field(
+        default=6,
         description=(
-            "Shape of this export, pinned to exactly 5 (ADR-0039 §10, ADR-0230 §12): an "
+            "Shape of this export, pinned to exactly 6 (ADR-0039 §10, ADR-0231 §16): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[5]`` "
-            "refuses every other value — a v1, v2, v3 or v4 document does not validate "
-            "against this contract at all — so the advertised version cannot be "
-            "mislabelled."
+            "the document rather than a producer's unchecked claim. ``Literal[6]`` "
+            "refuses every other value — a v1, v2, v3, v4 or v5 document does not "
+            "validate against this contract at all — so the advertised version cannot "
+            "be mislabelled."
         ),
     )
     exported_at: UtcInstant

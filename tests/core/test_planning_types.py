@@ -884,6 +884,95 @@ def test_a_citation_hop_ask_refuses_a_third_label() -> None:
         _hop("M1", "M2", "M3")
 
 
+# --- ADR-0231 §1: the ask that carries nothing -----------------------------
+# §18 item 5: "``ReadAsk(kind=WEB_SEARCH, query=…)``, ``labels=…`` and ``entry=…``
+# each refuse at construction, and a bare ``WEB_SEARCH`` ask validates — the arm of
+# §1 asserted at the model, not at a caller."
+
+
+def test_a_web_search_ask_carries_no_argument_at_all() -> None:
+    """§1's positive arm, so the three refusals below are not vacuous.
+
+    "A ``WEB_SEARCH`` ask states its kind and nothing else." The ask is
+    constructible from the kind alone, which is what makes the emission expressible
+    at all — every other kind's own argument is required, and a validator that read
+    this one through a neighbour's arm would refuse a conforming emission.
+    """
+    ask = ReadAsk(kind=ReadKind.WEB_SEARCH)
+
+    assert (ask.query, ask.labels, ask.entry) == (None, (), None)
+
+
+def test_a_web_search_ask_carrying_a_query_is_refused() -> None:
+    """§1, and this is the arm the whole kind's safety claim rests on.
+
+    "**The empty ask is the whole of this kind's safety mechanism, and it is a
+    property of the type rather than a rule an implementation is trusted to keep.**"
+    ``Planner.plan`` is handed ``memories`` read from a store under
+    ``Settings.data_dir``, so anything a planner writes is covered content whose
+    every covered path runs through the planner's own model call — and ADR-0155 §3's
+    third clause forbids that reaching an egress span. A query the model could write
+    would put the prohibition back "on the wrong side of the seam, where it would
+    depend on a model's compliance and on a reviewer noticing".
+    """
+    with pytest.raises(ValidationError, match="must not carry a query"):
+        ReadAsk(kind=ReadKind.WEB_SEARCH, query="flights to Lisbon")
+
+
+def test_a_web_search_ask_carrying_labels_is_refused() -> None:
+    """§1: no ``labels`` either, and the refusal is its own clause.
+
+    A label indexes the ``memories`` sequence, so an ask carrying one has named a
+    record beside a request whose query is composed from the utterance alone — two
+    kinds' arguments under one kind's name, which is the ambiguity ADR-0226 §3
+    exists to keep out of the emission.
+    """
+    with pytest.raises(ValidationError, match="must not carry labels"):
+        ReadAsk(kind=ReadKind.WEB_SEARCH, labels=("M1",))
+
+
+def test_a_web_search_ask_carrying_an_entry_is_refused() -> None:
+    """§1: and no ``entry``, which is the third of the three §1 enumerates."""
+    with pytest.raises(ValidationError, match="must not carry an entry"):
+        ReadAsk(kind=ReadKind.WEB_SEARCH, entry="F1")
+
+
+def test_a_request_naming_two_web_search_asks_is_refused() -> None:
+    """§1: "one emission carries at most one ``WEB_SEARCH`` ask".
+
+    ADR-0226 §2's rule "binds unchanged", and it has to be asserted over this kind
+    rather than inherited: the ask carries no argument, so two of them are the one
+    case where a duplicate is invisible by inspection — ``(ask, ask)`` is a pair of
+    equal values, and a validator keyed on anything but ``kind`` would let it
+    through. "One ask is one search" is what the refusal protects.
+    """
+    ask = ReadAsk(kind=ReadKind.WEB_SEARCH)
+
+    with pytest.raises(ValidationError, match="at most one ask of each kind"):
+        ReadRequest(asks=(ask, ask))
+
+
+def test_a_request_may_carry_a_web_search_ask_beside_every_other_kind() -> None:
+    """The widest emission the envelope now admits: four kinds, one of each.
+
+    ADR-0231 §1 makes the kind *additive* rather than exclusive — it "adds no second
+    request object, no second servicing site, no second budget and no second audit" —
+    so a plan may ask for a search beside the three reads that stay inside this
+    system. This is the arm that fails on a validator reading ``WEB_SEARCH`` as an
+    alternative to the others rather than as a fourth member.
+    """
+    request = ReadRequest(
+        asks=(
+            _query(),
+            _hop("M1"),
+            ReadAsk(kind=ReadKind.LOCAL_FILE, entry="F1"),
+            ReadAsk(kind=ReadKind.WEB_SEARCH),
+        )
+    )
+
+    assert {ask.kind for ask in request.asks} == set(ReadKind)
+
+
 @pytest.mark.parametrize(
     ("model", "payload"),
     [
@@ -947,27 +1036,34 @@ def test_a_label_that_resolves_to_nothing_is_still_constructible() -> None:
         assert _hop(label).labels == (label,)
 
 
-def test_the_kind_vocabulary_is_the_three_the_decisions_admit() -> None:
+def test_the_kind_vocabulary_is_the_four_the_decisions_admit() -> None:
     """ADR-0226 §1: a closed enumeration, and §4: added to and never renamed.
 
     Pinned by value as well as by name, because the serialised spelling is what a
     ``PlanExport`` carries and what a later reader matches on — renaming a member
     would silently invalidate every document already written.
 
-    **Three since ADR-0230 §1**, which admits ``LOCAL_FILE`` as an *additive entry*
-    under ADR-0226 §1's own licence: it adds no second request object, no second
-    servicing site, no second budget and no second audit. The closure is unchanged —
-    a fourth still needs the ADR that decides it — and so is the no-rename rule, which
-    is why the two older values are still asserted here one by one.
+    **Four since ADR-0231 §1**, which admits ``WEB_SEARCH`` as an *additive entry*
+    under ADR-0226 §1's own licence, exactly as ADR-0230 §1 admitted ``LOCAL_FILE``:
+    it adds no second request object, no second servicing site, no second budget and
+    no second audit. The closure is unchanged — a fifth still needs the ADR that
+    decides it — and so is the no-rename rule, which is why the three older values
+    are still asserted here one by one.
+
+    **The set assertion is what closes it**, and it is the half that fails on a
+    member added without a decision: an implementation growing a fifth spelling
+    passes every value assertion below and fails the equality above.
     """
     assert {member.value for member in ReadKind} == {
         "sighted_query",
         "citation_hop",
         "local_file",
+        "web_search",
     }
     assert ReadKind.SIGHTED_QUERY.value == "sighted_query"
     assert ReadKind.CITATION_HOP.value == "citation_hop"
     assert ReadKind.LOCAL_FILE.value == "local_file"
+    assert ReadKind.WEB_SEARCH.value == "web_search"
 
 
 # --- PlanExport ---------------------------------------------------------
@@ -975,23 +1071,28 @@ def test_the_kind_vocabulary_is_the_three_the_decisions_admit() -> None:
 
 def test_export_is_versioned_and_defaults_to_empty() -> None:
     export = PlanExport(exported_at=_WHEN)
-    assert export.schema_version == 5
+    assert export.schema_version == 6
     assert export.goals == ()
 
 
-def test_export_pins_the_schema_version_to_exactly_five() -> None:
+def test_export_pins_the_schema_version_to_exactly_six() -> None:
     """The label is a fact about the document, not a producer's claim (ADR-0039 §10).
 
-    ``Literal[5]`` refuses an explicit ``4`` — a document of the shape this export
-    had before ``ReadAsk`` gained ``entry`` and ``ReadKind`` gained ``LOCAL_FILE``
-    does not validate against this contract at all (ADR-0230 §12), exactly as a
-    ``3`` stopped validating when ``ActionPlan`` gained ``supersedes`` and a ``2``
-    when it gained ``read_request`` — and any other value, so the advertised
-    version cannot be mislabelled. The positive default is what a producer gets for
-    free; only the rejections pin it.
+    ``Literal[6]`` refuses an explicit ``5`` — a document of the shape this export
+    had before ``ReadKind`` gained ``WEB_SEARCH`` does not validate against this
+    contract at all (ADR-0231 §16), exactly as a ``4`` stopped validating when that
+    enumeration gained ``LOCAL_FILE`` and ``ReadAsk`` gained ``entry``, a ``3`` when
+    ``ActionPlan`` gained ``supersedes`` and a ``2`` when it gained ``read_request``
+    — and any other value, so the advertised version cannot be mislabelled. The
+    positive default is what a producer gets for free; only the rejections pin it.
+
+    **The neighbour on each side is asserted and not only the far ones**: ``5`` is
+    the shape this contract had one decision ago and ``7`` is the shape nobody has
+    decided, and a ``Literal`` that admitted either would be a document announcing a
+    shape it does not have.
     """
-    assert PlanExport(exported_at=_WHEN, schema_version=5).schema_version == 5
-    for stale in (1, 2, 3, 4, 6):
+    assert PlanExport(exported_at=_WHEN, schema_version=6).schema_version == 6
+    for stale in (1, 2, 3, 4, 5, 7):
         with pytest.raises(ValidationError):
             PlanExport(exported_at=_WHEN, schema_version=stale)  # type: ignore[arg-type]
 
@@ -1036,7 +1137,7 @@ def test_export_carries_a_whole_supersession_chain() -> None:
 
     export = PlanExport(exported_at=_WHEN, goals=(_goal(),), plans=(first, revision))
 
-    assert export.schema_version == 5
+    assert export.schema_version == 6
     assert [plan.supersedes for plan in export.plans] == [None, "p1"]
 
 
@@ -1117,7 +1218,7 @@ def test_export_round_trips_through_json() -> None:
     export = PlanExport(exported_at=_WHEN, goals=(_goal(),), plans=(plan,), executions=(execution,))
     restored = TypeAdapter(PlanExport).validate_json(export.model_dump_json())
     assert restored == export
-    assert restored.schema_version == 5
+    assert restored.schema_version == 6
     request = restored.plans[0].read_request
     assert request is not None
     assert {ask.kind for ask in request.asks} == {ReadKind.SIGHTED_QUERY, ReadKind.CITATION_HOP}

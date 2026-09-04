@@ -57,6 +57,7 @@ from ai_assistant.planning.planner import (
     _TAIL_HEADING,
     _UNAVAILABLE_GUIDANCE,
     _VOCABULARY_HEADING,
+    _WEB_SEARCH_GUIDANCE,
     _extract_object,
     _ExtractionError,
     _render_record,
@@ -234,6 +235,27 @@ _FILE_ASKING_REPLY = json.dumps(
 )
 
 
+#: The same reply, asking for a search beside the other three kinds (ADR-0231 §1).
+#:
+#: Kept separate from :data:`_FILE_ASKING_REPLY` for that constant's own reason and
+#: one more: the suite's ``search_asking_planner`` arms assert what an emission
+#: carries for **this** kind, and a reply that also named a file would let a parser
+#: that read ``web_search`` off the wrong member pass them.
+_SEARCH_ASKING_REPLY = json.dumps(
+    {
+        "rationale": "two steps to relocate",
+        "steps": [
+            {"intent": "find a place", "capability": "search_housing", "parameters": {}},
+        ],
+        "read_request": {
+            "query": "where does Ada want to live?",
+            "labels": ["M1", "M2"],
+            "web_search": True,
+        },
+    }
+)
+
+
 class TestModelBackedPlannerContract(PlannerContract):
     """Runs ModelBackedPlanner through the shared Planner conformance suite."""
 
@@ -256,6 +278,17 @@ class TestModelBackedPlannerContract(PlannerContract):
         assembled — ADR-0227's rule applied to the parse side of the seam.
         """
         return _planner(_FILE_ASKING_REPLY)
+
+    @pytest.fixture
+    def search_asking_planner(self) -> Planner | None:
+        """A planner over a model that asks for a search, so ADR-0231's arms bind here.
+
+        Read by the **production** parser for ``file_asking_planner``'s reason, which
+        matters more for this kind than for any other: the ask carries no argument, so
+        the only thing that can be got wrong at this seam is *whether* one was emitted
+        — and a request a test assembled would certify nothing about that.
+        """
+        return _planner(_SEARCH_ASKING_REPLY)
 
 
 async def test_extracts_capabilities_in_order() -> None:
@@ -3004,7 +3037,11 @@ async def test_a_file_may_be_named_beside_both_other_kinds() -> None:
 
     request = plan.read_request
     assert request is not None
-    assert {ask.kind for ask in request.asks} == set(ReadKind)
+    assert {ask.kind for ask in request.asks} == {
+        ReadKind.SIGHTED_QUERY,
+        ReadKind.CITATION_HOP,
+        ReadKind.LOCAL_FILE,
+    }
     [named] = [ask for ask in request.asks if ask.kind is ReadKind.LOCAL_FILE]
     assert named.entry == "F1"
 
@@ -3104,3 +3141,205 @@ async def test_a_dropped_file_member_is_logged_without_the_text_it_dropped() -> 
     drops = [event for event in captured if event["event"] == _READ_REQUEST_DROPPED]
     assert [event["reason"] for event in drops] == ["unusable_file"]
     assert invented not in json.dumps(drops)
+
+
+# --- ADR-0231 §1: the search this planner may ask for -----------------------
+# Lane 4's half of the seam, asserted through the **real** prompt assembler and the
+# **real** parser — ADR-0227's rule again, which forbids "an echoing fake where the
+# real renderer is the thing under test". What is asserted here is what a model was
+# told about the member and what this implementation reads back off one. Everything
+# past the emission is Lane 5's and exists nowhere yet: §17 rules that "between Lane
+# 4 and Lane 5 there is no mechanism", so no case below composes a query, opens a
+# channel or asks whether a search would be serviced.
+
+
+async def test_the_system_prompt_asks_for_a_search_below_the_read_it_widens() -> None:
+    """ADR-0231 §1 in the prompt, and ADR-0226 §5's posture in its placement.
+
+    The block adds a member to the ``read_request`` object
+    :data:`_READ_REQUEST_GUIDANCE` describes, so a reader meeting it first would be
+    told about an addition to a shape they have not been shown — the ordering
+    argument :data:`_ACT_RECORD_GUIDANCE` and :data:`_LOCAL_FILE_GUIDANCE` are each
+    placed by.
+
+    **And it is stated unconditionally**, which is the half worth pinning. ADR-0231
+    §17: "a planner is not told whether a search will be serviced". A block that
+    appeared only where an account was connected would make the emission — and so
+    ADR-0226 §8's fire rate — a function of a deployment's wiring, which §5 rules out
+    in terms for the channel case this applies.
+    """
+    assert _WEB_SEARCH_GUIDANCE.strip(), "the block decides nothing if it is empty"
+    unwired_system, _ = await _prompt_over_files()
+    shown_system, _ = await _prompt_over_files("notes.md")
+
+    assert _WEB_SEARCH_GUIDANCE in unwired_system
+    assert _WEB_SEARCH_GUIDANCE in shown_system
+    assert unwired_system.index(_READ_REQUEST_GUIDANCE) < unwired_system.index(
+        _WEB_SEARCH_GUIDANCE
+    ), "the block adds a member to a request the reader has already met"
+
+
+async def test_the_search_block_corrects_the_sentence_it_falsifies() -> None:
+    """The one member of ``read_request`` that does reach outside this system.
+
+    :data:`_READ_REQUEST_GUIDANCE` tells the planner that for a read "nothing is sent
+    anywhere, and nothing is looked up outside this system", and ADR-0231 §12 is
+    plain about what a search does instead: "**The first turn's query leaves.**" A
+    prompt carrying both sentences and reconciling neither would leave a model to
+    decide which of two paragraphs it is reading — the failure
+    :data:`_LOCAL_FILE_GUIDANCE` was placed to avoid, arriving here with the stakes
+    reversed, since there the correction was that a member exists and here it is that
+    a member sends something.
+
+    Asserted as an entailment of the two blocks rather than by matching a phrase:
+    what is pinned is that the sentence being corrected is still in the prompt and
+    that the corrected member is described after it.
+    """
+    system, _ = await _prompt_over_files()
+
+    assert "nothing is looked up outside this system" in _READ_REQUEST_GUIDANCE
+    assert system.index("nothing is looked up outside this system") < system.index(
+        _WEB_SEARCH_GUIDANCE
+    )
+    assert "outside this device" in _WEB_SEARCH_GUIDANCE, "the correction is stated"
+
+
+async def test_the_search_block_offers_no_place_to_write_a_query() -> None:
+    """ADR-0231 §1's safety claim, at the one seam a prompt can weaken it.
+
+    "**The empty ask is the whole of this kind's safety mechanism**", and the reason
+    is that a planner-composed query would be covered content reaching an egress
+    span, which ADR-0155 §3's third clause forbids. The type already refuses such a
+    field; what a prompt can still do is invite one — a worked example carrying a
+    search phrase, or a sentence about "what to search for" — and a model that writes
+    one has asked for something and reached nothing, which costs the turn its search
+    and the audit a drop.
+
+    So the example the block prints is asserted to be the flag and nothing else, and
+    the block is asserted to say in terms that the words are composed elsewhere.
+    """
+    assert '"web_search": true' in _WEB_SEARCH_GUIDANCE
+    assert "composed separately" in _WEB_SEARCH_GUIDANCE
+    assert "you do not write what to search for" in " ".join(
+        _WEB_SEARCH_GUIDANCE.lower().split()
+    ), "the block forecloses the spelling rather than leaving it unmentioned"
+
+
+async def test_an_asked_for_search_is_read_back_as_a_web_search_ask() -> None:
+    """ADR-0231 §1, through the production parser.
+
+    "A ``WEB_SEARCH`` ask states its kind and nothing else." The member carries no
+    value to land anywhere, so what this asserts is the whole of the parse: one ask,
+    of that kind, carrying none of the three arguments the other kinds take.
+    """
+    plan = await _emitted(_envelope(web_search=True))
+
+    request = plan.read_request
+    assert request is not None
+    [ask] = request.asks
+    assert ask.kind is ReadKind.WEB_SEARCH
+    assert ask.query is None
+    assert ask.labels == ()
+    assert ask.entry is None
+
+
+async def test_a_search_may_be_asked_for_beside_every_other_kind() -> None:
+    """ADR-0226 §2's at-most-one-of-each rule, at its widest emission (ADR-0231 §1).
+
+    "``ReadRequest``'s validator binds unchanged: one emission carries at most one
+    ``WEB_SEARCH`` ask", and the kind is additive rather than exclusive — so one
+    envelope may carry all four, each with exactly its own argument and none of the
+    others. This is the arm that fails on a parser reading ``web_search`` as an
+    alternative to the other members rather than as a fourth one.
+    """
+    plan = await _emitted(_envelope(query="the lease", labels=["M1"], file="F1", web_search=True))
+
+    request = plan.read_request
+    assert request is not None
+    assert {ask.kind for ask in request.asks} == set(ReadKind)
+
+
+async def test_a_declined_search_is_no_ask_and_no_drop() -> None:
+    """``false`` is a well-formed "no", and counting it as malformed would lie.
+
+    The prompt tells the planner not to send the key unless it is asking, but a model
+    that answers the member explicitly has asked for nothing — which is exactly the
+    state the absent member describes. Recording it in
+    :data:`_READ_REQUEST_DROPPED` would put a conforming refusal into the population
+    that field exists to distinguish from an emission that never happened, and
+    ADR-0226 §8's fire rate is read against that: a deployment reading a low one
+    could not then tell an honest "no" from an unreadable "yes".
+
+    The rest of the request survives, which is what makes this a "no" to the member
+    rather than to the emission.
+    """
+    with structlog.testing.capture_logs() as captured:
+        plan = await _emitted(_envelope(query="the lease", web_search=False))
+
+    request = plan.read_request
+    assert request is not None
+    assert [ask.kind for ask in request.asks] == [ReadKind.SIGHTED_QUERY]
+    assert not [event for event in captured if event["event"] == _READ_REQUEST_DROPPED]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("true", id="the-string-true"),
+        pytest.param("flights to Lisbon", id="a-composed-query"),
+        pytest.param(1, id="one"),
+        pytest.param(0, id="zero"),
+        pytest.param([], id="a-list"),
+        pytest.param({"query": "x"}, id="an-object"),
+        pytest.param("", id="an-empty-string"),
+    ],
+)
+async def test_an_unusable_search_member_costs_the_request_and_never_the_plan(
+    value: object,
+) -> None:
+    """The parser's posture for this member, over every way it can be unusable.
+
+    **The two arms that earn their keep are the string and the ``1``.** A model
+    writing ``"web_search": "flights to Lisbon"`` has composed a query, and ADR-0231
+    §1 rules that no field carries one — honouring it as a bare ask would search the
+    utterance while leaving the model believing its own words were used, which is a
+    different question asked silently. And ``bool`` is a subclass of ``int`` in
+    Python, so an equality against ``True`` would read a JSON ``1`` as an ask; the
+    identity check does not, which is why ``1`` and ``0`` are both here.
+
+    A drop costs the member and never the plan, and never a repair round: ADR-0047
+    §4's envelope rule is that other keys are ignored, and ADR-0176's own reasoning
+    is that type-checking one "would send a perfectly good plan to bounded repair
+    over a key that decides nothing on that shape".
+    """
+    model = FakeModelProvider(_envelope(web_search=value))
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    plan = await planner.plan(_goal(), context=_context(), capabilities=_VOCABULARY)
+
+    assert plan.read_request is None
+    assert [step.capability for step in plan.steps] == ["search_housing"]
+    assert len(model.calls) == 1, "a malformed member never buys a repair round"
+
+
+async def test_a_dropped_search_member_is_logged_without_the_text_it_dropped() -> None:
+    """ADR-0004 §5 and ADR-0226 §8, for this member's own drop.
+
+    The reason comes from the closed set the other drops use, and the value the model
+    wrote reaches no log line. That matters more here than for the neighbouring
+    members: what a model writes into this one is most likely a **query**, composed
+    over a supply read from a store under ``Settings.data_dir`` — the covered content
+    ADR-0231 §1 built the empty ask to keep off the wire. A drop that logged it would
+    put it in a log file instead, which is the same content in a different place.
+    """
+    composed = "Salamander-Kestrel-9 mortgage rates"
+    model = FakeModelProvider(_envelope(query="the lease", web_search=composed))
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    with structlog.testing.capture_logs() as captured:
+        plan = await planner.plan(_goal(), context=_context(), capabilities=_VOCABULARY)
+
+    assert plan.read_request is not None, "the usable half of the emission survives"
+    drops = [event for event in captured if event["event"] == _READ_REQUEST_DROPPED]
+    assert [event["reason"] for event in drops] == ["unusable_web_search"]
+    assert composed not in json.dumps(drops)

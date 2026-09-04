@@ -155,12 +155,22 @@ class FakePlanner:
     without standing a model up, which is the only place outside `orchestration` those
     are checkable. Nothing here renders it, indexes it or judges it: what a planner
     makes of a listing is an implementation's business (ADR-0211 §9 item 2), and a
-    ``LOCAL_FILE`` ask is scripted through ``read_request`` exactly as the other two
-    kinds are — **not** derived from ``files``, for the reason the request as a whole
+    ``LOCAL_FILE`` ask is scripted through ``read_request`` exactly as the other kinds
+    are — **not** derived from ``files``, for the reason the request as a whole
     is not derived from ``memories``. So a fake handed an empty listing and scripted to
     name ``F1`` emits ``F1``, which is the unresolved-label population ADR-0226 §9's
     audit exists to count and which a filtering fake would put out of a consumer's
     reach.
+
+    **A ``WEB_SEARCH`` ask needs nothing of this fake but the same hook** (ADR-0231
+    §1). The kind carries no argument, so a consumer drives a searching turn by
+    scripting ``read_request=ReadRequest(asks=(ReadAsk(kind=ReadKind.WEB_SEARCH),))``
+    and nothing here changes: the fake authors no query, holds no composer and reads
+    no utterance, which is ADR-0231 §3's seam sitting on the far side of this one.
+    Whether such an ask is serviced is the loop's and is invisible here — ADR-0226 §5's
+    posture, which ADR-0231 §17 restates for this kind — so a fake that answered
+    differently on a deployment with no search account would be certifying a planner
+    that had been told something no planner is told.
     """
 
     def __init__(

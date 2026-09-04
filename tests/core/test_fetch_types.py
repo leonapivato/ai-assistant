@@ -142,7 +142,15 @@ def test_a_request_naming_two_local_file_asks_is_refused() -> None:
 
 
 def test_a_request_may_carry_a_local_file_ask_beside_each_other_kind() -> None:
-    """The positive arm: three kinds, one of each, is the widest emission admitted."""
+    """The positive arm: this kind is additive to the two ADR-0226 admitted.
+
+    Asserted against the three kinds by name rather than against ``set(ReadKind)``,
+    which is what it read before ADR-0231 §1 admitted a fourth. This case is about
+    ADR-0230's member sitting beside its neighbours, and an equality against the
+    whole enumeration would silently turn it into a case about whatever the
+    enumeration last gained — ``tests/core/test_planning_types.py`` holds the
+    widest-emission arm, where every member is deliberately named.
+    """
     request = ReadRequest(
         asks=(
             ReadAsk(kind=ReadKind.SIGHTED_QUERY, query="q"),
@@ -151,7 +159,11 @@ def test_a_request_may_carry_a_local_file_ask_beside_each_other_kind() -> None:
         )
     )
 
-    assert {ask.kind for ask in request.asks} == set(ReadKind)
+    assert {ask.kind for ask in request.asks} == {
+        ReadKind.SIGHTED_QUERY,
+        ReadKind.CITATION_HOP,
+        ReadKind.LOCAL_FILE,
+    }
 
 
 # --- the outcome (ADR-0230 §4) ----------------------------------------------
