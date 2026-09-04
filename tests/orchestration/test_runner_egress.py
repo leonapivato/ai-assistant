@@ -22,6 +22,7 @@ from ai_assistant.core.errors import ConnectionStoreError, PermissionDeniedError
 from ai_assistant.core.types import (
     ActionPlan,
     ActionRequest,
+    CarriedProvenance,
     CostBasis,
     DataTier,
     DiscloserProvenance,
@@ -255,15 +256,25 @@ class _WatchingBinder:
     Structurally an ``EgressBinder`` and behaviourally the fake it wraps: the
     pairing pin needs the *returned* value to compare the built request against,
     and no seam member reports what it returned twice.
+
+    ``bind`` also keeps the **carrier** it was handed, recorded *before* it
+    delegates so a refusal still leaves the record. That is what makes "the stage
+    forwarded this value to the seam" separable from "the stage reached the same
+    outcome by itself": a case asserting only on the disposition passes a runner
+    that short-circuited on the value and never called ``bind`` at all.
     """
 
     def __init__(self, inner: FakeEgressBinder) -> None:
-        """Wrap ``inner``, recording each answer."""
+        """Wrap ``inner``, recording each answer and each carrier."""
         self.inner = inner
         self.returned: list[BoundEgressCall | None] = []
+        self.carried: list[CarriedProvenance] = []
 
     async def bind(self, tool: ToolDefinition, **kwargs: object) -> BoundEgressCall | None:
-        """Delegate, keeping the answer."""
+        """Record the carrier, delegate, keep the answer."""
+        provenance = kwargs["provenance"]
+        assert isinstance(provenance, CarriedProvenance)
+        self.carried.append(provenance)
         answer = await self.inner.bind(tool, **kwargs)  # type: ignore[arg-type]  # passthrough
         self.returned.append(answer)
         return answer
@@ -1008,13 +1019,23 @@ async def test_a_fail_closed_coverage_is_forwarded_unchanged_and_refused_at_the_
     ``over`` never produces it, because this package supplies the planner's model
     call every covered path of its arguments runs through.
 
+    **The binder is watched, because the disposition alone does not say who
+    refused.** A runner that short-circuited on the value — answered
+    ``EGRESS_UNBINDABLE`` itself and never called ``bind`` — satisfies every
+    committed-nothing assertion below while forwarding nothing anywhere, and ADR-0233
+    §6 puts the refusal at ``EgressBinding`` construction rather than in this
+    package. So the carrier the seam was handed is asserted to hold the value
+    unchanged, and the seam is asserted to have answered nothing: the call raised
+    inside it, which is the refusal §6 states, reached because the stage handed the
+    value over.
+
     Committing nothing is asserted the way the ``EGRESS_UNBINDABLE`` cases above
     assert it, plus the standing question: no ``pending_confirmation`` is left
     against the binding, so nothing is awaiting an answer to a call that may not be
     made at all.
     """
     tool = _tool(egress=True)
-    binder = _bound_binder(tool)
+    binder = _WatchingBinder(_bound_binder(tool))
     harness = _Harness(tool=tool, binder=binder)
     state = await _an_execution(harness.plans, _step())
     before = await _stored(harness.plans, state)
@@ -1029,6 +1050,16 @@ async def test_a_fail_closed_coverage_is_forwarded_unchanged_and_refused_at_the_
     )
 
     assert result.disposition is Disposition.EGRESS_UNBINDABLE
+    assert binder.carried == [
+        CarriedProvenance(
+            spans={},
+            planned_with_external_content=False,
+            coverage=SpanCoverage.PATH_WITHOUT_MODEL,
+        )
+    ], "the seam was handed the caller's value, unchanged"
+    assert binder.returned == [], (
+        "the seam answered nothing: the construction ADR-0233 §6 refuses raised inside it"
+    )
     assert result.decision_id is None
     policy = harness.policy
     assert isinstance(policy, _RecordingPolicy)
