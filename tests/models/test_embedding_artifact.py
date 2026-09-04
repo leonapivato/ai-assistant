@@ -40,6 +40,7 @@ from ai_assistant.models.embedding_artifact import (
     manifest_digest,
     packaged_artifact_dir,
     sha256_of,
+    unexpected_files,
     verify_artifact,
 )
 
@@ -172,6 +173,13 @@ def test_the_staged_artifact_matches_the_recorded_manifest() -> None:
     verify_artifact(packaged_artifact_dir())
 
 
+@_ARTIFACT_ABSENT
+def test_nothing_unmanifested_is_staged_for_packaging() -> None:
+    # What this working tree would actually ship, checked against what it says it
+    # ships. The two are the same list or the build packages an unrecorded file.
+    assert unexpected_files(packaged_artifact_dir()) == []
+
+
 # --------------------------------------------------------------------------- #
 # §5 — the acquisition seam
 # --------------------------------------------------------------------------- #
@@ -268,6 +276,57 @@ def test_a_complete_directory_is_verified_without_any_download(
 def test_a_missing_file_is_reported_by_name(tmp_path: Path) -> None:
     with pytest.raises(ArtifactError, match="is missing from"):
         verify_artifact(tmp_path)
+
+
+def test_a_file_the_manifest_does_not_name_is_refused(
+    tmp_path: Path, artifact: _SyntheticArtifact
+) -> None:
+    # The build hook force-includes the whole vendored directory, so anything
+    # sitting in it ships — a file left behind by an earlier pin, or one dropped
+    # there by anyone with write access to the tree. Verifying only the *named*
+    # files would let it be redistributed under this project's name with no
+    # digest and no notice, which is what "the SHA-256 of each file as shipped"
+    # forecloses (ADR-0024 §5, issue #1683).
+    artifact.stage(tmp_path)
+    (tmp_path / "left-behind.onnx").write_bytes(b"from an earlier pin")
+
+    with pytest.raises(ArtifactError, match="does not name") as caught:
+        verify_artifact(tmp_path)
+
+    # Named, so the remedy is obvious rather than a hunt through 65 MiB.
+    assert "left-behind.onnx" in str(caught.value)
+
+
+def test_an_unexpected_file_is_found_in_a_nested_directory(
+    tmp_path: Path, artifact: _SyntheticArtifact
+) -> None:
+    # The vendored files sit flat today, but a re-pin could nest them, and a check
+    # that only listed the top level would stop seeing anything below it.
+    artifact.stage(tmp_path)
+    (tmp_path / "extra").mkdir()
+    (tmp_path / "extra" / "stowaway.bin").write_bytes(b"nested")
+
+    assert unexpected_files(tmp_path) == ["extra/stowaway.bin"]
+
+
+def test_acquisition_refuses_a_directory_carrying_an_extra_file(
+    tmp_path: Path, artifact: _SyntheticArtifact
+) -> None:
+    # `ensure_artifact` is what the build hook calls, so the refusal has to bite
+    # there and not only in the helper beneath it: an extra file fails the build.
+    (tmp_path / "left-behind.onnx").write_bytes(b"from an earlier pin")
+
+    with network_denied(), pytest.raises(ArtifactError, match="does not name"):
+        ensure_artifact(tmp_path, download=_Downloader(artifact))
+
+
+def test_an_exactly_matching_directory_has_nothing_unexpected(
+    tmp_path: Path, artifact: _SyntheticArtifact
+) -> None:
+    with network_denied():
+        ensure_artifact(tmp_path, download=_Downloader(artifact))
+
+    assert unexpected_files(tmp_path) == []
 
 
 def test_a_seam_that_produces_nothing_fails(tmp_path: Path) -> None:
