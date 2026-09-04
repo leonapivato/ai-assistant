@@ -103,6 +103,7 @@ from ai_assistant.orchestration import (
     ObservationStage,
     QuestionStage,
     RoutingStage,
+    SearchServicer,
     StepExecutor,
     StepRunner,
     WriteOutcome,
@@ -500,6 +501,13 @@ class Harness:
         # is a *later* turn's egress ruling. `None` is the default and is every other
         # case's deployment: no root configured, so no file is nameable.
         fetcher: object | None = None,
+        # ADR-0231 §17's Lane 5 seam, so an engine-level case can drive a turn that
+        # **searches** — which is what §18 item 2 needs and what no loop-level case can
+        # reach: the stamp it asserts is on a *captured episode*, and the consequence
+        # it asserts is a *later* turn's egress ruling. `None` is the default and is
+        # every other case's deployment: no search account connected, so §13's
+        # disposition for any `WEB_SEARCH` ask is `NOT_CONFIGURED`.
+        search: SearchServicer | None = None,
         observer: object | None = None,
         reader: object | None = None,
         email_reader: object | None = None,
@@ -702,6 +710,7 @@ class Harness:
             # could plan a step the selecting registry never advertised.
             registry=self.invoker,
             fetcher=fetcher,  # type: ignore[arg-type]  # the harness's own heterogeneous knobs
+            search=search,
         )
         runner = StepRunner(
             plans=self.plans,

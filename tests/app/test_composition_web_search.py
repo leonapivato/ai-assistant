@@ -211,3 +211,61 @@ async def test_the_searcher_and_the_seam_share_one_registration_object(
         assert binder._registrations.registration(WEB_SEARCH_ID) is integration.registration
     finally:
         await engine.aclose()
+
+
+async def test_the_searcher_reaches_the_loop_and_nothing_else(tmp_path: Path) -> None:
+    """ADR-0231 §11's one-call-site clause, asserted where it can be broken.
+
+    "``app/composition.py`` wires the searcher into that one site and into nothing
+    else, no other subsystem holds the reference, and no lane adds a second caller."
+    There is no type that says so — a ``WebSearcher`` is a Protocol any holder could
+    satisfy the caller of — so the property is a fact about **this wiring**, asserted
+    here: the object ``build_web_search_integration`` returned is the object the loop's
+    servicer holds, and the loop is the only thing on the engine that holds one.
+
+    The **policy, the binder and the trail the servicer holds are the runner's own
+    objects**, which is the other half of the wiring and is asserted beside it: one
+    ``ThresholdActionPolicy`` so a step's send and a turn's search are ruled under one
+    set of thresholds and one ``RecipientGrants`` face (ADR-0193 §7), one binding seam
+    (ADR-0152 §10), and one trail because ADR-0192 §1 requires the decision the
+    searcher's ledger claim is keyed on to equal the one the store holds under that id.
+    """
+    built: list[WebSearchIntegration] = []
+
+    def counted(**arguments: Any) -> WebSearchIntegration:
+        integration = build_web_search_integration(**arguments)
+        built.append(integration)
+        return integration
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(composition_module, "build_web_search_integration", counted)
+        engine = build_engine(_settings(configured=True), data_dir=tmp_path)
+
+    try:
+        (integration,) = built
+        servicer = engine._loop._search
+        assert servicer is not None, "a configured deployment services searches"
+        assert servicer._searcher is integration.searcher, "the one the seam registered"
+        assert servicer._binder is engine._runner._binder
+        assert servicer._policy is engine._runner._policy
+        assert servicer._trail is engine._runner._trail
+    finally:
+        await engine.aclose()
+
+
+async def test_a_deployment_that_connected_no_account_services_no_search(
+    tmp_path: Path,
+) -> None:
+    """ADR-0231 §13's ``NOT_CONFIGURED``, at the wiring that produces it.
+
+    "A deployment with no search account connected … reads a 0% yield for this kind,
+    and that is a true statement about that configuration rather than a reading of a
+    trigger." The loop holds no servicer at all, so a ``WEB_SEARCH`` ask composes
+    nothing, seeks no ruling and opens no channel — and ``None`` is the ordinary case
+    rather than an error.
+    """
+    engine = build_engine(_settings(configured=False), data_dir=tmp_path)
+    try:
+        assert engine._loop._search is None
+    finally:
+        await engine.aclose()
