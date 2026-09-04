@@ -175,7 +175,11 @@ multiplier that makes the font program dangerous.
 `/ToUnicode` CMap raises at `MAPPING_DICTIONARY_SIZE_LIMIT` (100,000 mappings), and form
 invocations are capped in aggregate at `MAX_XFORM_INVOCATIONS_PER_EXTRACTION` (5,000).
 Both are recorded as evidence about a resolved version; §6 is why neither is a bound this
-system states as its own, and §10's deferrals are not discharged by either.
+system states as its own, and §10's deferrals are not discharged by either. The invocation
+cap does one further thing, which §3 states rather than leans on: because the extraction
+**skips** rather than raises past it, invocations beyond the cap are parses that do not
+happen, and a walk charging them would refuse a document the extraction would have
+fetched.
 
 ### Both lenses were right, and the text is what is wrong
 
@@ -239,10 +243,20 @@ ADR-0015 requires for changing it.
 
 ### What this ADR is not allowed to settle
 
-It changes no Protocol and the shape of no `core` value — no member, no field, no
-annotation, nothing a wire or a schema can see — so golden rule 5 is satisfied by this
-ADR being merged ahead of its lane rather than excepted, and the one `core/types.py`
-edit the lane makes is `TOO_LARGE`'s docstring (§9). It admits no format to §6's first
+**It changes the `Fetcher` outcome contract and this ADR says so plainly**, because that
+is the whole reason it exists rather than a lane's patch: §§2–4 make a document that
+`fetch` resolves to a **record** today resolve to `FetchOutcome(refusal=TOO_LARGE)`
+tomorrow, and `FetchOutcome` and `FetchRefusal` cross from `readers` to every consumer.
+That is a substantive, cross-subsystem semantic change to a `core` contract — the class of
+change ADR-0015 puts in an ADR, and the one PR #2014's architecture lens refused to let an
+implementation make (Context). What it does **not** change is any *shape*: no Protocol
+signature, no member, no field, no validator, no serialised form, no annotation — nothing a
+wire, a schema or a stored document can see, which is why `PROTOCOL_VERSION` does not move
+and why golden rule 5 is satisfied by this ADR being merged ahead of its lane rather than
+excepted. The one `core/types.py` edit the lane makes is `TOO_LARGE`'s docstring (§9),
+and that edit exists precisely because the semantics moved while the shape did not.
+
+It admits no format to §6's first
 rung and re-opens no library evaluation: ADR-0230 §13 charged Lane C1 with that, C1
 discharged it, and §6 below cites the adopted library's own limits as **evidence** and
 never as a bound this system may rely on. It decides nothing about the web (ADR-0230
@@ -477,6 +491,36 @@ today; under this bound it refuses earlier and cheaply, with the same class.
 > symmetry is why the walk skips a form already on the current path: the adopted version
 > refuses a re-entrant form and parses it not at all.
 
+> **Normative.** **The walk charges a stream only where the extraction reaches the parse,
+> and the extraction's own early exits are part of what it reaches.** Charging a stream the
+> extraction will not parse is not a conservative error: it refuses a document the stated
+> quantity says must fetch, which is a wrong outcome in the direction this ADR is least
+> entitled to. Two exits of the adopted version are named because both were built and
+> checked against it, and both would otherwise be over-charged:
+>
+> - **A page or form whose inherited `/Resources` is absent or empty is not parsed at
+>   all.** `PageObject._extract_text` reads `get_inherited(/Resources)` and returns the
+>   empty string before it touches the content stream, on the ground that no resources
+>   means no font and so no text. So a document inside `fetch_max_file_bytes` whose page
+>   carries megabytes of compressed operators and **no** `/Resources` parses **zero**
+>   bytes, and the walk charges it zero and descends nowhere from it.
+> - **The extraction stops descending into forms after a fixed number of invocations per
+>   page.** Past `MAX_XFORM_INVOCATIONS_PER_EXTRACTION` (5,000 in the adopted version) the
+>   descent returns the empty string and **skips** the form — it does not raise. So
+>   invocations past that point are parses that never happen, and the walk stops charging
+>   at the same point it stops descending.
+
+> **Normative.** **Mirroring those exits is not the reliance §6 forbids, and the
+> distinction is exact.** §6 forbids leaning on a dependency's limit *as a bound this
+> system states as its own* — claiming a quantity is bounded because the library caps it.
+> Nothing here does that: the bound is `fetch_max_decoded_bytes` and this system enforces
+> it. What these clauses do is the same thing the resource-resolution clause above already
+> does — make the walk agree with the extraction about **which parses happen** — and a walk
+> that disagreed would refuse documents this ADR requires it to fetch. The lane
+> re-establishes both exits against the version `uv.lock` fixes (§6); a release that
+> removed either simply gives the walk more to charge, and one that added a third is the
+> case §6's re-establishment and §10's last deferral cover.
+
 > **Normative.** **Where the walk cannot establish what the extraction will parse, the
 > fetch is refused `EXTRACTION_FAILED` and never extracted on the hope** — a stream the
 > library's own parser will not read, a resource dictionary that cannot be resolved, a
@@ -488,13 +532,15 @@ today; under this bound it refuses earlier and cheaply, with the same class.
 > **Normative.** **The property is required and no construction is**, in ADR-0230 §6's
 > own form — and it is named **achievable** rather than aspirational, because a
 > requirement no implementation is known to satisfy would be a deferral wearing a
-> decision's clothes. A walk of the **invocation graph** satisfies it: begin at the page's
-> decoded content stream; add each stream's decoded length to the total, and add the
-> decoded length of every font in that parse's resource context meeting the three-key
+> decision's clothes. A walk of the **invocation graph** satisfies it: at each object,
+> first resolve the inherited resources and **stop there, charging nothing, where the
+> extraction would** (above); otherwise add the stream's decoded length to the total, and
+> add the decoded length of every font in that resource context meeting the three-key
 > predicate above; compare the total **before** that stream is parsed;
 > then parse the stream **with the adopted library's own content-stream parser**, take the
 > `Do` operations it reports, resolve each against the inherited resources above, and
-> recurse — refusing the moment the total passes the bound.
+> recurse — counting invocations as the extraction counts them and stopping where it stops,
+> and refusing the moment the total passes the bound.
 
 > **Normative.** For **plain text and Markdown** the counted quantity is **zero**,
 > and no implementation checks the bound on those formats. Their extraction has no
@@ -577,9 +623,11 @@ double-counting. A form invoked five hundred times is parsed five hundred times,
 of distinct decoded bytes, and cost 126.6 s. Charged once it sits comfortably inside any
 figure this ADR could pick; charged per parse it is 50 MB and is refused immediately. The
 adopted library's aggregate cap of 5,000 invocations is what made the *unfixed* worst case
-five thousand times one form rather than unbounded; it is not something this bound leans
-on, because the walk charges every invocation and refuses long before the cap is reached
-(§6).
+five thousand times one form rather than unbounded. This bound does not lean on it as a
+bound (§6) — but the walk does **stop at it**, because past it the extraction skips the
+form rather than parsing it, and charging a parse that does not happen would refuse a
+document this ADR requires to fetch (§3). The 500-invocation document above is refused long
+before the cap, which is why the cap is not what makes it refuse.
 
 ### 4. The refusal is `TOO_LARGE`, and there is no sixth member
 
@@ -819,15 +867,34 @@ it — and this addition renames nothing, drops nothing and starts no second aud
     with `fetch_max_decoded_bytes` raised to a figure §2's table names. This is the arm
     that records the cost §2 accepts; an implementation that quietly admitted it would be
     charging the font program per document rather than per parse, which arm 10 forbids.
-13. **An out-of-domain bound does not load.** A zero and a negative value of
+13. **The walk stops where the extraction stops, in both of its named exits.** Two arms,
+    each a **fetch** arm, because each asserts that a document is *not* refused. A page
+    carrying megabytes of compressed operators and **no inherited `/Resources`** fetches,
+    charged nothing and yielding no text — the arm that fails on any walk that decodes and
+    charges a content stream before resolving the resources the extraction resolves first.
+    And a page invoking small forms **past `MAX_XFORM_INVOCATIONS_PER_EXTRACTION`**, whose
+    charge over the invocations the extraction actually performs is inside the bound while
+    the total over *all* its invocations is not, fetches — the arm that fails on any walk
+    charging parses the extraction skips. **These are the arms that fail an implementation
+    erring "safely" by over-charging**, which refuses documents §2's stated quantity
+    requires it to fetch.
+14. **The fail-closed branch is reached, and it is `EXTRACTION_FAILED`.** A document whose
+    form resource dictionary cannot be resolved — so the walk cannot establish what the
+    extraction will parse — is refused **`EXTRACTION_FAILED`**, not `TOO_LARGE` and not
+    fetched: no record is added, no turn fails, and `extract_text` is not called for that
+    page. **This is the arm that fails on any implementation that follows the adopted
+    library's permissive path and returns a record for a structure the walk did not
+    understand**, which is §3's one fail-closed branch and until this arm existed was the
+    only normative clause of this ADR with no test behind it.
+15. **An out-of-domain bound does not load.** A zero and a negative value of
     `fetch_max_decoded_bytes` is refused when
     `Settings` is constructed, before any fetcher is built and before any filesystem call,
     and each is a configuration error that stops the deployment rather than an empty
     listing, a `FetchRefusal` or a degraded turn. This is ADR-0230 §14 item 21's arm,
     extended by one field and asserted in its form.
-14. **The enumeration did not grow.** `FetchRefusal` has five members, and the audit event
+16. **The enumeration did not grow.** `FetchRefusal` has five members, and the audit event
     for arm 1's turn carries `TOO_LARGE` and no field naming a bound, a count or a size.
-15. **`fontTools` is not resolvable.** The suite fails if `fontTools` can be imported,
+17. **`fontTools` is not resolvable.** The suite fails if `fontTools` can be imported,
     because §3's predicate is stated for an environment in which `pypdf._font.py`'s decode
     branch is unreachable (§6). This is the page-tree-guard pattern Lane C1 used: a
     property of the resolved environment pinned by a test rather than asserted in prose.
@@ -888,8 +955,9 @@ stream, adds its length, adds the program of each font in that parse's resource 
 meeting §3's three-key predicate, scans the stream for `Do` occurrences, resolves each
 against the stream's own resources, recurses, and stops the moment the total passes the
 bound — so its cost is bounded by the bound and its state is a running total and a path
-set. §3 fixes what it must count and §8's arms 2, 3, 4, 10, 11 and 12 fix where it must not
-be wrong — 11 being the pair that fails an implementation counting *more* than §3 does; the
+set. §3 fixes what it must count and §8's arms 2, 3, 4, 10, 11, 12, 13 and 14 fix where it
+must not be wrong — 11 and 13 being the arms that fail an implementation counting *more*
+than §3 does, which is the error a walk is likelier to make than under-counting; the
 spelling is the lane's.
 
 **Independent of Lanes C2 and C3**, which touch `planning/` and `orchestration/` and
@@ -926,9 +994,14 @@ on either.
   the adopted version: a compressed **object stream** (`/ObjStm`), decoded whole by
   `PdfReader._get_object_from_stream` during ordinary indirect-object resolution — before
   any per-page loop, so before any total this ADR keeps exists — and a font's **`/ToUnicode`
-  CMap**. Each is read **once** and cached, so the page count is not a multiplier on
-  either, and each is therefore linear in the file that `fetch_max_file_bytes` already
-  bounds at the read. **Fired by either of two things and by nothing else**: a measurement
+  CMap**. Each is read **once** and cached, so no per-parse multiplier acts on either —
+  which is what separates them from the font program and is the *whole* of the ground for
+  deferring them. **They are not bounded by anything this system owns**, and in particular
+  `fetch_max_file_bytes` does not bound them: it bounds the bytes **read from disk**, and a
+  small compressed `/ObjStm` can expand to tens of MiB during indirect-object resolution,
+  at a per-stream ceiling a ranged dependency owns and this project does not declare (§6).
+  The residual is stated that way rather than argued away.
+  **Fired by either of two things and by nothing else**: a measurement
   showing one of them re-read or re-parsed per page, or per any other quantity a document
   controls — which is exactly what makes the font program chargeable and would make these
   so; or an adopted release whose **parse order** changes such that one of them is parsed
@@ -952,7 +1025,7 @@ on either.
 - **A `fontTools` that becomes resolvable.** §3's predicate is the only reachable font
   decode *in an environment without `fontTools`* (§6). Were it ever installed,
   `pypdf._font.py`'s branch would open a second decode under a different condition, and
-  §3's three keys would be incomplete. §8 arm 15 pins the absence rather than assuming it.
+  §3's three keys would be incomplete. §8 arm 17 pins the absence rather than assuming it.
   **Fired by** that test failing.
 - **A decoded stream a later library version reads that §3 does not charge** (§6). §3's
   counted set is decided by the extraction's own parse and its own font condition rather
@@ -1104,10 +1177,13 @@ figure instead was measured and rejected in §2: 8 MiB multiplies the instructio
 by thirty-eight, and 16 MiB readmits #2022's own document.
 
 **The inputs read once and cached are left unbounded, and that is the other price.** An
-object stream and a `/ToUnicode` CMap are still decoded without a figure of this system's
-own governing them; what governs them is `fetch_max_file_bytes` and the read it bounds, and
-the absence of a per-parse multiplier is why that is tolerable rather than why it is
-complete. §10 names each with what fires it. **The shape of the trade is the point of the
+object stream and a `/ToUnicode` CMap are still decoded with **no figure of this system's
+own governing them, and none of another's either**: `fetch_max_file_bytes` bounds the bytes
+read from disk and not what they expand to, so a small `/ObjStm` reaching tens of MiB during
+object resolution is bounded by a ranged dependency's per-stream ceiling and by nothing this
+project declares. What makes the residual tolerable is the absence of a per-parse
+multiplier — one decode, not one per page — and that is a reason for the deferral rather
+than a claim the class is covered. §10 names each with what fires it. **The shape of the trade is the point of the
 ADR, not a residue of it**: a smaller claim that holds beats the larger one ADR-0230 §6
 made and could not.
 
@@ -1122,9 +1198,10 @@ what an extraction *will* parse means following the invocation graph rather than
 one field, and §3 requires it because two measured documents defeat everything simpler:
 the count cannot be `/Contents`, and it cannot charge a repeatedly invoked form once. The
 walk is bounded by the bound, so it does not become a second unbounded traversal, and
-§8's arms 2, 3, 4, 10, 11 and 12 are what fail an implementation that skips it, that
-over-approximates it, that charges a once-and-cached input into it, or that charges a font
-program once per document instead of once per parse.
+§8's arms 2, 3, 4, 10, 11, 12, 13 and 14 are what fail an implementation that skips it,
+that over-approximates it — by charging a resource-less page, or invocations past the point
+the extraction stops descending — that charges a once-and-cached input into it, or that
+charges a font program once per document instead of once per parse.
 
 **A legitimate document can now be refused, and that direction is chosen.** Two kinds: a
 report whose per-page graphics push its counted total over 1 MiB, and — measured, and named
