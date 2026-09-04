@@ -958,8 +958,8 @@ def _declared_inventories(notices: str) -> list[tuple[str, frozenset[str]]]:
     """
     inventories: list[tuple[str, frozenset[str]]] = []
     for table in _notice_tables(notices):
-        pinned = [_cell(row) for row in table if row.startswith("| Pinned commit ")]
-        listed = [_cell(row) for row in table if row.startswith("| Files ")]
+        pinned = _rows_labelled(table, "Pinned commit")
+        listed = _rows_labelled(table, "Files")
         if not pinned and not listed:
             continue
         assert len(pinned) == 1, f"a table declares {len(pinned)} pinned commits: {table}"
@@ -968,6 +968,24 @@ def _declared_inventories(notices: str) -> list[tuple[str, frozenset[str]]]:
         assert len(names) == len(set(names)), f"{pinned[0]} lists a file twice"
         inventories.append((pinned[0].strip("`"), frozenset(names)))
     return inventories
+
+
+def _rows_labelled(table: Sequence[str], label: str) -> list[str]:
+    """The value cells of the rows in ``table`` whose label cell is exactly ``label``.
+
+    The label is matched whitespace-tolerantly, the way ``_declared_revisions``
+    matches its own: ``|   Pinned commit   |`` and ``| Pinned commit |`` are one
+    row to every Markdown renderer, so recognising only the unpadded spelling
+    made a padded document fail for a cause it does not have — an unrecognised
+    pin row reads as a table that declares no pin (#1932). The *value* cell's
+    padding was never the question; :func:`_cell` strips it.
+
+    Matching the whole label cell rather than a prefix of the row is the other
+    half of that agreement: ``| Pinned commit (upstream) |`` is a different label
+    and is counted by neither parser, instead of by this one alone.
+    """
+    labelled = re.compile(rf"^\|\s*{re.escape(label)}\s*\|")
+    return [_cell(row) for row in table if labelled.match(row)]
 
 
 def _cell(row: str) -> str:
@@ -1061,6 +1079,41 @@ def test_a_pin_cannot_borrow_its_inventory_from_a_different_table() -> None:
 
     with pytest.raises(AssertionError, match="declares 0 Files rows"):
         _declared_inventories(f"{only_a_pin}\n\nprose in between\n\n{only_an_inventory}")
+
+
+def test_a_padded_notice_table_declares_what_the_unpadded_one_declares() -> None:
+    """Cell padding is invisible to a Markdown renderer, so it is invisible here (#1932).
+
+    The row labels were read by exact prefix, under which ``|   Pinned commit |
+    `<sha>` |`` — the same table to every renderer — matched neither row list. Both
+    documents below are the shape the notices carry today with spaces added, and
+    the exact-prefix parser broke them in two different places: with a padded pin row
+    beside an unpadded inventory the table declared 0 pinned commits, which fails
+    loudly but names a defect the document does not have; with both rows padded the
+    table matched neither list, was skipped as prose, and the failure moved out of
+    this parser entirely to the multiset compare in
+    :func:`test_the_notices_name_every_file_that_ships`.
+
+    Asserted against the unpadded document's own parse *and* against the pair
+    itself, because equality alone is satisfied by two spellings that both parse to
+    nothing. ``_declared_revisions`` is read on the same documents because the two
+    parsers describe one table between them: padding that one tolerates and the
+    other refuses is a disagreement about what the notices say.
+    """
+    revision = "0" * 40
+    expected = [(revision, frozenset({"a.onnx", "b.onnx"}))]
+    unpadded = _synthetic_notices([(revision, ["a.onnx", "b.onnx"])])
+    header = "| | |\n|---|---|\n"
+    half_padded = (
+        f"{header}|   Pinned commit   |   `{revision}`   |\n| Files | `a.onnx`, `b.onnx` |"
+    )
+    fully_padded = (
+        f"{header}|   Pinned commit   |   `{revision}`   |\n|   Files   |   `a.onnx`, `b.onnx`   |"
+    )
+
+    for padded in (half_padded, fully_padded):
+        assert _declared_inventories(padded) == _declared_inventories(unpadded) == expected
+        assert _declared_revisions(padded) == _declared_revisions(unpadded) == [revision]
 
 
 def test_the_notices_are_declared_as_a_licence_file() -> None:
