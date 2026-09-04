@@ -601,6 +601,41 @@ async def test_a_confirmation_whose_value_cannot_be_located_is_not_put_at_all(
 #: state (round 2), and last the shapes that used to **throw** rather than refuse
 #: (round 6): an ``egress`` that is absent, a ``spans`` that is not a list, and a
 #: ``parameters`` that is not one either.
+#: An integer one past the last a double holds exactly. ``JSON.parse`` reads it as
+#: ``9007199254740992``, which is the whole of why the arguments cross this surface as
+#: **text**: "a JSON number read by ``JSON.parse`` would be a double, and an integer
+#: argument above 2**53 would reach the owner changed". The locator and the extent
+#: cross as numbers and cannot be spelled, so what they get instead is a refusal
+#: (adversarial review, round 10).
+_UNSAFE = 9007199254740993
+
+
+def _unsafe_position(view: dict[str, Any]) -> None:
+    """A locator past the last integer a double holds, on both halves at once.
+
+    Both for :func:`_negative_position`'s reason, and here it is load-bearing twice
+    over: the page rounds *both* to the same value, so the join still succeeds and the
+    only thing left to refuse the card is the safety of the number itself.
+
+    Args:
+        view: The confirmation view to spoil.
+    """
+    view["parameters"][1]["index"] = _UNSAFE
+    view["egress"]["spans"][1]["index"] = _UNSAFE
+
+
+def _unsafe_extent(view: dict[str, Any]) -> None:
+    """An extent past the last integer a double holds.
+
+    Rendered, it would put ``9007199254740992 code points`` on the card as a fact about
+    the bytes — a number this page produced by parsing, not one the gateway sent.
+
+    Args:
+        view: The confirmation view to spoil.
+    """
+    view["egress"]["spans"][0]["extent"] = _UNSAFE
+
+
 def _negative_position(view: dict[str, Any]) -> None:
     """A locator naming a position no decomposition has, on both halves at once.
 
@@ -651,6 +686,8 @@ _FAULTS: dict[str, Callable[[dict[str, Any]], None]] = {
     "arguments that are not a list": lambda view: view.update({"parameters": {}}),
     "a negative position": _negative_position,
     "a negative extent": _negative_extent,
+    "a locator no double holds": _unsafe_position,
+    "an extent no double holds": _unsafe_extent,
 }
 
 

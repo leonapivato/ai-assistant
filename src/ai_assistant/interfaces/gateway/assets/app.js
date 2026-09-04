@@ -1253,8 +1253,16 @@ function isText(value) {
 // The bound is `EgressSpan.index`'s own `ge=0`, restated. That is the same thing every
 // test in this rule is — a member read as `core` declares it — and it is deliberately
 // *not* the next thing along: see `readSpan`.
+//
+// **Safe rather than merely integral** (adversarial review, round 10). This member
+// crosses as a JSON **number**, so `JSON.parse` has already made it a double: an index
+// of `9007199254740993` arrives as `9007199254740992` and would be rendered as the
+// locator `to[9007199254740992]`, which is not the position the gateway sent. That is
+// `_parameter_text`'s own rule — the one this lane's arguments cross as text to
+// obey — reaching the members that could not. Nothing real is refused by it: a
+// position past 2**53 is an element of an array no process holds.
 function isPosition(index) {
-  return index === null || (Number.isInteger(index) && index >= 0);
+  return index === null || (Number.isSafeInteger(index) && index >= 0);
 }
 
 // Whether this page can put the whole of what ADR-0233 §8 obliges it to put.
@@ -1428,6 +1436,9 @@ function readDestination(member) {
 // is one, and the recipient in both forms where the occurrence names one. Each is read
 // as `core` **declares** it, `EgressSpan.extent`'s own `ge=0` included — a card saying
 // "-1 code points" is a description this page invented no less than `undefined` is.
+// And **safely**, for `isPosition`'s reason: an extent of `9007199254740993` is
+// `9007199254740992` by the time this sees it, so a card rendering it would state a
+// count the gateway did not send. An extent past 2**53 is a value no process holds.
 //
 // **And that is where the rule stops, on purpose** (adversarial review, round 8). What
 // it does not do is restate the *relations between* members: that the spans are the
@@ -1460,7 +1471,7 @@ function readSpan(span, parameters) {
   if (!isText(span.argument) || !isPosition(span.index)) {
     return false;
   }
-  if (!isText(span.provenance) || !Number.isInteger(span.extent) || span.extent < 0) {
+  if (!isText(span.provenance) || !Number.isSafeInteger(span.extent) || span.extent < 0) {
     return false;
   }
   if (span.tier !== null && !isText(span.tier)) {
