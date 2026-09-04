@@ -301,15 +301,31 @@ def _check_count(name: str, value: object) -> None:
 
     The test is on the *type* and not on :meth:`float.is_integer`, because
     ``range()`` refuses ``2.0`` exactly as it refuses ``2.5``: admitting an
-    integral float would only move the same crash further from its cause. A
-    ``bool`` is an ``int`` in Python and is taken as the count it equals, which
-    is already what ``range(True)`` means.
+    integral float would only move the same crash further from its cause.
+
+    **The type test is exact, not** ``isinstance``, for the reason
+    ``ai_assistant.core.logging``'s ``_SAFE_EXACT_TYPES`` gives about the same
+    hazard: an ``int`` subclass inherits the trust without being the thing
+    trusted. One overriding ``__lt__`` to return ``False`` passes ``value < 1``
+    and then the ``topics > live`` comparison — which is resolved by the
+    subclass's reflected operator — and plants a zero-record population under a
+    spec that documents at least one. Refusing the subclass means the ordering
+    below is ordinary ``int`` ordering and nothing else. ``bool`` is the one such
+    subclass in the standard library, and it is refused with the rest: no call
+    site passes one, and a count is not a truth value.
+
+    The value is not rendered until it is known to be an ``int``. ``repr`` on an
+    arbitrary object runs that object's code, which would let it raise something
+    other than the ``ValueError`` this owner exists to guarantee.
 
     Raises:
-        ValueError: If ``value`` is not an ``int``, or is below one.
+        ValueError: If ``value`` is not exactly an ``int``, or is below one.
     """
-    if not isinstance(value, int) or value < 1:
-        msg = f"{name} must be an integer >= 1, got {value!r}"
+    if type(value) is not int:
+        msg = f"{name} must be an integer >= 1, got a {type(value).__name__}"
+        raise ValueError(msg)
+    if value < 1:
+        msg = f"{name} must be an integer >= 1, got {value}"
         raise ValueError(msg)
 
 
