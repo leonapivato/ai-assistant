@@ -238,6 +238,17 @@ which enumerates that member's causes and gains a fourth.
 > computes it from `fetch_max_decoded_bytes`, from `fetch_max_content_bytes` or from
 > `fetch_max_file_bytes`, and no deployment's change to any of those moves it.
 
+> **Normative.** **For plain text and Markdown the counted quantity is zero**, and no
+> implementation checks `fetch_max_character_mappings` on those formats — ADR-0232 §3's
+> clause of that name, in its own words: their extraction has no decoding step, so it
+> builds no mapping. A `.txt` or `.md` file is never refused on this bound.
+
+> **Normative.** **The field is counted in the concrete extractor, per format**, on what
+> that format's own decoding produces, exactly as ADR-0232 §3 requires of
+> `fetch_max_decoded_bytes`. It is not a `core` concern, it adds no argument to any
+> Protocol, and it reaches the extractor as a configured figure as the other four bounds
+> do.
+
 > **Normative.** **Neither field may absorb the other's quantity, and in particular no
 > implementation converts mappings into notional bytes to charge them to
 > `fetch_max_decoded_bytes`.** An exchange rate between the two would make an operator's
@@ -245,8 +256,8 @@ which enumerates that member's causes and gains a fourth.
 > document respects.
 
 **Why two fields, stated as the argument ADR-0232 already made and this measurement
-extends.** ADR-0232 §1 reads ADR-0230 §6's two size bounds as two because *"what is read*
-and *what reaches the prompt* are different quantities with different consumers, and one
+extends.** ADR-0232 §1 reads ADR-0230 §6's two size bounds as two because *"what is read
+and what reaches the prompt are different quantities with different consumers, and one
 number cannot be honest about both"*, and adds a **third**: *"The bytes an extractor
 parses are a **third** such quantity with a third consumer — the parser — and the same
 argument that made §6 two fields makes it three."* The mappings a CMap parse builds are a
@@ -297,9 +308,10 @@ and each to the field whose quantity it is.
 > `bfchar` tokens or recognised a `beginbfrange` would be exactly the re-implementation
 > ADR-0232 §3 forbids for content streams, in a grammar with more shapes to get wrong: a
 > multi-line range continued across lines, a bracketed destination list, a `<<` block, a
-> comment, a broken line the library skips with a warning. PR #2037's rounds 3 to 6 are
-> the record of what predicting this library's control flow costs, and the correction that
-> ended them was to ask it instead.
+> comment, a broken line the library skips with a warning. PR #2037's rounds 3 to 5 are
+> the record of what predicting this library's control flow costs — three successive
+> statements of one font condition, each incomplete in one more place — and the correction
+> that ended them was to ask the library instead.
 
 > **Normative.** The walk performs that establishing parse **at most once per distinct
 > `/ToUnicode` stream per fetch**, and charges the count it yields at **every** parse whose
@@ -336,7 +348,10 @@ and each to the field whose quantity it is.
 > bounds that one CMap is the adopted version's own `MAPPING_DICTIONARY_SIZE_LIMIT` and
 > nothing this project declares — evidence about a version (ADR-0232 §6), disclosed here
 > in the same posture and for the same reason §3 discloses the 75 MB per-stream decode
-> ceiling behind its own residual.
+> ceiling behind its own residual. **The establishing parse's other half is bounded
+> outright**: `prepare_cm`'s normalisation is linear in the CMap's decoded bytes, and those
+> bytes were charged and compared at step (b) before the parse was entered, so the walk
+> never normalises a buffer `fetch_max_decoded_bytes` has not already admitted.
 
 > **Normative.** **Where the establishing parse raises, the fetch is refused
 > `EXTRACTION_FAILED`**, under ADR-0232 §3's one fail-closed branch and adding no member:
