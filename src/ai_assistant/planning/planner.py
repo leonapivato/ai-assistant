@@ -39,17 +39,35 @@ subsystem boundary carrying empty ``steps`` and a ``rationale`` saying why
 
 **Since ADR-0226 the envelope has one more, optional key, and it is not a third
 shape.** A plan or a decline may carry a ``read_request``: at most one ask of each
-of §2's two kinds, naming one further read the planner judged this turn's supply
-too thin without. It rides beside whichever shape the reply already is, it is
-serviced by the loop and never here, and it is never a step — reading the owner's
-own store is not an act in the world, so nothing about selection, permission or
-execution touches it (§4). Three properties of this module carry the decision. The
-supply is **labelled** by position, ``M1``, ``M2``, … (:func:`_label`), because §3
-rules that no record identifier is rendered to a model and none is accepted from
-one; the prompt asks for the request in :data:`_READ_REQUEST_GUIDANCE`, with
-:data:`_ACT_RECORD_GUIDANCE` stating the one case §2 named the hop for; and
-:func:`_optional_read_request` reads one back, dropping a malformed one rather than
-spending a repair round or costing the plan.
+member of :class:`~ai_assistant.core.types.ReadKind`, naming one further read the
+planner judged this turn's supply too thin without. The enumeration is where that
+membership lives and it is deliberately not restated here — it has grown twice
+(ADR-0230 §1, ADR-0231 §1), and a count written out in prose goes stale silently
+where the enum does not. The request rides beside whichever shape the reply already
+is, it is serviced by the loop and never here, and **no ask is ever a step**: §4
+rules that a ``ReadAsk`` is not a ``PlanStep``, is not selected against the
+capability vocabulary, is not resolved to a tool and reaches neither
+``StepExecutor`` nor ``ExecutionState``, and ADR-0231 leaves all four of those
+binding verbatim.
+
+**One clause of §4 no longer reads as widely as it did, and the difference lands
+outside this module.** §4's reason — "reading the owner's own store is not an act
+in the world" — is why an ask is not ruled on by the permission gate, and ADR-0231
+amends exactly that clause for the one kind whose servicing **is** an act in the
+world: §9 puts a ``WEB_SEARCH`` servicing's **send** in front of ``ActionPolicy``.
+What is ruled on there is the send, not the ask, and both the send and the ruling
+belong to ``orchestration``; nothing here selects, authorises or performs anything,
+and this module still emits a request and reads one back.
+
+Four properties of this module carry the decision. The supply is **labelled** by
+position, ``M1``, ``M2``, … (:func:`_label`), because §3 rules that no record
+identifier is rendered to a model and none is accepted from one; the prompt asks
+for the request in :data:`_READ_REQUEST_GUIDANCE`, with
+:data:`_ACT_RECORD_GUIDANCE` stating the one case §2 named the hop for,
+:data:`_LOCAL_FILE_GUIDANCE` naming a file where one was shown and
+:data:`_WEB_SEARCH_GUIDANCE` asking for a search with no argument at all
+(ADR-0231 §1); and :func:`_optional_read_request` reads one back, dropping a
+malformed member rather than spending a repair round or costing the plan.
 
 **A statement of fact is a decline** (#1695). It asks for nothing, so it wants no
 capability, and the prompt works that direction of ADR-0176 §4's test through
