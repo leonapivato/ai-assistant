@@ -13,14 +13,15 @@
   first limb, so the record is made here.
   **What is *not* changed, and a reader stopping at the qualifier will get this
   wrong.** Ratifying ADR-0233 relaxes nothing for any call: its condition is a
-  property of a call — the span's coverage recorded, a per-call `CONFIRM` answered
-  by the user, a confirmation that carried the span's own bytes under its surface
-  floor, and those bytes bound by `parameters_digest` — so before that mechanism
-  exists in code no call can meet it and this clause binds exactly as written.
+  property of a call — the call's coverage recorded on its binding, a per-call
+  `CONFIRM` answered by the user, a confirmation that carried every span's own bytes
+  under its surface floor, and those bytes bound by `parameters_digest` — so before
+  that mechanism exists in code no call can meet it and this clause binds exactly as
+  written.
   §3's **second** clause is untouched, unrelaxed and now *more* strictly enforced:
-  ADR-0233 §6 makes a span carrying covered content with a covered path containing
-  no model call refusable at `EgressBinding` construction, which is the first
-  mechanism any clause of §3 has ever had. §3's first, fourth, fifth and sixth
+  ADR-0233 §6 makes a call any covered path of whose content contains no model call
+  refusable at `EgressBinding` construction, which is the first mechanism any clause
+  of §3 has ever had. §3's first, fourth, fifth and sixth
   clauses bind entire, and ADR-0233 is neither the export ADR §3's fifth clause
   reserves nor cited toward one. §4's marked clause is discharged only for spans
   whose coverage was honestly recorded, and ADR-0233 §6 says so in its own marked

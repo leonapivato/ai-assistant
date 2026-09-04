@@ -1,7 +1,38 @@
 # 184. A decision recorded before the origin field is legible history, and the absence is its own value
 
-- Status: Accepted
+- Status: Accepted, §2's member roster and §9's one-sibling clause amended by ADR-0233 (a second sibling, for the epoch §9 named; §2's shared-base rule, §3's discrimination, §5's readers and §7's floor all stand)
 - Date: 2026-08-23
+- **Amended: 2026-09-04 by ADR-0233 — §2's member roster and §9's first clause, and
+  those alone.** §9 deferred a stored payload version for the trail's `data` column
+  and named its firing condition: "the next member added required-with-no-default to
+  a model the trail stores", with "the ADR adding that member" choosing "between a
+  second sibling and a version, in its own text". ADR-0233 §4 adds
+  `EgressBinding.coverage`, so the condition is met, and §14 there **chooses the
+  second sibling** — `CoverageUnrecordedBinding`, for the rows written between
+  `planned_with_external_content`'s arrival and `coverage`'s. Two clauses move.
+  §2's first clause describes `OriginUnrecordedBinding` as carrying "every member
+  `EgressBinding` carries **but** `planned_with_external_content`", which stops being
+  true once `EgressBinding` carries a member those rows also lack; and §9's first
+  clause — "No lane adds a second sibling to this union" — is the clause §9's
+  *second* clause licenses ADR-0233 to spend, and it is spent.
+  **Why the version was refused rather than taken, which is a fact §9 did not
+  have.** A version key names the schema a row stands under and supplies no
+  representable value for it: a stored binding lacking a required field still cannot
+  be decoded into any type, so the row would be neither legible nor typed — which is
+  the failure this whole ADR exists to prevent. §9's own objection to accumulating
+  siblings — "three siblings is six pairwise discriminations" — does not arise here
+  because the epochs are **totally ordered in time**, so the three shapes form a
+  chain rather than a matrix: a row lacking `planned_with_external_content`
+  necessarily lacks `coverage` too, and the discrimination stays the two-test ladder
+  §3 requires.
+  **Everything else stands and is relied on.** §2's shared-base rule is obeyed —
+  each member is still declared exactly once, on a private base chain the three
+  models inherit — and no member is restated. §3's structural, total and mutually
+  exclusive discrimination is preserved and extended by one rung. §4's
+  nothing-is-written rule, §5's five readers and §6's `authorises` ruling bind
+  unchanged. §7's floor is **extended by cause, not replaced**: `resolve` returns no
+  `ALLOW` on the new sibling for §7's own reason, that the fact a ruling would rest
+  on was never recorded. §11's partial supersession of ADR-0150 §1 is untouched.
 - **Decides `core/types.py` surface and one `core/protocols.py` obligation.** One
   new model over a private base shared with `EgressBinding`, one widened annotation on
   one existing field, and two behavioural clauses — one on `ActionPolicy`, one on
