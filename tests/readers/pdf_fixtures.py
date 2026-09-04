@@ -588,6 +588,44 @@ def content_array_pdf(*, part_bytes: int, undecodable_bytes: int) -> bytes:
     return document([Page(contents=parts, fonts={"/F1": font})], objects=objects)
 
 
+def oversized_content_array_pdf(*, members: int, decoded_bytes: int) -> bytes:
+    """One page whose ``/Contents`` array carries ``members`` references.
+
+    The first names a stream decoding to ``decoded_bytes``; every one after it names a
+    single shared fourteen-byte stream, so the *cardinality* is the amplification and
+    the document stays small enough to build in a test. ``ContentStream.__init__``
+    compares the array's length against ``CONTENT_STREAM_ARRAY_MAX_LENGTH`` before it
+    resolves a member, so above that the extraction parses nothing at all while the
+    first member alone would carry a walk past the bound — which is what makes this the
+    document separating a class-faithful walk from one that charges first.
+
+    Built by hand rather than through :func:`document`, because :class:`Page` gives each
+    member its own object and this needs one object named many times.
+    """
+    objects = _Objects()
+    catalogue = objects.reserve()
+    tree = objects.reserve()
+    page = objects.reserve()
+    font = objects.add(PLAIN_FONT)
+    first = objects.add(stream_object(drawing(decoded_bytes)))
+    shared = objects.add(stream_object(b"0 0 m 1 1 l S\n"))
+    objects.put(
+        page,
+        b"<< /Type /Page /Parent "
+        + reference(tree)
+        + b" /MediaBox "
+        + _MEDIA_BOX
+        + b" /Resources << /Font << /F1 "
+        + font
+        + b" >> >> /Contents ["
+        + b" ".join([first, *[shared] * (members - 1)])
+        + b"] >>",
+    )
+    objects.put(catalogue, b"<< /Type /Catalog /Pages " + reference(tree) + b" >>")
+    objects.put(tree, b"<< /Type /Pages /Kids [" + reference(page) + b"] /Count 1 >>")
+    return objects.build(root=catalogue)
+
+
 def unreadable_resources_pdf() -> bytes:
     """A page whose ``/Resources`` entry is present and is **not a dictionary**.
 

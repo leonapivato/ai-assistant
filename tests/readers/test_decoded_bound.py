@@ -49,6 +49,7 @@ from pdf_fixtures import (
     minimal_pdf,
     no_resources_pdf,
     object_stream_and_cmap_pdf,
+    oversized_content_array_pdf,
     pages_sharing_a_font,
     repeated_form_pdf,
     tounicode_font_pdf,
@@ -73,6 +74,10 @@ UNBOUNDED_FILE: Final = 1 << 30
 #: What ADR-0232 §3's walk stops descending at, mirroring the adopted extraction.
 #: Pinned against ``pypdf``'s own constant below rather than trusted.
 _CAP: Final = 5_000
+
+#: How many members an array-based ``/Contents`` may carry before the adopted parser
+#: refuses it outright. Pinned against ``pypdf``'s own constant below, like ``_CAP``.
+_ARRAY_CAP: Final = 10_000
 
 #: A word an arm can look for in a record, so "the text arrived" is checkable rather
 #: than merely non-empty.
@@ -529,6 +534,74 @@ async def test_a_resource_context_that_cannot_be_read_fails_closed(
     assert outcome.refusal is FetchRefusal.EXTRACTION_FAILED
     assert outcome.record is None
     assert parsed == []
+
+
+@pytest.mark.parametrize(
+    ("members", "expected"),
+    [
+        (_ARRAY_CAP + 1, FetchRefusal.EXTRACTION_FAILED),
+        (_ARRAY_CAP, FetchRefusal.TOO_LARGE),
+    ],
+)
+async def test_a_content_array_the_parser_refuses_is_not_a_size_refusal(
+    root: Path, parsed: list[object], members: int, expected: FetchRefusal
+) -> None:
+    """An array over the parser's own cardinality guard parses **nothing**, so the
+    class is the malformed one and not the bound's.
+
+    ``ContentStream.__init__`` compares the array's length against
+    ``CONTENT_STREAM_ARRAY_MAX_LENGTH`` **before it resolves a member**, so the
+    extraction of a page over it decodes not one byte. A walk charging the members
+    first crosses the bound on the first of them and answers ``TOO_LARGE`` for a
+    document the extraction refuses as malformed — the class confusion ADR-0232 §4
+    exists to prevent, one structure over from the resource context above.
+
+    **Both sides, because one alone passes an implementation that guesses.** The same
+    document one member *under* the guard is one the extraction really does decode, and
+    it really is over the bound, so it is ``TOO_LARGE``: a walk refusing every large
+    array as malformed would fail here, and a walk charging first would fail above.
+    Neither document is fetched by any reading — what is under test is only which
+    refusal the operator is sent to.
+    """
+    data = oversized_content_array_pdf(members=members, decoded_bytes=2_000_000)
+
+    outcome = await fetch(root, data)
+
+    assert outcome.refusal is expected
+    assert outcome.record is None
+    assert parsed == []
+
+
+def test_the_content_arrays_cardinality_guard_is_the_libraries_own() -> None:
+    """The walk refuses the array where the extraction refuses it, in both directions.
+
+    The sibling of the invocation-cap pin below, and pinned for the same reason: a
+    *lowered* guard would leave the walk charging an array the extraction has stopped
+    parsing, and a *raised* one would have it refuse an array the extraction parses
+    happily — the first is the class confusion this arm is about and the second refuses
+    a document ADR-0232 §2's stated quantity requires this seam to fetch.
+    """
+    from pypdf.generic._data_structures import (  # noqa: PLC0415 — read only to pin it
+        CONTENT_STREAM_ARRAY_MAX_LENGTH,
+    )
+
+    assert _ARRAY_CAP == CONTENT_STREAM_ARRAY_MAX_LENGTH
+
+
+def test_the_library_refuses_the_oversized_array_before_it_decodes_anything() -> None:
+    """The library fact the arm above mirrors, asserted rather than assumed.
+
+    ``pypdf`` alone raises for the document one member over the guard and returns text
+    for the document one member under it — which is what makes the pair of refusal
+    classes above the extraction's own rather than this walk's invention.
+    """
+    over = oversized_content_array_pdf(members=_ARRAY_CAP + 1, decoded_bytes=2_000)
+    under = oversized_content_array_pdf(members=_ARRAY_CAP, decoded_bytes=2_000)
+
+    with pytest.raises(Exception, match="Array-based stream"):
+        pypdf.PdfReader(io.BytesIO(over)).pages[0].extract_text()
+
+    assert pypdf.PdfReader(io.BytesIO(under)).pages[0].extract_text() == ""
 
 
 # --- §8 arms 16 and 17, and the two library facts the walk mirrors ------------
