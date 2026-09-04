@@ -379,10 +379,13 @@ have made the planner the namer again with an extra step.
 
 ### 3. The query composer: one argument, and that is the safety claim
 
-> **Normative.** `core/protocols.py` gains one Protocol, **`QueryComposer`**, with
-> exactly one member:
+> **Normative.** `core/protocols.py` gains one `@runtime_checkable` Protocol,
+> **`QueryComposer`**, with exactly one member, declared with exactly this signature:
 >
-> `async def compose(self, utterance: NonBlankEncodableText) -> QueryOutcome`
+> `async def compose(self, utterance: NonBlankEncodableText, /) -> QueryOutcome`
+>
+> The parameter is **positional-only**, so no keyword name of it exists for a caller
+> to pass a second value under and no implementation may rename it into a wider one.
 >
 > It takes **one positional argument and no other**, and no later lane adds a
 > parameter, a keyword, a constructor dependency on a `MemoryStore`, a
@@ -398,14 +401,26 @@ have made the planner the namer again with an extra step.
 > under `Settings.data_dir`. There is no parameter through which any of them could
 > arrive.
 
-> **Normative.** `QueryOutcome` carries a **query or a refusal, never both and never
-> neither** — ADR-0230 §4's shape, for its reason. The query is
-> `NonBlankEncodableText` bounded at `SEARCH_QUERY_MAX_CHARS` Unicode code points; a
-> composition exceeding the bound is **refused rather than truncated**, and the
-> refusal is a member of a closed `QueryRefusal` enumeration and never free text.
-> `compose` **raises for no composition reason**: an unavailable model, an unparseable
-> answer, an over-long answer and a composer that judged the turn unsearchable are all
-> refusals, and only `CancelledError` leaves it.
+> **Normative.** `core/types.py` gains **`QueryOutcome`**, a frozen model refusing
+> unknown fields, with exactly two fields — `query: NonBlankEncodableText | None`,
+> defaulting to `None`, and `refusal: QueryRefusal | None`, defaulting to `None` — and
+> a model validator requiring **exactly one of them to be set**, and requiring a set
+> `query` to be at most `SEARCH_QUERY_MAX_CHARS` Unicode code points. The condition is
+> enforced by the model rather than by its callers; an outcome carrying both or
+> neither is not a value this corpus admits.
+
+> **Normative.** `core/types.py` gains **`QueryRefusal`**, a `StrEnum` closed at
+> exactly four members: `DECLINED`, valued `declined`, where the composer judged the
+> turn to be one no web search would answer; `UNAVAILABLE`, valued `unavailable`,
+> where the model call did not produce an answer; `MALFORMED`, valued `malformed`,
+> where the answer could not be read as a query; and `TOO_LONG`, valued `too_long`,
+> where the answer exceeded `SEARCH_QUERY_MAX_CHARS`. The vocabulary is **added to
+> and never renamed**, and no later lane adds a member without the ADR that decides
+> it. A composition over the bound is **refused rather than truncated**.
+
+> **Normative.** `compose` **raises for no composition reason** — every one of
+> `QueryRefusal`'s members is returned and not raised — and only `CancelledError`
+> leaves it.
 
 > **Normative.** **A composed query is a model completion with no recorded origin**,
 > of the same class as `ActionPlan.rationale` (ADR-0226 §9, ADR-0228 §11). Wherever it
@@ -515,13 +530,29 @@ the other's input.
 > egress boundary.
 
 > **Normative.** The transport is an **HTTPS exchange built inside that module**, over
-> the injected `OutboundTransport` ADR-0191 §1 contracts, and it holds four properties
+> the injected `OutboundTransport` ADR-0191 §1 contracts, and it holds five properties
 > whatever library the implementing lane uses or writes: it opens a channel to the
 > **one origin the connected account names** and to no other; it **follows no
 > redirect** — a redirect response is a refusal and never a second request; it opens a
 > channel **per call** and closes it, retaining no pool, cache or keep-alive
-> (ADR-0191 §3); and it carries the account's credential to that origin and to
-> nothing else.
+> (ADR-0191 §3); it carries the account's credential to that origin and to nothing
+> else; and it **stops reading at `SEARCH_MAX_RESPONSE_BYTES`**.
+
+> **Normative.** **The response bound is enforced while the response is read and
+> before any part of it is parsed**, counted over the bytes taken off the channel. A
+> response that reaches the bound is **abandoned and refused** — the channel is
+> closed, no further byte is read, nothing is parsed, and no record is minted — and no
+> implementation buffers a whole response, parses incrementally past the bound, or
+> measures a response after assembling it. The bound is a `Settings` field with a
+> named default, a stated domain and a load-time refusal, exactly as ADR-0230 §6's
+> bounds are.
+
+> **Normative.** **The request's path, query string, headers and body are the
+> integration's own and are not a destination, not an argument and not model-reachable.**
+> They are composed inside the seam from the connected account's configuration and the
+> one query string the request carries; no component outside `ai_assistant.tools`
+> supplies, sees or influences them, and §8's canonical destination is the origin
+> alone.
 
 > **Normative.** Adopting a transport-bearing dependency for this exchange is
 > ADR-0003's ordinary route under ADR-0024's pinning rule, is confined to the
@@ -677,6 +708,17 @@ establishes no tier.
 > `ReadAsk` through `StepExecutor` — ADR-0226 §4's other three prohibitions bind
 > verbatim.
 
+> **Normative.** **The seam performs ADR-0029 §2's three pre-execution checks
+> itself, in that order, before the credential is read and before any channel is
+> opened**: the `ToolCall` is **revalidated and detached**, so a mutation landed after
+> construction cannot survive into execution; `PermissionDecision.authorises` is
+> **re-checked against that revalidated, detached value**; and the call runs under
+> ADR-0029 §4's invocation deadline. `ToolCall`'s construction-time validator is the
+> first line and not the only one — `frozen=True` bounds the ordinary write path and
+> not `__dict__` (ADR-0018 §3) — so a route that relied on construction alone would
+> lose exactly the check ADR-0029 §2 exists for. Nothing about these three is relaxed
+> by the send leaving through a different member.
+
 > **Normative.** No lane reads this section as opening a second route for **any other
 > send**, and no lane synthesises a plan step, an execution or a `RUNNING` claim in
 > order to give a clause about steps a subject here. It is stated over a `WEB_SEARCH` servicing's request and nothing else; every
@@ -695,12 +737,14 @@ for this kind, and this ADR chooses which to move: the route, which is a mechani
 rather than the capability boundary, which is a property #1908, ADR-0170 §5a and
 ADR-0208 §1 all rest on.
 
-**What the amendment costs, and what it does not.** It costs `ToolInvoker`'s three
+**What the amendment costs, and what it does not.** It moves `ToolInvoker`'s three
 pre-execution checks — revalidation and detachment, the authorisation re-check against
-a detached copy, and the deadline — which the seam performs itself for this call
-because `ToolCall`'s own validator runs `PermissionDecision.authorises` at
-construction and ADR-0029 §4's invocation deadline is the seam's to hold either way.
-It does **not** cost the payload binding (the request's `parameters_digest` is bound
+the detached copy, and the deadline — onto the seam, which is why they are a marked
+clause above rather than a remark: `ToolCall`'s own validator runs
+`PermissionDecision.authorises` at construction and that is deliberately **not
+sufficient**, because `object.__setattr__` defeats `frozen=True` and the model's own
+docstring says so. A route that took construction for the whole of the guarantee would
+have quietly dropped the check ADR-0029 §2 puts first. It does **not** cost the payload binding (the request's `parameters_digest` is bound
 into the decision and compared by `authorises`), the immutability (`ToolCall` is
 frozen and the binding is derived, never accepted), the approver (§9), the credential
 gate (§5), or the audit (this section). Condition 12's property is not weakened but
@@ -1261,12 +1305,17 @@ it says so.
 
 > **Normative.** The record gains **one field per servicing**: the **disposition** a
 > `WEB_SEARCH` ask resolved to, where it resolved to one, and nothing where the search
-> yielded records or where no `WEB_SEARCH` ask was made. It is a **member of a closed
-> enumeration** and never free text, and it distinguishes at least: no search account
-> connected; no budget slot remaining; the composer refused; the ruling was `CONFIRM`;
-> the ruling was `DENY`; the spend gate refused; the request failed in transport; the
-> provider refused the request; the response declared no report instant; the response
-> carried no result this kind could mint.
+> yielded records or where no `WEB_SEARCH` ask was made. It is a member of
+> **`SearchDisposition`**, a `StrEnum` closed at exactly eleven members and never free
+> text — `NOT_CONFIGURED`, `NO_BUDGET`, `COMPOSER_DECLINED`, `COMPOSER_UNAVAILABLE`,
+> `COMPOSER_MALFORMED`, `RULING_CONFIRM`, `RULING_DENY`, and the five of
+> `SearchRefusal` that can reach the servicer carried across one for one:
+> `SPEND_REFUSED`, `TRANSPORT_FAILED`, `PROVIDER_REFUSED`, `RESPONSE_TOO_LARGE` and
+> `UNATTESTED`. `SearchRefusal.NO_RESULT` is **not** a disposition: a search that
+> reached the provider and yielded nothing is a completed servicing whose returned
+> count is zero, which §9 of ADR-0226 already records, and calling it a disposition
+> would double-count it. A `QueryRefusal.TOO_LONG` is recorded as
+> `COMPOSER_MALFORMED`.
 
 > **Normative.** **The query, the address and the results are Tier 1 and this record
 > carries none of them.** No query text, no fragment of one, no length of one, no
@@ -1510,12 +1559,14 @@ its prompt under ADR-0098 §2's marking and its parse. Nothing calls it yet.
 `core/types.py`'s `DestinationProtocol.HTTPS`; the canonicaliser in
 `ai_assistant.tools.destinations` implementing §8's canonical form, its three
 equivalences and every refusal in its grammar; the HTTPS exchange inside
-`ai_assistant.tools.egress` over `OutboundTransport`, holding §5's four properties; the
+`ai_assistant.tools.egress` over `OutboundTransport`, holding §5's five properties and
+its read bound; the `Settings` field for `SEARCH_MAX_RESPONSE_BYTES` with its named
+default, its stated domain and its load-time refusal; the
 import-linter contract extension where a dependency is adopted, under ADR-0024's
 pinning rule; and the failure-path suite ADR-0154 §4's condition 14 requires — a
 refused redirect, a closed channel mid-response, a TLS failure, a response that is not
-the shape the provider documents, a deadline, and each of §8's refusals. Nothing calls
-it yet.
+the shape the provider documents, a deadline, a response that reaches the read bound, and each of §8's refusals.
+Nothing calls it yet.
 
 **Lane 3 — the searcher.** `core/protocols.py`'s `WebSearcher`; `core/types.py`'s
 `SearchOutcome` and `SearchRefusal`; the **shared conformance suite** and the
@@ -1528,14 +1579,51 @@ completion, its transcription and its minting under §10; the `Settings` fields 
 which constructs a searcher only where an account is connected and registers its
 close among the resources it has opened (ADR-0042 §2).
 
-> **Normative.** `WebSearcher` has three members and no more: `name`, a stable
-> non-empty source-instance identifier; `request`, which returns the `ActionRequest`
-> for a composed query or `None` where no account is connected and which **reads no
-> store, mints no id and takes no decision**; and `search`, which takes an authorised
-> `ToolCall` and returns a `SearchOutcome`. **`search` takes a `ToolCall` and never an
-> `ActionRequest`**, so an unauthorised search is unconstructable at the type level —
-> `ToolCall`'s own validator runs `PermissionDecision.authorises` — which is
-> `ToolInvoker.invoke`'s guarantee obtained without `ToolInvoker`.
+> **Normative.** `core/protocols.py` gains one `@runtime_checkable` Protocol,
+> **`WebSearcher`**, with exactly three members and no more, declared with exactly
+> these signatures:
+>
+> `@property`<br>
+> `def name(self) -> str: ...`
+>
+> `async def request(self, query: NonBlankEncodableText, /) -> ActionRequest | None: ...`
+>
+> `async def search(self, call: ToolCall, /) -> SearchOutcome: ...`
+>
+> `name` is stable across calls and non-empty and is what a minted record's
+> `Attestation.reported_by` carries. `request` returns the `ActionRequest` for a
+> composed query, or `None` where the deployment has connected no search account, and
+> **reads no store, mints no identifier, opens no channel and reaches no
+> authorisation conclusion**; the `ActionRequest` it returns carries the searcher's own
+> declaration as `tool`, exactly the origin and the query as `parameters`, and `None`
+> for `step_id`, `execution_id` and `egress_binding`. Both value parameters are
+> **positional-only**, for `QueryComposer`'s reason.
+
+> **Normative.** **`search` takes a `ToolCall` and never an `ActionRequest`**, so an
+> unauthorised search is unconstructable at the type level — `ToolCall`'s own
+> validator runs `PermissionDecision.authorises` — which is `ToolInvoker.invoke`'s
+> guarantee obtained without `ToolInvoker`. No member of this Protocol takes a
+> `MemoryRecord`, a supply, a `MemoryStore`, an `ActionPolicy`, an `AuditTrail` or a
+> `RecipientGrants`, and no later lane adds one that does.
+
+> **Normative.** `core/types.py` gains **`SearchOutcome`**, a frozen model refusing
+> unknown fields, with exactly three fields — `reported_at: UtcInstant | None`,
+> `records: tuple[MemoryRecord, ...]` defaulting to empty, and
+> `refusal: SearchRefusal | None` — and a model validator enforcing **all** of:
+> either a `refusal` is set with no `records` and no `reported_at`, or a `refusal` is
+> unset with a `reported_at` set and at least one record; at most
+> `SEARCH_MAX_RESULTS` records; every record of kind `SEMANTIC` with
+> `provenance.source` equal to `MemorySource.EXTERNAL`, an empty
+> `provenance.evidence`, and an `Attestation` whose `reported_at` **equals the
+> outcome's own**. Each condition is enforced by the model rather than by its callers.
+
+> **Normative.** `core/types.py` gains **`SearchRefusal`**, a `StrEnum` closed at
+> exactly six members: `SPEND_REFUSED`, `TRANSPORT_FAILED`, `PROVIDER_REFUSED`,
+> `RESPONSE_TOO_LARGE`, `UNATTESTED` — the response declared no report instant (§10) —
+> and `NO_RESULT`, which covers both a response carrying no result and one every
+> result of which §10 dropped. Each is valued by its lower-cased name, the vocabulary
+> is **added to and never renamed**, and no later lane adds a member without the ADR
+> that decides it.
 
 > **Normative.** The conformance suite holds the clauses expressible **without a
 > provider**: a `SearchOutcome` carries records **or** a refusal and never both or
@@ -1568,7 +1656,8 @@ for this kind, so nothing crosses the seam, and a planner is not told whether a 
 will be serviced — ADR-0226 §5's scoping posture applied, and the reason this lane
 needs no contract change at all.
 
-**Lane 5 — the servicing, the precedence and the audit.** In `ai_assistant.orchestration`:
+**Lane 5 — the servicing, the precedence and the audit.** `core/types.py`'s
+`SearchDisposition`; and in `ai_assistant.orchestration`:
 §11's servicing order and budget clause; the compose–bind–rule–record–send sequence and
 its origin-fact computation; §9's decline on any non-`ALLOW`; the minted records'
 entry into the fourth group under ADR-0226 §7's deduplication; §13's one added audit
@@ -1658,14 +1747,23 @@ for less.
 9. **A result over the content bound is dropped and its siblings are minted**, and a
    response every one of whose results is over the bound yields nothing.
 10. **`HTTPS` canonicalisation.** `HTTPS://Example.COM` and `https://example.com:443`
-    canonicalise identically; each of §8's refusals is refused — a non-`https` scheme,
-    userinfo, a path, a query, a fragment, an empty host, a non-ASCII host, a trailing
-    dot, a doubled dot, an over-long label, a hyphen-edged label, an IP literal, a port
-    with a leading zero, and a port outside 1–65535 — and `https://example.com/a` and
-    `https://example.com/b` are **one** destination after the path is refused, never two.
-11. **A redirect is a refusal.** Lane 2's transport, driven against a fake exchange that
-    answers a redirect: no second channel is opened, no credential reaches a second
-    origin, and the refusal class is the one §13 records.
+    canonicalise identically; and each of §8's refusals is refused, one assertion per
+    form — a non-`https` scheme, userinfo, a query, a fragment, an empty host, a
+    non-ASCII host, a trailing dot, a doubled dot, an over-long label, a hyphen-edged
+    label, an IP literal, a port with a leading zero, and a port outside 1–65535.
+    **A path-bearing form is refused and yields no destination at all**:
+    `https://example.com/a` and `https://example.com/b` are each refused independently,
+    and no test asserts that they canonicalise to anything — an assertion that they were
+    "one destination" would drive an implementation to strip the path, which §8 forbids
+    in terms.
+11. **A redirect is a refusal, and an oversized response is abandoned.** Lane 2's
+    transport, driven against a fake exchange: on a redirect, no second channel is
+    opened, no credential reaches a second origin, and the refusal class is the one §13
+    records. On a response longer than `SEARCH_MAX_RESPONSE_BYTES` — including one whose
+    declared length is absent and whose body never ends — the read stops at the bound,
+    the channel is closed, **nothing is parsed**, and the refusal is
+    `RESPONSE_TOO_LARGE`. Asserted over a byte channel that counts what was taken from
+    it, so an implementation that buffered the whole response before measuring fails.
 12. **The declaration is in no registry.** The composition test asserts that
     `ToolRegistry.capabilities()` and `all_tools()` on the wired registry hold no member
     of the search declaration, on a deployment with a search account connected — the
@@ -1673,10 +1771,15 @@ for less.
 13. **The credential is read inside the authorised call and nowhere else**, and a
     turn whose ruling was not `ALLOW` reads none — the `Secrets` fake fails the test if
     `get` is called on that path.
-14. **The invocation is claimed and completed**, and `orchestration` claims nothing: a
-    serviced search leaves one claim completed with a `SUCCEEDED` outcome, a transport
-    failure leaves one completed with a failure outcome, and a crash between them leaves
-    an open claim the existing recovery scan closes as `INDETERMINATE`.
+14. **The invocation is claimed and completed, and an interrupted one stays open.**
+    `orchestration` claims nothing: a serviced search leaves one claim completed with a
+    `SUCCEEDED` outcome, and a transport failure leaves one completed with a failure
+    outcome. An exit for which ADR-0029 computes no outcome — a `KeyboardInterrupt` or a
+    `SystemExit` raised on the way to the completion — leaves the claim **open**, and
+    the assertion is that it **stays** open: the existing recovery scan, driven over a
+    store holding that claim and no `RUNNING` step, completes nothing, and no further
+    claim is admitted under that decision. This is §6's clause asserted in the direction
+    that would fail an implementation which added the recovery arm §6 forbids.
 
 ### 19. Deferred, by name, each with what fires it
 
@@ -1895,9 +1998,9 @@ is that statement, and it answers #95 for nothing else.
 This ADR is in **ADR-0089's marked regime**: it carries well-formed clauses, so the
 marked clauses are the whole of what it obligates and the prose beside them supplies
 nothing. ADR-0089 §5 makes marking forward-only, so nothing this ADR cites is
-retro-marked. What binds is **eighty-nine clauses**: §1's four, §2's two, §3's five, §4's two,
-§5's six, §6's five, §8's seven, §9's five, §10's eight, §11's nine, §12's four, §13's
-six, §14's five, §15's three, §16's eight, §17's nine and §18's one. §7's table, §19's
+retro-marked. What binds is **ninety-seven clauses**: §1's four, §2's two, §3's seven, §4's two,
+§5's eight, §6's six, §8's seven, §9's five, §10's eight, §11's nine, §12's four,
+§13's six, §14's five, §15's three, §16's eight, §17's twelve and §18's one. §7's table, §19's
 list, §20's classification and every argument in this document are deliberately
 unmarked: they are attestation, deferral and argument, which ADR-0089 §1 classifies as
 non-normative however load-bearing.
