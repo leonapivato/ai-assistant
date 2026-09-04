@@ -1352,6 +1352,21 @@ function renderConfirmation(parent, confirmation) {
 // drop the key — and ADR-0177 §8 requires "every key and every value the mapping
 // carries". They are the exception rather than the rule, so they come after.
 //
+// **That clause is met by this rendering and not in spite of it**, which is worth
+// saying because adversarial review's round 4 read it the other way and the two
+// readings cannot both be built (round 3's `blocker` is the other one). §8 requires
+// `parameters` "rendered whole — every key and every value the mapping carries — and
+// the surface omits none, truncates none silently, and orders none in a way that
+// hides one", and gives its own reason: "a confirmation showing **some** of the
+// arguments a call would run with is not a confirmation of that call." Rendering an
+// array-valued argument as `to[0]` and `to[1]` omits nothing, truncates nothing and
+// hides nothing: every key is named, every element is on screen, and each is on
+// screen **as itself** rather than inside a JSON spelling that escapes its quotation
+// marks and writes its newlines as `\n`. What §8 requires is the values; what it does
+// not require is a container's own notation beside them — and rendering both would
+// put one value on the screen twice, free to disagree with itself, which is the
+// defect round 3 blocked and ADR-0150 §1 is named against.
+//
 // **A confirmation with no egress binding has no spans to render from**, and its
 // arguments are rendered as themselves. It owes ADR-0233 §8 nothing (§8's last
 // clause) and this clause of ADR-0177 §8 exactly as it always did.
