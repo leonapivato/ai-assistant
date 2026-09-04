@@ -145,11 +145,26 @@
   its atomicity as a raced concurrency test, and the route state machine. So the
   two Protocols, their split by capability, `record`, `recent`, `export`, `clear`,
   the error class and the record semantics are all reachable from marked text.
-  What the failed run alone carries is the display of the signatures, the
-  four-member exactness of `RoutingTrail`, `recent`'s newest-recorded-first
-  ordering and its local `[1, 2**63)` refusal, and `export`'s ADR-0085 §8c bound —
-  and each of those is what the marked clauses beside it are read to *mean*, not
-  something a lane was free to decide otherwise.
+  **What the run alone carried is genuinely outside the marked set, and it is
+  worth naming rather than softening.** The signatures as displayed, the
+  **exactly four members and no others** of `RoutingTrail`, `recent`'s
+  newest-recorded-first ordering, its local `[1, 2**63)` refusal, and `export`'s
+  ADR-0085 §8c bound appear nowhere in a well-formed clause of this ADR. Under
+  ADR-0089 §3 they therefore supply no obligation at all — not even as evidence of
+  meaning, since no marked clause here states a member count, an order or a limit
+  domain for those two members. An implementation satisfying every marked clause
+  of §9 and §12 could carry a fifth member on `RoutingTrail`, answer `recent`
+  oldest-first, and accept a `limit` of zero — and nothing outside this ADR closes
+  that either, since ADR-0186 §3's clauses name `recent_decisions` and
+  `export_decisions` on the engine surface rather than this Protocol, which is why
+  the run cited that section by analogy. That is the whole of what this
+  defect costs, and it is a gap in the record rather than in the tree: PR #1634
+  landed the run's shape exactly, and the shared conformance suite the triad
+  clause **does** require — `tests/permissions/routing_contract.py` — pins the
+  ordering, the recording-order-not-`decided_at` rule, the refused limit, `export`
+  and `clear` against every implementation. A second implementation would meet
+  them by binding to that suite, not by reading §9. Making any of it binding on
+  the ADR is a later decision's, since ADR-0089 §5 forecloses a note doing it.
   **Nothing is unbuilt by this, and nothing here re-marks the run.** ADR-0197's
   implementing lane landed exactly the shape the run states — both Protocols in
   `core/protocols.py` with those member sets, their two suites and fakes, and the
