@@ -800,11 +800,12 @@ def test_neither_arm_names_a_source_a_span_or_a_verdict(output: StringIO) -> Non
 # output, because §9's third condition is discharged by tests over each surface
 # and by nothing a component could check at the ruling.
 
-#: The gutter every line of a rendered value carries (:func:`cli._render_egress_value`).
-#: Spelled here so a case asserts the marker rather than re-deriving it, and so a
-#: renderer that dropped it on the continuations fails rather than passing on the
-#: first line.
-_VALUE_GUTTER: Final = "    \u2502 "
+#: The gutter every line of a rendered value carries. Read from the module rather
+#: than respelled, because :func:`cli._values_fit_this_terminal` measures against the
+#: same constant: a test that carried its own copy would keep passing if the renderer
+#: and the width rule drifted apart, which is the pair the constant exists to hold
+#: together.
+_VALUE_GUTTER: Final = cli._VALUE_GUTTER
 
 
 def _value_lines(rendered: str) -> list[str]:
@@ -1025,6 +1026,68 @@ def test_a_value_carrying_this_terminals_framing_is_neutralised(output: StringIO
     assert f"{_VALUE_GUTTER}{forged}" in rendered
     for line in rendered.split("\n"):
         assert line != forged
+
+
+def test_a_terminal_too_narrow_to_mark_a_value_withholds_the_whole_card(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0233 §8's second clause read on the terminal rather than on the value.
+
+    Below the gutter's own width Rich wraps the *marked* line: the marker is split
+    across display lines and the value's characters land on lines carrying none, so
+    the framing this renderer exists to close is defeated by the renderer rather than
+    by the value. There is no rendering at that width that both shows the text and
+    marks it, so the card is withheld and the remedy named — a wider window.
+
+    Asserted at the boundary and one column under it, because an off-by-one here is
+    the whole of the defect. Adversarial review, round 3, ``blocker``.
+    """
+    body = "abcdef"
+    confirmation = _egress_confirmation(
+        _egress_span("body", extent=len(body)), parameters={"body": body}
+    )
+
+    for width in (1, len(_VALUE_GUTTER) - 1, len(_VALUE_GUTTER)):
+        output.truncate(0)
+        output.seek(0)
+        monkeypatch.setattr(cli, "console", Console(file=output, force_terminal=False, width=width))
+
+        assert cli._render_confirmation(confirmation) is False, width
+        # Squashed rather than flowed: at one column every character is its own line,
+        # so the words themselves are what survive and the layout is not the subject.
+        rendered = "".join(output.getvalue().split())
+        assert "Confirmationwithheld" in rendered, width
+        assert "toonarrow" in rendered, width
+        assert "Nothingwassentandnothingwasdeclined" in rendered, width
+        assert body not in rendered, width  # no character of the value reached the screen
+
+
+def test_the_narrowest_terminal_that_still_marks_a_value_renders_the_card(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other side of :func:`cli._values_fit_this_terminal`'s boundary.
+
+    One column of value beside the gutter is enough to mark it, so the card is put
+    rather than withheld — and every line of the value still carries the marker,
+    which is what makes the boundary the right one rather than merely a threshold.
+    """
+    body = "abcdef"
+    monkeypatch.setattr(
+        cli, "console", Console(file=output, force_terminal=False, width=len(_VALUE_GUTTER) + 1)
+    )
+
+    assert (
+        cli._render_confirmation(
+            _egress_confirmation(_egress_span("body", extent=len(body)), parameters={"body": body})
+        )
+        is True
+    )
+    rendered = output.getvalue()
+
+    assert "Confirmation withheld" not in rendered  # the card was put, not withheld
+    # The gutter-carrying lines are the value block and nothing else on the card, so
+    # they are the value: one column at a time, all of it, every line marked.
+    assert "".join(_value_lines(rendered)) == body
 
 
 def test_a_value_the_parameters_do_not_locate_withholds_the_whole_card(
