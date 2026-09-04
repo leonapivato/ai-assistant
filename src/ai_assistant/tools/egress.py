@@ -3200,6 +3200,359 @@ def _past_bad_whitespace(text: str, position: int) -> int:
     return position
 
 
+@final
+class WebSearchTransport:
+    """Carry one authorised search to the connected account's origin, or refuse it.
+
+    :class:`SmtpEgressTransport`'s counterpart for ADR-0231's kind, and the same
+    division of labour: the **declaration**, the request's shape and what a response
+    transcribes to are the integration's, in
+    :mod:`ai_assistant.tools.web_search`; **this** is where the account's credential
+    is read and where a channel to the world is opened. ADR-0231 §5 designates this
+    module for exactly that — "A ``WEB_SEARCH`` request leaves through
+    ``ai_assistant.tools.egress`` … and through no other module" — and the
+    import-linter contract that confines network transports here is what makes the
+    designation mechanical rather than remembered.
+
+    **Constructed in exactly one place, and only where a deployment configured an
+    account**: :func:`~ai_assistant.tools.builtin.build_web_search_integration`.
+
+    The order in :meth:`fetch` is the decision, not an implementation detail, and
+    every step of it is one of ADR-0148 §6's marked clauses read for this kind:
+
+    1. The binding's connection reference is the registration's, its transport
+       endpoint is the one this integration is configured to use, and the **origin
+       the ruled call carries** is that same endpoint. None is re-derived, and each is
+       compared **as text before it is parsed**, so that two spellings of one host are
+       two origins here rather than one.
+    2. The connection record for the bound reference is read **once**, and the
+       credential is read for the slot that record names with **no ``await`` in
+       between** — ADR-0097 §5a's rule transposed onto the pair §6 binds.
+    3. The record is re-read before any byte is transmitted, and the credential is
+       discarded unless the record is still active, still carries the bound identity,
+       and still carries the revision read before the credential read. A read that
+       cannot be answered is treated as a changed one.
+    4. Only then is a channel opened, and only to the pinned origin.
+
+    **A denial never reaches step 2, because it never reaches this object.** A
+    ``DENY`` constructs no ``ToolCall`` (ADR-0029 §2), so nothing here reads a
+    credential or opens a socket, which is ADR-0148 §7's positional gate as a
+    consequence of where the read is rather than as a rule anyone has to remember.
+
+    **It holds no ledger, no gate and no clock**, and that is the boundary between
+    this object and the searcher: ADR-0231 §6's three pre-execution checks, §15's
+    spend admission, ADR-0192's claim and completion and ADR-0029 §4's deadline are
+    all decided *before* :meth:`fetch` is entered, by the one component that has the
+    authorised call in hand.
+    """
+
+    __slots__ = ("_exchange", "_records", "_registration", "_secrets")
+
+    def __init__(
+        self,
+        *,
+        registration: EgressRegistration,
+        records: ConnectionRecords,
+        secrets: Secrets,
+        exchange: HttpsExchange,
+    ) -> None:
+        """Bind a transport to one registered integration and one connected account.
+
+        Args:
+            registration: The integration's egress registration — its connection
+                reference and the one origin it is configured to ask. ADR-0148 §6
+                binds a registered tool to at most one connected account, and this is
+                that binding as ``tools/`` holds it. The **same object** the binding
+                seam's table holds, so the reference this transport reads a record by
+                and the reference the seam ruled over cannot come apart.
+            records: The connection records this transport reads. Exactly one read
+                before the credential and one after, and no other store.
+            secrets: The ``INTEGRATION``-scoped reading face ADR-0125 §8 injects at
+                the integration that needs one. Never a ``SecretStore``: provisioning
+                is not this object's, and a transport handed a writing face could
+                delete the credential it reads.
+            exchange: The HTTPS exchange, which holds ADR-0231 §5's five properties
+                and its read bound. It reads a credential from nowhere and holds
+                none: it is handed the header that carries one and never the face
+                that would produce one.
+        """
+        self._registration = registration
+        self._records = records
+        self._secrets = secrets
+        self._exchange = exchange
+
+    @property
+    def origin(self) -> str:
+        """The one origin this transport will open a channel to.
+
+        Returns:
+            The registration's, verbatim — the value a ruling and a grant range over,
+            and the value a bound call is compared against before anything is read.
+        """
+        return self._registration.transport_endpoint
+
+    async def fetch(
+        self,
+        binding: EgressBinding,
+        *,
+        origin: str,
+        target: str,
+        credential_field: str,
+        fields: Sequence[tuple[str, str]] = (),
+    ) -> HttpsResponse:
+        """Ask the bound account's origin for ``target``, or refuse without asking.
+
+        **The origin is an argument the caller read off the revalidated call, and it
+        is compared here rather than trusted**, which is
+        :meth:`SmtpEgressTransport._pinned`'s discipline for the value this kind puts
+        in an argument. What binds the recipient to the decision is
+        ``ActionRequest.parameters``: ADR-0021 §1 binds them by
+        ``parameters_digest``, and ADR-0029 §2 has that comparison re-run on a
+        revalidated, detached copy before this object is reached. So the value passed
+        here is one that chain already protects, and this method still refuses it
+        unless it equals the registration's — a second, independently mutable
+        recipient is exactly what ADR-0148 §4's third clause says a seam may not
+        re-derive its way around. What the *integration* composed — the path, the
+        parameter names and the fields — is passed beside it, because ADR-0231 §5 puts
+        that choice inside ``ai_assistant.tools`` and outside this seam.
+
+        Args:
+            binding: The egress binding the authorising decision carries. The account
+                and the endpoint are taken from here and re-derived nowhere.
+            origin: The origin the ruled call carries, read off the revalidated,
+                detached copy of it and never off the argument the caller was handed.
+            target: The origin-form request target the integration composed, already
+                percent-encoded.
+            credential_field: The field name the account's credential rides in. Its
+                value is supplied here and by nothing else, so no caller of this
+                method ever holds one.
+            fields: Any further request fields the integration wants, in order.
+                Credential-free by construction: the one field that carries a secret
+                is the one named above.
+
+        Returns:
+            The response, whose ``status`` is never a redirect and whose octets took
+            at most ``search_max_response_bytes`` off the channel.
+
+        Raises:
+            TransportPinError: If the binding names another connection, another
+                endpoint, or an origin other than the one this integration is
+                registered for. Raised **before** the record is read, so a call bound
+                elsewhere reaches no credential and no channel.
+            BoundCallChangedError: If the reference is not connectable, the recorded
+                identity is not the bound one, the record moved across the credential
+                read, the keyring holds nothing under the slot the record names, or
+                the credential is not a value this seam will write into a request
+                field. Each is one operator fact — this integration cannot ask under
+                this account — and none of them transmitted anything.
+            HttpsRedirectRefusedError: If the far end answered ``3xx``.
+            HttpsResponseTooLargeError: If the response passed the read bound.
+            MalformedHttpResponseError: If it was not an HTTP/1.1 response this seam
+                will read.
+            TransportError: If the channel could not be opened, verified or continued.
+            ConnectionStoreError: If the **first** record read failed. A store outage
+                asserts nothing about the call and is never converted; the *second*
+                read is different, and an unanswerable one there is treated as a
+                change.
+            CancelledError: Re-raised after the channel is released (ADR-0060 §1).
+        """
+        # Every refusal decidable from the binding and the arguments alone runs
+        # first, so a call that cannot be performed as bound never reaches a
+        # credential read at all — strictly better than ADR-0148 §6 requires, and
+        # here rather than in a docstring claiming a bound nobody has.
+        self._pinned_origin(binding, origin)
+
+        before = await self._records.latest(self._registration.reference)
+        slot = self._slot_of(before, binding)
+        credential = await self._secrets.get(slot)
+
+        self._check_unchanged(await self._reread(), before, binding)
+        if credential is None:
+            msg = (
+                f"{self._registration.tool_id}: the connection record for "
+                f"{self._registration.reference!r} names a credential slot the "
+                f"keyring holds nothing under; re-run the provisioning act"
+            )
+            raise _refuse_changed(msg)
+
+        try:
+            return await self._exchange.get(
+                origin=origin,
+                target=target,
+                headers=((credential_field, credential.get_secret_value()), *fields),
+            )
+        except TransportPinError as exc:
+            # The exchange refuses a target or a field value it will not write, and
+            # by this point the origin has already been pinned — so what is left is
+            # the integration's target or the account's own credential carrying a
+            # character no request field may hold. Both are the same operator fact
+            # this method's other refusals name, and neither opened a channel: the
+            # exchange checks before it connects. Converted rather than propagated so
+            # that `TransportPinError` from this method means exactly one thing —
+            # the call is bound somewhere this transport does not go.
+            msg = (
+                f"{self._registration.tool_id}: the request this integration composed "
+                f"is not one this seam will write, so nothing was sent; neither the "
+                f"target nor the field value is named"
+            )
+            raise _refuse_changed(msg) from exc
+
+    def _pinned_origin(self, binding: EgressBinding, origin: str) -> None:
+        """Refuse a call this integration is not the registration for (ADR-0148 §6).
+
+        **Three comparisons, and the first is the one an implementation forgets.**
+        ADR-0148 §6 requires that "the connection reference the binding carries names
+        the connection record it consults", so the reference is compared against the
+        registration's *before* the record is read — because the record is read **by
+        the registration's** reference. Without it, a binding for account B's
+        connection is checked against account A's record: where the two accounts share
+        an identity, both record checks pass, and the query goes out under A's
+        credential although the approval named B.
+
+        **The third is ADR-0231 §5's own, and it is here rather than inside
+        :class:`HttpsExchange`.** §5 makes the origin a per-call argument bearing
+        ``x-egress-destination``, so the exchange takes one per call and pins the
+        channel to it; what says that the *ruled* origin is the one this integration
+        is registered for is this comparison, in the object that holds the
+        registration. (PR #2074's round-9 architecture finding asked for the opposite
+        placement; the waiver's grounds are §5's per-call argument and §17's putting
+        the registration in this lane.)
+
+        Args:
+            binding: The authorised binding.
+            origin: The origin the ruled call carries.
+
+        Raises:
+            TransportPinError: If the binding names another connection or another
+                endpoint, or if the ruled origin is not the registration's.
+        """
+        if binding.account.reference != self._registration.reference:
+            msg = (
+                f"{self._registration.tool_id}: the binding names a connection this "
+                f"integration is not registered for, so the record consulted would not "
+                f"be the one the ruling was taken over (ADR-0148 §6). It is registered "
+                f"for {self._registration.reference!r}"
+            )
+            raise TransportPinError(msg)
+        if binding.transport_endpoint != self._registration.transport_endpoint:
+            msg = (
+                f"{self._registration.tool_id}: the bound transport endpoint is not the "
+                f"one this integration is configured to use, so the channel would not "
+                f"be to the service the ruling named (ADR-0148 §6, ADR-0231 §5)"
+            )
+            raise TransportPinError(msg)
+        if origin != self._registration.transport_endpoint:
+            msg = (
+                f"{self._registration.tool_id}: the origin this call was ruled on is not "
+                f"the one this integration is registered for, so a channel would be "
+                f"opened to a recipient no grant covered (ADR-0231 §5)"
+            )
+            raise TransportPinError(msg)
+
+    def _slot_of(self, stored: StoredEntry | None, binding: EgressBinding) -> SecretName:
+        """Read the record's slot, refusing a reference that is not connectable.
+
+        **Synchronous, and that is the point.** ADR-0148 §6 makes the check and the
+        credential read one step — "no ``await`` occurs between reading the identity,
+        revision, provisioning state and slot recorded for the bound reference and
+        calling ``Secrets.get`` for **that** slot" — so everything this decides has to
+        be decidable without suspending. A helper that awaited anything here would
+        reopen the window ADR-0097 §5a closes.
+
+        Args:
+            stored: The record read for the bound reference, or ``None``.
+            binding: The authorised binding.
+
+        Returns:
+            The slot the record names, which is never carried in the binding
+            (ADR-0148 §6) and is therefore never compared against one.
+
+        Raises:
+            BoundCallChangedError: If the reference is not connectable, or the
+                identity currently recorded for it is not the bound one.
+        """
+        entry = _entry_of(stored)
+        if entry is None or entry.state is not ProvisioningState.ACTIVE or entry.slot is None:
+            state = "absent" if entry is None or entry.state is None else entry.state.value
+            msg = (
+                f"{self._registration.tool_id}: connection "
+                f"{self._registration.reference!r} is not connectable — its record is "
+                f"{state}. Nothing is asked under it; re-running the provisioning act "
+                f"is the remedy (ADR-0148 §6)"
+            )
+            raise _refuse_changed(msg)
+        if entry.identity != binding.account.identity:
+            msg = (
+                f"{self._registration.tool_id}: connection "
+                f"{self._registration.reference!r} is recorded for a different account "
+                f"than the ruling was taken over, so nothing is asked under it "
+                f"(ADR-0148 §6)"
+            )
+            raise _refuse_changed(msg)
+        return entry.slot
+
+    async def _reread(self) -> StoredEntry | None:
+        """Re-read the connection record, treating an unanswerable read as changed.
+
+        The store's own failure is **not** propagated here, unlike the first read.
+        ADR-0148 §6's discard clause says "a read that cannot be answered is treated
+        as a changed one", and it says so because the credential is already in hand at
+        this point: a caller that saw the store's error and retried would be retrying
+        with a live credential and no verified account.
+
+        Returns:
+            The record, or ``None`` where the read could not be answered — which
+            :meth:`_check_unchanged` refuses exactly as it refuses a change.
+        """
+        try:
+            return await self._records.latest(self._registration.reference)
+        except ConnectionStoreError as exc:
+            _log.warning(
+                "web_search_record_reread_unanswerable",
+                reference=self._registration.reference,
+                error_type=type(exc).__name__,
+            )
+            return None
+
+    def _check_unchanged(
+        self, after: StoredEntry | None, before: StoredEntry | None, binding: EgressBinding
+    ) -> None:
+        """Discard the credential unless the record is exactly as it was.
+
+        ADR-0148 §6's post-read clause, with its revision rule stated as that section
+        states it: the revision is compared **only** before against after, across the
+        credential read, and never against a value the binding carries. A completed
+        rotation between the ruling and the send therefore refuses nothing on the
+        revision's account, while one landing *inside* the read refuses that read —
+        and the A → B → A sequence an identity comparison alone cannot see is caught,
+        because a revision is never reused.
+
+        Args:
+            after: The record as it stands now, or ``None`` for an unanswerable read.
+            before: The record read immediately before the credential.
+            binding: The authorised binding.
+
+        Raises:
+            BoundCallChangedError: If anything moved. The credential is dropped by
+                falling out of scope with the frame, and no byte is transmitted —
+                nothing has been opened.
+        """
+        first, second = _entry_of(before), _entry_of(after)
+        if (
+            second is None
+            or first is None
+            or second.state is not ProvisioningState.ACTIVE
+            or second.identity != binding.account.identity
+            or second.revision != first.revision
+        ):
+            msg = (
+                f"{self._registration.tool_id}: connection "
+                f"{self._registration.reference!r} changed across the credential read, "
+                f"so the credential is discarded and nothing is asked (ADR-0148 §6)"
+            )
+            raise _refuse_changed(msg)
+
+
 __all__ = [
     "HTTPS_SCHEME",
     "IMPLICIT_TLS_SCHEME",
@@ -3217,6 +3570,7 @@ __all__ = [
     "SmtpEgressTransport",
     "StreamOutboundTransport",
     "TransportPinError",
+    "WebSearchTransport",
     "parse_https_origin",
     "parse_smtp_endpoint",
     "smtp_message",

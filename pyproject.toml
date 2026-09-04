@@ -1621,6 +1621,11 @@ source_modules = [
     "ai_assistant.tools.provisioning",
     "ai_assistant.tools.registry",
     "ai_assistant.tools.send_email",
+    # ADR-0231's search integration: its declaration, its provider adapter and its
+    # searcher. It drives the HTTPS exchange the seam holds and reaches no transport
+    # of its own, which is why it is bound here rather than exempted — the seam is
+    # still the one absence.
+    "ai_assistant.tools.web_search",
 ]
 forbidden_modules = [
     # The standard library ADR-0147 §3 names. `http` and `urllib` are packages whose
