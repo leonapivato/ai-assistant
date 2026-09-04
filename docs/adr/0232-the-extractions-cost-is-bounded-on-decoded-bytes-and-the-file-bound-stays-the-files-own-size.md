@@ -96,12 +96,14 @@ page's own stream, and why §8 owes an arm for each of these three documents rat
 for #2022's alone.
 
 **Two further inputs were tested and are bounded by the adopted library**, which is §6's
-distinction rather than a gap: a Flate-compressed `/ToUnicode` CMap raises
+distinction rather than a gap. A Flate-compressed `/ToUnicode` CMap raises
 `LimitReachedError` at `MAPPING_DICTIONARY_SIZE_LIMIT` (100,000 mappings, measured at
-about 1.2 s before the raise), and form invocations are capped in aggregate at
-`MAX_XFORM_INVOCATIONS_PER_EXTRACTION` (5,000). Neither is a bound this system may rely
-on, and the second is what puts the repeated-invocation worst case at five thousand times
-one form rather than at unbounded.
+about 1.2 s before the raise) — a limit §3's walk does **not** follow and therefore leans
+on, which is why §8 pins it on both sides rather than trusting it. Form invocations are
+capped in aggregate at `MAX_XFORM_INVOCATIONS_PER_EXTRACTION` (5,000), which is what put
+the second document's *unfixed* worst case at five thousand times one form rather than at
+unbounded, and which this decision leans on not at all: §3's walk charges every
+invocation and refuses long before the cap.
 
 ### Both lenses were right, and the text is what is wrong
 
@@ -141,8 +143,13 @@ ADR-0015 requires for changing it.
   `fetch_max_content_bytes` (32 KiB) — each with `ge=1` (or `gt=timedelta(0)`) and
   `lt=2**63`, refused when `Settings` is constructed. `fetch_root_path` defaults unset.
 - **`core/types.py`'s `FetchRefusal` has exactly five members**, and `FetchOutcome`
-  carries a record or a refusal and never both or neither. **This ADR changes neither
-  file**, and adds no member, no field and no Protocol.
+  carries a record or a refusal and never both or neither. This ADR adds **no member, no
+  field and no Protocol**, and leaves `core/protocols.py` untouched; what it does reach in
+  `core/types.py` is one docstring, `TOO_LARGE`'s, which enumerates that member's causes
+  and gains a third (§9).
+- **`app/composition.py`'s `_build_local_file_fetcher` passes each bound explicitly** —
+  `max_file_bytes=settings.fetch_max_file_bytes` and the three beside it — so a new
+  `Settings` field reaches `readers` only if that call site is edited too (§9).
 - **`pypdf` is adopted ranged, `>=6.16`**, outside ADR-0024 §3's exact-pinned set, with
   `uv.lock` fixing 6.16.2. §6 below turns on that.
 - **The repair is on `main`'s history and not at the sha #2022 names.** #2022 and the
@@ -160,13 +167,16 @@ ADR-0015 requires for changing it.
 
 ### What this ADR is not allowed to settle
 
-It changes no Protocol and no `core/types.py` value, so golden rule 5 is not engaged by
-its implementation. It admits no format to §6's first rung and re-opens no library
-evaluation: ADR-0230 §13 charged Lane C1 with that, C1 discharged it, and §6 below cites
-the adopted library's own limits as **evidence** and never as a bound this system may
-rely on. It decides nothing about the web (ADR-0230 §15, #1996 Lane B), nothing about
-the egress seam (ADR-0154 §7), and nothing about retention (ADR-0230 §10, §15). It does
-not reopen ADR-0230 §6's refusal enumeration, which stays closed at five.
+It changes no Protocol and the shape of no `core` value — no member, no field, no
+annotation, nothing a wire or a schema can see — so golden rule 5 is satisfied by this
+ADR being merged ahead of its lane rather than excepted, and the one `core/types.py`
+edit the lane makes is `TOO_LARGE`'s docstring (§9). It admits no format to §6's first
+rung and re-opens no library evaluation: ADR-0230 §13 charged Lane C1 with that, C1
+discharged it, and §6 below cites the adopted library's own limits as **evidence** and
+never as a bound this system may rely on. It decides nothing about the web (ADR-0230
+§15, #1996 Lane B), nothing about the egress seam (ADR-0154 §7), and nothing about
+retention (ADR-0230 §10, §15). It does not reopen ADR-0230 §6's refusal enumeration,
+which stays closed at five.
 
 ## Decision
 
@@ -174,8 +184,10 @@ We will keep `fetch_max_file_bytes` as **the file's size on disk**, bounding the
 and nothing else, and add a **third `Settings` bound** on the bytes a format's own
 decoding produces for the extractor to parse — counted **while** extracting, compared
 before each decoded unit is parsed, and refused as **`TOO_LARGE`**. There is no sixth
-`FetchRefusal` member, no deadline, and no change to any Protocol, to `core/types.py`,
-to the conformance suite, to the canonical fake or to ADR-0230 §9's audit.
+`FetchRefusal` member, no deadline, and no change to any Protocol, to any `core` value's
+shape, to the conformance suite, to the canonical fake or to ADR-0230 §9's audit — the one
+thing this reaches in `core/types.py` being `TOO_LARGE`'s docstring, which enumerates that
+member's causes and gains a third.
 
 ### 1. The file bound stays the file's size on disk, and it bounds the read alone
 
@@ -280,22 +292,39 @@ for, on evidence rather than on an estimate.
 > `/Contents` alone does not satisfy this bound, and neither does one charging a
 > repeatedly invoked form a single time.
 
+> **Normative.** **What the walk treats as an invocation, and what it resolves that
+> invocation against, are the adopted extraction's own answers and never a second
+> grammar.** A `Do` is an invocation exactly where the extraction would descend on it — so
+> the two bytes `Do` inside a string literal are not one — and its operand is resolved
+> against the **inherited `/Resources`** of the object whose stream is being walked: a
+> page's for a page's content stream, a form's own for a form's. An implementation that
+> re-implements either and diverges does not satisfy this bound, in whichever direction it
+> diverges.
+
+> **Normative.** **An operand that resolves to no Form XObject adds nothing, and that is
+> soundness rather than optimism.** The walk resolves in the context the extraction
+> resolves in, so a name the walk cannot resolve to a form is a name the extraction cannot
+> resolve either, and a descent that will not happen costs nothing to charge for. The same
+> symmetry is why the walk skips a form already on the current path: the adopted version
+> refuses a re-entrant form and parses it not at all.
+
+> **Normative.** **Where the walk cannot establish what the extraction will parse, the
+> fetch is refused `EXTRACTION_FAILED` and never extracted on the hope** — a stream the
+> library's own parser will not read, a resource dictionary that cannot be resolved, a
+> structure the walk does not recognise. This is the one fail-closed branch, it names its
+> class, and that class is ADR-0230 §6's own for a supported format whose text could not
+> be decoded: no member is added, and a document refused here is one the extraction was
+> about to spend an unknown amount on.
+
 > **Normative.** **The property is required and no construction is**, in ADR-0230 §6's
 > own form — and it is named **achievable** rather than aspirational, because a
 > requirement no implementation is known to satisfy would be a deferral wearing a
 > decision's clothes. A walk of the **invocation graph** satisfies it: begin at the page's
-> decoded content stream, add each stream's decoded length to the running total **before**
-> that stream's operators are parsed, follow each `Do` occurrence to the Form XObject its
-> preceding name operand resolves to in that stream's own resources, skip a form already
-> on the current path exactly as the adopted library skips a re-entrant one, and refuse
-> the moment the total passes the bound — which is what keeps the walk's own cost inside
-> the bound rather than making it a second unbounded traversal.
-
-> **Normative.** **Ambiguity in that walk resolves toward counting**, never toward
-> skipping. A `Do` whose name operand cannot be resolved to a form, and a `Do` token that
-> turns out to have been inside a string literal, are counted rather than passed over: the
-> failure this admits is a legitimate document refused, which an operator can see and fix,
-> and the failure it refuses is the one this bound exists for.
+> decoded content stream; add each stream's decoded length to the running total and
+> compare it **before** that stream is parsed; then parse that stream **with the adopted
+> library's own content-stream parser**, take the `Do` operations it reports, resolve each
+> against the inherited resources above, and recurse — refusing the moment the total
+> passes the bound.
 
 > **Normative.** For **plain text and Markdown** the counted quantity is **zero**, and
 > no implementation checks this bound on those formats. Their extraction has no decoding
@@ -350,6 +379,16 @@ rather than decompressing again. That is a property of the adopted version, and 
 rule about such properties applies to it too: it is why the check is cheap, never why it
 is correct.
 
+**Using the library's own parser costs the admitted document a second parse, and that is
+the price of agreement.** A document that passes is parsed twice — once by the walk and
+once by the extraction — so the worst admitted case is twice a few seconds rather than
+once. The alternative is a second grammar for content streams, which is exactly where the
+`(Do) Tj` case and the resource-inheritance case above would be got wrong, and a walk that
+disagrees with the extraction is unsound in one direction and over-refuses in the other. A
+lane that can **establish** agreement with a cheaper scan may use one; what is fixed is
+the agreement, not the instrument. The doubling is bounded by the bound, which is what
+makes it affordable to state as the default.
+
 **Whether the whole of a page's count is established before `extract_text` is entered is
 not this ADR's to choose, because the descent leaves no other point.** The extraction
 follows a `Do` into a form and parses it inside the same call; there is no seam between
@@ -365,9 +404,10 @@ forces**, and it is the clause an implementation will be tempted to drop as
 double-counting. A form invoked five hundred times is parsed five hundred times, is 105 KB
 of distinct decoded bytes, and cost 126.6 s. Charged once it sits comfortably inside any
 figure this ADR could pick; charged per parse it is 50 MB and is refused immediately. The
-adopted library's aggregate cap of 5,000 invocations is what stops that being unbounded
-rather than merely large — and by §6 that is evidence about a version, not a bound this
-decision rests on.
+adopted library's aggregate cap of 5,000 invocations is what made the *unfixed* worst case
+five thousand times one form rather than unbounded; it is not something this bound leans
+on, because the walk charges every invocation and refuses long before the cap is reached
+(§6).
 
 ### 4. The refusal is `TOO_LARGE`, and there is no sixth member
 
@@ -465,11 +505,31 @@ guards Lane C1 pinned. Every one of those is a reason §3's walk need not follow
 input, and none of them is a reason to *state* that the input is bounded.
 
 > **Normative.** The implementing lane **establishes which streams the adopted version's
-> extraction parses**, at the version `uv.lock` fixes, and **pins what it found with
-> tests** rather than recording it in prose alone — in the shape Lane C1 used for the page
-> tree, where a document exercising the guard is refused under assertion so that a future
-> release dropping it fails a test instead of shipping the amplification. §3's walk covers
-> what this system must bound; the tests cover what the library bounds for it.
+> extraction parses that §3's walk does not count**, at the version `uv.lock` fixes, and
+> **pins each library limit it is relying on at that limit's own boundary** — a document
+> just inside it extracting and one just past it refused — rather than recording the limit
+> in prose or asserting only the refusing side. A one-sided arm is not a pin: a release
+> that *lowered* the limit, or raised it without passing the fixture, leaves such an arm
+> green while the guard the ADR leans on has moved.
+
+**The distinction that clause turns on is what §3's walk follows.** It follows a page's
+content streams and the forms invoked from them, because nothing bounds those. It does not
+follow a font's `/ToUnicode`, and it does not need to: the adopted version refuses one past
+`MAPPING_DICTIONARY_SIZE_LIMIT` and the whole cost before the raise measured at about a
+second. That is a limit this decision **relies on**, so §8 arm 12 pins it on both sides.
+The aggregate `MAX_XFORM_INVOCATIONS_PER_EXTRACTION` is a different case and is **not**
+relied on at all — the walk charges every invocation, so a document with a million `Do`s is
+refused by the bound long before the cap is reached, and the figure appears in this ADR
+only to describe how bad the unfixed worst case was.
+
+**And the set is established by measurement rather than proved complete, which is stated
+rather than implied.** The vectors above are the ones that were built and timed against
+`pypdf` 6.16.2. A further input the extraction parses, in this version or a later one,
+that §3's walk does not count and no library limit bounds, would be a hole this bound does
+not see — and the honest closing move for that class is not a longer enumeration but the
+out-of-process extraction §10 defers, which bounds the work rather than its inputs. What
+stands in the meantime is the walk, the boundary pins, §3's fail-closed refusal where the
+walk cannot establish what will be parsed, and §9's audit.
 
 **And it is not carried by anything this project declares.** Lane C1 adopted `pypdf`
 **ranged**, `>=6.16`, deliberately outside ADR-0024 §3's exact-pinned set — §3 pins the
@@ -531,10 +591,15 @@ it — and this addition renames nothing, drops nothing and starts no second aud
    distinct streams once**, which passes arms 1 and 2 whole.
 4. **A document that uses forms legitimately is not refused.** A page invoking a small
    Form XObject a few times, whose whole counted quantity is well inside the bound,
-   fetches, and the text the form contributes reaches the record. This is the arm in the
-   other direction, and it fails on an implementation over-approximating the walk — by
-   charging every `Do` the largest form in scope, say, rather than the one its operand
-   names.
+   fetches, and the text the form contributes reaches the record. Two further arms at the
+   same seam, each of which an over-approximating or a re-implemented walk fails while
+   passing this one: a page whose content stream carries the **literal text `(Do)`** and
+   invokes no form at all fetches, its counted quantity being its own stream and nothing
+   else — the arm that fails on any walk scanning bytes rather than deciding by the
+   extraction's grammar; and a page whose form is named in **resources it inherits through
+   the page tree** rather than in a dictionary of its own fetches, with the form's text in
+   the record — the arm that fails on any walk resolving an operand somewhere other than
+   where the extraction resolves it.
 5. **The bound is a running total, and refuses at the page that crosses it.** A document
    whose pages are each well inside the bound and whose sum passes it is refused
    `TOO_LARGE`, with `extract_text` not called for the crossing page or for any after it.
@@ -564,10 +629,13 @@ it — and this addition renames nothing, drops nothing and starts no second aud
     form.
 11. **The enumeration did not grow.** `FetchRefusal` has five members, and the audit event
     for arm 1's turn carries `TOO_LARGE` and no field naming a bound, a count or a size.
-12. **What the library bounds is pinned rather than assumed** (§6). A document whose
-    `/ToUnicode` CMap passes the adopted version's mapping limit is refused
-    `EXTRACTION_FAILED`, so a release raising or dropping that limit fails a test rather
-    than shipping a fourth amplification silently.
+12. **The one library limit this bound leans on is pinned on both sides** (§6). A
+    document whose `/ToUnicode` CMap sits just **inside** the adopted version's mapping
+    limit extracts, and one just **past** it is refused `EXTRACTION_FAILED`. Two arms and
+    not one, because a single refusing arm stays green under either movement that matters:
+    a release that lowered the limit would still refuse the over-sized fixture, and one
+    that raised it below the fixture's size would too. With both, a limit that moves in
+    either direction turns one of them red.
 
 > **Normative.** This ADR adds **no clause to the `Fetcher` conformance suite and no
 > parameter to the canonical fake.** The bound is enforced inside a concrete extraction,
@@ -585,12 +653,26 @@ it — and this addition renames nothing, drops nothing and starts no second aud
 
 > **Normative.** Its footprint is `src/ai_assistant/core/config.py` (the field, its
 > named default, its stated domain and its load-time refusal),
-> `src/ai_assistant/readers/_extract.py` (the counting, the comparison, and the
+> `src/ai_assistant/app/composition.py` (`_build_local_file_fetcher` passes the figure to
+> the fetcher beside the other four — without it an operator's configured value reaches
+> `readers` never, and the bound is a field nothing enforces),
+> `src/ai_assistant/readers/_extract.py` (the walk, the comparison, and the
 > `_extract_pdf` docstring, whose #2022 disclosure becomes a statement of the bound),
-> `src/ai_assistant/readers/files.py` (threading the configured figure to the
-> extraction), and tests under `tests/readers/` and `tests/core/`. It touches
-> `core/protocols.py` and `core/types.py` in **no** respect, and neither
-> `PROTOCOL_VERSION` nor `PlanExport.schema_version` moves.
+> `src/ai_assistant/readers/files.py` (threading the figure from the fetcher to the
+> extraction), `src/ai_assistant/core/types.py` (**one docstring**, below), and tests
+> under `tests/readers/`, `tests/core/` and `tests/app/`. `core/protocols.py` is untouched
+> and neither `PROTOCOL_VERSION` nor `PlanExport.schema_version` moves.
+
+> **Normative.** **The `core/types.py` change is `FetchRefusal.TOO_LARGE`'s docstring and
+> nothing else.** That docstring enumerates the member's causes — *"The file exceeded
+> `fetch_max_file_bytes`, or its extracted text exceeded `fetch_max_content_bytes`"* — and
+> §4 above adds a third, so leaving it would put a false enumeration on the contract a
+> consumer reads. **No member is added, no field, no validator, no serialised form and no
+> annotation**, so nothing a wire, a schema or a stored document can see moves — which is
+> why `PROTOCOL_VERSION` does not. This edit is golden rule 5's *"A Protocol change is a
+> breaking change … its ADR is ratified and merged as its own PR before anything
+> implements against it"* satisfied rather than excepted: **this** is that ADR, and the
+> lane makes the edit under it.
 
 > **Normative.** The lane **starts from `edb2345f` rather than from nothing** — its
 > `_decoded_content_bytes` helper, its check point in `_extract_pdf`'s page loop, and the
@@ -770,6 +852,12 @@ which. §10 defers the finer statement and names what would fire it.
 behaviour changes until a root is configured. A configured one sees no change unless a
 document spends more than thirty-two stream bytes per byte of text.
 
+**Two files outside `readers/` move by one line each, and both are load-bearing.**
+`app/composition.py` passes the figure to the fetcher — without which the field exists and
+enforces nothing — and `core/types.py`'s `TOO_LARGE` docstring gains its third cause,
+without which the contract a consumer reads carries a false enumeration. Neither changes a
+shape, so nothing versioned moves.
+
 **The extractor gains a walk, which is the largest thing this decision costs.** Counting
 what an extraction *will* parse means following the invocation graph rather than reading
 one field, and §3 requires it because two measured documents defeat everything simpler:
@@ -846,6 +934,15 @@ the parse, so the visitor cannot reach #2022's document at all. The other half i
 form carrying no text emits no flush, so a page invoking such a form five hundred times
 would pass a text-flush guard while parsing 50 MB. A guard that two of the three measured
 documents walk straight past is not a bound.
+
+**Have the walk lex content streams itself, rather than using the library's parser.**
+Rejected in §3, at the cost of a second parse of the admitted document. A page may carry
+the literal text `(Do)` with no form anywhere, and a form may be named in resources the
+page inherits through the page tree rather than in a dictionary of its own; both are
+ordinary documents, and a walk that answered either differently from the extraction would
+over-refuse the first and under-count the second. Two grammars for one question is the
+drift `scripts/adr_status.py` exists to end one directory over, and the review round that
+found this ADR's first draft of the clause found exactly those two cases.
 
 **Rely on `pypdf`'s `ZLIB_MAX_OUTPUT_LENGTH` and call the seam bounded.** Rejected in §6.
 It bounds memory and not time, per stream and not in aggregate, and it is carried by a
