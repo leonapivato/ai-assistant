@@ -2164,6 +2164,27 @@ _FIELD_NAME_CHARACTERS: Final = frozenset(string.ascii_letters + string.digits +
 #: not, and the credential travels in one of these values.
 _FIELD_VALUE_CHARACTERS: Final = _VISIBLE_ASCII | {" ", "\t"}
 
+#: RFC 9110 §5.5's ``obs-text``: every octet from ``0x80`` to ``0xFF``. It is
+#: named as characters rather than octets because a response line is decoded
+#: before it is read, and the decoding is ``latin-1`` for the reason §5.5 gives
+#: for admitting these at all — *"a recipient SHOULD treat other octets in field
+#: content (obs-text) as **opaque data**"*. ``latin-1`` is the one decoding that
+#: keeps that promise: it maps each octet to the code point of the same value and
+#: back again, so nothing is guessed, nothing is lost, and a caller that needs the
+#: octets recovers them with ``value.encode("latin-1")``.
+_OBSOLETE_TEXT: Final = frozenset(chr(code) for code in range(0x80, 0x100))
+
+#: What a field value or a reason phrase this seam **reads** may hold, which is
+#: the set it **writes** plus ``obs-text``. The asymmetry is deliberate and is the
+#: opposite way round from the one adversarial round 2 closed: RFC 9110 §5.5 tells
+#: a *sender* to keep to visible US-ASCII and tells a *recipient* to treat what
+#: arrives outside it as opaque, and RFC 9112 §4 admits ``obs-text`` in a
+#: reason-phrase outright. Refusing it would turn a response no reader would call
+#: malformed into a failed search, and would buy nothing: a field **name** is a
+#: ``token`` and stays ASCII, so nothing here can case-fold onto a framing field
+#: this seam reads, and every control octet is still refused (adversarial round 8).
+_RESPONSE_VALUE_CHARACTERS: Final = _FIELD_VALUE_CHARACTERS | _OBSOLETE_TEXT
+
 #: The header fields this exchange writes itself, and which a caller therefore may
 #: not supply. Two of them frame the response and one names the recipient: a
 #: caller able to write a second ``Host`` would be selecting a virtual host the
@@ -2199,11 +2220,13 @@ _MAX_CHUNK_SIZE_DIGITS: Final = 16
 _HEX_DIGITS: Final = frozenset(string.hexdigits)
 
 #: RFC 9110 §5.6.4's ``qdtext``: what a quoted string may carry **unescaped**. It
-#: is the field-value set less the two characters that would end the string or
+#: is the response-value set less the two characters that would end the string or
 #: begin an escape, which is why it is written as that set minus them rather than
 #: enumerated a second time — a quoted chunk extension carrying a ``"`` or a ``\``
-#: reaches here as a ``quoted-pair`` and never as text.
-_QUOTED_TEXT_CHARACTERS: Final = _FIELD_VALUE_CHARACTERS - {'"', "\\"}
+#: reaches here as a ``quoted-pair`` and never as text. It is drawn from the
+#: **response** set because §5.6.4 admits ``obs-text`` in a quoted string exactly
+#: as §5.5 admits it in a field value.
+_QUOTED_TEXT_CHARACTERS: Final = _RESPONSE_VALUE_CHARACTERS - {'"', "\\"}
 
 #: RFC 9110 §5.6.3's ``BWS`` — "bad" whitespace, which a sender must not generate
 #: and which §5.6.3 nonetheless directs a recipient to "parse for such bad
@@ -2241,7 +2264,10 @@ class HttpsResponse:
             being returned (ADR-0231 §5).
         headers: Every field the far end sent, in the order it sent them, with the
             name ASCII-lowercased and the value's surrounding whitespace stripped
-            as RFC 9110 §5.5 directs. Carried rather than interpreted: this
+            as RFC 9110 §5.5 directs. A value carrying ``obs-text`` is carried
+            opaquely, decoded octet for octet and recoverable with
+            ``value.encode("latin-1")`` (:data:`_RESPONSE_VALUE_CHARACTERS`).
+            Carried rather than interpreted: this
             exchange reads only the two that frame the body, and what a
             ``reported_at`` is read from is ADR-0231 §10's question.
         body: The payload's octets, exactly as they arrived, with any chunked
@@ -2791,12 +2817,14 @@ def _status_of(line: bytes) -> int:
     if len(code) != len(b"000") or not code.isascii() or not code.isdigit():
         msg = "the far end's status line carries no three-digit status code"
         raise MalformedHttpResponseError(msg)
-    if not reason.isascii() or any(chr(octet) not in _FIELD_VALUE_CHARACTERS for octet in reason):
+    if any(chr(octet) not in _RESPONSE_VALUE_CHARACTERS for octet in reason):
         # An **empty** phrase is admitted and only its octets are checked: RFC 9112
         # §4 writes ``1*(...)`` but ``HTTP/1.1 200 \r\n`` is what several ordinary
         # front ends send, and refusing it would be refusing a far end nobody would
-        # call malformed. A control octet in it is a different thing, and it is
-        # third-party text on its way to a log.
+        # call malformed. §4's grammar is ``1*( HTAB / SP / VCHAR / obs-text )``, so
+        # a non-ASCII phrase is admitted with them and is discarded with the rest of
+        # the phrase — this seam returns the code and nothing else. A control octet
+        # in it is a different thing, and it is third-party text on its way to a log.
         msg = "the far end's reason phrase carries an octet RFC 9112 §4 does not admit"
         raise MalformedHttpResponseError(msg)
     status = int(code)
@@ -2817,8 +2845,8 @@ async def _headers_of(reader: _BoundedReader) -> tuple[tuple[str, str], ...]:
         returned.
 
     Raises:
-        MalformedHttpResponseError: If a line is not a field, or carries an octet
-            outside ASCII. Obsolete line folding (a field continued on a line
+        MalformedHttpResponseError: If a line is not a field, or names one outside
+            RFC 9110 §5.6.2's ``token``. Obsolete line folding (a field continued on a line
             beginning with space or tab) is refused with them: RFC 9112 §5
             deprecates it, and reading it is the leniency response splitting is
             built out of.
@@ -2849,18 +2877,23 @@ def _field_of(line: bytes) -> tuple[str, str]:
         horizontal tab removed as RFC 9110 §5.5 directs.
 
     Raises:
-        MalformedHttpResponseError: If the line is not a field, carries an octet
-            outside ASCII, or carries a control octet in its value. Obsolete line
+        MalformedHttpResponseError: If the line is not a field, names it outside
+            RFC 9110 §5.6.2's ``token``, or carries a control octet in its value.
+            ``obs-text`` in the **value** is admitted and carried opaquely, which
+            §5.5 directs a recipient to do. Obsolete line
             folding — a field continued on a
             line beginning with space or tab — is refused with them: RFC 9112 §5
             deprecates it, and reading it is the leniency response splitting is
             built out of. The message names the defect and never the line: a far
             end's octets are a third party's text, and a refusal reaches a log.
     """
-    if not line.isascii():
-        msg = "the far end sent a header line carrying a non-ASCII octet"
-        raise MalformedHttpResponseError(msg)
-    name, separator, value = line.decode("ascii").partition(":")
+    # ``latin-1``, not ``ascii``: RFC 9110 §5.5 admits ``obs-text`` in field content
+    # and directs a recipient to treat it as opaque, which is what a decoding that
+    # maps each octet to the code point of the same value does. It cannot fail, so
+    # no refusal is owed for one — the **name** is checked against ``token`` below
+    # and is ASCII either way, which is what keeps a field this seam reads from
+    # being spelled in octets it does not.
+    name, separator, value = line.decode("latin-1").partition(":")
     if (
         not separator
         or not name
@@ -2869,15 +2902,16 @@ def _field_of(line: bytes) -> tuple[str, str]:
         msg = "the far end sent a line that is not a header field"
         raise MalformedHttpResponseError(msg)
     content = value.strip(" \t")
-    if any(character not in _FIELD_VALUE_CHARACTERS for character in content):
+    if any(character not in _RESPONSE_VALUE_CHARACTERS for character in content):
         # **The same set the request side is written under**, and the asymmetry is
         # what made this worth closing: :meth:`HttpsExchange._check_field` refuses a
         # control octet in a value this seam *writes*, and a value it *reads* went
         # into :attr:`HttpsResponse.headers` unchecked — third-party control data
         # handed on to whatever reads a field next (adversarial round 2). RFC 9110
-        # §5.5 admits visible ASCII, space and horizontal tab in field content and
-        # nothing else; ``CR`` and ``LF`` cannot arrive here at all, since the line
-        # was framed on them.
+        # §5.5 admits visible ASCII, space, horizontal tab and ``obs-text`` in field
+        # content and nothing else; ``CR`` and ``LF`` cannot arrive here at all,
+        # since the line was framed on them. The two sets differ by ``obs-text``
+        # alone, which :data:`_RESPONSE_VALUE_CHARACTERS` states the reason for.
         msg = "the far end sent a header field whose value carries a control octet"
         raise MalformedHttpResponseError(msg)
     return name.lower(), content
@@ -3055,10 +3089,9 @@ def _check_chunk_extension(extension: bytes) -> None:
     The grammar is ``*( BWS ";" BWS chunk-ext-name [ BWS "=" BWS chunk-ext-val ] )``
     with ``chunk-ext-name`` a ``token`` and ``chunk-ext-val`` a ``token`` or a
     ``quoted-string``; the first ``;`` has already been taken by :func:`_chunk_size`,
-    so what arrives here is one repetition and any that follow it. ``obs-text`` is
-    not admitted inside a quoted value, for the reason :func:`_field_of` refuses a
-    non-ASCII field line: a far end sending one is sending octets this seam has no
-    encoding for.
+    so what arrives here is one repetition and any that follow it. A **name** is a
+    ``token`` and is ASCII by that grammar; ``obs-text`` is admitted inside a
+    quoted **value** and nowhere else, which is where RFC 9110 §5.6.4 puts it.
 
     Nothing is returned, because nothing is kept — an extension names a coding this
     seam does not read, and reading one would be Lane 3's business at the earliest.
@@ -3069,9 +3102,7 @@ def _check_chunk_extension(extension: bytes) -> None:
     Raises:
         MalformedHttpResponseError: If the octets are not a ``chunk-ext``.
     """
-    if not extension.isascii():
-        raise MalformedHttpResponseError(_CHUNK_EXTENSION_DEFECT)
-    text = extension.decode("ascii")
+    text = extension.decode("latin-1")
     position = 0
     while True:
         position = _past_bad_whitespace(text, position)
@@ -3121,7 +3152,7 @@ def _past_chunk_extension_value(text: str, position: int) -> int:
                 return position + 1
             if character == "\\":
                 position += 1
-                if position == len(text) or text[position] not in _FIELD_VALUE_CHARACTERS:
+                if position == len(text) or text[position] not in _RESPONSE_VALUE_CHARACTERS:
                     break
             elif character not in _QUOTED_TEXT_CHARACTERS:
                 break
