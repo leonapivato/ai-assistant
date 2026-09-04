@@ -39,6 +39,7 @@ from fetch_fixtures import fetcher as build
 from pdf_fixtures import (
     amplified_content_stream_pdf,
     capped_invocations_pdf,
+    charged_font_programs_pdf,
     cmap_pages_pdf,
     content_array_pdf,
     drawing,
@@ -295,6 +296,40 @@ async def test_the_comparison_sits_between_decoded_streams(root: Path) -> None:
 
     assert outcome.refusal is FetchRefusal.TOO_LARGE
     assert outcome.record is None
+
+
+async def test_the_comparison_sits_between_charged_font_programs(
+    root: Path, parsed: list[object]
+) -> None:
+    """Arm 6's property over the **other** counted input, which no arm here pinned.
+
+    ADR-0232 §3's comparison clause names "a page's charged font programs" among what
+    no implementation decodes several of and compares the sum of afterwards. Every font
+    arm below charges **one** program per parse, so a regression batching a resource
+    dictionary's programs and comparing once at the end of the loop would pass all of
+    them: it would decode the second program before comparing, and where that program
+    cannot decode it would answer ``EXTRACTION_FAILED`` instead of the ``TOO_LARGE``
+    the first alone had already earned (issue #2046).
+
+    One page, two charged ``/Type1`` fonts, no ``/Contents``. The first program crosses
+    the bound on its own; the second declares more decoded bytes than ``pypdf``'s own
+    ``ZLIB_MAX_OUTPUT_LENGTH`` admits, so decoding it raises. An implementation summing
+    a resource dictionary's programs before comparing decodes both and answers the
+    malformed class; one comparing after each decoded program refuses ``TOO_LARGE`` on
+    the first and never touches the second. The class returned is the observation, as
+    it is in the arm above.
+    """
+    program = 1_200_000
+    assert program > DEFAULT_FETCH_MAX_DECODED_BYTES
+
+    outcome = await fetch(
+        root,
+        charged_font_programs_pdf(program_bytes=program, undecodable_bytes=80_000_000),
+    )
+
+    assert outcome.refusal is FetchRefusal.TOO_LARGE
+    assert outcome.record is None
+    assert parsed == []
 
 
 @pytest.mark.parametrize("over", [False, True])
