@@ -834,6 +834,24 @@ const DELIVERY_STREAM_CUT =
   "polled only while a browser is watching, so nothing was taken out of its outbox " +
   "while nothing here was listening. Start watching again.";
 
+// The same limb of ADR-0175 §2 on the delivery stream, for a line this page could not
+// read as a value on it (#2008). Its own sentence for the reason the cut above has one:
+// the condition `ANSWER_STREAM_MISFRAMED` states is the same, and what stopped is not —
+// an owner whose notifications stopped is not told about "that answer".
+//
+// **And it is not the cut either.** "Ended before the gateway finished it" is false of a
+// gateway that wrote a whole line and had it refused here, exactly as it is on the
+// answer stream, and this ending is the one an array or a scalar on this stream reaches
+// — which reached the cut's wording before the reader refused those (adversarial review,
+// round 1, `blocker`).
+const DELIVERY_STREAM_MISFRAMED =
+  "The connection carrying notifications carried a line this browser could not read as " +
+  "a value on it, so it read no further and has stopped watching. The gateway did " +
+  "answer: what broke is the shape of what was written and not the connection carrying " +
+  "it. Nothing the hub still holds was lost: it is polled only while a browser is " +
+  "watching, so nothing was taken out of its outbox while nothing here was listening. " +
+  "Start watching again.";
+
 // **The gateway is where a session lives, so the gateway stopping is where it ends**
 // (ADR-0168 §4: minted at the gateway, held in memory, and dies with the process).
 // This is the sentence for the surprise rather than a restatement of the mechanism:
@@ -6168,7 +6186,7 @@ async function readDeliveries(half) {
     } else {
       report("notifications", terminal, describeDeliveryEnd(terminal, response.status));
     }
-  } catch (_) {
+  } catch (error) {
     // An abort this page asked for is not the gateway having gone, and saying it was
     // would be a wrong explanation rather than a missing one: the gateway may be
     // perfectly alive at the other end of a socket that stopped carrying. The two
@@ -6192,6 +6210,15 @@ async function readDeliveries(half) {
     } else if (silent) {
       stopWatching(WENT_SILENT);
       fault(DELIVERY_STREAM_SILENT, "notifications");
+    } else if (error instanceof MisframedValue) {
+      // **Below the two aborts and above the gateway having gone** (#2008). The aborts
+      // are this page's own acts and keep their precedence for `open.released`'s reason:
+      // a deadline that fired raises on the *next* read, so a line already buffered can
+      // be refused after the stream was abandoned, and the act is what the owner is told
+      // about. What is left below them is a stream that carried something, which is the
+      // one ending here that is not a gateway that stopped saying anything.
+      stopWatching();
+      fault(DELIVERY_STREAM_MISFRAMED, "notifications");
     } else {
       stopWatching();
       fault(GATEWAY_GONE, "notifications");

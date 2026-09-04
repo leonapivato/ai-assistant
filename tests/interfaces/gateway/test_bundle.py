@@ -1290,6 +1290,39 @@ def test_a_misframed_answer_stream_is_not_told_as_a_gateway_that_had_gone() -> N
     )
 
 
+def test_the_two_misframed_endings_are_not_one_message_either() -> None:
+    """One reader, two consumers, and therefore two sentences (adversarial review,
+    round 1, ``blocker``).
+
+    ``streamValues`` is read by the answer stream and by the delivery stream, so
+    refusing a line there reaches both — and a change that gave only the first of them
+    an ending left the second falling through to ``GATEWAY_GONE``, which for a line that
+    parses to an array or a scalar was a *regression*: nothing threw on those before,
+    so they had reached ``DELIVERY_STREAM_CUT``.
+
+    The split is ``ANSWER_STREAM_CUT``/``DELIVERY_STREAM_CUT``'s own, for its own
+    reason: "The condition is the same; what was cut is not", and an owner whose
+    notifications stopped is not told about "that answer".
+    """
+    script = _code("app.js")
+    read = _functions(script)["readDeliveries"]
+    said = _joined(_constant(script, "DELIVERY_STREAM_MISFRAMED"))
+
+    assert "could not read as a value on it" in said
+    assert "has stopped watching" in said
+    assert "Start watching again." in said
+    # Neither of the two it displaces, and not the answer stream's subject either.
+    assert "ended before the gateway finished it" not in said
+    assert "may have stopped" not in said
+    assert "that answer" not in said
+    assert 'fault(DELIVERY_STREAM_MISFRAMED, "notifications");' in read
+    assert script.count("DELIVERY_STREAM_MISFRAMED") == 2
+    # Below the two aborts, which are this page's own acts, and above the gateway having
+    # gone, which is what is left once the stream is known to have carried something.
+    assert read.index("if (silent) {") < read.index("error instanceof MisframedValue")
+    assert read.index("error instanceof MisframedValue") < read.index('fault(GATEWAY_GONE, "not')
+
+
 def test_a_cut_answer_stream_leaves_no_partial_answer_on_screen() -> None:
     """§2 makes a body that ended without a terminal value a **transport failure**, and
     ADR-0173 §3 makes the terminal outcome's ``reply`` the answer — "no front end
@@ -3200,7 +3233,11 @@ def test_a_stream_that_never_opened_is_not_reported_as_one_that_went_quiet() -> 
     assert "${HEAD_DEADLINE_MILLISECONDS / 1000} seconds" in script
     # And it is its own wording rather than a second reader of an existing one.
     assert "head of the stream — so this browser abandoned it" in script
-    assert script.count("Start watching again.") == 3
+    # Four since #2008, and the fourth is the delivery stream's misframed-line ending —
+    # its own sentence for the reason the three above are three, and carrying the same
+    # way back because the condition is the same: the hub is polled only while a browser
+    # is watching, so nothing it holds was taken while nothing here was listening.
+    assert script.count("Start watching again.") == 4
 
 
 def test_the_page_holds_a_stream_from_the_request_and_not_from_its_first_value() -> None:
@@ -3296,7 +3333,7 @@ def test_a_stream_the_page_released_is_not_reported_as_the_gateway_having_gone()
     performed, and it would land in a panel ``showBootstrap`` has just hidden.
     """
     read = _functions(_code("app.js"))["readDeliveries"]
-    caught = read[read.index("} catch (_) {") :]
+    caught = read[read.index("} catch (error) {") :]
 
     assert caught.index("if (open.released) {") < caught.index("if (stalled) {")
     assert caught.index("if (open.released) {") < caught.index("fault(GATEWAY_GONE,")

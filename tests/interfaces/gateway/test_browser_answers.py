@@ -19,6 +19,12 @@ of why the wrong sentence reached the owner. ADR-0216 §2 puts exactly that here
 "behaviour a reading of the file cannot decide" — so the cases below run the page and
 read what the owner reads.
 
+**One case here is not about an answer, and it is here because it is not a second
+condition.** ``streamValues`` is read by the answer stream and by the delivery stream,
+so a line refused in that reader reaches both — and #2008's ending is therefore two
+sentences at one condition, exactly as ``ANSWER_STREAM_CUT`` and ``DELIVERY_STREAM_CUT``
+are. Driving both beside each other is what shows the pair is a pair.
+
 **The gateway's own answer, with only the body replaced.** Each case lets the
 request reach the gateway, takes the response it wrote, and substitutes the body —
 which is the condition #1622 names and the only one that is reachable: every ``2xx``
@@ -428,6 +434,51 @@ async def test_a_stream_value_whose_kind_is_unknown_is_still_ignored_rather_than
         assert complaints == []
 
 
+async def test_a_misframed_delivery_stream_is_not_reported_as_a_gateway_that_had_gone(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The same reader's condition on the other surface it serves (#2008).
+
+    ``streamValues`` is read by two consumers, so refusing a line there reaches both —
+    and the ending each of them gives it is its own. An owner whose notifications
+    stopped is not told about "that answer", which is why ``DELIVERY_STREAM_CUT`` was
+    split from ``ANSWER_STREAM_CUT`` in the first place, and the misframed pair is split
+    for that same reason.
+
+    **This is the case adversarial review's round-1 blocker names**, and the body is an
+    array rather than ``null`` deliberately: ``[].kind`` is ``undefined``, so before the
+    reader refused it nothing threw here at all and this stream ended in
+    ``DELIVERY_STREAM_CUT``. Refusing it in the reader and stopping there would have
+    moved it to ``GATEWAY_GONE`` — a regression this change introduced and this case
+    would have caught.
+
+    **The real body is cancelled rather than drained**, because a delivery stream is a
+    long poll the gateway holds open by design (ADR-0175 §4); a cancelled body is the
+    browser going away, which is an ending that gateway is written to meet.
+    """
+    thrown: list[str] = []
+    complaints: list[str] = []
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.page.on("pageerror", lambda error: thrown.append(str(error)))
+        drive.page.on("console", lambda message: _note(message, complaints))
+        await _substitute(drive, path="/deliveries", body=_STREAM_OF_AN_ARRAY, drain=False)
+        await drive.page.click("#watch-button")
+
+        said = await _fault(drive, panel="notifications")
+        assert "could not read as a value on it" in said
+        assert "The gateway did answer" in said
+        assert "Start watching again." in said
+        assert _GATEWAY_GONE not in said
+        assert _CUT not in said
+        # Not the answer stream's wording: nothing here was an answer.
+        assert "that answer" not in said
+        # The control is handed back, which is the whole of the way on from this ending.
+        await expect(drive.page.locator("#watch-button")).to_be_visible()
+        await _still_admitted(drive)
+        assert thrown == []
+        assert complaints == []
+
+
 async def test_a_spoken_answer_that_carries_no_outcome_is_neither_shown_nor_played(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
@@ -749,7 +800,11 @@ _HOLDING = """() => {
     if (asked === null || path !== asked.path) {
       return answered;
     }
-    await answered.text();
+    if (asked.drain) {
+      await answered.text();
+    } else {
+      await answered.body.cancel();
+    }
     return new Response(asked.body, {
       status: answered.status,
       statusText: answered.statusText,
@@ -765,16 +820,25 @@ async def _hold(drive: Drive) -> None:
     await drive.page.evaluate(_HOLDING)
 
 
-async def _substitute(drive: Drive, *, path: str, body: str) -> None:
+async def _substitute(drive: Drive, *, path: str, body: str, drain: bool = True) -> None:
     """Let one path's request through, then replace the body of what came back.
 
     Args:
         drive: The gateway, engine and page under test.
         path: The exact request path to substitute for.
         body: What the page reads in place of the body the gateway wrote.
+        drain: Whether to read the real body to its end before replacing it. True for
+            a turn, where reading it to the end is what makes "the turn really ran" a
+            fact about the drive rather than a claim. False for a **delivery** stream,
+            whose body is a long poll the gateway holds open by design (ADR-0175 §4) —
+            draining one would wait for a stream written to be waited on, so the real
+            body is cancelled instead, which is the browser going away and is what the
+            gateway is written to meet.
     """
     await _hold(drive)
-    await drive.page.evaluate("(asked) => { window.__held = asked; }", {"path": path, "body": body})
+    await drive.page.evaluate(
+        "(asked) => { window.__held = asked; }", {"path": path, "body": body, "drain": drain}
+    )
 
 
 async def _stop_substituting(drive: Drive) -> None:
