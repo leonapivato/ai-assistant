@@ -1,6 +1,6 @@
 # 231. The planner asks for a search, the turn's own words compose it, and the results come back as records
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-04
 - **Amends** [ADR-0226](0226-the-planner-names-one-more-read-beside-its-plan-and-the-loop-services-it-into-the-supply.md)
   — **§2's membership sentence, §4's not-ruled-on clause and §6's cross-kind
