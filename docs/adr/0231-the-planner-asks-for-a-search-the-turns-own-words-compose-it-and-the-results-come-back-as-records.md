@@ -1,7 +1,40 @@
 # 231. The planner asks for a search, the turn's own words compose it, and the results come back as records
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0235 (§9's second clause, in its second limb alone: a recorded `CONFIRM` on a `WEB_SEARCH` decision may be read from the trail and offered to a surface for the establishing act, as history and never as outstanding work; the limb's two siblings bind entire, so no lane resumes such a decision or treats it as outstanding work, and §9's first, third, fourth and fifth clauses, §19's entries and every other section of this ADR stand entire)
 - Date: 2026-09-04
+- **Partially superseded: 2026-09-04 by ADR-0235 — §9's second clause, in its second
+  limb alone, and nothing else in this ADR.** That clause closes *"A recorded
+  `CONFIRM` on a `WEB_SEARCH` decision **resolves in no turn**: no lane resumes it,
+  offers it to an interface, or treats it as outstanding work, and §19 defers the
+  surface that would."* §19's first entry names that surface as ADR-0177's,
+  ADR-0178's and ADR-0186's to decide and assigns the firing to those lanes;
+  ADR-0235 is the ADR that fires it, and its §3 permits exactly one thing the second
+  limb forbids — such a decision may be **read from the trail and offered to a
+  surface for the establishing act**.
+
+  **A reader acting on that limb would act differently, which is ADR-0070 §1's test
+  coming out on the supersession side** and ADR-0082 §1's for a record being owed.
+  The reading under which nothing moved was available — the limb's own sentence
+  names where the surface is deferred, as ADR-0148 §3's third clause named its own
+  condition — and ADR-0235 §13 states in full why the fail-closed reading is taken
+  instead.
+
+  **The other two limbs bind entire and ADR-0235 §3 restates them as its own
+  obligations.** No lane resumes such a `CONFIRM`; and no component treats a decision
+  the establishing act may ride as outstanding work — it is returned by no
+  `pending_confirmations`, is not a park, holds no turn, blocks nothing, is reclaimed
+  by nothing, and is presented by no surface as a task, a queue, a badge, an unread
+  count or anything a reader could take as owed. §9's first, third, fourth and fifth
+  clauses are untouched and load-bearing there: the servicer still asks nothing and
+  parks nothing, the composing stage is still told nothing new, no lane weakens a
+  declaration to reach an `ALLOW`, and the standing recipient grant is still the one
+  route to one.
+
+  The record is made in ADR-0235's own change (PR #2089) under ADR-0082 §7: §1's
+  condition is that the superseding ADR **exists**, not that it is ratified, and an
+  atomic pair is what makes a `Status` line pointing at nothing unreachable. This
+  line carried no leading token before, so the supersession leads and `Accepted` is
+  dropped (`docs/adr/template.md`); the remainder of this ADR stays accepted.
 - **Amends** [ADR-0226](0226-the-planner-names-one-more-read-beside-its-plan-and-the-loop-services-it-into-the-supply.md)
   — **§2's membership sentence, §4's not-ruled-on clause and §6's cross-kind
   precedence sentence, in one respect each.** §2's membership sentence has already

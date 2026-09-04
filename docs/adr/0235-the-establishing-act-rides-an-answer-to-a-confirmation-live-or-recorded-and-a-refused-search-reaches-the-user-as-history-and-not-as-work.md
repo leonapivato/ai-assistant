@@ -17,8 +17,8 @@
   first, third, fourth and fifth clauses are untouched and load-bearing here: the
   servicer still asks nothing and parks nothing, the composing stage is still told
   nothing new, no lane weakens a declaration to reach an `ALLOW`, and the standing
-  recipient grant is still the one route to one. §13 argues the classification and
-  states the record ADR-0231's header is owed.
+  recipient grant is still the one route to one. §13 argues the classification, and
+  the record ADR-0082 §1 owes is made on ADR-0231's header in this same change.
 - Requires **new `core` contract surface** and lands none of it (§4, §12). Flagged
   under golden rule 5.
 - Does **not** widen [ADR-0177](0177-the-browsers-control-surface-is-thirty-operations-and-a-credential-is-entered-only-on-a-loopback-origin.md)
@@ -1131,15 +1131,22 @@ obligation (ADR-0089 §1).
   removable by showing the test comes out the other way (ADR-0082 §1), and a missing
   one leaves a ratified prohibition reading wider than it holds.
 
-  **The record ADR-0231's header is owed is not made in this change, and that is a
-  fence rather than a judgement.** ADR-0082 §7 settles that §1's condition is that the
-  superseding ADR **exists**, not that it is ratified, so an atomic pair is available
-  to *"a lane whose fence admits both files"* (ADR-0200 §12). This lane's fence admits
-  `docs/adr/0235-*.md` alone. The record owed is a second pair on ADR-0231's `Status`
-  line — already a leading-token line under ADR-0070 §4's accumulation rule — together
-  with the appended dated note ADR-0070 §1 requires, and it is a header-only change
-  carrying no decision of its own. **#2090** holds it, filed with this PR, so that a
-  reader of either document can find the other.
+  **The record is made on ADR-0231's header in this same change**, which is
+  ADR-0082 §7's route and ADR-0200 §12's shape: §1's condition is that the superseding
+  ADR **exists**, not that it is ratified, and *"a lane whose fence admits both files
+  may make it atomically"*. ADR-0231's `Status` carried no leading token, so the
+  record takes the form `docs/adr/template.md` fixes for a first partial
+  supersession — the supersession leads and `Accepted` is dropped, so a prefix match
+  on `Accepted` cannot misread the replaced limb as live — beside the appended dated
+  note ADR-0070 §1 requires in every case. Nothing else in ADR-0231 moves: no byte of
+  its Context, Decision or Consequences, and no other header bullet.
+
+  **An earlier draft of this ADR filed the record instead of making it**, on a lane
+  fence that did not admit the second file, and adversarial review blocked on it at
+  round 6. Keeping that here rather than repairing it silently is the point: ADR-0082
+  §7 names this as #458's recurring misreading and ADR-0200 §12 records two rounds
+  spent on the same argument, so a third document reaching for the deferral and being
+  turned back is evidence about the rule rather than about this lane.
 
 - **ADR-0177 — neither amended nor superseded, and §9 is what makes that true.** §1's
   enumeration is not widened: none of §4's five new members resolves from a browser
