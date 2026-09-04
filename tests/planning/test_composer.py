@@ -269,6 +269,28 @@ async def test_an_answer_that_is_not_a_query_is_malformed(content: str) -> None:
     assert outcome.query is None
 
 
+@pytest.mark.parametrize(
+    "content",
+    ['{"query": "\\ud800"}', '{"query": "porto \\udfff"}', '{"query": " \\ud83d "}'],
+)
+async def test_a_query_with_no_utf_8_encoding_is_malformed_and_is_not_raised(
+    content: str,
+) -> None:
+    """The gap between "a JSON string" and "a value ``QueryOutcome`` accepts".
+
+    ``json.loads`` accepts an unpaired surrogate escape and hands back a ``str`` with
+    no UTF-8 encoding; ``QueryOutcome.query`` refuses one. A composer that constructed
+    the outcome and let that refusal out would raise for a **composition** reason,
+    which §3 forbids in terms — "only ``CancelledError`` leaves it" — so the answer is
+    the refusal §3 already has for an answer that could not be read as a query. The
+    third arm is the one that survives stripping: the surrogate is not whitespace.
+    """
+    outcome = await _answering(content).compose(UTTERANCE)
+
+    assert outcome.refusal is QueryRefusal.MALFORMED
+    assert outcome.query is None
+
+
 async def test_a_provider_failure_is_unavailable_and_is_not_raised() -> None:
     """§3's ``UNAVAILABLE``: "the model call did not produce an answer"."""
     outcome = await _over(_failing()).compose(UTTERANCE)

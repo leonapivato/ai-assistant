@@ -39,7 +39,7 @@ import json
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.errors import ModelError
-from ai_assistant.core.types import Message, QueryOutcome, QueryRefusal, Role
+from ai_assistant.core.types import Message, QueryOutcome, QueryRefusal, Role, encodable_text
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import ModelProvider
@@ -261,7 +261,9 @@ class ModelBackedQueryComposer:
         Args:
             proposed: Whatever the envelope's ``query`` key held — a ``str`` if the
                 model answered the shape it was asked for, and any JSON value or
-                ``None`` if it did not.
+                ``None`` if it did not. A ``str`` here is not yet a value
+                :class:`~ai_assistant.core.types.QueryOutcome` accepts: JSON admits
+                an unpaired surrogate escape, and the field does not.
 
         Returns:
             The composed query, or the refusal it earned.
@@ -273,6 +275,20 @@ class ModelBackedQueryComposer:
             return QueryOutcome(refusal=QueryRefusal.MALFORMED)
         query = proposed.strip()
         if not query:
+            return QueryOutcome(refusal=QueryRefusal.MALFORMED)
+        try:
+            encodable_text(query)
+        except ValueError:
+            # A JSON string may carry an unpaired surrogate — `json.loads` accepts
+            # `"\ud800"` and hands back a `str` with no UTF-8 encoding — and
+            # `QueryOutcome.query` refuses one. Constructing the outcome and letting
+            # that refusal out would raise for a *composition* reason, which §3
+            # forbids in terms: "only `CancelledError` leaves it". So the property is
+            # decided here, with the very function `NonBlankEncodableText` applies,
+            # rather than with a second definition of "encodable" that could drift
+            # from it. The construction below is left unguarded on purpose: a
+            # constraint this method did not anticipate should surface as the defect
+            # it is rather than be reported as a model's malformed answer.
             return QueryOutcome(refusal=QueryRefusal.MALFORMED)
         if len(query) > self._max_chars:
             return QueryOutcome(refusal=QueryRefusal.TOO_LONG)
