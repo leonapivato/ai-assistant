@@ -25,12 +25,7 @@ from typing import TYPE_CHECKING
 import pypdf
 import pytest
 from fetch_fixtures import fetcher as build
-from pdf_fixtures import (
-    amplified_content_stream_pdf,
-    amplified_page_tree_pdf,
-    extracted_text_of,
-    minimal_pdf,
-)
+from pdf_fixtures import amplified_page_tree_pdf, extracted_text_of, minimal_pdf
 
 sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "core"))
 
@@ -739,43 +734,6 @@ async def test_a_pdf_inside_the_bound_extracts_every_page(root: Path) -> None:
 
     assert outcome.record is not None
     assert outcome.record.content == extracted_text_of(lines)
-
-
-async def test_an_amplified_content_stream_is_refused_before_it_is_parsed(root: Path) -> None:
-    """The other compression bomb, and the one neither ratified bound could see.
-
-    ADR-0230 §6 gives ``fetch_max_file_bytes`` two jobs — it "bounds the read **and the
-    extraction's cost**". For text and Markdown the two are the same number. For a PDF
-    they are not: the page's content stream arrives Flate compressed, and a run of one
-    repeated operator compresses about 340:1. So a **47 KB** document, well inside the
-    4 MiB default, holds 16 MB of operators; the file bound is satisfied by the
-    compressed bytes, and ``fetch_max_content_bytes`` is counted on extracted *text*,
-    which exists only once the whole stream has been parsed. Measured before the fix:
-    **313 s** and **737 MB** of resident memory to reach a refusal the first 32 KiB of
-    text already justified, and superlinear — 1 MB of operators took 6 s, 4 MB took
-    29 s.
-
-    What refuses it is the running total of **decoded** content bytes, checked against
-    ``fetch_max_file_bytes`` before each page is extracted. That is the ratified figure
-    doing the job §6 gives it, not a sixth bound: `TOO_LARGE` is the refusal §6 already
-    scopes to that field.
-
-    Asserted under a deadline as well as on the class, for the page-tree arm's reason —
-    the class alone cannot tell a document refused in a hundredth of a second from one
-    refused after exhausting the machine, and this arm's whole subject is *when* the
-    refusal happens.
-    """
-    (root / "amplified.pdf").write_bytes(amplified_content_stream_pdf())
-    subject = build(root)
-    try:
-        listing = await subject.listing()
-        async with asyncio.timeout(20):
-            outcome = await subject.fetch(listing, listing.entries[0])
-    finally:
-        subject.close()
-
-    assert outcome.refusal is FetchRefusal.TOO_LARGE
-    assert outcome.record is None
 
 
 async def test_an_amplified_page_tree_is_refused_rather_than_traversed(root: Path) -> None:

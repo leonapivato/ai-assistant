@@ -125,16 +125,13 @@ def _rendered_body_length(text: str) -> int:
     return len(json.dumps(text)) - _DELIMITERS
 
 
-def extract(data: bytes, suffix: str, *, max_rendered_bytes: int, max_file_bytes: int) -> str:
+def extract(data: bytes, suffix: str, *, max_rendered_bytes: int) -> str:
     """The text ``data`` encodes, refused if its rendering passes the bound.
 
     Args:
         data: The file's bytes, already bounded by ``fetch_max_file_bytes``.
         suffix: The entry's lowercased suffix, one of :data:`SUPPORTED_SUFFIXES`.
         max_rendered_bytes: ``fetch_max_content_bytes``.
-        max_file_bytes: ``fetch_max_file_bytes``. Bounds the read *and the
-            extraction's cost* (ADR-0230 §6), which for a compressed format is not
-            the same figure as the bytes on disk — see :func:`_extract_pdf`.
 
     Returns:
         The file's text, verbatim, whose :func:`rendered_length` is at most
@@ -152,9 +149,7 @@ def extract(data: bytes, suffix: str, *, max_rendered_bytes: int, max_file_bytes
     if suffix in _TEXT_SUFFIXES:
         return _extract_text(data, max_rendered_bytes=max_rendered_bytes)
     if suffix == ".pdf":
-        return _extract_pdf(
-            data, max_rendered_bytes=max_rendered_bytes, max_file_bytes=max_file_bytes
-        )
+        return _extract_pdf(data, max_rendered_bytes=max_rendered_bytes)
     msg = f"no extraction is defined for the {suffix!r} suffix"
     raise ValueError(msg)
 
@@ -177,28 +172,7 @@ def _extract_text(data: bytes, *, max_rendered_bytes: int) -> str:
     return text
 
 
-def _decoded_content_bytes(page: pypdf.PageObject) -> int:
-    """How many bytes of content stream this page's extraction will parse.
-
-    A page's ``/Contents`` is one stream or an array of them, and ``get_data`` decodes
-    each through its declared filters — which for all but a hand-written document
-    means decompressing it. The decoded bytes are cached on the object, so asking for
-    the size here costs the extraction nothing: :meth:`extract_text` reads the same
-    cached bytes rather than decompressing a second time.
-
-    Returns:
-        The decoded length, or ``0`` for a page carrying no content stream at all,
-        which is a legal empty page and not a failure.
-    """
-    contents = page.get("/Contents")
-    if contents is None:
-        return 0
-    resolved = contents.get_object()
-    parts = resolved if isinstance(resolved, pypdf.generic.ArrayObject) else [resolved]
-    return sum(len(part.get_object().get_data()) for part in parts)
-
-
-def _extract_pdf(data: bytes, *, max_rendered_bytes: int, max_file_bytes: int) -> str:
+def _extract_pdf(data: bytes, *, max_rendered_bytes: int) -> str:
     """Extract a PDF's text a page at a time, refusing as soon as the bound passes.
 
     Page-at-a-time is what makes §6's "enforces the bound **while** extracting rather
@@ -230,33 +204,35 @@ def _extract_pdf(data: bytes, *, max_rendered_bytes: int, max_file_bytes: int) -
     adoption's "bounded by ``fetch_max_file_bytes``" honest for a format whose page
     count is not a function of its byte count.
 
-    **A page's decoded content is bounded before it is parsed, and by the same figure
-    that bounds the file.** §6 gives ``fetch_max_file_bytes`` two jobs — it "bounds the
-    read **and the extraction's cost**" — and for a format whose streams are Flate
-    compressed those are not the same number. Measured: a **47 KB** document, well
-    inside the 4 MiB default, whose one content stream is a 343:1 run of ``Tj``
-    operators cost **313 s** and **737 MB** of resident memory before any bound was
-    consulted, and the shape is superlinear — 1 MB of operators took 6 s, 4 MB took
-    29 s, 16 MB took 313 s. Neither bound could reach it: the file bound was satisfied
-    by the compressed bytes, and the content bound is checked on *text*, which is
-    produced only after the whole stream has been parsed into operators.
+    **What is *not* bounded here, and why this seam cannot bound it** (issue #2022).
+    A page's content stream arrives Flate compressed, and a run of one repeated
+    operator compresses about 340:1. So a **47 KB** document, well inside the 4 MiB
+    default, holds 16 MB of operators, and parsing them into ``pypdf``'s own objects
+    cost **313 s** and **737 MB** of resident memory when it was measured on this
+    branch — superlinearly: 1 MB of operators took 6 s and 4 MB took 29 s. Neither of
+    §6's figures reaches it. The file bound is satisfied by the compressed bytes, and
+    ``fetch_max_content_bytes`` is counted on extracted *text*, which exists only once
+    the whole stream has been parsed.
 
-    So the running total of **decoded** content bytes is checked against
-    ``fetch_max_file_bytes`` before each page is extracted, and a document past it is
-    ``TOO_LARGE``. That is the ratified figure applied to the job §6 gives it and not a
-    sixth bound with a number of its own — the round-2 objection to a page ceiling was
-    that it invented one, and this invents none. The refusal is honest for a legitimate
-    document too: a page whose text must render inside ``fetch_max_content_bytes``
-    carries orders of magnitude less content than 4 MiB, and a document that really did
-    hold 4 MiB of operators would cost the same seconds whether it arrived compressed
-    or not, which is what "bounded by ``fetch_max_file_bytes``" is supposed to mean.
+    **The memory half is bounded by the pinned library and the time half is not.**
+    ``pypdf`` 6.16.2 decodes a Flate stream through ``_decompress_with_limit``, capped
+    at ``ZLIB_MAX_OUTPUT_LENGTH`` (75,000,000 bytes) and raising ``LimitReachedError``
+    past it, with the same 75 MB ceiling on ``LZW``, ``RunLength``, ``JBIG2`` and the
+    array-based path — so a single stream cannot materialise more than that, and the
+    raise lands in this function's ``except`` as ``EXTRACTION_FAILED``. Nothing bounds
+    the **parse** of what was decoded.
 
-    **The visitor route was tried first and does not work**, which is worth recording so
-    it is not tried again: ``extract_text(visitor_text=…)`` reports a fragment per
-    *text-block flush* — ``BT``/``ET``/``cm``/``Tf`` — not per operator, so a single
-    ``BT … ET`` block holding 90,909 ``Tj`` operators calls it exactly twice, and both
-    calls come after the parse the cost is in. Measured with the guard in place, the
-    47 KB document's numbers did not move.
+    **Bounding it is a decision this lane may not take.** The obvious repair — a
+    running total of *decoded* content bytes refused against ``fetch_max_file_bytes``
+    — was written, measured (the 47 KB document then refuses in 0.01 s) and **removed
+    again** at review round 9, because it is an unratified refusal criterion: §6
+    defines that field as "the file's **size on disk**" and scopes ``TOO_LARGE`` to
+    its two configured bounds, and a 4 MiB PDF of vector artwork sits inside both
+    while carrying far more than 4 MiB of operators. Refusing it would change the
+    ``Fetcher`` outcome contract, which ADR-0015 puts in an ADR rather than in an
+    implementation. §6 is inconsistent here rather than silent — "the file's size on
+    disk" and "bounds the read **and the extraction's cost**" cannot both hold for a
+    compressed format — and #2022 carries the question.
     """
     try:
         reader = pypdf.PdfReader(io.BytesIO(data))
@@ -267,7 +243,6 @@ def _extract_pdf(data: bytes, *, max_rendered_bytes: int, max_file_bytes: int) -
     # The delimiters are paid once, up front, so the running comparison is against
     # the same number `rendered_length` would report for the whole.
     total = _DELIMITERS
-    decoded = 0
     index = 0
     while True:
         try:
@@ -276,12 +251,6 @@ def _extract_pdf(data: bytes, *, max_rendered_bytes: int, max_file_bytes: int) -
             return "".join(produced)
         except Exception as exc:  # as above; every failure of extraction is one class
             raise ExtractionFailedError(_UNDECODABLE) from exc
-        try:
-            decoded += _decoded_content_bytes(page)
-        except Exception as exc:  # as above
-            raise ExtractionFailedError(_UNDECODABLE) from exc
-        if decoded > max_file_bytes:
-            raise ContentTooLargeError(_OVER_BOUND)
         try:
             page_text = page.extract_text()
         except Exception as exc:  # as above

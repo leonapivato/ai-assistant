@@ -174,6 +174,10 @@ async def test_a_discriminated_identity_reaches_the_listing_and_the_record() -> 
         ("listing_ttl", timedelta(seconds=-1)),
         ("max_entries", 0),
         ("max_entries", -1),
+        ("listing_ttl", 1),
+        ("listing_ttl", 60.0),
+        ("max_entries", 1.5),
+        ("max_entries", True),
     ],
 )
 def test_a_bound_outside_its_domain_is_refused_at_construction(figure: str, value: object) -> None:
@@ -185,6 +189,14 @@ def test_a_bound_outside_its_domain_is_refused_at_construction(figure: str, valu
     negative ``max_entries`` reaches ``entries[:-1]``, which "quietly yields all but the
     last entry, so a bound would be defeated by a configuration value rather than
     enforced by one" — the exact reading §6 refuses.
+
+    **The type arms are the same defect one step out.** §6's words are "integers of at
+    least 1", and a ``float`` passes a bare ``< 1`` test only to fail later inside
+    ``entries[:1.5]`` — again a bound defeated by a configuration value rather than
+    enforced by one — while ``True`` passes it and silently *means* a cap of one. They
+    are here as well as on the concrete fetcher because a fake looser than the contract
+    certifies consumers the real implementation would reject, which is the whole reason
+    this module exists.
     """
     configured: dict[str, Any] = {figure: value}
 

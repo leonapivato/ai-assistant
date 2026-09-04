@@ -496,11 +496,7 @@ class LocalFileFetcher:
         data, read_at = await asyncio.to_thread(self._acquire, name)
         try:
             text = await asyncio.to_thread(
-                extract,
-                data,
-                suffix,
-                max_rendered_bytes=self._max_content_bytes,
-                max_file_bytes=self._max_file_bytes,
+                extract, data, suffix, max_rendered_bytes=self._max_content_bytes
             )
         except ContentTooLargeError as exc:
             raise _FileTooLargeError from exc
