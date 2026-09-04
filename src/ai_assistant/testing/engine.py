@@ -946,6 +946,9 @@ class FakeAssistantEngine:
         collected: _CollectedAct | None = None
         if until is not None:
             collected = await self._collect_the_act(token.handle, until, approved=approved)
+        # ``collected`` is ``None`` where no argument was supplied, and on the one
+        # further path that collects no act: a declining answer on a park this
+        # engine holds no recorded ``CONFIRM`` for, which is the state below.
         confirmation = self.parked.pop(token.handle)
         # **The reference names the decision that actually cleared the step**, where
         # this path recorded one (ADR-0004 §7, ADR-0014 §4). Before ADR-0235 nothing
@@ -1068,7 +1071,7 @@ class FakeAssistantEngine:
 
     async def _collect_the_act(
         self, handle: str, remember_recipients_until: datetime, *, approved: bool
-    ) -> _CollectedAct:
+    ) -> _CollectedAct | None:
         """Refuse the establishing act, or record the answer it rides (ADR-0235 §1, §2).
 
         **Every refusal here fires before anything is answered**, so the park survives
@@ -1076,20 +1079,29 @@ class FakeAssistantEngine:
         the shape §2 states in terms and the one
         :meth:`~ai_assistant.orchestration.runner.StepRunner.resume` already has.
 
-        **A park no recorded ``CONFIRM`` is bound to is refused whatever ``approved``
-        carries**, and it is the one place this fake refuses where the concrete engine
-        does not. The state is this fake's own and no hub is ever in it: ADR-0235 §2
-        is stated over "the answer to a **held confirmation**", and every durable park
-        a hub holds *has* a recorded ``CONFIRM`` — a park with none exists only because
-        :meth:`park` mints one and :meth:`hold_confirmation_decision` was never called.
-        So no clause governs it, and **neither carrier §4 offers is true of it**:
-        ``DECLINED`` *asserts* that the answer was recorded and nothing was recorded,
-        while an absent carrier says "no act was collected" and one was. Refusing the
-        act, rather than reporting it in terms that are false, leaves a consumer no
-        state to certify against that a hub can never reach — and it costs them
-        nothing, because the way to model a real confirmation carrying no egress
-        binding is to bind one (§2's first refused shape), which this engine then
-        answers exactly as a hub does, ``DENY``, ``DECLINED`` and all.
+        **A park no recorded ``CONFIRM`` is bound to collects no act, and the two
+        answers part company on it exactly as §2 parts them.** The state is this
+        fake's own — :meth:`park` mints a park and
+        :meth:`hold_confirmation_decision` was never called, where every durable park
+        a hub holds has a recorded ``CONFIRM`` — but the engine is reached through
+        ``AssistantEngine`` all the same, so what ``resume`` does here is the
+        contract's to say and not this fake's.
+
+        An **approving** answer is refused, which is §2's binding refusal on its first
+        shape: there is no ``EgressBinding`` for
+        :meth:`~ai_assistant.core.types.RecipientGrant.established_from` to transcribe
+        from, the park survives, and the same token answers it again without the
+        argument. A **declining** one is *not* refused, because §2 rules that the
+        argument supplied beside ``approved=False`` "establishes nothing and changes
+        nothing else: the answer is recorded as a ``DENY`` exactly as it is today, the
+        step is denied, and no grant is written" — ADR-0042 §4's guarantee, which §2
+        states no exception to. "Exactly as it is today" is what settles the carrier
+        too: a park with no bound ``CONFIRM`` has nothing for an answer to resolve, so
+        nothing is recorded here and nothing is recorded by a ``resume`` without the
+        argument either, and ``DECLINED`` — which §4 makes an *assertion* that the
+        answer was recorded — would be the one thing that is false of it. So the act
+        is reported absent (§6, "every call that collected no act"), and the outcome
+        is byte for byte the one a plain ``resume`` returns.
 
         **The declining answer reads no clock.** ADR-0235 §1's single reading exists
         for the approving path, where one instant is compared against the chosen expiry
@@ -1105,22 +1117,26 @@ class FakeAssistantEngine:
             approved: What the user said.
 
         Returns:
-            The collected act: the bound ``CONFIRM``, the answer just recorded, and
-            the instant the grant would expire at.
+            The collected act — the bound ``CONFIRM``, the answer just recorded, and
+            the instant the grant would expire at — or ``None`` where a declining
+            answer met a park no ``CONFIRM`` is bound to and there was no act to
+            collect.
 
         Raises:
-            UngrantableActError: If no recorded ``CONFIRM`` is bound to this park, or
-                — on an approving answer — if §2's binding conditions or §1's expiry
-                refuse it.
+            UngrantableActError: On an approving answer, if no recorded ``CONFIRM`` is
+                bound to this park, if §2's binding conditions refuse it, or if §1's
+                expiry does.
             AuditError: If the trail refuses the answer (:meth:`_record_the_answer`).
         """
         confirmed = self._parked_decisions.get(handle)
         if confirmed is None:
+            if not approved:
+                return None
             msg = (
-                "this token names a park this engine holds no recorded CONFIRM for, so "
-                "there is no answer for a standing recipient grant to ride; nothing was "
-                "answered and the same token still answers the park without the argument "
-                "(ADR-0235 §2)"
+                "this token names a park this engine holds no recorded CONFIRM whose "
+                "recipients could be made standing, so this answer establishes no "
+                "recipient grant; the confirmation is unaffected and may still be "
+                "answered (ADR-0235 §2)"
             )
             raise UngrantableActError(msg)
         establishing_at: datetime | None = None
