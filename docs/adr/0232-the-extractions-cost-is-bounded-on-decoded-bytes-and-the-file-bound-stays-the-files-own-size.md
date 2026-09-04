@@ -71,6 +71,38 @@ finding rather than the seconds.** They are recorded on #2022 and at the code, i
 `src/ai_assistant/readers/_extract.py`'s `_extract_pdf` docstring, which C1 merged
 carrying the whole disclosure.
 
+### The content stream is not the only amplified input, which this ADR's own review found
+
+`/Contents` is where Lane C1 looked, and a bound counting only `/Contents` is bypassed
+twice over. Adversarial review of this ADR's round 1 named the first; measuring it found
+the second. Both were built and timed against the adopted `pypdf` 6.16.2, and both are
+**smaller on disk** than the document #2022 is filed about:
+
+| document on disk | `/Contents` decoded | what carries the operators | `extract_text()` |
+| --- | --- | --- | --- |
+| 12,453 B | **10 B** | one Form XObject holding 4 MB of operators | **33.9 s** |
+| 1,173 B | 5,500 B | one 100 KB Form XObject invoked **500 times** | **126.6 s** |
+
+`extract_text` **descends into Form XObjects**: `PageObject._extract_text__xform` follows
+each `Do` operator into the named form and parses it as a content stream of its own. So
+the first document's `/Contents` decodes to ten bytes and the parse is somewhere else
+entirely. And the descent is **per invocation** rather than per form — the adopted
+version's cycle guard (`known_ids`) refuses only a *re-entrant* form, so five hundred
+sequential `Do`s of one form are five hundred parses of it. A count over distinct decoded
+bytes sees 105 KB and admits two minutes of parsing.
+
+**This is why §3 counts bytes *per parse* over the invocation graph** rather than the
+page's own stream, and why §8 owes an arm for each of these three documents rather than
+for #2022's alone.
+
+**Two further inputs were tested and are bounded by the adopted library**, which is §6's
+distinction rather than a gap: a Flate-compressed `/ToUnicode` CMap raises
+`LimitReachedError` at `MAPPING_DICTIONARY_SIZE_LIMIT` (100,000 mappings, measured at
+about 1.2 s before the raise), and form invocations are capped in aggregate at
+`MAX_XFORM_INVOCATIONS_PER_EXTRACTION` (5,000). Neither is a bound this system may rely
+on, and the second is what puts the repeated-invocation worst case at five thousand times
+one form rather than at unbounded.
+
 ### Both lenses were right, and the text is what is wrong
 
 PR #2014 wrote two repairs and could keep neither, and the pair is why this is an ADR's
@@ -211,26 +243,29 @@ checkable.
 - **The legitimacy side is a ratio against a bound that is already ratified.** A
   document that fetches at all must render its extracted text inside
   `fetch_max_content_bytes`, 32 KiB. 1 MiB is exactly **thirty-two times** that. So this
-  bound refuses only a document spending **more than thirty-two bytes of content stream
-  per byte of text it yields** — a document that is overwhelmingly not text. An ordinary
-  text page's stream carries its text plus its positioning and font operators, a few
-  times over, not thirty-two.
+  bound refuses only a document whose extraction parses **more than thirty-two bytes of
+  operators per byte of text it yields** — a document that is overwhelmingly not text. An
+  ordinary text page's stream carries its text plus its positioning and font operators, a
+  few times over, not thirty-two.
 - **The cost side is the measurement.** At the adversarial density Lane C1 built — a
   stream of nothing but repeated `Tj` — 1 MB of operators parsed in **6 s**, against
-  313 s at 16 MB. So the default admits a worst case of a few seconds of parse on a
-  stream chosen to be as expensive as a stream can be, where today it admits minutes and
-  is bounded by nothing.
+  313 s at 16 MB, and the form-carried documents of Context measure in the same regime
+  (4 MB of operators in a Form XObject, 33.9 s). So the default admits a worst case of a
+  few seconds of parse on input chosen to be as expensive as PDF operators get, where
+  today it admits minutes and is bounded by nothing.
 
 **An operator raising it buys superlinearly more, and that is worth writing down**
 rather than discovering: 1 MB → 6 s, 4 MB → 28 s, 16 MB → 313 s on Lane C1's machine.
 Doubling the figure does not double the worst case.
 
-**What this changes for a document that was going to refuse anyway is only the price.**
-A 300-page report carries far more than 32 KiB of text and refuses on
-`fetch_max_content_bytes` today; under this bound it refuses earlier and cheaply, and
-the class it refuses with is the same. The only documents whose **outcome** changes are
-those spending more than thirty-two stream bytes per text byte — the amplified ones and
-pages of vector artwork, which yield no useful text in either case.
+**For a document that was going to refuse anyway, only the price changes.** A 300-page
+report carries far more than 32 KiB of text and refuses on `fetch_max_content_bytes`
+today; under this bound it refuses earlier and cheaply, with the same class. What changes
+**outcome** is a document parsing more than thirty-two bytes per byte of text it yields —
+the amplified ones, pages of vector artwork, and a document whose per-page graphics are
+parsed on every page. The third of those is a legitimate document refused, which is the
+direction ADR-0230 §6 chooses for its own bounds and which §10 defers raising the figure
+for, on evidence rather than on an estimate.
 
 ### 3. What is counted, per format, and where the comparison sits
 
@@ -239,8 +274,28 @@ pages of vector artwork, which yield no useful text in either case.
 > argument to any Protocol, and reaches the extractor as a configured figure exactly as
 > the other two bounds do.
 
-> **Normative.** For **PDF** the counted quantity is the **decoded length of each page's
-> content stream**, taken before that page's text is extracted.
+> **Normative.** For **PDF** the counted quantity is the decoded length of **every stream
+> the extraction parses, counted once per parse** — a page's own content stream, and every
+> Form XObject stream reached from it, once for each `Do` that invokes it. A count over
+> `/Contents` alone does not satisfy this bound, and neither does one charging a
+> repeatedly invoked form a single time.
+
+> **Normative.** **The property is required and no construction is**, in ADR-0230 §6's
+> own form — and it is named **achievable** rather than aspirational, because a
+> requirement no implementation is known to satisfy would be a deferral wearing a
+> decision's clothes. A walk of the **invocation graph** satisfies it: begin at the page's
+> decoded content stream, add each stream's decoded length to the running total **before**
+> that stream's operators are parsed, follow each `Do` occurrence to the Form XObject its
+> preceding name operand resolves to in that stream's own resources, skip a form already
+> on the current path exactly as the adopted library skips a re-entrant one, and refuse
+> the moment the total passes the bound — which is what keeps the walk's own cost inside
+> the bound rather than making it a second unbounded traversal.
+
+> **Normative.** **Ambiguity in that walk resolves toward counting**, never toward
+> skipping. A `Do` whose name operand cannot be resolved to a form, and a `Do` token that
+> turns out to have been inside a string literal, are counted rather than passed over: the
+> failure this admits is a legitimate document refused, which an operator can see and fix,
+> and the failure it refuses is the one this bound exists for.
 
 > **Normative.** For **plain text and Markdown** the counted quantity is **zero**, and
 > no implementation checks this bound on those formats. Their extraction has no decoding
@@ -253,10 +308,10 @@ pages of vector artwork, which yield no useful text in either case.
 > per-page bound would admit an unbounded document made of bounded pages, which is the
 > defect `fetch_max_content_bytes` is already summed to avoid.
 
-> **Normative.** The comparison is made **after each decoded unit and before the next is
-> decoded**, and the extraction is refused the moment the total passes the bound. No
-> implementation decodes a page's several content streams and compares their sum
-> afterwards.
+> **Normative.** The comparison is made **after each decoded stream and before the next
+> is decoded**, and the extraction is refused the moment the total passes the bound. No
+> implementation decodes several streams — a page's content array, a page's forms, or a
+> page and its forms together — and compares their sum afterwards.
 
 > **Normative.** Both refusals precede the work they bound: **the total is compared
 > before the operators it counts are parsed**, which is the property ADR-0230 §6 claimed
@@ -294,6 +349,25 @@ decoded bytes on the object, so the `extract_text()` that follows reads the same
 rather than decompressing again. That is a property of the adopted version, and §6's
 rule about such properties applies to it too: it is why the check is cheap, never why it
 is correct.
+
+**Whether the whole of a page's count is established before `extract_text` is entered is
+not this ADR's to choose, because the descent leaves no other point.** The extraction
+follows a `Do` into a form and parses it inside the same call; there is no seam between
+that form's decode and its parse for an implementation to sit in. So a page's counted
+quantity — its own stream plus every parse the walk reaches from it — is established
+**before** the page's extraction begins, and the stream-by-stream comparison above
+applies to the walk's own decodes. That is the same shape as the page loop one level up,
+and it is why the bound is a bound on an *input* rather than an observation of work in
+progress (§5).
+
+**Counting per parse rather than per distinct stream is what the second measured document
+forces**, and it is the clause an implementation will be tempted to drop as
+double-counting. A form invoked five hundred times is parsed five hundred times, is 105 KB
+of distinct decoded bytes, and cost 126.6 s. Charged once it sits comfortably inside any
+figure this ADR could pick; charged per parse it is 50 MB and is refused immediately. The
+adopted library's aggregate cap of 5,000 invocations is what stops that being unbounded
+rather than merely large — and by §6 that is evidence about a version, not a bound this
+decision rests on.
 
 ### 4. The refusal is `TOO_LARGE`, and there is no sixth member
 
@@ -381,6 +455,22 @@ array-based path, and each raise lands in `_extract_pdf`'s own `except` as
 unbounded. **It is not a bound on the parse**, which is where the 313 s went, and it is
 not aggregate — it is per stream, and a document has many.
 
+**It is not the only such limit, and the set matters here because it decides where §3's
+walk stops.** Measured against the same version: a `/ToUnicode` CMap is capped at
+`MAPPING_DICTIONARY_SIZE_LIMIT` (100,000 mappings) and raises past it, so a compressed
+CMap bomb is refused `EXTRACTION_FAILED` at about a second rather than becoming a fourth
+vector; form invocations are capped in aggregate at
+`MAX_XFORM_INVOCATIONS_PER_EXTRACTION` (5,000); and the page tree carries the three
+guards Lane C1 pinned. Every one of those is a reason §3's walk need not follow that
+input, and none of them is a reason to *state* that the input is bounded.
+
+> **Normative.** The implementing lane **establishes which streams the adopted version's
+> extraction parses**, at the version `uv.lock` fixes, and **pins what it found with
+> tests** rather than recording it in prose alone — in the shape Lane C1 used for the page
+> tree, where a document exercising the guard is refused under assertion so that a future
+> release dropping it fails a test instead of shipping the amplification. §3's walk covers
+> what this system must bound; the tests cover what the library bounds for it.
+
 **And it is not carried by anything this project declares.** Lane C1 adopted `pypdf`
 **ranged**, `>=6.16`, deliberately outside ADR-0024 §3's exact-pinned set — §3 pins the
 behaviour-affecting stack exactly because *"a **published wheel** install resolves them
@@ -413,42 +503,71 @@ it — and this addition renames nothing, drops nothing and starts no second aud
 > **Normative.** The implementing lane owes a test for each of the following, each over
 > behaviour rather than over a call count, in ADR-0230 §14's form.
 
-1. **The amplified content stream is refused before it is parsed.** Lane C1's document —
-   about 47 KB on disk, one page, 16 MB of decoded operators — is refused `TOO_LARGE`,
-   adds no record, fails no turn, and puts no prefix of its text in the supply, the
-   record or the reply. **Asserted under a deadline the test fails on**, because the
-   defect this ADR closes is a cost and not a class: the returned class was already
-   correct before the fix, and only the deadline separates 313 s from 0.01 s. This is
-   ADR-0230 §14 item 4's fourth-arm reasoning — *"a hang is not a wrong answer this suite
-   could otherwise observe"* — applied to a parse rather than to an open.
-2. **The bound is a running total, and refuses at the unit that crosses it.** A document
+> **Normative.** **Every refusal arm below asserts that the parse was not entered, and
+> none asserts a wall-clock duration.** The observation is `pypdf`'s own
+> `PageObject.extract_text` — not called for a page the bound refuses — which is
+> deterministic, independent of the machine the suite runs on, and proves exactly the
+> property the arm is about. A wall-clock threshold proves less and flakes: tight enough
+> to catch the regression it would fail a descheduled worker, loose enough not to it would
+> pass a regression spending seconds again. That is the nondeterminism §5 refuses in
+> production, and it is not admitted into the suite instead. It is available here and was
+> not in ADR-0230 §14 item 4's fourth arm because that arm's failure is a **hang**, which
+> returns nothing to assert over; these return a refusal.
+
+1. **The amplified content stream is refused before it is parsed.** Lane C1's
+   document — about 47 KB on disk, one page, 16 MB of decoded operators in its own
+   `/Contents` — is refused `TOO_LARGE`, `extract_text` is not called for that page, no
+   record is added, no turn fails, and no prefix of its text reaches the supply, the
+   record or the reply.
+2. **A form-carried amplification is refused, and the count is not `/Contents`.** A page
+   whose `/Contents` decodes to a handful of bytes and whose single Form XObject carries
+   megabytes of operators — about 12 KB on disk, measured at 33.9 s unbounded — is refused
+   `TOO_LARGE` with `extract_text` not called. **This is the arm that fails on any
+   implementation counting `/Contents` alone**, which passes arm 1 whole.
+3. **A repeatedly invoked form is charged per invocation.** A page invoking one 100 KB
+   Form XObject several hundred times — about 1.2 KB on disk, roughly 105 KB of *distinct*
+   decoded bytes, measured at 126.6 s unbounded — is refused `TOO_LARGE` with
+   `extract_text` not called. **This is the arm that fails on any implementation counting
+   distinct streams once**, which passes arms 1 and 2 whole.
+4. **A document that uses forms legitimately is not refused.** A page invoking a small
+   Form XObject a few times, whose whole counted quantity is well inside the bound,
+   fetches, and the text the form contributes reaches the record. This is the arm in the
+   other direction, and it fails on an implementation over-approximating the walk — by
+   charging every `Do` the largest form in scope, say, rather than the one its operand
+   names.
+5. **The bound is a running total, and refuses at the page that crosses it.** A document
    whose pages are each well inside the bound and whose sum passes it is refused
-   `TOO_LARGE`, with the pages past the crossing never extracted. This is the arm that
-   fails on any implementation applying the bound per page.
-3. **The comparison sits between decoded units, not after a page's.** A single page whose
-   `/Contents` is an **array** of streams whose sum passes the bound is refused after the
-   stream that crosses it and **before the next is decoded**. This is the arm that fails
-   on `edb2345f` as written, which summed a page's streams before comparing.
-4. **The boundary value, both ways.** A document whose decoded content is exactly
+   `TOO_LARGE`, with `extract_text` not called for the crossing page or for any after it.
+   This is the arm that fails on any implementation applying the bound per page.
+6. **The comparison sits between decoded streams, not after a page's.** A single page
+   whose `/Contents` is an **array** of streams whose sum passes the bound is refused
+   after the stream that crosses it and **before the next is decoded**, asserted on what
+   was decoded rather than on elapsed time. This is the arm that fails on `edb2345f` as
+   written, which summed a page's streams before comparing.
+7. **The boundary value, both ways.** A document whose counted quantity is exactly
    `fetch_max_decoded_bytes` extracts; one byte over is refused `TOO_LARGE`. **Both arms
    run with `fetch_max_content_bytes` set high enough that only this bound can decide
    them** — an amplified stream yields far more text than 32 KiB, so an arm left at the
    default asserts nothing about the bound it names.
-5. **A document inside every bound is unaffected.** Its text reaches the record whole and
-   the reply carries it, with no bound consulted having refused anything.
-6. **A plain-text file over this bound is fetched.** A `.txt` or `.md` file larger than
+8. **A document inside every bound is unaffected.** Its text reaches the record whole and
+   the reply carries it, with no bound having refused anything.
+9. **A plain-text file over this bound is fetched.** A `.txt` or `.md` file larger than
    `fetch_max_decoded_bytes` and inside `fetch_max_file_bytes` fetches, with
    `fetch_max_content_bytes` raised so the text bound does not decide the arm. This is
    the arm that fails on any implementation applying the bound to a format with no
    decoding step.
-7. **An out-of-domain bound does not load.** A zero and a negative
-   `fetch_max_decoded_bytes` are each refused when `Settings` is constructed, before any
-   fetcher is built and before any filesystem call, and each is a configuration error
-   that stops the deployment rather than an empty listing, a `FetchRefusal` or a degraded
-   turn. This is ADR-0230 §14 item 21's arm, extended by one field and asserted in its
-   form.
-8. **The enumeration did not grow.** `FetchRefusal` has five members, and the audit event
-   for arm 1's turn carries `TOO_LARGE` and no field naming a bound, a count or a size.
+10. **An out-of-domain bound does not load.** A zero and a negative
+    `fetch_max_decoded_bytes` are each refused when `Settings` is constructed, before any
+    fetcher is built and before any filesystem call, and each is a configuration error
+    that stops the deployment rather than an empty listing, a `FetchRefusal` or a degraded
+    turn. This is ADR-0230 §14 item 21's arm, extended by one field and asserted in its
+    form.
+11. **The enumeration did not grow.** `FetchRefusal` has five members, and the audit event
+    for arm 1's turn carries `TOO_LARGE` and no field naming a bound, a count or a size.
+12. **What the library bounds is pinned rather than assumed** (§6). A document whose
+    `/ToUnicode` CMap passes the adopted version's mapping limit is refused
+    `EXTRACTION_FAILED`, so a release raising or dropping that limit fails a test rather
+    than shipping a fourth amplification silently.
 
 > **Normative.** This ADR adds **no clause to the `Fetcher` conformance suite and no
 > parameter to the canonical fake.** The bound is enforced inside a concrete extraction,
@@ -473,17 +592,25 @@ it — and this addition renames nothing, drops nothing and starts no second aud
 > `core/protocols.py` and `core/types.py` in **no** respect, and neither
 > `PROTOCOL_VERSION` nor `PlanExport.schema_version` moves.
 
-> **Normative.** The lane **lifts `edb2345f`** rather than rebuilding it — its
-> `_decoded_content_bytes` helper, its check point in `_extract_pdf`'s page loop, and
-> the `amplified_content_stream_pdf` fixture `41d75b9f` removed with it — and reshapes
-> it to this ADR: the comparison is against `fetch_max_decoded_bytes` and not against
-> `fetch_max_file_bytes`, and it is made **after each decoded stream** rather than after
-> a page's streams are summed (§3).
+> **Normative.** The lane **starts from `edb2345f` rather than from nothing** — its
+> `_decoded_content_bytes` helper, its check point in `_extract_pdf`'s page loop, and the
+> `amplified_content_stream_pdf` fixture `41d75b9f` removed with it — and reshapes each
+> to this ADR. What it may **not** do is lift that commit as it stands: it counted
+> `/Contents` alone, compared a page's several streams only after summing them, and
+> refused against `fetch_max_file_bytes`. §3 is what it is reshaped to, and §8's arms 2
+> and 3 are the two documents that pass it unchanged.
 
 **It is one lane under ADR-0137 §1** — the substantial new machinery is in `readers/`,
 and `core/config.py` gains one field with its validator, which is the *"a call site
 updated, an argument threaded through"* shape §1's carve-out covers rather than a second
 subsystem's worth of machinery.
+
+**The walk is the largest thing in it, and it is smaller than it sounds.** It decodes a
+stream, adds its length, scans it for `Do` occurrences, resolves each against the stream's
+own resources, recurses, and stops the moment the total passes the bound — so its cost is
+bounded by the bound and its state is a running total and a path set. §3 fixes what it
+must count and §8 arms 2, 3 and 4 fix where it must not be wrong; the spelling is the
+lane's.
 
 **Independent of Lanes C2 and C3**, which touch `planning/` and `orchestration/` and
 share no file with it. Its ordering constraint is C1 alone, and #2022's ruling — that
@@ -509,6 +636,17 @@ on either.
   one. Fired by a measured case where the parse of a stream **inside** the bound is
   itself too slow for a turn — never by a preference for a wall-clock guard over a byte
   one.
+- **Raising the default on evidence.** 1 MiB is chosen from an adversarial parse density
+  and a ratio against the text bound (§2), with no corpus of real documents behind it. A
+  legitimate document over it is **refused** until an operator raises the figure — the
+  fail-closed direction ADR-0230 §6 takes for its own bounds, and visible in §9's audit
+  rather than silent. Fired by that audit showing `TOO_LARGE` on a deployment's ordinary
+  documents; not by a lane's estimate of what a real PDF costs.
+- **Following the streams the adopted library bounds for us.** §3's walk covers a page's
+  content streams and the forms reached from them; a `/ToUnicode` CMap, the page tree and
+  the aggregate form-invocation count are bounded by the library and are pinned rather
+  than walked (§6, §8 arm 12). Fired by a release dropping one of those guards — which is
+  what the pinning tests exist to make a test failure rather than a discovery.
 - **A per-format decoded bound.** One figure covers every format this rung reads, which
   is right while one format decodes and two do not. Fired by the ADR admitting a format
   whose amplification profile the shared figure serves badly, which §3 already obliges to
@@ -632,6 +770,21 @@ which. §10 defers the finer statement and names what would fire it.
 behaviour changes until a root is configured. A configured one sees no change unless a
 document spends more than thirty-two stream bytes per byte of text.
 
+**The extractor gains a walk, which is the largest thing this decision costs.** Counting
+what an extraction *will* parse means following the invocation graph rather than reading
+one field, and §3 requires it because two measured documents defeat everything simpler:
+the count cannot be `/Contents`, and it cannot charge a repeatedly invoked form once. The
+walk is bounded by the bound, so it does not become a second unbounded traversal, and
+§8's arms 2, 3 and 4 are what fail an implementation that skips it or over-approximates
+it.
+
+**A legitimate document can now be refused, and that direction is chosen.** A report
+whose per-page graphics push its counted quantity over 1 MiB is refused with 20 KB of
+text, and the operator raises the figure. ADR-0230 §6 takes that direction for its own
+bounds — *"a legitimate local configuration refused until the lane can establish it — a
+configuration error a deployment can see and fix"* — and §9's audit is where a deployment
+sees it. §10 defers raising the default until there is evidence rather than an estimate.
+
 **One more thing has to be stated by any ADR admitting a format** — what its decoding
 step produces for this bound. That is a small standing cost on a future decision, taken
 deliberately, because the alternative is a format admitted with no figure and a bound
@@ -673,6 +826,26 @@ repair, which both required lenses refused at round 2 as an unratified fifth bou
 number of its own. It is also the wrong quantity — the measured document has **one**
 page — and #2015 recorded and closed the page-tree question separately, on the adopted
 library's own three traversal guards, which Lane C1 pinned with a test.
+
+**Count the page's `/Contents` and stop there** — the lifted repair's own accounting.
+Rejected on measurement, in Context and §3: a 12 KB document whose `/Contents` decodes to
+ten bytes puts 4 MB of operators in a Form XObject and costs 33.9 s, because
+`extract_text` descends into forms. This is the shape a bound is most likely to be
+implemented as, which is why §8 arm 2 exists rather than a sentence saying not to.
+
+**Count each distinct decoded stream once.** Rejected on measurement, in §3: a 1.2 KB
+document invoking one 100 KB form five hundred times has 105 KB of distinct decoded bytes
+and costs 126.6 s, because the adopted version's cycle guard refuses a *re-entrant* form
+and not a repeated one. The counted quantity is bytes **parsed**, and a form parsed five
+hundred times is charged five hundred times.
+
+**Enforce `fetch_max_content_bytes` per text-block flush instead, through
+`extract_text(visitor_text=…)`.** Rejected, and Lane C1's measurement is half the reason:
+a single `BT … ET` block holding 90,909 `Tj` operators calls the visitor twice, both after
+the parse, so the visitor cannot reach #2022's document at all. The other half is that a
+form carrying no text emits no flush, so a page invoking such a form five hundred times
+would pass a text-flush guard while parsing 50 MB. A guard that two of the three measured
+documents walk straight past is not a bound.
 
 **Rely on `pypdf`'s `ZLIB_MAX_OUTPUT_LENGTH` and call the seam bounded.** Rejected in §6.
 It bounds memory and not time, per stream and not in aggregate, and it is carried by a
