@@ -1,4 +1,4 @@
-"""The five ``Settings`` fields ADR-0230 adds, and where each refuses (§14 item 21).
+"""The ``Settings`` fields ADR-0230 and ADR-0232 add, and where each refuses.
 
 Item 21 asks for "one arm per field — a zero and a negative ``fetch_listing_ttl``,
 ``fetch_listing_max_entries``, ``fetch_max_file_bytes`` and
@@ -7,6 +7,12 @@ any fetcher is built and before any filesystem call**, and each a configuration 
 that stops the deployment rather than an empty listing, a ``FetchRefusal`` or a
 degraded turn. This is the arm that fails on any implementation carrying an unchecked
 bound through to a slice."
+
+ADR-0232 §8 arm 15 is that item "extended by one field and asserted in its form": a zero
+and a negative ``fetch_max_decoded_bytes``, refused at load for the same reason and in
+the same place. Its **named default** is pinned here too, because §2 argues 1 MiB rather
+than picking it — thirty-two times ``fetch_max_content_bytes`` on the legitimacy side,
+and 1 MB of operators at about 6 s against 313 s at 16 MB on the cost side.
 
 The root's own field is deliberately not in that class: its named default is unset,
 and unset means the mechanism is off (§6's first clause). What it *does* owe is the
@@ -47,9 +53,10 @@ def test_the_named_defaults_are_the_ones_the_decision_names() -> None:
     """ADR-0230 §4 and §6 name four figures; a drift here is a drift from the ADR.
 
     Pinned by value because each number is argued rather than chosen: five minutes is
-    §4's expiry, forty is §6's entry cap, 4 MiB bounds "the read and the extraction's
-    cost", and 32 KiB is "what reaches the prompt — roughly 32,000 characters of
-    English, about 5,400 CJK code points or about 2,700 emoji".
+    §4's expiry, forty is §6's entry cap, 4 MiB bounds the **read** — and nothing else,
+    ADR-0232 §1 having taken the second limb of that clause away — 32 KiB is "what
+    reaches the prompt — roughly 32,000 characters of English, about 5,400 CJK code
+    points or about 2,700 emoji", and 1 MiB is what an extraction may **parse**.
     """
     settings = Settings()
 
@@ -57,6 +64,7 @@ def test_the_named_defaults_are_the_ones_the_decision_names() -> None:
     assert settings.fetch_listing_max_entries == 40
     assert settings.fetch_max_file_bytes == 4 * 1024 * 1024
     assert settings.fetch_max_content_bytes == 32 * 1024
+    assert settings.fetch_max_decoded_bytes == 1024 * 1024
 
 
 @pytest.mark.parametrize(
@@ -70,6 +78,8 @@ def test_the_named_defaults_are_the_ones_the_decision_names() -> None:
         ("fetch_max_file_bytes", -1),
         ("fetch_max_content_bytes", 0),
         ("fetch_max_content_bytes", -1),
+        ("fetch_max_decoded_bytes", 0),
+        ("fetch_max_decoded_bytes", -1),
     ],
 )
 def test_a_bound_outside_its_domain_does_not_load(field: str, value: Any) -> None:

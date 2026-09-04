@@ -994,17 +994,21 @@ def test_every_integer_setting_is_discovered() -> None:
         "email_max_messages",
         "email_max_bytes",
         "email_max_content_bytes",
-        # ADR-0230 §6's three integer bounds on the local-file fetch, acknowledged
-        # here for every reader figure's reason and with the same ``bool`` argument.
-        # §6 states the domain in as many words — "integers of **at least 1**" — and
-        # says why zero and negative are refused rather than given a meaning: "a zero
-        # entry cap is a mechanism that shows nothing while appearing configured", and
-        # a negative one is worse, because "the obvious Python spelling of a cap,
-        # ``entries[:-1]``, quietly yields all but the last entry, so a bound would be
-        # defeated by a configuration value rather than enforced by one".
+        # ADR-0230 §6's three integer bounds on the local-file fetch, and ADR-0232
+        # §2's fourth, acknowledged here for every reader figure's reason and with
+        # the same ``bool`` argument. §6 states the domain in as many words —
+        # "integers of **at least 1**" — and says why zero and negative are refused
+        # rather than given a meaning: "a zero entry cap is a mechanism that shows
+        # nothing while appearing configured", and a negative one is worse, because
+        # "the obvious Python spelling of a cap, ``entries[:-1]``, quietly yields all
+        # but the last entry, so a bound would be defeated by a configuration value
+        # rather than enforced by one". ADR-0232 §2 states the same domain for the
+        # decoded bound, and `True` there would be a bound of one decoded byte —
+        # a fetcher that refuses every PDF while appearing configured.
         "fetch_listing_max_entries",
         "fetch_max_file_bytes",
         "fetch_max_content_bytes",
+        "fetch_max_decoded_bytes",
         # ADR-0159 §3's spend bound, acknowledged here with the same `bool`
         # argument the caps above carry: `reconciler_max_conflicts=True` is a
         # bound of one, which asks the model about the best-ranked conflict alone
