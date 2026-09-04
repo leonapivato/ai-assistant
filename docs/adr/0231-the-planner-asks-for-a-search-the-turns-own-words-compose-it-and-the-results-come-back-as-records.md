@@ -559,8 +559,9 @@ the other's input.
 > named default, stated domain and load-time refusal ADR-0230 §6 requires of its
 > own.** `search_query_max_chars`, default **256**, an integer of at least 1, counted
 > in Unicode code points. `search_max_results`, default **3**, an integer from 1 to
-> **10** — ADR-0226 §6's whole budget, so no configuration lets one search take more
-> than the servicing has. `search_max_result_chars`, default **2048**, an integer of
+> **3** — §10's figure is the ceiling and the setting narrows it, never widens it, so
+> §11's precedence holds in every configuration and no deployment can make one search
+> take a third of ADR-0226 §6's budget. `search_max_result_chars`, default **2048**, an integer of
 > at least 1, counted as §10 counts it. `search_max_response_bytes`, default
 > **1 MiB**, an integer of at least 1. A value outside a stated domain is refused at
 > `Settings` load, before any composer, searcher, transport or filesystem call, and no
@@ -943,10 +944,13 @@ widening a grant nobody widened.
 
 ### 9. The ruling: what makes a search `ALLOW`, and what a non-`ALLOW` does
 
-> **Normative.** A `WEB_SEARCH` request is serviced **only on an `ALLOW`**. On any
-> other ruling — `CONFIRM`, `DENY`, or an `ActionPolicy` that raised — no channel is
-> opened, no credential is read, no record is minted, the read budget is untouched,
-> and the servicing of this kind yields nothing.
+> **Normative.** A `WEB_SEARCH` request is serviced **only on a recorded `ALLOW`**.
+> On any other outcome — a `CONFIRM`, a `DENY`, an `EgressBinder` that refused or
+> raised, an `ActionPolicy` that raised, or an `AuditTrail` that could not record the
+> decision — no channel is opened, no credential is read, no record is minted, the
+> read budget is untouched, and the servicing of this kind yields nothing. **Each of
+> those outcomes has its own `SearchDisposition` member** (§13), so none is reported
+> as another and none is omitted.
 
 > **Normative.** **The servicer asks the user nothing and parks nothing.** ADR-0226
 > §5's clause binds unchanged: a servicing that did not yield leaves the supply as
@@ -1137,7 +1141,7 @@ argument at all (§1), and the query is composed from the utterance alone (§3).
 in the prompt is inert because nothing will take one, which is ADR-0230 §15's own
 phrasing for why deferring the fetch is safe rather than merely smaller.
 
-**Three results, and the figure is bounded rather than measured.** ADR-0226 §6's ten
+**Three is the ceiling, and the figure is bounded rather than measured.** ADR-0226 §6's ten
 is a measured figure; nothing has measured this one, and this ADR says so instead of
 implying otherwise. What bounds it is the budget it draws from and the prompt it
 enters: three results at `search_max_result_chars` each is a prompt addition of the
@@ -1170,8 +1174,11 @@ disk, on the stronger case; this one needs no argument at all.
 
 > **Normative.** **The servicing order is: local file, then web search, then citation
 > hop, then sighted query.** ADR-0226 §6's decision is applied and not moved — the
-> capped read ahead of the uncapped one — and this kind is capped by §10 at three
-> records where the hop's cap is ten and the query has none.
+> capped read ahead of the uncapped one — and the order is **fixed here rather than
+> derived per deployment**: a file is capped at one record, a search at
+> `search_max_results`, which §5 admits no value above **three**, a hop at the whole
+> budget of ten through its two labels, and a query at nothing. No configuration
+> reorders them.
 
 > **Normative.** **One budget, and the search draws at most `search_max_results`
 > slots of it.** ADR-0226 §6's budget of ten binds per servicing (ADR-0228 §7),
@@ -1342,14 +1349,18 @@ it says so.
 > **Normative.** The record gains **one field per servicing**: the **disposition** a
 > `WEB_SEARCH` ask resolved to, where it resolved to one, and nothing where the search
 > yielded records or where no `WEB_SEARCH` ask was made. It is a member of
-> **`SearchDisposition`**, a `StrEnum` closed at exactly **thirteen** members and
+> **`SearchDisposition`**, a `StrEnum` closed at exactly **fifteen** members and
 > never free text: `NOT_CONFIGURED`; `NO_BUDGET`; the four members of `QueryRefusal`
 > carried across one for one as `COMPOSER_DECLINED`, `COMPOSER_UNAVAILABLE`,
-> `COMPOSER_MALFORMED` and `COMPOSER_TOO_LONG`; `RULING_CONFIRM`; `RULING_DENY`; and
-> the five members of `SearchRefusal` that can reach the servicer, carried across one
-> for one: `SPEND_REFUSED`, `TRANSPORT_FAILED`, `PROVIDER_REFUSED`,
+> `COMPOSER_MALFORMED` and `COMPOSER_TOO_LONG`; `BINDING_FAILED`, where
+> `EgressBinder.bind` refused or raised or the connection could not be read;
+> `RULING_CONFIRM`; `RULING_DENY`; `RULING_UNAVAILABLE`, where `ActionPolicy` raised
+> or the decision could not be recorded; and the five members of `SearchRefusal` that
+> can reach the servicer, carried across one for one: `SPEND_REFUSED`, `TRANSPORT_FAILED`, `PROVIDER_REFUSED`,
 > `RESPONSE_TOO_LARGE` and `UNATTESTED`. **The mapping from each refusal vocabulary is
-> injective**, so no two causes are collapsed. `SearchRefusal.NO_RESULT` is **not** a
+> injective**, so no two causes are collapsed. `BINDING_FAILED` and `RULING_UNAVAILABLE`
+> carry **no message, no exception type and no store detail** — a fault is an operator's
+> fact and the class is the whole of what this Tier 2 event may say about one. `SearchRefusal.NO_RESULT` is **not** a
 > disposition: a search that reached the provider and yielded nothing is a completed
 > servicing whose returned count is zero, which ADR-0226 §9 already records, and
 > calling it a disposition would double-count it.
@@ -1811,7 +1822,7 @@ for less.
    order the provider returned them.
 9a. **The three vocabularies are complete and the mapping is total.** `QueryRefusal`
     holds exactly its four members, `SearchRefusal` exactly its six, and
-    `SearchDisposition` exactly its thirteen; every `QueryRefusal` member and every
+    `SearchDisposition` exactly its fifteen; every `QueryRefusal` member and every
     `SearchRefusal` member except `NO_RESULT` maps to a distinct `SearchDisposition`
     member, and `NO_RESULT` maps to none. Asserted over the enums themselves, so a
     member added without an arm fails.
@@ -1840,6 +1851,14 @@ for less.
 13. **The credential is read inside the authorised call and nowhere else**, and a
     turn whose ruling was not `ALLOW` reads none — the `Secrets` fake fails the test if
     `get` is called on that path.
+12a. **A refusal at any stage before the send degrades the turn and names itself.**
+    Five arms, each over a fake that raises or refuses at one stage — the binder, the
+    policy, the trail, the spend gate, and the transport — asserting for each that the
+    turn completes, no record enters the fourth group, the read budget is unspent, and
+    §13's disposition is the member for **that** stage and not another. The spend arm
+    additionally asserts that **no credential is read, no channel is opened, no
+    invocation claim is appended and no completion is**, which fails an implementation
+    that claimed before consulting the gate.
 13a. **A call mutated after construction reaches no credential and no channel.**
     An authorised `ToolCall` whose `request.parameters` are rewritten through
     `__dict__` after construction — the bypass ADR-0018 §3 puts inside the threat
@@ -1897,7 +1916,8 @@ for less.
   lane deciding what a user is shown before a send.
 - **Moving `search_max_results`, or a second search per servicing.** §10's three is
   bounded rather than measured and §1 admits one request per ask. Fired by §13's audit
-  showing what turns actually needed. Not fired by a lane finding three results thin.
+  showing what turns actually needed — raising the ceiling is an ADR, narrowing it
+  under it is a `Settings` value. Not fired by a lane finding three results thin.
 - **Model-spend accounting for the composer's call** (§15). Nothing in this system
   meters model spend. Fired by the ADR that decides a model-spend surface.
 - **Telling the user that a search was refused.** §9 gives the composing stage nothing,
@@ -2082,11 +2102,10 @@ is that statement, and it answers #95 for nothing else.
 This ADR is in **ADR-0089's marked regime**: it carries well-formed clauses, so the
 marked clauses are the whole of what it obligates and the prose beside them supplies
 nothing. ADR-0089 §5 makes marking forward-only, so nothing this ADR cites is
-retro-marked. What binds is **one hundred and two clauses**: §1's four, §2's two, §3's eight,
-§4's two, §5's nine, §6's seven, §8's seven, §9's five, §10's eight, §11's nine,
-§12's four, §13's seven, §14's five, §15's three, §16's eight, §17's thirteen and
-§18's one.
-§7's table, §19's
+retro-marked. What binds is **one hundred and two clauses**: §1's four, §2's two,
+§3's eight, §4's two, §5's nine, §6's seven, §8's seven, §9's five, §10's eight,
+§11's nine, §12's four, §13's seven, §14's five, §15's three, §16's eight, §17's
+thirteen and §18's one. §7's table, §19's
 list, §20's classification and every argument in this document are deliberately
 unmarked: they are attestation, deferral and argument, which ADR-0089 §1 classifies as
 non-normative however load-bearing.
