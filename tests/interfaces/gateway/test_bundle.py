@@ -5689,12 +5689,20 @@ def test_a_confirmation_that_cannot_be_shown_whole_is_not_shown_at_all() -> None
     # position, which is absent or an integer and nothing else.
     assert "!Array.isArray(value)" in functions["isRecord"]
     assert 'typeof value === "string"' in functions["isText"]
-    assert "index === null || (Number.isInteger(index) && index >= 0)" in functions["isPosition"]
+    assert (
+        "index === null || (Number.isSafeInteger(index) && index >= 0)" in functions["isPosition"]
+    )
     # Each member is read as `core` **declares** it, the range on the declaration
     # included — and the rule stops there rather than restating the relations *between*
     # members, which are `ActionRequest`'s and which a page cannot state without a
     # second derivation of ADR-0150 §4 (adversarial review, round 8).
-    assert "span.extent < 0" in functions["readSpan"]
+    assert "!Number.isSafeInteger(span.extent) || span.extent < 0" in functions["readSpan"]
+    # **Safe**, not merely integral: both members cross as JSON numbers, so a value past
+    # 2**53 has already been rounded by ``JSON.parse`` and would be rendered as a
+    # locator or a count the gateway did not send — ``_parameter_text``'s own
+    # losslessness rule reaching the two members that cannot be spelled as text
+    # (adversarial review, round 10).
+    assert "Number.isInteger" not in family
     # The containers, the vocabulary, and the one member whose absent state would put a
     # sentence on the screen that the page was not told (ADR-0181 §6's ``false`` arm).
     reader = functions["readConfirmation"]
