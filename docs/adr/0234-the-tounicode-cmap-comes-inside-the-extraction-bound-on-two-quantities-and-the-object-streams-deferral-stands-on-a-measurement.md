@@ -136,7 +136,7 @@ must be bounded, and neither one bounds the other.
   whose page font lives inside a 2 MB `/ObjStm` calls `PdfReader._get_object_from_stream`
   **once** at 1, 5, 20 and 50 pages — the count does not move with the page count,
   because `_get_object_from_stream` parses every object in the stream in one pass and
-  caches each, and `get_object` consults that cache first. §7 below is that measurement
+  caches each, and `get_object` consults that cache first. §6 below is that measurement
   and what it licenses.
 
 ### What this ADR is not allowed to settle
@@ -347,8 +347,8 @@ and each to the field whose quantity it is.
 > across a whole fetch's establishing parses are at most the bound plus one CMap's. What
 > bounds that one CMap is the adopted version's own `MAPPING_DICTIONARY_SIZE_LIMIT` and
 > nothing this project declares — evidence about a version (ADR-0232 §6), disclosed here
-> in the same posture and for the same reason §3 discloses the 75 MB per-stream decode
-> ceiling behind its own residual. **The establishing parse's other half is bounded
+> in the same posture and for the same reason ADR-0232 §3 discloses the 75 MB per-stream
+> decode ceiling behind its own residual. **The establishing parse's other half is bounded
 > outright**: `prepare_cm`'s normalisation is linear in the CMap's decoded bytes, and those
 > bytes were charged and compared at step (b) before the parse was entered, so the walk
 > never normalises a buffer `fetch_max_decoded_bytes` has not already admitted.
@@ -361,6 +361,20 @@ and each to the field whose quantity it is.
 > building a font — `AttributeError` and `TypeError` — are swallowed here too, because a
 > font it swallows for is a font it goes on to parse the content stream past, and the walk
 > agrees with it (ADR-0232 §3).
+
+**ADR-0232 §3's refusal-precedes-the-work property is kept, and the reading that says
+otherwise is worth answering here rather than in a review round.** §3's clause is *"the
+total is compared before the operators it counts are parsed"* — a statement about the
+**extraction's** work, which is what the bound exists to refuse, and it holds exactly: a
+document over either field is refused with `extract_text` never entered, so not one of the
+per-page mapping builds this section counts is ever paid. What precedes a comparison is
+the **walk's** own establishing parse, and walk-side work preceding its own comparison is
+not a departure from §3 but the residual §3 already states for its own charge: *"Obtaining
+a stream's decoded length requires decoding it … so one stream's decoded bytes are
+materialised before the comparison that refuses them."* The shape is identical, one
+quantity over — the count cannot be had without the parse any more than the length can be
+had without the decode — and the clause above bounds this one where §3 could only disclose
+its own.
 
 **Charging the CMap's bytes at every parse costs one decode, not many.** `pypdf` caches a
 stream's decoded bytes on the object and the walk reaches the same stream object at every
