@@ -53,6 +53,46 @@
   §1 — ADR-0070 §1's first term — with no other ADR as its cause, so it is recorded
   as this appended dated note, the Alternatives text below is **not** rewritten, and
   no `Status` edit is owed (ADR-0082 §1). Refs #1506, PR #1504.
+- **Note (2026-09-04): the same Alternatives entry cites "(ADR-0106 §2)" for a
+  ground that is in ADR-0106 §1 — its `ATTESTED` bullet, ten lines above §2's
+  heading.** The entry "A boolean `opened` field beside the outcome" reads:
+  "Refused in §1: it is a total function of `outcome`, so it would be the second
+  spelling of a fact already recorded (ADR-0106 §2), and a stored derivation is
+  one that can disagree with what it derives from." **ADR-0106 §2 is "The marker
+  is one durable boolean on `Provenance`"**, and it decides a field: "`Provenance`
+  gains `derived_from_external: bool = False`: whether a **derived** belief's
+  warrant traces to recorded external content. It carries no meaning outside the
+  `DERIVED` band". It says nothing about a second spelling. **The reasoning the
+  entry is reaching for is ADR-0106 §1's**, in the first bullet under "The
+  predicate is two-part because the two bands need different carriers": "In
+  `ATTESTED`, externality is already recorded: the band is reached only through
+  `MemorySource.EXTERNAL`, whose whole meaning is that a connected source reported
+  it. **A marker there would be a second spelling of a fact `band_of` already
+  gives for free, and a second spelling is a second thing that can disagree.**"
+  **The cost is small and worth naming exactly.** Both sections are ADR-0106's and
+  the argument runs across them, so a reader who follows the pointer lands one
+  heading past the sentence rather than nowhere; what they do not get is the
+  sentence itself, and they may conclude ADR-0106 does not carry the ground the
+  entry attributes to it. Nothing binds on it either way: this ADR is marked under
+  ADR-0089 §1 by its own declaration in §13, the Alternatives section carries no
+  mark, and under ADR-0089 §3 unmarked text "never supplies an obligation".
+  **This is a second note rather than an edit to the one above it.** The
+  2026-09-03 note corrects a different defect in the same sentence — its "total
+  function of `outcome`" claim — and quotes the sentence, citation and all, as it
+  found it. ADR-0070 §1's mechanism decides the form: "Append-only means an
+  amendment *adds*; it does not overwrite", so a dated note already merged is
+  itself append-only text, and folding this correction into it would restate a
+  2026-09-03 record as though it had said this on that day.
+  **Nothing decided changes and no reader acts differently as to the decision**
+  (ADR-0070 §1, and its 2026-07-31 §1 note on what "differently" means). The
+  refusal the entry records stands on the grounds the 2026-09-03 note above
+  restates; only the pointer to where one of them is argued moves, and it moves
+  within one ADR. This is a broken cross-reference in this ADR's own words —
+  ADR-0070 §1's third term — with no other ADR as its cause, and it names no
+  clause of ADR-0106 as amended, so it is recorded as this appended dated note,
+  the Alternatives text below is **not** rewritten, and no `Status` edit is owed
+  here or on ADR-0106 (ADR-0082 §1). Refs #2035, #1506, PR #2034, ADR-0106 §1,
+  ADR-0089 §3, ADR-0070 §1.
 - **Decides `core/protocols.py` and `core/types.py` surface — a breaking change
   (golden rule 5).** Two new Protocols with their two triads, one new frozen model,
   one new `StrEnum`, one new error class and one new `Settings` figure. It adds no

@@ -116,6 +116,61 @@
   line as it stood on the day it was written, and is left as written (ADR-0001,
   append-only). ADR-0201 §§1–6 is the operative text; this note records the supersession
   and does not restate its terms. Refs #1637, ADR-0201 §1, §2, §5, §8, §9.
+- **Note (2026-09-04): §9's clause introducing the two trail Protocols encloses
+  two fenced blocks, so under ADR-0089 §2 it is not a mark, and what it alone
+  states supplies no obligation.** The run beginning "**Normative.**
+  `core/protocols.py` gains **two** Protocols on ADR-0185 §4's split, and the seam
+  divides by capability" carries two fenced Python blocks inside the block quote,
+  displaying `RoutingRecorder`'s one member and `RoutingTrail`'s four. ADR-0089
+  §2's grammar clause ends "A clause contains no fenced block", and the clause two
+  below it rules that "A line that fails any part of that grammar is not a mark,
+  and no ADR is marked by it." This ADR is nonetheless a **marked** ADR under
+  ADR-0089 §4 — §9's own neighbours are well-formed clauses — so ADR-0089 §3
+  governs the run: unmarked text "is read to determine what a marked clause
+  *means*; it never supplies an obligation."
+  **What a reader takes from it is the reading of the marks around it, and those
+  marks are not thin.** The clause immediately below it is well-formed and carries
+  the split itself: "The routing stage of §2 is injected with a
+  **`RoutingRecorder`** and holds no `RoutingTrail`. Nothing but a future
+  hub-owned read surface (§11) holds one. Structural typing means the one
+  `permissions/` store satisfies both … what the stage cannot do is *name*
+  `recent`, `export` or `clear`." Two clauses further on, both Protocols "are
+  **new Protocols and each owes the full triad** — Protocol, shared conformance
+  suite, and canonical fake in `ai_assistant.testing` — in the change that adds
+  them"; between them, `RoutingTrailError` "is what every member of both Protocols
+  raises on a durable failure"; and §9's `routing_trail_max_rows` clause prunes
+  "earliest-recorded-first inside `record`'s critical section". §12 then binds, in
+  marked clauses of its own, both triads in one lane, the `RoutingRecorder` suite
+  against **both** fakes, `record`'s conflict cases and whole-record idempotence,
+  its atomicity as a raced concurrency test, and the route state machine. So the
+  two Protocols, their split by capability, `record`, `recent`, `export`, `clear`,
+  the error class and the record semantics are all reachable from marked text.
+  What the failed run alone carries is the display of the signatures, the
+  four-member exactness of `RoutingTrail`, `recent`'s newest-recorded-first
+  ordering and its local `[1, 2**63)` refusal, and `export`'s ADR-0085 §8c bound —
+  and each of those is what the marked clauses beside it are read to *mean*, not
+  something a lane was free to decide otherwise.
+  **Nothing is unbuilt by this, and nothing here re-marks the run.** ADR-0197's
+  implementing lane landed exactly the shape the run states — both Protocols in
+  `core/protocols.py` with those member sets, their two suites and fakes, and the
+  one `permissions/` store satisfying both — in PR #1634. Moving the fences out to
+  repair the clause is not available to a note in any case: ADR-0089 §5 rules that
+  "No mark is added to a ratified ADR, by a dated note or otherwise", and ADR-0070
+  §1's append-only mechanism forbids rewriting the ratified text below. Whether
+  anything mechanically **reports** a run of this shape is ADR-0089 §7's own
+  deferral — "a fenced block inside a clause … is mechanically decidable. None of
+  that is decided here" — and it is not taken up here either; #2038 holds it.
+  **Nothing decided changes and no reader acts differently as to the decision**
+  (ADR-0070 §1, and its 2026-07-31 §1 note on what "differently" means). The run's
+  standing follows from ADR-0089 §2 and §3, which were ratified before this ADR
+  was written and have governed it since the day it merged; this note records that
+  consequence rather than creating it, and it moves no clause into or out of the
+  marked set. This is a defect in this ADR's own words — a stale phrase, ADR-0070
+  §1's second term — with no other ADR as its cause, so it is recorded as this
+  appended dated note, §9's text below is **not** rewritten, and no `Status` edit
+  is owed (ADR-0082 §1); this ADR's `Status` line leads with `Partially superseded
+  by` in any event, which ADR-0082 §2 excludes an amendment qualifier from. Refs
+  #1669, #2038, PR #1634, ADR-0089 §2, §3, §5, §7.
 - **This is `track:conversation` (#1312) milestone 26's ruling**, and it decides the
   line both #1312 and #1230 have carried as deferred since ADR-0170 §9 named it:
   *`ask` → typed operation, one-directional — a typed operation is never re-read —
