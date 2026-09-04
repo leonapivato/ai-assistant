@@ -1245,11 +1245,16 @@ function isText(value) {
 }
 
 // Whether a member is ADR-0150 §4's position: **absent** where the span's value is
-// the argument's whole value, and a zero-based index into an ordered decomposition
+// the argument's whole value, and a **zero-based** index into an ordered decomposition
 // otherwise. It is half of the locator, so a shape that is neither is a card whose two
-// halves cannot be joined.
+// halves cannot be joined — and a negative one would be rendered as the locator
+// `to[-1]`, which names a position no decomposition has.
+//
+// The bound is `EgressSpan.index`'s own `ge=0`, restated. That is the same thing every
+// test in this rule is — a member read as `core` declares it — and it is deliberately
+// *not* the next thing along: see `readSpan`.
 function isPosition(index) {
-  return index === null || Number.isInteger(index);
+  return index === null || (Number.isInteger(index) && index >= 0);
 }
 
 // Whether this page can put the whole of what ADR-0233 §8 obliges it to put.
@@ -1413,7 +1418,34 @@ function readDestination(member) {
 //
 // **Every other member is read because `spanWords` renders every other member**: the
 // locator, the discloser, the extent as a number of code points, the tier where there
-// is one, and the recipient in both forms where the occurrence names one.
+// is one, and the recipient in both forms where the occurrence names one. Each is read
+// as `core` **declares** it, `EgressSpan.extent`'s own `ge=0` included — a card saying
+// "-1 code points" is a description this page invented no less than `undefined` is.
+//
+// **And that is where the rule stops, on purpose** (adversarial review, round 8). What
+// it does not do is restate the *relations between* members: that the spans are the
+// decomposition of the arguments, that every argument carries one, that an extent is
+// its located value's code-point count. Two reasons, and the second is decisive.
+//
+// Those relations are `ActionRequest._the_binding_covers_the_arguments`, checked in
+// `core` over the real values, on the one object that holds both sides — and `core`
+// "recomputes rather than believes" there precisely so that no component further out
+// has to. A second statement of ADR-0150 §4's decomposition in the page's language is
+// business logic in an adapter (golden rule 3) and a second derivation of one fact
+// (ADR-0150 §1), which is the shape ADR-0178 §3 rejects for the destination set in
+// terms and for the same stated reason. A body breaching one of them is a gateway
+// contradicting its own model — the case named above, which this page cannot reach:
+// the gateway that would send it also serves this script.
+//
+// And the extent relation is not merely unrequired, it is **not available**. The
+// extent is the code-point count of the span's value "in that value's canonical JSON
+// encoding" (`_span_extent`), while what crosses to this page is `_parameter_text`'s
+// spelling — `json.dumps` with its ordinary separators and no key sort. For any
+// argument that is not a JSON string the two are different spellings of one value and
+// have different lengths: `{"b": 2, "a": "x\ny"}` is 21 code points here and 18
+// canonically. A page comparing them would refuse **correct** confirmations, which is
+// round 3's defect one member over and the direction `_parameter_text` exists to
+// prevent.
 function readSpan(span, parameters) {
   if (!isRecord(span)) {
     return false;
@@ -1421,7 +1453,7 @@ function readSpan(span, parameters) {
   if (!isText(span.argument) || !isPosition(span.index)) {
     return false;
   }
-  if (!isText(span.provenance) || !Number.isInteger(span.extent)) {
+  if (!isText(span.provenance) || !Number.isInteger(span.extent) || span.extent < 0) {
     return false;
   }
   if (span.tier !== null && !isText(span.tier)) {
