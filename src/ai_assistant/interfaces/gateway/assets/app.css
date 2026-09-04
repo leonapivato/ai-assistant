@@ -520,6 +520,34 @@ code {
  * approval on the part they could see.
  */
 
+/*
+ * One argument's value, as the owner reads it before approving it (ADR-0233 §8).
+ *
+ * `pre-wrap` for `.reply`'s reason, arriving at text where it matters more: an email
+ * body written as three paragraphs is three paragraphs, and a paragraph's default
+ * collapsing would render it as one run-on line — a value the owner did not write and
+ * is being asked to approve. `body`'s `overflow-wrap: anywhere` does the rest, so a
+ * long unbroken token wraps to the column instead of running off it.
+ *
+ * **No `max-height`, no `overflow`, no clamped line count, and no rule that could hide
+ * part of one**, for the reason `.confirmation-row` has none and one of its own:
+ * ADR-0233 §8 requires every value rendered whole, "not truncated, not elided, not
+ * abbreviated, not summarised, not paraphrased, not collapsed behind a control the
+ * user must operate to see them". A long body therefore makes the card taller, on a
+ * phone as much as on a desktop; a scroller here would put the approval on the part
+ * that happened to be in the box.
+ *
+ * It is the page's own ink rather than `.hint`'s muted grey. Everything around it is
+ * framing this page wrote; this is the thing being answered about, and it is the one
+ * text in the card that should be the easiest to read.
+ */
+.argument-value {
+  white-space: pre-wrap;
+  margin: 0.2rem 0 0.7rem;
+  padding-left: 0.7rem;
+  border-left: 2px solid var(--line);
+}
+
 .source-name {
   margin: 0 0 0.2rem;
   font-weight: 600;

@@ -355,6 +355,10 @@ async def test_a_destination_less_occurrence_crosses_whole_and_names_no_recipien
     provenance, its extent and its tier — and carries ``null`` where a recipient would
     be. Dropping it, or inventing a destination for it, would fail the whole-rendering
     clause in the two opposite directions.
+
+    **And it carries its own value since ADR-0233 §8**, which is the one member of
+    this view that is content: the argument's whole value, because this span's
+    ``index`` is absent (ADR-0150 §4).
     """
     confirmation = _confirmation(
         _span(
@@ -374,6 +378,7 @@ async def test_a_destination_less_occurrence_crosses_whole_and_names_no_recipien
                 "provenance": "user_authored",
                 "extent": 11,
                 "tier": "personal",
+                "value": "hello",
                 "destination": None,
             }
         ]
@@ -498,12 +503,15 @@ async def test_no_connection_reference_or_endpoint_reaches_the_page() -> None:
     async with _harness(_holding()) as one:
         egress = (await _view(one, confirmation))["egress"]
 
-        # ADR-0181 §6's addition moves this roster by one and changes nothing else
-        # about what it excludes: no connection reference, no transport endpoint.
+        # ADR-0181 §6's addition moved this roster by one and ADR-0233 §8's by one
+        # more; neither changes what it excludes: no connection reference, no
+        # transport endpoint. ``coverage`` is a three-valued fact about the call and
+        # ``value`` is the span's own bytes, and neither is a reference to anything.
         assert set(egress) == {
             "account_identity",
             "destinations",
             "spans",
+            "coverage",
             "planned_with_external_content",
         }
         assert set(egress["spans"][0]) == {
@@ -512,6 +520,7 @@ async def test_no_connection_reference_or_endpoint_reaches_the_page() -> None:
             "provenance",
             "extent",
             "tier",
+            "value",
             "destination",
         }
 

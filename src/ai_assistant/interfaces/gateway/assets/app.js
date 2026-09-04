@@ -583,6 +583,29 @@ function line(parent, text, className) {
   return p;
 }
 
+// One value the owner is being asked to approve, whole (ADR-0233 §8).
+//
+// **`line`'s sibling and not `line` itself**, because the two have different jobs and
+// one of them is not prose. A paragraph collapses runs of whitespace, so an email body
+// written as three paragraphs would render here as one run-on line — the same defect
+// `.reply` fixed for a composed answer, arriving at the one text on this page whose
+// exact shape is the thing being answered about. `.argument-value` keeps the breaks;
+// nothing here truncates, elides, abbreviates, summarises or clamps, and the stylesheet
+// gives it no `max-height` and no scroller for the same reason (ADR-0233 §8).
+//
+// **It is a text node, like every other value this page renders** (ADR-0042 §4,
+// ADR-0177 §8): a value carrying `<script>`, an HTML entity, a Markdown fence or a
+// line that mimics this page's own framing is shown as those characters and is never
+// parsed as any of them. Being the argument the owner is about to send relaxes nothing
+// — it is the case the clause exists for.
+function valueBlock(parent, text) {
+  const held = document.createElement("p");
+  held.className = "argument-value";
+  held.textContent = text;
+  parent.appendChild(held);
+  return held;
+}
+
 // One parsed JSON document as an object, or `{}` for anything else.
 //
 // **A body that is not an object is not distinguished from an absent one**, which is
@@ -1155,15 +1178,67 @@ function renderStep(body, step) {
 //
 // **The approval control is built last, after the whole floor is on screen**, which
 // is §7's "before it collects the user's answer" read as an ordering obligation on
-// this renderer and not only as a wording one.
+// this renderer and not only as a wording one. ADR-0233 §8 states the same ordering
+// over the thing it adds — "where a surface has an order, the values precede the
+// controls" — so the bytes that would leave are on screen, whole, before there is
+// anything to press.
+//
+// **What ADR-0233 §8 adds, and what it does not.** ADR-0178 §7's floor is unreduced:
+// the account, both destination forms, the canonical set and the payload description
+// all still render, in their own order, and the values render **beside** them and
+// never in place of any part of one. What is new is that a confirmation carrying an
+// egress binding now also puts the **content** — every span's own value, from
+// `Confirmation.parameters`, whole — and the call's `coverage`. The description
+// remains a description: nothing here presents an extent as the text, and nothing
+// presents the text as the description (§7's sixth clause, which binds harder now
+// that both are on the screen).
+//
+// **The content is not a second artifact and nothing here mints one** (ADR-0233 §2).
+// It is the arguments the request already carries, which the description is derived
+// *from* and which `ActionRequest` ties to it span by span and code point by code
+// point. This page derives none of it: the decomposition happens in the gateway's own
+// Python process, for the reason the destination set does (ADR-0178 §3) and for one
+// more — the values cross as text, losslessly, so a page indexing into a JSON array
+// would have to parse one back and would round an integer argument on the way.
 //
 // **The token is relayed and never rendered** (ADR-0177 §8). It reaches
 // `answerConfirmation` through a closure, so it is in no text node, no attribute and
 // no browser storage; this page parses no part of it and derives nothing from it.
 
+// What this page says instead of a confirmation it cannot put whole (ADR-0233 §8).
+//
+// "A surface that cannot render a value whole renders **no** confirmation and says
+// so, which is ADR-0178 §9's second clause read one member over: a partial
+// content-bearing confirmation is worse than none, because it looks like a whole
+// one." So the card is refused entire — no values, no description, no reason and **no
+// control** — rather than shown with a hole in it.
+//
+// It is reachable only through a gateway whose spans and arguments disagree, which
+// `ActionRequest` refuses at construction (ADR-0150 §4): what makes it worth a branch
+// is that the failure it guards is silent, and its cost is an approval given over
+// bytes the owner never saw.
+const CONFIRMATION_NOT_WHOLE =
+  "One of the arguments this confirmation carries cannot be shown here in full, so " +
+  "this page does not put it to you: approving what is only partly on screen would " +
+  "be answering about something else.";
+
+// One span whose own value did not reach this page.
+//
+// `null` is unambiguous here and is not a value the owner could be looking at: every
+// located value crosses as **text**, so a JSON `null` argument arrives as the four
+// characters `null` and this arrives as nothing at all.
+function unlocated(span) {
+  return span.value === null;
+}
+
 function renderConfirmation(parent, confirmation) {
   const item = document.createElement("div");
   item.className = "confirmation-row";
+  if (confirmation.egress !== null && confirmation.egress.spans.some(unlocated)) {
+    line(item, CONFIRMATION_NOT_WHOLE, "notice");
+    parent.appendChild(item);
+    return;
+  }
   line(item, `${confirmation.tool_id} — ${confirmation.tool_description}`, "reply");
   renderParameters(item, confirmation.parameters);
   // `egress` absent is ADR-0178 §4's discriminator, and all it states is that the
@@ -1190,13 +1265,28 @@ function renderConfirmation(parent, confirmation) {
 // The values arrive already spelled as text by the gateway, losslessly — a JSON
 // number read by `JSON.parse` would be a double, and an integer argument above 2**53
 // would reach the owner changed.
+//
+// **Each value is a block of its own rather than the tail of its key's line**
+// (ADR-0233 §8). A paragraph collapses whitespace, so an email body written as three
+// paragraphs rendered as one run-on line — which is not the value whole, and this is
+// the surface where "whole" is the thing being answered about. The key still names
+// every argument and no value is omitted, so ADR-0177 §8's own clause is unreduced.
+//
+// **This is where the value of every span whose `index` is absent is rendered**, and
+// it is why `renderEgress` renders only the indexed ones: ADR-0150 §4 makes such a
+// span's own value the argument's whole value, which is this line, and a second copy
+// beside the description would be one value on the screen twice — with the second
+// free to disagree with the first, which is the shape ADR-0150 §1 is named against.
 function renderParameters(item, parameters) {
   if (parameters.length === 0) {
     line(item, "It would run with no arguments.", "hint");
     return;
   }
   line(item, "It would run with these arguments, as the assistant wrote them:", "hint");
-  parameters.forEach((one) => line(item, `${one.key} = ${one.value}`, "hint"));
+  parameters.forEach((one) => {
+    line(item, `${one.key} =`, "hint");
+    valueBlock(item, one.value);
+  });
 }
 
 // ADR-0148 §8's fourth clause, before the answer is collected: the connected
@@ -1207,6 +1297,21 @@ function renderParameters(item, parameters) {
 // what the policy ruled over and is deduplicated, so it says how many people this is
 // going to; the occurrences are ADR-0150 §10's third clause, so one recipient named by
 // `to` and again by `bcc` is one member of the set and two disclosures here.
+//
+// **An indexed span's own value follows its description, and an indexless one's does
+// not** (ADR-0233 §8, ADR-0150 §4). A span with no `index` describes the argument's
+// **whole** value, which `renderParameters` has already put on screen above, whole and
+// unabridged; rendering it again here would put one value on the screen twice. A span
+// **with** an `index` describes one element of an array, which the line above spells
+// only inside that array's JSON — where a newline is the two characters `\n` and a
+// quotation mark is escaped — so its own value is rendered here, as itself. Between
+// the two, every span's value is on screen whole and before the control.
+//
+// **The call's coverage is last of the egress block and is a statement about the
+// call** (ADR-0233 §8). It is rendered in all three states, beside the values and
+// never in place of one, and it is deliberately not adjacent to the origin line: the
+// two answer different questions and a surface that ran them together would be
+// asserting a marker neither ADR mints.
 function renderEgress(item, egress) {
   line(item, `From the connected account: ${egress.account_identity}`, "hint");
   line(item, `Planned over: ${originWords(egress.planned_with_external_content)}`, "hint");
@@ -1216,7 +1321,13 @@ function renderEgress(item, egress) {
   if (egress.spans.length === 0) {
     line(item, "the payload description names no span", "hint");
   }
-  egress.spans.forEach((one) => line(item, spanWords(one), "hint"));
+  egress.spans.forEach((one) => {
+    line(item, spanWords(one), "hint");
+    if (one.index !== null) {
+      valueBlock(item, one.value);
+    }
+  });
+  line(item, `About this call as a whole: ${coverageWords(egress.coverage)}.`, "hint");
 }
 
 // The call's origin, at the strength the recorded predicate carries (ADR-0181 §6).
@@ -1254,6 +1365,61 @@ function originWords(plannedWithExternalContent) {
     "material this assistant selected, in which no record is marked as " +
     "resting on recorded external content"
   );
+}
+
+// Where what this call would send came from, at the strength the recorded fact
+// carries (ADR-0233 §8).
+//
+// **A property of the call, never of a span.** ADR-0233 §4 puts one three-valued fact
+// on the **binding**, over every span the call would transmit, and §8 forbids a
+// surface rendering it as a statement about a span: no arm names an argument, a
+// position, a destination or a payload span, and nothing says or implies that any
+// particular value is the covered one. That is ADR-0181 §6's fifth clause read one
+// axis over, and the lead-in says the scope out loud rather than leaving it to be
+// inferred from where the line sits.
+//
+// **All three arms are rendered, including the one no confirmation can reach.**
+// `path_without_model` is refused at `EgressBinding` construction (ADR-0233 §6), so a
+// card carrying it should not exist — and it has an arm anyway, because "a fact shown
+// only when it is alarming is a fact a user learns to read as an alarm, and its
+// absence as clearance" (ADR-0181 §6's fourth clause, which §8 adopts). The rendering
+// is total over the enum rather than over the states this page expects to meet.
+//
+// **`not_covered` is not an assurance.** It says no covered path was recorded for
+// this call — never that nothing in it relates to anything the owner has told this
+// system, and never that the send is safe. The second half of that arm is the clause
+// made explicit rather than left to a reader, because this is the arm a reader is
+// most likely to take as clearance.
+//
+// **No arm names a record, and no arm is a verdict.** None names a record, a record
+// identifier, an episode, a store-side key, a schema field or a memory, and none
+// names a *kind* of source (ADR-0150 §10's second clause, kept). Nothing here scores,
+// ranks, thresholds or warns: this is not a detection, and §8 bars presenting it as
+// one. It is also not `planned_with_external_content` — that answers whether the
+// material *selected into the planning call* carried the external mark, which is a
+// different question, and the two are rendered as two sentences for that reason.
+//
+// **A member this page has no words for is shown as the value it is**, which is
+// `disclosureWords`' own arrangement and is the honest arm: inventing a sentence for
+// a state this page does not know — or, worse, falling through to a reassuring one —
+// would be a fabrication at the surface where the owner approves something.
+function coverageWords(coverage) {
+  if (coverage === "not_covered") {
+    return (
+      "nothing it would send was recorded as drawn from what this system stores, " +
+      "which is what was recorded and not a statement that the send is safe"
+    );
+  }
+  if (coverage === "model_on_every_path") {
+    return (
+      "some of what it would send was composed by a model that had been shown " +
+      "something this system stores"
+    );
+  }
+  if (coverage === "path_without_model") {
+    return "it would send something taken from what this system stores directly";
+  }
+  return coverage;
 }
 
 // One member of the set `core` derived, in the two shapes it has and no third.
