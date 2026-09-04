@@ -171,8 +171,9 @@ _CORE_PREFIX = "src/ai_assistant/core/"
 # and falls to §6.
 _ADR_FILE_RE = re.compile(r"^(\d{3,4})-.*\.md$")
 
-# `--- /dev/null`, and the two pathname spellings `_DIFF_PATH_RE` reads more
-# closely just below. The prefixes are pinned by the caller's `_diff_opts`
+# The three shapes a patch section's file headers take: `--- a/path` and
+# `+++ b/path`, the two pathname spellings `_DIFF_PATH_RE` reads more closely just
+# below, and `--- /dev/null`. The prefixes are pinned by the caller's `_diff_opts`
 # (`diff.noprefix=false`, `diff.mnemonicPrefix=false`), and `/dev/null` is the one
 # shape that carries no pathname, so this is what is left once the section walk has
 # taken the path out of the other two.
