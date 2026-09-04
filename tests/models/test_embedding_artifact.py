@@ -19,7 +19,10 @@ packaged directory in place, without copying it anywhere.
 
 from __future__ import annotations
 
+import errno
 import hashlib
+import shutil
+from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
@@ -46,7 +49,6 @@ from ai_assistant.models.embedding_artifact import (
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from pathlib import Path
 
 #: The smallest manifest file, used wherever a test needs to corrupt one.
 _SMALL_FILE = "config.json"
@@ -315,9 +317,16 @@ def test_acquisition_refuses_a_directory_carrying_an_extra_file(
     # `ensure_artifact` is what the build hook calls, so the refusal has to bite
     # there and not only in the helper beneath it: an extra file fails the build.
     (tmp_path / "left-behind.onnx").write_bytes(b"from an earlier pin")
+    downloader = _Downloader(artifact)
 
     with network_denied(), pytest.raises(ArtifactError, match="does not name"):
-        ensure_artifact(tmp_path, download=_Downloader(artifact))
+        ensure_artifact(tmp_path, download=downloader)
+
+    # The whole manifest was fetched before the extra file was noticed, and none
+    # of it is left behind: the refusal is what this build leaves, not a
+    # half-populated directory a later one would find "already present" (#2081).
+    assert downloader.filenames == set(artifact.manifest)
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["left-behind.onnx"]
 
 
 def test_an_exactly_matching_directory_has_nothing_unexpected(
@@ -327,6 +336,225 @@ def test_an_exactly_matching_directory_has_nothing_unexpected(
         ensure_artifact(tmp_path, download=_Downloader(artifact))
 
     assert unexpected_files(tmp_path) == []
+
+
+def test_a_failed_verification_removes_what_this_build_staged(
+    tmp_path: Path, artifact: _SyntheticArtifact
+) -> None:
+    """The issue's reproduction: one file present-but-corrupt, one missing (#2081).
+
+    The corrupt file is never re-fetched — it is not missing — so the build only
+    learns about it in the closing re-hash, after the missing one has been staged.
+    Everything before this fix left that staged file in the destination.
+    """
+    artifact.stage(tmp_path, without="tokenizer.json")
+    (tmp_path / _SMALL_FILE).write_bytes(artifact.payload[_SMALL_FILE] + b"\n")
+    downloader = _Downloader(artifact)
+
+    with network_denied(), pytest.raises(ArtifactError, match="does not match its recorded"):
+        ensure_artifact(tmp_path, download=downloader)
+
+    assert downloader.filenames == {"tokenizer.json"}, "the missing file was staged first"
+    assert not (tmp_path / "tokenizer.json").exists(), "and it was not left behind"
+
+
+def test_a_failed_verification_keeps_what_was_already_there(
+    tmp_path: Path, artifact: _SyntheticArtifact
+) -> None:
+    # Rolling back what the build staged must not turn into deleting what it
+    # refused to trust: the corrupt file is the evidence a maintainer acts on.
+    artifact.stage(tmp_path, without="tokenizer.json")
+    corrupt = artifact.payload[_SMALL_FILE] + b"\n"
+    (tmp_path / _SMALL_FILE).write_bytes(corrupt)
+
+    with network_denied(), pytest.raises(ArtifactError):
+        ensure_artifact(tmp_path, download=_Downloader(artifact))
+
+    assert (tmp_path / _SMALL_FILE).read_bytes() == corrupt
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
+        set(artifact.manifest) - {"tokenizer.json"}
+    )
+
+
+def test_a_symlinked_parent_cannot_carry_the_artifact_out_of_its_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Staging through a symlink writes outside the directory, unseen by both checks.
+
+    ``verify_artifact`` follows the same link and passes; ``unexpected_files``
+    does not follow it, so it reports nothing either — the acquisition succeeded
+    and put a manifest file somewhere else entirely. The parent is checked at
+    every level between the destination directory and the entry, not just the
+    innermost, because a link higher up leads out just as well.
+    """
+    nested = _SyntheticArtifact({"sub/dir/model_optimized.onnx": b"nested weights\n"})
+    monkeypatch.setattr(embedding_artifact, "ARTIFACT_MANIFEST", MappingProxyType(nested.manifest))
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "dir").mkdir(parents=True)
+    destination = tmp_path / "vendor"
+    destination.mkdir()
+    (destination / "sub").symlink_to(elsewhere, target_is_directory=True)
+    downloader = _Downloader(nested)
+
+    with network_denied(), pytest.raises(ArtifactError, match="it is a symlink"):
+        ensure_artifact(destination, download=downloader)
+
+    assert downloader.calls == [], "the refusal comes before the download"
+    assert not (elsewhere / "dir" / "model_optimized.onnx").exists(), "nothing was written outside"
+
+
+def test_a_nested_parent_blocked_by_a_file_is_refused_before_the_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The leaf reads as absent (a path through a regular file does not exist), so
+    # only walking the parents catches this — and walking them in the preflight is
+    # what keeps it from costing a 65 MiB download first.
+    nested = _SyntheticArtifact({"sub/model_optimized.onnx": b"nested weights\n"})
+    monkeypatch.setattr(embedding_artifact, "ARTIFACT_MANIFEST", MappingProxyType(nested.manifest))
+    (tmp_path / "sub").write_bytes(b"a regular file where a directory belongs")
+    downloader = _Downloader(nested)
+
+    with network_denied(), pytest.raises(ArtifactError, match="is not a directory"):
+        ensure_artifact(tmp_path, download=downloader)
+
+    assert downloader.calls == []
+
+
+def test_a_rollback_that_cannot_remove_a_file_says_so(
+    tmp_path: Path, artifact: _SyntheticArtifact, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A rollback that silently did not happen is worse than one that did not
+    # start: the next build finds the file "already present" with nothing
+    # anywhere saying why. The acquisition failure still propagates unchanged.
+    artifact.stage(tmp_path, without="tokenizer.json")
+    (tmp_path / _SMALL_FILE).write_bytes(artifact.payload[_SMALL_FILE] + b"\n")
+
+    def refuse(self: Path, missing_ok: bool = False) -> None:
+        raise OSError(errno.EACCES, "permission denied")
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+
+    with network_denied(), pytest.raises(ArtifactError, match="does not match") as caught:
+        ensure_artifact(tmp_path, download=_Downloader(artifact))
+
+    assert any("could not remove" in note for note in caught.value.__notes__)
+    assert any("tokenizer.json" in note for note in caught.value.__notes__)
+
+
+def test_a_manifest_entry_blocked_by_a_directory_is_refused(
+    tmp_path: Path, artifact: _SyntheticArtifact
+) -> None:
+    """A directory where a manifest entry belongs is named, not staged around.
+
+    ``missing_files`` asks whether each entry *is a file*, so this reads as
+    "absent" and is fetched — and ``shutil.move`` onto an existing directory puts
+    the file *inside* it, which verification then reports as the entry still
+    missing while the downloaded bytes sit one level down.
+    """
+    artifact.stage(tmp_path, without=_SMALL_FILE)
+    (tmp_path / _SMALL_FILE).mkdir()
+    downloader = _Downloader(artifact)
+
+    with network_denied(), pytest.raises(ArtifactError, match="is not a regular file"):
+        ensure_artifact(tmp_path, download=downloader)
+
+    assert downloader.calls == [], "the refusal comes before the download"
+    assert list((tmp_path / _SMALL_FILE).iterdir()) == [], "and nothing was moved inside it"
+
+
+@pytest.mark.parametrize(
+    "name", ["/nonexistent-directory/escaped.bin", "../escaped.bin", "sub/../../escaped.bin"]
+)
+def test_a_manifest_name_that_is_not_a_confined_relative_path_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    # `directory / name` silently discards `directory` for an absolute name and
+    # walks out of it for a `..`, so an entry of either shape would be staged
+    # outside the artifact directory. The names are repository constants, so this
+    # is a guard against a careless re-pin rather than against a live attacker —
+    # and the verification half of it is #2093.
+    escaping = _SyntheticArtifact({name: b"escaping weights\n"})
+    monkeypatch.setattr(
+        embedding_artifact, "ARTIFACT_MANIFEST", MappingProxyType(escaping.manifest)
+    )
+    downloader = _Downloader(escaping)
+
+    with network_denied(), pytest.raises(ArtifactError, match="not a confined relative path"):
+        ensure_artifact(tmp_path / "vendor", download=downloader)
+
+    assert downloader.calls == [], "the refusal comes before the download"
+
+
+def test_a_move_that_fails_after_creating_its_destination_is_rolled_back(
+    tmp_path: Path, artifact: _SyntheticArtifact, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Across filesystems `shutil.move` copies and then unlinks the source, so a
+    # failure after the copy leaves a destination this call made. The journal
+    # records the destination before the move for exactly that reason.
+    def half_move(source: str, destination: str) -> None:
+        Path(destination).write_bytes(Path(source).read_bytes())
+        raise OSError(errno.EXDEV, "the source could not be removed")
+
+    monkeypatch.setattr(shutil, "move", half_move)
+
+    with network_denied(), pytest.raises(OSError, match="could not be removed"):
+        ensure_artifact(tmp_path, download=_Downloader(artifact))
+
+    assert list(tmp_path.iterdir()) == [], "the half-moved file was left behind"
+
+
+def test_a_symlinked_artifact_directory_is_refused(
+    tmp_path: Path, artifact: _SyntheticArtifact
+) -> None:
+    # The one place `_refuse_a_blocked_entry`'s walk stops, and so the one that
+    # has to be judged on its own: a link here moves the whole artifact out of
+    # the tree the build packages, and every check downstream follows it.
+    elsewhere = tmp_path / "elsewhere"
+    # Complete and correct behind the link, which is the case that used to pass:
+    # nothing is absent, so staging never ran and only verification looked — and
+    # it follows the link like everything else.
+    artifact.stage(elsewhere)
+    destination = tmp_path / "vendor"
+    destination.symlink_to(elsewhere, target_is_directory=True)
+    downloader = _Downloader(artifact)
+
+    with network_denied(), pytest.raises(ArtifactError, match="is a symlink"):
+        ensure_artifact(destination, download=downloader)
+
+    assert downloader.calls == []
+
+
+def test_an_artifact_directory_that_is_a_file_is_refused(
+    tmp_path: Path, artifact: _SyntheticArtifact
+) -> None:
+    # Without this the refusal is a raw `FileExistsError` out of `mkdir`, outside
+    # the module's own failure contract.
+    destination = tmp_path / "vendor"
+    destination.write_bytes(b"a file where the artifact directory belongs")
+
+    with network_denied(), pytest.raises(ArtifactError, match="is not a directory"):
+        ensure_artifact(destination, download=_Downloader(artifact))
+
+
+def test_a_manifest_naming_both_a_file_and_a_directory_of_it_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `a` and `a/b` ask for one path to be a file and a directory at once. Sorted
+    # order stages `a` first, so `a/b` meets it as a raw `FileExistsError` out of
+    # `mkdir` — outside this module's failure contract, and a manifest shape
+    # nested-path support has to reject rather than half-perform.
+    colliding = _SyntheticArtifact(
+        {"tokenizer.json": b"a file\n", "tokenizer.json/nested": b"and a directory\n"}
+    )
+    monkeypatch.setattr(
+        embedding_artifact, "ARTIFACT_MANIFEST", MappingProxyType(colliding.manifest)
+    )
+    downloader = _Downloader(colliding)
+
+    with network_denied(), pytest.raises(ArtifactError, match="file and a directory at once"):
+        ensure_artifact(tmp_path, download=downloader)
+
+    assert downloader.calls == [], "the refusal comes before the download"
 
 
 def test_a_seam_that_produces_nothing_fails(tmp_path: Path) -> None:
