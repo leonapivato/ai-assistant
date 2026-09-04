@@ -1230,12 +1230,27 @@ def _search_ask(searched: object) -> list[ReadAsk]:
     request naming the kind is one ask of it; ``ReadRequest``'s validator holds the
     at-most-one-of-each-kind rule as it does for every other kind.
 
-    **``false`` is a "no" and never a drop.** A model that answers the member
-    explicitly has asked for nothing, which is exactly the state the absent member
-    describes, so it adds no ask and increments no counter: recording it as malformed
-    would put a well-formed refusal into the population :data:`_READ_REQUEST_DROPPED`
-    exists to distinguish from an emission that never happened, and ADR-0226 §8's
-    fire rate is read against that.
+    **``false`` is a "no" and is never counted as malformed.** A model that answers
+    the member explicitly has asked for nothing, which is exactly the state the absent
+    member describes, so it adds no ask and this function counts nothing: recording it
+    as unusable would put a well-formed refusal into the population
+    :data:`_READ_REQUEST_DROPPED`'s per-member reasons exist to distinguish from an
+    emission that never happened, and ADR-0226 §8's fire rate is read against that. An
+    explicit JSON ``null`` reads as the absent member for the same reason, and by the
+    same rule the three members beside it are read by — this function is not reached
+    for one at all.
+
+    **What the caller then does with a request that asks for nothing is not this
+    distinction**, and the difference is worth stating so the paragraph above is not
+    read as promising more than it says. A ``read_request`` whose *only* member is a
+    declined search yields no ask, so :func:`_optional_read_request` records the
+    generic ``no_usable_ask`` — exactly as it does for ``{}``, for ``{"query": null}``
+    and for every other request object that asked for nothing. That count is about the
+    **request**, not about this member: what it says is that a request was emitted and
+    carried no ask, which of a sole ``false`` is simply true. Reporting it any other
+    way would need this member to be distinguishable from an empty object at the seam
+    that counts requests, which is a distinction nothing downstream has a use for and
+    which ADR-0231 §1 does not ask for.
 
     **Everything else is a drop, and the identity check is what makes that true of
     ``1`` too.** ``bool`` is a subclass of ``int`` in Python, so ``searched == True``

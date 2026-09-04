@@ -3259,19 +3259,20 @@ async def test_a_search_may_be_asked_for_beside_every_other_kind() -> None:
     assert {ask.kind for ask in request.asks} == set(ReadKind)
 
 
-async def test_a_declined_search_is_no_ask_and_no_drop() -> None:
+async def test_a_declined_search_beside_another_ask_is_no_ask_and_no_drop() -> None:
     """``false`` is a well-formed "no", and counting it as malformed would lie.
 
     The prompt tells the planner not to send the key unless it is asking, but a model
     that answers the member explicitly has asked for nothing — which is exactly the
     state the absent member describes. Recording it in
     :data:`_READ_REQUEST_DROPPED` would put a conforming refusal into the population
-    that field exists to distinguish from an emission that never happened, and
-    ADR-0226 §8's fire rate is read against that: a deployment reading a low one
-    could not then tell an honest "no" from an unreadable "yes".
+    that field's per-member reasons exist to distinguish from an emission that never
+    happened, and ADR-0226 §8's fire rate is read against that: a deployment reading a
+    low one could not then tell an honest "no" from an unreadable "yes".
 
     The rest of the request survives, which is what makes this a "no" to the member
-    rather than to the emission.
+    rather than to the emission — and it is why this arm carries a second member,
+    where the one below deliberately does not.
     """
     with structlog.testing.capture_logs() as captured:
         plan = await _emitted(_envelope(query="the lease", web_search=False))
@@ -3280,6 +3281,46 @@ async def test_a_declined_search_is_no_ask_and_no_drop() -> None:
     assert request is not None
     assert [ask.kind for ask in request.asks] == [ReadKind.SIGHTED_QUERY]
     assert not [event for event in captured if event["event"] == _READ_REQUEST_DROPPED]
+
+
+@pytest.mark.parametrize(
+    "sole",
+    [
+        pytest.param({"web_search": False}, id="declined"),
+        pytest.param({"web_search": None}, id="null"),
+        pytest.param({}, id="empty"),
+        pytest.param({"query": None}, id="a-null-neighbour"),
+    ],
+)
+async def test_a_request_that_asks_for_nothing_is_counted_as_a_request_and_not_a_member(
+    sole: dict[str, object],
+) -> None:
+    """The other half of the "no", stated rather than left to be discovered.
+
+    A ``read_request`` whose only member declines — or is an explicit ``null``, which
+    this parser reads as the absent member for **every** one of the four, so that no
+    member's ``null`` means something a neighbour's does not — carries no ask. So
+    ``_optional_read_request`` records the generic ``no_usable_ask``, which is a fact
+    about the **request** rather than about the member: a request was emitted and
+    asked for nothing, which of each of these is simply true.
+
+    **The assertion that matters is the reason**, and it is why all four arms are
+    parametrised against each other rather than asserted apart. Not one of them is
+    reported as ``unusable_web_search``, so a declined search never enters the
+    population ADR-0226 §8's diagnostic keeps for an emission that could not be read —
+    and a deployment reading a low fire rate can still tell the two apart. Making a
+    sole ``false`` report differently from a bare ``{}`` would need this member to be
+    distinguishable from an empty object at the seam that counts requests, which is a
+    distinction nothing downstream has a use for and which ADR-0231 §1 does not ask
+    for.
+    """
+    with structlog.testing.capture_logs() as captured:
+        plan = await _emitted(_envelope(**sole))
+
+    assert plan.read_request is None
+    assert [step.capability for step in plan.steps] == ["search_housing"]
+    drops = [event for event in captured if event["event"] == _READ_REQUEST_DROPPED]
+    assert [event["reason"] for event in drops] == ["no_usable_ask"]
 
 
 @pytest.mark.parametrize(
