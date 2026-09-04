@@ -5464,14 +5464,24 @@ class FetchRefusal(StrEnum):
     object's kind — a permission denial, an I/O error, a resource limit (§4)."""
 
     TOO_LARGE = "too_large"
-    """The file exceeded ``fetch_max_file_bytes``, or its extracted text exceeded
-    ``fetch_max_content_bytes`` (§6).
+    """The file exceeded ``fetch_max_file_bytes``, its extracted text exceeded
+    ``fetch_max_content_bytes`` (§6), or its extraction's decoded bytes exceeded
+    ``fetch_max_decoded_bytes`` (ADR-0232 §2, §4).
 
-    Both bounds refuse rather than truncate: "No implementation returns a prefix,
-    a first page, a first *n* bytes, an abridgement or a 'first part of' record,
-    and none records a truncation flag in place of refusing." A file that *grew*
-    past the size bound between the listing and the fetch lands here too, because
-    the read is itself bounded and no bound is carried from the listing."""
+    All three bounds refuse rather than truncate: "No implementation returns a
+    prefix, a first page, a first *n* bytes, an abridgement or a 'first part of'
+    record, and none records a truncation flag in place of refusing." A file that
+    *grew* past the size bound between the listing and the fetch lands here too,
+    because the read is itself bounded and no bound is carried from the listing.
+
+    **Which of the three refused is not disclosed**, and ADR-0232 §4 keeps one
+    class for all of them rather than adding a sixth member: which bound a
+    document passed is a fact about that document's contents, and a member
+    meaning *small on disk and large once decompressed* would be the disclosure
+    §6 declines to make about a file's type, one property over. The cost is real
+    and is named — ADR-0230 §9's refusal rate tells an operator that *a* bound is
+    set below their documents and not which — and §10 defers the finer
+    statement."""
 
     EXTRACTION_FAILED = "extraction_failed"
     """The file is of a supported format and its text could not be decoded (§6).
