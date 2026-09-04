@@ -484,10 +484,11 @@ today; under this bound it refuses earlier and cheaply, with the same class.
 > re-implements either and diverges does not satisfy this bound, in whichever direction it
 > diverges.
 
-> **Normative.** **An operand that resolves to no Form XObject adds nothing, and that is
-> soundness rather than optimism.** The walk resolves in the context the extraction
-> resolves in, so a name the walk cannot resolve to a form is a name the extraction cannot
-> resolve either, and a descent that will not happen costs nothing to charge for. The same
+> **Normative.** **An operand naming no Form XObject in that parse's resource context adds
+> nothing, and that is soundness rather than optimism.** The walk resolves in the context
+> the extraction resolves in, so a name that is not there for the walk is not there for the
+> extraction, the descent does not happen, and a parse that does not happen costs nothing
+> to charge for. The same
 > symmetry is why the walk skips a form already on the current path: the adopted version
 > refuses a re-entrant form and parses it not at all.
 
@@ -523,11 +524,22 @@ today; under this bound it refuses earlier and cheaply, with the same class.
 
 > **Normative.** **Where the walk cannot establish what the extraction will parse, the
 > fetch is refused `EXTRACTION_FAILED` and never extracted on the hope** — a stream the
-> library's own parser will not read, a resource dictionary that cannot be resolved, a
-> structure the walk does not recognise. This is the one fail-closed branch, it names its
+> library's own parser raises on, a resource context present but structurally unreadable
+> (a `/Resources` entry that is not a dictionary), a structure the walk does not recognise.
+> This is the one fail-closed branch, it names its
 > class, and that class is ADR-0230 §6's own for a supported format whose text could not
 > be decoded: no member is added, and a document refused here is one the extraction was
 > about to spend an unknown amount on.
+
+> **Normative.** **This branch is for the absence of an answer and never for an answer of
+> "nothing", and the difference decides ordinary documents.** A resource context that is
+> **absent or empty**, and an operand naming **no entry** in one that is present, are both
+> answers: the walk asked, the answer is that no parse follows, the extraction skips
+> exactly there, and the document **fetches** with nothing charged for it (above). Neither
+> is a failure to establish. What is a failure to establish is a question the walk could
+> not ask — a structure it cannot read at all. An implementation that refused the first two
+> would refuse ordinary documents, and one that fetched on the third would extract on the
+> hope; §8 arms 13 and 14 are the two sides of that line.
 
 > **Normative.** **The property is required and no construction is**, in ADR-0230 §6's
 > own form — and it is named **achievable** rather than aspirational, because a
@@ -726,8 +738,12 @@ not count a `/ToUnicode` stream, which is the reliance the clause above forbids.
 not restore that reliance and must not be read as doing so.** The CMap is left uncharged
 because it is read **once and cached**, so no per-parse multiplier acts on it — not because
 `MAPPING_DICTIONARY_SIZE_LIMIT` exists, which is recorded here as evidence and is not the
-reason; §10 defers it on that stated ground. Nor is the invocation cap leant on: the walk
-charges every invocation and refuses long before 5,000 is reached.
+reason; §10 defers it on that stated ground. **Nor is the invocation cap leant on, and §3
+is where the exact relation is stated**: the cap is not a bound this system relies on —
+`fetch_max_decoded_bytes` is, and this system enforces it — but because the extraction
+*skips* rather than raises past the cap, the cap does decide **which parses happen**, and
+§3 therefore requires the walk to stop charging where the extraction stops descending.
+Those are different uses of the same number, and only the first is what §6 forbids.
 
 > **Normative.** The implementing lane **establishes, against the version `uv.lock`
 > fixes, two things**: which streams the extraction parses as content-stream instructions,
@@ -878,14 +894,17 @@ it — and this addition renames nothing, drops nothing and starts no second aud
     charging parses the extraction skips. **These are the arms that fail an implementation
     erring "safely" by over-charging**, which refuses documents §2's stated quantity
     requires it to fetch.
-14. **The fail-closed branch is reached, and it is `EXTRACTION_FAILED`.** A document whose
-    form resource dictionary cannot be resolved — so the walk cannot establish what the
-    extraction will parse — is refused **`EXTRACTION_FAILED`**, not `TOO_LARGE` and not
-    fetched: no record is added, no turn fails, and `extract_text` is not called for that
-    page. **This is the arm that fails on any implementation that follows the adopted
-    library's permissive path and returns a record for a structure the walk did not
-    understand**, which is §3's one fail-closed branch and until this arm existed was the
-    only normative clause of this ADR with no test behind it.
+14. **The fail-closed branch is reached, and it is `EXTRACTION_FAILED`.** A page whose
+    `/Resources` entry is **present but structurally unreadable** — not a dictionary — so
+    the walk cannot establish what the extraction will parse, is refused
+    **`EXTRACTION_FAILED`**: not `TOO_LARGE`, not fetched, no record added, no turn failed,
+    and `extract_text` not called for that page. **This is the arm that fails on any
+    implementation that follows the adopted library's permissive path and returns a record
+    for a structure the walk did not understand**, which is §3's one fail-closed branch and
+    until this arm existed was the only normative clause of this ADR with no test behind
+    it. It is deliberately **not** an absent `/Resources` and **not** an operand naming no
+    form: those are answers, arm 13 fetches on both, and an implementation collapsing the
+    three fails one of the two arms.
 15. **An out-of-domain bound does not load.** A zero and a negative value of
     `fetch_max_decoded_bytes` is refused when
     `Settings` is constructed, before any fetcher is built and before any filesystem call,
