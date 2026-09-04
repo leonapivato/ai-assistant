@@ -1068,16 +1068,23 @@ This section is direction for the lanes that build it, and it binds them as mark
 > in its own PR: `SpanCoverage`; `coverage` on `EgressBinding`, `CarriedProvenance` and
 > `ConfirmationEgress`; `EgressBinding`'s construction refusal; and
 > `CoverageUnrecordedBinding` with the widened union and the private base chain §14
-> decides. Golden rule 5 and ADR-0015 §5 govern the sequencing. Because `coverage` is
-> required with no default, that PR also passes the fail-closed `PATH_WITHOUT_MODEL`
-> at every existing construction site, so that the tree it lands on is green. Passing
-> a constant is not implementing §5 — nothing is computed, read or inferred — which is
-> why that adaptation does not breach this clause's first sentence. Three things
-> outside `core` ride in that PR and nothing else does: this constant at each existing
-> construction site, the `PROTOCOL_VERSION` move the next clause requires, and the
-> `ActionPolicyContract` assertion the clause after it requires. What may **not** ride
-> in it is any computation of the value and any change to a rendering surface; those
-> are the lanes below, and they are what the first sentence is about.
+> decides. Golden rule 5 and ADR-0015 §5 govern the sequencing.
+
+> **Normative.** "Before anything implements against it" bounds that PR by a test and
+> not by a list: outside `core` it carries exactly what this ADR's own clauses make
+> unsatisfiable, or the tree unbuildable, without it — and nothing else. As this ADR
+> stands that is four things. The fail-closed `PATH_WITHOUT_MODEL` at every existing
+> construction site whose composer does not yet compute the value, because `coverage`
+> is required with no default and the tree must build. §4's transcription of
+> `coverage` from the recorded decision's `egress_binding` at both `ConfirmationEgress`
+> assembly sites, because §4 admits no other route and a constant there would be a
+> second carriage. The `PROTOCOL_VERSION` move the next clause requires. The
+> `ActionPolicyContract` assertion the clause after it requires. Two things it does
+> **not** carry, and they are what the first sentence is for: the composer's
+> computation of the value, which is the lane below, and any change to a rendering
+> surface, which is §8's lanes. A lane that finds a fifth thing the contract makes
+> unavoidable carries it under this test and records that it did, rather than reading
+> the four as exhaustive.
 
 > **Normative.** `PROTOCOL_VERSION` moves, because `ConfirmationEgress` gains a member
 > and that value crosses the wire (ADR-0178 §6's rule).
@@ -1153,9 +1160,9 @@ builds the case rather than inventing one:
 This ADR is in **ADR-0089's marked regime**: the marked clauses are the whole of what
 it obligates, and the prose beside them determines what they mean and supplies no
 obligation of its own (ADR-0089 §3). Marking is forward-only, so nothing this ADR
-cites is retro-marked (§5). What binds is **sixty-nine clauses**: §1's three, §2's
+cites is retro-marked (§5). What binds is **seventy clauses**: §1's three, §2's
 three, §3's two, §4's eight, §5's three, §6's four, §7's two, §8's eleven, §9's four,
-§10's four, §11's six, §12's three, §13's two, §14's five and §15's nine. Each is a
+§10's four, §11's six, §12's three, §13's two, §14's five and §15's ten. Each is a
 block quote at column 0 preceded by a blank line, stating one obligation with its own
 scope (§2); passages stating two separable obligations were split in drafting for that
 reason.
