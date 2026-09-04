@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import threading
+import time
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -46,6 +47,18 @@ _STUB_RATE = 22_050
 _LIVENESS_SECONDS = 10.0
 
 _SPOKEN_SENTENCE = "Your dentist appointment is on Thursday afternoon."
+
+#: The real-voice case's wall-clock budget, and the transcriber module's
+#: `_REAL_ENGINE_SECONDS` under the same reasoning: it is a ceiling on pathology
+#: and not a latency target, and it has to cover the model load, which
+#: `SupertonicSynthesizer.__init__` defers into the first `synthesize`
+#: (ADR-0118 §4's shape). Measured for this case too (#2091): 1.8-1.9s per
+#: format serially, under 5s inside a whole `just test-fast` run — below the
+#: fortieth-slowest case of that run — and 9.6s against 24 runnable processes on
+#: 8 cores, which is the most concurrency `just test-fast`'s three-slot lease
+#: allows. The transcriber module carries the full figures and why the number
+#: stays where it is.
+_REAL_VOICE_SECONDS = 120.0
 
 
 class _StubVoice:
@@ -383,13 +396,34 @@ async def test_the_real_voice_writes_playable_audio_with_no_socket_opened(
     ADR-0200 §13's second clause for this seam. "Playable" is demuxed and decoded
     here rather than inferred: what the browser will be handed is a container, and
     a rendering that is not one is not a rendering however many bytes it has.
+
+    An expiry names the leg it died in, as the transcriber's twin of this case
+    does and for the same reason (#2091).
     """
-    async with asyncio.timeout(120.0):
-        with network_denied():
-            rendering = await SupertonicSynthesizer().synthesize(
-                _SPOKEN_SENTENCE, format=media_type
-            )
-            decoded = decode_mono(rendering.decoded(), media_type=media_type, sample_rate=16_000)
+    legs: dict[str, float] = {}
+    try:
+        async with asyncio.timeout(_REAL_VOICE_SECONDS):
+            with network_denied():
+                started = time.monotonic()
+                rendering = await SupertonicSynthesizer().synthesize(
+                    _SPOKEN_SENTENCE, format=media_type
+                )
+                legs["synthesis"] = time.monotonic() - started
+                started = time.monotonic()
+                decoded = decode_mono(
+                    rendering.decoded(), media_type=media_type, sample_rate=16_000
+                )
+                legs["decode"] = time.monotonic() - started
+    except TimeoutError:
+        finished = ", ".join(f"{leg} {cost:.1f}s" for leg, cost in legs.items()) or "none"
+        # Only this case's budget raises `TimeoutError` here; the seam takes no
+        # deadline of its own (ADR-0200 §1).
+        pytest.fail(
+            f"the real voice did not render {media_type.name} inside "
+            f"{_REAL_VOICE_SECONDS}s; completed legs: {finished}. Serially this "
+            "case costs ~1.9s, so a run that reaches this budget is stalled "
+            "rather than merely sharing a busy machine (#2091)."
+        )
 
     assert rendering.media_type is media_type
     # A sentence of speech, not a click: at 16 kHz this is at least a second.
