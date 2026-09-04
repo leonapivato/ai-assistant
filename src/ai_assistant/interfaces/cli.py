@@ -9267,6 +9267,15 @@ def _coverage_line(coverage: SpanCoverage) -> str:
             assert_never(coverage)
 
 
+#: The marker every line of a rendered value carries (:func:`_render_egress_value`).
+#: No line this confirmation card writes carries it — the card's own fields lead with
+#: a label and a span's key with its own indent — so a value line can never be read as
+#: one this adapter wrote. It is spelled once because
+#: :func:`_values_fit_this_terminal` measures against it: a marker and a width rule
+#: that disagreed would leave open exactly the case the marker exists to close.
+_VALUE_GUTTER: Final = "    │ "
+
+
 #: Returned by :func:`_locate_span_value` for a span the parameters do not locate,
 #: which ``None`` cannot stand for: JSON null is a value an argument may hold, and
 #: a surface that read "absent" off it would render nothing where it owed a value.
@@ -9309,6 +9318,35 @@ def _locate_span_value(parameters: Mapping[str, object], span: EgressSpan) -> ob
     if not isinstance(held, list) or not 0 <= span.index < len(held):
         return _UNLOCATABLE
     return held[span.index]
+
+
+def _values_fit_this_terminal() -> bool:
+    """Whether this terminal is wide enough to mark a value as data (ADR-0233 §8).
+
+    **The gutter is only a marker while it fits on the line.** Below
+    ``len(_VALUE_GUTTER) + 1`` columns Rich wraps the *marked* line itself — the
+    gutter is split across display lines and the value's characters land on lines
+    carrying no marker at all, which is the framing this renderer exists to close
+    arriving through the renderer rather than through the value. Adversarial review,
+    round 3, ``blocker``.
+
+    **So the card is withheld rather than the marker dropped**, which is §8's second
+    clause read on the terminal instead of on the value: a surface that cannot render
+    a value whole — here, cannot render it as data — renders **no** confirmation and
+    says so, because a partial content-bearing confirmation looks like a whole one.
+    It is not a truncation to work around: at six columns there is no rendering that
+    both shows the text and marks it, and the remedy is a wider window rather than a
+    cleverer renderer.
+
+    Nothing else on the card is measured, because nothing else on it is content the
+    user is answering *about*: ADR-0178 §7's floor is a description this adapter
+    authored around values `core` derived, and it wraps the way every other line in
+    this module wraps (#2072).
+
+    Returns:
+        Whether the gutter and at least one column of value fit the console's width.
+    """
+    return console.width > len(_VALUE_GUTTER)
 
 
 def _span_value_text(value: object) -> str:
@@ -9426,8 +9464,8 @@ def _render_egress_value(value: str) -> None:
     Args:
         value: The span's own value, as the confirmation carries it.
     """
-    gutter = Text("    │ ", style="dim")
-    room = max(console.width - len(gutter), 1)
+    gutter = Text(_VALUE_GUTTER, style="dim")
+    room = console.width - len(gutter)
     for line in _safe_prose(value).split("\n"):
         for wrapped in Text.from_markup(line).wrap(console, room):
             console.print(gutter + wrapped)
@@ -9540,14 +9578,15 @@ def _render_confirmation(confirmation: Confirmation) -> bool:
     instead of it, because reducing the card is not the way to satisfy a clause
     about adding to it.
 
-    **A confirmation whose values cannot all be located renders as no
-    confirmation** (ADR-0233 §8's second clause). ``ConfirmationEgress``
-    deliberately re-checks none of the binding's structural invariants and a
-    ``Confirmation`` crosses the wire, so this is reachable even though the request
-    it was built from could not have been constructed. What is printed then names
-    the tool and says the card was withheld; it renders no part of the payload,
-    since a partial content-bearing confirmation is precisely what §8 refuses, and
-    the caller answers nothing.
+    **A confirmation this surface cannot render whole renders as no confirmation**
+    (ADR-0233 §8's second clause), in the two ways that can happen. The values may not
+    be locatable: ``ConfirmationEgress`` deliberately re-checks none of the binding's
+    structural invariants and a ``Confirmation`` crosses the wire, so that is
+    reachable even though the request it was built from could not have been
+    constructed. Or the terminal may be too narrow to mark them as data
+    (:func:`_values_fit_this_terminal`). Either way
+    :func:`_render_withheld_confirmation` names the tool and says which, renders no
+    part of the payload, and the caller answers nothing.
 
     Returns:
         Whether the confirmation was rendered. ``False`` withdraws the card under
@@ -9558,11 +9597,18 @@ def _render_confirmation(confirmation: Confirmation) -> bool:
     if egress is not None:
         located = _egress_values(confirmation, egress)
         if located is None:
-            console.print("\n[bold yellow]Confirmation withheld[/]")
-            console.print(
-                f"  I cannot show you everything {_safe(confirmation.tool_id)} would send, "
-                "so I am not asking you to approve it. Nothing was sent and nothing was "
-                "declined; the step is still waiting."
+            _render_withheld_confirmation(
+                confirmation,
+                because=("the arguments it carries do not hold every value its description names"),
+            )
+            return False
+        if located and not _values_fit_this_terminal():
+            _render_withheld_confirmation(
+                confirmation,
+                because=(
+                    "this window is too narrow to mark the text as data, so run this "
+                    "again in a wider one"
+                ),
             )
             return False
         values = located
@@ -9576,6 +9622,31 @@ def _render_confirmation(confirmation: Confirmation) -> bool:
         _render_confirmation_egress(egress, values)
     console.print(f"  Why: {_safe(confirmation.reason)}")
     return True
+
+
+def _render_withheld_confirmation(confirmation: Confirmation, *, because: str) -> None:
+    """No card, and it says so (ADR-0233 §8's second clause).
+
+    **It renders no part of the payload**, whole or otherwise, because a partial
+    content-bearing confirmation is precisely what §8 refuses: it looks like a whole
+    one, and a user answering against it has answered about something else. Nor does
+    it render ADR-0178 §7's floor, which would be a confirmation card missing the one
+    thing this ADR added to it.
+
+    **It states which act did not happen**, on the three-valued discipline ADR-0139
+    §4 fixes: nothing was sent and nothing was declined, so no ruling was recorded in
+    either direction and the step is exactly where it was.
+
+    Args:
+        confirmation: The action that will not be put to the user.
+        because: What could not be rendered, in words that name no value.
+    """
+    console.print("\n[bold yellow]Confirmation withheld[/]")
+    console.print(
+        f"  I cannot show you everything {_safe(confirmation.tool_id)} would send — "
+        f"{because} — so I am not asking you to approve it. Nothing was sent and "
+        "nothing was declined; the step is still waiting."
+    )
 
 
 def _prompt_for_approval(confirmation: Confirmation) -> bool | None:
