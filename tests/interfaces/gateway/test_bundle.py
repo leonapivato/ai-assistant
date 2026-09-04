@@ -5413,6 +5413,13 @@ def test_the_token_is_relayed_and_never_rendered_or_stored() -> None:
     **``strand`` is the fifth** (#1621): the one act that gives a token back and records
     that its answer went unread. It compares the handle against two sets and puts it in
     no node, which is §8 obeyed exactly as the four above obey it.
+
+    **``readConfirmation`` is the sixth and it reads the token's *type*** (ADR-0233 §8).
+    It asks whether the handle arrived as text and nothing else — it does not parse it,
+    derive from it, render it or store it — and it asks because a card whose control
+    cannot be answered is a card offering an approval that will fail. The rule it is
+    part of is total over every member ``renderConfirmation`` dereferences, and the
+    token is one of them.
     """
     script = _code("app.js")
     functions = _functions(script)
@@ -5423,6 +5430,7 @@ def test_the_token_is_relayed_and_never_rendered_or_stored() -> None:
         "offerApproval",
         "answerConfirmation",
         "strand",
+        "readConfirmation",
     }
     assert {name for name, body in functions.items() if "token" in body} == touching
     assert not re.search(r"textContent\s*=[^;]*token", script)
@@ -5496,7 +5504,7 @@ def _vocabulary(script: str) -> str:
     """The ``COVERAGE_WORDS`` map's own text.
 
     The page's whole vocabulary for ADR-0233 §4's three states — the sentences and the
-    enumeration in one place, so ``coverageWords`` and the refusal in ``shownWhole``
+    enumeration in one place, so ``coverageWords`` and the refusal in ``readEgress``
     cannot come to disagree about which states exist.
     """
     opened = script.index("const COVERAGE_WORDS = {")
@@ -5578,10 +5586,54 @@ def test_the_values_are_rendered_before_there_is_anything_to_press() -> None:
     assert card.index("renderParameters(") < card.index("renderEgress(")
     # Every entry the carrier holds, under the locator that names it — the same
     # spelling ``spanWords`` gives a span, which is what joins the two halves of the
-    # card and what ``shownSpan`` looks a span up by.
+    # card and what ``readSpan`` looks a span up by.
     assert "parameters.forEach(" in arguments
     assert "locatorWords(one.key, one.index)" in arguments
     assert "locatorWords(span.argument, span.index)" in functions["spanWords"]
+
+
+#: Every function ADR-0233 §8's shape rule is written in, so the rule has one text.
+#:
+#: It is a family rather than one function because the body it reads is nested — an
+#: entry inside ``parameters``, a member inside ``destinations``, a recipient inside a
+#: span — and a single function walking all of that is one nobody can check against the
+#: renderers. What makes it a rule and not a list is that every member the renderers
+#: dereference is named somewhere in this text, which is what the test below asks.
+_SHAPE_RULE: Final = (
+    "isRecord",
+    "isText",
+    "isPosition",
+    "readConfirmation",
+    "readParameter",
+    "readEgress",
+    "readDestination",
+    "readSpan",
+    "readSpanDestination",
+)
+
+#: The functions that dereference a confirmation's own members, and therefore the
+#: functions the shape rule has to be total over. ``coverageWords``, ``originWords``,
+#: ``disclosureWords`` and ``locatorWords`` are not here: each is handed a value rather
+#: than a body, so it reads no member of one.
+_CONFIRMATION_RENDERERS: Final = (
+    "renderConfirmation",
+    "renderParameters",
+    "renderEgress",
+    "destinationWords",
+    "spanWords",
+)
+
+#: One chain of members read off a confirmation, an egress binding, an argument entry,
+#: a set member or a span — the five identifiers those renderers hold one of the body's
+#: own values in.
+#:
+#: The **whole** chain is captured and split, because a read two deep is still two
+#: members read: ``span.destination.supplied`` is where a recipient's supplied form is
+#: dereferenced, and a pattern matching only the first segment would leave ``supplied``
+#: out of the set this is total over.
+_MEMBER_READ: Final = re.compile(
+    r"\b(?:confirmation|egress|parameters|one|member|span)((?:\.\w+)+)"
+)
 
 
 def test_a_confirmation_that_cannot_be_shown_whole_is_not_shown_at_all() -> None:
@@ -5603,10 +5655,21 @@ def test_a_confirmation_that_cannot_be_shown_whole_is_not_shown_at_all() -> None
     "the gateway did not answer" — the wrong sentence, and it took the whole listing
     with it.
 
-    **And the last of them is a lookup rather than a comparison**, because the content
-    is carried once: a span's own value is the argument entry carrying its locator, so
-    what is asked is that the locator names exactly one entry whose value is text.
-    There is no second copy for a comparison to be made against (ADR-0233 §2).
+    **And the rule is asserted total rather than case by case**, which is what rounds
+    1, 2, 6 and 7 cost: each named one more member than the last — a span's value, then
+    ``coverage``, then the containers, then the entries inside them — and each fix left
+    the next member unguarded, because the defect was never the member. So the members
+    this asks about are not written down here: they are read **off the renderers**, and
+    every one either renderer dereferences must be named by the shape rule. A member
+    added to a renderer without a test for it fails this, which is the eighth round not
+    being needed.
+
+    **And the locator is a lookup rather than a comparison**, because the content is
+    carried once: a span's own value is the argument entry carrying its locator, so
+    what is asked is that the locator names exactly one entry. There is no second copy
+    for a comparison to be made against (ADR-0233 §2), and what an entry *is* has
+    already been asked of every entry before any span is read — which is why the two
+    halves are read in that order and the order is pinned.
     """
     script = _code("app.js")
     functions = _functions(script)
@@ -5614,18 +5677,46 @@ def test_a_confirmation_that_cannot_be_shown_whole_is_not_shown_at_all() -> None
 
     assert card.index("CONFIRMATION_NOT_WHOLE") < card.index("confirmation.tool_id")
     assert card.index("CONFIRMATION_NOT_WHOLE") < card.index("offerApproval(")
-    assert "if (!shownWhole(confirmation)) {" in card
+    assert "if (!readConfirmation(confirmation)) {" in card
     assert "so it is not put to you at all" in _joined(
         script[script.index("const CONFIRMATION_NOT_WHOLE") :]
     )
 
-    whole = functions["shownWhole"]
-    span = functions["shownSpan"]
-    assert "Array.isArray(confirmation.parameters)" in whole
-    assert "Array.isArray(egress.spans)" in whole
-    assert "Object.hasOwn(COVERAGE_WORDS, egress.coverage)" in whole
-    assert "one.key === span.argument && one.index === span.index" in span
-    assert 'typeof located[0].value === "string"' in span
+    family = "".join(functions[name] for name in _SHAPE_RULE)
+    # The three predicates the rule is written in, each a type test: an object that is
+    # an object and not an array or ``null``; text, because a member that did not
+    # arrive is ``undefined`` and a template renders that as a word; and ADR-0150 §4's
+    # position, which is absent or an integer and nothing else.
+    assert "!Array.isArray(value)" in functions["isRecord"]
+    assert 'typeof value === "string"' in functions["isText"]
+    assert "index === null || Number.isInteger(index)" in functions["isPosition"]
+    # The containers, the vocabulary, and the one member whose absent state would put a
+    # sentence on the screen that the page was not told (ADR-0181 §6's ``false`` arm).
+    reader = functions["readConfirmation"]
+    egress = functions["readEgress"]
+    assert "Array.isArray(confirmation.parameters)" in reader
+    assert "Array.isArray(egress.spans)" in egress
+    assert "Array.isArray(egress.destinations)" in egress
+    assert "Object.hasOwn(COVERAGE_WORDS, egress.coverage)" in egress
+    assert 'typeof egress.planned_with_external_content !== "boolean"' in egress
+    # Every entry is read before any span is, so the locator lookup below may ask how
+    # many entries carry a locator without asking again what an entry is.
+    assert reader.index("readParameter") < reader.index("readEgress")
+    assert "one.key === span.argument && one.index === span.index" in functions["readSpan"]
+
+    # **Total over what the renderers read.** The member names are collected from the
+    # confirmation renderers themselves rather than listed here, so this cannot fall
+    # behind them; the two array methods are the only reads that are not members of the
+    # body. The floor on the count is what stops a pattern that matched nothing from
+    # passing this vacuously.
+    read = set()
+    for name in _CONFIRMATION_RENDERERS:
+        for chain in _MEMBER_READ.findall(functions[name]):
+            read |= set(chain.split(".")[1:])
+    read -= {"length", "forEach"}
+    assert len(read) >= 20, sorted(read)
+    for member in sorted(read):
+        assert f".{member}" in family, member
 
 
 def test_the_call_carries_one_coverage_line_in_every_state_core_has() -> None:
@@ -5651,7 +5742,7 @@ def test_the_call_carries_one_coverage_line_in_every_state_core_has() -> None:
     for state in SpanCoverage:
         assert f"{state.value}:" in words, state.value
     # Three keys and no fourth, so the map the sentences come from and the test the
-    # card is refused by (``shownWhole``) are one enumeration rather than two that can
+    # card is refused by (``readEgress``) are one enumeration rather than two that can
     # drift apart.
     assert words.count(":") == len(SpanCoverage)
     assert "return COVERAGE_WORDS[coverage];" in functions["coverageWords"]

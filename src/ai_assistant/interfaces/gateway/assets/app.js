@@ -1222,6 +1222,36 @@ const CONFIRMATION_NOT_WHOLE =
   "here, so it is not put to you at all: approving what is only partly shown would " +
   "be answering about something else.";
 
+// Whether a parsed member is a JSON **object**, asked rather than substituted for.
+//
+// The predicate half of `asObject`'s rule, and deliberately not `asObject` itself.
+// That function *normalises* — a body it cannot read becomes `{}`, which is right for
+// a response whose caller then finds every member absent, and wrong here: an `egress`
+// normalised to `{}` is an `egress` whose account, recipients and coverage are all
+// absent, and the card built over it would look like a whole confirmation while
+// naming no recipient the ruling was taken over. ADR-0233 §8 refuses the
+// confirmation, so what this needs is the question and never the substitution.
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+// Whether a member arrived as text. Every string a confirmation carries is spelled in
+// the gateway's own process — the values by `_parameter_text`, the rest by `core`'s
+// models — so anything else is a member that did not arrive, and the templates below
+// would put `undefined`, a digit or `[object Object]` on the screen where the fact
+// the owner is answering about should be.
+function isText(value) {
+  return typeof value === "string";
+}
+
+// Whether a member is ADR-0150 §4's position: **absent** where the span's value is
+// the argument's whole value, and a zero-based index into an ordered decomposition
+// otherwise. It is half of the locator, so a shape that is neither is a card whose two
+// halves cannot be joined.
+function isPosition(index) {
+  return index === null || Number.isInteger(index);
+}
+
 // Whether this page can put the whole of what ADR-0233 §8 obliges it to put.
 //
 // **Asked over the whole card before any of it is built**, because §8's refusal is
@@ -1229,33 +1259,50 @@ const CONFIRMATION_NOT_WHOLE =
 // worse than none, because it looks like a whole one".
 //
 // **And asked as type tests over shapes rather than as equalities against values**,
-// which is adversarial review's rounds 1, 2 and 6 and is the fail-closed direction §8
-// requires. Nothing in this page validates the body it was handed against a schema, so
-// every member it reads can be absent, a number or an object as easily as it can be
-// the thing the gateway sends — and the narrower each test is, the more shapes walk
-// past it into a card that looks whole. Two shapes make that concrete: a `value` that
-// is missing is `undefined`, which under a check for `null` alone was rendered as the
-// word "undefined" where the bytes should have been; and an `egress` or a `spans` that
-// is absent used to **throw** here, which `readPending` caught as "the gateway did not
-// answer" — the wrong sentence, and it took the whole listing with it. A shape this
-// page cannot read is a card it refuses, one card, and the rest of the listing renders.
+// which is the fail-closed direction §8 requires. Nothing in this page validates the
+// body it was handed against a schema, so every member it reads can be absent, a
+// number or an object as easily as it can be the thing the gateway sends — and the
+// narrower each test is, the more shapes walk past it into a card that looks whole.
+// Two make that concrete: a `value` that is missing is `undefined`, which under a
+// check for `null` alone was rendered as the word "undefined" where the bytes should
+// have been; and an absent `egress` used to **throw** here, which `readPending` caught
+// as "the gateway did not answer" — the wrong sentence about a gateway that had just
+// answered, and it took the whole listing with it rather than the one card.
 //
-// **The content is carried once, so there is nothing to cross-check** (round 6, and
-// ADR-0233 §2's refusal of "a second renderable artifact beside the description"). The
-// arguments cross **decomposed** (`_parameter_views`), a span carries no value of its
-// own, and the two are joined by the locator they share. So this asks whether every
-// span's locator names exactly one argument entry whose value is text — which is
-// `shownSpan` — rather than whether two copies of one value agree. There is no second
-// copy to disagree, and no comparison that could be lossy: an earlier shape of this
-// page carried the value on the span too, and the only way to check an *indexed* one
-// was to parse the argument's JSON here and re-spell the element, which is a second
-// derivation of a `core` rule in the page's language (ADR-0178 §3) and is lossy in the
-// exact direction `_parameter_text` exists to prevent — `JSON.parse` reads
-// `9007199254740993` as `9007199254740992`.
+// **Total over every member either renderer dereferences, at every depth**, which is
+// what makes this the shape rule rather than a list of the shapes that have gone wrong
+// so far. Adversarial review named four of them in four rounds — a span's value, then
+// `coverage`, then `egress` and `spans` and `parameters` as containers, then the
+// *entries* inside those containers and `destinations` — and each round's fix left the
+// next member unguarded, because the defect was never the member. It is the class: a
+// member read out of a response body nothing validated. So the enumeration this walks
+// is `_confirmation_view`'s, not any round's, and a member added to that view without
+// a test here is a member `renderConfirmation` renders as `undefined` rather than one
+// that throws — which is a rendering fault the page can be read for, and not a lost
+// listing.
 //
-// **What no page-side test reaches** is a gateway that lies about its own arguments,
-// which it can also do by serving a different `app.js`: this page is loaded from that
-// origin and no other (ADR-0168 §10), and no check written in it reaches outside that.
+// **A shape this page cannot read is a card it refuses, one card, and the rest of the
+// listing renders**, which is the whole of what the totality buys: the failure that
+// matters is not that a member is missing, it is that reading it throws out of
+// `renderConfirmation`, past `readPending`'s `catch`, and takes every other
+// confirmation waiting for an answer with it.
+//
+// **The content is carried once, so there is nothing to cross-check** (ADR-0233 §2's
+// refusal of "a second renderable artifact beside the description"). The arguments
+// cross **decomposed** (`_parameter_views`), a span carries no value of its own, and
+// the two are joined by the locator they share. So this asks whether every span's
+// locator names exactly one argument entry — which is `readSpan` — rather than whether
+// two copies of one value agree. There is no second copy to disagree, and no
+// comparison that could be lossy: an earlier shape of this page carried the value on
+// the span too, and the only way to check an *indexed* one was to parse the argument's
+// JSON here and re-spell the element, which is a second derivation of a `core` rule in
+// the page's language (ADR-0178 §3) and is lossy in the exact direction
+// `_parameter_text` exists to prevent — `JSON.parse` reads `9007199254740993` as
+// `9007199254740992`.
+//
+// **The order of the two halves is load-bearing.** `parameters` is read entry by entry
+// *before* any span is, so `readSpan` may ask how many entries carry a locator without
+// asking again what an entry is.
 //
 // **The call's coverage must be one this page has words for.** §8 obliges a surface
 // to state it "in all three states", and a value outside the three is not one of them
@@ -1263,46 +1310,148 @@ const CONFIRMATION_NOT_WHOLE =
 // a sentence about the call this page invented. An earlier shape of this function
 // rendered such a value as itself, on `disclosureWords`' precedent; that precedent is
 // about a span's *discloser*, which is beside the floor, and this is the floor.
-function shownWhole(confirmation) {
+//
+// **What no page-side test reaches** is a gateway that lies about its own arguments,
+// which it can also do by serving a different `app.js`: this page is loaded from that
+// origin and no other (ADR-0168 §10), and no check written in it reaches outside that.
+function readConfirmation(confirmation) {
+  if (!isRecord(confirmation)) {
+    return false;
+  }
+  if (
+    !isText(confirmation.token) ||
+    !isText(confirmation.tool_id) ||
+    !isText(confirmation.tool_description) ||
+    !isText(confirmation.reason)
+  ) {
+    return false;
+  }
   if (!Array.isArray(confirmation.parameters)) {
     return false;
   }
-  const egress = confirmation.egress;
-  if (egress === null) {
+  if (!confirmation.parameters.every(readParameter)) {
+    return false;
+  }
+  // `egress` absent is **not** ADR-0178 §4's discriminator. The discriminator is a
+  // `null` the gateway wrote, which states that the ruling was taken over no egress
+  // binding; a key that never arrived states nothing, and reading it as "no binding"
+  // would put an egress call on the screen with its recipients silently dropped.
+  if (confirmation.egress === null) {
     return true;
   }
-  if (typeof egress !== "object" || !Array.isArray(egress.spans)) {
+  return readEgress(confirmation.egress, confirmation.parameters);
+}
+
+// One entry of the one carrier the arguments cross in (ADR-0150 §4, ADR-0233 §8).
+//
+// A locatable value under the locator that names it — which is what `renderParameters`
+// puts on the screen and what a span is joined to. `value` is text because every
+// argument is spelled by the gateway, losslessly, so that the page never parses one
+// back; `key` is text because it is rendered; and `index` is the position or nothing.
+function readParameter(one) {
+  return isRecord(one) && isText(one.key) && isPosition(one.index) && isText(one.value);
+}
+
+// The egress binding, member by member, as `renderEgress` reads it (ADR-0178 §7).
+function readEgress(egress, parameters) {
+  if (!isRecord(egress)) {
+    return false;
+  }
+  if (!isText(egress.account_identity)) {
+    return false;
+  }
+  // **A boolean and no third state.** `originWords` renders two whole sentences and
+  // the `false` one is not an assurance (ADR-0181 §6's third clause), so an absent
+  // member falling into that arm would be this page telling the owner no selected
+  // record carried the external mark on the strength of a key that never arrived.
+  if (typeof egress.planned_with_external_content !== "boolean") {
     return false;
   }
   if (!Object.hasOwn(COVERAGE_WORDS, egress.coverage)) {
     return false;
   }
-  return egress.spans.every((span) => shownSpan(span, confirmation.parameters));
+  if (!Array.isArray(egress.destinations) || !egress.destinations.every(readDestination)) {
+    return false;
+  }
+  if (!Array.isArray(egress.spans)) {
+    return false;
+  }
+  return egress.spans.every((span) => readSpan(span, parameters));
 }
 
-// Whether one span's own value is on the screen, as itself (ADR-0233 §8).
+// One member of the derived destination set, in the two shapes `destinationWords`
+// renders and no third (ADR-0178 §3).
+//
+// **The arms are told apart by an identity that is there**, which is the
+// discrimination the view itself crosses: `_destination_view` keeps all three keys on
+// both shapes and writes `null` where the member holds nothing. An *absent* identity
+// is therefore not the recipient arm — it is a member this page cannot tell the arms
+// apart on, and rendering it as "the connected account undefined" would name a
+// recipient set the ruling was not taken over.
+function readDestination(member) {
+  if (!isRecord(member)) {
+    return false;
+  }
+  if (member.account_identity !== null) {
+    return isText(member.account_identity);
+  }
+  return isText(member.canonical) && isText(member.protocol);
+}
+
+// One occurrence of the payload description, and the argument entry whose value it
+// describes (ADR-0150 §4, ADR-0233 §8).
 //
 // **Located rather than compared**, since round 6: the value is not on the span, so
 // there is no second copy to check against. The span and the argument entry carry the
 // same locator — ADR-0150 §4's `(argument, index)` pair — and this asks whether that
-// locator names exactly one entry whose value is text. One entry, because a body
-// naming two is a body this page cannot say which of them the span describes; and
-// text, because every located value is spelled by the gateway, so anything else is
-// a member that did not arrive.
-function shownSpan(span, parameters) {
-  if (span === null || typeof span !== "object") {
+// locator names exactly **one** entry. One, because a body naming two is a body this
+// page cannot say which of them the span describes, and a body naming none is one
+// where the span's own value is nowhere on the screen.
+//
+// **What the entry is has already been asked**, by `readParameter` over every entry
+// before any span is read, so the count is the whole of what is left here.
+//
+// **Every other member is read because `spanWords` renders every other member**: the
+// locator, the discloser, the extent as a number of code points, the tier where there
+// is one, and the recipient in both forms where the occurrence names one.
+function readSpan(span, parameters) {
+  if (!isRecord(span)) {
+    return false;
+  }
+  if (!isText(span.argument) || !isPosition(span.index)) {
+    return false;
+  }
+  if (!isText(span.provenance) || !Number.isInteger(span.extent)) {
+    return false;
+  }
+  if (span.tier !== null && !isText(span.tier)) {
+    return false;
+  }
+  if (span.destination !== null && !readSpanDestination(span.destination)) {
     return false;
   }
   const located = parameters.filter(
     (one) => one.key === span.argument && one.index === span.index
   );
-  return located.length === 1 && typeof located[0].value === "string";
+  return located.length === 1;
+}
+
+// The recipient one occurrence names, in both the forms ADR-0148 §2 requires — and
+// neither reconstructed from the other, which ADR-0148 §14 names as a failure in
+// terms, so a member missing either form is a member this page will not guess at.
+function readSpanDestination(destination) {
+  return (
+    isRecord(destination) &&
+    isText(destination.protocol) &&
+    isText(destination.supplied) &&
+    isText(destination.canonical)
+  );
 }
 
 function renderConfirmation(parent, confirmation) {
   const item = document.createElement("div");
   item.className = "confirmation-row";
-  if (!shownWhole(confirmation)) {
+  if (!readConfirmation(confirmation)) {
     line(item, CONFIRMATION_NOT_WHOLE, "notice");
     parent.appendChild(item);
     return;
@@ -1345,7 +1494,7 @@ function renderConfirmation(parent, confirmation) {
 // value is not an array, or one element of one that is — under the locator that names
 // it, so an array-valued `to` reads as `to[0]` and `to[1]`. That is the same
 // decomposition a span is identified by, which is what lets a span's own value be on
-// screen without a copy of it riding on the span (`shownSpan`): one carrier, one
+// screen without a copy of it riding on the span (`readSpan`): one carrier, one
 // rendering, nothing that can disagree with anything else (ADR-0233 §2, ADR-0150 §1).
 //
 // **An element rendered as itself is not the same as an element inside its array's
@@ -1393,7 +1542,7 @@ function renderParameters(item, parameters) {
 //
 // **One spelling, used by the value above and by the description below**, so the two
 // halves of what a card says about one span cannot come to name it differently — the
-// locator is the whole of what joins them, on the screen and in `shownSpan`.
+// locator is the whole of what joins them, on the screen and in `readSpan`.
 function locatorWords(argument, index) {
   return index === null ? argument : `${argument}[${index}]`;
 }
@@ -1505,7 +1654,7 @@ function originWords(plannedWithExternalContent) {
 // that precedent does not reach here: a span's discloser sits *beside* the floor,
 // while this is the floor, and §8 obliges the surface to state it in all three states
 // or not to put the confirmation. So the three below are the whole vocabulary, the
-// card is refused where the value is outside them (`shownWhole`), and this function
+// card is refused where the value is outside them (`readEgress`), and this function
 // has no fallthrough to invent a fourth sentence with.
 const COVERAGE_WORDS = {
   not_covered:

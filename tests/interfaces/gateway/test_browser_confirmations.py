@@ -46,7 +46,7 @@ from ai_assistant.core.types import (
 from ai_assistant.interfaces.gateway.server import _confirmation_view
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Iterator, Mapping
     from pathlib import Path
 
     from browser_drive import Drive
@@ -670,6 +670,219 @@ async def test_a_confirmation_this_page_cannot_put_whole_is_not_put_at_all(
         assert _BODY not in said, (fault, said)
         assert "undefined" not in said, (fault, said)
         assert await card.locator("button").count() == 0
+
+
+#: What a card refused under ADR-0233 §8 says, and the only part of the sentence this
+#: module matches on — the whole of it is pinned in ``test_bundle.py``.
+_CANNOT_PUT = "so it is not put to you at all"
+
+
+def _members(
+    view: object, path: str = "", steps: tuple[str | int, ...] = ()
+) -> Iterator[tuple[str, object, tuple[str | int, ...]]]:
+    """Every member of one confirmation's view, at every depth, with the way to it.
+
+    A list's **elements** are members too, which is not a technicality: ``parameters``
+    being a list is what the guard used to ask, and ``parameters: [null, ...]`` is the
+    entry inside it — the shape adversarial review's round 7 found still reaching
+    ``one.key``.
+
+    Args:
+        view: The view, or any part of one.
+        path: What to call this part, for the failure message.
+        steps: The keys and positions that reach this part from the whole view.
+
+    Yields:
+        The path to one member, its value, and the steps that reach it.
+    """
+    if isinstance(view, dict):
+        for key, value in view.items():
+            here = f"{path}.{key}" if path else key
+            yield here, value, (*steps, key)
+            yield from _members(value, here, (*steps, key))
+    elif isinstance(view, list):
+        for position, value in enumerate(view):
+            here = f"{path}[{position}]"
+            yield here, value, (*steps, position)
+            yield from _members(value, here, (*steps, position))
+
+
+def _nulled(view: dict[str, Any], steps: tuple[str | int, ...]) -> dict[str, Any]:
+    """The view again with one member replaced by ``null``, the rest untouched.
+
+    Round-tripped through JSON rather than deep-copied, so what the page is handed is
+    a document that could have arrived over the wire.
+
+    Args:
+        view: The confirmation view to copy.
+        steps: The keys and positions reaching the member to null.
+
+    Returns:
+        The copy.
+    """
+    copied: dict[str, Any] = json.loads(json.dumps(view))
+    target: Any = copied
+    for step in steps[:-1]:
+        target = target[step]
+    target[steps[-1]] = None
+    return copied
+
+
+def _may_arrive_null(view: dict[str, Any]) -> frozenset[str]:
+    """Every member of this view a **correct** gateway may send as ``null``.
+
+    Stated rather than discovered, because it is the other half of the property: a
+    page that refused every card with a ``null`` anywhere in it would pass "nothing
+    throws" by refusing confirmations it is obliged to put.
+
+    Three sources, and no fourth. Whatever this view already carries as ``null`` is a
+    member the gateway writes that way — a whole argument's absent position, a
+    recipient arm's empty account identity, a span with no tier. ``egress`` is
+    ADR-0178 §4's discriminator, and a confirmation over no egress binding is a card
+    this page renders. And a span's ``destination`` is optional (ADR-0150 §4), so an
+    occurrence naming no recipient is rendered as the payload-description span it is.
+
+    Args:
+        view: The confirmation view the case is generated from.
+
+    Returns:
+        The paths whose nulling leaves a card this page must still put.
+    """
+    already = {path for path, value, _ in _members(view) if value is None}
+    spans = {
+        f"egress.spans[{position}].destination" for position in range(len(view["egress"]["spans"]))
+    }
+    return frozenset(already | {"egress"} | spans)
+
+
+#: Both cards of the listing and whether the panel is reporting a fault.
+#:
+#: The fault is the observable the class turns on. A member read that throws escapes
+#: ``renderConfirmation`` into ``readPending``'s ``catch``, which writes "the gateway
+#: did not answer" about a gateway that had just answered — and the listing it was
+#: half way through rendering is gone.
+_LISTING = """() => {
+  const rows = [...document.querySelectorAll('#confirmation-list .confirmation-row')];
+  const slot = document.querySelector('#confirmations > .fault');
+  return {
+    rows: rows.map((row) => ({
+      text: row.innerText,
+      values: [...row.querySelectorAll('.argument-value')].map((el) => el.textContent),
+      controls: row.querySelectorAll('button').length,
+    })),
+    faulted: slot !== null && !slot.hidden,
+  };
+}"""
+
+#: The condition each case waits on: this case's own companion on the screen, or the
+#: panel reporting a fault. Waiting on the companion alone would time out where the
+#: listing was lost, which is the failure this case exists to name — so the fault is a
+#: state the wait ends in and an assertion reports, rather than a timeout.
+_ARRIVED = """(said) => {
+  const list = document.querySelector('#confirmation-list');
+  const slot = document.querySelector('#confirmations > .fault');
+  return list.innerText.includes(said) || (slot !== null && !slot.hidden);
+}"""
+
+
+@pytest.mark.parametrize(
+    "seed",
+    [
+        _email(),
+        _confirmation(_span("body", _BODY), parameters={"body": _BODY}),
+    ],
+    ids=["a set of recipients", "the connected account"],
+)
+async def test_no_member_of_a_confirmation_is_read_without_the_shape_being_read_for(
+    gateway_browser: Browser, tmp_path: Path, seed: Confirmation
+) -> None:
+    """ADR-0233 §8's refusal as a **property**, over every member of the body.
+
+    Adversarial review named four members in four rounds — a span's ``value``, then
+    ``coverage``, then ``egress``, ``spans`` and ``parameters`` as containers, then the
+    entries inside those containers and ``destinations`` — and each fix left the next
+    member unguarded, because the defect was never the member. It is the class: a
+    member read out of a response body nothing validated. Two instances stood at the
+    handover and both are here by construction rather than by name:
+    ``parameters: [null, ...]`` reaching ``one.key``, and ``destinations: null``
+    reaching a ``forEach``.
+
+    So the cases are **generated from the gateway's own view**, one per member at every
+    depth, and each one is driven: the request really goes to the gateway, the gateway
+    really answers it, and only the body is replaced (#1622). What each case asserts is
+    the whole of what the class is about.
+
+    **The listing survives.** A second, unaltered confirmation rides beside the
+    mutated one in the same body, and it is on screen whole — its values, its
+    controls — in every case. That is the consequence a throw has and a refusal does
+    not: ``readPending``'s ``catch`` reports "the gateway did not answer" about a
+    gateway that had just answered, and takes every other confirmation waiting for an
+    answer with it.
+
+    **The card is one of the two whole states, never a partial one.** Either the page
+    refused it — the notice, no value, no control — or it put it whole. Nothing in
+    between, and the word ``undefined`` on neither, which is what a member rendered
+    without being read for looks like on a screen.
+
+    **And the refusal is not the answer to everything**, which
+    :func:`_may_arrive_null` is: three kinds of member arrive ``null`` from a correct
+    gateway, and a card carrying one of them is a card this page is obliged to put.
+
+    Both destination shapes are driven, because ``readDestination`` has two arms and
+    the account arm's ``protocol`` and ``canonical`` are exactly the members a view
+    built from recipients never exercises (ADR-0178 §3).
+
+    Args:
+        gateway_browser: The one browser this run launched.
+        tmp_path: The case's data directory.
+        seed: The confirmation whose view every case is generated from.
+    """
+    view = _confirmation_view(seed)
+    renders = _may_arrive_null(view)
+    walked = list(_members(view))
+    # A walker that stopped early would pass this whole case vacuously, so the count
+    # is floored: the smaller of the two views carries twenty-six members.
+    assert len(walked) >= 26, len(walked)
+
+    complaints: list[str] = []
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.page.on("console", lambda message: _note(message, complaints))
+        drive.engine.parked["h-1"] = seed
+
+        for case, (path, _, steps) in enumerate(walked):
+            # The companion is a whole confirmation the gateway itself produced, with
+            # one member changed: the reason, which is what this case waits on. A
+            # per-case marker is what makes the read the *new* listing rather than the
+            # one still on screen from the case before.
+            beside = _confirmation_view(_email(handle="h-2"))
+            beside["reason"] = f"case {case}"
+            await _substitute(
+                drive,
+                path="/confirmations",
+                body=json.dumps({"confirmations": [_nulled(view, steps), beside]}),
+            )
+            await drive.page.click("#confirmations-button")
+            await drive.page.wait_for_function(_ARRIVED, arg=f"case {case}")
+            read = await drive.page.evaluate(_LISTING)
+
+            assert not read["faulted"], (path, read)
+            rows = read["rows"]
+            assert len(rows) == 2, (path, rows)
+            assert rows[1]["values"] == [_BODY, *_RECIPIENTS], (path, rows[1])
+            assert rows[1]["controls"] == 3, (path, rows[1])
+
+            card = rows[0]
+            assert "undefined" not in card["text"], (path, card)
+            if path in renders:
+                assert _CANNOT_PUT not in card["text"], (path, card)
+                assert _BODY in card["values"], (path, card)
+                assert card["controls"] == 3, (path, card)
+            else:
+                assert _CANNOT_PUT in card["text"], (path, card)
+                assert card["values"] == [], (path, card)
+                assert card["controls"] == 0, (path, card)
+
+        assert complaints == []
 
 
 async def test_an_argument_carrying_no_span_is_still_a_key_and_a_value_on_the_screen(
