@@ -780,3 +780,23 @@ def unbuildable_font_pdf(*, decoded_bytes: int, subtype: bytes = b"/Type1") -> b
     return document(
         [Page(contents=[operators(decoded_bytes)], fonts={"/F1": font})], objects=objects
     )
+
+
+def cmap_pages_pdf(*, pages: int, cmap_bytes: int) -> bytes:
+    """``pages`` pages sharing one font whose ``/ToUnicode`` CMap is ``cmap_bytes``.
+
+    The input ADR-0232 leaves uncharged and unbounded, in the shape that shows what it
+    costs: the extraction re-parses that CMap once per page, so a walk establishing
+    every font by building it would double a per-page cost this system does not govern.
+    The padding is one ``%``-prefixed line, which ``process_cm_line`` returns on at
+    once, so what the arm measures is the normalisation rather than a contrived parse.
+    """
+    objects = _Objects()
+    cmap = objects.add(stream_object(_TO_UNICODE + b"\n%" + b"C" * cmap_bytes))
+    font = objects.add(
+        b"<< /Type /Font /Subtype /TrueType /BaseFont /Mapped /ToUnicode " + cmap + b" >>"
+    )
+    return document(
+        [Page(contents=[b"BT /F1 24 Tf (A) Tj ET"], fonts={"/F1": font}) for _ in range(pages)],
+        objects=objects,
+    )

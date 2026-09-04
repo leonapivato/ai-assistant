@@ -39,6 +39,7 @@ from fetch_fixtures import fetcher as build
 from pdf_fixtures import (
     amplified_content_stream_pdf,
     capped_invocations_pdf,
+    cmap_pages_pdf,
     content_array_pdf,
     drawing,
     extracted_text_of,
@@ -55,6 +56,7 @@ from pdf_fixtures import (
     unbuildable_font_pdf,
     unreadable_resources_pdf,
 )
+from pypdf import _cmap as cmap_module
 
 from ai_assistant.core.types import FetchOutcome, FetchRefusal
 from ai_assistant.readers import DEFAULT_FETCH_MAX_DECODED_BYTES
@@ -632,3 +634,40 @@ async def test_a_font_the_extraction_cannot_build_precedes_the_content_charge(
     assert outcome.refusal is FetchRefusal.EXTRACTION_FAILED
     assert outcome.record is None
     assert parsed == []
+
+
+async def test_the_walk_does_not_reparse_a_to_unicode_cmap(
+    root: Path, parsed: list[object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The walk adds no parse of an input ADR-0232 leaves uncharged and unbounded.
+
+    A ``/ToUnicode`` CMap is decoded and **parsed** once per page — ``get_data`` caches
+    the decompression, not ``prepare_cm``'s normalisation or the mapping dictionary it
+    builds — and §2 and §10 leave it uncharged and unbounded by name. So a walk that
+    established every font by building it would double a per-page cost this system does
+    not govern, which is unratified work on the seam the bound exists to make honest.
+    ``_establish_font`` therefore asks only about a font carrying no ``/ToUnicode``.
+
+    Asserted on the **count of parses**, not on elapsed time: one per page extracted,
+    never two. A duration would flake and would prove less, which is §8's own standard
+    for every other arm here. That the per-page multiplier exists at all is issue #2042,
+    which fires §10's deferral and is not this PR's to close.
+    """
+    prepared: list[object] = []
+    real = cmap_module.prepare_cm
+
+    def counted(font: object) -> bytes:
+        prepared.append(font)
+        return real(font)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(cmap_module, "prepare_cm", counted)
+    pages = 3
+    outcome = await fetch(root, cmap_pages_pdf(pages=pages, cmap_bytes=200_000))
+
+    assert outcome.refusal is None
+    assert outcome.record is not None
+    assert len(parsed) == pages
+    assert len(prepared) == pages, (
+        f"the CMap was prepared {len(prepared)} times over {pages} extracted pages; "
+        f"the walk must add no parse of an input the bound does not charge"
+    )
