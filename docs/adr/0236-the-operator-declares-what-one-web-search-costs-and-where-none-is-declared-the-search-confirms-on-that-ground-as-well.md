@@ -112,9 +112,14 @@ third, and nobody can set it.
 > constructs the declaration it registers with
 > `ToolCost(basis=CostBasis.PER_CALL, amount=<the figure>, currency=<the code>)` where
 > both are supplied, and with `ToolCost(basis=CostBasis.UNKNOWN)` where neither is.
-> That builder is the **only** place in `src/ai_assistant` where the figure reaches a
-> declaration: no other component reads either setting, derives a cost, substitutes
-> one, or edits a `ToolDefinition` after construction.
+> That builder is the **only** place in production where the figure reaches a
+> declaration, and `FakeWebSearcher` (§7) is the only other site under
+> `src/ai_assistant` that may build one at all — it is the canonical fake, it is
+> test-only, and its parity clause is what puts it there. **No** other component reads
+> either setting, derives a cost, substitutes one, or edits a `ToolDefinition` after
+> construction. In particular no composition root, no interface adapter and nothing in
+> `orchestration/` computes a `ToolCost`; `app/composition.py` forwards the two values
+> and does no more.
 
 > **Normative.** The module-level `WEB_SEARCH` constant keeps `UNKNOWN` and no lane
 > mutates it. The configured declaration is a **second value built per registration**,
@@ -187,9 +192,17 @@ price an operator states about a call they are paying for.
 
 > **Normative.** An operator asserting that a search costs them nothing states
 > `web_search_cost_per_call = 0` with the currency their account is denominated in.
-> That is a positive assertion carrying a currency, it contributes zero to both of
-> ADR-0194 §2's totals exactly as a `FREE` basis does, and it satisfies
+> That is a positive assertion carrying a currency, and it satisfies
 > `_UNKNOWN_COST_FLOOR` exactly as any other `PER_CALL` figure does.
+
+> **Normative.** Its **spend equivalence to a `FREE` basis is conditional and is
+> stated as such**: a zero `PER_CALL` figure contributes zero to both of ADR-0194
+> §2's totals where its currency **is** `world_spend_currency`, and where no
+> `world_spend_currency` is configured at all, since §2's first clause then sums
+> nothing. Where the two currencies **differ**, §2's non-conversion clause governs and
+> a zero figure is treated as an `UNKNOWN` basis is — which a `FREE` basis would not
+> be. No lane states the equivalence unconditionally, and §6 is where that residual is
+> accounted for.
 
 **Three reasons, and the first is decisive on its own.** ADR-0231 §9's fourth clause
 forbids *"a `cost` declared `FREE` where the figure is not known"* as one of the
@@ -209,12 +222,21 @@ else would be indistinguishable, field by field, from one who set nothing. ADR-0
 present/absent but free versus unknown"*; a two-field configuration that offered
 three bases would reintroduce exactly the collapse the enum removed, one layer out.
 
-Third, nothing is lost. ADR-0194 §2 says in terms that *"A `FREE` basis contributes
-zero, in both totals"* and that a `PER_CALL` basis in the configured currency
-contributes its `amount`. `Decimal("0")` contributes zero. The zero-figure form is
-spend-equivalent to `FREE` and strictly more informative, because it carries the
-currency the operator asserted and therefore says which register the zero was asserted
-in.
+Third, little is lost, and what is lost is stated rather than claimed away. ADR-0194
+§2 says *"A `FREE` basis contributes zero, in both totals"* and that *"A `PER_CALL`
+basis **in the configured currency** contributes its `amount`"* — so `Decimal("0")` in
+that currency contributes zero and the two forms are spend-equivalent, while the
+zero-figure form is strictly more informative because it says which register the zero
+was asserted in. **The one configuration where `FREE` would genuinely be better is the
+currency mismatch**: §2's non-conversion clause treats a zero `EUR` figure under a
+`USD` spend currency as it treats an `UNKNOWN` one, so it consumes the allowance or
+meets §4's second ground, where a `FREE` basis would have contributed zero. That
+residual is real and is not the ground on which this section stands: reasons one and
+two hold in every configuration, the mismatch is an operator's own misconfiguration
+that §6 already refuses to paper over, and buying the mismatch case would cost the
+structural unreachability that makes ADR-0231 §9's prohibition self-enforcing. An
+operator declaring a zero figure states it in the currency they meter in, and §6's
+consequence is what tells them why.
 
 ### 4. Absence: `UNKNOWN`, `CONFIRM` on the cost ground, and that is the shipped default
 
@@ -239,10 +261,23 @@ in.
 > configuration is the reader who most needs the sentence, and ADR-0231 §5's
 > load-time-refusal style already puts each field's meaning in its description.
 
-**What this does and does not open.** After this ADR a deployment that has configured
-the figure has `fired == [_DISCLOSURE_FLOOR]` on a search, so `_only_the_disclosure_floor`
-admits the lookup and a covering standing grant yields an `ALLOW` naming the grant's
-`id` and its recomputed `subject_digest`. ADR-0231 §9's fifth clause is untouched and
+**What this does and does not open, stated with the condition it depends on.** After
+this ADR, a deployment that has configured the figure **and whose thresholds fire on
+neither `risk_level=LOW` nor `reversibility=REVERSIBLE`** has
+`fired == [_DISCLOSURE_FLOOR]` on a search, so `_only_the_disclosure_floor` admits the
+lookup and a covering standing grant yields an `ALLOW` naming the grant's `id` and its
+recomputed `subject_digest`. The shipped defaults are such a deployment —
+`confirm_at_risk` is `MEDIUM` and `confirm_at_reversibility` is `IRREVERSIBLE` — but a
+deployment that set `confirm_at_risk=LOW`, or `confirm_at_reversibility=REVERSIBLE`, has
+`_risk_rule` or `_reversibility_rule` in `fired` beside the disclosure floor, so the
+seam is consulted zero times and the search confirms whatever the figure says. **That
+is not a defect this ADR fixes and not one it may fix**: those are the user's own
+thresholds, ADR-0036 §1 makes them the user's, and ADR-0231 §5 already states the
+neighbouring case in terms — a deployment judging `MEDIUM` honest *"gets a mechanism
+that is never serviced under the shipped thresholds; that outcome is legible,
+fail-closed and costs nothing but the capability"*. This decision removes the one
+firing clause **no** configuration could reach; a threshold the user set is one they
+can unset. ADR-0231 §9's fifth clause is untouched and
 is the whole of what is left: **the one route to an `ALLOW` is still ADR-0193's
 standing recipient grant, established by a recorded act of the user**, and ADR-0193 §4
 still refuses any grant over a binding carrying `planned_with_external_content`. This
@@ -263,6 +298,14 @@ decision removes a second blocker; it creates no route.
 > *"No lane reports a figure for this kind without saying which of the two it is"*,
 > read one configuration fact further.
 
+> **Normative.** That obligation is **scoped to a population over which the pair did
+> not change**, because nothing retained anywhere records which configuration a given
+> turn ran under. A population spanning a change to either field is **not reportable
+> on this axis at all**: a lane splits it at the change or states no ground, and no
+> lane infers a ground for a turn, back-fills one, or reads the current configuration
+> as evidence about an earlier turn. The instant of such a change is the operator's own
+> fact and this system does not hold it.
+
 **Why a member would be the wrong instrument, argued against §13's own standard.**
 ADR-0231 §9 requires that *"the `SearchDisposition` member it is recorded under names
 the **stage** that produced it"*. Both grounds are produced by the same stage — the
@@ -277,6 +320,17 @@ a deployment carries no information the deployment does not already hold, and §
 argument — *"collapsing them would make the one field useless at exactly the moment
 someone reads it"* — cuts the other way here: adding a member that never varies is the
 dilution, not the fix.
+
+**The residual is named rather than argued away, because it is the one case a member
+would have covered.** A deployment that changes the pair part-way through a period has
+a population of `RULING_CONFIRM` records straddling two configurations and no retained
+fact separating them, which is why the clause above refuses the report rather than
+offering a reconstruction. What that costs is a report an operator can get by
+re-scoping the window around a change they themselves made and dated; what a member
+would cost is opening a closed fifteen-member enumeration, on every turn of every
+deployment, to carry a value that is constant except across an operator act. §9 records
+the trade so that a later ADR weighing #2112's sixteenth member weighs this one beside
+it rather than rediscovering it.
 
 > **Normative.** Whether ADR-0231 §13's enumeration should grow **at all** is issue
 > #2112's question and is deferred to it by name. This ADR neither answers it nor
@@ -311,35 +365,49 @@ a figure it has every right to declare.
 ### 7. What the implementing lane owes
 
 > **Normative.** **One lane**, briefed from this ADR's merged text and not before it
-> is Accepted and merged (golden rule 5). It touches `core/config.py`, `tools/`,
-> `app/composition.py` and `ai_assistant/testing/`, and it touches
-> `core/protocols.py` and `core/types.py` **not at all** — this decision adds no
-> Protocol, no type and no field to one, so nothing here is a contract change under
-> golden rule 5's own subject.
+> is Accepted and merged. It touches `core/config.py`, `tools/`, `app/composition.py`
+> and `ai_assistant/testing/`, and it touches `core/protocols.py` and `core/types.py`
+> **not at all**: no Protocol, no type, and no field added to one. **It is a
+> substantive contract change all the same** — two `core.config.Settings` fields are
+> *"a `core/` type crossing subsystem boundaries"* in ADR-0015 §5's terms — which is
+> why this ADR ships as its own PR and is ratified before the lane opens, and §12 is
+> where that route is stated. No lane reads the `core/protocols.py` sentence above as
+> licence to implement ahead of this ADR's merge.
 
-The lane's whole content:
+**Four obligations, one per file, each marked — because §3 of ADR-0089 makes the marked
+set the whole of what this ADR obliges, and a per-file requirement stated only in a
+bullet list would bind nothing.**
 
-- **`core/config.py`.** The two fields of §1 with the domain and refusals of §2,
-  reusing `_checked_spend_amount` at `floor="zero"` for the amount rather than
-  restating ADR-0194 §1's predicate a third time, and `world_spend_currency`'s own
-  shape check for the code. The both-or-neither refusal and the
-  registration-whole refusal as `model_validator(mode="after")` clauses, in
-  `_the_search_registration_is_whole_or_absent`'s shape and with messages that name
-  the field to set or unset.
-- **`tools/builtin.py`.** The two parameters on `build_web_search_integration`, the
-  per-registration declaration §1 requires, and the same-rules restatement §2 owes,
-  with the `Raises:` entry its docstring already carries for a bound.
-- **`app/composition.py`.** The two settings passed through to the builder, on the
-  one path that already passes the three bounds.
-- **`ai_assistant/testing/searching.py`.** The canonical fake's parity: `FakeWebSearcher`
-  takes the same pair, in the same domain, and builds its declaration the same way.
-  It is refused every state a deployment cannot be in — an amount with no currency, a
-  currency with no amount, a negative or uncountable amount, a malformed code, and a
-  `FREE` basis by there being no parameter that could ask for one — for the module's own
-  stated reason: a fake *"ruled on more leniently than the real thing would let a
-  consumer's policy test pass for a reason no deployment enjoys"*. A fake that could be
-  made **cheaper** to rule on than any deployment can be is exactly that failure, on the
-  one field this ADR moves.
+> **Normative.** **`core/config.py`** carries the two fields of §1 with the domain and
+> refusals of §2, reusing `_checked_spend_amount` at `floor="zero"` for the amount
+> rather than restating ADR-0194 §1's predicate a third time, and
+> `world_spend_currency`'s own shape check for the code. The both-or-neither refusal
+> and the registration-whole refusal are `model_validator(mode="after")` clauses in
+> `_the_search_registration_is_whole_or_absent`'s shape, and each message names the
+> field to set or to unset.
+
+> **Normative.** **`tools/builtin.py`** gives `build_web_search_integration` the two
+> keyword parameters, builds the per-registration declaration §1 requires, and states
+> §2's domain at that site with the `Raises:` entry its docstring already carries for a
+> bound.
+
+> **Normative.** **`app/composition.py` forwards both settings to the builder**, on the
+> one path that already passes the three bounds, and this is an obligation rather than
+> a note: a lane that landed the fields, the builder and every test above while the
+> composition root passed neither value would leave **every configured deployment at
+> `UNKNOWN`** with a green gate, which is precisely the failure the whole decision
+> exists to remove. §8's item 11 is what makes it fail instead.
+
+> **Normative.** **`ai_assistant/testing/searching.py` keeps the canonical fake at
+> parity.** `FakeWebSearcher` takes the same pair, in the same domain, and builds its
+> declaration the same way — it is the one site §1 admits beside the builder. It is
+> refused every state a deployment cannot be in: an amount with no currency, a currency
+> with no amount, a negative or uncountable amount, a malformed code, and a `FREE`
+> basis by there being no parameter that could ask for one. The module's own reason
+> governs — a fake *"ruled on more leniently than the real thing would let a consumer's
+> policy test pass for a reason no deployment enjoys"* — and a fake that could be made
+> **cheaper** to rule on than any deployment can be is exactly that failure, on the one
+> field this ADR moves.
 
 > **Normative.** The lane also lands ADR-0231 §18's item 1 **over the production
 > `ThresholdActionPolicy` and the production declaration**, which is the arm that ADR
@@ -358,7 +426,11 @@ The lane's whole content:
    `ThresholdActionPolicy(grants=…).decide` on a request carrying it, over a covering
    grant, returns an `ALLOW` whose `reason` names the standing grant and whose
    `authorised_by` is the grant's id. Asserted through the **production** policy and a
-   real `RecipientGrants`, which is ADR-0231 §18's item 1 made reachable.
+   real `RecipientGrants`, which is ADR-0231 §18's item 1 made reachable. The policy is
+   constructed at the **shipped** thresholds, and the test says so, because §4's
+   condition is that no threshold rule fires — a companion arm sets
+   `confirm_at_risk=LOW` and asserts the ruling is `CONFIRM` and `covering` is never
+   called, which is that condition asserted rather than assumed.
 2. **The absence keeps both floors, and the grant is not consulted.** The same wiring
    with neither field set: the declaration's `cost` is `UNKNOWN`, the ruling is
    `CONFIRM`, its reason names both grounds, and the `RecipientGrants` fake fails the
@@ -391,6 +463,19 @@ The lane's whole content:
     no covering grant are both recorded `RULING_CONFIRM`, and `SearchDisposition` has
     fifteen members. This is §5 asserted, and it fails a lane that reached for a
     sixteenth on the way past.
+11. **The composition root forwards both values, asserted end to end.** Over
+    `app/composition.py`'s own wiring, with `Settings` carrying the pair and a
+    connected account: the declaration the built `WebSearchIntegration` registers is
+    `PER_CALL` with that amount and that code. **Not** asserted over the builder called
+    directly, since that is what item 1 does and it is exactly the assertion a
+    composition root that dropped the pair would still pass. This is the arm §7's
+    third clause exists for.
+12. **A zero figure in a mismatched currency is refused at the gate, not at load.**
+    `web_search_cost_per_call = 0` with `EUR`, `world_spend_currency = "USD"`, a
+    ceiling set and no allowance: `Settings` loads, the policy rules `ALLOW` on a
+    covering grant, and the `SpendGate` refuses. This is §3's stated residual and §6's
+    consequence asserted, and it fails an implementation that coupled the two
+    currencies at load or silently converted between them.
 
 ### 9. Deferred, by name, each with what fires it
 
@@ -403,9 +488,17 @@ The lane's whole content:
   instance of ADR-0231 §5's clause. Fired by an ADR deciding that framing, or by a
   registered integration whose reachability actually turns on it.
 - **A `SearchDisposition` member distinguishing the cost ground.** §5's answer is no,
-  on §13's own standard. Fired by an ADR opening §13's enumeration — #2112 is the
-  live candidate — **together with** a reader who would act differently on the two,
+  on ADR-0231 §13's own standard. Fired by an ADR opening that enumeration — #2112 is
+  the live candidate — **together with** a reader who would act differently on the two,
   which §5 argues does not exist while the ground is a constant of the deployment.
+  **The one case that argument does not cover is named here so a later ADR weighs it
+  rather than rediscovering it**: a population of `RULING_CONFIRM` records straddling a
+  change to `web_search_cost_per_call` cannot be separated by ground from anything this
+  system retains, which is why §5's second clause refuses the report over such a
+  population instead of offering a reconstruction. That is the whole of what a member
+  would buy, and it is judged not worth opening a closed fifteen-member enumeration on
+  every turn of every deployment for. A later ADR that disagrees has the residual
+  stated, the cost stated, and #2112 to take it with.
 - **A per-tool or per-capability spend ceiling for the search.** ADR-0194 §1's last
   clause reserves it and ADR-0231 §15 sets none. ADR-0194 §8 states the trigger and this
   ADR does not touch it: *"Reopened by a decision that lands keyed per-user tool
@@ -548,16 +641,23 @@ This ADR is **marked** under ADR-0089: the block-quoted clauses are the whole of
 it obliges, and the prose beside them is read to determine what they mean and supplies
 no obligation of its own (§3).
 
-It adds no `core/protocols.py` Protocol, no `core/types.py` type and no field to one, so
-ADR-0015 §1's mechanical test for the architecture lens — *"A change touching
-`core/protocols.py` or `core/types.py`"* — does not reach it. It is put through **both**
-required reviews all the same, adversarial and architecture, green on one tree, on two
-grounds an author should not decide narrowly: it adds two `core.config.Settings` fields,
-which is a `core` surface every subsystem reads and which ADR-0015 §5's *"a `core/` type
-crossing subsystem boundaries"* reaches on any honest reading, and it changes the
-`ToolDefinition` a `PermissionDecision` is recorded against, which is the one field of
-that declaration standing between a granted search and an `ALLOW`. It is drafted, reviewed and revised as
-`Proposed`, and its status is flipped only once both have returned clean, by the
+**It is a substantive contract ADR under ADR-0015 §5** — its two
+`core.config.Settings` fields are *"a `core/` type crossing subsystem boundaries"*, read
+by `app/`, `tools/` and every other consumer of `Settings` — so it *"ships as its own
+PR, ratified before the implementation PR that depends on it"*, which is what this PR
+is and why §7's lane does not open until it merges. §7's first clause states the same
+classification, and nothing in this ADR reads the absence of a `core/protocols.py` or
+`core/types.py` change as putting it outside that route.
+
+ADR-0015 §1's **mechanical** test for the architecture lens — *"A change touching
+`core/protocols.py` or `core/types.py`"* — does not reach it, and it is put through
+**both** required reviews all the same, adversarial and architecture, green on one
+tree. Two grounds, neither of which an author should decide narrowly for themselves:
+the `Settings` surface above, and the fact that this decision changes the
+`ToolDefinition` a `PermissionDecision` is recorded against — the one field of that
+declaration standing between a granted search and an `ALLOW`.
+
+It is drafted, reviewed and revised as `Proposed`, and its status is flipped only once both have returned clean, by the
 one-line `Proposed` → `Accepted` flip ADR-0165 exempts. `CONTRIBUTING.md` →
 "Finishing an ADR PR" is the sequence and is pointed at rather than re-argued. Nothing
 implements against §§1–8 until this has merged (ADR-0015 §5, golden rule 5).
