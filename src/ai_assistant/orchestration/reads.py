@@ -330,9 +330,18 @@ class SearchDisposition(StrEnum):
     grant, which on ``origin/main`` today is every deployment: the query is Tier 1
     leaving the device, so ``ThresholdActionPolicy``'s disclosure floor fires and
     ADR-0148 §3's route (b) is the only route to an ``ALLOW`` (§9). **It resolves
-    in no turn** — no lane resumes it, offers it to an interface, or treats it as
-    outstanding work — and the decision it was recorded under carries no
-    ``execution_id`` and no ``step_id``, so no recovery query can reach it."""
+    in no turn**: no lane resumes it and none treats it as outstanding work, and the
+    decision it was recorded under carries no ``execution_id`` and no ``step_id``
+    (§6), so no recovery query and no park can reach it.
+
+    **What ADR-0235 §3 adds to that, and what it leaves alone.** That section — the
+    surface ADR-0231 §19 deferred, ratified since — makes exactly this row the subject
+    of ``establish_recipient_grant``: a recorded ``CONFIRM`` no park holds, with both
+    of those fields unset, offered to the user **as history** so they may make the
+    recipients standing. So a lane may now *list* one; what stays true is every clause
+    ADR-0231 §9 states about the search itself — the turn is over, no lane resumes it,
+    it is not outstanding work, and answering it establishes a grant rather than
+    performing the search it was about."""
 
     RULING_DENY = "ruling_deny"
     """The recorded ruling was ``DENY`` (§9) — a policy the operator set."""
@@ -748,8 +757,11 @@ class SearchServicer:
         ADR-0226 §5's clause binds unchanged, and a recorded ``CONFIRM`` here
         resolves in no turn: the decision carries no ``execution_id`` and no
         ``step_id`` (§6), so ``AuditTrail.pending_confirmation``'s
-        ``(execution_id, step_id)`` query cannot reach it and no lane can offer it
-        to an interface.
+        ``(execution_id, step_id)`` query cannot reach it, no park holds it, and
+        nothing about this turn waits on it. **ADR-0235 §3 is where such a row is
+        offered to the user afterwards** — as *history*, for the establishing act,
+        which is the surface ADR-0231 §19 deferred by name — and that changes nothing
+        here: the servicing asked nobody, parked nothing and is over.
 
         **The send is not made through ``ToolInvoker.invoke``** (§6). Taking the
         invoker's route would require putting the search in a ``ToolRegistry``, and
@@ -832,10 +844,20 @@ class SearchServicer:
         if outcome is not PermissionOutcome.ALLOW:
             # §9: the one route to an `ALLOW` is ADR-0193's standing recipient
             # grant over the provider's canonical destination set, established by a
-            # recorded act of the user. Until a surface offers that act the store
-            # is empty, `ThresholdActionPolicy`'s disclosure floor fires on a
-            # `discloses` that is non-empty because the query is Tier 1 leaving the
-            # device, and every search is this branch.
+            # recorded act of the user — the act ADR-0235 decides and no lane has
+            # yet implemented, so the store is empty and
+            # `ThresholdActionPolicy`'s disclosure floor fires on a `discloses`
+            # that is non-empty because the query is Tier 1 leaving the device.
+            #
+            # **And a second, independent floor fires with it today** (issue
+            # #2111): the search declaration carries `cost=UNKNOWN`, which
+            # `ThresholdActionPolicy` treats as its own non-configurable `CONFIRM`
+            # and which no grant discharges — §5 admits an "operator's configured
+            # per-call figure" but adds no `Settings` field for one and
+            # `build_web_search_integration` takes no parameter for one. So every
+            # search is this branch on `origin/main` for **two** reasons, which
+            # is what §13's disposition is read against and why closing either
+            # alone changes nothing.
             return _Searched(
                 (),
                 SearchDisposition.RULING_DENY

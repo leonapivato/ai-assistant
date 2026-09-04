@@ -1230,8 +1230,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # call away from authorising the send it is ruling on, and the
             # annotation on its constructor is what removes the capability.
             # Wiring it here is what makes ADR-0148 §3's route (b) reachable at
-            # all; until a surface offers the establishing act (§13) the store
-            # is empty, so every ruling is the one it was before.
+            # all; until the establishing act ADR-0235 decides is *implemented*
+            # the store is empty, so every ruling is the one it was before.
             grants=recipient_grants,
         )
 
