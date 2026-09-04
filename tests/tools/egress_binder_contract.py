@@ -300,9 +300,9 @@ class EgressBinderContract(ABC):
         """A subject holding **no** canonicaliser for any protocol.
 
         ADR-0152 §13 obliges a case for "a ``DestinationProtocol`` the seam holds no
-        canonicaliser for", and ADR-0150 §3 admits exactly one protocol today — so
-        the case is reachable only against a subject whose canonicaliser set has
-        been **narrowed**. Narrowing is not the second canonicaliser ADR-0148 §2's
+        canonicaliser for", and every member ADR-0150 §3 admits has one — so the
+        case is reachable only against a subject whose canonicaliser set has been
+        **narrowed**. Narrowing is not the second canonicaliser ADR-0148 §2's
         sixth clause forbids: nothing here supplies an alternative rule for a
         protocol the seam already canonicalises.
         """

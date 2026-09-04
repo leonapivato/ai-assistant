@@ -1024,6 +1024,12 @@ def test_every_integer_setting_is_discovered() -> None:
         # deployment that looks configured and silently never searches, with §13's
         # audit field reporting a composer fault for every turn.
         "search_query_max_chars",
+        # ADR-0231 §5's bound on a web-search response, acknowledged here for the
+        # same reason and with the sharpest ``bool`` argument of the byte ceilings:
+        # ``search_max_response_bytes=True`` is a one-byte response bound, so every
+        # response a provider can send is abandoned ``RESPONSE_TOO_LARGE`` after one
+        # byte — a deployment that looks configured and never completes a search.
+        "search_max_response_bytes",
         # ADR-0159 §3's spend bound, acknowledged here with the same `bool`
         # argument the caps above carry: `reconciler_max_conflicts=True` is a
         # bound of one, which asks the model about the best-ranked conflict alone

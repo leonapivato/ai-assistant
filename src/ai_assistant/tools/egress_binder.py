@@ -110,6 +110,7 @@ if TYPE_CHECKING:
 #: protocol absent from the set below rather than passing it through.
 _CANONICALISERS: Final[Mapping[DestinationProtocol, SeamProtocol]] = {
     DestinationProtocol.SMTP: SeamProtocol.SMTP,
+    DestinationProtocol.HTTPS: SeamProtocol.HTTPS,
 }
 
 _PARAMETERS: Final = TypeAdapter[Mapping[str, "FrozenJson"]](FrozenJsonMapping)
@@ -419,7 +420,8 @@ class EgressBindingSeam:
                 unchanged — nothing supplies a second canonicaliser for a protocol
                 the seam already canonicalises. Narrowing is what makes ADR-0152
                 §3's "a protocol this seam holds no canonicaliser for" refusal
-                reachable in a tree that defines one protocol, which ADR-0152 §13
+                reachable in a tree that canonicalises every protocol it defines,
+                which ADR-0152 §13
                 obliges this lane to ship a case for.
 
         """

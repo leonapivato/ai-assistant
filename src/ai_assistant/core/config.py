@@ -3565,9 +3565,10 @@ class Settings(BaseSettings):
     # — because a prefix of a query is a different question, and one no reader of
     # the outcome could tell from the question that was asked.
     #
-    # ADR-0231 §5 adds three further fields for the searcher and its transport;
-    # they land with the lanes that enforce them, since a bound nothing reads is a
-    # figure an operator can set and watch do nothing.
+    # ADR-0231 §5 adds two further fields for the searcher itself —
+    # `search_max_results` and `search_max_result_chars`; they land with the lane
+    # that enforces them, since a bound nothing reads is a figure an operator can
+    # set and watch do nothing.
     search_query_max_chars: _IntegerSetting = Field(
         default=256,
         ge=1,
@@ -3576,6 +3577,30 @@ class Settings(BaseSettings):
             "The most **Unicode code points** a composed web-search query may carry "
             "(ADR-0231 §3, §5). At least 1. Enforced by the composer, never by the "
             "model: a composition beyond it is refused `TOO_LONG` and never truncated."
+        ),
+    )
+    # **The transport's bound, and it is a different quantity from the two above.**
+    # ADR-0231 §5 counts it "over the bytes taken off the channel" — the whole
+    # response, its status line and headers included — and enforces it "while the
+    # response is read and before any part of it is parsed". So it bounds what the
+    # exchange may *buy* from a far end, where `search_max_result_chars` bounds what
+    # reaches a prompt; neither is derived from the other and nothing computes one
+    # from the other.
+    #
+    # **A response over it is abandoned and refused, never truncated**: the read
+    # stops as soon as one byte past the bound has been taken, the channel is
+    # closed, nothing is parsed and no record is minted. A response exactly at it is
+    # read whole. An implementation that buffered the whole response and then
+    # measured it would satisfy neither half.
+    search_max_response_bytes: _IntegerSetting = Field(
+        default=1024 * 1024,
+        ge=1,
+        lt=2**63,
+        description=(
+            "The most bytes one web-search response may take off the channel — its "
+            "status line and headers included — enforced on the read itself and "
+            "before any part of it is parsed (ADR-0231 §5). At least 1. A response "
+            "beyond it is **abandoned and refused**, never truncated."
         ),
     )
 

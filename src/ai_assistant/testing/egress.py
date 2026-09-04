@@ -323,7 +323,7 @@ class FakeEgressBinder:
                 entry, so ADR-0148 §2's one-canonicaliser-per-protocol clause holds
                 — and narrowing is what makes ADR-0152 §3's "a protocol this seam
                 holds no canonicaliser for" refusal reachable in a tree that
-                defines one protocol.
+                canonicalises every protocol it defines.
         """
         self._definitions: dict[str, ToolDefinition] = {}
         self._registrations: dict[str, _Registration] = {}
