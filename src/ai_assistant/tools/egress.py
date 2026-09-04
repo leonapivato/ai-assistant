@@ -2658,16 +2658,39 @@ def _status_of(line: bytes) -> int:
 
     Raises:
         MalformedHttpResponseError: If the line is not a status line this exchange
-            reads. The message names the defect and never the line: a far end's
-            octets are a third party's text, and a refusal reaches a log.
+            reads — no version it knows, no space after the status code, no
+            three-digit code, a code outside every class, or a reason phrase
+            carrying an octet the grammar does not admit. The message names the
+            defect and never the line: a far end's octets are a third party's
+            text, and a refusal reaches a log.
     """
-    version, separator, rest = line.partition(b" ")
-    code = rest.partition(b" ")[0]
-    if not separator or version not in _HTTP_VERSIONS:
+    version, versioned, rest = line.partition(b" ")
+    if not versioned or version not in _HTTP_VERSIONS:
         msg = "the far end's first line names no HTTP version this seam reads"
+        raise MalformedHttpResponseError(msg)
+    code, coded, reason = rest.partition(b" ")
+    if not coded:
+        # RFC 9112 §4's grammar is ``HTTP-version SP status-code SP
+        # [reason-phrase]``: the second space is required and the phrase after it
+        # is not. Reading a line without it would be the leniency this module
+        # refuses everywhere else, and it is the one shape a status-line parser
+        # written as "take the first field after the version" admits without
+        # noticing (adversarial round 2).
+        msg = (
+            "the far end's status line puts no space after its status code, so it "
+            "is not a status line (RFC 9112 §4)"
+        )
         raise MalformedHttpResponseError(msg)
     if len(code) != len(b"000") or not code.isascii() or not code.isdigit():
         msg = "the far end's status line carries no three-digit status code"
+        raise MalformedHttpResponseError(msg)
+    if not reason.isascii() or any(chr(octet) not in _FIELD_VALUE_CHARACTERS for octet in reason):
+        # An **empty** phrase is admitted and only its octets are checked: RFC 9112
+        # §4 writes ``1*(...)`` but ``HTTP/1.1 200 \r\n`` is what several ordinary
+        # front ends send, and refusing it would be refusing a far end nobody would
+        # call malformed. A control octet in it is a different thing, and it is
+        # third-party text on its way to a log.
+        msg = "the far end's reason phrase carries an octet RFC 9112 §4 does not admit"
         raise MalformedHttpResponseError(msg)
     status = int(code)
     if not _MIN_STATUS <= status <= _MAX_STATUS:
@@ -2719,8 +2742,9 @@ def _field_of(line: bytes) -> tuple[str, str]:
         horizontal tab removed as RFC 9110 §5.5 directs.
 
     Raises:
-        MalformedHttpResponseError: If the line is not a field, or carries an
-            octet outside ASCII. Obsolete line folding — a field continued on a
+        MalformedHttpResponseError: If the line is not a field, carries an octet
+            outside ASCII, or carries a control octet in its value. Obsolete line
+            folding — a field continued on a
             line beginning with space or tab — is refused with them: RFC 9112 §5
             deprecates it, and reading it is the leniency response splitting is
             built out of. The message names the defect and never the line: a far
@@ -2737,7 +2761,19 @@ def _field_of(line: bytes) -> tuple[str, str]:
     ):
         msg = "the far end sent a line that is not a header field"
         raise MalformedHttpResponseError(msg)
-    return name.lower(), value.strip(" \t")
+    content = value.strip(" \t")
+    if any(character not in _FIELD_VALUE_CHARACTERS for character in content):
+        # **The same set the request side is written under**, and the asymmetry is
+        # what made this worth closing: :meth:`HttpsExchange._check_field` refuses a
+        # control octet in a value this seam *writes*, and a value it *reads* went
+        # into :attr:`HttpsResponse.headers` unchecked — third-party control data
+        # handed on to whatever reads a field next (adversarial round 2). RFC 9110
+        # §5.5 admits visible ASCII, space and horizontal tab in field content and
+        # nothing else; ``CR`` and ``LF`` cannot arrive here at all, since the line
+        # was framed on them.
+        msg = "the far end sent a header field whose value carries a control octet"
+        raise MalformedHttpResponseError(msg)
+    return name.lower(), content
 
 
 async def _body_of(reader: _BoundedReader, headers: tuple[tuple[str, str], ...]) -> bytes:
