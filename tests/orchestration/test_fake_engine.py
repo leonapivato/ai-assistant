@@ -61,9 +61,10 @@ from assistant_engine_contract import (
     spoken_step_park_outcome,
 )
 
-from ai_assistant.core.errors import OversizedValueError
+from ai_assistant.core.errors import DuplicateDecisionError, OversizedValueError
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
+    ActionRequest,
     AnswerKind,
     Attestation,
     BeliefBand,
@@ -71,19 +72,30 @@ from ai_assistant.core.types import (
     BoundAccount,
     ContinuationToken,
     ConversationSummary,
+    CostBasis,
+    DataTier,
     DestinationProtocol,
     DiscloserProvenance,
+    Disposition,
     EgressBinding,
     EgressDestination,
     EgressSpan,
     GrantScope,
+    Idempotency,
     MemoryKind,
+    PermissionDecision,
+    PermissionOutcome,
+    PermissionRuling,
     Placement,
     PlacementReach,
     PlacementSetter,
     QuestionState,
+    Reversibility,
+    RiskLevel,
     RoutableOperation,
     SpanCoverage,
+    ToolCost,
+    ToolDefinition,
     TurnOutcome,
     UtcInstant,
 )
@@ -133,6 +145,31 @@ def _binding() -> EgressBinding:
         planned_with_external_content=False,
         coverage=SpanCoverage.NOT_COVERED,
     )
+
+
+#: The instant every recipient-grant case here is arranged at, matching the fake's
+#: own default :attr:`recipient_grant_clock` so nothing has to move it.
+_RECIPIENT_AT = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+
+
+def _transmitting_tool() -> ToolDefinition:
+    """A declaration a recorded egress ``CONFIRM`` can be about."""
+    return ToolDefinition(
+        id="send_email",
+        capability="send_email",
+        description="Send an email.",
+        risk_level=RiskLevel.LOW,
+        reversibility=Reversibility.IRREVERSIBLE,
+        side_effecting=True,
+        reads=(),
+        writes=(),
+        discloses=(DataTier.PERSONAL,),
+        cost=ToolCost(basis=CostBasis.FREE),
+        idempotency=Idempotency.NONE,
+    )
+
+
+_TRANSMITTING_TOOL = _transmitting_tool()
 
 
 class TestFakeAssistantEngineContract(AssistantEngineContract):
@@ -1172,3 +1209,65 @@ async def test_seeding_over_a_held_id_replaces_its_placement_rather_than_inherit
     assert lifted is not None
     assert lifted.reach is PlacementReach.ANYONE
     assert lifted.set_by is PlacementSetter.OWNER_ACT
+
+
+# --- ADR-0235 §2, ADR-0193 §2: the fake records before it settles ------------
+
+
+async def test_a_trail_that_refuses_the_answer_leaves_the_park_answerable() -> None:
+    """The order ADR-0193 §2 fixes, held on the canonical fake (ADR-0235 §2).
+
+    The answer is recorded **before** the park is evicted, which is what the
+    concrete engine does — its runner records the resolving decision inside the
+    critical section that then replaces the park with its settled record. A fake
+    that settled first would, on a trail refusing the write, hand back a token that
+    **restates an execution** no recorded answer authorised: a state no conforming
+    hub can be in, and precisely the one a consumer's own retry logic would be
+    written against.
+
+    Arranged by seeding the id the fake mints for the answer, so ``record`` refuses
+    it as a duplicate — a refusal the operation cannot have caused, which is the
+    shape that separates "the write failed" from "the act was refused".
+    """
+    engine = FakeAssistantEngine()
+    binding = _binding()
+    confirmed = PermissionDecision.from_request(
+        ActionRequest(
+            tool=_TRANSMITTING_TOOL,
+            parameters={"to": "Alice@Example.ORG", "body": "hello"},
+            egress_binding=binding,
+        ),
+        PermissionRuling(outcome=PermissionOutcome.CONFIRM, reason="it discloses off-device"),
+        id="d-confirm",
+        decided_at=_RECIPIENT_AT,
+    )
+    await engine.trail.record(confirmed)
+    engine.hold_confirmation_decision("park-1", confirmed)
+    parked = engine.park("park-1", egress=binding)
+    await engine.trail.record(
+        confirmed.model_copy(
+            update={
+                "id": "decision-park-1-answer",
+                "ruling": PermissionRuling(outcome=PermissionOutcome.DENY, reason="a squatter"),
+                "decided_at": _RECIPIENT_AT,
+                "expires_at": None,
+            }
+        )
+    )
+
+    with pytest.raises(DuplicateDecisionError):
+        await engine.resume(
+            parked.token,
+            approved=True,
+            timeout=timedelta(seconds=30),
+            remember_recipients_until=_RECIPIENT_AT + timedelta(days=1),
+        )
+
+    assert [held.token.handle for held in await engine.pending_confirmations()] == ["park-1"]
+    assert await engine.recipient_grants.export() == []
+
+    resumed = await engine.resume(parked.token, approved=True, timeout=timedelta(seconds=30))
+
+    assert resumed.step is not None
+    assert resumed.step.disposition is Disposition.EXECUTED
+    assert resumed.recipient_grant is None

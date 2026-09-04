@@ -144,6 +144,7 @@ from ai_assistant.service import configuration
 from ai_assistant.service.configuration import ConfigurationStamp
 from ai_assistant.testing import (
     FakeActionPolicy,
+    FakeAssistantEngine,
     FakeAuditTrail,
     FakeConnectionProvisioner,
     FakeContextProvider,
@@ -931,6 +932,37 @@ async def _runner(now: Clock) -> None:
     ).run(state, "s1", timeout=timedelta(seconds=30), origin=NOTHING_EXTERNAL)
 
 
+async def _recipient_grant_operations(now: Clock) -> None:
+    """The operations read the clock to judge a confirmation's lifetime (ADR-0235 §3).
+
+    Driven through the listing, which is the cheapest of the three reads and the one
+    a client reaches first; the other two are pinned beside the operations
+    themselves. ``grantable_decisions`` reads the clock **once** for the whole
+    window, so the reading happens whether or not a row carries an expiry.
+    """
+    await RecipientGrantOperations(
+        store=FakeRecipientGrantStore(),
+        trail=FakeAuditTrail(),
+        policy=FakeActionPolicy(),
+        id_factory=lambda: "g-1",
+        clock=now,
+    ).grantable_decisions(limit=1)
+
+
+async def _fake_assistant_engine(now: Clock) -> None:
+    """The canonical fake reads a clock of its own for the establishing act.
+
+    **Guarded at the read rather than at construction**, which is what makes this
+    seam's ``owner`` a run-time expression at all: ``recipient_grant_clock`` is a
+    public lever a test replaces, so a wrapper installed in ``__init__`` would be
+    discarded by the next assignment. The seam is driven through the promoted
+    listing, as the concrete one above is.
+    """
+    engine = FakeAssistantEngine()
+    engine.recipient_grant_clock = now
+    await engine.grantable_decisions(limit=1)
+
+
 async def _store_health(now: Clock) -> None:
     """The report stamps the instant it was taken; synchronous, as the reader is."""
     with tempfile.TemporaryDirectory() as directory:
@@ -1021,6 +1053,18 @@ SEAMS = [
     Seam("SqliteTranscriptArchive", _sqlite_transcript_archive, TranscriptArchiveError),
     Seam("StepExecutor", _executor, PlanningError),
     Seam("StepRunner", _runner, PlanningError),
+    # ADR-0235 §3's three clock reads — the listing's one-per-window instant, the
+    # answer's stamp and the revoking record's — behind one guard at the store, and
+    # translated to `orchestration`'s own error for `StepRunner`'s reason: ADR-0026
+    # §4 gives the failure to the *stage*, because `core/errors.py` defines none for
+    # this package.
+    Seam("RecipientGrantOperations", _recipient_grant_operations, PlanningError),
+    # The canonical fake's own reading of the same act, guarded at the **read**
+    # because `recipient_grant_clock` is a public lever a consumer's test replaces —
+    # so a wrap at construction would be discarded by the next assignment. It
+    # translates as the concrete seam does, because a consumer's test against a
+    # non-conforming clock must not pass here and fail against a hub.
+    Seam("FakeAssistantEngine", _fake_assistant_engine, PlanningError),
     Seam("StoreHealthReader", _store_health, ClockReadingError),
     Seam("UpcomingEventStage", _upcoming, ClockReadingError),
 ]

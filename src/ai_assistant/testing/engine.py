@@ -39,6 +39,7 @@ from datetime import UTC, datetime, timedelta
 from itertools import count
 from typing import TYPE_CHECKING, Final, assert_never, cast
 
+from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
     GrantError,
     InvalidGrantError,
@@ -922,9 +923,18 @@ class FakeAssistantEngine:
         # §2), so the park survives them and the same token answers it again without
         # the argument.
         establishing_at: datetime | None = None
+        answered: PermissionDecision | None = None
         if until is not None and approved:
             self._check_establishable(token.handle)
             establishing_at = self._establishing_instant(until)
+            # **The answer is recorded before the park is evicted**, which is the
+            # order the concrete engine has and the one ADR-0193 §2 fixes: the
+            # runner records the resolving decision and only then does the engine
+            # replace the park with its settled record. A fake that settled first
+            # would, on a trail that refused the write, leave a token restating an
+            # execution no answer authorised — a state no conforming hub can be in,
+            # and the one a consumer's own retry logic would be written against.
+            answered = await self._record_the_answer(token.handle, at=establishing_at)
         confirmation = self.parked.pop(token.handle)
         # **A denial is a result, not an exception** (ADR-0042 §4): the adapter
         # conveys consent, the policy rules on it, and the engine records and
@@ -974,9 +984,8 @@ class FakeAssistantEngine:
         )
         recipient_grant = await self._establish_recipients(
             token.handle,
-            approved=approved,
             remember_recipients_until=until,
-            establishing_at=establishing_at,
+            answer=answered,
         )
         # ``turn`` is ``None`` here because this engine parks nothing from a live
         # turn — the shape a **recovered** park produces after a restart, which
@@ -1010,6 +1019,31 @@ class FakeAssistantEngine:
             decision: The recorded ``CONFIRM``, as the trail holds it.
         """
         self._parked_decisions[handle] = decision
+
+    def _recipient_now(self) -> datetime:
+        """The guarded reading of :attr:`recipient_grant_clock` (ADR-0026 §2, §4).
+
+        **Guarded at the read and not at construction, which is this attribute's
+        own shape rather than an exception to the rule.**
+        :func:`~ai_assistant.core.clock.checked_clock` says to wrap "where the clock
+        is stored", and on this class the clock is stored where a *test* replaces it
+        — it is a public lever, so a wrapper installed in ``__init__`` would be
+        thrown away by the next assignment and the guard would be there or not
+        depending on whether a case used the lever.
+
+        The translation is :meth:`StepRunner._now`'s, so the fake refuses what the
+        concrete engine refuses with the type it refuses it with: a consumer's test
+        against a non-conforming clock must not pass here and fail against a hub.
+
+        Raises:
+            PlanningError: If the reading is not a conforming one — naive,
+                indeterminate, or outside the localizable range.
+        """
+        try:
+            return checked_clock(self.recipient_grant_clock, owner="FakeAssistantEngine")()
+        except ClockReadingError as exc:
+            msg = f"the recipient-grant clock returned a non-conforming reading: {exc}"
+            raise PlanningError(msg) from exc
 
     def _check_establishable(self, handle: str) -> None:
         """Refuse an establishing act on a park it may not ride (ADR-0235 §2).
@@ -1052,7 +1086,7 @@ class FakeAssistantEngine:
             UngrantableActError: If the chosen instant is at or before that reading.
                 The message names the instant it was compared against.
         """
-        decided_at = self.recipient_grant_clock()
+        decided_at = self._recipient_now()
         if remember_recipients_until <= decided_at:
             msg = (
                 f"a standing recipient grant expires strictly after the answer that "
@@ -1063,28 +1097,19 @@ class FakeAssistantEngine:
             raise UngrantableActError(msg)
         return decided_at
 
-    async def _establish_recipients(
-        self,
-        handle: str,
-        *,
-        approved: bool,
-        remember_recipients_until: datetime | None,
-        establishing_at: datetime | None,
-    ) -> RecipientGrantOutcome | None:
-        """Perform the act this ``resume`` collected, and say what became of it.
+    async def _record_the_answer(self, handle: str, *, at: datetime) -> PermissionDecision:
+        """Author and record the resolving ``ALLOW`` this act rides (ADR-0193 §2).
 
-        Reached **after** the answer is settled, so nothing here raises and
-        everything here is reported on the carrier (ADR-0235 §6). The three refusing
-        members are read from the **type** of the refusal ``record`` raised and from
-        nothing else — no message is parsed, no count taken, and no listing read
-        afterwards (ADR-0235 §11).
+        Called **before** the park is evicted, so a trail that refuses the write
+        leaves the park exactly where it was and the token still answerable — the
+        order the concrete engine has, where the runner records inside the critical
+        section that later replaces the park with its settled record.
+
+        Raises:
+            AuditError: If the trail refuses the answer. It propagates, because a
+                trail that will not hold the record of a decision is not a state
+                this engine may report an outcome over.
         """
-        if remember_recipients_until is None:
-            return None
-        if not approved or establishing_at is None:
-            # The one member that never reaches the store (ADR-0235 §4): the answer
-            # was recorded as a ``DENY`` and no grant could be established from it.
-            return RecipientGrantOutcome(not_established=RecipientGrantNotEstablished.DECLINED)
         confirmed = self._parked_decisions[handle]
         answer = PermissionDecision.from_confirmation(
             confirmed,
@@ -1093,11 +1118,38 @@ class FakeAssistantEngine:
                 reason="the fake engine records the answer the user gave",
             ),
             id=f"decision-{handle}-answer",
-            decided_at=establishing_at,
+            decided_at=at,
         )
         await self.trail.record(answer)
+        return answer
+
+    async def _establish_recipients(
+        self,
+        handle: str,
+        *,
+        remember_recipients_until: datetime | None,
+        answer: PermissionDecision | None,
+    ) -> RecipientGrantOutcome | None:
+        """Say what became of the act this ``resume`` collected.
+
+        Reached **after** the step has executed and settled, so nothing here raises
+        and everything here is reported on the carrier (ADR-0235 §6). The three
+        refusing members are read from the **type** of the refusal ``record`` raised
+        and from nothing else — no message is parsed, no count taken, and no listing
+        read afterwards (ADR-0235 §11).
+
+        ``answer`` is ``None`` on the one path that collected the act and reached no
+        approving answer: ``approved=False``, where the ``DENY`` is recorded and the
+        store is never reached (ADR-0235 §2, §4).
+        """
+        if remember_recipients_until is None:
+            return None
+        if answer is None:
+            # The one member that never reaches the store (ADR-0235 §4): the answer
+            # was recorded as a ``DENY`` and no grant could be established from it.
+            return RecipientGrantOutcome(not_established=RecipientGrantNotEstablished.DECLINED)
         grant = RecipientGrant.established_from(
-            confirmed,
+            self._parked_decisions[handle],
             answer,
             id=f"recipient-grant-{handle}",
             expires_at=remember_recipients_until,
@@ -2043,7 +2095,7 @@ class FakeAssistantEngine:
         check_arguments("grantable_decisions", max_bytes=self._max_payload_bytes, limit=limit)
         self.calls.append(("grantable_decisions", {"limit": limit}))
         rows = await self.trail.recent(limit=limit)
-        now = self.recipient_grant_clock()
+        now = self._recipient_now()
         resolved = {row.resolves for row in rows if row.resolves is not None}
         complete = len(rows) < limit
         oldest = rows[-1].decided_at if rows else None
@@ -2080,7 +2132,7 @@ class FakeAssistantEngine:
             ("establish_recipient_grant", {"decision_id": named, "expires_at": until})
         )
         confirmed = await self._offerable_decision(named)
-        decided_at = self.recipient_grant_clock()
+        decided_at = self._recipient_now()
         if until <= decided_at:
             msg = (
                 f"a standing recipient grant expires strictly after the answer that "
@@ -2151,7 +2203,7 @@ class FakeAssistantEngine:
             tool=outstanding.tool,
             account=outstanding.account,
             destinations=outstanding.destinations,
-            decided_at=self.recipient_grant_clock(),
+            decided_at=self._recipient_now(),
             expires_at=outstanding.expires_at,
             revokes=outstanding.id,
         )
@@ -2206,7 +2258,7 @@ class FakeAssistantEngine:
                 f"confirmation has one answer, so this one is spent (ADR-0044 §2b, ADR-0235 §3)"
             )
             raise UngrantableActError(msg)
-        now = self.recipient_grant_clock()
+        now = self._recipient_now()
         if confirmed.expires_at is not None and confirmed.expires_at <= now:
             msg = (
                 f"decision {decision_id!r} stopped being answerable at "

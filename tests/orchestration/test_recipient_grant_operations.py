@@ -27,6 +27,7 @@ from ai_assistant.core.errors import (
     InvalidRecipientGrantError,
     InvalidResolutionError,
     PermissionDeniedError,
+    PlanningError,
     RecipientGrantError,
     UngrantableActError,
 )
@@ -60,7 +61,7 @@ from ai_assistant.testing.recipient_grants import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Awaitable, Callable, Iterator
 
     from ai_assistant.core.protocols import ActionPolicy, AuditTrail, RecipientGrantStore
 
@@ -1113,3 +1114,56 @@ async def test_the_grants_destination_set_is_the_bindings_own_derived_one() -> N
 
     assert grant.destinations == binding(ALICE).canonical_destination_set
     assert member(ALICE) in grant.destinations
+
+
+# --- ADR-0026 §2, §4: the clock is guarded where it is stored ----------------
+
+
+def _naive_clock() -> datetime:
+    """A reading with its offset dropped, which is what ``checked_clock`` refuses."""
+    return AT.replace(tzinfo=None)
+
+
+@pytest.mark.parametrize(
+    "drive",
+    [
+        pytest.param(
+            lambda operations: operations.grantable_decisions(limit=50), id="grantable_decisions"
+        ),
+        pytest.param(
+            lambda operations: operations.establish_recipient_grant("d-confirm", expires_at=_UNTIL),
+            id="establish_recipient_grant",
+        ),
+        pytest.param(lambda operations: operations.revoke_recipient_grant("g-1"), id="revoke"),
+    ],
+)
+async def test_a_non_conforming_clock_reading_is_the_stages_own_error(
+    drive: Callable[[RecipientGrantOperations], Awaitable[object]],
+) -> None:
+    """ADR-0026 §2's guard and §4's translation, on all three reading paths.
+
+    §2 puts the wrap **where the clock is stored** — "a call site cannot forget" —
+    and §4 gives the failure to the *stage*, because ``core/errors.py`` defines no
+    error for `orchestration`. Without both, a naive reading reaches an ordering
+    comparison against an aware ``expires_at`` and raises a bare ``TypeError``, and a
+    naive reading with nothing to compare against is used silently — an act stamped
+    at an instant nobody can locate.
+
+    Parameterised over the three operations that read a clock rather than over one,
+    because §2's whole point is that the guard is not a thing a call site remembers:
+    a case covering only the listing would pass an implementation that wrapped one
+    read and left the other two bare.
+    """
+    granted = recipient_grant(member(ALICE), grant_id="g-1")
+    store = FakeRecipientGrantStore(now=lambda: _ANSWERED_AT)
+    await store.record(granted)
+    operations = RecipientGrantOperations(
+        store=store,
+        trail=await _seeded(confirmation(binding(ALICE))),
+        policy=FakeActionPolicy(),
+        id_factory=lambda: next(_MINTED),
+        clock=_naive_clock,
+    )
+
+    with pytest.raises(PlanningError, match="non-conforming reading"):
+        await drive(operations)
