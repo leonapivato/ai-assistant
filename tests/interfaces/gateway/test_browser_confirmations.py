@@ -640,6 +640,12 @@ _FAULTS: dict[str, Callable[[dict[str, Any]], None]] = {
     "an omitted coverage": lambda view: view["egress"].pop("coverage"),
     "an unknown coverage": lambda view: view["egress"].update({"coverage": "probably_fine"}),
     "a numeric coverage": lambda view: view["egress"].update({"coverage": 1}),
+    # A one-element array of a *legitimate* state, which a property key coerces to that
+    # state's own name: the one shape where the vocabulary lookup answers yes about a
+    # body carrying no ``SpanCoverage`` member (adversarial review, round 9).
+    "a coverage that is a list": lambda view: view["egress"].update(
+        {"coverage": [SpanCoverage.NOT_COVERED.value]}
+    ),
     "an omitted egress": lambda view: view.pop("egress"),
     "spans that are not a list": lambda view: view["egress"].update({"spans": {}}),
     "arguments that are not a list": lambda view: view.update({"parameters": {}}),

@@ -1372,7 +1372,14 @@ function readEgress(egress, parameters) {
   if (typeof egress.planned_with_external_content !== "boolean") {
     return false;
   }
-  if (!Object.hasOwn(COVERAGE_WORDS, egress.coverage)) {
+  // **Text first, and the lookup second** (adversarial review, round 9). A property
+  // key is coerced, so `Object.hasOwn` and `COVERAGE_WORDS[...]` both read the array
+  // `["not_covered"]` as the string `not_covered` — and the page would render the
+  // `not_covered` sentence, with the control live, about a body that carried no
+  // `SpanCoverage` member at all. That is this rule's own defect rather than a new
+  // one: every other member is read as text before it is used, and the one lookup on
+  // the card was the one place the type test had been left to the lookup.
+  if (!isText(egress.coverage) || !Object.hasOwn(COVERAGE_WORDS, egress.coverage)) {
     return false;
   }
   if (!Array.isArray(egress.destinations) || !egress.destinations.every(readDestination)) {
