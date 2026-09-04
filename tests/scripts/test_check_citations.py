@@ -946,6 +946,64 @@ def test_the_supersession_token_matches_case_insensitively(tmp_path: Path) -> No
     assert _findings(_report(tmp_path, "--no-tracker"), "liveness") == []
 
 
+@pytest.mark.parametrize(
+    "separator",
+    [" ", "   ", "\t"],
+    ids=["single-space", "three-spaces", "tab"],
+)
+def test_a_record_is_found_however_its_two_words_were_separated(
+    tmp_path: Path, separator: str
+) -> None:
+    """§4's record name is two words, and the run between them is any spaces or tabs.
+
+    Read through a *reported* disagreement rather than through silence, because
+    silence is exactly what a dropped record produces: §6 prefers a benign miss
+    to a false report, so a separator narrowed to a literal space would lose the
+    tab and multi-space records and the resulting quiet would pass an assertion
+    of ``== []``. Reporting is the only direction that discriminates, so this is
+    a mutation detector rather than a restatement of the case above.
+
+    The citation is the other half of the pin: whatever run was written, the
+    record is reported under the canonical name, which is the folding
+    ``adr_status.field_records`` does on the name as well as on the value.
+
+    Checked against that mutation: narrowing the run to a literal space fails
+    the ``three-spaces`` and ``tab`` cases here and nothing else under
+    ``tests/scripts/``, which is the gap #2021 records.
+    """
+    _make_repo(
+        tmp_path,
+        _pair("Accepted", f"- Partially{separator}supersedes: ADR-0001 — §3's clause only\n"),
+    )
+
+    findings = _findings(_report(tmp_path, "--no-tracker"), "liveness")
+
+    assert [(f["path"], f["citation"]) for f in findings] == [
+        ("docs/adr/0002-two.md", "Partially supersedes: ADR-0001")
+    ]
+
+
+def test_a_record_name_broken_over_two_lines_is_not_a_record(tmp_path: Path) -> None:
+    """The run between the two words is matched on one line, and that is deliberate.
+
+    ``field_records`` locates a bullet *line* and folds what follows into the
+    value, so a name split at the break is not a name it can see. PR #2020
+    flagged the shape rather than supporting it: this is a missed record, which
+    is §6's benign direction, where reassembling a field name across lines would
+    have to decide what a bare ``- Partially`` bullet is before it knows.
+
+    The joined checkout is the same characters without the break, and it *is*
+    reported — so the line break is pinned as the whole of the difference, which
+    an assertion of silence alone would not show.
+    """
+    record = "- Partially{}supersedes: ADR-0001 — §3's clause only\n"
+    _make_repo(tmp_path / "split", _pair("Accepted", record.format("\n  ")))
+    _make_repo(tmp_path / "joined", _pair("Accepted", record.format(" ")))
+
+    assert _findings(_report(tmp_path / "split", "--no-tracker"), "liveness") == []
+    assert len(_findings(_report(tmp_path / "joined", "--no-tracker"), "liveness")) == 1
+
+
 def test_a_missing_forward_record_is_reported(tmp_path: Path) -> None:
     _make_repo(tmp_path, _pair("Accepted", "- Supersedes: ADR-0001 (all of it)\n"))
 
