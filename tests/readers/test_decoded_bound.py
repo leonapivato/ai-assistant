@@ -52,6 +52,7 @@ from pdf_fixtures import (
     repeated_form_pdf,
     tounicode_font_pdf,
     type1_font_pages_pdf,
+    unbuildable_font_pdf,
     unreadable_resources_pdf,
 )
 
@@ -589,3 +590,34 @@ def test_the_shipped_default_is_the_figure_the_decision_names() -> None:
     operator raising it buys superlinearly more.
     """
     assert DEFAULT_FETCH_MAX_DECODED_BYTES == 1024 * 1024
+
+
+@pytest.mark.parametrize("over_the_bound", [True, False])
+async def test_a_font_the_extraction_cannot_build_precedes_the_content_charge(
+    root: Path, parsed: list[object], over_the_bound: bool
+) -> None:
+    """§3's fail-closed branch reached through font *initialisation*, not resources.
+
+    ``PageObject._extract_text`` builds a stream's fonts **before** it resolves the
+    content key, and it swallows only ``AttributeError`` and ``TypeError`` while doing
+    so. A ``/FontDescriptor`` naming a program under two ``/FontFile*`` keys makes
+    ``Font._parse_font_descriptor`` raise ``PdfReadError``, so the page's content stream
+    is parsed **not at all** — however large it is.
+
+    A walk charging the content stream first therefore answers ``TOO_LARGE`` for a
+    malformed document, which is exactly the class confusion ADR-0232 §4 exists to
+    prevent: "report a size refusal as an extraction failure and that operator goes
+    looking for corrupt files", and the reverse sends them to bounds that are not the
+    problem. Both directions are run, because the class must not depend on the size of a
+    stream nothing parses.
+    """
+    data = unbuildable_font_pdf(decoded_bytes=4_000_000 if over_the_bound else 1_000)
+    with pytest.raises(Exception, match="More than one /FontFile"):
+        pypdf.PdfReader(io.BytesIO(data)).pages[0].extract_text()
+    parsed.clear()  # that demonstration is this test's own and not the fetch's
+
+    outcome = await fetch(root, data)
+
+    assert outcome.refusal is FetchRefusal.EXTRACTION_FAILED
+    assert outcome.record is None
+    assert parsed == []

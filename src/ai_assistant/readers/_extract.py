@@ -128,6 +128,19 @@ _RESOURCES: Final = "/Resources"
 #: happen*, which is the same question the resource context decides.
 _MAX_XFORM_INVOCATIONS: Final = 5_000
 
+#: The three keys a ``/FontDescriptor`` may name a font program under. More than one
+#: of them in **one** descriptor makes ``pypdf``'s ``Font._parse_font_descriptor``
+#: raise, and that raise happens while a page's fonts are built — *before* its content
+#: stream is resolved — so the extraction reaches that parse not at all.
+_FONT_FILE_KEYS: Final = ("/FontFile", "/FontFile2", "/FontFile3")
+
+#: The subtypes for which the adopted extraction reaches ``_parse_font_descriptor``
+#: **unconditionally**. ``/Type3`` also reaches it, but only where the font is
+#: *interpretable* — a property of its ``/CharProcs`` glyph names — so it is left out
+#: here on purpose: over-approximating this set would refuse a document the extraction
+#: fetches, which is the one direction ADR-0232 §3 is least entitled to be wrong in.
+_DESCRIPTOR_SUBTYPES: Final = ("/Type1", "/MMType1", "/TrueType")
+
 
 class ExtractionFailedError(Exception):
     """The file is of a supported format and its text could not be decoded.
@@ -385,6 +398,49 @@ def _charged_font_program(font: PdfObject) -> StreamObject | None:
     return resolved if isinstance(resolved, StreamObject) else None
 
 
+def _refuse_unbuildable_font(font: PdfObject) -> None:
+    """Refuse where the extraction's own font *initialisation* will raise.
+
+    ``PageObject._extract_text`` builds a stream's fonts **before** it resolves the
+    content key, and it swallows only ``AttributeError`` and ``TypeError`` while doing
+    so. Anything else leaves the page's extraction having parsed nothing at all — so a
+    walk that charged the content stream first would answer ``TOO_LARGE`` for a document
+    the extraction refuses as malformed, which is the class confusion ADR-0232 §4 exists
+    to prevent, pointing an operator at their bounds when the answer is a corrupt file.
+
+    Exactly one such failure is a property of the dictionary rather than of what
+    decoding it produces: ``Font._parse_font_descriptor`` raises ``PdfReadError`` where
+    one ``/FontDescriptor`` names a program under more than one of
+    :data:`_FONT_FILE_KEYS`. It is decided here from keys, before anything is decoded,
+    which is the same standard §3 sets for the font predicate itself.
+
+    **The residual is stated rather than hidden.** Font initialisation can also raise
+    from a limit only *doing the work* discovers — a ``/ToUnicode`` past
+    ``MAPPING_DICTIONARY_SIZE_LIMIT``, a ``/Widths`` past ``MAX_WIDTH_ENTRY_COUNT``.
+    Establishing those would mean decoding and parsing, in the walk, an input ADR-0232
+    §2 and §10 leave uncharged and unbounded by name — paying the cost the bound exists
+    to refuse, before it has refused anything. So a document that is **both** malformed
+    that way **and** over the bound is reported ``TOO_LARGE`` rather than
+    ``EXTRACTION_FAILED``. It is refused either way; what is lost is which of two
+    refusals an operator is shown, and buying it back costs the property that makes the
+    bound a bound.
+
+    Raises:
+        ExtractionFailedError: Where the extraction's font initialisation will raise.
+    """
+    if not isinstance(font, DictionaryObject):
+        return
+    if font.get("/Subtype", "") not in _DESCRIPTOR_SUBTYPES:
+        return
+    if "/FontDescriptor" not in font:
+        return
+    descriptor = font["/FontDescriptor"]
+    if not isinstance(descriptor, DictionaryObject):
+        return
+    if sum(key in descriptor for key in _FONT_FILE_KEYS) > 1:
+        raise ExtractionFailedError(_UNBUILDABLE_FONT)
+
+
 def _charge_font_programs(resources: DictionaryObject, budget: _Budget) -> None:
     """Charge every font program this one parse will decode, one decode at a time.
 
@@ -409,6 +465,7 @@ def _charge_font_programs(resources: DictionaryObject, budget: _Budget) -> None:
             # `_extract_text` swallows exactly this while building its fonts, so a
             # font it cannot resolve is a font it decodes no program for.
             continue
+        _refuse_unbuildable_font(font)
         program = _charged_font_program(font)
         if program is not None:
             budget.charge(len(program.get_data()))
@@ -450,10 +507,16 @@ def _charge_parse(obj: DictionaryObject, walk: _Walk, *, is_page: bool) -> None:
 
     ADR-0232 §3's named construction, which is required to have the property rather
     than to be this shape: resolve the inherited resources and **stop there, charging
-    nothing, where the extraction would**; otherwise add each decoded stream's length
-    and compare, add each charged font program's length and compare, then parse the
+    nothing, where the extraction would**; otherwise add each charged font program's
+    length and compare, add each decoded stream's length and compare, then parse the
     stream **with the adopted library's own content-stream parser**, take the ``Do``
     operations it reports, resolve each against those same resources, and recurse.
+
+    **Fonts are established and charged before the content stream because that is the
+    order the extraction works in**, and the order decides a *class* rather than a
+    number: a page whose font initialisation raises is a page whose content stream the
+    extraction parses not at all, so charging it would answer ``TOO_LARGE`` where the
+    document is malformed (:func:`_refuse_unbuildable_font`).
 
     **The library's own parser rather than a second grammar**, which costs an admitted
     document a second parse and is the price of agreement. A stream can carry the
@@ -475,10 +538,16 @@ def _charge_parse(obj: DictionaryObject, walk: _Walk, *, is_page: bool) -> None:
     resources = _resource_context(obj)
     if resources is None:
         return
+    # Fonts first, because that is the order `_extract_text` works in: it builds a
+    # stream's fonts before it resolves the content key, and a failure there leaves
+    # the page's extraction having parsed nothing. Within the pair the order is not
+    # ADR-0232 §3's to fix — "the property is required and no construction is" — and
+    # what it does fix, that each decode is followed by its own comparison, holds
+    # either way round.
+    _charge_font_programs(resources, walk.budget)
     content, streams = _content_of(obj, is_page=is_page)
     for stream in streams:
         walk.budget.charge(len(stream.get_data()))
-    _charge_font_programs(resources, walk.budget)
     if content is None:
         return
     for operands, operator in ContentStream(content, walk.pdf, "bytes").operations:
@@ -668,3 +737,4 @@ def _extract_pdf(data: bytes, *, max_rendered_bytes: int, max_decoded_bytes: int
 _UNDECODABLE: Final = "the file could not be decoded as the format its suffix names"
 _OVER_BOUND: Final = "the extraction is over a configured bound"
 _UNREADABLE_CONTEXT: Final = "a resource context is present and cannot be read"
+_UNBUILDABLE_FONT: Final = "a font in the resource context cannot be initialised"
