@@ -1966,6 +1966,133 @@ class EgressBinderContract(ABC):
         assert again.binding.planned_with_external_content is False
         assert again.binding == first.binding
 
+    # --- ADR-0233 §4, §6: the call's coverage, carried, transcribed and refused ---
+
+    @pytest.mark.parametrize(
+        "coverage",
+        [SpanCoverage.NOT_COVERED, SpanCoverage.MODEL_ON_EVERY_PATH],
+        ids=lambda member: member.value,
+    )
+    async def test_the_binding_carries_the_carriers_coverage(
+        self, binder: EgressBinder, coverage: SpanCoverage
+    ) -> None:
+        """ADR-0233 §4's fourth clause: the seam writes the binding's value from the
+        carrier's, unchanged.
+
+        ``test_the_binding_carries_the_carriers_planned_with_external_content``'s
+        reasoning one axis over, and it needs its own case for that case's reason:
+        the arguments are **identical** across both runs, so a seam that derived a
+        value of its own rather than taking the caller's answers the same on both and
+        fails one of them. ADR-0233 §5's second clause forbids recovering the fact
+        from an argument's value, its name, its field or its shape, so there is
+        nothing here for a derivation to read.
+
+        Both constructable states, because a seam that hard-coded ``NOT_COVERED``
+        would pass one of them by accident of its own default — and ``NOT_COVERED``
+        is precisely the value ADR-0233 §4 names as the one nobody may get for free,
+        since it asserts that nothing in the call came from anywhere near this
+        system's stores.
+        """
+        self.register_egress(binder, SEND_EMAIL)
+
+        bound = await binder.bind(
+            SEND_EMAIL,
+            parameters={"to": ["a@example.com"], "subject": "s", "body": "b"},
+            provenance=CarriedProvenance(
+                spans={}, planned_with_external_content=False, coverage=coverage
+            ),
+        )
+
+        assert bound is not None
+        assert bound.binding.coverage is coverage
+
+    async def test_a_carrier_whose_coverage_has_a_path_without_a_model_call_is_refused(
+        self, binder: EgressBinder
+    ) -> None:
+        """ADR-0233 §6 reaching the seam, and the case a silent downgrade would fail.
+
+        ADR-0155 §3's **second** clause is absolute: a span carrying covered content
+        some covered path of which contains no model call is forbidden whatever any
+        authorisation, policy, grant or user answer says. §6 makes the binding refuse
+        that value at construction, so a call carrying it is unconstructable rather
+        than merely forbidden, and the seam converts the refusal into its own
+        ``EgressBindingError`` exactly as it converts every other one ADR-0150 states.
+
+        **What this fails that no `core` case can.** ``tests/core/test_span_coverage``
+        pins the refusal at the model, over a binding a test built itself. A binder
+        that mapped a ``PATH_WITHOUT_MODEL`` carrier to ``NOT_COVERED`` on its way
+        through — a downgrade, in the one direction ADR-0233 §5's third clause says no
+        operation may take — would satisfy every one of those cases and would let
+        through exactly the call ADR-0155 §3 exists to stop. Held on the **shared**
+        suite so both binders owe it.
+
+        No bound call comes back, because ADR-0150 §1 makes a binding whole or
+        absent: the refusal is not a partial binding with the fact removed.
+        """
+        self.register_egress(binder, SEND_EMAIL)
+
+        with pytest.raises(EgressBindingError):
+            await binder.bind(
+                SEND_EMAIL,
+                parameters={"to": ["a@example.com"], "subject": "s", "body": "b"},
+                provenance=CarriedProvenance(
+                    spans={},
+                    planned_with_external_content=False,
+                    coverage=SpanCoverage.PATH_WITHOUT_MODEL,
+                ),
+            )
+
+    @pytest.mark.parametrize(
+        "coverage",
+        [SpanCoverage.NOT_COVERED, SpanCoverage.MODEL_ON_EVERY_PATH],
+        ids=lambda member: member.value,
+    )
+    async def test_rebind_transcribes_the_coverage_from_approved(
+        self, binder: EgressBinder, coverage: SpanCoverage
+    ) -> None:
+        """ADR-0233 §4's sixth clause: the **third** thing taken from ``approved``.
+
+        ``rebind`` receives no carrier and nothing to recompute this from — the
+        composition happened before the confirmation was parked, plausibly before a
+        restart — so a member that re-derived it would answer with a value of its own,
+        compare unequal to the approved binding, and refuse the very call the user was
+        asked about and approved. The equality assertion is what makes that visible:
+        it is the refusal ADR-0152 §7 already states, reached through this field
+        alone.
+
+        Both states again, so the transcription cannot be a constant: a seam
+        answering ``NOT_COVERED`` always would pass one arm and, on the other, refuse
+        every resumed call the approver was told a model had composed.
+
+        This narrows ADR-0152 §7's count from two to three and narrows nothing else in
+        it: everything else is still re-derived, and the resumed binding still has to
+        equal the approved one whole.
+        """
+        self.register_egress(binder, SEND_EMAIL)
+        parameters: dict[str, FrozenJson] = {
+            "to": ["a@example.com"],
+            "subject": "s",
+            "body": "b",
+        }
+        first = await binder.bind(
+            SEND_EMAIL,
+            parameters=parameters,
+            provenance=CarriedProvenance(
+                spans={}, planned_with_external_content=False, coverage=coverage
+            ),
+        )
+        assert first is not None
+        assert first.binding.coverage is coverage
+
+        again = await binder.rebind(SEND_EMAIL, parameters=parameters, approved=first.binding)
+
+        assert again is not None
+        assert again.binding.coverage is coverage
+        assert again.binding == first.binding, (
+            "the re-derived binding equals the approved one, so ADR-0152 §7's "
+            "equality refusal does not fire on the field ADR-0233 §4 adds"
+        )
+
     async def test_rebind_refuses_a_reference_that_went_pending_while_parked(
         self, binder: EgressBinder
     ) -> None:
