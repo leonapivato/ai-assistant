@@ -12,6 +12,11 @@ the composer in ``tests/planning/``. The ``Fetcher`` suite made the other choice
 a reason that does not hold here: its implementation lives in ``ai_assistant.readers``,
 "a package no subsystem may import".
 
+**The hooks are ``async``**, unlike the ``QueryComposer`` suite's: preparing a
+subject here means arranging a connected account and a keyring, and a keyring is
+written to through an ``async`` seam. A sync hook would have to drive a loop of its
+own inside the one the case is already running on.
+
 **Hooks and not one fixture, because the clauses are about answers a suite has to
 choose.** "At most the configured result count", "every minted record is attested to
 this searcher's name" and "each refusal is returned rather than raised" cannot be
@@ -189,7 +194,7 @@ class WebSearcherContract:
         """
         raise NotImplementedError
 
-    def searching(self, results: int) -> ScriptedSearch:
+    async def searching(self, results: int) -> ScriptedSearch:
         """Override with a subject whose provider answers with ``results`` results.
 
         ``results`` is what the *provider* returned, before the subject's own bound
@@ -202,7 +207,7 @@ class WebSearcherContract:
         """
         raise NotImplementedError
 
-    def refusing(self, refusal: SearchRefusal) -> ScriptedRefusal:
+    async def refusing(self, refusal: SearchRefusal) -> ScriptedRefusal:
         """Override with a subject whose search refuses with ``refusal``.
 
         Called once per case that needs it, and once per member: every member of
@@ -211,18 +216,18 @@ class WebSearcherContract:
         """
         raise NotImplementedError
 
-    def gated(self) -> GatedSearch:
+    async def gated(self) -> GatedSearch:
         """Override with a subject that can be held at its suspension point.
 
         Called once per case that needs it. See :class:`GatedSearch`.
         """
         raise NotImplementedError
 
-    def connected(self) -> ConnectedAccount:
+    async def connected(self) -> ConnectedAccount:
         """Override with a subject that has a search account connected."""
         raise NotImplementedError
 
-    def unconnected(self) -> WebSearcher:
+    async def unconnected(self) -> WebSearcher:
         """Override with a subject built where no search account is connected.
 
         Unreached by an implementation that sets
@@ -291,7 +296,7 @@ class WebSearcherContract:
         if self.constructed_only_with_an_account:
             pytest.skip("implementation is constructed only where an account is connected")
 
-        subject = self.unconnected()
+        subject = await self.unconnected()
 
         assert await subject.request(QUERY) is None
 
@@ -306,7 +311,7 @@ class WebSearcherContract:
         origin and the query it was given" and nothing besides — no step, no
         execution, and no binding this member has no business deriving (§6).
         """
-        subject = self.connected()
+        subject = await self.connected()
 
         request = await subject.searcher.request(QUERY)
 
@@ -336,23 +341,29 @@ class WebSearcherContract:
         assert searcher.name.strip()
         assert searcher.name.strip() == searcher.name
 
-    async def test_name_is_the_same_string_before_between_and_after_searches(self) -> None:
+    async def test_name_is_the_same_string_before_and_after_every_search(self) -> None:
         """§17: "the same string on every access and across every call".
 
-        Read before, between and after two calls that succeed, and the same again
-        over two that refuse — §17's clause spelled as it is written. An identity
-        that moved under a turn would scatter one source's records across two
-        ``reported_by`` values no later fold could bring back together, and a
-        property asserted only once per subject cannot see it.
+        Read before and after a call that **succeeds** and again around a call that
+        **refuses**, which is §17's clause over the calls a suite can actually make:
+        two calls on one subject would need two authorisations, since ADR-0192 §1
+        spends one on the claim — so "across every call" is asserted across every call
+        this harness can prepare rather than by driving one subject twice.
+
+        An identity that moved under a turn would scatter one source's records across
+        two ``reported_by`` values no later fold could bring back together, and a
+        property asserted once per subject cannot see it.
         """
-        for prepared in (self.searching(1), self.refusing(SearchRefusal.NO_RESULT)):
+        for prepared in (
+            await self.searching(1),
+            await self.refusing(SearchRefusal.NO_RESULT),
+        ):
             before = prepared.searcher.name
             await prepared.searcher.search(prepared.call)
-            between = prepared.searcher.name
-            await prepared.searcher.search(prepared.call)
 
-            assert before == between == prepared.searcher.name
+            assert before == prepared.searcher.name
             assert before.strip() == before
+            assert before.strip()
 
     # --- what an outcome carries (ADR-0231 §10, §17) ------------------------
 
@@ -363,8 +374,8 @@ class WebSearcherContract:
         *value* — what it fails is a searcher that never reaches one of the two
         states, which is the half a harness can get wrong.
         """
-        succeeding = self.searching(1)
-        refusing = self.refusing(SearchRefusal.TRANSPORT_FAILED)
+        succeeding = await self.searching(1)
+        refusing = await self.refusing(SearchRefusal.TRANSPORT_FAILED)
 
         first = await succeeding.searcher.search(succeeding.call)
         second = await refusing.searcher.search(refusing.call)
@@ -381,7 +392,7 @@ class WebSearcherContract:
         from a searcher that has none.
         """
         bound = self.results_bound()
-        subject = self.searching(bound + 2)
+        subject = await self.searching(bound + 2)
 
         outcome = await subject.searcher.search(subject.call)
 
@@ -399,7 +410,7 @@ class WebSearcherContract:
         target (§16); and the content bound fails one that let a result through the
         prompt-facing bound its operator set.
         """
-        subject = self.searching(self.results_bound())
+        subject = await self.searching(self.results_bound())
 
         outcome = await subject.searcher.search(subject.call)
 
@@ -426,7 +437,7 @@ class WebSearcherContract:
         which is exactly the local substitute ADR-0092 §3 forbids. An implementation
         that reached for a clock of its own fails at the value, not at a review.
         """
-        subject = self.searching(1)
+        subject = await self.searching(1)
         outcome = await subject.searcher.search(subject.call)
         assert outcome.reported_at is not None
 
@@ -449,7 +460,7 @@ class WebSearcherContract:
         call site, where a closed refusal enumeration makes the non-yield a value the
         audit can count and the turn can ignore.
         """
-        subject = self.refusing(refusal)
+        subject = await self.refusing(refusal)
 
         outcome = await subject.searcher.search(subject.call)
 
@@ -467,7 +478,7 @@ class WebSearcherContract:
         its provider call and returning ``TRANSPORT_FAILED`` for a shutdown that was
         working correctly.
         """
-        subject = self.gated()
+        subject = await self.gated()
         gate = subject.arm()
         call = asyncio.ensure_future(subject.searcher.search(subject.call))
         await gate.reached()
