@@ -56,6 +56,7 @@ from ai_assistant.core.types import (
     PermissionRuling,
     Reversibility,
     RiskLevel,
+    SpanCoverage,
     ToolCost,
     ToolDefinition,
 )
@@ -142,6 +143,7 @@ def _binding(*, planned: bool, spans: Sequence[EgressSpan] | None = None) -> Egr
         account=_ACCOUNT,
         transport_endpoint=_ENDPOINT,
         planned_with_external_content=planned,
+        coverage=SpanCoverage.NOT_COVERED,
     )
 
 

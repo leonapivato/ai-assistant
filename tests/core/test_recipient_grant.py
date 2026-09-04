@@ -40,6 +40,7 @@ from ai_assistant.core.types import (
     RecipientGrant,
     Reversibility,
     RiskLevel,
+    SpanCoverage,
     ToolCost,
     ToolDefinition,
 )
@@ -106,6 +107,7 @@ def _binding(
         account=account,
         transport_endpoint=ENDPOINT,
         planned_with_external_content=external,
+        coverage=SpanCoverage.NOT_COVERED,
     )
 
 

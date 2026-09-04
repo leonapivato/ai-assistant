@@ -35,6 +35,7 @@ from ai_assistant.core.types import (
     Idempotency,
     Reversibility,
     RiskLevel,
+    SpanCoverage,
     ToolCost,
     ToolDefinition,
 )
@@ -85,6 +86,7 @@ def _binding(
         account=BoundAccount(identity="work@example.com", reference="conn-0001"),
         transport_endpoint="test://endpoint",
         planned_with_external_content=planned_with_external_content,
+        coverage=SpanCoverage.NOT_COVERED,
     )
 
 
@@ -172,6 +174,7 @@ def test_a_locator_built_by_model_construct_does_not_survive_revalidation() -> N
         CarriedProvenance(
             spans={forged: DiscloserProvenance.SYSTEM_SELECTED},
             planned_with_external_content=False,
+            coverage=SpanCoverage.NOT_COVERED,
         )
 
 
@@ -190,6 +193,7 @@ def test_a_carrier_refuses_a_key_that_is_not_a_well_formed_locator() -> None:
         CarriedProvenance(
             spans={object(): DiscloserProvenance.USER_AUTHORED},  # type: ignore[dict-item]  # the bypass under test
             planned_with_external_content=False,
+            coverage=SpanCoverage.NOT_COVERED,
         )
 
 
@@ -199,6 +203,7 @@ def test_a_carrier_refuses_a_value_that_is_not_a_discloser_provenance() -> None:
         CarriedProvenance(
             spans={EgressSpanLocator(argument="to"): "hearsay"},  # type: ignore[dict-item]  # the bypass under test
             planned_with_external_content=False,
+            coverage=SpanCoverage.NOT_COVERED,
         )
 
 
@@ -211,7 +216,9 @@ def test_a_carrier_does_not_change_when_the_caller_mutates_what_it_passed() -> N
     which is precisely the window the detachment closes.
     """
     caller_holds = {EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED}
-    carrier = CarriedProvenance(spans=caller_holds, planned_with_external_content=False)
+    carrier = CarriedProvenance(
+        spans=caller_holds, planned_with_external_content=False, coverage=SpanCoverage.NOT_COVERED
+    )
 
     caller_holds[EgressSpanLocator(argument="to")] = DiscloserProvenance.SYSTEM_SELECTED
     caller_holds[EgressSpanLocator(argument="body")] = DiscloserProvenance.SYSTEM_SELECTED
@@ -232,7 +239,9 @@ def test_a_carrier_omitting_spans_is_refused() -> None:
 
 def test_a_carrier_over_an_empty_mapping_is_well_formed() -> None:
     """ADR-0152 §1: the deliberate empty carrier, which is today's every call (§5)."""
-    carrier = CarriedProvenance(spans={}, planned_with_external_content=False)
+    carrier = CarriedProvenance(
+        spans={}, planned_with_external_content=False, coverage=SpanCoverage.NOT_COVERED
+    )
 
     assert len(carrier.spans) == 0
     assert dict(carrier.spans) == {}
@@ -248,6 +257,7 @@ def test_a_carriers_mapping_refuses_mutation_and_survives_a_round_trip() -> None
     carrier = CarriedProvenance(
         spans={EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED},
         planned_with_external_content=False,
+        coverage=SpanCoverage.NOT_COVERED,
     )
 
     with pytest.raises(TypeError):

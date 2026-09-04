@@ -923,6 +923,22 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     which the version log distinguishes on the express ground that neither type there
     sets ``extra="forbid"``.
 
+    **ADR-0233 §15 is under the second limb and moves the version alone**, to
+    **29**, with the method set unmoved at forty-nine. ``ConfirmationEgress`` gains
+    ``coverage`` (§4); that model is carried to a client on
+    ``TurnOutcome.step.confirmation`` and as the element type of
+    ``pending_confirmations``; the projection dumps every field; and the model sets
+    ``extra="forbid"``. It is the same model and the same route that moved 11 for
+    ``planned_with_external_content``, so the arithmetic is checked again rather
+    than inherited. ADR-0233 §13's first clause adds no Protocol, no method and no
+    gateway route, which is why the first limb is not reached, and the ``core``
+    models it adds beside the confirmation shape —
+    :class:`~ai_assistant.core.types.SpanCoverage`'s carrier on ``EgressBinding``
+    and :class:`~ai_assistant.core.types.CoverageUnrecordedBinding` — are not a
+    second ground: ``PermissionDecision`` is named nowhere under ``wire/`` and is
+    returned by no promoted method, so widening its union changes no value a peer
+    emits or decodes.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -931,7 +947,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (49, 28), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (49, 29), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

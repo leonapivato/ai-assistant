@@ -45,6 +45,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     CostBasis,
+    CoverageUnrecordedBinding,
     DurableIdentifier,
     EgressBinding,
     Idempotency,
@@ -116,13 +117,13 @@ def _check_standing_shape(decision: PermissionDecision) -> None:
     """Refuse the route-(b) defects decidable from the decision alone (ADR-0193 §6).
 
     Three of ADR-0193 §6's eight checks and its pairing clause need no store, so
-    they are made here — **before** the ``OriginUnrecordedBinding`` refusal
-    ADR-0184 §4 states over every decision. The order is what makes the
-    origin-unrecorded case land as an
+    they are made here — **before** the ended-epoch refusals ADR-0184 §4 and
+    ADR-0233 §14 state over every decision. The order is what makes an
+    origin-unrecorded or coverage-unrecorded case land as an
     :class:`~ai_assistant.core.errors.InvalidAuthorisationError` rather than as a
-    bare ``AuditError``, which ADR-0193 §14 requires by type; ADR-0184 §4 is
+    bare ``AuditError``, which ADR-0193 §14 requires by type; both clauses are
     satisfied either way, since the row is still refused and this class *is* an
-    ``AuditError``. A decision carrying that shape and **not** in route-(b) scope
+    ``AuditError``. A decision carrying either shape and **not** in route-(b) scope
     is untouched here and still refused there, exactly as before.
 
     **The origin check is stated over the binding's arm, not over a field's
@@ -263,6 +264,13 @@ _ORIGIN_UNRECORDED = (
     "was never recorded, and no answer can establish it"
 )
 
+#: ADR-0184 §7's floor extended by cause (ADR-0233 §14), worded the same way and for
+#: the same reason.
+_COVERAGE_UNRECORDED = (
+    "fake: the user approved, but this decision records an egress call whose coverage "
+    "was never recorded, and no answer can establish it"
+)
+
 
 class FakeActionPolicy:
     """A conservative, monotone ``ActionPolicy`` test double.
@@ -371,15 +379,20 @@ class FakeActionPolicy:
         answer about that call **is** route (a) — the one route §5's second clause
         leaves open.
 
-        **ADR-0184 §7's floor is the one clause that does need a branch here**, and
-        it is the only case where an approval is not enough: where
-        ``confirmed.egress_binding`` records no origin — an
-        :class:`~ai_assistant.core.types.OriginUnrecordedBinding`, which only a row
-        written before ADR-0181 can carry — no ``ALLOW`` is returned whatever
-        ``approved`` says, because the origin of such a call cannot be established
-        at all and ADR-0181 §5's second clause leaves no route by which any
-        authorisation covers it. Nothing in the tree hands one here; it is a floor,
-        written because a floor's value is that it holds when a route appears.
+        **ADR-0184 §7's floor is the one clause that does need a branch here, and
+        ADR-0233 §14 extends it by cause to a second**: these are the only cases
+        where an approval is not enough. Where ``confirmed.egress_binding`` records
+        no origin — an :class:`~ai_assistant.core.types.OriginUnrecordedBinding`,
+        which only a row written before ADR-0181 can carry — or records no coverage —
+        a :class:`~ai_assistant.core.types.CoverageUnrecordedBinding`, which only a
+        row written before ADR-0233 can carry — no ``ALLOW`` is returned whatever
+        ``approved`` says, because the missing fact cannot be established at all and
+        ADR-0181 §5's second clause leaves no route by which any authorisation covers
+        such a call. The second branch is written rather than inherited: a
+        coverage-unrecorded row *has* ``planned_with_external_content`` and falls
+        straight past the first ``isinstance``. Nothing in the tree hands either one
+        here; both are floors, written because a floor's value is that it holds when
+        a route appears.
         """
         self.resolutions.append((confirmed.model_copy(deep=True), approved))
 
@@ -391,6 +404,8 @@ class FakeActionPolicy:
             return PermissionRuling(outcome=PermissionOutcome.DENY, reason=_NOT_A_CONFIRMATION)
         if isinstance(confirmed.egress_binding, OriginUnrecordedBinding):
             return PermissionRuling(outcome=PermissionOutcome.DENY, reason=_ORIGIN_UNRECORDED)
+        if isinstance(confirmed.egress_binding, CoverageUnrecordedBinding):
+            return PermissionRuling(outcome=PermissionOutcome.DENY, reason=_COVERAGE_UNRECORDED)
         return PermissionRuling(
             outcome=PermissionOutcome.ALLOW,
             reason="fake: the user approved the confirmation",
@@ -656,17 +671,19 @@ class FakeAuditTrail:
         also let an overridden method decide what is stored, which is the hazard
         that helper exists for.
 
-        **A decision whose ``egress_binding`` records no origin is refused**
-        (ADR-0184 §4), and it is the one refusal the model cannot make for itself:
-        an :class:`~ai_assistant.core.types.OriginUnrecordedBinding` is a *valid*
-        member of a ``PermissionDecision``, because it has to be for a stored row to
-        decode into one. It represents a row from an epoch that has ended, so it is
-        only ever read out of a store and never minted into one — a caller bypassing
-        ``from_request`` could otherwise append one and fabricate history rather
-        than a value. This fake holds objects rather than bytes and so cannot be
-        seeded with such a row at all, which is why the read half of ADR-0184 §5 is
-        pinned in ``SqliteAuditTrail``'s own tests while *this* clause is in the
-        shared conformance suite.
+        **A decision whose ``egress_binding`` records no origin, or no coverage, is
+        refused** (ADR-0184 §4, ADR-0233 §14), and it is the one refusal the model
+        cannot make for itself: an
+        :class:`~ai_assistant.core.types.OriginUnrecordedBinding` and a
+        :class:`~ai_assistant.core.types.CoverageUnrecordedBinding` are each a
+        *valid* member of a ``PermissionDecision``, because each has to be for a
+        stored row to decode into one. Each represents a row from an epoch that has
+        ended, so each is only ever read out of a store and never minted into one — a
+        caller bypassing ``from_request`` could otherwise append one and fabricate
+        history rather than a value. This fake holds objects rather than bytes and so
+        cannot be seeded with such a row at all, which is why the read half of
+        ADR-0184 §5 is pinned in ``SqliteAuditTrail``'s own tests while *these*
+        clauses are in the shared conformance suite.
 
         **And it is named from the snapshot**, because a caller can hand over a raw
         mapping: it validates into a decision, and ``decision.id`` on a ``dict`` is an
@@ -683,7 +700,8 @@ class FakeAuditTrail:
 
         Raises:
             AuditError: If the decision does not satisfy its own model, or carries
-                an ``OriginUnrecordedBinding``. Raised
+                an ``OriginUnrecordedBinding`` or a ``CoverageUnrecordedBinding``.
+                Raised
                 as an ``AuditError`` rather than letting pydantic's
                 ``ValidationError`` escape, because CONTRIBUTING has this layer
                 raise only from the ``AssistantError`` hierarchy — a caller
@@ -707,6 +725,13 @@ class FakeAuditTrail:
                 f"decision {snapshot.id!r} is not a valid record: its egress binding "
                 f"records no origin, which is a shape only a row written before "
                 f"ADR-0181 can have; the trail reads such rows and never writes one"
+            )
+            raise AuditError(msg)
+        if isinstance(snapshot.egress_binding, CoverageUnrecordedBinding):
+            msg = (
+                f"decision {snapshot.id!r} is not a valid record: its egress binding "
+                f"records no coverage, which is a shape only a row written before "
+                f"ADR-0233 can have; the trail reads such rows and never writes one"
             )
             raise AuditError(msg)
         # The resolution read is the one ``await`` that is deliberately **not**

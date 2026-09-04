@@ -48,6 +48,7 @@ from ai_assistant.core.types import (
     PermissionRuling,
     Reversibility,
     RiskLevel,
+    SpanCoverage,
     ToolCost,
     ToolDefinition,
 )
@@ -132,6 +133,7 @@ def _binding(
         account=account,
         transport_endpoint=_ENDPOINT,
         planned_with_external_content=planned_with_external_content,
+        coverage=SpanCoverage.NOT_COVERED,
     )
 
 
@@ -219,9 +221,13 @@ def test_every_field_of_a_binding_is_required(omitted: str) -> None:
         "transport_endpoint": _ENDPOINT,
         # ADR-0181 §3's second clause adds a fourth, on the same terms and for the
         # same reason: the safe-looking default is a claim about a selection the
-        # defaulting producer never made. The parametrisation reads
-        # ``model_fields``, so this case covers it without naming it.
+        # defaulting producer never made. ADR-0233 §4's second clause adds a fifth,
+        # for the reason read one axis over — the safe-looking default there is
+        # `NOT_COVERED`, which asserts that nothing in the call came from anywhere
+        # near this system's stores. The parametrisation reads ``model_fields``, so
+        # both cases are covered without naming either.
         "planned_with_external_content": False,
+        "coverage": SpanCoverage.NOT_COVERED,
     }
     assert EgressBinding(**whole)  # type: ignore[arg-type]  # heterogeneous test kwargs
 

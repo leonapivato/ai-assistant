@@ -62,6 +62,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     ActionRequest,
     CarriedProvenance,
+    CoverageUnrecordedBinding,
     Disposition,
     ExecutionState,
     OriginUnrecordedBinding,
@@ -69,6 +70,7 @@ from ai_assistant.core.types import (
     PermissionOutcome,
     PlanStep,
     SkipReason,
+    SpanCoverage,
     StepStatus,
     StepTransition,
     ToolCall,
@@ -687,6 +689,26 @@ class StepRunner:
                 f"recorded, so it cannot be resumed: the question it asked is unanswerable"
             )
             raise PermissionDeniedError(msg)
+        if isinstance(approved_binding, CoverageUnrecordedBinding):
+            # ADR-0184 §8's fourth clause applied one epoch on (ADR-0233 §14):
+            # narrow the union and refuse rather than assume the case away. Such a
+            # decision records a call whose coverage was never recorded, so nothing
+            # says which of ADR-0155 §3's two prohibitions governs what it would
+            # carry and `EgressBinder.rebind` must never receive one. The origin
+            # guard above does not catch this epoch — such a row **has**
+            # `planned_with_external_content`, so it falls straight past that
+            # `isinstance` — which is why the refusal is written rather than
+            # inherited. `pending_confirmation` already refuses to offer such a
+            # park, so the recovery path cannot arrive here; the in-process path
+            # can, because `_recorded` reads the trail's `get`, which returns the
+            # row as history rather than raising (ADR-0184 §5). Refused by this
+            # seam's own existing name, before any ruling is sought, so nothing is
+            # written and the step stays parked.
+            msg = (
+                f"decision {confirmed.id!r} records an egress call whose coverage was never "
+                f"recorded, so it cannot be resumed: the question it asked is unanswerable"
+            )
+            raise PermissionDeniedError(msg)
 
         try:
             bound = await self._rebound(confirmed.tool, step.parameters, approved_binding)
@@ -765,6 +787,19 @@ class StepRunner:
             provenance=CarriedProvenance(
                 spans={},
                 planned_with_external_content=origin.planned_with_external_content,
+                # ADR-0233 §15: the **fail-closed** constant, at the one site whose
+                # composer does not yet compute the value. `coverage` is required
+                # with no default and this method composes nothing it could read the
+                # answer off, so it states the value ADR-0233 §4's last clause gives
+                # a component holding no recorded origin: a component that wrongly
+                # says this gets its call refused at construction and someone
+                # notices immediately, while one that wrongly said `NOT_COVERED`
+                # would send the user's accumulated model to a third party and
+                # nobody would notice at all. The consequence is stated rather than
+                # hidden — until the lane that makes this compute lands, this seam
+                # answers `PATH_WITHOUT_MODEL` and every send is refused, which is
+                # the fail-closed direction working and an unfinished job (#2051).
+                coverage=SpanCoverage.PATH_WITHOUT_MODEL,
             ),
         )
 

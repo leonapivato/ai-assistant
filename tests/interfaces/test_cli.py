@@ -93,6 +93,7 @@ from ai_assistant.core.types import (
     Retirement,
     Reversibility,
     RiskLevel,
+    SpanCoverage,
     StepExecution,
     StepFailure,
     StepOutcome,
@@ -462,6 +463,7 @@ def _egress_confirmation(
             account_identity=identity,
             spans=spans,
             planned_with_external_content=planned_with_external_content,
+            coverage=SpanCoverage.NOT_COVERED,
         ),
     )
 

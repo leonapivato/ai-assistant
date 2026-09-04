@@ -1,4 +1,4 @@
-"""``PROTOCOL_VERSION`` reads 28 and its log names the decision (ADR-0230 §12).
+"""``PROTOCOL_VERSION`` moved to 28 and its log names the decision (ADR-0230 §12).
 
 §14 item 19 asks that "``PROTOCOL_VERSION`` reads 28 with ``wire/envelope.py``'s log
 naming this ADR". The rest of that item — a ``PlanExport`` round-tripping at
@@ -26,8 +26,23 @@ _MOVED_FROM: Final = 27
 
 
 def test_the_protocol_version_moved_to_the_figure_the_decision_names() -> None:
-    """§12: "``PROTOCOL_VERSION`` moves 27 → 28"."""
-    assert envelope.PROTOCOL_VERSION == _MOVED_TO
+    """§12: "``PROTOCOL_VERSION`` moves 27 → 28", asserted as a move and not as a state.
+
+    **An equality here would make a later, unrelated and correctly reasoned bump look
+    like a violation of ADR-0230**, which is the failure ``CONTRIBUTING.md`` -> "No
+    state claims in living documents" is about, and which ADR-0186 §13 already ruled
+    on for the neighbouring clause: a clause fixing what *this* decision does to the
+    number "is not a bar on any later one". ADR-0233 §15 moved it again, to 29, under
+    the same limb of ADR-0124 §9 and for a different type.
+
+    So what is asserted is the half that stays true for as long as ADR-0230 stands:
+    the number is **at or past** the figure §12 names, because a later ADR can move it
+    on and none can un-move ADR-0230's move. The absolute figure has exactly one home,
+    ``tests/core/test_engine_surface_closure.py``, where a lane moving it is made to
+    name the limb it is under; the other half — that the move is *accounted for* in
+    the log a reviewer reads — is the case below.
+    """
+    assert envelope.PROTOCOL_VERSION >= _MOVED_TO
 
 
 def test_the_log_carries_an_entry_naming_this_decision_and_its_reason() -> None:

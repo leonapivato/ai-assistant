@@ -34,6 +34,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     BoundAccount,
     CanonicalDestination,
+    CoverageUnrecordedBinding,
     DataTier,
     DestinationProtocol,
     DiscloserProvenance,
@@ -43,9 +44,14 @@ from ai_assistant.core.types import (
     OriginUnrecordedBinding,
     PermissionDecision,
     PermissionOutcome,
+    SpanCoverage,
 )
 from ai_assistant.permissions import SqliteAuditTrail
-from ai_assistant.permissions.audit import ORIGIN_UNRECORDED, _run_to_completion
+from ai_assistant.permissions.audit import (
+    COVERAGE_UNRECORDED,
+    ORIGIN_UNRECORDED,
+    _run_to_completion,
+)
 from ai_assistant.testing.cancellation import (
     ResourceLog,
     SuspendedMidWrite,
@@ -1835,6 +1841,7 @@ def _egress_decision(decision_id: str = "d-egress", **overrides: object) -> Perm
         account=BoundAccount(identity="work@example.com", reference="conn-0001"),
         transport_endpoint="smtp://mail.example.com:587",
         planned_with_external_content=False,
+        coverage=SpanCoverage.NOT_COVERED,
     )
     fields: dict[str, object] = {
         "parameters": {"to": "a@example.com"},
@@ -1873,8 +1880,16 @@ async def _record_as_legacy(trail: SqliteAuditTrail, recorded: PermissionDecisio
     """Record ``recorded``, then rewrite its row as a pre-ADR-0181 build wrote it.
 
     Rewritten rather than hand-built, so the fixture is the **current** encoding
-    minus exactly one key. A hand-written row could drift from what the trail
-    actually stores and would then be testing a shape no build ever produced.
+    minus exactly the keys that epoch had not begun writing. A hand-written row could
+    drift from what the trail actually stores and would then be testing a shape no
+    build ever produced.
+
+    **Two keys rather than one since ADR-0233 §14**, and that is the epochs being
+    ordered rather than a widening: a build predating ``planned_with_external_content``
+    necessarily predates ``coverage`` too, so a genuine pre-origin row lacks both.
+    A row lacking only ``planned_with_external_content`` is the shape ADR-0184 §10
+    asked for and ADR-0233 §14 makes **unsatisfiable** — it is nobody's epoch, and
+    ``test_a_stored_row_missing_only_the_origin_now_raises`` is where that is pinned.
 
     Seeded through the ``data`` column directly because ADR-0184 §4 makes the row
     unproducible through ``record``, which now refuses the shape outright — the
@@ -1883,6 +1898,20 @@ async def _record_as_legacy(trail: SqliteAuditTrail, recorded: PermissionDecisio
     await trail.record(recorded)
     legacy = _stored(trail, recorded.id)
     del legacy["egress_binding"]["planned_with_external_content"]
+    del legacy["egress_binding"]["coverage"]
+    _rewrite(trail, recorded.id, legacy)
+
+
+async def _record_as_coverage_legacy(trail: SqliteAuditTrail, recorded: PermissionDecision) -> None:
+    """Record ``recorded``, then rewrite its row as a pre-ADR-0233 build wrote it.
+
+    :func:`_record_as_legacy` one epoch on, and the middle rung of ADR-0233 §14's
+    ladder: the current encoding minus ``coverage`` alone, which is exactly what a
+    build between ADR-0181 §3 and ADR-0233 §4 wrote.
+    """
+    await trail.record(recorded)
+    legacy = _stored(trail, recorded.id)
+    del legacy["egress_binding"]["coverage"]
     _rewrite(trail, recorded.id, legacy)
 
 
@@ -1909,17 +1938,21 @@ async def test_a_stored_row_carrying_the_origin_decodes_as_a_whole_binding(
     assert got.egress_binding == recorded.egress_binding
 
 
-async def test_a_stored_row_missing_only_the_origin_decodes_as_the_sibling(
+async def test_a_stored_row_missing_both_added_keys_decodes_as_the_origin_sibling(
     ephemeral: SqliteAuditTrail,
 ) -> None:
-    """§3's second row, and the whole of what ADR-0184 adds to what the trail tolerates.
+    """§3's second row as ADR-0233 §15 restates it: **both** keys removed.
 
-    The same JSON with **exactly** that key removed decodes carrying an
-    ``OriginUnrecordedBinding`` — not a projection, not a marker: every other fact
-    the row holds comes back, which is the second test ADR-0184's Context sets. The
-    user reading their trail sees the connected account, the occurrence in both its
-    supplied and canonical forms and the payload description, and learns exactly one
-    thing more, that the origin of this call was never recorded.
+    The same JSON with the two keys a pre-ADR-0181 build never wrote removed decodes
+    carrying an ``OriginUnrecordedBinding`` — not a projection, not a marker: every
+    other fact the row holds comes back, which is the second test ADR-0184's Context
+    sets. The user reading their trail sees the connected account, the occurrence in
+    both its supplied and canonical forms and the payload description, and learns
+    exactly one thing more, that the origin of this call was never recorded.
+
+    **The key set moved because the epochs are ordered, not because the tolerance
+    widened**: ADR-0184 §1's roster is that clause's with the second name added and
+    its narrowness untouched (ADR-0233 §14).
     """
     recorded = _egress_decision()
     await _record_as_legacy(ephemeral, recorded)
@@ -1936,6 +1969,130 @@ async def test_a_stored_row_missing_only_the_origin_decodes_as_the_sibling(
     assert got.egress_binding.canonical_destination_set == (
         CanonicalDestination(protocol=DestinationProtocol.SMTP, canonical="a@example.com"),
     )
+
+
+async def test_a_stored_row_missing_only_the_origin_now_raises(
+    ephemeral: SqliteAuditTrail,
+) -> None:
+    """ADR-0233 §15's fourth replacement case, and the sharpest of the five.
+
+    The shape ADR-0184 §10 asked for — the current JSON with **only**
+    ``planned_with_external_content`` removed — is exactly what ADR-0233 §14 makes
+    **unsatisfiable**. Such a row still carries ``coverage``, which
+    ``OriginUnrecordedBinding`` does not declare, so ``extra="forbid"`` refuses it
+    there; and it lacks ``planned_with_external_content``, which both other rungs
+    require. No epoch ever wrote it, no member of the union declares a row of that
+    shape, and it raises.
+
+    This is the case that fails an implementation which widened the tolerance rather
+    than shaping it — ADR-0184 §10's own reason for the case it stated, arriving at
+    the combination a matrix would admit and a ladder does not.
+    """
+    recorded = _egress_decision()
+    await ephemeral.record(recorded)
+    neither_epoch = _stored(ephemeral, "d-egress")
+    del neither_epoch["egress_binding"]["planned_with_external_content"]
+    _rewrite(ephemeral, "d-egress", neither_epoch)
+
+    with pytest.raises(AuditError, match="no longer validates"):
+        await ephemeral.get("d-egress")
+
+
+async def test_a_stored_row_missing_only_the_coverage_decodes_as_the_middle_rung(
+    ephemeral: SqliteAuditTrail,
+) -> None:
+    """ADR-0233 §15's second replacement case: the epoch this ADR mints a shape for.
+
+    The current JSON with **exactly** ``coverage`` removed decodes carrying a
+    ``CoverageUnrecordedBinding``, and every other fact the row holds comes back —
+    including ``planned_with_external_content``, which such a row *did* record. That
+    is the whole reason the origin guard does not catch this epoch, and therefore the
+    reason ADR-0233 §14 states each refusal for it rather than inheriting one.
+    """
+    recorded = _egress_decision()
+    await _record_as_coverage_legacy(ephemeral, recorded)
+
+    got = await ephemeral.get("d-egress")
+
+    assert got is not None
+    assert isinstance(got.egress_binding, CoverageUnrecordedBinding)
+    assert not isinstance(got.egress_binding, EgressBinding)
+    assert got.egress_binding.planned_with_external_content is False
+    assert got.egress_binding.account == BoundAccount(
+        identity="work@example.com", reference="conn-0001"
+    )
+    assert got.egress_binding.transport_endpoint == "smtp://mail.example.com:587"
+    assert got.egress_binding.spans == recorded.egress_binding.spans  # type: ignore[union-attr]  # built whole above
+    assert got.egress_binding.canonical_destination_set == (
+        CanonicalDestination(protocol=DestinationProtocol.SMTP, canonical="a@example.com"),
+    )
+
+
+async def test_a_returned_coverage_legacy_decision_fabricates_no_coverage_on_the_way_out(
+    ephemeral: SqliteAuditTrail,
+) -> None:
+    """ADR-0233 §14's nothing-is-fabricated clause, over the dump.
+
+    ``coverage`` is required with no default and ADR-0233 §5 forbids a seam inventing
+    one, so every member of ``SpanCoverage`` is out; the model does not carry the
+    member at all, so there is no key to emit. Asserted over the **whole** dump, so a
+    lane that moved the fact elsewhere in the record is caught too.
+    """
+    await _record_as_coverage_legacy(ephemeral, _egress_decision())
+
+    got = await ephemeral.get("d-egress")
+
+    assert got is not None
+    assert "coverage" not in json.dumps(got.model_dump(mode="json"))
+    assert "coverage" not in got.model_dump()["egress_binding"]
+
+
+async def test_a_coverage_legacy_park_is_refused_by_its_own_condition_name(
+    ephemeral: SqliteAuditTrail,
+) -> None:
+    """ADR-0233 §14's park clause, and the condition name that is **not** inherited.
+
+    ``pending_confirmation`` answers ``None`` for this epoch too, detected on the
+    decoded value's type, and carries ``coverage-unrecorded`` rather than
+    ``origin-unrecorded`` — a reader meeting one in the log learns which fact the row
+    is missing, and these are different epochs. Nothing is written, the step stays
+    durably ``AWAITING_APPROVAL`` with its ``CONFIRM`` unresolved and its row intact.
+
+    Asserted over the **bytes in the ``data`` column**, because a read-side
+    representation is precisely the thing a decoded comparison could not tell apart
+    from a rewrite.
+    """
+    await _record_as_coverage_legacy(ephemeral, _egress_decision())
+    before = _stored(ephemeral, "d-egress")
+
+    with structlog.testing.capture_logs() as captured:
+        park = await ephemeral.pending_confirmation(execution_id="exec-a", step_id="step-1")
+
+    assert park is None
+    refusals = [entry for entry in captured if entry.get("refused") == "park"]
+    assert [entry["event"] for entry in refusals] == [COVERAGE_UNRECORDED]
+    assert refusals[0]["step_id"] == "step-1"
+    assert _stored(ephemeral, "d-egress") == before
+
+
+async def test_the_trail_reads_the_coverage_legacy_shape_and_refuses_to_write_one(
+    ephemeral: SqliteAuditTrail,
+) -> None:
+    """ADR-0233 §14's write clause on the concrete store, beside the read it mirrors.
+
+    ADR-0184 §4's second clause extended by cause: the same value the trail hands
+    *out* of a row it cannot be handed *into* one, so the shape cannot be minted into
+    a trail and back-dated as history it is not.
+    """
+    await _record_as_coverage_legacy(ephemeral, _egress_decision())
+    read_back = await ephemeral.get("d-egress")
+    assert read_back is not None
+    assert isinstance(read_back.egress_binding, CoverageUnrecordedBinding)
+
+    with pytest.raises(AuditError, match="records no coverage"):
+        await ephemeral.record(read_back.model_copy(update={"id": "d-forged"}))
+
+    assert await ephemeral.get("d-forged") is None
 
 
 async def test_a_stored_row_missing_the_origin_and_faulty_elsewhere_still_raises(
@@ -2059,6 +2216,7 @@ async def test_resolution_of_returns_a_legacy_resolution_by_its_binding(
     await ephemeral.record(answer)
     legacy = _stored(ephemeral, "d-answer")
     del legacy["egress_binding"]["planned_with_external_content"]
+    del legacy["egress_binding"]["coverage"]
     _rewrite(ephemeral, "d-answer", legacy)
 
     resolution = await ephemeral.resolution_of(execution_id="exec-a", step_id="step-1")

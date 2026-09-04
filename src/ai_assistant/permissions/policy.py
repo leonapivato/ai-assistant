@@ -33,6 +33,7 @@ import structlog
 from ai_assistant.core.errors import RecipientGrantError
 from ai_assistant.core.types import (
     CostBasis,
+    CoverageUnrecordedBinding,
     OriginUnrecordedBinding,
     PermissionOutcome,
     PermissionRuling,
@@ -62,6 +63,14 @@ _NOT_A_CONFIRMATION = "the decision resolved was not a CONFIRM, so it authorises
 _ORIGIN_UNRECORDED = (
     "the user approved, but this decision records an egress call whose origin was never "
     "recorded, and no answer can establish it"
+)
+
+#: ADR-0184 §7's floor extended by cause (ADR-0233 §14), worded the same way and for
+#: the same reason: a statement about the **record**, naming the fact the trail never
+#: wrote down rather than anything about what the call would carry.
+_COVERAGE_UNRECORDED = (
+    "the user approved, but this decision records an egress call whose coverage was "
+    "never recorded, and no answer can establish it"
 )
 
 
@@ -525,21 +534,26 @@ class ThresholdActionPolicy:
         clause here would refuse every approval of exactly the calls §6 exists to
         put to the user, which is the failure §5's sixth clause names.
 
-        **ADR-0184 §7's floor *does* add a branch, and it is the one case where an
-        approval is not enough.** Where ``confirmed.egress_binding`` records no
-        origin — an
+        **ADR-0184 §7's floor *does* add a branch, and ADR-0233 §14 extends it by
+        cause to a second: these are the two cases where an approval is not
+        enough.** Where ``confirmed.egress_binding`` records no origin — an
         :class:`~ai_assistant.core.types.OriginUnrecordedBinding`, which only a row
-        written before ADR-0181 can carry — no ``ALLOW`` is returned whatever
-        ``approved`` says. The origin of such a call cannot be established at all,
-        and ADR-0181 §5's second clause leaves no route by which any authorisation
-        covers it; the user's answer is route (a) for a call whose facts are known,
-        and here one of them never was. It is a **floor rather than a route that
-        exists**: ``AuditTrail.pending_confirmation`` refuses to offer such a park
-        and ``StepRunner.resume`` refuses it again before any ruling is sought, so
-        nothing in the tree reaches this branch — which is exactly ADR-0021 §5's
-        "fail-closed twice over" and why it is written anyway. ``decide`` gains no
-        counterpart: :attr:`ActionRequest.egress_binding` stays narrow, so the case
-        is unconstructable at that member.
+        written before ADR-0181 can carry — or records no coverage — a
+        :class:`~ai_assistant.core.types.CoverageUnrecordedBinding`, which only a
+        row written before ADR-0233 can carry — no ``ALLOW`` is returned whatever
+        ``approved`` says. The missing fact cannot be established at all, and
+        ADR-0181 §5's second clause leaves no route by which any authorisation
+        covers such a call; the user's answer is route (a) for a call whose facts
+        are known, and here one of them never was. **The second branch is written
+        rather than inherited**, because a coverage-unrecorded row *has*
+        ``planned_with_external_content`` and so falls straight past the first
+        ``isinstance``. Both are a **floor rather than a route that exists**:
+        ``AuditTrail.pending_confirmation`` refuses to offer either park and
+        ``StepRunner.resume`` refuses each again before any ruling is sought, so
+        nothing in the tree reaches these branches — which is exactly ADR-0021 §5's
+        "fail-closed twice over" and why they are written anyway. ``decide`` gains no
+        counterpart: :attr:`ActionRequest.egress_binding` stays narrow, so both cases
+        are unconstructable at that member.
 
         **Only ``True`` is consent.** ``approved`` is annotated ``bool`` and
         mypy runs strict over `src` and `tests`, so a caller passing anything
@@ -560,6 +574,8 @@ class ThresholdActionPolicy:
             return PermissionRuling(outcome=PermissionOutcome.DENY, reason=_NOT_A_CONFIRMATION)
         if isinstance(confirmed.egress_binding, OriginUnrecordedBinding):
             return PermissionRuling(outcome=PermissionOutcome.DENY, reason=_ORIGIN_UNRECORDED)
+        if isinstance(confirmed.egress_binding, CoverageUnrecordedBinding):
+            return PermissionRuling(outcome=PermissionOutcome.DENY, reason=_COVERAGE_UNRECORDED)
         if self._outcome_for(confirmed.tool) is PermissionOutcome.DENY:
             return PermissionRuling(
                 outcome=PermissionOutcome.DENY,

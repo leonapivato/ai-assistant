@@ -50,12 +50,14 @@ from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     BoundAccount,
     CostBasis,
+    CoverageUnrecordedBinding,
     EgressBinding,
     Idempotency,
     OriginUnrecordedBinding,
     PermissionDecision,
     PermissionOutcome,
     RiskLevel,
+    SpanCoverage,
     ToolCost,
     ToolDefinition,
     ToolOutcome,
@@ -1176,6 +1178,7 @@ class AuditTrailContract:
                     account=BoundAccount(identity="work@example.com", reference="conn-0001"),
                     transport_endpoint="test://endpoint/one",
                     planned_with_external_content=False,
+                    coverage=SpanCoverage.NOT_COVERED,
                 )
             }
         )
@@ -2023,6 +2026,55 @@ class AuditTrailContract:
         }
         binding: object = (
             OriginUnrecordedBinding(**members)  # type: ignore[arg-type]  # heterogeneous members
+            if supplied == "model"
+            else members
+        )
+        await trail.record(decision("d-1"))
+        unrecorded = decision("d-2").model_copy(update={"egress_binding": binding})
+        handed: Any = unrecorded
+        if supplied == "whole-decision":
+            handed = {**dict(unrecorded), "egress_binding": members}
+
+        await _refuses(trail, handed, AuditError)
+
+        assert await trail.get("d-2") is None
+        assert [held.id for held in await trail.export()] == ["d-1"]
+
+    @pytest.mark.parametrize("supplied", ["model", "mapping", "whole-decision"])
+    async def test_a_decision_whose_binding_records_no_coverage_is_refused(
+        self, trail: AuditTrail, supplied: str
+    ) -> None:
+        """ADR-0233 §14's write clause: read such a row, never write one.
+
+        ADR-0184 §4's second clause extended **by cause** and for §4's own reason, at
+        the epoch after the one above. A
+        :class:`~ai_assistant.core.types.CoverageUnrecordedBinding` represents a row
+        written before ADR-0233 §4 added ``coverage``; ADR-0184 §5's readers hand one
+        back as history, and this is the other half — an epoch that has ended may be
+        read out of and never appended to, so the shape cannot be minted into a trail
+        and back-dated as history it is not.
+
+        **The refusal is stated rather than inherited, and this suite is where that
+        matters most.** Such a row *has* ``planned_with_external_content``, so it is
+        **not** an ``OriginUnrecordedBinding``: an implementation that narrowed only
+        against that class passes the case above and fails this one, appending a
+        fabricated row from an epoch nobody is writing in.
+
+        The three arms are the case above's, for its reasons: a built model, a bare
+        mapping through ``model_copy(update=...)`` — which does not validate, so a
+        store checking what it was *handed* rather than the snapshot it is about to
+        *write* rebuilds the mapping into exactly the shape it just refused — and the
+        whole decision handed over as a mapping, which reaches ``model_validate``
+        untouched and comes back a decision.
+        """
+        members: dict[str, object] = {
+            "spans": (),
+            "account": BoundAccount(identity="work@example.com", reference="conn-0001"),
+            "transport_endpoint": "test://endpoint/one",
+            "planned_with_external_content": False,
+        }
+        binding: object = (
+            CoverageUnrecordedBinding(**members)  # type: ignore[arg-type]  # heterogeneous members
             if supplied == "model"
             else members
         )

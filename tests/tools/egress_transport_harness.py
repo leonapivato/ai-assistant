@@ -42,6 +42,7 @@ from ai_assistant.core.types import (
     ProvisioningState,
     SecretName,
     SecretScope,
+    SpanCoverage,
 )
 from ai_assistant.testing import FakeByteChannel, FakeOutboundTransport
 from ai_assistant.testing.secrets import FakeSecretStore
@@ -443,6 +444,7 @@ def binding(  # noqa: PLR0913 — one keyword per fact a ruling fixes; grouping 
         account=BoundAccount(identity=identity, reference=reference),
         transport_endpoint=endpoint,
         planned_with_external_content=False,
+        coverage=SpanCoverage.NOT_COVERED,
     )
 
 

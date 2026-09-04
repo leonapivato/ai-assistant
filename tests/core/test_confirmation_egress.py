@@ -37,6 +37,7 @@ from ai_assistant.core.types import (
     EgressBinding,
     EgressDestination,
     EgressSpan,
+    SpanCoverage,
 )
 
 if TYPE_CHECKING:
@@ -96,6 +97,7 @@ def _binding(*spans: EgressSpan, planned_with_external_content: bool = False) ->
         account=_account(),
         transport_endpoint=ENDPOINT,
         planned_with_external_content=planned_with_external_content,
+        coverage=SpanCoverage.NOT_COVERED,
     )
 
 
@@ -105,6 +107,7 @@ def _reduced(binding: EgressBinding) -> ConfirmationEgress:
         account_identity=binding.account.identity,
         spans=binding.spans,
         planned_with_external_content=binding.planned_with_external_content,
+        coverage=SpanCoverage.NOT_COVERED,
     )
 
 
@@ -156,32 +159,49 @@ def test_the_egress_member_carries_no_default_so_every_site_states_it() -> None:
 
 
 def test_confirmation_egress_refuses_an_extra_member_and_a_missing_one() -> None:
-    """ADR-0178 §2 as ADR-0181 §3 narrows it: exactly **three** fields, all required.
+    """ADR-0178 §2 as ADR-0181 §3 and ADR-0233 §4 narrow it: **four** fields, all required.
 
-    The count moves by one and nothing else in §2 does (ADR-0181 §11): the third
-    member is ``planned_with_external_content``, populated from the recorded
-    decision's binding at both assembly sites and by no other route, and it carries
-    no second copy of anything §2 already refuses.
+    The count moves by one each time and nothing else in §2 does (ADR-0181 §11,
+    ADR-0233 §14): each added member is the recorded decision's own value, populated
+    from its binding at both assembly sites and by no other route, and neither
+    carries a second copy of anything §2 already refuses. ADR-0178 §10's roster test
+    keeps its subject — no field here is named or typed for a connection reference, a
+    transport endpoint, a ``BoundAccount`` or a ``SecretName`` — and ``coverage`` is
+    none of those.
     """
     assert set(ConfirmationEgress.model_fields) == {
         "account_identity",
         "spans",
         "planned_with_external_content",
+        "coverage",
     }
     assert all(field.is_required() for field in ConfirmationEgress.model_fields.values())
     with pytest.raises(ValidationError, match=r"extra_forbidden|Extra inputs"):
-        ConfirmationEgress(
+        ConfirmationEgress(  # type: ignore[call-arg]  # the point of the case
             account_identity=IDENTITY,
             spans=(),
             planned_with_external_content=False,
-            transport_endpoint=ENDPOINT,  # type: ignore[call-arg]  # the point of the case
+            coverage=SpanCoverage.NOT_COVERED,
+            transport_endpoint=ENDPOINT,
         )
     with pytest.raises(ValidationError, match="spans"):
         ConfirmationEgress(  # type: ignore[call-arg]  # ditto
-            account_identity=IDENTITY, planned_with_external_content=False
+            account_identity=IDENTITY,
+            planned_with_external_content=False,
+            coverage=SpanCoverage.NOT_COVERED,
         )
     with pytest.raises(ValidationError, match="account_identity"):
-        ConfirmationEgress(spans=(), planned_with_external_content=False)  # type: ignore[call-arg]  # ditto
+        ConfirmationEgress(  # type: ignore[call-arg]  # ditto
+            spans=(),
+            planned_with_external_content=False,
+            coverage=SpanCoverage.NOT_COVERED,
+        )
+    with pytest.raises(ValidationError, match="coverage"):
+        ConfirmationEgress(  # type: ignore[call-arg]  # ditto
+            account_identity=IDENTITY,
+            spans=(),
+            planned_with_external_content=False,
+        )
 
 
 def test_the_spans_are_the_bindings_own_value_member_for_member() -> None:
@@ -262,7 +282,10 @@ def test_the_account_identity_must_render_as_something() -> None:
     for invisible in ("", "   ", "\u200b"):
         with pytest.raises(ValidationError):
             ConfirmationEgress(
-                account_identity=invisible, spans=(), planned_with_external_content=False
+                account_identity=invisible,
+                spans=(),
+                planned_with_external_content=False,
+                coverage=SpanCoverage.NOT_COVERED,
             )
 
 
@@ -276,7 +299,10 @@ def test_the_account_identity_survives_byte_for_byte() -> None:
     """
     awkward = " \u00a0Work Account\t(Personal)  "
     reduced = ConfirmationEgress(
-        account_identity=awkward, spans=(), planned_with_external_content=False
+        account_identity=awkward,
+        spans=(),
+        planned_with_external_content=False,
+        coverage=SpanCoverage.NOT_COVERED,
     )
     assert reduced.account_identity == awkward
 
@@ -362,7 +388,8 @@ def test_the_derived_set_is_a_property_and_never_a_field() -> None:
             account_identity=IDENTITY,
             spans=(),
             planned_with_external_content=False,
-            canonical_destination_set=(),  # type: ignore[call-arg]  # the point of the case
+            canonical_destination_set=(),
+            coverage=SpanCoverage.NOT_COVERED,  # type: ignore[call-arg]  # the point of the case
         )
 
 
@@ -416,7 +443,10 @@ def test_an_empty_span_tuple_is_a_description_and_not_a_non_egress_marker() -> N
     still derives a non-empty set.
     """
     egress = ConfirmationEgress(
-        account_identity=IDENTITY, spans=(), planned_with_external_content=False
+        account_identity=IDENTITY,
+        spans=(),
+        planned_with_external_content=False,
+        coverage=SpanCoverage.NOT_COVERED,
     )
     assert egress.canonical_destination_set == (ConfirmationDestination(account_identity=IDENTITY),)
     assert egress is not None

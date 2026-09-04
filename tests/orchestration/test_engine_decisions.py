@@ -46,6 +46,7 @@ from ai_assistant.core.types import (
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
+    SpanCoverage,
 )
 from ai_assistant.permissions import SqliteAuditTrail
 
@@ -93,6 +94,7 @@ def _egress_binding() -> EgressBinding:
         account=_ACCOUNT,
         transport_endpoint=_ENDPOINT,
         planned_with_external_content=False,
+        coverage=SpanCoverage.NOT_COVERED,
     )
 
 
@@ -131,11 +133,19 @@ def _rewrite(trail: SqliteAuditTrail, decision_id: str, payload: dict[str, Any])
 async def bound() -> AsyncIterator[Harness]:
     """An engine over a real ``SqliteAuditTrail`` seeded with :data:`_ROWS`.
 
-    ``d-legacy`` is written by **recording the current shape and then removing
-    exactly one key from the stored bytes**, which is ``test_audit``'s own technique
-    and for its reason: a hand-built row could drift from what the trail actually
-    stores and would then pin a shape no build ever produced. ADR-0184 §4 makes it
-    unproducible through ``record``, so the ``data`` column is the only door.
+    ``d-legacy`` is written by **recording the current shape and then removing from
+    the stored bytes exactly the keys that epoch had not begun writing**, which is
+    ``test_audit``'s own technique and for its reason: a hand-built row could drift
+    from what the trail actually stores and would then pin a shape no build ever
+    produced. ADR-0184 §4 makes it unproducible through ``record``, so the ``data``
+    column is the only door.
+
+    **Two keys rather than one since ADR-0233 §14**, and that is the epochs being
+    ordered rather than a widening: a build predating
+    ``planned_with_external_content`` necessarily predates ``coverage`` too, so a
+    genuine pre-origin row lacks both. ``tests/permissions/test_audit.py`` owns the
+    three-rung discrimination itself, including the shape that carries ``coverage``
+    without the origin key and satisfies no rung at all.
     """
     trail = SqliteAuditTrail(path=":memory:")
     harness = Harness(trail=trail)
@@ -144,6 +154,7 @@ async def bound() -> AsyncIterator[Harness]:
             await trail.record(_decision(decision_id, at=_AT + timedelta(seconds=offset)))
         legacy = _stored(trail, "d-legacy")
         del legacy["egress_binding"]["planned_with_external_content"]
+        del legacy["egress_binding"]["coverage"]
         _rewrite(trail, "d-legacy", legacy)
         yield harness
     finally:

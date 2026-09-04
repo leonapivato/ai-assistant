@@ -31,6 +31,7 @@ from ai_assistant.core.types import (
     ExecutionState,
     RecordedInvocation,
     ReplyChunk,
+    SpanCoverage,
     StepOutcome,
     ToolCost,
     ToolFailureKind,
@@ -169,6 +170,7 @@ def test_an_egress_confirmation_survives_the_round_trip_a_client_actually_makes(
                     ),
                 ),
             ),
+            coverage=SpanCoverage.NOT_COVERED,
         ),
     )
     outcome = TurnOutcome(
