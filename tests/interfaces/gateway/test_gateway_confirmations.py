@@ -49,7 +49,6 @@ from ai_assistant.interfaces.gateway.records import RequestClass
 from ai_assistant.interfaces.gateway.server import (
     _ASSISTANT_PATHS,
     _TURN_BUDGET,
-    _confirmation_span_view,
     _recorded_binding_view,
     _span_view,
 )
@@ -322,7 +321,7 @@ async def test_the_values_cross_as_data_and_are_not_pre_escaped() -> None:
     async with _harness(_holding()) as one:
         view = await _view(one, _confirmation(_span("body"), parameters={"body": raw}))
 
-        assert view["parameters"] == [{"key": "body", "value": raw}]
+        assert view["parameters"] == [{"key": "body", "index": None, "value": raw}]
 
 
 # --- ADR-0178 §7: the floor, over the view the page receives -----------------
@@ -365,9 +364,10 @@ async def test_a_destination_less_occurrence_crosses_whole_and_names_no_recipien
     be. Dropping it, or inventing a destination for it, would fail the whole-rendering
     clause in the two opposite directions.
 
-    **And it carries its own value since ADR-0233 §8**, which is the one member of
-    this view that is content: the argument's whole value, because this span's
-    ``index`` is absent (ADR-0150 §4).
+    **And it carries no value**, which is ADR-0233 §2 rather than an omission: the
+    content crosses **once**, in the arguments, decomposed under ADR-0150 §4 — so this
+    span's own value is the ``parameters`` entry carrying its locator, and a copy here
+    would be the second renderable artifact §2 refuses.
     """
     confirmation = _confirmation(
         _span(
@@ -387,7 +387,6 @@ async def test_a_destination_less_occurrence_crosses_whole_and_names_no_recipien
                 "provenance": "user_authored",
                 "extent": 11,
                 "tier": "personal",
-                "value": "hello",
                 "destination": None,
             }
         ]
@@ -463,7 +462,7 @@ async def test_a_non_egress_confirmation_carries_no_egress_and_claims_nothing() 
         view = await _view(one, confirmation)
 
         assert view["egress"] is None
-        assert view["parameters"] == [{"key": "body", "value": "hello"}]
+        assert view["parameters"] == [{"key": "body", "index": None, "value": "hello"}]
         assert view["reason"] == "this discloses data off-device"
 
 
@@ -512,10 +511,11 @@ async def test_no_connection_reference_or_endpoint_reaches_the_page() -> None:
     async with _harness(_holding()) as one:
         egress = (await _view(one, confirmation))["egress"]
 
-        # ADR-0181 §6's addition moved this roster by one and ADR-0233 §8's by one
+        # ADR-0181 §6's addition moved this roster by one and ADR-0233 §4's by one
         # more; neither changes what it excludes: no connection reference, no
-        # transport endpoint. ``coverage`` is a three-valued fact about the call and
-        # ``value`` is the span's own bytes, and neither is a reference to anything.
+        # transport endpoint. ``coverage`` is a three-valued fact about the call, and
+        # it is a reference to nothing. The span roster does **not** move: the content
+        # crosses in the arguments and never on a span (ADR-0233 §2).
         assert set(egress) == {
             "account_identity",
             "destinations",
@@ -529,7 +529,6 @@ async def test_no_connection_reference_or_endpoint_reaches_the_page() -> None:
             "provenance",
             "extent",
             "tier",
-            "value",
             "destination",
         }
 
@@ -875,18 +874,20 @@ async def test_the_calls_coverage_crosses_in_every_state_and_is_derived_from_not
         assert egress["coverage"] == confirmation.egress.coverage.value
 
 
-async def test_every_spans_own_value_crosses_whole_in_both_decomposition_shapes() -> None:
-    """ADR-0233 §8's first clause, as the page receives it.
+async def test_the_arguments_cross_decomposed_so_every_spans_value_is_one_of_them() -> None:
+    """ADR-0233 §8's first clause, as the page receives it — in **one** carrier.
 
     "For every span the ``spans`` tuple carries, that span's own value, taken from
     ``Confirmation.parameters`` under ADR-0150 §4's decomposition — the argument's
     whole value where ``index`` is absent, and that argument's value's element at
     ``index`` otherwise."
 
-    Both shapes are here because both reach the page and only one of them is the
-    obvious one. The element case is also where a page doing its own decomposition
-    would go wrong: the argument crosses as text, so an array reaches the browser as
-    JSON, and its elements are only inside it.
+    So the arguments cross **decomposed** and the spans carry no value at all: a span's
+    own value is the entry whose ``(key, index)`` is its own locator, which is what
+    makes this one artifact rather than the two ADR-0233 §2 refuses. Both of ADR-0150
+    §4's shapes are here because both reach the page and only one is the obvious one —
+    and the element case is where a page doing its own decomposition would go wrong,
+    since an array reaches a browser as JSON text and its elements are only inside it.
     """
     parameters: dict[str, FrozenJson] = {"body": "hello\n\nAlice", "to": ("a@x.test", "b@y.test")}
     confirmation = _confirmation(
@@ -896,80 +897,75 @@ async def test_every_spans_own_value_crosses_whole_in_both_decomposition_shapes(
         parameters=parameters,
     )
     async with _harness(_holding()) as one:
-        egress = (await _view(one, confirmation))["egress"]
+        view = await _view(one, confirmation)
 
-        assert [one["value"] for one in egress["spans"]] == [
-            "hello\n\nAlice",
-            "a@x.test",
-            "b@y.test",
+        assert view["parameters"] == [
+            {"key": "body", "index": None, "value": "hello\n\nAlice"},
+            {"key": "to", "index": 0, "value": "a@x.test"},
+            {"key": "to", "index": 1, "value": "b@y.test"},
         ]
+        # Every span's locator names exactly one of them, which is the join the page
+        # performs and refuses the whole card without (ADR-0233 §8).
+        located = [(one["key"], one["index"]) for one in view["parameters"]]
+        assert [(one["argument"], one["index"]) for one in view["egress"]["spans"]] == located
 
 
-async def test_a_spans_value_crosses_as_losslessly_as_the_argument_it_comes_from() -> None:
-    """:func:`_parameter_text`'s rule, reaching the value beside the description.
+async def test_an_empty_array_argument_crosses_as_the_one_entry_no_span_describes() -> None:
+    """ADR-0150 §4's one shape that carries no span, and ADR-0177 §8's totality.
 
-    An integer above ``2**53`` read by ``JSON.parse`` is a double, so a value spelled
-    on the page rather than here would reach the owner **changed** — and a confirmation
-    showing a value the call would not run with is worse than one showing none. The
-    same reason the arguments are spelled in this process applies span by span, and a
-    span's value and its argument's are the same string for an indexless span.
+    "A key whose value **is** an empty JSON array is the ``argument`` of **no** span",
+    so a decomposition emitting one entry per span would drop the key — and ADR-0177 §8
+    requires "every key and every value the mapping carries". It crosses as one
+    indexless entry, spelled as the empty array it is.
     """
-    big = 9007199254740993
-    parameters: dict[str, FrozenJson] = {"count": big}
-    confirmation = _confirmation(_span("count", extent=16), parameters=parameters)
+    parameters: dict[str, FrozenJson] = {"body": "hello", "cc": ()}
+    confirmation = _confirmation(_span("body", extent=5), parameters=parameters)
     async with _harness(_holding()) as one:
         view = await _view(one, confirmation)
 
-        assert view["egress"]["spans"][0]["value"] == "9007199254740993"
-        assert view["parameters"] == [{"key": "count", "value": "9007199254740993"}]
+        assert view["parameters"] == [
+            {"key": "body", "index": None, "value": "hello"},
+            {"key": "cc", "index": None, "value": "[]"},
+        ]
 
 
-@pytest.mark.parametrize(
-    ("spans", "parameters"),
-    [
-        ((("subject", None),), {"body": "hello"}),
-        ((("body", 0),), {"body": "hello"}),
-        ((("to", 2),), {"to": ("a@x.test",)}),
-    ],
-    ids=[
-        "an argument the parameters do not carry",
-        "an index on a string",
-        "an index past the end",
-    ],
-)
-async def test_a_span_the_arguments_do_not_locate_crosses_as_no_value_at_all(
-    spans: tuple[tuple[str, int | None], ...], parameters: dict[str, FrozenJson]
-) -> None:
-    """The absence that lets the page perform ADR-0233 §8's refusal.
+async def test_an_arguments_elements_cross_as_losslessly_as_the_argument_itself() -> None:
+    """:func:`_parameter_text`'s rule, reaching each element of an array as well.
 
-    Each of the three is a state ``ActionRequest`` refuses at construction (ADR-0150
-    §4), so none is reachable through a request this system built — which is exactly
-    why the view answers rather than raises: a ``KeyError`` here would take down the
-    turn's response, and what a surface owes for an unlocatable value is §8's refusal
-    of the **whole** card, which is the page's to take over every span at once.
-
-    ``null`` cannot be mistaken for a value the owner is looking at: every located
-    value crosses as text, so a JSON ``null`` argument crosses as the four characters
-    ``null``.
+    An integer above ``2**53`` read by ``JSON.parse`` is a double, so a value spelled
+    on the page rather than here would reach the owner **changed** — and a confirmation
+    showing a value the call would not run with is worse than one showing none. That is
+    the whole reason the decomposition happens in this process: a page indexing into an
+    array-valued argument would have to parse its text back, and the two elements here
+    differ in the digit that round trip loses.
     """
+    big = 9007199254740993
+    parameters: dict[str, FrozenJson] = {"count": big, "ids": (big, big + 2)}
     confirmation = _confirmation(
-        *[_span(argument, index=index, extent=1) for argument, index in spans],
+        _span("count", extent=16),
+        _span("ids", index=0, extent=16),
+        _span("ids", index=1, extent=16),
         parameters=parameters,
     )
     async with _harness(_holding()) as one:
-        egress = (await _view(one, confirmation))["egress"]
+        view = await _view(one, confirmation)
 
-        assert [one["value"] for one in egress["spans"]] == [None]
+        assert view["parameters"] == [
+            {"key": "count", "index": None, "value": "9007199254740993"},
+            {"key": "ids", "index": 0, "value": "9007199254740993"},
+            {"key": "ids", "index": 1, "value": "9007199254740995"},
+        ]
 
 
-def test_a_recorded_decisions_description_carries_no_content() -> None:
+async def test_no_span_view_carries_content_on_either_surface_it_reaches() -> None:
     """ADR-0150 §10's second clause, at the one place ADR-0233 §8 could have breached it.
 
-    §8's floor is stated over "a surface rendering a ``Confirmation``". A decision's
-    **history** row is not one: the ruling was already taken, and the binding it hangs
-    off never held the arguments. So the description stays a description there, and
-    the value rides only on the confirmation's own span view — which is why there are
-    two functions rather than one with a flag.
+    §8's floor is met by the arguments crossing decomposed rather than by a value
+    riding on a span, so **one** span view serves both of its consumers, exactly as it
+    did before this ADR. A decision's **history** row is the other consumer: the ruling
+    was already taken, over a binding that never held the arguments, and putting bytes
+    on that row would make the description content-bearing where ADR-0150 §10's second
+    clause keeps it empty.
     """
     span = _span("body", extent=5)
     binding = EgressBinding(
@@ -979,13 +975,13 @@ def test_a_recorded_decisions_description_carries_no_content() -> None:
         planned_with_external_content=False,
         coverage=SpanCoverage.NOT_COVERED,
     )
+    confirmation = _confirmation(span, parameters={"body": "hello"})
 
     recorded = _recorded_binding_view(binding)
+    async with _harness(_holding()) as one:
+        crossed = (await _view(one, confirmation))["egress"]["spans"]
 
     assert recorded is not None
     assert recorded["spans"] == [_span_view(span)]
-    assert "value" not in recorded["spans"][0]
-    assert _confirmation_span_view(span, {"body": "hello"}) == {
-        **_span_view(span),
-        "value": "hello",
-    }
+    assert crossed == [_span_view(span)]
+    assert "value" not in _span_view(span)

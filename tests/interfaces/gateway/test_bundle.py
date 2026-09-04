@@ -5528,16 +5528,14 @@ def test_every_value_is_put_on_the_screen_whole_and_as_a_text_node() -> None:
     for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "createContextualFragment"):
         assert sink not in block, sink
     # One renderer of a confirmation's content, and no second caller: since
-    # adversarial review's round 3 every value is rendered exactly once, from the span
-    # it belongs to, so nothing on the screen can disagree with anything else on it.
+    # adversarial review's rounds 3 and 6 the arguments cross decomposed and are
+    # rendered exactly once, so nothing on the screen can disagree with anything else
+    # on it — and no span carries a copy for it to disagree with.
     assert {name for name, body in functions.items() if "valueBlock(" in body} == {
         "valueBlock",
-        "renderValue",
-    }
-    assert {name for name, body in functions.items() if "renderValue(" in body} == {
-        "renderValue",
         "renderParameters",
     }
+    assert "span.value" not in _code("app.js")
 
 
 def test_the_stylesheet_cannot_hide_part_of_a_value() -> None:
@@ -5567,9 +5565,9 @@ def test_the_values_are_rendered_before_there_is_anything_to_press() -> None:
 
     Every value is rendered by ``renderParameters``, which ``renderConfirmation``
     calls before both the egress facts and the control — so the check is that the one
-    renderer of content runs first and that the values it renders are the **spans'**,
-    which is what makes "every span's value" and "before the control" one ordering
-    rather than two.
+    renderer of content runs first, and that what it renders is the **locator** every
+    span is identified by, which is what makes "every span's value" and "before the
+    control" one ordering rather than two.
     """
     functions = _functions(_code("app.js"))
     card = functions["renderConfirmation"]
@@ -5578,11 +5576,12 @@ def test_the_values_are_rendered_before_there_is_anything_to_press() -> None:
     assert card.index("renderParameters(") < card.index("offerApproval(")
     assert card.index("renderEgress(") < card.index("offerApproval(")
     assert card.index("renderParameters(") < card.index("renderEgress(")
-    # The values are the spans' own, keyed by the name that locates each one, and the
-    # keys carrying no span — ADR-0150 §4's empty arrays — are rendered too, so
-    # ADR-0177 §8's "every key and every value" survives the span-by-span rendering.
-    assert "egress.spans.forEach((one) => renderValue(item, spanKey(one), one.value));" in arguments
-    assert "!egress.spans.some((span) => span.argument === one.key)" in arguments
+    # Every entry the carrier holds, under the locator that names it — the same
+    # spelling ``spanWords`` gives a span, which is what joins the two halves of the
+    # card and what ``shownSpan`` looks a span up by.
+    assert "parameters.forEach(" in arguments
+    assert "locatorWords(one.key, one.index)" in arguments
+    assert "locatorWords(span.argument, span.index)" in functions["spanWords"]
 
 
 def test_a_confirmation_that_cannot_be_shown_whole_is_not_shown_at_all() -> None:
@@ -5594,19 +5593,20 @@ def test_a_confirmation_that_cannot_be_shown_whole_is_not_shown_at_all() -> None
     after half of it is on screen is the partial confirmation the clause is against.
     What it says is asserted too, because "and says so" is half the clause.
 
-    **Three tests, each of them a type test rather than an equality against one
-    value** (adversarial review, rounds 1 and 2). Nothing in this page validates the
-    body it was handed, so every member it reads can be absent, a number or an object:
-    a ``value`` that is missing is ``undefined``, which a check for ``null`` alone let
-    through to be rendered as the word "undefined"; a ``coverage`` outside the three
-    is a sentence about the call this page would be inventing; and an indexless span
-    whose ``value`` disagrees with the argument on screen is a card showing one text
-    and approving a request carrying another.
+    **Every test is a type test over a shape, not an equality against one value**
+    (adversarial review, rounds 1, 2 and 6). Nothing in this page validates the body it
+    was handed, so every member it reads can be absent, a number or an object: a
+    ``value`` that is missing is ``undefined``, which a check for ``null`` alone let
+    through to be rendered as the word "undefined"; a ``coverage`` outside the three is
+    a sentence about the call this page would be inventing; and an ``egress`` or a
+    ``spans`` that is absent used to **throw** here, which ``readPending`` caught as
+    "the gateway did not answer" — the wrong sentence, and it took the whole listing
+    with it.
 
-    **The third is the join, and it is checked rather than trusted.** ADR-0233 §2
-    records that the description and the arguments "cannot come apart, and the
-    recomputation is the join" — which ``ActionRequest`` performs at construction over
-    the same two things, and which this page performs over what actually reached it.
+    **And the last of them is a lookup rather than a comparison**, because the content
+    is carried once: a span's own value is the argument entry carrying its locator, so
+    what is asked is that the locator names exactly one entry whose value is text.
+    There is no second copy for a comparison to be made against (ADR-0233 §2).
     """
     script = _code("app.js")
     functions = _functions(script)
@@ -5621,9 +5621,11 @@ def test_a_confirmation_that_cannot_be_shown_whole_is_not_shown_at_all() -> None
 
     whole = functions["shownWhole"]
     span = functions["shownSpan"]
+    assert "Array.isArray(confirmation.parameters)" in whole
+    assert "Array.isArray(egress.spans)" in whole
     assert "Object.hasOwn(COVERAGE_WORDS, egress.coverage)" in whole
-    assert 'typeof span.value !== "string"' in span
-    assert "named[0].value === span.value" in span
+    assert "one.key === span.argument && one.index === span.index" in span
+    assert 'typeof located[0].value === "string"' in span
 
 
 def test_the_call_carries_one_coverage_line_in_every_state_core_has() -> None:

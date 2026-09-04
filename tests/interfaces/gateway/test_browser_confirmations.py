@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from browser_drive import DESKTOP, PHONE, driving
+from playwright.async_api import expect
 from test_browser_answers import _substitute
 
 from ai_assistant.core.types import (
@@ -592,22 +593,28 @@ async def test_a_confirmation_whose_value_cannot_be_located_is_not_put_at_all(
 #: fault at a time against an otherwise correct card — a body written from scratch
 #: would be refused for whatever else it got wrong.
 #:
-#: The first three are a span's value arriving as something other than the text the
-#: gateway spells (adversarial review, round 1); the fourth is the **join** — an
-#: indexless span whose value is not the argument this page renders, which is a card
-#: showing one text while approving a request that carries another; and the last three
-#: are a call-level coverage outside the three states §8 obliges the surface to state
-#: (both round 2's blockers).
+#: The first three are a value arriving as something other than the text the gateway
+#: spells (adversarial review, round 1). The next two are a **locator** a span cannot
+#: be joined to — one that names no entry and one that names two — which is what the
+#: page asks instead of comparing two copies, since round 6 left the content carried
+#: once. Then a call-level coverage outside the three states §8 obliges the surface to
+#: state (round 2), and last the shapes that used to **throw** rather than refuse
+#: (round 6): an ``egress`` that is absent, a ``spans`` that is not a list, and a
+#: ``parameters`` that is not one either.
 _FAULTS: dict[str, Callable[[dict[str, Any]], None]] = {
-    "an omitted value": lambda view: view["egress"]["spans"][1].pop("value"),
-    "a numeric value": lambda view: view["egress"]["spans"][1].update({"value": 12}),
-    "an object value": lambda view: view["egress"]["spans"][1].update({"value": {"a": "b"}}),
-    "a value the argument disagrees with": lambda view: view["egress"]["spans"][0].update(
-        {"value": "a body this call would not send"}
+    "an omitted value": lambda view: view["parameters"][1].pop("value"),
+    "a numeric value": lambda view: view["parameters"][1].update({"value": 12}),
+    "an object value": lambda view: view["parameters"][1].update({"value": {"a": "b"}}),
+    "a locator no entry carries": lambda view: view["parameters"][1].update({"index": 7}),
+    "a locator two entries carry": lambda view: view["parameters"].append(
+        dict(view["parameters"][1])
     ),
     "an omitted coverage": lambda view: view["egress"].pop("coverage"),
     "an unknown coverage": lambda view: view["egress"].update({"coverage": "probably_fine"}),
     "a numeric coverage": lambda view: view["egress"].update({"coverage": 1}),
+    "an omitted egress": lambda view: view.pop("egress"),
+    "spans that are not a list": lambda view: view["egress"].update({"spans": {}}),
+    "arguments that are not a list": lambda view: view.update({"parameters": {}}),
 }
 
 
@@ -626,12 +633,16 @@ async def test_a_confirmation_this_page_cannot_put_whole_is_not_put_at_all(
     argument reaches ``coverage``, where an absent one rendered as ``undefined.`` and
     left the controls live.
 
-    **And it reaches the join**, which is the fault no type test finds: an indexless
-    span's value is on screen through ``renderParameters``, from the ``parameters``
-    list, so a body whose span value and argument value **disagree** shows one text
-    and approves a request carrying the other. ADR-0233 §2 records that the two
-    "cannot come apart, and the recomputation is the join"; this page checks that join
-    over what actually reached it rather than trusting the process that sent it.
+    **And it reaches the locator**, which is what the page asks instead of comparing
+    two copies: the content is carried once (ADR-0233 §2), so a span's own value is the
+    argument entry carrying its locator, and a body where that locator names no entry —
+    or names two — is one where this page cannot say which text the span describes.
+
+    **Three of them used to throw rather than refuse** (round 6). An absent ``egress``,
+    a ``spans`` that is not a list and a ``parameters`` that is not one reached the
+    guard's own member reads; the throw was caught by ``readPending`` as "the gateway
+    did not answer", which is the wrong sentence about a gateway that had just answered
+    — and it discarded the whole listing rather than the one card.
 
     Every case is driven rather than argued about: the request really goes to the
     gateway, the gateway really answers it, and only the **body** is replaced — the
@@ -692,3 +703,38 @@ async def test_an_argument_carrying_no_span_is_still_a_key_and_a_value_on_the_sc
 
         assert [one["text"] for one in shown["values"]] == [_BODY, "[]"], shown["values"]
         assert "cc =" in shown["cardText"], shown["cardText"]
+
+
+async def test_one_card_this_page_cannot_put_does_not_take_the_listing_with_it(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """Adversarial review, round 6, second ``blocker``: the refusal is per card.
+
+    A malformed row used to throw inside the renderer, which ``readPending`` caught as
+    ``GATEWAY_GONE`` — "the gateway did not answer, so it may have stopped" — about a
+    gateway that had just answered, and the listing it had already written was cleared
+    with it. Two parks are answered here, one of them malformed: the bad one says it
+    cannot be put, the good one is whole and answerable, and no fault is raised.
+    """
+    thrown: list[str] = []
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.page.on("pageerror", lambda error: thrown.append(str(error)))
+        drive.engine.parked["h-1"] = _email(handle="h-1")
+        drive.engine.parked["h-2"] = _email(handle="h-2")
+        views = [_confirmation_view(_email(handle="h-1")), _confirmation_view(_email(handle="h-2"))]
+        views[0].pop("egress")
+        await _substitute(drive, path="/confirmations", body=json.dumps({"confirmations": views}))
+
+        await drive.page.click("#confirmations-button")
+        await drive.page.wait_for_selector("#confirmation-list .confirmation-row")
+        rows = drive.page.locator("#confirmation-list .confirmation-row")
+        await expect(rows).to_have_count(2)
+
+        assert "so it is not put to you at all" in await rows.first.inner_text()
+        assert await rows.first.locator("button").count() == 0
+        whole = await rows.last.inner_text()
+        assert _BODY in whole, whole
+        assert await rows.last.locator("button", has_text="Yes, do it").count() == 1
+        # The listing survived, so nothing said the gateway had stopped.
+        await expect(drive.page.locator("#confirmations > .fault")).to_be_hidden()
+        assert thrown == []

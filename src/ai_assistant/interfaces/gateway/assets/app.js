@@ -1228,43 +1228,34 @@ const CONFIRMATION_NOT_WHOLE =
 // of the confirmation and not of a line: "a partial content-bearing confirmation is
 // worse than none, because it looks like a whole one".
 //
-// **And asked as three type tests rather than as three equalities**, which is
-// adversarial review's rounds 1 and 2 and is the fail-closed direction §8 requires.
-// Nothing in this page validates the body it was handed against a schema, so every
-// member it reads can be absent, a number or an object as easily as it can be the
-// thing the gateway sends — and the narrower each test is, the more shapes walk
-// past it into a card that looks whole.
+// **And asked as type tests over shapes rather than as equalities against values**,
+// which is adversarial review's rounds 1, 2 and 6 and is the fail-closed direction §8
+// requires. Nothing in this page validates the body it was handed against a schema, so
+// every member it reads can be absent, a number or an object as easily as it can be
+// the thing the gateway sends — and the narrower each test is, the more shapes walk
+// past it into a card that looks whole. Two shapes make that concrete: a `value` that
+// is missing is `undefined`, which under a check for `null` alone was rendered as the
+// word "undefined" where the bytes should have been; and an `egress` or a `spans` that
+// is absent used to **throw** here, which `readPending` caught as "the gateway did not
+// answer" — the wrong sentence, and it took the whole listing with it. A shape this
+// page cannot read is a card it refuses, one card, and the rest of the listing renders.
 //
-// **A value must be text.** Every located value is spelled by the gateway with
-// `_parameter_text`, so a JSON `null` argument arrives as the four characters `null`
-// and a number arrives as its digits; a `value` that is missing is `undefined`, which
-// under a check for `null` alone was rendered as the word "undefined" where the bytes
-// should have been.
+// **The content is carried once, so there is nothing to cross-check** (round 6, and
+// ADR-0233 §2's refusal of "a second renderable artifact beside the description"). The
+// arguments cross **decomposed** (`_parameter_views`), a span carries no value of its
+// own, and the two are joined by the locator they share. So this asks whether every
+// span's locator names exactly one argument entry whose value is text — which is
+// `shownSpan` — rather than whether two copies of one value agree. There is no second
+// copy to disagree, and no comparison that could be lossy: an earlier shape of this
+// page carried the value on the span too, and the only way to check an *indexed* one
+// was to parse the argument's JSON here and re-spell the element, which is a second
+// derivation of a `core` rule in the page's language (ADR-0178 §3) and is lossy in the
+// exact direction `_parameter_text` exists to prevent — `JSON.parse` reads
+// `9007199254740993` as `9007199254740992`.
 //
-// **An indexless span's value must be the argument the body carries beside it.** This
-// is the join: ADR-0233 §2 records that the description and the arguments "cannot
-// come apart, and the recomputation is the join", which `ActionRequest` performs at
-// construction over the same two things — and the two reach this page as two members
-// of one body, so a disagreement between them is a gateway that contradicts itself
-// and a card that gets refused.
-//
-// **There is no equivalent test for an indexed span, and the reason is that no
-// lossless one exists** (adversarial review, round 3). An element could only be
-// checked against its argument by parsing that argument's JSON here and re-spelling
-// the element — which is a second derivation of a `core` rule in the page's language
-// (ADR-0178 §3) and, worse, is **lossy** in the exact direction `_parameter_text`
-// exists to prevent: `JSON.parse` reads `9007199254740993` as `9007199254740992`, and
-// a re-spelled float, object or non-ASCII string need not come back the way Python
-// wrote it. A comparison that can differ for a **correct** confirmation would refuse
-// a real approval, which is a worse failure than the one it guards.
-//
-// What is closed instead is the half this page controls: since round 3 an argument's
-// own JSON is no longer rendered beside its elements, so nothing on the screen can
-// disagree with anything else on the screen — every value is rendered once, from the
-// span it belongs to. A body that forged a span's value would be a gateway lying to
-// the page it served, which it can also do by serving a different `app.js`; the page
-// is loaded from that origin and no other (ADR-0168 §10), and no check written in it
-// reaches outside that.
+// **What no page-side test reaches** is a gateway that lies about its own arguments,
+// which it can also do by serving a different `app.js`: this page is loaded from that
+// origin and no other (ADR-0168 §10), and no check written in it reaches outside that.
 //
 // **The call's coverage must be one this page has words for.** §8 obliges a surface
 // to state it "in all three states", and a value outside the three is not one of them
@@ -1273,9 +1264,15 @@ const CONFIRMATION_NOT_WHOLE =
 // rendered such a value as itself, on `disclosureWords`' precedent; that precedent is
 // about a span's *discloser*, which is beside the floor, and this is the floor.
 function shownWhole(confirmation) {
+  if (!Array.isArray(confirmation.parameters)) {
+    return false;
+  }
   const egress = confirmation.egress;
   if (egress === null) {
     return true;
+  }
+  if (typeof egress !== "object" || !Array.isArray(egress.spans)) {
+    return false;
   }
   if (!Object.hasOwn(COVERAGE_WORDS, egress.coverage)) {
     return false;
@@ -1284,15 +1281,22 @@ function shownWhole(confirmation) {
 }
 
 // Whether one span's own value is on the screen, as itself (ADR-0233 §8).
+//
+// **Located rather than compared**, since round 6: the value is not on the span, so
+// there is no second copy to check against. The span and the argument entry carry the
+// same locator — ADR-0150 §4's `(argument, index)` pair — and this asks whether that
+// locator names exactly one entry whose value is text. One entry, because a body
+// naming two is a body this page cannot say which of them the span describes; and
+// text, because every located value is spelled by the gateway, so anything else is
+// a member that did not arrive.
 function shownSpan(span, parameters) {
-  if (typeof span.value !== "string") {
+  if (span === null || typeof span !== "object") {
     return false;
   }
-  if (span.index !== null) {
-    return true;
-  }
-  const named = parameters.filter((one) => one.key === span.argument);
-  return named.length === 1 && named[0].value === span.value;
+  const located = parameters.filter(
+    (one) => one.key === span.argument && one.index === span.index
+  );
+  return located.length === 1 && typeof located[0].value === "string";
 }
 
 function renderConfirmation(parent, confirmation) {
@@ -1304,7 +1308,7 @@ function renderConfirmation(parent, confirmation) {
     return;
   }
   line(item, `${confirmation.tool_id} — ${confirmation.tool_description}`, "reply");
-  renderParameters(item, confirmation.parameters, confirmation.egress);
+  renderParameters(item, confirmation.parameters);
   // `egress` absent is ADR-0178 §4's discriminator, and all it states is that the
   // ruling was taken over no egress binding. So this branch renders the four other
   // members and says **nothing** about recipients — not that there are none, and not
@@ -1336,21 +1340,22 @@ function renderConfirmation(parent, confirmation) {
 // the surface where "whole" is the thing being answered about. The key still names
 // every argument and no value is omitted, so ADR-0177 §8's own clause is unreduced.
 //
-// **On an egress confirmation the values are the spans' own, and they are rendered
-// exactly once** (ADR-0233 §8, ADR-0150 §4, and adversarial review's round-3
-// `blocker`). ADR-0150 §4's decomposition is total over the arguments — every
-// top-level key whose value is not an empty array is the argument of at least one
-// span — so rendering span by span renders every key and every value, and an
-// argument's own JSON is never rendered *beside* its elements. That matters for more
-// than tidiness: an array's JSON spells a multi-line element with the two characters
-// `\n` and escapes its quotation marks, so it is not that element's value whole; and
-// a card rendering both would be putting one value on the screen twice, free to
-// disagree with itself, which is the shape ADR-0150 §1 is named against.
+// **The arguments arrive decomposed and this renders them as they arrive**
+// (ADR-0233 §8, ADR-0150 §4). Each entry is one locatable value — an argument whose
+// value is not an array, or one element of one that is — under the locator that names
+// it, so an array-valued `to` reads as `to[0]` and `to[1]`. That is the same
+// decomposition a span is identified by, which is what lets a span's own value be on
+// screen without a copy of it riding on the span (`shownSpan`): one carrier, one
+// rendering, nothing that can disagree with anything else (ADR-0233 §2, ADR-0150 §1).
 //
-// **The keys carrying no span are the empty arrays, and they are rendered here.**
-// ADR-0150 §4 gives an empty array no span at all, so a span-only rendering would
-// drop the key — and ADR-0177 §8 requires "every key and every value the mapping
-// carries". They are the exception rather than the rule, so they come after.
+// **An element rendered as itself is not the same as an element inside its array's
+// JSON**, and that is why the decomposition is worth the entry: an array's JSON spells
+// a multi-line element with the two characters `\n` and escapes its quotation marks,
+// so it is not that element's value whole — and "whole" is what §8 is about.
+//
+// **An empty array is one entry with no index**, because ADR-0150 §4 gives it no span
+// and ADR-0177 §8 still requires "every key and every value the mapping carries". It
+// is the one argument on a card that no span describes.
 //
 // **That clause is met by this rendering and not in spite of it**, which is worth
 // saying because adversarial review's round 4 read it the other way and the two
@@ -1367,39 +1372,30 @@ function renderConfirmation(parent, confirmation) {
 // put one value on the screen twice, free to disagree with itself, which is the
 // defect round 3 blocked and ADR-0150 §1 is named against.
 //
-// **A confirmation with no egress binding has no spans to render from**, and its
-// arguments are rendered as themselves. It owes ADR-0233 §8 nothing (§8's last
-// clause) and this clause of ADR-0177 §8 exactly as it always did.
-function renderParameters(item, parameters, egress) {
+// **A confirmation with no egress binding is rendered by the same code**, because the
+// carrier is the same: it owes ADR-0233 §8 nothing (§8's last clause) and this clause
+// of ADR-0177 §8 exactly as it always did, and neither is served by a second branch
+// here.
+function renderParameters(item, parameters) {
   if (parameters.length === 0) {
     line(item, "It would run with no arguments.", "hint");
     return;
   }
   line(item, "It would run with these arguments, as the assistant wrote them:", "hint");
-  if (egress === null) {
-    parameters.forEach((one) => renderValue(item, one.key, one.value));
-    return;
-  }
-  egress.spans.forEach((one) => renderValue(item, spanKey(one), one.value));
-  parameters
-    .filter((one) => !egress.spans.some((span) => span.argument === one.key))
-    .forEach((one) => renderValue(item, one.key, one.value));
+  parameters.forEach((one) => {
+    line(item, `${locatorWords(one.key, one.index)} =`, "hint");
+    valueBlock(item, one.value);
+  });
 }
 
-// One argument, or one element of one, under the name that locates it.
-function renderValue(item, key, value) {
-  line(item, `${key} =`, "hint");
-  valueBlock(item, value);
-}
-
-// Where a span came from, as ADR-0150 §4 identifies it: the argument, and the
+// Where a value came from, as ADR-0150 §4 identifies it: the argument, and the
 // position within it where the argument's value is an array.
 //
 // **One spelling, used by the value above and by the description below**, so the two
 // halves of what a card says about one span cannot come to name it differently — the
-// name is the whole of what joins them on the screen.
-function spanKey(span) {
-  return span.index === null ? span.argument : `${span.argument}[${span.index}]`;
+// locator is the whole of what joins them, on the screen and in `shownSpan`.
+function locatorWords(argument, index) {
+  return index === null ? argument : `${argument}[${index}]`;
 }
 
 // ADR-0148 §8's fourth clause, before the answer is collected: the connected
@@ -1411,11 +1407,11 @@ function spanKey(span) {
 // going to; the occurrences are ADR-0150 §10's third clause, so one recipient named by
 // `to` and again by `bcc` is one member of the set and two disclosures here.
 //
-// **The values are not here, and that is deliberate** (adversarial review, round 3).
-// Every span's own value is on screen above, rendered by `renderParameters` from the
-// spans themselves and rendered **once**; this function renders the payload
-// *description*, which holds no content. The two halves are joined by `spanKey`,
-// which names a span the same way in both.
+// **The values are not here, and that is deliberate** (adversarial review, rounds 3
+// and 6). Every span's own value is on screen above, rendered **once** by
+// `renderParameters` out of the one carrier the arguments cross in; this function
+// renders the payload *description*, which holds no content. The two halves are joined
+// by `locatorWords`, which names a value and a span the same way in both.
 //
 // **The call's coverage is last of the egress block and is a statement about the
 // call** (ADR-0233 §8). It is rendered in all three states, beside the values and
@@ -1550,7 +1546,7 @@ function destinationWords(member) {
 // it is and names no recipient; dropping it, or rendering it as though it named one,
 // would fail the whole-rendering clause in the two opposite directions.
 function spanWords(span) {
-  const where = spanKey(span);
+  const where = locatorWords(span.argument, span.index);
   const facts = [disclosureWords(span.provenance), `${span.extent} code points`];
   if (span.tier !== null) {
     facts.push(`tier ${span.tier}`);
