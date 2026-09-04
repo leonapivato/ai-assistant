@@ -78,6 +78,7 @@ import stat
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Final, final
 from uuid import uuid4
 
@@ -108,7 +109,6 @@ from ai_assistant.readers._locality import PlatformTables, ProcPlatformTables
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
-    from pathlib import Path
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import MemoryRecord
@@ -310,7 +310,10 @@ class LocalFileFetcher:
         Args:
             root: The one directory this fetcher lists and reads. **Absolute**, and
                 deliberately **not** canonicalised: resolving it would follow the
-                symbolic links ADR-0230 §6 requires the descent to refuse.
+                symbolic links ADR-0230 §6 requires the descent to refuse. Guarded
+                and rebuilt into a built-in ``Path`` by :func:`_checked_root`, which
+                is a different operation from resolving it — no link is followed and
+                no component is renamed.
             now: The wall clock. Read once per listing, at acquisition, for
                 :attr:`~ai_assistant.core.types.SourceListing.read_at` and for one of
                 the two expiry deadlines; and once per successful fetch, at the
@@ -344,7 +347,8 @@ class LocalFileFetcher:
 
         Raises:
             ConfigurationError: If any figure is outside its domain, if the root is
-                relative, if this platform offers no atomic contained resolution
+                not a ``Path`` or is relative, if this platform offers no atomic
+                contained resolution
                 (ADR-0230 §6's unavailability clause), if the platform will not
                 establish the root's locality, if the opened mount root's device
                 identity does not match what the tables claimed, or if the descent
@@ -359,9 +363,7 @@ class LocalFileFetcher:
             max_decoded_bytes=max_decoded_bytes,
             max_character_mappings=max_character_mappings,
         )
-        if not root.is_absolute():
-            msg = f"the fetch root must be an absolute path, got {str(root)!r} (ADR-0230 §6)"
-            raise ConfigurationError(msg)
+        location = _checked_root(root)
         self._now = checked_clock(now, owner="LocalFileFetcher")
         self._monotonic = monotonic
         self._listing_ttl_ns = int(listing_ttl.total_seconds() * 1_000_000_000)
@@ -377,7 +379,7 @@ class LocalFileFetcher:
         # restart, which is correct rather than a limitation — a turn does not
         # survive a restart either.
         self._key = secrets.token_bytes(32)
-        self._root = _acquire_root(root, tables if tables is not None else ProcPlatformTables())
+        self._root = _acquire_root(location, tables if tables is not None else ProcPlatformTables())
 
     @property
     def name(self) -> str:
@@ -754,15 +756,38 @@ def _refuse_out_of_domain(  # noqa: PLR0913 — one keyword per configured figur
     never gave it. ``type(...) is not int`` rather than ``isinstance`` is what draws
     both lines at once, ``bool`` being a subclass.
 
+    **The type refusal and the range refusal are separate, and they render the
+    offending value differently on purpose** (#1978, #2101). Every one of these
+    guards is reached by a value of *arbitrary* type — that is the whole reason the
+    type is checked here rather than trusted from the annotation — so a message
+    built with ``repr`` lets the refused object's own ``__repr__`` run inside the
+    message that refuses it, and a hostile one raises straight past the guard,
+    turning the wrong-exception-class defect the guard exists to fix into a
+    different one. The type refusal therefore names the type, through
+    :func:`_type_name_of` because that read is itself a call into the refused
+    object's class. Below the type test ``repr`` is not merely safe but *right*:
+    what a caller needs from a range violation is ``got 0``, and ``got int`` tells
+    them nothing. Both refusals phrase the domain once and share it, so the two
+    halves of one rule cannot drift into two rules.
+
+    The exact-type tests are what make the range messages safe without any
+    canonicalisation: no subclass is accepted at either, so a figure that reaches a
+    range refusal is a built-in whose ``__repr__`` is the built-in's.
+
     Raises:
         ConfigurationError: Naming the figure and its domain.
     """
-    if type(listing_ttl) is not timedelta or listing_ttl <= timedelta(0):
+    ttl_domain = "a strictly positive timedelta"
+    if type(listing_ttl) is not timedelta:
         msg = (
-            f"fetch_listing_ttl must be a strictly positive timedelta, got "
-            f"{listing_ttl!r} (ADR-0230 §6)"
+            f"fetch_listing_ttl must be {ttl_domain}, got "
+            f"{_type_name_of(listing_ttl)} (ADR-0230 §6)"
         )
         raise ConfigurationError(msg)
+    if listing_ttl <= timedelta(0):
+        msg = f"fetch_listing_ttl must be {ttl_domain}, got {listing_ttl!r} (ADR-0230 §6)"
+        raise ConfigurationError(msg)
+    figure_domain = "an integer of at least 1"
     for label, figure, citation in (
         ("fetch_listing_max_entries", listing_max_entries, "ADR-0230 §6"),
         ("fetch_max_file_bytes", max_file_bytes, "ADR-0230 §6"),
@@ -770,9 +795,108 @@ def _refuse_out_of_domain(  # noqa: PLR0913 — one keyword per configured figur
         ("fetch_max_decoded_bytes", max_decoded_bytes, "ADR-0232 §2"),
         ("fetch_max_character_mappings", max_character_mappings, "ADR-0234 §2"),
     ):
-        if type(figure) is not int or figure < 1:
-            msg = f"{label} must be an integer of at least 1, got {figure!r} ({citation})"
+        if type(figure) is not int:
+            msg = f"{label} must be {figure_domain}, got {_type_name_of(figure)} ({citation})"
             raise ConfigurationError(msg)
+        if figure < 1:
+            msg = f"{label} must be {figure_domain}, got {figure!r} ({citation})"
+            raise ConfigurationError(msg)
+
+
+#: What a type refusal names when the type will not say what it is called.
+_UNNAMEABLE_TYPE: Final = "an unnameable type"
+
+
+def _type_name_of(value: object) -> str:
+    """``type(value).__name__``, or a fixed literal where reading it will not answer.
+
+    **The name read is itself a call into the refused object's class**, which is the
+    half of #1978 that survives substituting ``repr``: a metaclass may override
+    ``__getattribute__`` for ``"__name__"`` and raise, or answer with something that
+    is not a built-in ``str`` whose own rendering then raises. Either takes the
+    refusal down with the value it was refusing — the same wrong-exception-class
+    escape one level in, so a guard that reaches for a type name owes this read the
+    same distrust it gives the value.
+
+    :func:`~ai_assistant.core.types.fault_class_of` guards the same read for the
+    same reason and this mirrors its shape rather than inventing a second one:
+    ``Exception`` is caught and ``BaseException`` is **not**, so a
+    ``CancelledError`` raised by the name read is delivered onward (ADR-0060 §1).
+    ``type(name) is str`` rather than ``isinstance``, because a ``str`` subclass is
+    a second object with a second chance to raise and this one is asked to render
+    itself into the message.
+
+    **A third statement of the same guard**, beside ``readers/calendar.py``'s and
+    ``readers/email.py``'s, and deliberately not a fourth home for it: the shared
+    home would be a new private module in this package, which is a decision about
+    the package's shape rather than about this defect, and ``fault_class_of`` itself
+    cannot serve — it takes an ``Exception``, because it classifies a fault, while a
+    configuration guard refuses a value of arbitrary type. Collapsing the three is
+    #2110.
+
+    Args:
+        value: The refused object, asked only what its type is called.
+
+    Returns:
+        The type's name, or :data:`_UNNAMEABLE_TYPE` where it could not be read.
+    """
+    try:
+        name = type(value).__name__
+        nameable = type(name) is str and bool(name)
+    # A blind `except Exception` on purpose — see the docstring; `BaseException`
+    # is deliberately not caught. `BLE` is not enabled in this tree and `RUF100`
+    # fails the gate on an unused directive, so the reason stays a comment.
+    except Exception:
+        return _UNNAMEABLE_TYPE
+    return name if nameable else _UNNAMEABLE_TYPE
+
+
+def _checked_root(value: object) -> Path:
+    """The configured root as an absolute built-in ``Path``, or a refusal naming it.
+
+    **Typed before it is called into**, which the other two readers' ``_checked_path``
+    guards have stated since #1057 and this constructor did not: ``root.is_absolute()``
+    was the first thing reached, so a ``str`` root — the value a second composition
+    root actually writes, because it looks correct — escaped as an ``AttributeError``
+    naming a *method* rather than as the ``ConfigurationError`` ADR-0230 §6 documents
+    for this seam. ``Settings`` refuses a non-path at load and ``mypy`` refuses one at
+    a type-checked call site; what is left is the direct caller ADR-0093 §10 names,
+    for whom the refusal is the only description of the rule they broke (#2101).
+
+    Typed ``object`` because the guard disbelieves the annotation, which is the point:
+    a ``Path`` annotation would make the refusal statically unreachable, which is the
+    reasoning that let the value through.
+
+    **Accepted by ``isinstance``, then rebuilt.** Proving the type proves nothing
+    about a subclass's overrides, and both halves below are reachable through one: a
+    subclass answers ``is_absolute`` — the guard's own question — and raises from
+    ``__str__`` or ``__fspath__`` inside the message that would report the answer.
+    ``Path(value)`` copies the unparsed strings a ``PurePath`` already holds, so it
+    consults neither, and it is emphatically **not** ``resolve()``: §6 requires the
+    descent to *refuse* a symbolic link rather than follow one, so resolving here
+    would answer a question §6 reserves for :func:`_acquire_root`, and a plain
+    ``Path`` rebuilds to itself. It is the rebuilt root that is checked and handed on,
+    so every message below this guard renders a built-in. The rebuild reads
+    ``PurePath``'s own ``parser`` and ``_raw_paths``, so it closes the overrides this
+    guard is documented against rather than every conceivable one.
+
+    Args:
+        value: The configured root, disbelieved until it has been checked.
+
+    Returns:
+        The same location as a built-in ``Path``.
+
+    Raises:
+        ConfigurationError: If ``value`` is not a ``Path``, or is not absolute.
+    """
+    if not isinstance(value, Path):
+        msg = f"the fetch root must be a Path, got {_type_name_of(value)} (ADR-0230 §6)"
+        raise ConfigurationError(msg)
+    root = Path(value)
+    if not root.is_absolute():
+        msg = f"the fetch root must be an absolute path, got {str(root)!r} (ADR-0230 §6)"
+        raise ConfigurationError(msg)
+    return root
 
 
 def _acquire_root(root: Path, tables: PlatformTables) -> int:

@@ -16,15 +16,17 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import stat
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path as _Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import pypdf
 import pytest
 from fetch_fixtures import fetcher as build
+from hostile_values import Hostile, HostilePath, NumericName, Unnameable
 from pdf_fixtures import amplified_page_tree_pdf, extracted_text_of, minimal_pdf
 
 sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "core"))
@@ -569,6 +571,146 @@ def test_a_relative_root_refuses_the_construction(tmp_path: Path) -> None:
     """
     with pytest.raises(ConfigurationError, match="absolute"):
         LocalFileFetcher(_Path("documents"))
+
+
+#: Every figure ``_refuse_out_of_domain`` guards, spelled as the keyword a caller
+#: passes, with the domain both of that figure's refusals cite and a value inside the
+#: type but outside the range. The domain is a *shared* phrase in the source, so an
+#: arm that matched only one of the two refusals would not notice them diverging.
+_DOMAIN_GUARDS: Final = [
+    ("listing_ttl", "a strictly positive timedelta"),
+    ("listing_max_entries", "an integer of at least 1"),
+    ("max_file_bytes", "an integer of at least 1"),
+    ("max_content_bytes", "an integer of at least 1"),
+    ("max_decoded_bytes", "an integer of at least 1"),
+    ("max_character_mappings", "an integer of at least 1"),
+]
+
+#: The two ways a type can fail to name itself: the read of ``__name__`` raises, or it
+#: answers with something that is not a ``str`` whose own rendering would then raise.
+_UNNAMEABLE: Final = ["unreadable", "not-a-str"]
+
+
+def _unnameable(kind: str) -> object:
+    """An instance of a class that will not say what it is called.
+
+    **Built inside the arm rather than passed to it**: pytest renders a failing test's
+    arguments, and rendering *this* one asks the class the very question it refuses —
+    so a regression that ought to show as one red assertion crashes the session with
+    an ``INTERNALERROR`` from inside pytest's own traceback formatter instead.
+    """
+    metaclass = Unnameable if kind == "unreadable" else NumericName
+    return metaclass("Evil", (), {})()
+
+
+@pytest.mark.parametrize(("figure", "domain"), _DOMAIN_GUARDS)
+def test_a_hostile_repr_does_not_raise_past_a_domain_guard(
+    root: Path, figure: str, domain: str
+) -> None:
+    """Nothing but a ``ConfigurationError`` leaves this constructor (#1978, #2101).
+
+    Each of these guards conflated the type test with the range test in one condition,
+    so one message served both and it was built with ``repr`` — and the message is
+    reached by a value of *arbitrary* type, so the refused object's own ``__repr__``
+    ran inside the message that refused it. Split, the type refusal names the type,
+    and ADR-0230 §6's promise that a domain violation is a configuration error holds
+    whatever the constructor was handed.
+    """
+    expected = re.escape(f"fetch_{figure} must be {domain}, got Hostile")
+    with pytest.raises(ConfigurationError, match=expected):
+        build(root, **{figure: Hostile()})  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(("figure", "domain"), _DOMAIN_GUARDS)
+@pytest.mark.parametrize("kind", _UNNAMEABLE)
+def test_a_hostile_type_name_does_not_raise_past_a_domain_guard(
+    root: Path, figure: str, domain: str, kind: str
+) -> None:
+    """The half of #1978 that survives substituting ``repr``.
+
+    Naming the type is a call into the refused object's *class*, so a metaclass that
+    raises on ``__name__`` — or answers with a second object that raises when rendered
+    — would move the wrong-exception-class escape rather than close it. The read is
+    guarded for the same reason :func:`~ai_assistant.core.types.fault_class_of` guards
+    its own, and for the reason the two other readers guard theirs.
+    """
+    expected = re.escape(f"fetch_{figure} must be {domain}, got an unnameable type")
+    with pytest.raises(ConfigurationError, match=expected):
+        build(root, **{figure: _unnameable(kind)})  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(("figure", "domain"), _DOMAIN_GUARDS)
+def test_a_figure_out_of_range_is_still_reported_by_value(
+    root: Path, figure: str, domain: str
+) -> None:
+    """The reason the condition was *split* rather than the format substituted.
+
+    ``repr`` is not merely safe below the type test but *right*: what a caller needs
+    from a range violation is ``got 0``, and ``got int`` tells them nothing. The exact
+    type has been proved by the time this message is built, so the value rendering
+    itself is a built-in's ``__repr__``. Both refusals cite the same domain phrase,
+    which the source writes once.
+    """
+    value: object = timedelta(0) if figure == "listing_ttl" else 0
+    expected = re.escape(f"fetch_{figure} must be {domain}, got {value!r}")
+    with pytest.raises(ConfigurationError, match=expected):
+        build(root, **{figure: value})  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("value", [None, "/srv/documents", 3, b"/srv/documents"])
+def test_a_root_that_is_not_a_path_refuses_the_construction(value: object) -> None:
+    """The guard both other readers have had since #1057, at the seam that lacked one.
+
+    ``root.is_absolute()`` was the first thing reached, so a ``str`` root — the value a
+    second composition root actually writes, because it looks correct — escaped as an
+    ``AttributeError`` naming a *method* rather than as the ``ConfigurationError``
+    ADR-0230 §6 documents for this seam (#2101).
+    """
+    with pytest.raises(ConfigurationError, match="the fetch root must be a Path"):
+        LocalFileFetcher(value)  # type: ignore[arg-type]
+
+
+def test_a_hostile_repr_does_not_raise_past_the_root_guard() -> None:
+    """The root guard is reached by a value of *arbitrary* type, like the figures."""
+    with pytest.raises(ConfigurationError, match="the fetch root must be a Path, got Hostile"):
+        LocalFileFetcher(Hostile())  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("kind", _UNNAMEABLE)
+def test_a_hostile_type_name_does_not_raise_past_the_root_guard(kind: str) -> None:
+    """#2104's rule at the guard #2101 adds, so the new guard is not a new escape."""
+    expected = "the fetch root must be a Path, got an unnameable type"
+    with pytest.raises(ConfigurationError, match=expected):
+        LocalFileFetcher(_unnameable(kind))  # type: ignore[arg-type]
+
+
+def test_a_path_subclass_cannot_lie_its_way_past_the_root_guard() -> None:
+    """Proving ``isinstance`` proves nothing about the overrides.
+
+    ``is_absolute`` is the guard's own question and a subclass answers it, so a
+    relative root would be admitted by saying it was not one — and the refusal that
+    reports it renders the value, which the same subclass raises from. The guard
+    rebuilds into a built-in ``Path`` and asks *that*, which is not ``resolve()``: no
+    symbolic link is followed, because §6 requires the descent to refuse one.
+    """
+    with pytest.raises(ConfigurationError, match=re.escape("absolute path, got 'documents'")):
+        LocalFileFetcher(HostilePath("documents"))
+
+
+def test_a_path_subclass_naming_a_real_directory_still_constructs(root: Path) -> None:
+    """The rebuild narrows what is *admitted* by nothing at all.
+
+    ADR-0230 §6's two stages are unchanged and so is every bound: what changes is that
+    the location they run over is a built-in, so no override reaches the platform view
+    or a message. The mount point is stated as a plain path because the *fixture*
+    passes it to ``os.path.relpath``, which is outside the guard.
+    """
+    subject = build(HostilePath(str(root)), mount_point=root)
+
+    try:
+        assert subject.name == FILE_FETCHER_NAME
+    finally:
+        subject.close()
 
 
 async def test_a_fetch_never_blocks_the_event_loop_for_the_whole_read(root: Path) -> None:
