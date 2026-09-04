@@ -35,8 +35,10 @@ from ai_assistant.core.errors import (
     UnknownConversationError,
 )
 from ai_assistant.core.protocols import (
+    ActionPolicy,
     AuditTrail,
     InvocationLedger,
+    RecipientGrantStore,
     SpeechSynthesizer,
     SpeechTranscriber,
     SpendGate,
@@ -102,6 +104,7 @@ from ai_assistant.orchestration import (
     ObservationRunReport,
     ObservationStage,
     QuestionStage,
+    RecipientGrantOperations,
     RoutingStage,
     SearchServicer,
     StepExecutor,
@@ -136,6 +139,7 @@ from ai_assistant.testing import (
     FakeObserver,
     FakePlanStore,
     FakeReader,
+    FakeRecipientGrantStore,
     FakeSourceGrants,
     FakeSourceGrantStore,
     FakeSourceReadTrail,
@@ -217,6 +221,29 @@ def _grant_operations(sources: Sequence[HeldSource] = ()) -> GrantOperations:
     return GrantOperations(
         store=FakeSourceGrantStore(),
         sources=sources,
+        id_factory=_grant_ids(),
+        clock=lambda: AT,
+    )
+
+
+def _recipient_grant_operations(
+    *,
+    store: RecipientGrantStore | None = None,
+    trail: AuditTrail | None = None,
+    policy: ActionPolicy | None = None,
+) -> RecipientGrantOperations:
+    """The recipient-grant collaborator every ``Engine`` needs (ADR-0235 §4).
+
+    Required rather than optional on the façade, on ``grant_operations``' argument:
+    the five methods are on the Protocol, so an engine that could be built without
+    them is one whose surface is conditionally present. The three seams default to
+    fresh fakes, which is the shape almost every case here wants — a store with
+    nothing in it, a trail nothing has been recorded to, and a policy that allows.
+    """
+    return RecipientGrantOperations(
+        store=FakeRecipientGrantStore() if store is None else store,
+        trail=FakeAuditTrail() if trail is None else trail,
+        policy=FakeActionPolicy() if policy is None else policy,
         id_factory=_grant_ids(),
         clock=lambda: AT,
     )
@@ -490,6 +517,7 @@ class Harness:
         composing: ComposingStage | None = None,
         tools: tuple[ToolDefinition, ...] = (),
         policy: FakeActionPolicy | None = None,
+        recipient_grants: FakeRecipientGrantStore | None = None,
         memory: FakeMemoryStore | None = None,
         conversation_store: FakeConversationStore | None = None,
         closers: Sequence[object] = (),
@@ -745,9 +773,26 @@ class Harness:
         # script what the composer does — refuse, come back blank, or contradict
         # the step account — without a second harness.
         self.composing = composing if composing is not None else _composing()
+        #: The recipient-grant store the five ADR-0235 §7 operations read and write,
+        #: held here so a case can seed it, put it at its ceiling, or make its writes
+        #: fail — the states the establishing act's carrier is about.
+        self.recipient_grants = (
+            FakeRecipientGrantStore() if recipient_grants is None else recipient_grants
+        )
         self.engine = Engine(
             composing=self.composing,
             grant_operations=_grant_operations(),
+            # The harness's **own** trail and policy, so the act this surface performs
+            # is recorded where every other ruling is and ruled on by the same gate
+            # (ADR-0235 §3). A second trail here would let a case establish a grant
+            # from a confirmation `recent_decisions` cannot see.
+            recipient_grant_operations=RecipientGrantOperations(
+                store=self.recipient_grants,
+                trail=self.trail,
+                policy=self.policy,
+                id_factory=lambda: next(self.ids),
+                clock=self.clock,
+            ),
             connection_operations=_connection_operations(),
             loop=loop,
             runner=runner,
@@ -1595,6 +1640,7 @@ def _fresh_facade(harness: Harness) -> Engine:
     return Engine(
         composing=_composing(),
         grant_operations=_grant_operations(),
+        recipient_grant_operations=_recipient_grant_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
@@ -1717,6 +1763,7 @@ async def test_a_recovered_entry_does_not_count_toward_the_confirmation_ceiling(
     facade = Engine(
         composing=_composing(),
         grant_operations=_grant_operations(),
+        recipient_grant_operations=_recipient_grant_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
@@ -1782,6 +1829,7 @@ async def test_an_in_process_park_resolved_elsewhere_is_reconciled_and_frees_the
     facade_a = Engine(
         composing=_composing(),
         grant_operations=_grant_operations(),
+        recipient_grant_operations=_recipient_grant_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
@@ -1839,6 +1887,7 @@ async def test_reconcile_keeps_a_concurrent_same_engine_converse_park() -> None:
     facade = Engine(
         composing=_composing(),
         grant_operations=_grant_operations(),
+        recipient_grant_operations=_recipient_grant_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
@@ -1983,6 +2032,7 @@ async def test_concurrent_recovery_does_not_prune_another_calls_returned_token()
     facade = Engine(
         composing=_composing(),
         grant_operations=_grant_operations(),
+        recipient_grant_operations=_recipient_grant_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
@@ -2745,6 +2795,7 @@ async def test_a_clock_at_the_start_of_the_calendar_does_not_break_the_sweep() -
     facade = Engine(
         composing=_composing(),
         grant_operations=_grant_operations(),
+        recipient_grant_operations=_recipient_grant_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
@@ -3184,6 +3235,7 @@ async def test_outstanding_confirmations_apply_backpressure_without_stranding() 
     engine = Engine(
         composing=_composing(),
         grant_operations=_grant_operations(),
+        recipient_grant_operations=_recipient_grant_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
@@ -3259,6 +3311,7 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
     engine = Engine(
         composing=_composing(),
         grant_operations=_grant_operations(),
+        recipient_grant_operations=_recipient_grant_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
@@ -3298,6 +3351,7 @@ async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
         Engine(
             composing=_composing(),
             grant_operations=_grant_operations(),
+            recipient_grant_operations=_recipient_grant_operations(),
             connection_operations=_connection_operations(),
             loop=harness.engine._loop,
             runner=harness.engine._runner,
@@ -3326,6 +3380,7 @@ async def test_a_non_integer_confirmation_ceiling_is_refused(bad: object) -> Non
         Engine(
             composing=_composing(),
             grant_operations=_grant_operations(),
+            recipient_grant_operations=_recipient_grant_operations(),
             connection_operations=_connection_operations(),
             loop=harness.engine._loop,
             runner=harness.engine._runner,

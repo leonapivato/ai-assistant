@@ -48,6 +48,7 @@ from ai_assistant.orchestration import (
     MemoryWriteStage,
     ObservationStage,
     QuestionStage,
+    RecipientGrantOperations,
     StepExecutor,
     StepRunner,
 )
@@ -57,6 +58,7 @@ from ai_assistant.permissions.audit import ORIGIN_UNRECORDED
 from ai_assistant.planning import SqlitePlanStore
 from ai_assistant.testing import (
     FakeActionPolicy,
+    FakeAuditTrail,
     FakeConnectionProvisioner,
     FakeContextProvider,
     FakeConversationStore,
@@ -68,6 +70,7 @@ from ai_assistant.testing import (
     FakeMemoryWriter,
     FakeModelProvider,
     FakeObserver,
+    FakeRecipientGrantStore,
     FakeSourceGrantStore,
     FakeSourceReadTrail,
     FakeStreamingCompleter,
@@ -82,6 +85,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
     from pathlib import Path
 
+    from ai_assistant.core.protocols import ActionPolicy, AuditTrail
     from ai_assistant.core.types import CurrentContext, FrozenJson, Goal, MemoryRecord, ShownFile
 
 AT = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
@@ -116,6 +120,30 @@ def _grant_operations(sources: Sequence[HeldSource] = ()) -> GrantOperations:
     return GrantOperations(
         store=FakeSourceGrantStore(),
         sources=sources,
+        id_factory=_grant_ids(),
+        clock=lambda: AT,
+    )
+
+
+def _recipient_grant_operations(
+    *,
+    store: FakeRecipientGrantStore | None = None,
+    trail: AuditTrail | None = None,
+    policy: ActionPolicy | None = None,
+) -> RecipientGrantOperations:
+    """The recipient-grant collaborator every ``Engine`` needs (ADR-0235 §4).
+
+    Required rather than optional on the façade, on ``_grant_operations``' reason
+    exactly: the five methods are on the Protocol, so an engine that could be built
+    without them is one whose surface is conditionally present. The three seams
+    default to fresh fakes — an empty store, a trail nothing has been recorded to,
+    and a policy that allows — which is what a case not about the establishing act
+    wants.
+    """
+    return RecipientGrantOperations(
+        store=FakeRecipientGrantStore() if store is None else store,
+        trail=FakeAuditTrail() if trail is None else trail,
+        policy=FakeActionPolicy() if policy is None else policy,
         id_factory=_grant_ids(),
         clock=lambda: AT,
     )
@@ -275,6 +303,7 @@ def _make_engine(
     return Engine(
         composing=_composing(),
         grant_operations=_grant_operations(),
+        recipient_grant_operations=_recipient_grant_operations(),
         connection_operations=_connection_operations(),
         loop=loop,
         runner=runner,

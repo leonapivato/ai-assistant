@@ -108,6 +108,7 @@ from ai_assistant.orchestration import (
     MemoryWriteStage,
     ObservationStage,
     QuestionStage,
+    RecipientGrantOperations,
     RoutingStage,
     StepExecutor,
     StepRunner,
@@ -133,6 +134,7 @@ from ai_assistant.testing import (
     FakeNotificationOutbox,
     FakeObserver,
     FakePlanStore,
+    FakeRecipientGrantStore,
     FakeRoutingRecorder,
     FakeSourceGrantStore,
     FakeSourceReadTrail,
@@ -553,6 +555,17 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
             sources=sources,
             id_factory=_counter("grant"),
             clock=grant_clock if grant_clock is not None else (lambda: AT),
+        ),
+        # The five recipient-grant operations, over the **same** trail and policy the
+        # runner has (ADR-0235 §3): the act records its answer where every other
+        # ruling is recorded and is ruled on by the same gate, so the suite drives
+        # one system rather than two that agree by luck.
+        recipient_grant_operations=RecipientGrantOperations(
+            store=FakeRecipientGrantStore(),
+            trail=audit,
+            policy=FakeActionPolicy(),
+            id_factory=_counter("recipient-grant"),
+            clock=lambda: AT,
         ),
         # The canonical provisioner fake, which performs ADR-0148 §6's three writes
         # rather than short-cutting them — so the suite's provisioning clauses are

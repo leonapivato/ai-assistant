@@ -76,6 +76,7 @@ from ai_assistant.orchestration import (
     NotificationWriteStage,
     ObservationStage,
     QuestionStage,
+    RecipientGrantOperations,
     RecoveryScan,
     RoutingStage,
     SearchServicer,
@@ -683,12 +684,14 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # ``authorised_by`` against it and takes it as a constructor dependency.
         #
         # **One object, passed three times**: as a ``RecipientGrantResolution`` to
-        # the trail, as a ``RecipientGrants`` to the policy, and — once a surface
-        # offers the establishing act (ADR-0193 §13 defers which) — whole to
-        # whatever performs it. Structural typing is what makes that sound, and the
-        # narrowing is the *annotation on each consumer* rather than anything done
-        # here: what the trail cannot do is name ``covering`` or ``record``, and
-        # what the policy cannot do is name ``record``.
+        # the trail, as a ``RecipientGrants`` to the policy, and — **now that a
+        # surface offers the establishing act** (ADR-0235 §9 decides which) — whole
+        # to ``RecipientGrantOperations``, which is what performs it. Structural
+        # typing is what makes that sound, and the narrowing is the *annotation on
+        # each consumer* rather than anything done here: what the trail cannot do is
+        # name ``covering`` or ``record``, what the policy cannot do is name
+        # ``record``, and the operations object is the only holder of the whole
+        # face (ADR-0235 §4).
         #
         # The ceiling is the operator's configuration and reaches the constructor
         # with no default of its own: ``Settings`` carries ADR-0193 §1's shipped 64,
@@ -1230,8 +1233,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # call away from authorising the send it is ruling on, and the
             # annotation on its constructor is what removes the capability.
             # Wiring it here is what makes ADR-0148 §3's route (b) reachable at
-            # all; until the establishing act ADR-0235 decides is *implemented*
-            # the store is empty, so every ruling is the one it was before.
+            # all, and the establishing act ADR-0235 decides is now implemented
+            # below — so a ruling here may source a grant a user actually made.
             grants=recipient_grants,
         )
 
@@ -1829,6 +1832,24 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                     calendar=(facet_reader, ingestion_reader, upcoming_reader),
                     email=(email_facet_reader, email_ingestion_reader),
                 ),
+                id_factory=_uuid,
+                clock=_utcnow,
+            ),
+            # The five recipient-grant operations (ADR-0235 §3, §7), over the
+            # **whole** store face above — the moment that comment anticipated,
+            # arriving. This object is its only holder: the trail names one read of
+            # it, the policy names another, and nothing else in the process can
+            # append a grant or revoke one.
+            #
+            # **The same trail and the same policy the runner has** (ADR-0235 §3).
+            # The act records its answer where every other ruling is recorded and is
+            # ruled on by the gate that rules on every other call, so a grant cannot
+            # be established from a confirmation `recent_decisions` cannot see, and a
+            # recorded `ALLOW` here is one the deployment's own thresholds authored.
+            recipient_grant_operations=RecipientGrantOperations(
+                store=recipient_grants,
+                trail=trail,
+                policy=policy,
                 id_factory=_uuid,
                 clock=_utcnow,
             ),

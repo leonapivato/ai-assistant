@@ -103,6 +103,7 @@ if TYPE_CHECKING:
         ContinuationToken,
         ConversationDigest,
         ConversationSummary,
+        DurableIdentifier,
         EncodableText,
         FeedbackEvent,
         GrantableSource,
@@ -118,6 +119,7 @@ if TYPE_CHECKING:
         PermissionDecision,
         Placement,
         Question,
+        RecipientGrant,
         RecordedInvocation,
         ReplyChunk,
         SecretValue,
@@ -132,6 +134,7 @@ if TYPE_CHECKING:
         TranscriptEntry,
         TranscriptHit,
         TurnOutcome,
+        UtcInstant,
     )
 
 #: The free-form name the connect frame carries, for the hub's logs (ADR-0084 §2).
@@ -467,19 +470,44 @@ class HubClient:
         *,
         approved: bool,
         timeout: timedelta,  # noqa: ASYNC109 - the caller's budget, relayed to the hub (ADR-0029 §4)
+        remember_recipients_until: UtcInstant | None = None,
     ) -> TurnOutcome:
         """Relay the user's consent for a parked step (ADR-0042 §4).
+
+        **The establishing act rides this call and no second one** (ADR-0235 §2), so
+        the answer and the standing request cross in one frame: an act split across
+        two calls is one a client can half-perform, and the half that survives is an
+        approval the user believed was standing.
+
+        **No local refusal to add for the new argument.** Every one of the act's
+        refusals is a fact about a record only the hub holds — the confirmation's
+        binding, and the instant the hub's own clock will stamp on the answer — so
+        there is nothing to validate before the round trip, and the refusals arrive
+        as ``UngrantableActError`` in a typed error frame like any other (ADR-0085
+        §9's "refused locally" reaches nothing here). An **absent** argument is
+        absent from the payload rather than ``null`` (ADR-0085 §10), which
+        :func:`~ai_assistant.wire.codec.arguments_object` does for every optional
+        argument on this client.
 
         Args:
             token: The continuation the confirmation carried.
             approved: What the user said.
             timeout: The budget for the resumed turn.
+            remember_recipients_until: The instant the user asked this call's
+                recipients be remembered until, or ``None`` where they asked for
+                nothing standing. Relayed and never defaulted, derived, extended or
+                rounded here (ADR-0235 §1).
 
         Returns:
-            What the resumed pass did.
+            What the resumed pass did, carrying what became of the standing request
+            on ``recipient_grant`` where one was made.
         """
         return await self._call(  # type: ignore[no-any-return]
-            "resume", token=token, approved=approved, timeout=timeout
+            "resume",
+            token=token,
+            approved=approved,
+            timeout=timeout,
+            remember_recipients_until=remember_recipients_until,
         )
 
     async def learn(self, event: FeedbackEvent) -> LearnOutcome:
@@ -1046,6 +1074,105 @@ class HubClient:
             carries no meaning.
         """
         return await self._call("standing_grants")  # type: ignore[no-any-return]
+
+    # --- the recipient-grant surface (ADR-0235 §3, §7) ---------------------
+
+    async def grantable_decisions(
+        self, *, limit: int = DEFAULT_PAGE_SIZE
+    ) -> tuple[PermissionDecision, ...]:
+        """One page of the recorded ``CONFIRM``s an establishing act may ride.
+
+        ``limit`` is refused unless it is **strictly positive**, on
+        :meth:`recent_grants`' reason: it bounds the trail rows the hub reads as
+        well as the rows it returns, so a non-positive one would reach
+        ``AuditTrail.recent`` as an unbounded read.
+
+        **What comes back is history and never a queue** (ADR-0235 §3). No row here
+        is a park, holds a turn or blocks anything, and no surface renders one as
+        outstanding work — which is what keeps this apart from
+        :meth:`pending_confirmations`.
+
+        Args:
+            limit: How many trail rows the hub reads, and thereby the most this can
+                return.
+
+        Returns:
+            The offerable decisions, most recent first.
+        """
+        positive_page_argument(limit, name="limit")
+        return await self._call("grantable_decisions", limit=limit)  # type: ignore[no-any-return]
+
+    async def establish_recipient_grant(
+        self, decision_id: DurableIdentifier, *, expires_at: UtcInstant
+    ) -> RecipientGrant:
+        """Answer a recorded ``CONFIRM`` no park holds, and get the grant it made.
+
+        ``decision_id`` undergoes :data:`~ai_assistant.core.types.Identifier`
+        validation locally and before any I/O (ADR-0085 §3c), so this client refuses
+        exactly what the in-process engine refuses and strips the value the hub is
+        then asked about.
+
+        Args:
+            decision_id: The decision, from **this surface's own**
+                :meth:`grantable_decisions` listing.
+            expires_at: The instant the user chose, past which the grant ceases to
+                be live. Relayed and never defaulted or derived here (ADR-0235 §1).
+
+        Returns:
+            The grant the hub's store accepted.
+        """
+        named = identifier(decision_id, name="decision_id")
+        return await self._call(  # type: ignore[no-any-return]
+            "establish_recipient_grant", decision_id=named, expires_at=expires_at
+        )
+
+    async def standing_recipient_grants(self) -> tuple[RecipientGrant, ...]:
+        """Every standing recipient grant that is live now, read hub-side.
+
+        **No local refusal to add**, because the method takes no argument, exactly
+        as :meth:`standing_grants` takes none. A live set too large for the frame
+        comes back as ``OversizedValueError`` rather than as a truncated set: a
+        truncated answer to "what do I authorise" is a false answer rather than a
+        partial one (ADR-0235 §7).
+
+        Returns:
+            Every live grant.
+        """
+        return await self._call("standing_recipient_grants")  # type: ignore[no-any-return]
+
+    async def recent_recipient_grants(
+        self, *, limit: int = DEFAULT_PAGE_SIZE
+    ) -> tuple[RecipientGrant, ...]:
+        """One page of the recipient-grant store's own history, newest first.
+
+        Granting and revoking records alike, and **no liveness**: a record here says
+        an act happened, never that it still stands (ADR-0235 §7). ``limit`` is
+        refused unless strictly positive, on :meth:`recent_grants`' reason.
+
+        Args:
+            limit: How many records this page holds.
+
+        Returns:
+            The page.
+        """
+        positive_page_argument(limit, name="limit")
+        return await self._call(  # type: ignore[no-any-return]
+            "recent_recipient_grants", limit=limit
+        )
+
+    async def revoke_recipient_grant(self, grant_id: DurableIdentifier) -> RecipientGrant | None:
+        """Withdraw one standing recipient grant, hub-side.
+
+        Args:
+            grant_id: The id either recipient-grant listing renders.
+
+        Returns:
+            The revoking record the hub appended, or ``None`` where the store held
+            no outstanding grant with that id — which is also the honest answer to a
+            caller that lost a race to another revocation (ADR-0235 §7).
+        """
+        named = identifier(grant_id, name="grant_id")
+        return await self._call("revoke_recipient_grant", grant_id=named)  # type: ignore[no-any-return]
 
     # --- the wire ----------------------------------------------------------
 

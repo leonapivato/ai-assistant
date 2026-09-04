@@ -116,6 +116,7 @@ from ai_assistant.orchestration.ingestion import IngestionStage
 from ai_assistant.orchestration.loop import LearningLoop
 from ai_assistant.orchestration.observation import ObservationStage
 from ai_assistant.orchestration.questions import QuestionStage
+from ai_assistant.orchestration.recipient_grants import RecipientGrantOperations
 from ai_assistant.orchestration.runner import StepRunner
 from ai_assistant.orchestration.writes import MemoryWriteStage
 from ai_assistant.permissions import ThresholdActionPolicy
@@ -132,6 +133,7 @@ from ai_assistant.testing import (
     FakeObserver,
     FakeOutboundTransport,
     FakePlanStore,
+    FakeRecipientGrantStore,
     FakeSourceGrants,
     FakeSourceGrantStore,
     FakeSourceReadTrail,
@@ -591,6 +593,10 @@ def build_world(
 
     plans = FakePlanStore(now=lambda: NOW)
     decisions = count(1)
+    # One gate object, shared by the runner and by the recipient-grant
+    # operations below (ADR-0235 §3): the establishing act is ruled on by the same
+    # policy every other call is, so a grant cannot rest on a looser one.
+    gate = ThresholdActionPolicy() if policy is None else policy
     runner = StepRunner(
         plans=plans,
         registry=registry,
@@ -598,7 +604,7 @@ def build_world(
         # undeclared cost — both fire on ``send_email`` and no constructor argument
         # reaches either, so this policy can never ``ALLOW`` this tool. That is the
         # posture arm (a) measures rather than an arrangement of it.
-        policy=ThresholdActionPolicy() if policy is None else policy,
+        policy=gate,
         trail=trail,
         executor=StepExecutor(plans=plans, registry=registry, invoker=registry, now=lambda: NOW),
         binder=binder,
@@ -665,6 +671,15 @@ def build_world(
             store=FakeSourceGrantStore(),
             sources=(),
             id_factory=lambda: "grant-1",
+            clock=lambda: NOW,
+        ),
+        # The five recipient-grant operations, over this harness's own trail and
+        # policy (ADR-0235 §3): the act records where every other ruling is recorded.
+        recipient_grant_operations=RecipientGrantOperations(
+            store=FakeRecipientGrantStore(),
+            trail=trail,
+            policy=gate,
+            id_factory=lambda: "recipient-grant-1",
             clock=lambda: NOW,
         ),
         connection_operations=ConnectionOperations(provisioner=FakeConnectionProvisioner()),
