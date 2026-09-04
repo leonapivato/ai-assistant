@@ -1,11 +1,17 @@
-"""The hostile values both readers' guard suites refuse, defined once.
+"""The hostile values the readers' guard suites refuse, defined once.
 
-``readers/calendar.py`` and ``readers/email.py`` state the same discipline in
-their guards' docstrings: a constructor guard reached by a value of *arbitrary*
-type builds its refusal from the value's type name, never from ``repr``. The
-refused object's own ``__repr__`` runs inside the message that refuses it, so a
-hostile one raises straight past the guard — turning the wrong-exception-class
-defect the guard exists to fix into a different one (#1978).
+**Every reader whose guards refuse a value of arbitrary type defines its probes
+here**, rather than its own. This module's importers are the record of which
+readers those are; a count of them in prose is not, and the next reader package
+to grow a guard would make one wrong.
+
+The discipline the probes exist for is stated in the guards' own docstrings, and
+in ``readers/_guards.py`` for the type-name read they route through: a
+constructor guard reached by a value of *arbitrary* type builds its refusal from
+the value's type name, never from ``repr``. The refused object's own ``__repr__``
+runs inside the message that refuses it, so a hostile one raises straight past
+the guard — turning the wrong-exception-class defect the guard exists to fix into
+a different one (#1978).
 
 Reaching for the type name is then the same problem one level in, so the probes
 here come in both shapes: an object that will not render itself, and a type that
@@ -28,11 +34,10 @@ its own, which a genuine subclass can override. Each is the same regress one lev
 further in, and each stops in the same place: ask the *real* class, and let no read
 the value can influence decide which exception leaves the guard.
 
-The suites assert this across two readers and every kind of guard — the paths, the
-zone, the durations and the integers — so the probes live here rather than being
-redefined in each. A definition per suite is one more chance for one of them to
-drift into a class that no longer raises, and a probe that cannot fail is worse
-than no probe.
+The probes live here rather than being redefined per suite, at every kind of guard
+a reader grows: a definition per suite is one more chance for one of them to drift
+into a class that no longer raises, and a probe that cannot fail is worse than no
+probe.
 
 **:class:`Hostile`'s name is load-bearing.** Every refusal the duration suites
 match on ends ``got Hostile``, and that tail is the whole assertion: it says the
@@ -191,7 +196,7 @@ def unnameable(kind: str) -> object:
     what this returns never reaches a parameter list.
 
     Defined once here for the reason every other probe in this module is (#2110):
-    each of the three reader suites held its own copy, and a builder redefined per
+    every suite that needed one held its own copy, and a builder redefined per
     suite is one more chance for one of them to drift into a class that no longer
     refuses.
     """
