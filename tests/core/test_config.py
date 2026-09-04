@@ -1030,6 +1030,18 @@ def test_every_integer_setting_is_discovered() -> None:
         # response a provider can send is abandoned ``RESPONSE_TOO_LARGE`` after one
         # byte — a deployment that looks configured and never completes a search.
         "search_max_response_bytes",
+        # ADR-0231 §5's two searcher bounds, acknowledged for the same reason. The
+        # ``bool`` argument bites differently on each and both are worth stating:
+        # ``search_max_results=True`` mints one record where the operator asked for
+        # three, which is a deployment quietly getting a third of the reach it
+        # configured; ``search_max_result_chars=True`` is a bound of one character on
+        # a *quoted* rendering, whose two delimiters already cost two — so every
+        # result is dropped and every search yields ``NO_RESULT`` while the
+        # deployment looks configured. ``search_max_results`` also carries the one
+        # upper end in this tuple, ADR-0231 §5's ceiling of three, which is what
+        # keeps §11's precedence true in every configuration.
+        "search_max_results",
+        "search_max_result_chars",
         # ADR-0159 §3's spend bound, acknowledged here with the same `bool`
         # argument the caps above carry: `reconciler_max_conflicts=True` is a
         # bound of one, which asks the model about the best-ranked conflict alone

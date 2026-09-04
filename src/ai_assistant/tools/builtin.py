@@ -58,10 +58,17 @@ from ai_assistant.core.types import (
     ToolCost,
     ToolDefinition,
 )
-from ai_assistant.tools.egress import SmtpEgressTransport, parse_smtp_endpoint
+from ai_assistant.tools.egress import (
+    HttpsExchange,
+    SmtpEgressTransport,
+    WebSearchTransport,
+    parse_https_origin,
+    parse_smtp_endpoint,
+)
 from ai_assistant.tools.egress_binder import EgressRegistration, RegistrationTable
 from ai_assistant.tools.registry import InMemoryToolRegistry
 from ai_assistant.tools.send_email import SEND_EMAIL, SendEmail
+from ai_assistant.tools.web_search import WEB_SEARCH, WEB_SEARCH_ID, WebSearchEgress
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
@@ -295,8 +302,139 @@ def build_send_email_integration(
     )
 
 
-def egress_registrations(integration: EgressIntegration | None) -> RegistrationTable:
-    """Return the binding seam's registration table for ``integration``.
+# --- the configured search integration (ADR-0231 §5, §17) ---------------
+
+
+@dataclass(frozen=True, slots=True)
+class WebSearchIntegration:
+    """One configured search integration: its searcher and its registration.
+
+    The two travel together because they are one decision, exactly as
+    :class:`EgressIntegration`'s three do — and with **one member fewer, which is the
+    whole of ADR-0231 §5's design**. There is no ``definition`` here to put in a
+    registry: the search integration is "registered at the egress seam against a
+    connected account, and in no ``ToolRegistry``", so a composition root that wired
+    this value could not accidentally advertise a capability for it. What the binding
+    seam needs is the registration; what the turn needs is the searcher; and nothing
+    needs a registry entry.
+
+    Attributes:
+        searcher: The ``WebSearcher`` a servicer drives. It carries the declaration by
+            value and compares against it on every call (ADR-0029 §2, ADR-0231 §6).
+        registration: The connected account and the origin, as the binding seam reads
+            them. The **same object** the transport inside ``searcher`` holds, so the
+            origin a ruled call is pinned against and the reference a record is read by
+            cannot come apart.
+    """
+
+    searcher: WebSearchEgress
+    registration: EgressRegistration
+
+
+def build_web_search_integration(  # noqa: PLR0913 — one parameter per injected seam ADR-0231 §5, §6 and §15 name, plus the account's two configured facts and the three bounds §5 adds; each is one thing a deployment supplies on its own
+    *,
+    connection: str,
+    origin: str,
+    records: ConnectionRecords,
+    secrets: Secrets,
+    transport: OutboundTransport,
+    ledger: InvocationLedger,
+    gate: SpendGate,
+    max_results: int,
+    max_result_chars: int,
+    max_response_bytes: int,
+) -> WebSearchIntegration:
+    """Register the web search against one connected account (ADR-0231 §5, §17).
+
+    **The one place in production a searcher is constructed**, and the only site under
+    ``src/ai_assistant`` — the answer for this integration to the question issue #83
+    asks of the mail one: the exchange is built here, handed to the searcher's
+    transport, and reachable from nowhere else.
+
+    **The origin is parsed here and then never used parsed.** Parsing is a fail-fast on
+    the operator's configuration — a deployment naming an origin ADR-0231 §8 will not
+    canonicalise should not start and then fail at a search. What the transport
+    compares per call is the ruled call's origin against this registration's *as text,
+    before parsing* (ADR-0154's condition 5), so two spellings of one host stay two
+    origins; the parse here changes nothing about that comparison and only decides
+    whether the text is one this seam will ever open. Unlike ``send_email``'s, this
+    fail-fast is exactly as strong as it reads: ADR-0231 §8's grammar validates the
+    authority, so #1147's and #1158's escapes have no counterpart here.
+
+    **Nothing is registered in a ``ToolRegistry``, and there is no parameter through
+    which it could be** (§5). This function returns no ``definition`` and
+    :func:`build_default_registry` takes no search argument, so "the declaration is
+    absent from ``capabilities()`` and ``all_tools()``" is a property of the two
+    signatures rather than of a line somebody remembered not to write.
+
+    Args:
+        connection: The connection reference the search is registered against — a
+            reference the provisioner already minted (ADR-0151 §3). Selecting among
+            existing references is not minting one, proposing one or predicting one,
+            which is what that clause governs.
+        origin: The one origin the connected account names, as
+            ``https://host[:port]`` (ADR-0231 §5, §8). The transport pins every call to
+            exactly this text and opens a channel to no other.
+        records: The connection store, read once per call by the binding seam and twice
+            around the credential read by the transport (ADR-0148 §6). The **same**
+            store object the provisioner writes, so a provisioning act cannot commit a
+            revision this path could not yet see.
+        secrets: The ``INTEGRATION``-scoped reading face (ADR-0125 §8). Never a
+            ``SecretStore``: a transport handed the writing face could delete the
+            credential it reads.
+        transport: The injected capability of reaching the world (ADR-0191 §1),
+            **required**. The one place that constructs the real implementation is
+            ``app/composition.py``; a test hands
+            :class:`~ai_assistant.testing.FakeOutboundTransport` by that same route,
+            and there is no other route.
+        ledger: The ``InvocationLedger`` the searcher claims and completes through
+            (ADR-0192 §1, §3) — the same object the composition root wires as
+            ``AuditTrail`` and ``InvocationCompleter``.
+        gate: The ``SpendGate`` every search is admitted by, before the claim
+            (ADR-0194 §3) — the same object again, because all four read the same rows
+            and two holders keyed by them could disagree about a total (ADR-0194 §5).
+        max_results: ``Settings.search_max_results``.
+        max_result_chars: ``Settings.search_max_result_chars``.
+        max_response_bytes: ``Settings.search_max_response_bytes``.
+
+    Returns:
+        The searcher and the registration as one value.
+
+    Raises:
+        TransportPinError: If ``origin`` is not a form this seam pins. The same class
+            the transport raises for the same fact, so a deployment reads one error for
+            one mistake whether it is caught at startup or at a search.
+        ValueError: If a bound is outside ADR-0231 §5's stated domain for it.
+            ``Settings`` refuses each at load; this states the same rules at the one
+            place a searcher can be built without going through it.
+    """
+    # Fail-fast only; the parsed value is deliberately discarded. See above.
+    parse_https_origin(origin)
+    registration = EgressRegistration(
+        tool_id=WEB_SEARCH_ID, reference=connection, transport_endpoint=origin
+    )
+    return WebSearchIntegration(
+        searcher=WebSearchEgress(
+            transport=WebSearchTransport(
+                registration=registration,
+                records=records,
+                secrets=secrets,
+                exchange=HttpsExchange(transport=transport, max_response_bytes=max_response_bytes),
+            ),
+            ledger=ledger,
+            gate=gate,
+            max_results=max_results,
+            max_result_chars=max_result_chars,
+            declaration=WEB_SEARCH,
+        ),
+        registration=registration,
+    )
+
+
+def egress_registrations(
+    integration: EgressIntegration | None, search: WebSearchIntegration | None = None
+) -> RegistrationTable:
+    """Return the binding seam's registration table for what is configured.
 
     The seam's half of the same fact :func:`build_default_registry` uses for the
     registry's half, so a composition root cannot wire one without the other. An
@@ -305,14 +443,37 @@ def egress_registrations(integration: EgressIntegration | None) -> RegistrationT
     declaring either §3 keyword while bound to no connected account is refused
     rather than quietly answered "not an egress call".
 
+    **The search's registration goes in this same table and in no registry**
+    (ADR-0231 §5), which is what makes ``EgressBinder.bind`` able to derive a binding
+    for it: ``EgressBindingSeam._registered`` performs the registry-original
+    comparison "only where the registry holds a definition for the id", and then
+    returns the **egress** registration. So the two halves of what "registered" has
+    meant since leg 12 come apart exactly here, and this function is where the half
+    this kind needs is supplied.
+
     Args:
-        integration: The configured integration, or ``None`` where a deployment
+        integration: The configured mail integration, or ``None`` where a deployment
             configured none.
+        search: The configured search integration, or ``None`` likewise. Separate
+            parameters and not one sequence, because they are two independent
+            configuration facts: a deployment may connect either, both or neither,
+            and a caller passing a list could pass two of one kind, which
+            :meth:`RegistrationTable.register` would then refuse at startup rather
+            than at the type.
 
     Returns:
-        A table holding its registration, or an empty one.
+        A table holding the registration of each configured integration, or an empty
+        one.
     """
-    return RegistrationTable(() if integration is None else (integration.registration,))
+    configured = (
+        registration
+        for registration in (
+            None if integration is None else integration.registration,
+            None if search is None else search.registration,
+        )
+        if registration is not None
+    )
+    return RegistrationTable(configured)
 
 
 # --- the factory --------------------------------------------------------
@@ -385,7 +546,9 @@ __all__ = [
     "CURRENT_TIME",
     "CurrentTime",
     "EgressIntegration",
+    "WebSearchIntegration",
     "build_default_registry",
     "build_send_email_integration",
+    "build_web_search_integration",
     "egress_registrations",
 ]

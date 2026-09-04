@@ -37,8 +37,10 @@ from ai_assistant.tools.builtin import (
     CURRENT_TIME,
     CurrentTime,
     EgressIntegration,
+    WebSearchIntegration,
     build_default_registry,
     build_send_email_integration,
+    build_web_search_integration,
     egress_registrations,
 )
 from ai_assistant.tools.invocation import EgressToolImplementation, ToolImplementation
@@ -51,7 +53,9 @@ __all__ = [
     "EgressToolImplementation",
     "InMemoryToolRegistry",
     "ToolImplementation",
+    "WebSearchIntegration",
     "build_default_registry",
     "build_send_email_integration",
+    "build_web_search_integration",
     "egress_registrations",
 ]

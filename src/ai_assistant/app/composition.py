@@ -98,6 +98,7 @@ from ai_assistant.secret_store import KeyringSecretStore
 from ai_assistant.tools import (
     build_default_registry,
     build_send_email_integration,
+    build_web_search_integration,
     egress_registrations,
 )
 from ai_assistant.tools.connection_store import SqliteConnectionStore
@@ -1230,9 +1231,64 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # protocol `tools.destinations` holds a canonicaliser for: it can only
         # narrow that set, and narrowing here would manufacture ADR-0152 §3
         # refusals for protocols the seam can in fact canonicalise.
+        # **The one configured search integration, where a deployment configured
+        # one** (ADR-0231 §5, §17). Built *after* the registry above and handed to
+        # it never: the search declaration is registered "at the egress seam
+        # against a connected account, and in no ``ToolRegistry``", which is the
+        # hinge ADR-0231 §5 rests on — a registry entry would put its capability in
+        # front of the planner, and the planner naming it is the outcome the whole
+        # design exists to make unreachable. `build_default_registry` takes no
+        # search argument, so that absence is a property of the signature rather
+        # than of a line somebody remembered not to write.
+        #
+        # **Constructed only where an account is connected** (§17), so a deployment
+        # that named neither `web_search_connection` nor `web_search_origin` holds
+        # no searcher at all — and `Settings` refuses half a pair, so this is whole
+        # or absent. `records`, `secrets` and the transport are the objects this
+        # root already holds, for the mail integration's reasons: a second store
+        # handle would let a provisioning act commit a revision one of them could
+        # not yet see, and constructing the transport inside the branch is what
+        # keeps "a subsystem handed no capability has no route to the world" true
+        # of the whole tree rather than of one argument list (ADR-0191 §1, §3).
+        #
+        # **The ledger and the gate are the same object the invoker is handed**
+        # (ADR-0192 §9, ADR-0194 §5): one object satisfies `AuditTrail`,
+        # `InvocationLedger`, `InvocationCompleter` and `SpendLedger` over one
+        # store, each consumer gets the face its job needs, and two holders keyed by
+        # those rows could otherwise disagree about a total.
+        #
+        # **No ``close`` is registered for it, and that is ADR-0042 §2 read rather
+        # than skipped.** That section's obligation is over "the resources it has
+        # opened"; a searcher opens none that outlives a call. ADR-0191 §3 makes the
+        # exchange open a channel per call and close it in a ``finally``, "retaining
+        # no pool, cache or keep-alive", and the connection store and the keyring it
+        # reads through are objects this root already closes. A no-op ``close``
+        # registered here would be a lifecycle nobody has, which is the shape
+        # ADR-0231 §6 refuses one clause over.
+        #
+        # **Nothing calls it yet.** ADR-0231 §17's Lane 5 is what wires a searcher
+        # into the turn's read servicer; a merged Lane 3 is "a searcher no turn
+        # reaches, in a deployment with no account connected".
+        search = (
+            None
+            if settings.web_search_connection is None or settings.web_search_origin is None
+            else build_web_search_integration(
+                connection=settings.web_search_connection,
+                origin=settings.web_search_origin,
+                records=connections,
+                secrets=integration_secrets,
+                transport=StreamOutboundTransport() if transport is None else transport,
+                ledger=trail,
+                gate=trail,
+                max_results=settings.search_max_results,
+                max_result_chars=settings.search_max_result_chars,
+                max_response_bytes=settings.search_max_response_bytes,
+            )
+        )
+
         binder = EgressBindingSeam(
             definitions=tools,
-            registrations=egress_registrations(egress),
+            registrations=egress_registrations(egress, search),
             records=connections,
         )
         runner = StepRunner(
