@@ -67,7 +67,7 @@ import statistics
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, tzinfo
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from aged_store import (
@@ -696,8 +696,20 @@ def test_a_sized_spec_refuses_a_population_it_cannot_actually_plant() -> None:
     # Zero reached a raw ZeroDivisionError; a negative silently collapsed the
     # store to one topic, reporting a density nobody asked for.
     for crowding in (0, -5):
-        with pytest.raises(ValueError, match="must both be >= 1"):
+        with pytest.raises(ValueError, match=r"crowding must be an integer >= 1"):
             AgedStoreSpec.sized(total=2_000, crowding=crowding, closed_fraction=0.5)
+    # `total` is vetted by the same owner as `__post_init__`'s counts, and before
+    # the arithmetic: it reaches `round()` while no spec exists yet, so a
+    # non-finite one surfaced as an `OverflowError` about converting a float and
+    # a `nan` as a `ValueError` about the same conversion — neither of which
+    # names the argument at fault. An integral float is refused too, because
+    # `topics` is derived from `total` by floor division: `total=2_000.0` used to
+    # build a spec whose `topics` was `20.0`, and vetting only the spec's own
+    # fields would report that as a fault in `topics`, which the caller never
+    # passed.
+    for bad_total in (math.inf, math.nan, 2_000.0):
+        with pytest.raises(ValueError, match=r"total must be an integer >= 1"):
+            AgedStoreSpec.sized(total=cast("int", bad_total), crowding=100, closed_fraction=0.5)
     # `total` is met exactly or not at all. Two roundings compose, so some
     # requests have no live count that lands on them; the near miss is refused
     # rather than returned under the requested label.
@@ -732,6 +744,58 @@ def test_a_spec_refuses_a_closed_fraction_that_is_not_a_share() -> None:
         AgedStoreSpec(live=200, topics=20, absence_share=math.nan)
     with pytest.raises(ValueError, match="preference_share must be in"):
         AgedStoreSpec(live=200, topics=20, preference_share=math.inf)
+
+
+def test_a_spec_refuses_a_live_count_that_is_not_a_whole_number() -> None:
+    """``live`` is an ``int`` by annotation only, and ``nan`` walked through the old test.
+
+    Every ordered comparison against ``nan`` is false, so ``self.live < 1``
+    admitted it: the spec was built, and the value survived to
+    ``range(spec.live)`` in ``_live_drafts``, which raises a ``TypeError`` about
+    a float argument rather than the ``ValueError`` this constructor documents.
+    A crash two calls away from its cause is the failure mode this fixture exists
+    to spare the lanes that build on it.
+
+    Mutation-checked: restoring the old ``self.live < 1`` test fails every
+    refusal asserted below — ``nan``, ``inf`` and the two finite floats because
+    nothing is raised at all, and ``-inf`` and the sub-one counts because what is
+    raised is the old sentence, which names both fields rather than the one at
+    fault.
+    """
+    for bad in (math.nan, math.inf, -math.inf, 2.5, 200.0):
+        with pytest.raises(ValueError, match=r"live must be an integer >= 1"):
+            AgedStoreSpec(live=cast("int", bad), topics=1)
+    # The range half of the same owner, unweakened by the type half.
+    for below_one in (0, -5):
+        with pytest.raises(ValueError, match=r"live must be an integer >= 1"):
+            AgedStoreSpec(live=below_one, topics=1)
+    # A `bool` is an `int` in Python and is taken as the count it equals rather
+    # than refused: `range(True)` already means `range(1)`, so the spec this
+    # builds is the one it reports.
+    assert AgedStoreSpec(live=True, topics=True).cluster_density == 1.0
+
+
+def test_a_spec_refuses_a_topic_count_that_is_not_a_whole_number() -> None:
+    """``topics=nan`` built a spec whose reported density was itself ``nan``.
+
+    :attr:`AgedStoreSpec.cluster_density` and
+    :attr:`AgedStoreSpec.cluster_population` both divide by ``topics``, so a
+    ``nan`` that passed the range test became the measurement *label* rather than
+    a refusal — the one thing this fixture's guards exist to prevent. The
+    ``topics > live`` topology test let it through for the same reason: ``nan``
+    loses that comparison as well.
+
+    Mutation-checked: restoring the old ``self.topics < 1`` test fails every
+    refusal asserted below — ``nan`` and the two finite floats because nothing is
+    raised, ``inf`` because what is raised is the topology sentence, and ``-inf``
+    and the sub-one counts because it is the old range sentence.
+    """
+    for bad in (math.nan, math.inf, -math.inf, 2.5, 20.0):
+        with pytest.raises(ValueError, match=r"topics must be an integer >= 1"):
+            AgedStoreSpec(live=200, topics=cast("int", bad))
+    for below_one in (0, -5):
+        with pytest.raises(ValueError, match=r"topics must be an integer >= 1"):
+            AgedStoreSpec(live=200, topics=below_one)
 
 
 def test_a_spec_refuses_more_topics_than_it_has_live_records() -> None:
