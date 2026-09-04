@@ -4,29 +4,37 @@
 - Date: 2026-09-04
 - **Partially supersedes**
   [ADR-0232](0232-the-extractions-cost-is-bounded-on-decoded-bytes-and-the-file-bound-stays-the-files-own-size.md)
-  — **its exclusion of a font's `/ToUnicode` CMap from the extraction bound, and the
-  one-field shape that exclusion held up.** Four clauses move, all about the same
-  question. §2's *"The decoded inputs an extraction reads **once and caches** … are **not
-  bounded by this ADR**, and no implementation, lane or later ADR derives a refusal
-  criterion on them from this field"* keeps its `/ObjStm` half and loses its `/ToUnicode`
-  half: §1 below charges that CMap's decoded bytes to `fetch_max_decoded_bytes`, per
-  parse. §3's *"Nothing else is counted, and that is a boundary rather than a gap"*
-  names the CMap in its enumeration of what is not counted, and that name comes out.
-  §8 arm 11's second arm requires a document whose large `/ObjStm` **and** whose large
-  `/ToUnicode` CMap both sit inside `fetch_max_file_bytes` to **fetch**, *"neither
-  charged"*; §8 below replaces the CMap half of that arm and keeps the `/ObjStm` half
-  verbatim. And §10's fifth deferral — the once-and-cached class — loses its
-  `/ToUnicode` half, which the 2026-09-04 note on that ADR already recorded as **fired**;
-  §7 below re-states its `/ObjStm` half on the measurement it was missing.
-  **§2's one-field decision moves too, and that is the larger half of this
-  supersession**: §2 rules that `Settings` gains *"**one** field"* bounding the decoded
-  bytes an extraction parses, and §2 below adds a **second**, on a quantity that is not
-  bytes, because the CMap's cost is a function of two quantities and neither is a
-  function of the other. **Everything else in ADR-0232 stands**, and most of it is
-  load-bearing here: §1's file bound, §2's counted-per-parse rule and its 1 MiB figure,
-  §3's walk and its agree-with-the-extraction standard, §4's single `TOO_LARGE` class and
-  closed five-member enumeration, §5's refusal of a deadline, §6's evidence-about-a-version
-  rule, §7's untouched audit, and §9's footprint. §11 below shows the working under
+  — **its exclusion of a font's `/ToUnicode` CMap from what an extraction is bounded on,
+  and the one-field shape that exclusion held up.** Six clauses move, every one of them
+  about that question. §2's *"The decoded inputs an extraction reads **once and caches** …
+  are **not bounded by this ADR**, and no implementation, lane or later ADR derives a
+  refusal criterion on them from this field"* keeps its `/ObjStm` half and loses its
+  `/ToUnicode` half: §1 below charges that CMap's decoded length to
+  `fetch_max_decoded_bytes`, once per parse, for every font in a parse's resource context
+  whose `/ToUnicode` resolves to a stream. §2's *"`Settings` gains **one** field"* becomes
+  two — **the larger half of this supersession** — because the CMap's cost is a function
+  of its decoded bytes **and** of the mappings its parse builds, and neither is a function
+  of the other: 65,000 mappings arrive in 927,031 bytes of `bfchar` or in **178** of
+  `bfrange`, so §2 below adds `fetch_max_character_mappings` for the second quantity, with
+  its own named default and stated domain and refused at load in the same form. §3's
+  *"Nothing else is counted, and that is a boundary rather than a gap"* names the CMap in
+  its enumeration of what is not charged, and that name comes out while the `/ObjStm`
+  stays — its separating test, the per-parse multiplier and never the cost per byte,
+  unchanged and now coming out the other way. §4's *"which of the **three** bounds
+  refused"* becomes any of **four**: that clause's **ruling** is extended rather than
+  replaced and binds the new field entire. §8 arm 11's second arm requires a document
+  whose large `/ObjStm` **and** whose large `/ToUnicode` CMap both sit inside
+  `fetch_max_file_bytes` to **fetch**, *"neither charged"*; §7 below keeps the `/ObjStm`
+  half verbatim and replaces the CMap half. And §10's fifth deferral — the once-and-cached
+  class — loses its `/ToUnicode` half, which the 2026-09-04 note on that ADR already
+  recorded as **fired**; §6 below re-states its `/ObjStm` half on the measurement it was
+  missing, `PdfReader._get_object_from_stream` being entered once whatever the page count.
+  **Everything else in ADR-0232 stands**, and most of it is load-bearing here: §1's file
+  bound, §2's counted-per-parse rule, its 1 MiB figure and its naming and
+  independent-figure clauses, §3's walk entire and the standard it is held to, §4's single
+  `TOO_LARGE` class and closed five-member enumeration, §5's refusal of a deadline, §6's
+  evidence-about-a-version rule, §7's untouched audit, §9's footprint and the lane it
+  charges, and §11. §10 below shows the working under
   [ADR-0070](0070-adr-lifecycle-amend-supersede-status.md) §1 and
   [ADR-0082](0082-recording-an-amendment-on-an-earlier-adrs-status-line.md) §1, clause by
   clause, including the clauses a reader would most expect to have moved and which did
@@ -260,6 +268,20 @@ number that is checkable, that looks like a bound, and that the worst document w
 straight past. That is the shape of claim ADR-0232 was written to end, and writing it one
 input over would be the same mistake with a different subject.
 
+**Why the byte half is not a third field, which is the question this section's own
+argument invites.** CMap bytes are cheap against operator bytes — about 0.0045 s per
+decoded MB per page against roughly 1.3 s per MB for `Tj` operators, a factor near 280 —
+and a reader who has just been told that two quantities need two fields will ask why these
+two do not. **Because they are one quantity.** Both are decoded bytes the extraction
+parses, counted at the same point, consumed by the same parser, and differing only in what
+a byte of each costs — and ADR-0232 §2 rules in terms that *"A per-byte cost is not the
+test for whether a class is charged"*. It already made this exact trade for the embedded
+font program, 120× cheaper per byte and charged to the same field, and §5 below inherits
+the over-refusal that follows exactly as §2 did. Mappings are not bytes at all: they are
+not produced by decoding, they are not visible in any byte count, and they have their own
+consumer in the mapping-dictionary build. The line between one field and two is the
+quantity, never the price.
+
 **And the byte half is not decoration.** Held at 1,800 mappings, the marginal cost per
 page runs 0.006 s at a 25 KB CMap to **0.037 s** at 8 MB — `prepare_cm`'s whole-buffer
 normalisation, re-run per page like everything else here. Cheap per byte, and ADR-0232 §2
@@ -324,6 +346,12 @@ and each to the field whose quantity it is.
 > building a font — `AttributeError` and `TypeError` — are swallowed here too, because a
 > font it swallows for is a font it goes on to parse the content stream past, and the walk
 > agrees with it (ADR-0232 §3).
+
+**Charging the CMap's bytes at every parse costs one decode, not many.** `pypdf` caches a
+stream's decoded bytes on the object and the walk reaches the same stream object at every
+parse, so taking its length again is a read rather than a second decompression — the same
+property ADR-0232 §3 already relies on for content streams, and subject to the same rule
+about such properties: it is why the charge is cheap, never why it is correct.
 
 **Why the establishing parse is not the reliance ADR-0232 §6 forbids, and why it is not
 the doubling ADR-0232 §3 already priced.** §6 forbids leaning on a dependency's limit *as
