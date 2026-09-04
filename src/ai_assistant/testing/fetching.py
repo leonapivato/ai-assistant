@@ -184,15 +184,32 @@ class FakeFetcher:
                 reaches ``entries[: -1]``, which "quietly yields all but the last entry,
                 so a bound would be defeated by a configuration value rather than
                 enforced by one".
+
+                **The type is part of the domain and is checked with the value**, for
+                the concrete fetcher's reason and so this fake is not the looser of the
+                two: §6's words are "integers of at least 1", and a ``float`` passes a
+                bare ``< 1`` test to fail later inside ``entries[:1.5]`` — a bound
+                defeated by a configuration value rather than enforced by one, which is
+                the very defect the negative arm above is refused for. ``True`` passes
+                it too and *means* a cap of one, a reading §6 never gave it.
+                ``type(...) is not int`` draws both lines at once, ``bool`` being a
+                subclass. A fake looser than the contract certifies consumers the real
+                implementation would reject.
         """
         _refuse_malformed_declared_name(name)
         if discriminator is not None:
             _refuse_malformed_discriminator(discriminator)
-        if listing_ttl <= timedelta(0):
-            msg = f"fetch_listing_ttl must be strictly positive, got {listing_ttl!r} (ADR-0230 §6)"
+        if type(listing_ttl) is not timedelta or listing_ttl <= timedelta(0):
+            msg = (
+                f"fetch_listing_ttl must be a strictly positive timedelta, got "
+                f"{listing_ttl!r} (ADR-0230 §6)"
+            )
             raise ValueError(msg)
-        if max_entries < 1:
-            msg = f"fetch_listing_max_entries must be at least 1, got {max_entries!r} (ADR-0230 §6)"
+        if type(max_entries) is not int or max_entries < 1:
+            msg = (
+                f"fetch_listing_max_entries must be an integer of at least 1, got "
+                f"{max_entries!r} (ADR-0230 §6)"
+            )
             raise ValueError(msg)
         scripted = dict(files or {})
         for candidate in scripted:
