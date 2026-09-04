@@ -11,9 +11,12 @@ Issue #2111. `WEB_SEARCH` declares `cost=ToolCost(basis=CostBasis.UNKNOWN)`, and
 `ThresholdActionPolicy` fires **two** floors on that declaration rather than one —
 `_DISCLOSURE_FLOOR` and `_UNKNOWN_COST_FLOOR`. Its route-(b) predicate,
 `_only_the_disclosure_floor`, admits the standing-grant lookup only where
-`fired == [_DISCLOSURE_FLOOR]`, so on a search the seam is consulted **zero** times
-and no `RecipientGrants` this system can hold changes the answer. Every search is
-`CONFIRM`, in every configuration, whatever the user has granted.
+`fired == [_DISCLOSURE_FLOOR]`, so on a search the seam is consulted **zero** times in
+**every** configuration and no `RecipientGrants` this system can hold changes the
+answer. No search is ever `ALLOW`ed: under the shipped thresholds every one is
+`CONFIRM`, and under a `deny_at_risk` at or below `LOW` — or a `deny_at_reversibility`
+at or below `REVERSIBLE` — it is `DENY` instead (§4 states that split; the outcome the
+thresholds decide is not this ADR's subject, the unreachable `ALLOW` is).
 
 That is not what ADR-0231 §5 decided. Its declaration clause already names the field
 this ADR supplies:
@@ -212,14 +215,24 @@ price an operator states about a call they are paying for.
 > That is a positive assertion carrying a currency, and it satisfies
 > `_UNKNOWN_COST_FLOOR` exactly as any other `PER_CALL` figure does.
 
-> **Normative.** Its **spend equivalence to a `FREE` basis is conditional and is
-> stated as such**: a zero `PER_CALL` figure contributes zero to both of ADR-0194
-> §2's totals where its currency **is** `world_spend_currency`, and where no
-> `world_spend_currency` is configured at all, since §2's first clause then sums
-> nothing. Where the two currencies **differ**, §2's non-conversion clause governs and
-> a zero figure is treated as an `UNKNOWN` basis is — which a `FREE` basis would not
-> be. No lane states the equivalence unconditionally, and §6 is where that residual is
-> accounted for.
+> **Normative.** Its **spend equivalence to a `FREE` basis is a statement about
+> ADR-0194 §2's admission projection alone**, and no lane widens it to the accounted
+> total. §2 makes that total *"the sum of the reported per-invocation costs carried by
+> ADR-0192's **completion** rows"* and says *"Nothing else contributes to it: not a
+> `ToolDefinition.cost`"* — so a **declared** figure of any basis contributes to the
+> accounted total not at all, and what a search is accounted is whatever its
+> completion **reports**, which this ADR neither fixes nor predicts. A deployment
+> declaring `0` whose provider reports `1` is accounted `1`.
+
+> **Normative.** Within the projection, the equivalence holds **only where
+> `world_spend_currency` is set and the figure is denominated in it**. Where the two
+> differ, §2's non-conversion clause governs and the zero figure is treated as an
+> `UNKNOWN` basis is — which a `FREE` basis would not be. Where no
+> `world_spend_currency` is configured at all there is **no equivalence to state**:
+> §2's first clause is that *"Where no currency is configured nothing is summed, no
+> total is stated, and nothing is refused"*, so neither basis contributes to anything
+> and the gate refuses nothing whichever was declared. No lane states the equivalence
+> unconditionally, and §6 is where the mismatch residual is accounted for.
 
 **Three reasons, and the first is decisive on its own.** ADR-0231 §9's fourth clause
 forbids *"a `cost` declared `FREE` where the figure is not known"* as one of the
@@ -239,21 +252,26 @@ else would be indistinguishable, field by field, from one who set nothing. ADR-0
 present/absent but free versus unknown"*; a two-field configuration that offered
 three bases would reintroduce exactly the collapse the enum removed, one layer out.
 
-Third, little is lost, and what is lost is stated rather than claimed away. ADR-0194
-§2 says *"A `FREE` basis contributes zero, in both totals"* and that *"A `PER_CALL`
-basis **in the configured currency** contributes its `amount`"* — so `Decimal("0")` in
-that currency contributes zero and the two forms are spend-equivalent, while the
-zero-figure form is strictly more informative because it says which register the zero
-was asserted in. **The one configuration where `FREE` would genuinely be better is the
-currency mismatch**: §2's non-conversion clause treats a zero `EUR` figure under a
-`USD` spend currency as it treats an `UNKNOWN` one, so it consumes the allowance or
-meets §4's second ground, where a `FREE` basis would have contributed zero. That
-residual is real and is not the ground on which this section stands: reasons one and
-two hold in every configuration, the mismatch is an operator's own misconfiguration
-that §6 already refuses to paper over, and buying the mismatch case would cost the
-structural unreachability that makes ADR-0231 §9's prohibition self-enforcing. An
-operator declaring a zero figure states it in the currency they meter in, and §6's
-consequence is what tells them why.
+Third, little is lost at the one place a declared figure is read, and what is lost is
+stated rather than claimed away. **A declared cost is read by ADR-0194 §2's admission
+projection and by nothing else** — the accounted total is built from ADR-0192's
+completion rows and §2 says *"Nothing else contributes to it: not a
+`ToolDefinition.cost`"* — so "what is lost by refusing `FREE`" is a question about the
+projection, and about it only. There, §2 says *"A `FREE` basis contributes zero, in
+both totals"* and that *"A `PER_CALL` basis **in the configured currency** contributes
+its `amount`"*: `Decimal("0")` in `world_spend_currency` projects zero exactly as
+`FREE` would, while carrying the register the zero was asserted in.
+
+**The one configuration where `FREE` would genuinely project better is the currency
+mismatch**: §2's non-conversion clause treats a zero `EUR` figure under a `USD` spend
+currency as it treats an `UNKNOWN` one, so it consumes the allowance or meets §4's
+second ground, where a `FREE` basis would have projected zero. That residual is real
+and is not the ground on which this section stands: reasons one and two hold in every
+configuration, the mismatch is an operator's own misconfiguration that §6 already
+refuses to paper over, and buying the mismatch case would cost the structural
+unreachability that makes ADR-0231 §9's prohibition self-enforcing. An operator
+declaring a zero figure states it in the currency they meter in, and §6's consequence
+is what tells them why.
 
 ### 4. Absence: `UNKNOWN`, `CONFIRM` on the cost ground, and that is the shipped default
 
@@ -284,8 +302,10 @@ consequence is what tells them why.
 > route this ADR opens is the one ADR-0016 §4 already names: **declare the figure**.
 
 > **Normative.** The `Settings` fields' own descriptions say what their absence
-> means — that the search confirms on the cost ground as well as the disclosure one,
-> so a standing grant cannot make it fire — because an operator reading their
+> means — that the cost floor fires alongside the disclosure one, so **no standing
+> grant is consulted and no search can be `ALLOW`ed**, and that the ruling is therefore
+> `CONFIRM` unless this deployment's own deny thresholds reach a `LOW`, `REVERSIBLE`
+> declaration — because an operator reading their
 > configuration is the reader who most needs the sentence, and ADR-0231 §5's
 > load-time-refusal style already puts each field's meaning in its description.
 
@@ -383,7 +403,8 @@ it rather than rediscovering it.
 
 **The consequence is stated rather than smoothed over.** A deployment that configures
 the figure in a currency other than its spend currency, with a ceiling set and no
-allowance, reaches an `ALLOW` at the policy and is then refused at the gate with
+allowance, and whose thresholds fire on neither `LOW` nor `REVERSIBLE`, reaches an
+`ALLOW` at the policy over a covering grant and is then refused at the gate with
 `SpendUndeterminedError` — recorded as `SearchDisposition.SPEND_REFUSED`, which §13
 already has, on the servicing that ADR-0231 §15 puts the gate inside. That is
 fail-closed, legible in the audit, and correct: the user authorised the recipient and
@@ -472,8 +493,9 @@ bullet list would bind nothing.**
 > **Normative.** The lane also lands ADR-0231 §18's item 1 **over the production
 > `ThresholdActionPolicy` and the production declaration**, which is the arm that ADR
 > could only model. Its premise is now constructible: a deployment with the figure
-> configured, a real `RecipientGrants` holding a covering grant, and the assertion that
-> the ruling is an `ALLOW` whose `authorised_by` is the grant's id.
+> configured, at thresholds that fire on neither `LOW` nor `REVERSIBLE`, with a real
+> `RecipientGrants` holding a covering grant, and the assertion that the ruling is an
+> `ALLOW` whose `authorised_by` is the grant's id.
 
 ### 8. The representative-input tests this decision owes
 
@@ -497,9 +519,12 @@ bullet list would bind nothing.**
    test if `covering` is called at all — which is `_only_the_disclosure_floor`'s
    zero-consultations property asserted rather than assumed.
 3. **A zero figure is a figure.** `web_search_cost_per_call = 0` with a currency
-   yields a `PER_CALL` declaration, an `ALLOW` on the covering grant, and a projected
-   contribution of `Decimal("0")` at the gate. Its `basis` is asserted **not** to be
-   `FREE`, which fails an implementation that mapped zero onto the other member.
+   yields a `PER_CALL` declaration and, at the shipped thresholds, an `ALLOW` on the
+   covering grant; with that currency equal to `world_spend_currency`, its projected
+   contribution at the gate is `Decimal("0")`. Its `basis` is asserted **not** to be
+   `FREE`, which fails an implementation that mapped zero onto the other member. **No
+   arm asserts anything about the accounted total**, which §3's first clause puts
+   beyond a declared figure's reach.
 4. **Every half-configuration is refused at load, and names its field.** Amount alone;
    currency alone; either set with the registration absent; either set with exactly one
    of `web_search_connection`/`web_search_origin` set. Each raises at `Settings` load
@@ -756,8 +781,8 @@ implements against §§1–8 until this has merged (ADR-0015 §5, golden rule 5)
   registration. Both are refused at load with a message naming the field, which is the
   trade `_the_search_registration_is_whole_or_absent` already made once for this kind.
 - **A currency mismatch is now reachable and is refused late.** A deployment can
-  configure `EUR` for the search and `USD` for its spend ceiling, reach an `ALLOW`, and
-  be refused at the gate on every call. §6 states it rather than preventing it, because
+  configure `EUR` for the search and `USD` for its spend ceiling, reach an `ALLOW` at
+  the policy where its thresholds admit one, and be refused at the gate on every call. §6 states it rather than preventing it, because
   the alternative refuses a deployment that meters no spend at all. An operator meeting
   it reads `SPEND_REFUSED` in the audit, which is the disposition ADR-0231 §13 already
   has for it.
@@ -767,10 +792,11 @@ implements against §§1–8 until this has merged (ADR-0015 §5, golden rule 5)
   policy test to pass for a reason no deployment enjoys.
 - **The corpus acquires its first `PER_CALL` cost, and ADR-0194's arithmetic acquires
   its first real operand.** Every `cost` on `main` today is `FREE` or `UNKNOWN`, which is
-  why ADR-0194 §8 could call the priced route *"open and unwalked"*. It is walked now,
-  and with no `world_spend_*` ceiling configured a granted search is metered and refused
-  by nothing — §1's *"unset means unbounded"* working as decided. §9 names that as
-  ADR-0194 §8's own trigger and issue #2116 carries it.
+  why ADR-0194 §8 could call the priced route *"open and unwalked"*. It is walked now.
+  What a deployment then gets is §1's and §2's, unchanged: with no `world_spend_currency`
+  nothing is summed and nothing refused; with a currency but no ceiling the totals are
+  computed and readable and still nothing is refused — *"unset means unbounded"* working
+  as decided. §9 names that as ADR-0194 §8's own trigger and issue #2116 carries it.
 - **`send_email` keeps its `UNKNOWN` cost, visibly.** §9 defers the general case and
   says why the consequence differs. A reader who notices the asymmetry now finds it
   argued rather than unexplained.
