@@ -934,6 +934,65 @@ def test_a_long_value_is_neither_truncated_elided_nor_collapsed(output: StringIO
         assert elision not in rendered
 
 
+def test_every_wrapped_continuation_of_a_value_keeps_the_gutter(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0233 §8's second and ninth clauses, on the display line rather than the buffer.
+
+    Rich does not repeat a literal prefix on the continuations it wraps: handed one
+    long line it emits the gutter once and puts the remainder at the margin, so a
+    body would run past the marker within a line or two and those continuations would
+    read as lines this adapter wrote. That is the regression
+    :func:`cli._render_content` records an adversarial ``blocker`` for, one renderer
+    over, and the wrapping is therefore taken by :func:`cli._render_egress_value`
+    rather than left to the console.
+
+    Asserted at a narrow width, over both shapes that wrap — an unbroken run, which
+    folds, and ordinary words, which break at spaces — because they take different
+    paths through Rich's wrapper. The pieces concatenate back to the value, which is
+    §8's whole-rendering clause read on the screen; a lost gutter shows up here as a
+    piece that never reached :func:`_value_lines`, and a lost character as a
+    reconstruction that does not match.
+
+    Adversarial review, round 2, ``minor``.
+    """
+    cases = (("x" * 500, "xx", True), (" ".join(f"word{n}" for n in range(80)), "word", False))
+    for value, token, folds in cases:
+        output.truncate(0)
+        output.seek(0)
+        monkeypatch.setattr(cli, "console", Console(file=output, force_terminal=False, width=40))
+        cli._render_confirmation(
+            _egress_confirmation(
+                _egress_span("body", extent=len(value)), parameters={"body": value}
+            )
+        )
+        rendered = output.getvalue()
+        # Scoped to §8's block: the `With:` heading above it renders the same
+        # arguments through `_safe` on adapter-authored lines, and those wrap the way
+        # every interpolated line in this module wraps (#2072). What §8's clauses are
+        # stated over is this block.
+        block = rendered[rendered.index("What it would send, whole:") :]
+        pieces = _value_lines(block)
+
+        assert len(pieces) > 1, value[:20]  # it really did wrap
+        if folds:
+            joined = "".join(pieces)
+            # An unbroken run has nowhere to break, so it is folded and the pieces
+            # concatenate back to it character for character.
+            assert joined == value
+        else:
+            # A word wrap consumes the space it breaks at — on a screen the break
+            # *is* that space — so the pieces are rejoined across the break the way
+            # a reader reads them. Every word, in order, none dropped and none run
+            # into its neighbour, which is what §8's whole-rendering clause is
+            # about: no word, no line and no fragment of the value is missing.
+            assert " ".join(pieces).split() == value.split()
+        # No piece of the value reached the screen outside the gutter.
+        for line in block.split("\n"):
+            if token in line:
+                assert line.startswith(_VALUE_GUTTER), (value[:20], line)
+
+
 def test_a_value_carrying_this_terminals_framing_is_neutralised(output: StringIO) -> None:
     """ADR-0233 §8's ninth clause, on the case it exists for.
 
