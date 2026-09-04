@@ -65,7 +65,8 @@ and assigns this lane one further thing in terms:
 
 ### The tree, read rather than assumed
 
-Every claim here was checked against `origin/main` at `6a49a318` while writing.
+Every claim here was checked against `origin/main` at `89f410e9` while writing, and
+re-checked there after ADR-0231's Lane 3 merged the search seam under this document.
 
 - **`RecipientGrant.established_from` has no caller.** Its only occurrences in
   `src/` are its own definition and three docstrings that name it; its only callers
@@ -112,12 +113,30 @@ stated here so that no clause below rests on one.
 - **ADR-0177 §1's enumeration stands at thirty-one, not thirty.** ADR-0200 §12(a)
   partially superseded it, adding `converse_spoken`; ADR-0177's `Status` line and
   `wire/envelope.py`'s commentary both carry the figure. §9 below leaves it there.
-- **There is no web search in the tree yet.** No `WebSearcher`, no `WEB_SEARCH`, no
-  such `ReadKind` member; `ReadKind` is `SIGHTED_QUERY`, `CITATION_HOP` and
-  `LOCAL_FILE`. The only artifact is the undriven HTTPS exchange in `tools/egress`,
-  whose own docstring says *"Nothing constructs one yet."* Everything this ADR says
-  about a `WEB_SEARCH` decision is said about ADR-0231's ratified text and about the
-  lanes implementing it, not about code.
+- **The search seam is in the tree; the kind that drives it is not yet.** ADR-0231's
+  Lane 3 has merged: `WebSearcher` is a Protocol in `core/protocols.py` with three
+  members — `name`, `request` and `search` — `SearchOutcome` and `SearchRefusal` are
+  in `core/types.py`, `tools/web_search.py` holds the declaration and the integration,
+  `testing/searching.py` holds the fake, and `app/composition.py` builds the
+  integration where `web_search_connection` and `web_search_origin` are both
+  configured. **`ReadKind` still carries only `SIGHTED_QUERY`, `CITATION_HOP` and
+  `LOCAL_FILE`**: `ReadKind.WEB_SEARCH`, the ask that reaches the seam from a turn,
+  is ADR-0231's Lane 4 and is in flight beside this document. So the seam exists, no
+  turn drives it yet, and what this ADR says about a `WEB_SEARCH` **decision** rests
+  on ADR-0231's ratified text plus the two facts below.
+- **A search request carries neither binding field, and that is now code rather than
+  an inference.** `WebSearcher.request` returns `ActionRequest(tool=…, parameters=…)`
+  and supplies neither `step_id` nor `execution_id`, both of which default to `None`
+  on `ActionRequest`. A decision made from that request therefore carries neither,
+  because `PermissionDecision.from_request` transcribes them from the request — which
+  is exactly the discriminator §3 rests population (b) on, and it is a property of the
+  merged seam rather than a reading of ADR-0231's prose about plan steps.
+- **The declaration reaches `CONFIRM` for the reason ADR-0231 §9 states.**
+  `tools/web_search.py` declares `discloses=(PERSONAL,)`, `risk_level=LOW` and
+  `reversibility=REVERSIBLE`, and is registered at the egress seam and in no
+  `ToolRegistry` — so the disclosure floor fires, route (a) needs an asker ADR-0226 §5
+  forbids, and route (b) needs the grant this ADR's surface establishes. The chain
+  ADR-0231 §9 predicted is now the one the tree runs.
 - **There is no `confirmations` command.** The command-line confirmation surface is
   `assistant resume` alone; `assistant grants`, `assistant granted` and
   `assistant revoke` are source-grant commands and §7 below keeps them so.
@@ -135,10 +154,12 @@ The answer both authorises the call and, under §2 below, may establish the gran
 is outstanding work in every sense the corpus uses the phrase.
 
 **(b) A confirmation no park holds.** ADR-0231's `WEB_SEARCH` decision is the whole
-of this population today: it is not a `PlanStep`, reaches neither `StepExecutor` nor
-`ExecutionState`, and therefore carries neither a `step_id` nor an `execution_id`.
-Nothing waits on it, nothing resumes it, and the turn it belonged to composed and
-finished. It is history.
+of this population once its Lane 4 lands, and it is empty until then: the decision is
+not a `PlanStep`, reaches neither `StepExecutor` nor `ExecutionState`, and carries
+neither a `step_id` nor an `execution_id` — which the merged `WebSearcher.request`
+already settles by supplying neither (the Context's tree reading). Nothing waits on
+it, nothing resumes it, and the turn it belonged to composed and finished. It is
+history.
 
 The difference is what makes one door insufficient and two doors honest. Answering
 (a) is an act on work; answering (b) is an act on a record. A single operation
@@ -886,7 +907,8 @@ in it, which is the disclosure ADR-0199 exists to refuse.
 
 > **Normative.** This ADR **fixes no number**, and that is deliberate rather than an
 > omission. `PROTOCOL_VERSION` stands at 29 on `origin/main` and ADR-0231 §16 obliges
-> a further move for `ReadKind.WEB_SEARCH` from a lane in flight beside this one; a
+> a further move for `ReadKind.WEB_SEARCH` from its Lane 4, in flight beside this one
+> — ADR-0231's Lane 3 landed the search seam and moved the constant not at all; a
 > number written here would be a fact about a tree that has since moved. The lane
 > reads the constant and moves it by one, and no lane reads this clause as licence to
 > skip the move or to fold two grounds into one entry.
