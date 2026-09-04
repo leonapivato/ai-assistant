@@ -464,7 +464,7 @@ fact, which is the unobtainable bound ADR-0098 §6's second clause forbids"*. A 
 would also put a user-typed provider string where ADR-0148 §2's canonicaliser has to
 meet it, reopening from the surface a question the seam has closed.
 
-### 4. The `core` surface: five engine members, one argument, one transcribing constructor
+### 4. The `core` surface: five engine members, one argument, one carrier, one transcribing constructor
 
 > **Normative.** This ADR decides the following `core` surface and lands none of it.
 > A contract that adds a member, widens an argument or changes a return is changing
@@ -503,6 +503,21 @@ class AssistantEngine(Protocol):                       # core/protocols.py
     ) -> RecipientGrant | None: ...
 
 
+class TurnOutcome(BaseModel):                          # core/types.py
+    recipient_grant: RecipientGrantOutcome | None = None       # §6, default None
+
+
+class RecipientGrantOutcome(BaseModel):                # core/types.py
+    established: RecipientGrant | None = None                  # §6
+    refusal: RecipientGrantRefusal | None = None               # §6
+
+
+class RecipientGrantRefusal(StrEnum):                  # core/types.py
+    CEILING_REACHED = "ceiling_reached"                        # §6
+    ALREADY_STANDING = "already_standing"                      # §6
+    REFUSED = "refused"                                        # §6
+
+
 class PermissionDecision(BaseModel):                   # core/types.py
     @classmethod
     def from_confirmation(                                     # §4
@@ -514,6 +529,42 @@ class PermissionDecision(BaseModel):                   # core/types.py
         decided_at: UtcInstant,
     ) -> PermissionDecision: ...
 ```
+
+> **Normative.** `RecipientGrantOutcome` is the carrier §6 requires, and it carries
+> **exactly one** of its two members: `established` on an act that recorded a grant,
+> `refusal` on one that did not, and a value setting both or neither is refused by a
+> `model_validator(mode="after")`, as ADR-0170 §4's own invariants are stated. It
+> composes, filters and enriches nothing, reads no clock and no store, and the
+> `RecipientGrant` it carries on the establishing arm is the record the store
+> accepted, detached as every other promoted read's is (ADR-0018 §3).
+
+> **Normative.** `RecipientGrantRefusal` names the reasons a surface must be able to
+> tell apart, and `CEILING_REACHED` is here because ADR-0193 §1 obliges a surface to
+> name **that** reason in terms. `ALREADY_STANDING` is the duplicate-**subject**
+> refusal ADR-0193 §1 makes `record` perform, and `REFUSED` is every other
+> `InvalidRecipientGrantError` that operation can raise — the duplicate-id check and
+> the revocation invariants — which no surface distinguishes because ADR-0193 §1 gives
+> a user no different act for them. A lane adds no fourth member without deciding what
+> a surface says about it.
+
+> **Normative.** `TurnOutcome` **gains exactly one field**, `recipient_grant`, typed
+> `RecipientGrantOutcome | None` and defaulting to `None`, and its docstring names
+> this ADR as the decision that added it. That is **ADR-0197's move exactly** — that
+> ADR added `routed` to `TurnOutcome` in its own text, defaulting to `None`, with its
+> docstring naming it *"as `reply`'s names ADR-0170 §3"* — and it is a widening rather
+> than a change: ADR-0170 §4 fixes the three shapes on which `reply` is `None` and the
+> one on which `reply_degraded` is `True`, and this field alters neither, so no clause
+> of ADR-0170 is superseded, narrowed or read more widely. ADR-0197's header records
+> no supersession of ADR-0170 for the identical move, and this one records none
+> either.
+
+> **Normative.** `recipient_grant` is `None` on **every** outcome of a call that
+> performed no establishing act — every `ask`, every `resume` supplying no
+> `remember_recipients_until`, and ADR-0198 §1's **restatement**, which drives nothing
+> and therefore establishes nothing. That adds a value to ADR-0198 §2's enumeration
+> without changing any value it fixes: `turn`, `routed`, `reply`, `reply_degraded` and
+> `step` carry there exactly what that clause says they carry, and `None` is the true
+> value of a member describing an act the restatement did not perform.
 
 > **Normative.** `PermissionDecision.from_confirmation` is a **pure transcribing
 > constructor** on the record in `ai_assistant.core.types`, and it is
@@ -554,7 +605,11 @@ class PermissionDecision(BaseModel):                   # core/types.py
 > **Normative.** This ADR adds **no Protocol**, no member to `ActionPolicy`,
 > `AuditTrail`, `EgressBinder`, `RecipientGrants`, `RecipientGrantResolution` or
 > `RecipientGrantStore`, no `Settings` field, no error class, and no member to
-> `RoutableOperation`. The three grant faces are consumed exactly as ADR-0193 §1
+> `RoutableOperation`. What it **does** add to `core/types.py` is the carrier above —
+> one field on `TurnOutcome` and the two values it is typed over — and nothing else:
+> no field on `RecipientGrant`, `PermissionDecision`, `Confirmation` or
+> `ConfirmationEgress`, and no second construction path for any of them.
+> The three grant faces are consumed exactly as ADR-0193 §1
 > shipped them, and the engine holds the **store** face — which is what ADR-0193 §1
 > withholds from the policy and from the trail and withholds from no one else, and
 > what `app/composition.py`'s comment already anticipates passing *"whole to whatever
@@ -678,6 +733,18 @@ holds.
 > store, and neither is a price this decision pays for a check that could not be
 > authoritative anyway.
 
+> **Normative.** **No lane repairs any of this with a count read before the write**,
+> and ADR-0193 §1 forbids it in terms rather than merely declining to supply the read.
+> That clause makes the duplicate-id check, the duplicate-subject refusal, the ceiling
+> count and the append **one** operation, and names the reason the ceiling in
+> particular cannot be checked outside it: *"two writers of **different** subjects at
+> one below the ceiling both see room, both append, and the store ends one over — a
+> race the duplicate-subject refusal cannot catch, because the two subjects differ."*
+> So a pre-check would not fail closed; it would fail **open**, quietly, exactly where
+> the ceiling is load-bearing. A surface that refused the act on such a read would
+> also refuse acts the store would have admitted. `Alternatives considered` records
+> the shape and this ground.
+
 > **Normative.** **No lane substitutes a live count for the outstanding count**, at
 > the engine, at a surface, or in a store implementation's own fast path. The two
 > differ by exactly the expired-but-unrevoked records ADR-0193 §1 says still occupy a
@@ -698,16 +765,29 @@ holds.
 > states nothing false.
 
 > **Normative.** On population (a), `resume` **does not raise on a ceiling refusal**.
-> It returns the `TurnOutcome` for the call it approved and executed, exactly as a
-> `resume` supplying no `remember_recipients_until` would, and the establishment's
-> failure is carried by the absence of the grant rather than by an exception. The
-> reason is the order: by the time `record` is asked the call has been sent, and
-> `resume`'s return is fixed as `TurnOutcome` (§4), so a raise would report a failure
-> for an egress nobody can un-send, breaching this section's own bar below on
-> *"presenting it as a fault of the call that was confirmed"* — while discarding
-> the outcome the surface needs in order to tell the user what that call did. The two
-> shapes this ADR rejected for it are in `Alternatives considered`, and the carrier it
-> declines to mint is named in §11.
+> It returns the `TurnOutcome` for the call it approved and executed, and that outcome
+> **carries a `RecipientGrantOutcome` naming what became of the standing request**
+> (§4): `established` where a grant was recorded, and otherwise `refusal` carrying
+> `CEILING_REACHED`, `ALREADY_STANDING` or `REFUSED`. A raise is refused here because
+> by the time `record` is asked the call has been sent, so it would report a failure
+> for an egress nobody can un-send — breaching this section's own bar below on
+> *"presenting it as a fault of the call that was confirmed"* — while discarding the
+> outcome the surface needs in order to say what that call did. `Alternatives
+> considered` records the three shapes rejected for it.
+
+> **Normative.** The carrier is what discharges **ADR-0193 §1's ceiling clause** on
+> this population, and nothing else in this decision can: that clause obliges a
+> surface offering the act to refuse it *"with a reason visible to the user, naming
+> that the ceiling was reached"*, and a surface names a reason it was told. Round 9 of
+> this review found the earlier draft, which asked the surface to infer the refusal
+> from a `standing_recipient_grants` read after `resume` returned. That inference is
+> **unavailable**, and the record of why is kept here rather than repaired away: three
+> outcomes collapse into one listing — a ceiling refusal, a grant established with an
+> expiry §1 admits an instant after the answer and therefore already not live, and the
+> duplicate-subject refusal — and `Confirmation` carries no decision id (`tool_id`,
+> `tool_description`, `parameters`, `reason`, `token` and `egress` are its whole
+> membership), so no correlation on `RecipientGrant.established_by` is available and no
+> difference between two reads separates the three.
 
 > **Normative.** What governs `resume` across this ADR is therefore **one rule and not
 > two: it raises where nothing has been sent, and returns where something has.** §1's
@@ -716,24 +796,18 @@ holds.
 > the call has gone out, so it returns. No lane reads the three as inconsistent, and
 > none repairs any of them into another.
 
-> **Normative.** A surface that collected the act on population (a) **confirms the
-> establishment by reading `standing_recipient_grants` once `resume` has returned**,
-> and states the standing outcome from what that read holds and from nothing else. It
-> asserts no grant it has not read — a surface reporting the standing request as
-> recorded because `resume` returned normally would be asserting the one thing this
-> clause exists to prevent — and it does not stay silent either, because a user who is
-> told nothing concludes that what they asked for happened.
+> **Normative.** A surface that collected the act on population (a) **states the
+> standing outcome from the carrier and from nothing else**, and states it on the same
+> screen as the call's own result. It asserts no grant the carrier does not carry, and
+> it does not stay silent on a refusal either, because a user told nothing about a
+> request they made concludes that it was granted. Where the carrier is absent — every
+> call that collected no act — the surface says nothing about standing grants at all.
 
-> **Normative.** That read-back is **how** the refusal reaches the user on this
-> population, and it is stated because the operation no longer carries it. The
-> `Confirmation` a park hands a surface carries no decision id — `tool_id`,
-> `tool_description`, `parameters`, `reason`, `token` and `egress` are its whole
-> membership on `origin/main` — so no surface can match
-> `RecipientGrant.established_by` against the confirmation it answered. Where a
-> surface cannot itself tell which grant is which, and on this population it cannot,
-> it **renders the listing it read and states that this is what now stands**, which is
-> the whole of what it has read and no more (ADR-0193 §11's discipline, read one store
-> over).
+> **Normative.** No surface derives the standing outcome from a
+> `standing_recipient_grants` read taken after the act, and none reports the act as
+> performed because `resume` returned normally. The listing states what the user
+> currently authorises (§7) and is a fine thing to render beside the outcome; what it
+> cannot do is say what *this* act did, for the three reasons above.
 
 > **Normative.** A surface offering the act **states that refusal to the user at the
 > moment it happens**, naming that the ceiling was reached and that the recourse is
@@ -941,6 +1015,15 @@ which is what "a product surface with a user action behind it" describes.
 > one store over: a listing stating what stands now, and a log off which
 > `connection-log` already says liveness may not be read.
 
+> **Normative.** `assistant resume` states the standing outcome from the
+> `RecipientGrantOutcome` its `TurnOutcome` carries (§4, §6), beside the call's own
+> result and never in place of it. On `CEILING_REACHED` it names the ceiling and
+> points at `assistant revoke-recipient-grant`, which is ADR-0193 §1's *"naming that
+> the ceiling was reached and that the recourse is to revoke a grant they hold"*
+> discharged on the shipping surface; on `ALREADY_STANDING` it says the recipients
+> were already authorised and points at `assistant recipient-grants`; on `REFUSED` it
+> says no standing authorisation was created and names no cause it was not given.
+
 > **Normative.** The history command is what makes ADR-0193 §1's recourse performable
 > on the shipping surface, so it is named here rather than left to the lane: a user
 > whose act §6 refused on the ceiling reaches it, finds the expired grant the standing
@@ -1008,9 +1091,11 @@ in it, which is the disclosure ADR-0199 exists to refuse.
 > **Normative.** The lane implementing §4 moves `PROTOCOL_VERSION`, in the same
 > change, and records the ground in the constant's own commentary as every prior move
 > has. ADR-0124 §9's first limb is what obliges it: the promoted method set grows by
-> **five** — the members §4's block declares — and `resume`'s declared arguments grow
-> by one, so a peer at the earlier version and a peer at the later one do not agree
-> about the surface.
+> **five** — the members §4's block declares — `resume`'s declared arguments grow by
+> one, and a **wire-carried `core` type gains a member**: `TurnOutcome` gains
+> `recipient_grant`, which crosses on every turn call's result payload. Each of the
+> three obliges the move on its own and the entry records all three; a peer at the
+> earlier version and a peer at the later one do not agree about the surface.
 
 > **Normative.** This ADR **fixes no number**, and that is deliberate rather than an
 > omission. `PROTOCOL_VERSION` stands at 29 on `origin/main` and ADR-0231 §16 obliges
@@ -1070,17 +1155,13 @@ Named individually:
   changes a return is changing this decision rather than implementing it"* — so it is
   an ADR partially superseding that clause, not a lane's repair. **Fires** on a
   measurement that a real user reaches the ceiling and cannot find the record.
-- **A carrier by which `resume` reports a failed establishment to its caller.** §6
-  rules that it does not raise on a ceiling refusal and returns its `TurnOutcome`, so
-  what became of the standing request is learned by reading
-  `standing_recipient_grants` and never from the return. A carrier would be a widened
-  return or a minted error class on a promoted operation, and §4 forbids both in
-  terms — *"a contract that adds a member, widens an argument or changes a return is
-  changing this decision rather than implementing it"* — while the shapes that avoid
-  the widening cost either a misreport or an approved send (`Alternatives
-  considered`). **Fires** on an ADR that decides how a promoted operation reports a
-  second act it performed beside its own, which is a question this ADR is the first to
-  raise and the wrong one to settle inside it.
+- **A pre-write reservation, quota preview or "will this fit" read of the ceiling.**
+  §6 refuses it on ADR-0193 §1's own atomicity ground rather than on the absence of a
+  read, so supplying the read would not make it available. What a user gets instead is
+  the act attempted and its refusal named (§4's carrier), which is the outcome
+  ADR-0193 §1 asks a surface for. **Fires** on an ADR that decides the ceiling is a
+  quantity a user should be shown before they act, which is a product question this
+  one does not reach.
 - **Renewing a grant.** Nothing here extends, re-dates or re-scopes a grant, because
   ADR-0193 §1's store is append-only and its §9 makes changing an authorisation a
   revocation followed by a new grant. A new grant needs a fresh confirmation about a
@@ -1116,8 +1197,10 @@ the obligations (ADR-0089 §3).
 rule 5, ADR-0015 §5).
 
 **Lane 1 — the contract, the engine and the terminal, in one change.** It lands
-`PermissionDecision.from_confirmation`; the five new `AssistantEngine` members of §4 and the
-changed signature of `resume`, with their entries in the shared `AssistantEngine` conformance suite and in
+`PermissionDecision.from_confirmation`; the five new `AssistantEngine` members of §4, the
+changed signature of `resume`, and §4's two new `core/types.py` values with the
+`TurnOutcome` field that carries one of them, with their entries in the shared
+`AssistantEngine` conformance suite and in
 `FakeAssistantEngine` (`ai_assistant.testing`); the engine implementation, including
 the store's whole face reaching `Engine` from `app/composition.py`; the
 `PROTOCOL_VERSION` move of §10 and its commentary entry; and the command-line surface
@@ -1204,13 +1287,35 @@ enumeration in its own text (§9).
 > ceiling leaves the answer recorded, raises `InvalidRecipientGrantError`, and returns
 > no grant. On population (a) a `resume` carrying `remember_recipients_until` in the
 > same condition leaves the answer recorded, **executes the call**, **returns its
-> `TurnOutcome` and raises nothing**, and leaves the grant store unchanged — the arm
-> that fails against the shape §6 rejects, which would have raised over an egress that
-> had already gone out. Both assert that nothing was evicted, narrowed, expired or
+> `TurnOutcome` and raises nothing**, and carries a `RecipientGrantOutcome` whose
+> `refusal` is `CEILING_REACHED` and whose `established` is unset, over a grant store
+> left unchanged — the arm that fails against the shape §6 rejects, which would have
+> raised over an egress that had already gone out. Both assert that nothing was
+> evicted, narrowed, expired or
 > truncated to make room, and both are arranged over a store already holding the
 > configured maximum of **outstanding** records at least one of which is **expired**,
 > so both fail against an implementation that counted the live set instead — which is
 > the substitution §6 forbids.
+
+> **Normative.** Lane 1 ships the **carrier** tests, which are the ones round 9 of
+> this review showed a listing cannot stand in for. Over one `resume` carrying
+> `remember_recipients_until` in each case: a successful act carries `established`
+> holding the recorded grant and no `refusal`; a ceiling refusal carries
+> `CEILING_REACHED`; a duplicate-subject refusal carries `ALREADY_STANDING`; and every
+> call that collected no act — an `ask`, a `resume` without the argument, and
+> ADR-0198 §1's restatement — carries `recipient_grant` as `None`. Each asserts the
+> `TurnOutcome` was **returned** rather than raised.
+
+> **Normative.** Lane 1 ships the arm that would have passed against the rejected
+> draft and fails against it: an act whose supplied expiry is an instant **after** the
+> answer, such that the grant is recorded and is already **not live** when
+> `standing_recipient_grants` is read. It carries `established`, and the test asserts
+> that the surface's outcome is drawn from the carrier and not from the empty listing
+> — the case that makes a read-back indistinguishable from a ceiling refusal.
+
+> **Normative.** Lane 1 ships the `RecipientGrantOutcome` validator test in **both**
+> directions, as ADR-0170 §4's own invariants are stated: a value carrying both
+> members is refused, and so is one carrying neither.
 
 > **Normative.** Lane 1 ships the test pinning §6's **settlement**, on both
 > populations and by name rather than by a roster: after a ceiling refusal the same
@@ -1265,6 +1370,12 @@ enumeration in its own text (§9).
 > one asserting that an instant carrying no offset is refused as a usage error before
 > any client is built. Without them §9 is prose an implementation satisfies under any
 > name, which is the gap round 8 of this review found in an earlier draft of it.
+
+> **Normative.** Lane 1 ships the terminal arm for §9's three carrier renderings: on
+> `CEILING_REACHED` the output names the ceiling and `assistant
+> revoke-recipient-grant`, on `ALREADY_STANDING` it names the standing listing, and on
+> `REFUSED` it names no cause. It is asserted over the rendered output, because
+> ADR-0193 §1's obligation is discharged in what the user reads and nowhere else.
 
 ### 13. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
@@ -1376,9 +1487,10 @@ Unmarked; a record of route rather than an obligation.
 
 This ADR is marked under ADR-0089: the block-quoted clauses are the whole of what it
 obliges. It is contract-surface — §4 adds five members to `AssistantEngine`, one
-argument to a fifth, and one classmethod to a `core/types.py` record — so both
-required reviews apply under ADR-0015 §1: adversarial and architecture, green on one
-tree. It is drafted, reviewed and revised as `Proposed`, and its status is flipped
+argument to a sixth, one classmethod to a `core/types.py` record, and one field to
+`TurnOutcome` with the two `core/types.py` values it is typed over — so both required
+reviews apply under ADR-0015 §1: adversarial and architecture, green on one tree. It
+is drafted, reviewed and revised as `Proposed`, and its status is flipped
 only once both required reviews have returned clean on one tree, by the one-line
 `Proposed` → `Accepted` flip ADR-0165 exempts. `CONTRIBUTING.md` → "Finishing an ADR
 PR" is the sequence and it is pointed at rather than re-argued. Nothing implements
@@ -1419,6 +1531,12 @@ against §4 until this has merged (ADR-0015 §5, golden rule 5).
   stated with it rather than smoothed over:** a refusal settles the confirmation it
   refused, so the recourse buys the *next* such call and not this one, and a user who
   wanted these recipients standing revokes, then answers about them once more.
+- **`TurnOutcome` grows a member that most turns leave `None`.** Every client
+  decodes a field only a `resume` carrying `remember_recipients_until` ever sets, and
+  the wire version moves for it. That is the price of ADR-0193 §1's obligation being
+  dischargeable at all on a held confirmation: the alternative shapes either misreport
+  a sent call, discard an approved send, or leave the user unable to learn that the
+  ceiling refused them. ADR-0197 paid the same price for `routed` on the same type.
 - **A voice-only deployment cannot establish a grant at all.** Every send stays a
   confirmation on a screen, and a user with no screen is where ADR-0207 already left
   them. That is disclosed here rather than discovered.
@@ -1469,6 +1587,25 @@ against §4 until this has merged (ADR-0015 §5, golden rule 5).
   choices were to widen ADR-0193 §1's exact surface or to make every act read a Tier 1
   store whole, for a check `record` would have to repeat anyway — so §6 puts the
   ceiling where ADR-0193 §1 already put it and rules what the surface must say.
+- **Leaving `resume`'s return alone and having the surface read
+  `standing_recipient_grants` back after it.** Rejected on round 9 of this review,
+  which both lenses raised independently: the read cannot name a ceiling refusal,
+  because a ceiling refusal, a grant established with an expiry §1 admits an instant
+  after the answer, and a duplicate-subject refusal all show as the same listing, and
+  `Confirmation` carries no decision id to correlate on. ADR-0193 §1 obliges the
+  surface to name *that* the ceiling was reached, so a shape that cannot is not
+  available. §6 keeps the reasoning rather than the draft.
+- **Deciding the ceiling before the answer, on a new bounded count read commissioned
+  on `RecipientGrantStore`.** Rejected, and on ADR-0193 §1's own words rather than on
+  the cost of the member: that clause makes the duplicate-id check, the
+  duplicate-subject refusal, the ceiling count and the append **one** operation
+  precisely because *"two writers of different subjects at one below the ceiling both
+  see room, both append, and the store ends one over — a race the duplicate-subject
+  refusal cannot catch"*. A pre-check therefore fails **open** rather than closed,
+  which is the direction the ceiling exists to refuse; and commissioning the member
+  would additionally be a change to ADR-0193 §1's exact surface, owing that ADR the
+  record ADR-0082 §1 requires. The atomic refusal plus a carrier that names it costs
+  neither.
 - **`resume` raising after the call has been executed**, which an earlier draft of
   §6 required. Rejected on review: `resume` returns a `TurnOutcome` and the egress has
   already gone out by the time the ceiling refuses, so the terminal would report a
@@ -1480,7 +1617,10 @@ against §4 until this has merged (ADR-0015 §5, golden rule 5).
   raise there leaves the step parked with its `ALLOW` durable, and the next `resume`
   on that token is ADR-0198 §1's restatement, which states the settled answer and
   drives nothing. The approved send would then never happen at all — a user's
-  approval silently discarded, which is worse than either report.
+  approval silently discarded, which is worse than any report. What all three rejected
+  shapes have in common is that they try to carry a second act's outcome on a channel
+  built for the first; §4's carrier gives it one of its own, which is what ADR-0197
+  did for `routed` on the same type.
 - **A `Settings` default lifetime for a grant, so a surface could offer one.**
   Rejected in §1: ADR-0193 §9 puts the instant in the user's act, and a configured
   default is the grant-minted-from-configuration shape ADR-0097 §8 refuses.
