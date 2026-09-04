@@ -1,25 +1,32 @@
 #!/usr/bin/env python3
-"""The ADR ``Status`` field two tools read — one statement of one rule.
+"""The ADR header fields two tools read — one statement of one rule.
 
-``scripts/project_status.py`` renders the field into a status table.
-``scripts/check_citations.py`` reads it to decide whether an ADR's own header
-agrees with the supersession another ADR records against it (ADR-0088 §4). Two
-questions, one field, and — until now — two spellings of how far that field
-reaches.
+``scripts/project_status.py`` renders the ``Status`` field into a status table.
+``scripts/check_citations.py`` reads that same field to decide whether an ADR's
+own header agrees with the supersession another ADR records against it, and
+reads the ``Supersedes`` / ``Partially supersedes`` record that raises the
+question (ADR-0088 §4). Three readings, one grammar for how far a header field
+reaches, and — until this module — three spellings of it.
 
-The second spelling is what this module exists to end. ``check_citations.py``
-said in a comment that its continuation rule was "lifted from
+Those spellings are what this module exists to end. ``check_citations.py`` said
+in a comment that its continuation rule was "lifted from
 ``scripts/project_status.py``", and it was: the two regexes were
 character-for-character identical. So when the rule was corrected in one of them
-(#519) the copy in the other kept the defect (#2017), which is the failure issue
-#751 records about hand-copied statements of this repository's rules and the
-reason ``scripts/citations.py`` exists in the same directory. A caller that
+(#519) the copy in the other kept the defect (#2017), and the reverse record's
+own copy of the same two-column floor kept it after that (#2018) — the failure
+issue #751 records about hand-copied statements of this repository's rules and
+the reason ``scripts/citations.py`` exists in the same directory. A caller that
 imports the rule cannot drift from it.
 
+Where a field *begins* stays each caller's decision, because the callers differ
+on it for a reason: ADR-0088 §4 pins the reverse record to column zero, where a
+``Status`` bullet is read wherever it is indented. That is the ``allow_indent``
+argument, and it is the only thing about a header field this module leaves open.
+
 Nothing here reads the filesystem or decides anything: it takes text and returns
-the field. Both callers choose their own input — ``check_citations.py`` passes an
-ADR's header alone, because ADR-0088 §4 legislates a *header* field — and both
-do their own work with the value.
+the fields. Each caller chooses its own input — ``check_citations.py`` passes an
+ADR's header alone, because ADR-0088 §4 legislates a *header* field — and each
+does its own work with the values.
 
 Stdlib only, and importable by name: both callers are run as scripts
 (``uv run python scripts/<name>.py``), so ``scripts/`` is ``sys.path[0]`` and
@@ -29,37 +36,57 @@ neither needs an installed package to find this module.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 #: Tab stops are four columns wide, which is how CommonMark expands a tab.
 _TAB_STOP = 4
 
-# The Status field may wrap across continuation lines. The bullet is located
-# first and its **content column** computed from the marker as it was actually
-# written; the lines that follow are folded into the value only while they are
-# indented to at least that column. A blank line, or a line shallower than the
-# content column, ends the field. The captured lines are folded into one by
-# :func:`_fold` before use.
-#
-# Depth is the whole rule, and it is markdown's own: a line indented to the
-# bullet's content column belongs to that bullet (a wrapped prose line, or a
-# nested list item such as ``- migration completed``), and one indented less
-# starts a new sibling field (``- Date:``, ``- Amends on ratification:``).
-# Two consequences the previous lexical guard got wrong in opposite directions
-# (#417): a nested item may carry a colon of its own without being mistaken for
-# the next field, and a metadata label may carry punctuation no field-name
-# pattern anticipates without being folded into the value.
-#
-# The column is computed rather than assumed, which is what a single regex could
-# not do (#519): a floor fixed at the bullet's indent plus two is the content
-# column of a canonical ``- `` marker only, so under a *padded* marker
-# (``-   Status:``) it sits too shallow and swallows the sibling field beneath.
-# Computing it also subsumes tabs exactly rather than approximating them: a
-# sibling written with a *single* leading space still ends the field, because one
-# space does not reach the content column, while a lone tab does reach it.
-_STATUS_LINE_RE = re.compile(
-    r"^(?P<indent>[ \t]*)-(?P<padding>[ \t]*)Status:[ \t]*(?P<value>.+)$",
-    re.IGNORECASE,
-)
+
+@dataclass(frozen=True)
+class FieldRecord:
+    """One header field of an ADR, read whole.
+
+    Attributes:
+        lineno: The 1-based line of the bullet the field was written on, counted
+            in the text that was passed in.
+        name: The field name as written, folded onto one line.
+        value: The field's value, continuation lines folded in.
+    """
+
+    lineno: int
+    name: str
+    value: str
+
+
+def _field_line_re(names: Sequence[str], *, allow_indent: bool) -> re.Pattern[str]:
+    """Return the pattern matching the bullet line of any of ``names``.
+
+    Whitespace *inside* a name matches any run of spaces or tabs, so
+    ``Partially supersedes`` is found however it was spaced; everything else in
+    a name is matched literally. The names are the only part of the line a
+    caller supplies, and they are escaped, so no caller writes a pattern here.
+
+    Args:
+        names: The field names to match, case-insensitively.
+        allow_indent: Whether the bullet may carry leading whitespace. ``False``
+            pins it to column zero.
+
+    Returns:
+        The compiled pattern, with ``indent``, ``padding``, ``name`` and
+        ``value`` groups. Compilation is memoised by :mod:`re`'s own cache.
+    """
+    alternation = "|".join(
+        r"[ \t]+".join(re.escape(word) for word in name.split()) for name in names
+    )
+    indent = r"(?P<indent>[ \t]*)" if allow_indent else r"(?P<indent>)"
+    return re.compile(
+        rf"^{indent}-(?P<padding>[ \t]*)(?P<name>{alternation}):[ \t]*(?P<value>.+)$",
+        re.IGNORECASE,
+    )
 
 
 def _expanded_width(text: str, start: int = 0) -> int:
@@ -79,7 +106,7 @@ def _expanded_width(text: str, start: int = 0) -> int:
 
 
 def _content_column(indent: str, padding: str) -> int:
-    """Return the content column of a ``- Status:`` bullet written with this marker.
+    """Return the content column of a ``- Name:`` bullet written with this marker.
 
     The content column is where the field's own text begins: past the bullet's
     indent, past the ``-``, and past whatever whitespace was written after it,
@@ -91,12 +118,13 @@ def _content_column(indent: str, padding: str) -> int:
     an indented code block — pulling the content column back to one past the
     marker — is deliberately not applied. This reads a metadata field rather
     than rendering a document, and the wider column errs toward *ending* the
-    field: folding a sibling in corrupts the value (#519), where stopping early
-    at most truncates one, and no ADR wraps a Status under a padded marker.
+    field: folding a sibling in corrupts the value (#519, #2018), where stopping
+    early at most truncates one, and no ADR wraps a header field under a padded
+    marker.
 
     Args:
         indent: The whitespace before the ``-`` marker.
-        padding: The whitespace between the ``-`` and ``Status:``.
+        padding: The whitespace between the ``-`` and the field name.
 
     Returns:
         The column a continuation line must reach to belong to the bullet.
@@ -106,27 +134,96 @@ def _content_column(indent: str, padding: str) -> int:
 
 
 def _fold(value: str) -> str:
-    """Collapse a wrapped Status field into a single line.
+    """Collapse a wrapped field onto a single line.
 
     Continuation lines still carry their own indentation; fold each whitespace
     run (including line breaks) to a single space so the full field renders on
-    one row. A single-line status is returned trimmed and otherwise unchanged.
+    one row. A single-line field is returned trimmed and otherwise unchanged.
 
     Args:
-        value: The raw Status value, possibly spanning several lines.
+        value: The raw text, possibly spanning several lines.
 
     Returns:
-        The Status text on one line.
+        The text on one line.
     """
     return re.sub(r"\s+", " ", value).strip()
+
+
+def field_records(text: str, names: Sequence[str], *, allow_indent: bool) -> list[FieldRecord]:
+    """Return every ``- Name: value`` header field in ``text``, in document order.
+
+    A field may wrap across continuation lines. The bullet is located first and
+    its **content column** computed from the marker as it was actually written;
+    the lines that follow are folded into the value only while they are indented
+    to at least that column. A blank line, or a line shallower than the content
+    column, ends the field — and a line folded into one field's value is never
+    read as the start of another.
+
+    Depth is the whole rule, and it is markdown's own: a line indented to the
+    bullet's content column belongs to that bullet (a wrapped prose line, or a
+    nested list item such as ``- migration completed``), and one indented less
+    starts a new sibling field (``- Date:``, ``- Amends on ratification:``).
+    Two consequences the previous lexical guard got wrong in opposite directions
+    (#417): a nested item may carry a colon of its own without being mistaken for
+    the next field, and a metadata label may carry punctuation no field-name
+    pattern anticipates without being folded into the value.
+
+    The column is computed rather than assumed, which is what a single regex
+    could not do (#519, #2018): a floor fixed at the bullet's indent plus two is
+    the content column of a canonical ``- `` marker only, so under a *padded*
+    marker (``-   Status:``) it sits too shallow and swallows the sibling field
+    beneath. Computing it also subsumes tabs exactly rather than approximating
+    them: a sibling written with a *single* leading space still ends the field,
+    because one space does not reach the content column, while a lone tab does
+    reach it.
+
+    Args:
+        text: The text to read — a whole ADR, or the header alone where the
+            caller's rule is a header rule (ADR-0088 §4).
+        names: The field names to look for, case-insensitively.
+        allow_indent: Whether an indented bullet counts. ``False`` accepts a
+            marker at column zero only, which is what ADR-0088 §4 requires of
+            the reverse supersession record.
+
+    Returns:
+        One :class:`FieldRecord` per bullet found, values folded onto one line.
+    """
+    pattern = _field_line_re(names, allow_indent=allow_indent)
+    lines = text.split("\n")
+    records: list[FieldRecord] = []
+    index = 0
+    while index < len(lines):
+        match = pattern.match(lines[index])
+        if match is None:
+            index += 1
+            continue
+        column = _content_column(match.group("indent"), match.group("padding"))
+        captured = [match.group("value")]
+        following = index + 1
+        while following < len(lines):
+            line = lines[following]
+            stripped = line.lstrip(" \t")
+            if not stripped or _expanded_width(line[: len(line) - len(stripped)]) < column:
+                break
+            captured.append(stripped)
+            following += 1
+        records.append(
+            FieldRecord(
+                lineno=index + 1,
+                name=_fold(match.group("name")),
+                value=_fold(" ".join(captured)),
+            )
+        )
+        index = following
+    return records
 
 
 def status_value(text: str) -> str | None:
     """Return the folded ``Status`` field of an ADR, or ``None`` if it has none.
 
-    The first ``- Status:`` bullet wins, and the lines beneath it are folded in
-    while they reach the bullet's own content column (see
-    :func:`_content_column`).
+    The first ``- Status:`` bullet wins, at whatever indent it was written, and
+    the lines beneath it are folded in while they reach the bullet's own content
+    column (see :func:`field_records`).
 
     Args:
         text: The text to read — a whole ADR, or the header alone where the
@@ -135,18 +232,5 @@ def status_value(text: str) -> str | None:
     Returns:
         The Status value on one line, or ``None`` when no Status bullet is found.
     """
-    lines = text.split("\n")
-    for index, line in enumerate(lines):
-        match = _STATUS_LINE_RE.match(line)
-        if match is None:
-            continue
-        column = _content_column(match.group("indent"), match.group("padding"))
-        captured = [match.group("value")]
-        for following in lines[index + 1 :]:
-            stripped = following.lstrip(" \t")
-            indent = following[: len(following) - len(stripped)]
-            if not stripped or _expanded_width(indent) < column:
-                break
-            captured.append(stripped)
-        return _fold(" ".join(captured))
-    return None
+    records = field_records(text, ("Status",), allow_indent=True)
+    return records[0].value if records else None

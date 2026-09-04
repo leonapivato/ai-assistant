@@ -66,7 +66,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from adr_status import status_value
+from adr_status import field_records, status_value
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Sequence
@@ -268,20 +268,21 @@ _QUALIFIED_PAIR = 2
 #: benign, where a nested item read as a field declares a supersession nobody
 #: wrote. All nine records on `main` sit at column zero.
 #:
-#: Its wrapping stays a pattern where ``Status``'s became a computed scan
-#: (:func:`adr_status.status_value`), and the two agree wherever this one can
-#: match at all: pinned at column zero and read for its *first* ``ADR-NNNN``
-#: only, a fixed two-column floor is the content column of the canonical ``- ``
-#: marker this line must carry, and a line folded in past the target cannot
-#: change which ADR the record names. The one shape where they part — a padded
-#: ``-   Supersedes:`` whose own value names no ADR while a sibling beneath it
-#: does — is #2018, parked rather than fixed here because #2017 scopes this
-#: pattern out.
-_SUPERSEDES_RE = re.compile(
-    r"^-[ \t]*(?P<kind>Partially\s+supersedes|Supersedes):[ \t]*"
-    r"(?P<value>.+(?:\n(?:\t|[ \t]{2,})\S.*)*)",
-    re.IGNORECASE | re.MULTILINE,
-)
+#: Where it *ends* is :func:`adr_status.field_records`'s rule, the one
+#: ``Status`` is read by: the continuation floor is the content column of the
+#: marker as it was actually written. Only the leading indent is this record's
+#: own decision, and the two halves of the marker are separate questions — a
+#: line's *depth* decides what it belongs to whether or not the field it belongs
+#: to was allowed to be indented in the first place.
+#:
+#: Those halves were once one pattern, and the ``-[ \t]*`` above admitted a
+#: padded ``-   Supersedes:`` while the floor stayed the two columns a canonical
+#: ``- `` reaches, so a two-space sibling field beneath such a record was folded
+#: into its value (#2018, the same defect as #519 and #2017). That is §6's
+#: forbidden direction rather than a benign miss: a record whose own value names
+#: no ADR is meant to be skipped in silence, and the folded-in sibling gave it a
+#: target to report a disagreement against.
+_SUPERSEDES_NAMES = ("Partially supersedes", "Supersedes")
 
 #: An HTML comment. Excluded from the header for the reason a fence is (§1):
 #: a commented-out record is display. ``docs/adr/template.md`` carries one.
@@ -886,11 +887,6 @@ def build_definition_index(root: Path) -> DefinitionIndex:
 # --------------------------------------------------------------------------- #
 
 
-def _fold(value: str) -> str:
-    """Collapse a wrapped header field into one line."""
-    return " ".join(value.split())
-
-
 def header(text: str) -> str:
     """Return an ADR's header — everything above its first ``## `` section.
 
@@ -941,7 +937,7 @@ def status_field(text: str) -> str | None:
     legislates a header field: a body list item may legitimately be an
     illustration (see :func:`header`).
 
-    Its indent stays permissive where :data:`_SUPERSEDES_RE`'s does not, and the
+    Its indent stays permissive where :func:`reverse_records`'s does not, and the
     asymmetry is the point rather than an oversight: the two fail in opposite
     directions. A ``Status`` this failed to find yields an empty supersessor set
     and therefore a *report* — the dangerous outcome — where a record this fails
@@ -953,15 +949,17 @@ def status_field(text: str) -> str | None:
 def reverse_records(text: str) -> list[tuple[int, str, str]]:
     """Return the ``Supersedes`` / ``Partially supersedes`` records in a header.
 
+    Read at column zero and no further indent (see :data:`_SUPERSEDES_NAMES`),
+    but with the same continuation rule as every other header field: the value
+    reaches as far as the marker's own content column, no further.
+
     Returns:
         ``(lineno, kind, folded value)`` per record, in document order.
     """
-    records: list[tuple[int, str, str]] = []
-    head = header(text)
-    for match in _SUPERSEDES_RE.finditer(head):
-        lineno = head.count("\n", 0, match.start()) + 1
-        records.append((lineno, _fold(match.group("kind")), _fold(match.group("value"))))
-    return records
+    return [
+        (record.lineno, record.name, record.value)
+        for record in field_records(header(text), _SUPERSEDES_NAMES, allow_indent=False)
+    ]
 
 
 def supersessors_named(status: str) -> set[int]:
