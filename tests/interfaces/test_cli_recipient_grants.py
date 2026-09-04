@@ -23,6 +23,7 @@ import pytest
 import typer.main
 from rich.console import Console
 from test_cli_decisions import _binding, _decision, _flat
+from test_cli_invocations import _help_text
 from typer.testing import CliRunner
 
 from ai_assistant.core.errors import (
@@ -163,11 +164,20 @@ def test_an_instant_carrying_no_offset_is_refused_before_any_client_is_built(
     The exit code is 2, a usage error, and no engine is built: a ``ValueError`` out
     of the parse would escape the command's ``except (AssistantError,
     TransportError)`` boundary as an uncaught traceback, which ADR-0042 §7 forbids.
+
+    **Read through :func:`_help_text` rather than raw**, which is
+    ``test_cli_invocations``' helper and its reason exactly: Typer renders a usage
+    error through a Rich console this module does not own, and that console decides
+    its own colour and width from the environment. Rich pads each line with SGR
+    codes, so a phrase asserted across one is absent from the string while plainly
+    present on the screen — which is what a terminal-less local run hides and a CI
+    runner does not.
     """
     result = CliRunner().invoke(cli.app, ["remember-recipients", "d-1", "--until", typed])
 
+    rendered = _help_text(result.output)
     assert result.exit_code == 2
-    assert "offset" in _flat(result.output) or "ISO 8601" in _flat(result.output)
+    assert "offset" in rendered or "ISO 8601" in rendered
 
 
 def test_an_instant_with_an_offset_is_admitted() -> None:
@@ -184,11 +194,13 @@ def test_naming_a_decision_without_an_until_is_a_usage_error() -> None:
     rounds it, offers it pre-filled, or supplies one where the user supplied none."
     The command that could most easily break that is this one — a default of "a
     week" would read as helpful — so the absence is a refusal rather than a silence.
+
+    The usage text is read through :func:`_help_text` for the case above's reason.
     """
     result = CliRunner().invoke(cli.app, ["remember-recipients", "d-1"])
 
     assert result.exit_code == 2
-    assert "--until" in _flat(result.output)
+    assert "--until" in _help_text(result.output)
 
 
 # --- §9: the five renderings, on ``assistant resume`` ------------------------
