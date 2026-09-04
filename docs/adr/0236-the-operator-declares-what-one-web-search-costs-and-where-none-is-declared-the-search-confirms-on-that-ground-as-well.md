@@ -112,14 +112,21 @@ third, and nobody can set it.
 > constructs the declaration it registers with
 > `ToolCost(basis=CostBasis.PER_CALL, amount=<the figure>, currency=<the code>)` where
 > both are supplied, and with `ToolCost(basis=CostBasis.UNKNOWN)` where neither is.
-> That builder is the **only** place in production where the figure reaches a
-> declaration, and `FakeWebSearcher` (§7) is the only other site under
-> `src/ai_assistant` that may build one at all — it is the canonical fake, it is
-> test-only, and its parity clause is what puts it there. **No** other component reads
-> either setting, derives a cost, substitutes one, or edits a `ToolDefinition` after
-> construction. In particular no composition root, no interface adapter and nothing in
-> `orchestration/` computes a `ToolCost`; `app/composition.py` forwards the two values
-> and does no more.
+> **The rule is stated over building a `ToolCost`, not over reading a setting.** That
+> builder is the **only** place in production where either value becomes a `ToolCost`,
+> and `FakeWebSearcher` (§7) is the only other site under `src/ai_assistant` that may
+> build one from them at all — it is the canonical fake, it is test-only, and its
+> parity clause is what puts it there. **No** other component derives a cost from
+> either value, interprets one, substitutes one, defaults one, or edits a
+> `ToolDefinition` after construction; nothing in `interfaces/`, `orchestration/` or
+> `permissions/` reads either setting for any purpose at all.
+
+> **Normative.** **`app/composition.py` reads both settings and passes them through
+> unchanged**, which is the whole of what it does with them and is what §7's third
+> clause obliges. Passing a value is not interpreting it: the composition root applies
+> no default, performs no arithmetic, constructs no `ToolCost`, and does not decide
+> whether the pair is whole — §2's refusals have already run at `Settings` load, and
+> the builder restates them at its own site.
 
 > **Normative.** The module-level `WEB_SEARCH` constant keeps `UNKNOWN` and no lane
 > mutates it. The configured declaration is a **second value built per registration**,
@@ -470,7 +477,16 @@ bullet list would bind nothing.**
     directly, since that is what item 1 does and it is exactly the assertion a
     composition root that dropped the pair would still pass. This is the arm §7's
     third clause exists for.
-12. **A zero figure in a mismatched currency is refused at the gate, not at load.**
+12. **A configured fake carries the figure it was configured with.** `FakeWebSearcher`
+    constructed with `Decimal("1")` and `"USD"`: the `ActionRequest` its `request`
+    returns carries a `tool` whose `cost` is `PER_CALL` with exactly that amount and
+    that code, and one constructed with neither carries `UNKNOWN`. This is §7's parity
+    clause asserted on its **happy path**, and it is owed separately from items 8 and
+    9 because those two are jointly satisfiable by a fake that refuses every bad pair,
+    leaves `FAKE_WEB_SEARCH` alone, and then hands out the `UNKNOWN` constant whatever
+    it was constructed with — the one implementation the rest of this list cannot
+    fail.
+13. **A zero figure in a mismatched currency is refused at the gate, not at load.**
     `web_search_cost_per_call = 0` with `EUR`, `world_spend_currency = "USD"`, a
     ceiling set and no allowance: `Settings` loads, the policy rules `ALLOW` on a
     covering grant, and the `SpendGate` refuses. This is §3's stated residual and §6's
