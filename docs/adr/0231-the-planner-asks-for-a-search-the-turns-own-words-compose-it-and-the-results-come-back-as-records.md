@@ -972,6 +972,20 @@ honesty clause. And ADR-0154 §6's residency clause binds this registering lane:
 > decimal digits without a leading zero denoting a value in 1–65535. A refusal is an
 > `EgressBindingError` at the derivation, never a silent normalisation.
 
+> **Normative.** **"An IP literal in any notation" is a decidable test and not a
+> judgement, and the test is this: a host whose rightmost label is a *number* — one or
+> more ASCII decimal digits, or `0x`/`0X` followed by one or more ASCII hexadecimal
+> digits — is an IP literal and is refused.** It is stated because the label grammar
+> above admits the whole abbreviated family while catching none of it: `127.1`,
+> `2130706433` and `0x7f000001` each satisfy every clause above, and each is resolved
+> to `127.0.0.1` by the same stack `asyncio.open_connection` sits on, so a
+> canonicaliser tested only against `127.0.0.1` refuses the one spelling nobody writes
+> and admits the three an attacker would. A registrable name never ends in such a
+> label, so nothing legitimate is refused by it, and this is the URL standard's own
+> "ends in a number" rule adopted rather than invented. A bracketed or colon-bearing
+> IPv6 form is already outside the character set the clause above admits, and no lane
+> reads that as this clause not reaching it.
+
 > **Normative.** The canonicaliser lives at the seam, in `ai_assistant.tools`, and
 > **never in `core`** — ADR-0148 §2's sixth clause, and the reason
 > `DestinationProtocol.SMTP`'s own contract gives: *"a copy of the rule in `core` would
@@ -1940,7 +1954,11 @@ for less.
     canonicalise identically; and each of §8's refusals is refused, one assertion per
     form — a non-`https` scheme, userinfo, a query, a fragment, an empty host, a
     non-ASCII host, a trailing dot, a doubled dot, an over-long label, a hyphen-edged
-    label, an IP literal, an **empty stated port** (`https://example.com:`, and its
+    label, an IP literal — asserted over `127.0.0.1` **and** over the three spellings
+    the label grammar admits and the resolver treats alike, `https://127.1`,
+    `https://2130706433` and `https://0x7f000001`, since an implementation that tests
+    for four dotted decimal octets passes on the first and admits the rest — an
+    **empty stated port** (`https://example.com:`, and its
     trailing-slash form where the parse reaches one), a port with a leading zero, a
     non-numeric port, and a port outside 1–65535.
     **A path-bearing form is refused and yields no destination at all**:
@@ -2266,8 +2284,8 @@ is that statement, and it answers #95 for nothing else.
 This ADR is in **ADR-0089's marked regime**: it carries well-formed clauses, so the
 marked clauses are the whole of what it obligates and the prose beside them supplies
 nothing. ADR-0089 §5 makes marking forward-only, so nothing this ADR cites is
-retro-marked. What binds is **one hundred and three clauses**: §1's four, §2's two,
-§3's eight, §4's two, §5's ten, §6's seven, §8's seven, §9's five, §10's eight,
+retro-marked. What binds is **one hundred and four clauses**: §1's four, §2's two,
+§3's eight, §4's two, §5's ten, §6's seven, §8's eight, §9's five, §10's eight,
 §11's nine, §12's four, §13's seven, §14's five, §15's three, §16's eight, §17's
 thirteen and §18's one. §7's table, §19's
 list, §20's classification and every argument in this document are deliberately
