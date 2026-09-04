@@ -2540,10 +2540,28 @@ class HttpsExchange:
                 second place a bound is decided.
 
         Raises:
-            ValueError: If ``max_response_bytes`` is below 1. ``Settings`` refuses
-                that at load (ADR-0231 §5), and this states the same rule at the
-                one place a bound of zero would silently mean "refuse everything".
+            ValueError: If ``max_response_bytes`` is not an exact :class:`int`, or
+                is below 1. ``Settings`` refuses both at load — ADR-0231 §5's
+                domain, and ``_exactly_an_integer``'s allowlist — and this states
+                the same rules at the one place a bound of zero would silently
+                mean "refuse everything" and a fractional or boolean one would
+                reach the channel instead of the comparison.
         """
+        if type(max_response_bytes) is not int:
+            # An **exact** ``int``, which is what ``Settings._exactly_an_integer``
+            # and ``RetryPolicy.max_attempts`` each check, rather than
+            # ``isinstance``: every value this refuses — ``bool``, and any other
+            # ``int`` subclass whose instances mean something other than their
+            # integer value — is precisely an ``isinstance`` match, so ``True``
+            # would otherwise configure a one-byte bound while satisfying the
+            # range test below. A ``float`` is refused with them, and it is the
+            # worse case: a fractional allowance is never *compared* to anything,
+            # it is handed to :meth:`ByteChannel.read`, where it raises a
+            # ``TypeError`` no ``Raises`` block on this path declares — after the
+            # request, and the credential in it, have been written to the far end.
+            # Adversarial review found it on round 10.
+            msg = f"max_response_bytes is an exact int; got {max_response_bytes!r}"
+            raise ValueError(msg)
         if max_response_bytes < 1:
             msg = f"max_response_bytes is an integer of at least 1; got {max_response_bytes}"
             raise ValueError(msg)

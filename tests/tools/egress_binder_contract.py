@@ -232,6 +232,100 @@ REFUSES: Final = (
     _OVER_LABEL,
     _OVER_DOMAIN,
 )
+#: The same obligation for HTTPS, and the reason it exists at all: a protocol
+#: added to :class:`~ai_assistant.core.types.DestinationProtocol` is canonicalised
+#: by **two** independent implementations, and only a corpus both subjects run
+#: makes them agree. Adversarial review found this one absent — the production seam
+#: had gained ``HTTPS`` and the canonical fake had not, so a tool declaring
+#: ``x-egress-destination: "https"`` bound against production and was refused by
+#: the double, and no test said so.
+#:
+#: ADR-0231 §8's canonical form is ``https://<host>:<port>``, *"always all three,
+#: with the port rendered explicitly even where the supplied form omitted it"*, and
+#: the equivalences it establishes are **exactly three**: the scheme differs only
+#: by ASCII case, the host differs only by ASCII case, and one form omits the port
+#: where the other states 443. The accepted corpus is those three and their
+#: boundaries; everything else is a refusal, because §8 is explicit that *"every
+#: other difference makes two destinations"*.
+_MAX_HTTPS_LABEL: Final = "https://" + "a" * 63 + ".com"
+_OVER_HTTPS_LABEL: Final = "https://" + "a" * 64 + ".com"
+_OVER_HTTPS_HOST: Final = "https://" + ("a" * 49 + ".") * 5 + "abcd"
+
+HTTPS_CANONICALISES: Final = (
+    ("https://example.com", "https://example.com:443"),
+    ("HTTPS://Example.COM", "https://example.com:443"),
+    ("https://example.com:443", "https://example.com:443"),
+    ("https://example.com:8443", "https://example.com:8443"),
+    ("https://sub.example.com:1", "https://sub.example.com:1"),
+    ("https://example.com:65535", "https://example.com:65535"),
+    ("https://a-b.example.com", "https://a-b.example.com:443"),
+    (_MAX_HTTPS_LABEL, _MAX_HTTPS_LABEL + ":443"),
+    # ADR-0231 §8's number test is *"``0x``/``0X`` followed by **one or more**
+    # ASCII hexadecimal digits"*, so a bare ``0x`` label is not a number and is
+    # admitted. Pinned here rather than left to each implementation's reading,
+    # because it is the one boundary where a plausible stricter rule would make
+    # the two disagree — and whether the ratified test should be one character
+    # wider is an ADR question, filed as issue #2075.
+    ("https://0x", "https://0x:443"),
+)
+
+#: Supplied HTTPS forms **every** implementation must refuse, in ADR-0231 §8's own
+#: order: a scheme that is not ``https``, an origin carrying more than an origin, a
+#: port outside its stated domain, a host outside its grammar, and an IP literal in
+#: any of the notations §8's decidable test names.
+HTTPS_REFUSES: Final = (
+    "http://example.com",
+    "example.com",
+    "https://example.com/",
+    "https://example.com/search",
+    "https://example.com?q=1",
+    "https://example.com#fragment",
+    "https://user@example.com",
+    "https://example.com:",
+    "https://example.com:0",
+    "https://example.com:65536",
+    "https://example.com:443443",
+    "https://example.com:0443",
+    "https://example.com:80x",
+    "https://",
+    "",
+    "https://.example.com",
+    "https://example.com.",
+    "https://exa..mple.com",
+    "https://-lead.example.com",
+    "https://trail-.example.com",
+    "https://exa_mple.com",
+    "https://café.example.com",
+    _OVER_HTTPS_LABEL,
+    _OVER_HTTPS_HOST,
+    "https://127.0.0.1",
+    "https://127.1",
+    "https://2130706433",
+    "https://0x7f000001",
+    "https://[::1]",
+)
+
+
+def _https_tool() -> ToolDefinition:
+    """A search integration declaring an HTTPS origin, as ADR-0231 §5's schema does.
+
+    Two arguments and no more: an ``origin`` bearing ``x-egress-destination:
+    "https"`` and ``x-egress-tier: "operational"``, which §5 states verbatim, and a
+    ``query`` bearing neither keyword. The tier is the operator's own
+    configuration rather than the user's, which is what §5 gives as the reason for
+    it differing from the email tool's.
+    """
+    return tool_declaring(
+        {
+            "origin": {
+                "type": "string",
+                "x-egress-destination": "https",
+                "x-egress-tier": "operational",
+            },
+            "query": {"type": "string"},
+        },
+        tool_id="web_search@provider",
+    )
 
 
 def _no_provenance() -> CarriedProvenance:
@@ -534,6 +628,58 @@ class EgressBinderContract(ABC):
             await binder.bind(
                 SEND_EMAIL,
                 parameters={"to": [supplied], "subject": "s", "body": "b"},
+                provenance=_no_provenance(),
+            )
+
+    @pytest.mark.parametrize(("supplied", "canonical"), HTTPS_CANONICALISES)
+    async def test_every_implementation_canonicalises_the_https_corpus_identically(
+        self, binder: EgressBinder, supplied: str, canonical: str
+    ) -> None:
+        """ADR-0148 §2 and ADR-0231 §8, for the second protocol the seam canonicalises.
+
+        The corpus above is run against a declaration bearing
+        ``x-egress-destination: "https"`` rather than the email one, because that
+        keyword is what selects the canonicaliser — and it is the reason this case
+        exists: a protocol admitted to the enum and wired into only *one* of the
+        two implementations is a divergence nothing else in this suite reaches.
+        """
+        searcher = _https_tool()
+        self.register_egress(binder, searcher)
+
+        bound = await binder.bind(
+            searcher,
+            parameters={"origin": supplied, "query": "weather"},
+            provenance=_no_provenance(),
+        )
+
+        assert bound is not None
+        # The destination-bearing span by its *keyword*, not by position: this
+        # declaration carries two arguments and only ``origin`` declares a
+        # destination, so the last span is the query and carries none.
+        occurrences = [
+            span.destination for span in bound.binding.spans if span.destination is not None
+        ]
+        assert len(occurrences) == 1
+        assert occurrences[0].supplied == supplied
+        assert occurrences[0].canonical == canonical
+
+    @pytest.mark.parametrize("supplied", HTTPS_REFUSES)
+    async def test_every_implementation_refuses_the_same_https_forms(
+        self, binder: EgressBinder, supplied: str
+    ) -> None:
+        """ADR-0231 §8: *"a refusal ... never a silent normalisation"*, in both subjects.
+
+        The direction that matters is the same one :data:`REFUSES` names for SMTP:
+        a fake admitting a form production refuses lets a consumer's test approve a
+        call production would never make.
+        """
+        searcher = _https_tool()
+        self.register_egress(binder, searcher)
+
+        with pytest.raises(EgressBindingError):
+            await binder.bind(
+                searcher,
+                parameters={"origin": supplied, "query": "weather"},
                 provenance=_no_provenance(),
             )
 
