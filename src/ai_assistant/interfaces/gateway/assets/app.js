@@ -1235,13 +1235,25 @@ function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-// Whether a member arrived as text. Every string a confirmation carries is spelled in
-// the gateway's own process — the values by `_parameter_text`, the rest by `core`'s
-// models — so anything else is a member that did not arrive, and the templates below
-// would put `undefined`, a digit or `[object Object]` on the screen where the fact
-// the owner is answering about should be.
+// Whether a member arrived as text this page can put on a screen as itself.
+//
+// Every string a confirmation carries is spelled in the gateway's own process — the
+// values by `_parameter_text`, the rest by `core`'s models — so anything else is a
+// member that did not arrive, and the templates below would put `undefined`, a digit
+// or `[object Object]` on the screen where the fact the owner is answering about
+// should be.
+//
+// **Well-formed, which is the other half of "as itself"** (adversarial review, round
+// 11). A JSON escape can carry a **lone surrogate** — `"\ud800"` parses to a string
+// with no UTF-8 encoding at all — and a text node holding one renders the replacement
+// character. That is a character the value does not contain, put on the screen in
+// place of one it does, which is ADR-0233 §8's "cannot render a value whole" exactly:
+// no rendering of it is the value. `core` refuses these at construction for the same
+// underlying reason (`EncodableText`, `FrozenJson`: "a `str` Python holds happily and
+// no UTF-8 encoder will take"), so this restates a member's declared type as every
+// other test here does, and refuses nothing a correct gateway can send.
 function isText(value) {
-  return typeof value === "string";
+  return typeof value === "string" && value.isWellFormed();
 }
 
 // Whether a member is ADR-0150 §4's position: **absent** where the span's value is

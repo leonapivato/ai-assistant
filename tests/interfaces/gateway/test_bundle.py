@@ -5689,6 +5689,10 @@ def test_a_confirmation_that_cannot_be_shown_whole_is_not_shown_at_all() -> None
     # position, which is absent or an integer and nothing else.
     assert "!Array.isArray(value)" in functions["isRecord"]
     assert 'typeof value === "string"' in functions["isText"]
+    # And **well-formed**, which is the other half of "as itself": a lone surrogate has
+    # no UTF-8 encoding, and a text node holding one renders the replacement character
+    # in place of a character the value does not contain (adversarial review, round 11).
+    assert "value.isWellFormed()" in functions["isText"]
     assert (
         "index === null || (Number.isSafeInteger(index) && index >= 0)" in functions["isPosition"]
     )
