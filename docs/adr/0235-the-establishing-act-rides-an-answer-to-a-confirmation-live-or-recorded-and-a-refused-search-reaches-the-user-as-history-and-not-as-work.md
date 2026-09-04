@@ -77,8 +77,9 @@ and assigns this lane one further thing in terms:
 
 ### The tree, read rather than assumed
 
-Every claim here was checked against `origin/main` at `89f410e9` while writing, and
-re-checked there after ADR-0231's Lane 3 merged the search seam under this document.
+Every claim here was checked against `origin/main` at `31ea35fe`, re-checked there
+after ADR-0231's Lane 3 merged the search seam under this document (PR #2086) and
+again after its Lane 4 merged the kind that drives it (PR #2099).
 
 - **`RecipientGrant.established_from` has no caller.** Its only occurrences in
   `src/` are its own definition and three docstrings that name it; its only callers
@@ -125,17 +126,18 @@ stated here so that no clause below rests on one.
 - **ADR-0177 §1's enumeration stands at thirty-one, not thirty.** ADR-0200 §12(a)
   partially superseded it, adding `converse_spoken`; ADR-0177's `Status` line and
   `wire/envelope.py`'s commentary both carry the figure. §9 below leaves it there.
-- **The search seam is in the tree; the kind that drives it is not yet.** ADR-0231's
+- **The search seam and the kind that drives it are both in the tree.** ADR-0231's
   Lane 3 has merged: `WebSearcher` is a Protocol in `core/protocols.py` with three
   members — `name`, `request` and `search` — `SearchOutcome` and `SearchRefusal` are
   in `core/types.py`, `tools/web_search.py` holds the declaration and the integration,
   `testing/searching.py` holds the fake, and `app/composition.py` builds the
   integration where `web_search_connection` and `web_search_origin` are both
-  configured. **`ReadKind` still carries only `SIGHTED_QUERY`, `CITATION_HOP` and
-  `LOCAL_FILE`**: `ReadKind.WEB_SEARCH`, the ask that reaches the seam from a turn,
-  is ADR-0231's Lane 4 and is in flight beside this document. So the seam exists, no
-  turn drives it yet, and what this ADR says about a `WEB_SEARCH` **decision** rests
-  on ADR-0231's ratified text plus the two facts below.
+  configured. **ADR-0231's Lane 4 has merged too** (PR #2099): `ReadKind.WEB_SEARCH`
+  is the enum's fourth member, `PROTOCOL_VERSION` moved to **30** and
+  `PlanExport.schema_version` to **6** with it, so a turn can now ask for the search
+  the seam services. Population (b) is therefore **no longer empty by construction**,
+  and what this ADR says about a `WEB_SEARCH` **decision** rests on merged code and
+  on ADR-0231's ratified text together rather than on the text alone.
 - **A search request carries neither binding field, and that is now code rather than
   an inference.** `WebSearcher.request` returns `ActionRequest(tool=…, parameters=…)`
   and supplies neither `step_id` nor `execution_id`, both of which default to `None`
@@ -166,12 +168,12 @@ The answer both authorises the call and, under §2 below, may establish the gran
 is outstanding work in every sense the corpus uses the phrase.
 
 **(b) A confirmation no park holds.** ADR-0231's `WEB_SEARCH` decision is the whole
-of this population once its Lane 4 lands, and it is empty until then: the decision is
-not a `PlanStep`, reaches neither `StepExecutor` nor `ExecutionState`, and carries
-neither a `step_id` nor an `execution_id` — which the merged `WebSearcher.request`
-already settles by supplying neither (the Context's tree reading). Nothing waits on
-it, nothing resumes it, and the turn it belonged to composed and finished. It is
-history.
+of this population, and with its Lane 4 merged the population is **reachable rather
+than prospective** (the Context's tree reading): the decision is not a `PlanStep`,
+reaches neither `StepExecutor` nor `ExecutionState`, and carries neither a `step_id`
+nor an `execution_id` — which the merged `WebSearcher.request` already settles by
+supplying neither. Nothing waits on it, nothing resumes it, and the turn it belonged
+to composed and finished. It is history.
 
 The difference is what makes one door insufficient and two doors honest. Answering
 (a) is an act on work; answering (b) is an act on a record. A single operation
@@ -351,13 +353,14 @@ declared argument is admitted by that clause rather than by a change to it (§13
 > `RecipientGrant.established_from`, records the grant, and returns it. The clauses
 > below say what it does on every other outcome.
 
-> **Normative.** Every pre-record refusal of the act on **both** operations — §3's
-> seven availability conditions below, §2's binding refusal, and §1's expiry refusal —
-> raises `UngrantableActError`, one new `AssistantError` subclass this ADR mints and
-> the only one it mints **for a pre-record refusal of the act** — §4's two
-> `InvalidRecipientGrantError` subclasses are the other two classes this ADR adds, and
-> they name a refusal the store makes after the answer rather than one this operation
-> makes before it. The message names which condition failed and **no lane
+> **Normative.** Every refusal of the act that leaves **no answer recorded** on
+> **both** operations — §3's seven availability conditions below, whether they fail at
+> the check or the fourth of them fails late against the trail's own invariant, §2's
+> binding refusal, and §1's expiry refusal — raises `UngrantableActError`, one new
+> `AssistantError` subclass this ADR mints and the only one it mints **for a refusal
+> that records no answer** — §4's two `InvalidRecipientGrantError` subclasses are the
+> other two classes this ADR adds, and they name a refusal the store makes after the
+> answer rather than one this operation makes before it. The message names which condition failed and **no lane
 > branches on the message**; where more than one fails, the first in the order §3
 > states is the one named, so the refusal is deterministic across implementations.
 
@@ -478,6 +481,64 @@ declared argument is admitted by that clause rather than by a change to it (§13
 > newer than the boundary has any resolution of it inside the window too — while a
 > candidate sharing the boundary instant may have one tie-broken just outside it, and
 > offering that one would be offering a confirmation the user has already answered.
+
+> **Normative.** The fourth condition can also fail **late**, and this ADR decides
+> that outcome rather than leaving it to an implementation.
+> `establish_recipient_grant` reads the trail, finds no resolution, and only then
+> awaits `ActionPolicy.resolve`; a second caller may resolve the same `CONFIRM` inside
+> that interval, and `AuditTrail.record` then refuses **this** operation's answer,
+> because the trail's resolution invariant is where a confirmation's one-answer rule
+> is really enforced (ADR-0021 §1, ADR-0044 §2b). **Where `record` refuses the answer
+> with `InvalidResolutionError`, the operation reads the trail once more for a
+> resolution of the named confirmation, and raises `UngrantableActError` where one is
+> now recorded** — §3's fourth condition failing late, reported as the same type it is
+> reported as when it fails at the check, because the act was not performed, nothing
+> was recorded by this operation, nothing was sent, and the user-visible outcome is
+> identical to the refusal they would have met a moment earlier. **Where no resolution
+> is recorded, the `InvalidResolutionError` propagates unchanged**, and every other
+> `AuditError` — a `DuplicateDecisionError`, an `InvalidAuthorisationError`, an
+> `AuditError` for a record the trail will not take — propagates unchanged in every
+> case. A fault is not a settled decision, and converting one into the other would
+> hide it.
+
+> **Normative.** The race is **settled and never retried**. No lane re-reads and
+> re-attempts the act, composes a second answer, waits and tries again, or reports the
+> loss as a fault of the trail or of the store. The confirmation now has its one
+> answer (ADR-0044 §2b), §3's fourth condition keeps it out of `grantable_decisions`
+> for good, and what the user is told is §6's recourse: this confirmation is spent,
+> and the next such call may be made standing.
+
+> **Normative.** **The second read is decisive here, and §6's is not, and the two are
+> not the same move.** §6 refuses to infer a *ceiling* refusal from a
+> `standing_recipient_grants` read because that listing is **live-only and
+> non-monotonic** — a grant may expire or be revoked between the act and the read, so
+> three outcomes collapse into one listing. The trail is the opposite: it is
+> **append-only and write-once** (ADR-0021 §4), so "a resolution of this confirmation
+> exists" is **monotonic** — once true it stays true, and a resolution recorded during
+> the interval is newer than every row the first read returned, so it is inside any
+> window of `limit` at least one and §3's window-completeness rule does not arise on
+> the re-read. The read confirms a fact that cannot change back; it does not guess a
+> reason that was never observable.
+
+> **Normative.** The read is required rather than inferred from the exception,
+> because `InvalidResolutionError` is **one class over seven grounds** — the
+> confirmation is absent, is not a `CONFIRM`, is already resolved, is answered about a
+> different subject, has a sibling resolution of the same concrete binding (ADR-0044
+> §2b), postdates its answer, or carries an authorisation pointer that does not match
+> — and no lane branches on its message (§3's own rule, ADR-0193 §1's one-class
+> lesson read on a second store). Six of the seven are closed **by construction** on
+> this operation, which is why the read finds the seventh and nothing else: the first
+> two are facts about a row this operation read from an append-only trail and that
+> nothing can retract; the subject ground cannot fire because
+> `PermissionDecision.from_confirmation` transcribes `tool`, `parameters_digest`,
+> `step_id` and `execution_id` from the confirmation by value and accepts none of them
+> from its caller (§4); the sibling ground is scoped to a resolution carrying **both**
+> `execution_id` and `step_id`, which §3's third condition requires this population's
+> confirmations to carry neither of; and the operation stamps its answer at the
+> instant of the call, which is at or after the recorded confirmation's `decided_at`.
+> The seventh — the authorisation pointer — is a fault of the ruling rather than a
+> race, and it is the reason the clause converts on the **read** rather than on the
+> class.
 
 > **Normative.** The engine **composes no answer of its own** on either operation.
 > `ActionPolicy.resolve` authors every ruling, the trail records it, `core`
@@ -915,12 +976,27 @@ holds.
 > difference between two reads separates the three.
 
 > **Normative.** What governs `resume` across this ADR is therefore **one rule and not
-> two: it raises where nothing has been sent, and returns where something has.** §1's
-> expiry refusal and §2's binding refusal both fire before any ruling is sought, so
-> they raise and the step stays durably parked and answerable; everything `record` can
-> do — refuse on the ceiling, refuse the duplicate subject, refuse otherwise, or fail
-> to write at all — happens after the call has gone out, so all four return and are
-> carried. No lane reads them as inconsistent, and none repairs any into another.
+> two, and it is stated over the answer rather than over the send: `resume` raises
+> only where no answer was recorded, and returns wherever one was.** The raising case
+> is exactly §1's expiry refusal and §2's binding refusal; both fire before any ruling
+> is sought, so nothing is written and the step stays durably parked and answerable.
+> Wherever an answer *was* recorded `resume` returns, whatever followed — `DECLINED`
+> where the resolving ruling was not an `ALLOW`, so the store was never reached, and
+> `CEILING_REACHED`, `ALREADY_STANDING`, `REFUSED` or `STORE_UNAVAILABLE` where it was
+> and everything `record` can do happened after the call had gone out. No lane reads
+> these as inconsistent, and none repairs any into another.
+
+> **Normative.** The rule is stated over the **answer** and not over the send because
+> a send-shaped rule is **false on the two recorded declines**, and that is recorded
+> here rather than repaired away. A `resume` carrying `approved=False` records its
+> `DENY` and calls nothing (§2, and ADR-0042 §4 guarantees the record); a policy
+> `DENY` on an approving `resume` likewise records the ruling and reaches neither the
+> egress nor the store (§2). Both **send nothing and must nonetheless return**,
+> carrying `DECLINED`. An implementation given "it raises where nothing has been sent"
+> would have to raise on both, discarding a `TurnOutcome` that reports a decision the
+> user made and the trail already holds — which is the failure ADR-0042 §4 exists to
+> prevent, reached from the opposite direction. **A recorded `DENY` returns despite
+> the absence of any egress, and no lane reads the raising case as reaching it.**
 
 > **Normative.** **`RecipientGrantError` does not escape `resume` once the call has
 > been sent.** It is caught at the establishing step, rendered as
@@ -1262,12 +1338,15 @@ in it, which is the disclosure ADR-0199 exists to refuse.
 > earlier version and a peer at the later one do not agree about the surface.
 
 > **Normative.** This ADR **fixes no number**, and that is deliberate rather than an
-> omission. `PROTOCOL_VERSION` stands at 29 on `origin/main` and ADR-0231 §16 obliges
-> a further move for `ReadKind.WEB_SEARCH` from its Lane 4, in flight beside this one
-> — ADR-0231's Lane 3 landed the search seam and moved the constant not at all; a
-> number written here would be a fact about a tree that has since moved. The lane
-> reads the constant and moves it by one, and no lane reads this clause as licence to
-> skip the move or to fold two grounds into one entry.
+> omission. ADR-0231's Lane 4 has since landed (PR #2099) and made the move ADR-0231
+> §16 obliged, so `PROTOCOL_VERSION` stands at **30** on `origin/main` and the move
+> this ADR's lane makes reads **30 → 31** as of that reading — ADR-0231's Lane 3 had
+> landed the search seam and moved the constant not at all. That arithmetic is
+> recorded as a reading of a tree and **not as the number this ADR fixes**: the rule
+> is that the lane reads the constant *at the moment it lands* and moves it by one,
+> because any figure written here is a fact about a tree that may move again before
+> the lane does. No lane reads this clause as licence to skip the move, to fold two
+> grounds into one entry, or to write 31 without having read 30.
 
 > **Normative.** Nothing else under `wire/` changes for it. The connect exchange
 > gains no member, no frame's encoding changes, no `FrameKind` is added, and a result
@@ -1416,6 +1495,25 @@ enumeration in its own text (§9).
 > `planned_with_external_content` as `True`. Each asserts that **no** answer and
 > **no** grant were recorded, and each asserts that `grantable_decisions` does not
 > return the decision either.
+
+> **Normative.** Lane 1 ships the **concurrent-resolution** test for §3's late failure
+> of the fourth condition, and it is **deterministic rather than timing-dependent**:
+> the second resolution of the same `CONFIRM` is recorded **between** this operation's
+> availability check and its write, through a seam the test drives — the `ActionPolicy`
+> the engine awaits in that interval is the natural one — and never by racing two
+> tasks and hoping. It asserts that the loser raises **`UngrantableActError`** and not
+> `InvalidResolutionError`, that the winner's answer stands as the confirmation's one
+> resolution, that the recipient-grant store is **empty**, and that
+> `grantable_decisions` no longer returns the decision. It fails against an
+> implementation that let the trail's refusal propagate, which is the implementation
+> the seeded already-resolved arm above cannot catch, because that arm is refused at
+> the check and never reaches the write.
+
+> **Normative.** Lane 1 ships its companion, and it is the arm a roster would omit:
+> an `InvalidResolutionError` from `record` with **no** resolution of the confirmation
+> recorded **propagates unchanged**, and so does every other `AuditError`. It fails
+> against an implementation that converted the class rather than reading the trail —
+> the one that would report a fault as a settled decision.
 
 > **Normative.** Lane 1 ships the expiry pair, on **both** operations and in each
 > case **over a confirmation the policy rules `ALLOW` on**: an expiry at or before the
