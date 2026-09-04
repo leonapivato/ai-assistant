@@ -59,7 +59,7 @@ import io
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
 import pypdf
 from pypdf._font import Font
@@ -410,27 +410,40 @@ def _establish_font(font: PdfObject) -> None:
     completeness is a property of that dependency's source; asking it is exact by
     construction and gets smaller with every version.
 
-    **It costs a second font build per parse**, which is the doubling §3 already prices
-    for the content-stream parse and accepts for the same reason: the extraction builds
-    a stream's fonts on every ``_extract_text`` call, so this doubles a cost rather than
-    adding a new one, and it is bounded by the bound.
+    **It is asked only of a font carrying no ``/ToUnicode``, and that boundary is the
+    bound's own rather than a convenience.** Building a font parses its ``/ToUnicode``
+    CMap — ``get_data`` caches the decompression, not ``prepare_cm``'s normalisation or
+    the mapping dictionary it builds — and that CMap is an input ADR-0232 §2 and §10
+    leave **uncharged and unbounded by name**. Asking here would double a per-page cost
+    this system does not govern: ten pages sharing a 2 MB CMap measured 0.092 s under
+    the extraction alone and 0.161 s with the ask, which is unratified work added to the
+    seam this bound exists to make honest. Where there is no ``/ToUnicode``, the only
+    input building the font reads is the ``/Type1`` program the caller has **just
+    charged**, so what doubles is a quantity the bound governs — which is exactly the
+    price §3 already accepts for parsing a content stream twice. That the extraction
+    re-parses the CMap per page at all is issue #2042, which fires §10's deferral and is
+    not this lane's to close.
 
-    **One residual, and it is forced by §3's own ordering.** A font program is charged
-    *before* this runs, because §3 requires the comparison to precede the work it bounds
-    — "the total is compared before the operators it counts are parsed" — and building a
-    font decodes and scans that program. So a document whose charged font programs alone
-    cross the bound **and** whose fonts the extraction cannot build is reported
-    ``TOO_LARGE`` rather than ``EXTRACTION_FAILED``. It is refused either way: §3's harm
-    clause is about refusing a document "the stated quantity says must fetch", and no
-    reading fetches this one. Closing it means scanning a program before charging it,
-    which is the property that makes the bound a bound.
+    **Two residuals follow, both stated rather than hidden, and both on a document that
+    is refused either way** (issue #2043). A font *with* a ``/ToUnicode`` is not
+    established here, so one that is also unbuildable lets the content stream be
+    charged. And a font program is charged *before* this runs, because §3 requires the
+    comparison to precede the work it bounds — "the total is compared before the
+    operators it counts are parsed" — so a document whose charged programs alone cross
+    the bound crosses first. Both report ``TOO_LARGE`` where the extraction alone would
+    report ``EXTRACTION_FAILED``; §3's harm clause is about refusing a document "the
+    stated quantity says must fetch", and no reading fetches either. Closing them means
+    parsing an unbounded input, or scanning a program before charging it, which is the
+    property that makes the bound a bound.
 
     Raises:
         ExtractionFailedError: Where the extraction's own font initialisation raises
             anything it would not itself swallow.
     """
+    if not isinstance(font, DictionaryObject) or "/ToUnicode" in font:
+        return
     try:
-        Font.from_font_resource(cast("DictionaryObject", font))
+        Font.from_font_resource(font)
     except AttributeError, TypeError:
         # `_extract_text` swallows exactly these while building a font and carries on
         # to parse the content stream, so this is a parse that *does* happen.
