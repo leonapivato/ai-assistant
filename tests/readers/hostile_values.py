@@ -12,12 +12,21 @@ here come in both shapes: an object that will not render itself, and a type that
 will not say what it is called.
 
 A guard's *accepted* type is the third shape, and it is why :class:`HostilePath`
-and :class:`HostileZone` are here too. Proving ``isinstance`` proves nothing about
-a subclass's overrides, so a message rendered below the type test still asks the
+and :class:`HostileZone` are here too. Proving the type proves nothing about a
+subclass's overrides, so a message rendered below the type test still asks the
 refused value about itself — and an overridden predicate answers the guard's own
 question with whatever the subclass prefers. The readers answer that by rebuilding
 the accepted value into a built-in, which is #1979's answer for the durations at
 the other guards (#2101, #2104).
+
+The *test itself* is the fourth, and :func:`impostor_of`, :class:`ClassRaises` and
+:class:`UnrebuildablePath` are why it needs probes of its own. ``isinstance`` falls
+back to ``value.__class__``, an attribute the object controls, so a guard can be
+lied to about the type before it decides anything — or taken down by a ``__class__``
+that raises. And the rebuild that closes the third shape reads Python attributes of
+its own, which a genuine subclass can override. Each is the same regress one level
+further in, and each stops in the same place: ask the *real* class, and let no read
+the value can influence decide which exception leaves the guard.
 
 The suites assert this across two readers and every kind of guard — the paths, the
 zone, the durations and the integers — so the probes live here rather than being
@@ -108,3 +117,57 @@ class HostileZone(str):
 
     def __repr__(self) -> str:
         raise RuntimeError("a hostile __repr__ must not raise past a guard")
+
+
+class UnrebuildablePath(Path):
+    """A genuine ``Path`` subclass whose internals raise when the rebuild reads them.
+
+    :class:`HostilePath` is refused by rebuilding; this one refuses the rebuild.
+    ``Path(value)`` copies what a ``PurePath`` already holds by reading ``parser``
+    and ``_raw_paths``, and those are ordinary Python attributes — so the operation
+    that closes every *other* override is itself reachable, one level further in.
+    That is the same regress ``__name__`` opened for the type refusal, and it stops
+    in the same place: the guard catches the failure and answers with its own
+    exception class rather than letting the value's choose.
+    """
+
+    def __getattribute__(self, name: str) -> Any:
+        """Everything but the two attributes the rebuild needs."""
+        if name in {"parser", "_raw_paths"}:
+            raise RuntimeError("a hostile Path internal must not raise past a guard")
+        return super().__getattribute__(name)
+
+
+def impostor_of(claimed: type) -> object:
+    """An object of an unrelated class that answers ``__class__`` with ``claimed``.
+
+    ``isinstance`` falls back to ``value.__class__`` when the concrete type does not
+    match, so this passes ``isinstance(value, claimed)`` while being nothing of the
+    kind — and the operation below such a test then meets an object that cannot
+    support it. ``str.__str__`` and ``timedelta.__sub__`` answer with ``TypeError``
+    and ``Path(value)`` with ``AttributeError``, none of which is the exception the
+    guard promises.
+
+    ``type(value)`` is not fooled — it reads ``Py_TYPE`` — so a guard testing
+    ``issubclass(type(value), claimed)`` refuses this in its own words, and
+    :func:`_type_name_of`-style refusals name it ``Impostor``.
+    """
+
+    class Impostor:
+        @property  # type: ignore[misc]  # a read-only `__class__`; the hostile case
+        def __class__(self) -> type:
+            return claimed
+
+    return Impostor()
+
+
+class ClassRaises:
+    """An object whose ``__class__`` raises when a guard reads it.
+
+    :func:`impostor_of`'s other half: where that one lies, this one refuses to
+    answer, so an ``isinstance`` test raises before any refusal can be built at all.
+    """
+
+    @property  # type: ignore[misc]  # a read-only `__class__`; the hostile case
+    def __class__(self) -> type:
+        raise RuntimeError("a hostile __class__ must not raise past a guard")

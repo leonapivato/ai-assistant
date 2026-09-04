@@ -31,7 +31,15 @@ from pathlib import Path
 from typing import Any, Final
 
 import pytest
-from hostile_values import Hostile, HostilePath, NumericName, Unnameable
+from hostile_values import (
+    ClassRaises,
+    Hostile,
+    HostilePath,
+    NumericName,
+    Unnameable,
+    UnrebuildablePath,
+    impostor_of,
+)
 from pydantic import ValidationError
 
 from ai_assistant.core.config import _MAX_EMAIL_WINDOW, Settings, load_settings
@@ -302,6 +310,61 @@ def test_an_accepted_source_is_stored_as_a_builtin_path() -> None:
 
     assert type(reader._path) is type(Path("/"))
     assert reader._path == _ABSOLUTE
+
+
+def test_a_path_that_will_not_rebuild_is_refused_rather_than_raising() -> None:
+    """The rebuild that closes the subclass shape is itself reachable, one level in.
+
+    ``Path(value)`` copies what a ``PurePath`` holds by reading ``parser`` and
+    ``_raw_paths``, which are ordinary Python attributes a genuine subclass can
+    override to raise. The guard catches it and answers in its own exception class.
+    """
+    expected = (
+        "the email source must be a Path that rebuilds to a built-in one, got UnrebuildablePath"
+    )
+    with pytest.raises(ValueError, match=re.escape(expected)):
+        EmailReader(UnrebuildablePath(str(_ABSOLUTE)))
+
+
+#: Every guard on this constructor that admits a *subclass* of what it accepts, as
+#: the keyword a caller passes, the type it admits, and the refusal it states.
+_ACCEPTED_TYPE_GUARDS: Final = [
+    ("path", Path, "the email source must be a Path"),
+    ("window_past", timedelta, "email_window_past must be a timedelta"),
+    ("read_timeout", timedelta, "email_read_timeout must be a timedelta"),
+]
+
+
+@pytest.mark.parametrize(("field", "accepted", "refusal"), _ACCEPTED_TYPE_GUARDS)
+def test_an_impostor_does_not_pass_a_type_guard(field: str, accepted: type, refusal: str) -> None:
+    """The type test is put to the *real* class, never to the object (#2104).
+
+    ``isinstance`` falls back to ``value.__class__``, so an object of an unrelated
+    class answering that attribute passes it — and the operation below the test then
+    meets something that cannot support it, answering ``TypeError`` or
+    ``AttributeError`` rather than the ``ValueError`` this constructor promises.
+    """
+    kwargs: dict[str, Any] = {"path": _ABSOLUTE, field: impostor_of(accepted)}
+    with pytest.raises(ValueError, match=re.escape(f"{refusal}, got Impostor")):
+        EmailReader(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("field", "refusal"), [(field, refusal) for field, _type, refusal in _ACCEPTED_TYPE_GUARDS]
+)
+def test_a_class_that_raises_does_not_take_a_type_guard_down(field: str, refusal: str) -> None:
+    """Where an impostor lies about its class, this one refuses to answer."""
+    kwargs: dict[str, Any] = {"path": _ABSOLUTE, field: ClassRaises()}
+    with pytest.raises(ValueError, match=re.escape(f"{refusal}, got ClassRaises")):
+        EmailReader(**kwargs)
+
+
+def test_an_honest_subclass_of_each_accepted_type_is_still_admitted() -> None:
+    """Asking the real class narrows what is accepted by nothing at all."""
+    reader = EmailReader(HostilePath(str(_ABSOLUTE)), window_past=_Forged(days=2))
+
+    assert reader._path == _ABSOLUTE
+    assert reader._window_past == timedelta(days=2)
 
 
 class _Forged(timedelta):

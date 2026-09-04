@@ -25,7 +25,16 @@ from typing import Any, Final
 from zoneinfo import ZoneInfo
 
 import pytest
-from hostile_values import Hostile, HostilePath, HostileZone, NumericName, Unnameable
+from hostile_values import (
+    ClassRaises,
+    Hostile,
+    HostilePath,
+    HostileZone,
+    NumericName,
+    Unnameable,
+    UnrebuildablePath,
+    impostor_of,
+)
 from pydantic import ValidationError
 
 from ai_assistant.core.config import _MAX_CALENDAR_WINDOW, Settings, load_settings
@@ -321,6 +330,83 @@ def test_a_str_subclass_naming_a_real_zone_is_still_accepted() -> None:
     reader = CalendarReader(_ABSOLUTE, timezone=HostileZone("Europe/Rome"))
 
     assert reader._zone == ZoneInfo("Europe/Rome")
+
+
+def test_a_path_that_will_not_rebuild_is_refused_rather_than_raising() -> None:
+    """The rebuild that closes the subclass shape is itself reachable, one level in.
+
+    ``Path(value)`` copies what a ``PurePath`` holds by reading ``parser`` and
+    ``_raw_paths``, which are ordinary Python attributes a genuine subclass can
+    override to raise — the same regress ``__name__`` opened for the type refusal
+    (#2104). The guard catches it and answers in its own exception class, so
+    "nothing but a ``ValueError`` leaves this constructor" is true rather than
+    nearly true.
+    """
+    expected = (
+        "the calendar source must be a Path that rebuilds to a built-in one, got UnrebuildablePath"
+    )
+    with pytest.raises(ValueError, match=re.escape(expected)):
+        CalendarReader(UnrebuildablePath(str(_ABSOLUTE)))
+
+
+#: Every guard on this constructor that admits a *subclass* of what it accepts, as
+#: the keyword a caller passes, the type it admits, and the refusal it states.
+_ACCEPTED_TYPE_GUARDS: Final = [
+    ("path", Path, "the calendar source must be a Path"),
+    ("timezone", str, "the calendar timezone must be a str"),
+    ("window_past", timedelta, "calendar_window_past must be a timedelta"),
+    ("window_future", timedelta, "calendar_window_future must be a timedelta"),
+    ("read_timeout", timedelta, "calendar_read_timeout must be a timedelta"),
+]
+
+
+@pytest.mark.parametrize(("field", "accepted", "refusal"), _ACCEPTED_TYPE_GUARDS)
+def test_an_impostor_does_not_pass_a_type_guard(field: str, accepted: type, refusal: str) -> None:
+    """The type test is put to the *real* class, never to the object (#2104).
+
+    ``isinstance`` falls back to ``value.__class__`` when the concrete type does not
+    match, so an object of an unrelated class answering that attribute passes it —
+    and the operation below the test then meets something that cannot support it:
+    ``str.__str__`` and ``timedelta.__sub__`` answer ``TypeError`` and ``Path(value)``
+    ``AttributeError``, none of which is the exception this constructor promises.
+    ``type(value)`` reads ``Py_TYPE`` and is not fooled.
+    """
+    kwargs: dict[str, Any] = {"path": _ABSOLUTE, field: impostor_of(accepted)}
+    with pytest.raises(ValueError, match=re.escape(f"{refusal}, got Impostor")):
+        CalendarReader(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("field", "refusal"), [(field, refusal) for field, _type, refusal in _ACCEPTED_TYPE_GUARDS]
+)
+def test_a_class_that_raises_does_not_take_a_type_guard_down(field: str, refusal: str) -> None:
+    """:func:`test_an_impostor_does_not_pass_a_type_guard`'s other half.
+
+    Where an impostor lies about its class, this one refuses to answer — so an
+    ``isinstance`` test raises before any refusal can be built at all, which is the
+    escape at its earliest possible point.
+    """
+    kwargs: dict[str, Any] = {"path": _ABSOLUTE, field: ClassRaises()}
+    with pytest.raises(ValueError, match=re.escape(f"{refusal}, got ClassRaises")):
+        CalendarReader(**kwargs)
+
+
+def test_an_honest_subclass_of_each_accepted_type_is_still_admitted() -> None:
+    """Asking the real class narrows what is accepted by nothing at all.
+
+    ``issubclass(type(value), X)`` and ``isinstance(value, X)`` agree on every object
+    that does not override ``__class__``, which is the whole population a caller
+    legitimately passes.
+    """
+    reader = CalendarReader(
+        HostilePath(str(_ABSOLUTE)),
+        timezone=HostileZone("Europe/Rome"),
+        window_past=_Forged(days=2),
+    )
+
+    assert reader._path == _ABSOLUTE
+    assert reader._zone == ZoneInfo("Europe/Rome")
+    assert reader._window_past == timedelta(days=2)
 
 
 @pytest.mark.parametrize("field", _DURATION_GUARDS)

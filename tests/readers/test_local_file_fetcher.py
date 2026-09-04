@@ -26,7 +26,15 @@ from typing import TYPE_CHECKING, Final
 import pypdf
 import pytest
 from fetch_fixtures import fetcher as build
-from hostile_values import Hostile, HostilePath, NumericName, Unnameable
+from hostile_values import (
+    ClassRaises,
+    Hostile,
+    HostilePath,
+    NumericName,
+    Unnameable,
+    UnrebuildablePath,
+    impostor_of,
+)
 from pdf_fixtures import amplified_page_tree_pdf, extracted_text_of, minimal_pdf
 
 sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "core"))
@@ -695,6 +703,43 @@ def test_a_path_subclass_cannot_lie_its_way_past_the_root_guard() -> None:
     """
     with pytest.raises(ConfigurationError, match=re.escape("absolute path, got 'documents'")):
         LocalFileFetcher(HostilePath("documents"))
+
+
+def test_a_root_that_will_not_rebuild_is_refused_rather_than_raising(root: Path) -> None:
+    """The rebuild that closes the subclass shape is itself reachable, one level in.
+
+    ``Path(value)`` copies what a ``PurePath`` holds by reading ``parser`` and
+    ``_raw_paths``, which are ordinary Python attributes a genuine subclass can
+    override to raise. The guard catches it and answers with the
+    ``ConfigurationError`` ADR-0230 §6 promises rather than the value's choice.
+    """
+    expected = (
+        "the fetch root must be a Path that rebuilds to a built-in one, got UnrebuildablePath"
+    )
+    with pytest.raises(ConfigurationError, match=re.escape(expected)):
+        LocalFileFetcher(UnrebuildablePath(str(root)))
+
+
+def test_an_impostor_does_not_pass_the_root_guard() -> None:
+    """The type test is put to the *real* class, never to the object.
+
+    ``isinstance`` falls back to ``value.__class__``, so an object of an unrelated
+    class answering that attribute with ``Path`` passes it — and ``Path(value)`` then
+    answers ``AttributeError`` rather than the ``ConfigurationError`` §6 promises.
+    ``type(value)`` reads ``Py_TYPE`` and is not fooled.
+    """
+    with pytest.raises(ConfigurationError, match="the fetch root must be a Path, got Impostor"):
+        LocalFileFetcher(impostor_of(_Path))  # type: ignore[arg-type]
+
+
+def test_a_class_that_raises_does_not_take_the_root_guard_down() -> None:
+    """Where an impostor lies about its class, this one refuses to answer.
+
+    An ``isinstance`` test raises before any refusal can be built at all, which is the
+    escape at its earliest possible point.
+    """
+    with pytest.raises(ConfigurationError, match="the fetch root must be a Path, got ClassRaises"):
+        LocalFileFetcher(ClassRaises())  # type: ignore[arg-type]
 
 
 def test_a_path_subclass_naming_a_real_directory_still_constructs(root: Path) -> None:
