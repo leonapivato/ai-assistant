@@ -1,7 +1,22 @@
 # 152. The binding is derived at one seam, never supplied to it, and a call it cannot describe is refused
 
-- Status: Partially superseded by ADR-0157 (§4's flat-declaration clause, and §6's unshaped-destination refusal in its declaration limb alone) and ADR-0181 (§7's clause that `rebind` takes exactly one thing from `approved`)
+- Status: Partially superseded by ADR-0157 (§4's flat-declaration clause, and §6's unshaped-destination refusal in its declaration limb alone) and ADR-0181 (§7's clause that `rebind` takes exactly one thing from `approved`) and ADR-0233 (that same count clause of §7, narrowed by one further fact)
 - Date: 2026-08-14
+- **Partially superseded: 2026-09-04 by ADR-0233 — §7's count of what `rebind` takes
+  from `approved`, by one further fact, and nothing else in §7.** ADR-0181 §3 already
+  narrowed that clause's "exactly one" to two, in the dated note below. ADR-0233 §4
+  adds a third, `coverage`: the call-level fact its §4 puts on `EgressBinding` and
+  `CarriedProvenance`, which `rebind` takes from `approved` matched to the binding it
+  re-derived. The reason is §7's own, applied to a third field exactly as ADR-0181
+  applied it to a second — the fact is about a composition made before the confirmation
+  was parked, plausibly before a restart, and `rebind` receives nothing to recompute it
+  from; a `rebind` that re-derived it would have to invent a value the composer never
+  supplied. **Everything else in §7 stands**: the afresh derivation from `tool` and
+  `parameters`, the whole-value equality refusal against `approved`, both
+  unmatched-locator refusals, the no-`SYSTEM_SELECTED`-fill rule, and the two `None`
+  limbs. §1, §5, §6, §8–§13 are unchanged, and §5's provenance residue is untouched —
+  `coverage` is a call-level fact and records no span-level origin, so the note of
+  2026-08-23 below still reads exactly as it did.
 - Partially superseded: 2026-08-23 by ADR-0181 — **§7's exactly-one-thing clause,
   by a count of one, and nothing else in §7.** That clause rules that `rebind`
   "takes from `approved` **exactly one** thing: each span's `provenance`. Nothing

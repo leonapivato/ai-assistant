@@ -1,7 +1,24 @@
 # 178. A confirmation carries the egress it is about, and its absence is the discriminator
 
-- Status: Partially superseded by ADR-0181 (§2's clause that `ConfirmationEgress` has exactly two fields)
+- Status: Partially superseded by ADR-0181 (§2's clause that `ConfirmationEgress` has exactly two fields) and ADR-0233 (that same field-count clause of §2, narrowed by one further required field)
 - Date: 2026-08-22
+- **Partially superseded: 2026-09-04 by ADR-0233 — §2's field-count clause, by one
+  further required field, and that clause alone.** ADR-0181 §3 already made §2's
+  "exactly two fields" three, recorded in the note below. ADR-0233 §4 adds a fourth,
+  `coverage: SpanCoverage`, required with no default, populated from the recorded
+  decision's `egress_binding` at both assembly sites and by no other route — which is
+  §5's rule obeyed rather than widened, exactly as ADR-0181's addition obeyed it.
+  **Every other clause of §2 stands whole**: `spans` is still the binding's own value
+  and not a second description; no connection reference, credential slot, `SecretName`,
+  `transport_endpoint` or `BoundAccount` is carried, and `coverage` is none of those, so
+  §10's `model_fields` roster test keeps its subject and moves by one further entry.
+  **§7's first clause is extended and not superseded** (ADR-0070 §1, and ADR-0082 §1's
+  stacked addition): ADR-0233 §8 states a rendering floor that sits **beside** §7's
+  without making any sentence of it false — every clause of §7 still holds of every
+  surface, and §7's sixth clause, that no surface renders the payload description as
+  though it were the payload, is not merely intact but is quoted and relied on there.
+  §1, §3, §4, §5, §6, §8, §9, §11 and §12 are unchanged, `Confirmation` gains no member,
+  and §9's size clauses stay true.
 - Partially superseded: 2026-08-23 by ADR-0181 — **§2's exactly-two-fields clause,
   and that clause alone.** §2 rules that `ConfirmationEgress` has "exactly two
   fields, both required with no default: `account_identity` … and `spans`".

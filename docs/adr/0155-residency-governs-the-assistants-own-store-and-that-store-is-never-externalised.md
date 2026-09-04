@@ -1,16 +1,27 @@
 # 155. Residency governs the assistant's own store, and that store is never externalised
 
-- Status: Accepted, §3's third clause amended by ADR-0233 (its closing sentence alone, on the owner's ruling of 2026-09-04 taking arm (b); §3's second clause and every other clause of this ADR stand)
+- Status: Partially superseded by ADR-0233 (§3's third clause, to the extent of the four conditions the commissioned approval surface states; §3's second clause and every other clause of this ADR stand)
 - Date: 2026-08-14
-- **Amended: 2026-09-04 by ADR-0233 — §3's third clause, in its closing sentence and nothing else.**
-  That sentence reads *"An owner ruling alone does not relax this clause; relaxation
-  requires the commissioned ADR and its approval surface, ratified, and **until then
-  every lane implements the prohibition as written**."* The owner ruled arm **(b)**
-  on 2026-09-04 (#1996), and ADR-0233 is the ADR that arm commissions: it designs the
-  content-bearing approval surface, states its privacy consequences, and states the
-  four conditions under which this clause no longer forbids a span. A reader holding
-  only this ADR would read "until then" as still running, which is ADR-0070 §1's
-  first limb, so the record is made here.
+- **Partially superseded: 2026-09-04 by ADR-0233 — §3's third clause, in two of its
+  sentences, and nothing else in this ADR.** The owner ruled arm **(b)** on 2026-09-04
+  (#1996), and ADR-0233 is the ADR that arm commissions: it designs the content-bearing
+  approval surface, states its privacy consequences, and states four conditions on a
+  call under which this clause no longer forbids a span.
+  **The prohibition sentence is the first of the two.** "An egress span may not carry
+  covered content all of whose covered paths contain a model call" acquires the
+  exception those four conditions state, so a reader holding only this ADR would read it
+  more widely than it now holds. That is a change a lane acts on differently, which
+  ADR-0070 §1 puts on the supersession side of its line whatever the size of the edit —
+  hence a partial supersession rather than the amendment an earlier draft of this record
+  claimed.
+  **The closing sentence is the second.** It reads *"An owner ruling alone does not
+  relax this clause; relaxation requires the commissioned ADR and its approval surface,
+  ratified, and **until then every lane implements the prohibition as written**."* That
+  condition is now met, so "until then" stops running, and a reader holding only this
+  ADR would read it as still running.
+  **What this clause reserved was the route and not the relaxation**, which is why the
+  record is a supersession and not a discharge: arm (b) commissions an ADR "under which
+  a relaxation could **then be considered**", and considering it is what ADR-0233 did.
   **What is *not* changed, and a reader stopping at the qualifier will get this
   wrong.** Ratifying ADR-0233 relaxes nothing for any call: its condition is a
   property of a call — the call's coverage recorded on its binding, a per-call

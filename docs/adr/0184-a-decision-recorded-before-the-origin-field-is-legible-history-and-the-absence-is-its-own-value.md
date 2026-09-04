@@ -1,20 +1,39 @@
 # 184. A decision recorded before the origin field is legible history, and the absence is its own value
 
-- Status: Accepted, §2's member roster and §9's one-sibling clause amended by ADR-0233 (a second sibling, for the epoch §9 named; §2's shared-base rule, §3's discrimination, §5's readers and §7's floor all stand)
+- Status: Partially superseded by ADR-0233 (§1's exception roster, §2's first, third and fifth clauses, §3's two-shape discrimination sentence, and §9's one-sibling clause; §2's shared-base rule, §3's structural property, §4's write rule, §5's readers and §7's floor all stand)
 - Date: 2026-08-23
-- **Amended: 2026-09-04 by ADR-0233 — §2's member roster and §9's first clause, and
-  those alone.** §9 deferred a stored payload version for the trail's `data` column
-  and named its firing condition: "the next member added required-with-no-default to
-  a model the trail stores", with "the ADR adding that member" choosing "between a
-  second sibling and a version, in its own text". ADR-0233 §4 adds
-  `EgressBinding.coverage`, so the condition is met, and §14 there **chooses the
+- **Partially superseded: 2026-09-04 by ADR-0233 — §1's exception roster, §2's first,
+  third and fifth clauses, §3's two-shape discrimination sentence, and §9's first
+  clause; those, and no others.** §9 deferred a stored payload version for the trail's
+  `data` column and named its firing condition: "the next member added
+  required-with-no-default to a model the trail stores", with "the ADR adding that
+  member" choosing "between a second sibling and a version, in its own text". ADR-0233
+  §4 adds `EgressBinding.coverage`, so the condition is met, and §14 there **chooses the
   second sibling** — `CoverageUnrecordedBinding`, for the rows written between
-  `planned_with_external_content`'s arrival and `coverage`'s. Two clauses move.
-  §2's first clause describes `OriginUnrecordedBinding` as carrying "every member
-  `EgressBinding` carries **but** `planned_with_external_content`", which stops being
-  true once `EgressBinding` carries a member those rows also lack; and §9's first
-  clause — "No lane adds a second sibling to this union" — is the clause §9's
-  *second* clause licenses ADR-0233 to spend, and it is spent.
+  `planned_with_external_content`'s arrival and `coverage`'s.
+  **The instrument is supersession because each sentence below is one a lane acts on
+  differently** (ADR-0070 §1), which is how this corpus has recorded every widening of a
+  roster clause — including this ADR's own of ADR-0150 §1. Five sentences move.
+  **§1** recognises a row by its carrying "every member `EgressBinding` requires
+  **except** `planned_with_external_content`". Once `EgressBinding` requires `coverage`
+  too, that exception list needs both names: a genuine pre-origin row lacks `coverage`
+  as well, and the sentence read unrepaired would make this ADR's own rows
+  unrecognisable. §1's *narrowness* — a row faulty in any other way or at any other
+  position is a corrupted store exactly as before — is untouched.
+  **§2's first clause** describes `OriginUnrecordedBinding` as carrying "every member
+  `EgressBinding` carries **but** `planned_with_external_content`", for the same reason.
+  **§2's third clause** states "`EgressBinding` is unchanged … no member is added to
+  it"; ADR-0233 §4 adds `coverage` to it.
+  **§2's fifth clause** types `PermissionDecision.egress_binding` as
+  `EgressBinding | OriginUnrecordedBinding | None`; it becomes a three-shape union,
+  still one field, still named `egress_binding`, still defaulting to `None`, and `None`
+  keeps exactly the meaning ADR-0150 §1's second clause gives it.
+  **§3's** sentence that "a stored object carrying `planned_with_external_content`
+  validates as `EgressBinding` **and as nothing else**" stops being true: such an object
+  lacking `coverage` validates as `CoverageUnrecordedBinding`. ADR-0233 §14 states the
+  three-way rule that replaces it.
+  **§9's first clause** — "No lane adds a second sibling to this union" — is the clause
+  §9's *second* clause licenses ADR-0233 to spend, and it is spent.
   **Why the version was refused rather than taken, which is a fact §9 did not
   have.** A version key names the schema a row stands under and supplies no
   representable value for it: a stored binding lacking a required field still cannot
@@ -27,8 +46,13 @@
   §3 requires.
   **Everything else stands and is relied on.** §2's shared-base rule is obeyed —
   each member is still declared exactly once, on a private base chain the three
-  models inherit — and no member is restated. §3's structural, total and mutually
-  exclusive discrimination is preserved and extended by one rung. §4's
+  models inherit — and no member is restated; §2's fourth clause keeps
+  `ActionRequest.egress_binding` narrow and ADR-0233 does not widen it; and §2's sixth
+  clause is scoped "by this ADR", so it says nothing about what a later one may mint.
+  **§3's structural property is preserved entire and is what makes the third rung
+  possible**: `extra="forbid"` keeps the union total and mutually exclusive with no
+  discriminator field, no tag, no version key and no `Literal` member, on three models
+  as on two. It is the two-shape sentence that is replaced, never the property. §4's
   nothing-is-written rule, §5's five readers, §6's `authorises` ruling and §8's
   second, third and fourth clauses bind unchanged, each still speaking of the
   *origin*-unrecorded shape and only of it; ADR-0233 §14 states the parallel
