@@ -19,6 +19,18 @@
   nothing new, no lane weakens a declaration to reach an `ALLOW`, and the standing
   recipient grant is still the one route to one. §13 argues the classification, and
   the record ADR-0082 §1 owes is made on ADR-0231's header in this same change.
+- **Partially supersedes** [ADR-0193](0193-a-standing-recipient-grant-is-a-user-act-on-a-canonical-destination-set-and-never-covers-a-call-planned-over-external-content.md)
+  — **§1's "one class rather than several" limb alone.** That limb closes *"**One
+  class rather than several**, on `InvalidGrantError`'s reasoning and for its reason:
+  the caller's recourse is identical in every refusing case — read the store and
+  construct a different record — so a family would be several names for one
+  response"*. §4 below gives **two** of `record`'s refusal grounds their own
+  subclasses of `InvalidRecipientGrantError`, because on those two the caller's
+  recourse is **not** identical and §1's own ceiling clause obliges a surface to name
+  one of them. Everything else in §1 stands entire — the record's shape, the three
+  faces, the exact store surface, the ceiling's value and placement, and in
+  particular the atomic count-with-append and the race argument that justifies it,
+  which §6 relies on unchanged. §13 argues the classification.
 - Requires **new `core` contract surface** and lands none of it (§4, §12). Flagged
   under golden rule 5.
 - Does **not** widen [ADR-0177](0177-the-browsers-control-surface-is-thirty-operations-and-a-credential-is-entered-only-on-a-loopback-origin.md)
@@ -540,6 +552,12 @@ class RecipientGrantNotEstablished(StrEnum):           # core/types.py
 class UngrantableActError(AssistantError): ...         # core/errors.py, §1/§2/§3
 
 
+# core/errors.py — the discriminator ADR-0193 §1's one-class limb withheld.
+# The base still catches every refusal, so a caller wanting one handler keeps it.
+class RecipientGrantCeilingError(InvalidRecipientGrantError): ...      # §6
+class DuplicateRecipientGrantError(InvalidRecipientGrantError): ...    # §6
+
+
 class PermissionDecision(BaseModel):                   # core/types.py
     @classmethod
     def from_confirmation(                                     # §4
@@ -567,6 +585,45 @@ class PermissionDecision(BaseModel):                   # core/types.py
 > other `InvalidRecipientGrantError` that operation can raise — the duplicate-id check
 > and the revocation invariants — which no surface distinguishes, because ADR-0193 §1
 > gives a user no different act for them.
+
+> **Normative.** The three refusing members are read from the **type of the refusal
+> `record` raised** and from nothing else. `RecipientGrantStore.record` gains two
+> subclasses of `InvalidRecipientGrantError`: `RecipientGrantCeilingError`, raised
+> where a granting record would take the outstanding count above
+> `Settings.recipient_grant_max_outstanding`, and `DuplicateRecipientGrantError`,
+> raised where a granting record duplicates an outstanding grant's `tool`, `account`
+> and `destinations`. Every other refusal ground `record` has — the duplicate id, a
+> record that does not satisfy its own model, and the revocation invariants — keeps
+> raising the base class unchanged.
+
+> **Normative.** This is the whole of what this ADR changes in ADR-0193, and it
+> supersedes **one limb of §1 and nothing else**: *"One class rather than several …
+> the caller's recourse is identical in every refusing case — read the store and
+> construct a different record — so a family would be several names for one
+> response."* On these two grounds the recourse is **not** identical. A user at the
+> ceiling revokes a grant they hold, which is the act §1's own ceiling clause tells a
+> surface to name; a user whose subject already stands needs **no** act at all,
+> because what they asked for is already true. Reading the store and constructing a
+> different record — §1's stated recourse — is what neither user should do, and on the
+> duplicate ground it is what would give them a second authorisation they think is one
+> (§7's two-vocabulary reasoning, one store over).
+
+> **Normative.** The change is **subclasses rather than a reason member**, and the
+> base class keeps every ground: a caller that wants *"the recipient-grant store
+> refused the record"* still writes one `except InvalidRecipientGrantError` and
+> catches all of them, so §1's stated benefit is preserved rather than traded away.
+> It is the corpus's own shape for exactly this — `MemoryStoreConflictError` under
+> `MemoryStoreError`, `SpendCeilingError` under `SpendError`,
+> `DeferralIdConflictError` under `DeferralStoreError` — and it is why a discriminator
+> costs no caller anything.
+
+> **Normative.** **Everything else in ADR-0193 §1 stands entire and this ADR relies on
+> it.** The count is still atomic with the append, still evaluated over *outstanding*
+> records inside `record`, and §1's argument for that placement — *"two writers of
+> different subjects at one below the ceiling both see room, both append, and the
+> store ends one over — a race the duplicate-subject refusal cannot catch"* — is
+> untouched and is exactly why §6 mandates no pre-write count. A subclass names a
+> refusal that has already happened; it moves no check and weakens no atomicity.
 
 > **Normative.** `STORE_UNAVAILABLE` is the fourth, and it is **not a refusal of the
 > user's request**: it is a `RecipientGrantError` that is not an
@@ -1182,11 +1239,20 @@ in it, which is the disclosure ADR-0199 exists to refuse.
 > as `PermissionRuling.authorised_by`, and no `ActionPolicy` may consult either
 > source-grant seam.
 
-> **Normative.** It changes no clause of ADR-0193. §1's record, store faces, ceiling
-> and digest; §2's construction path, content floor and transcription; §3's five
-> comparisons; §4's origin bar; §6's resolution read; §7's check point; §8's partial
-> coverage rule; §9's prospectivity, expiry and data rights; and §11's three
-> rendering states are all used as given.
+> **Normative.** It changes **one limb of one clause** of ADR-0193 — §1's "one class
+> rather than several", superseded as the header records and §4 argues — and nothing
+> else in that ADR. §1's record, store faces, exact store surface, ceiling value,
+> atomic count-with-append and digest; §2's construction path, content floor and
+> transcription; §3's five comparisons; §4's origin bar; §6's resolution read; §7's
+> check point; §8's partial coverage rule; §9's prospectivity, expiry and data rights;
+> and §11's three rendering states are all used as given.
+
+> **Normative.** In particular it adds **no member** to `RecipientGrantStore`,
+> `RecipientGrants` or `RecipientGrantResolution`, widens no argument and changes no
+> return, so §1's exact-surface clause — *"a contract that adds a member, widens an
+> argument or changes a return is changing this decision rather than implementing
+> it"* — is **not** superseded and binds every later lane exactly as it did. What
+> moved is the refusal's type, which that clause does not reach.
 
 Named individually:
 
@@ -1209,6 +1275,15 @@ Named individually:
   changes a return is changing this decision rather than implementing it"* — so it is
   an ADR partially superseding that clause, not a lane's repair. **Fires** on a
   measurement that a real user reaches the ceiling and cannot find the record.
+- **Any second way to learn why an act was refused.** The discriminator is read from
+  the **refusal itself**, by type, and *"not inferred from messages or a post-write
+  read"* — architecture review's own words at round 11, kept because they are the bar.
+  No lane parses `InvalidRecipientGrantError`'s message, matches on its text, reads
+  `standing_recipient_grants`, `recent_recipient_grants` or `export` after a refusal
+  to work out which ground it was, or infers the ground from a count it took itself.
+  A refusal carrying the base class is `REFUSED` and is rendered as such; it is never
+  guessed at. **Fires** on an ADR that gives another refusal ground a distinct user
+  recourse, which is the only thing that would earn it a third subclass.
 - **A pre-write reservation, quota preview or "will this fit" read of the ceiling.**
   §6 refuses it on ADR-0193 §1's own atomicity ground rather than on the absence of a
   read, so supplying the read would not make it available. What a user gets instead is
@@ -1251,12 +1326,14 @@ the obligations (ADR-0089 §3).
 rule 5, ADR-0015 §5).
 
 **Lane 1 — the contract, the engine and the terminal, in one change.** It lands
-`PermissionDecision.from_confirmation`; the five new `AssistantEngine` members of §4, the
-changed signature of `resume`, §4's two new `core/types.py` values with the
-`TurnOutcome` field that carries one of them, and §3's `UngrantableActError`, with
-their entries in the shared
-`AssistantEngine` conformance suite and in
-`FakeAssistantEngine` (`ai_assistant.testing`); the engine implementation, including
+`PermissionDecision.from_confirmation`; the five new `AssistantEngine` members of §4
+and the changed signature of `resume`, with their entries in the shared
+`AssistantEngine` conformance suite and in `FakeAssistantEngine`
+(`ai_assistant.testing`); §4's two new `core/types.py` values and the `TurnOutcome`
+field that carries one of them; §3's `UngrantableActError`; §4's two
+`InvalidRecipientGrantError` subclasses, with their entries in the shared
+`RecipientGrantStore` conformance suite and in every implementation of that store;
+the engine implementation, including
 the store's whole face reaching `Engine` from `app/composition.py`; the
 `PROTOCOL_VERSION` move of §10 and its commentary entry; and the command-line surface
 of §9. No new Protocol is added, so ADR-0137 §3's triad rule has no subject here; what
@@ -1374,6 +1451,25 @@ enumeration in its own text (§9).
 > directions, as ADR-0170 §4's own invariants are stated: a value carrying both
 > members is refused, and so is one carrying neither.
 
+> **Normative.** Lane 1 ships the **discriminator** tests against the store contract
+> itself, in the `RecipientGrantStore` conformance suite so that every implementation
+> owes them: a granting record taking the outstanding count above the ceiling raises
+> `RecipientGrantCeilingError`; one duplicating an outstanding grant's `tool`,
+> `account` and `destinations` raises `DuplicateRecipientGrantError`; a duplicate id
+> and a revocation failing its invariants each raise the **base**
+> `InvalidRecipientGrantError` and neither subclass; and `except
+> InvalidRecipientGrantError` catches all four, which is the clause of ADR-0193 §1
+> this ADR preserves rather than trades.
+
+> **Normative.** Lane 1 ships the mapping test from those types to §4's carrier, and
+> it asserts the mapping is **by type**: a `resume` whose `record` raises
+> `RecipientGrantCeilingError` carries `CEILING_REACHED`, one raising
+> `DuplicateRecipientGrantError` carries `ALREADY_STANDING`, one raising the base class
+> carries `REFUSED`, and one raising a bare `RecipientGrantError` carries
+> `STORE_UNAVAILABLE`. It fails against an implementation that read a message, took a
+> count of its own, or read any listing after the refusal — §11's bar, which is
+> otherwise a rule a reviewer has to notice.
+
 > **Normative.** Lane 1 ships the **store-fault** pair, arranged over a
 > `RecipientGrantStore.record` raising a `RecipientGrantError` that is **not** an
 > `InvalidRecipientGrantError`. On population (a), after the step has executed,
@@ -1457,6 +1553,46 @@ enumeration in its own text (§9).
 
 Unmarked throughout; the classification is a statement about this change, not an
 obligation (ADR-0089 §1).
+
+- **ADR-0193 — partially superseded**, §1's "one class rather than several" limb
+  alone, scoped as the header states and argued in §4. A reader holding only ADR-0193
+  reads that limb as ruling out a refusal family for this store, and would, after this
+  ADR, read it more widely than it now holds — ADR-0070 §1's test on the supersession
+  side and ADR-0082 §1's for a record being owed. The limb is **reasoned rather than
+  bare**, which is what makes the supersession narrow and checkable: its stated ground
+  is that *"the caller's recourse is identical in every refusing case"*, and this ADR
+  moves it exactly where that ground is false and nowhere else. Two grounds get names;
+  the other four keep the base class; the base class still catches all six.
+
+  **The reading under which no record is owed was available and is not taken.** It
+  would run: §1's ceiling clause *already* obliges a surface to name that the ceiling
+  was reached, so a store that made the ground legible is satisfying §1 rather than
+  changing it, and the two clauses were simply in tension. That reading is honest —
+  rounds 9 through 11 of this review are the evidence that the tension is real, and
+  architecture review's round-11 finding states it in terms. It is not taken for
+  ADR-0082 §1's own reason: the limb is a decision with a stated ground, a lane acting
+  on it would ship one class and would now be wrong, and a record that turns out not
+  to have been owed is removable while a missing one leaves a ratified sentence
+  reading wider than it holds.
+
+  **The record is made on ADR-0193's header in this same change**, on the route and
+  in the shape §13 states for ADR-0231 below: ADR-0082 §7's condition is that the
+  superseding ADR exists rather than that it is ratified, and the lane's fence admits
+  both files. ADR-0193's `Status` carried no leading token, so the record takes
+  `docs/adr/template.md`'s first-partial form beside the appended dated note. Nothing
+  else in ADR-0193 moves — no byte of its Context, Decision or Consequences, and no
+  other header bullet — and in particular §1's exact-surface clause is untouched,
+  because this ADR adds no store member (§11).
+
+- **ADR-0170 — not superseded, and the check is recorded because it looks like it
+  should be.** §4 adds one field to `TurnOutcome`. ADR-0170 §4 fixes the three shapes
+  on which `reply` is `None` and the one on which `reply_degraded` is `True`; a new
+  `None`-defaulting field alters neither, so no reader of ADR-0170 acts differently
+  and ADR-0070 §1's test comes out on the no-record side. **ADR-0197 is the precedent
+  and it is exact**: that ADR added `routed` to `TurnOutcome` in its own text,
+  `None`-defaulting, its docstring naming it *"as `reply`'s names ADR-0170 §3"*, and
+  its header records no supersession of ADR-0170. ADR-0198 §2's restatement
+  enumeration is likewise widened rather than changed (§4).
 
 - **ADR-0231 — partially superseded**, §9's second clause, in its second limb alone,
   scoped as the header states. A reader holding only ADR-0231 reads *"no lane … offers
@@ -1564,8 +1700,8 @@ Unmarked; a record of route rather than an obligation.
 This ADR is marked under ADR-0089: the block-quoted clauses are the whole of what it
 obliges. It is contract-surface — §4 adds five members to `AssistantEngine`, one
 argument to a sixth, one classmethod to a `core/types.py` record, one field to
-`TurnOutcome` with the two `core/types.py` values it is typed over, and one
-`core/errors.py` class — so both required
+`TurnOutcome` with the two `core/types.py` values it is typed over, and three
+`core/errors.py` classes, two of which narrow an existing refusal — so both required
 reviews apply under ADR-0015 §1: adversarial and architecture, green on one tree. It
 is drafted, reviewed and revised as `Proposed`, and its status is flipped
 only once both required reviews have returned clean on one tree, by the one-line

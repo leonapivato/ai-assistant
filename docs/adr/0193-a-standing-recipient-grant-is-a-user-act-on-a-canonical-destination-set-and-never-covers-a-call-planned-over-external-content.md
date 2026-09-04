@@ -1,7 +1,38 @@
 # 193. A standing recipient grant is a user act on a canonical destination set, and never covers a call planned over external content
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0235 (§1's "one class rather than several" limb alone: `RecipientGrantStore.record` gains two subclasses of `InvalidRecipientGrantError` — `RecipientGrantCeilingError` for the outstanding-count ceiling and `DuplicateRecipientGrantError` for a granting record duplicating an outstanding grant's `tool`, `account` and `destinations` — because on those two grounds the caller's recourse is not identical, which is the limb's own stated ground; every other refusal ground keeps the base class, the base class still catches all of them, and the rest of §1 stands entire, its exact store surface, its ceiling value and placement and its atomic count-with-append included)
 - Date: 2026-08-24
+- **Partially superseded: 2026-09-04 by ADR-0235 — §1's "one class rather than
+  several" limb alone, and nothing else in this ADR.** That limb closes *"**One class
+  rather than several**, on `InvalidGrantError`'s reasoning and for its reason: the
+  caller's recourse is identical in every refusing case — read the store and construct
+  a different record — so a family would be several names for one response."*
+
+  **The limb is superseded exactly where its own ground is false.** §1's ceiling
+  clause obliges a surface offering the establishing act to refuse it *"with a reason
+  visible to the user, naming that the ceiling was reached and that the recourse is to
+  revoke a grant they hold"* — a recourse that is **not** "read the store and construct
+  a different record", and one no surface could name while `record`'s refusal carried
+  no discriminator. A user whose subject already stands needs no act at all. So
+  ADR-0235 §4 gives those two grounds their own subclasses of
+  `InvalidRecipientGrantError` and leaves the other four — the duplicate id, a record
+  that does not satisfy its own model, and the revocation invariants — raising the
+  base class unchanged.
+
+  **What the limb bought is kept rather than traded.** The base class still catches
+  every refusal, so a caller wanting *"the recipient-grant store refused the record"*
+  still writes one `except InvalidRecipientGrantError`. The discriminator is read from
+  the refusal's type and never from its message or from a read taken after it
+  (ADR-0235 §11).
+
+  **Nothing else in §1 moves**, and ADR-0235 relies on the rest of it standing: the
+  record's shape and field list, the three faces, the **exact store surface** — no
+  member is added, no argument widened and no return changed — the ceiling's value and
+  its placement inside `record`, and the atomic count-with-append together with the
+  race argument that justifies it, *"two writers of different subjects at one below the
+  ceiling both see room, both append, and the store ends one over"*, which is why
+  ADR-0235 §6 mandates no pre-write count. Every other section of this ADR stands
+  entire.
 - Decides: the standing recipient grant ADR-0021 §6 defers as "a store, not a
   field" and ADR-0148 §3's third clause reserves — what a grant is, how the user
   establishes one, what it covers, where route (b) is evaluated, how
