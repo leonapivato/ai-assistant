@@ -1248,7 +1248,9 @@ def test_yes_does_not_answer_an_egress_confirmation_and_declines_nothing(
     rendered = _flowed(output.getvalue())
     assert "--yes does not answer this one" in rendered
     assert "Nothing was sent and nothing was declined" in rendered
-    assert "assistant resume" in rendered  # what to do instead
+    # What to do instead, named precisely enough to act on: `assistant resume` alone
+    # is the command that just did this, so the flag to drop is named too.
+    assert "Answer it with assistant resume, run without --yes." in rendered
 
 
 async def test_an_unanswered_confirmation_stays_parked_and_exits_nonzero(
