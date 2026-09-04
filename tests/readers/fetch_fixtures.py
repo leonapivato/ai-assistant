@@ -83,7 +83,7 @@ def vouching(
     )
 
 
-def fetcher(  # noqa: PLR0913 — a root, a mount point, two clocks and five configured figures
+def fetcher(  # noqa: PLR0913 — a root, a mount point, two clocks and six configured figures
     root: Path,
     *,
     mount_point: Path | None = None,
@@ -94,6 +94,7 @@ def fetcher(  # noqa: PLR0913 — a root, a mount point, two clocks and five con
     max_file_bytes: int | None = None,
     max_content_bytes: int | None = None,
     max_decoded_bytes: int | None = None,
+    max_character_mappings: int | None = None,
 ) -> LocalFileFetcher:
     """A fetcher over ``root``, with the platform vouching for it.
 
@@ -113,6 +114,7 @@ def fetcher(  # noqa: PLR0913 — a root, a mount point, two clocks and five con
         "max_file_bytes": max_file_bytes,
         "max_content_bytes": max_content_bytes,
         "max_decoded_bytes": max_decoded_bytes,
+        "max_character_mappings": max_character_mappings,
     }
     return LocalFileFetcher(
         root,

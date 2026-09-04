@@ -1,4 +1,4 @@
-"""The ``Settings`` fields ADR-0230 and ADR-0232 add, and where each refuses.
+"""The ``Settings`` fields ADR-0230, ADR-0232 and ADR-0234 add, and where each refuses.
 
 Item 21 asks for "one arm per field — a zero and a negative ``fetch_listing_ttl``,
 ``fetch_listing_max_entries``, ``fetch_max_file_bytes`` and
@@ -13,6 +13,15 @@ and a negative ``fetch_max_decoded_bytes``, refused at load for the same reason 
 the same place. Its **named default** is pinned here too, because §2 argues 1 MiB rather
 than picking it — thirty-two times ``fetch_max_content_bytes`` on the legitimacy side,
 and 1 MB of operators at about 6 s against 313 s at 16 MB on the cost side.
+
+ADR-0234 §7 arm 14 extends it once more, by ``fetch_max_character_mappings`` — a figure
+on a quantity that is not bytes at all, the ``/ToUnicode`` mappings an extraction
+**builds**. Its named default is pinned for §5's reason: 400,000 is a **matching**
+rather than a derivation, sized so that its worst case — about 1.30 s of dictionary
+build at the dearest form ``pypdf`` will build a mapping from — is the worst case of the
+megabyte of operators ``fetch_max_decoded_bytes``'s own default admits, "so an operator
+who has accepted one has accepted the other". §2 forbids computing either from the
+other, which is exactly why both are pinned by value here.
 
 The root's own field is deliberately not in that class: its named default is unset,
 and unset means the mechanism is off (§6's first clause). What it *does* owe is the
@@ -50,13 +59,17 @@ def test_the_mechanism_is_off_until_a_root_is_configured() -> None:
 
 
 def test_the_named_defaults_are_the_ones_the_decision_names() -> None:
-    """ADR-0230 §4 and §6 name four figures; a drift here is a drift from the ADR.
+    """ADR-0230 §4 and §6 name four figures, ADR-0232 a fifth and ADR-0234 a sixth; a
+    drift here is a drift from the ADR.
 
     Pinned by value because each number is argued rather than chosen: five minutes is
     §4's expiry, forty is §6's entry cap, 4 MiB bounds the **read** — and nothing else,
     ADR-0232 §1 having taken the second limb of that clause away — 32 KiB is "what
     reaches the prompt — roughly 32,000 characters of English, about 5,400 CJK code
-    points or about 2,700 emoji", and 1 MiB is what an extraction may **parse**.
+    points or about 2,700 emoji", 1 MiB is what an extraction may **parse**, and 400,000
+    is what it may **build** — a fourth quantity with a fourth consumer, the
+    mapping-dictionary build, which no byte figure bounds: 65,000 mappings arrive in
+    927,031 bytes of ``bfchar`` or in 178 of ``bfrange``.
     """
     settings = Settings()
 
@@ -65,6 +78,7 @@ def test_the_named_defaults_are_the_ones_the_decision_names() -> None:
     assert settings.fetch_max_file_bytes == 4 * 1024 * 1024
     assert settings.fetch_max_content_bytes == 32 * 1024
     assert settings.fetch_max_decoded_bytes == 1024 * 1024
+    assert settings.fetch_max_character_mappings == 400_000
 
 
 @pytest.mark.parametrize(
@@ -80,6 +94,8 @@ def test_the_named_defaults_are_the_ones_the_decision_names() -> None:
         ("fetch_max_content_bytes", -1),
         ("fetch_max_decoded_bytes", 0),
         ("fetch_max_decoded_bytes", -1),
+        ("fetch_max_character_mappings", 0),
+        ("fetch_max_character_mappings", -1),
     ],
 )
 def test_a_bound_outside_its_domain_does_not_load(field: str, value: Any) -> None:
