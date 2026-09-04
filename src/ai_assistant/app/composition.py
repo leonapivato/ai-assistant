@@ -78,6 +78,7 @@ from ai_assistant.orchestration import (
     QuestionStage,
     RecoveryScan,
     RoutingStage,
+    SearchServicer,
     StepExecutor,
     StepRunner,
     UpcomingEventStage,
@@ -92,7 +93,11 @@ from ai_assistant.permissions import (
     ThresholdActionPolicy,
 )
 from ai_assistant.permissions.spend import SpendConfiguration
-from ai_assistant.planning import ModelBackedPlanner, SqlitePlanStore
+from ai_assistant.planning import (
+    ModelBackedPlanner,
+    ModelBackedQueryComposer,
+    SqlitePlanStore,
+)
 from ai_assistant.readers import CalendarReader, EmailReader, LocalFileFetcher
 from ai_assistant.secret_store import KeyringSecretStore
 from ai_assistant.tools import (
@@ -1112,6 +1117,124 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # the ledger face and never the gate, for the mirror reason.
         tools = build_default_registry(egress=egress, ledger=trail, gate=trail)
 
+        # ADR-0152 §10's marked clause: "It is implemented in `tools/`, and consumed
+        # in `orchestration` by the runner stage … **The composition root wires the
+        # one implementation.**" (#1138). PR #1135 landed the seam and gave
+        # ``StepRunner`` a ``binder`` defaulting to ``None``; this is the wiring it
+        # deferred, because ``records`` needs a connection store the root did not
+        # open until the connection surface arrived.
+        #
+        # **The same store object the provisioner writes**, not a second one over
+        # the same file. ADR-0152 §10 makes the seam read one connection record per
+        # egress call for its connectability and identity, and a second handle would
+        # let a provisioning act commit a revision this seam could not yet see —
+        # the split ADR-0102 §7 refuses one store over, arriving here.
+        #
+        # **`registrations` holds whatever `egress` above does, and nothing else.**
+        # How a tool comes to be registered against a connected account is
+        # `tools/`-internal and contracted nowhere (ADR-0152 §10), so `tools/` owns
+        # both derivations and this root performs neither: `egress_registrations`
+        # is the seam's half of the same value `build_default_registry` took the
+        # registry's half of. An unconfigured deployment still gets an **empty**
+        # table, and that is not an inert value — it is what keeps ADR-0152 §8's
+        # mis-registration refusal reachable, so a tool declaring either §3 keyword
+        # while bound to no connected account is refused rather than quietly
+        # answered ``None``.
+        #
+        # **`definitions` is the same object injected as ``ToolRegistry`` and
+        # ``ToolInvoker``**, so ADR-0152 §1's registry-original comparison and the
+        # one ``invoke`` makes read one table rather than two that must agree
+        # (ADR-0029 §1). ``canonicalises`` is left to its default, which is every
+        # protocol `tools.destinations` holds a canonicaliser for: it can only
+        # narrow that set, and narrowing here would manufacture ADR-0152 §3
+        # refusals for protocols the seam can in fact canonicalise.
+        # **The one configured search integration, where a deployment configured
+        # one** (ADR-0231 §5, §17). Built *after* the registry above and handed to
+        # it never: the search declaration is registered "at the egress seam
+        # against a connected account, and in no ``ToolRegistry``", which is the
+        # hinge ADR-0231 §5 rests on — a registry entry would put its capability in
+        # front of the planner, and the planner naming it is the outcome the whole
+        # design exists to make unreachable. `build_default_registry` takes no
+        # search argument, so that absence is a property of the signature rather
+        # than of a line somebody remembered not to write.
+        #
+        # **Constructed only where an account is connected** (§17), so a deployment
+        # that named neither `web_search_connection` nor `web_search_origin` holds
+        # no searcher at all — and `Settings` refuses half a pair, so this is whole
+        # or absent. `records`, `secrets` and the transport are the objects this
+        # root already holds, for the mail integration's reasons: a second store
+        # handle would let a provisioning act commit a revision one of them could
+        # not yet see, and constructing the transport inside the branch is what
+        # keeps "a subsystem handed no capability has no route to the world" true
+        # of the whole tree rather than of one argument list (ADR-0191 §1, §3).
+        #
+        # **The ledger and the gate are the same object the invoker is handed**
+        # (ADR-0192 §9, ADR-0194 §5): one object satisfies `AuditTrail`,
+        # `InvocationLedger`, `InvocationCompleter` and `SpendLedger` over one
+        # store, each consumer gets the face its job needs, and two holders keyed by
+        # those rows could otherwise disagree about a total.
+        #
+        # **No ``close`` is registered for it, and that is ADR-0042 §2 read rather
+        # than skipped.** That section's obligation is over "the resources it has
+        # opened"; a searcher opens none that outlives a call. ADR-0191 §3 makes the
+        # exchange open a channel per call and close it in a ``finally``, "retaining
+        # no pool, cache or keep-alive", and the connection store and the keyring it
+        # reads through are objects this root already closes. A no-op ``close``
+        # registered here would be a lifecycle nobody has, which is the shape
+        # ADR-0231 §6 refuses one clause over.
+        #
+        # **The one caller is the read servicer** (ADR-0231 §11, §17's Lane 5).
+        # This root wires the searcher into ``SearchServicer`` below and into
+        # nothing else, no other subsystem holds the reference, and §17's
+        # no-second-servicing-site clause is what keeps that true. A deployment
+        # with no account connected holds no searcher and no servicer, which is
+        # §13's ``NOT_CONFIGURED`` and never an error.
+        search = (
+            None
+            if settings.web_search_connection is None or settings.web_search_origin is None
+            else build_web_search_integration(
+                connection=settings.web_search_connection,
+                origin=settings.web_search_origin,
+                records=connections,
+                secrets=integration_secrets,
+                transport=StreamOutboundTransport() if transport is None else transport,
+                ledger=trail,
+                gate=trail,
+                max_results=settings.search_max_results,
+                max_result_chars=settings.search_max_result_chars,
+                max_response_bytes=settings.search_max_response_bytes,
+            )
+        )
+
+        binder = EgressBindingSeam(
+            definitions=tools,
+            registrations=egress_registrations(egress, search),
+            records=connections,
+        )
+        # The four gate thresholds are the operator's configuration (ADR-0021 §5,
+        # #239); the Settings defaults reproduce the policy's own, so an unset
+        # deployment keeps today's gate. The two floors take no setting.
+        #
+        # **Built here rather than inside `StepRunner`'s argument list**, because
+        # ADR-0231 §6 puts the same ruling in front of a `WEB_SEARCH` servicing and
+        # §9 makes the standing recipient grant the one route to an `ALLOW` for it:
+        # two policies over two `RecipientGrants` faces would let a step's send and
+        # a turn's search be ruled under different thresholds in one process.
+        policy = ThresholdActionPolicy(
+            confirm_at_risk=settings.confirm_at_risk,
+            confirm_at_reversibility=settings.confirm_at_reversibility,
+            deny_at_risk=settings.deny_at_risk,
+            deny_at_reversibility=settings.deny_at_reversibility,
+            # The **query face** of the store above and never the store
+            # (ADR-0193 §7): a policy handed the whole thing is one ``record``
+            # call away from authorising the send it is ruling on, and the
+            # annotation on its constructor is what removes the capability.
+            # Wiring it here is what makes ADR-0148 §3's route (b) reachable at
+            # all; until a surface offers the establishing act (§13) the store
+            # is empty, so every ruling is the one it was before.
+            grants=recipient_grants,
+        )
+
         # The writer persists to the *same* store the loop retrieves from (ADR-0028 §4),
         # and appends its ``MEMORY_WRITE`` traces to the *same* trace store the read
         # path and the engine boundary use, so §4's correlation join has one stream
@@ -1186,6 +1309,61 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # each pin the root's mount, and the one the loop read from would be the
             # one the ordered shutdown did not close (ADR-0042 §2).
             fetcher=fetcher,
+            # **The search servicer, where this deployment connected an account**
+            # (ADR-0231 §11, §17's Lane 5). It is the loop's only route to the
+            # search seam and the seam's only caller: `search` above is handed to
+            # this object and to no other, so ADR-0231 §11's "no component outside
+            # `service_read_request` calls `request`" is a property of this wiring.
+            #
+            # **Whole or absent, never half.** `Settings` refuses one of the pair
+            # `web_search_connection`/`web_search_origin` without the other, so
+            # `search` above is a searcher or nothing, and this is a servicer or
+            # nothing with it. `None` is the ordinary case and never an error: a
+            # deployment with no account connected services no search on any of its
+            # turns, and ADR-0231 §13's disposition records that as the provisioning
+            # fact it is rather than as a fault — which is what makes "0% yield for
+            # this kind" a true statement about a configuration rather than a
+            # reading of a trigger.
+            #
+            # **The policy, the binder and the trail are the same objects the runner
+            # holds**, not second ones over the same rows. One `ThresholdActionPolicy`
+            # so a step's send and a turn's search are ruled under one set of
+            # thresholds and one `RecipientGrants` face (ADR-0193 §7); one
+            # `EgressBindingSeam` so both read one registration table (ADR-0152 §10);
+            # and one trail because ADR-0192 §1 requires the decision the searcher's
+            # own ledger claim is keyed on to equal the decision the store holds
+            # under that id — a second handle would refuse every claim under a
+            # ruling this servicer had just recorded.
+            #
+            # **The clock and the id factory are the recorder's** (ADR-0021 §3): the
+            # policy is withheld both, which is what leaves `decide` a genuine
+            # function of its argument, and they are the same `_utcnow` and `_uuid`
+            # every other seam this root wires reads.
+            search=(
+                None
+                if search is None
+                else SearchServicer(
+                    # **The same model seam the planner and the routing stage reach
+                    # through** — one provider, one router, one retry policy — and
+                    # the bound the operator configured (ADR-0231 §5). What the
+                    # composer is handed at each call is the turn's own utterance
+                    # and nothing else; it holds no store, and its member has no
+                    # parameter a record could arrive through (§3).
+                    composer=ModelBackedQueryComposer(
+                        model, max_chars=settings.search_query_max_chars
+                    ),
+                    # The integration's **searcher** and never the integration:
+                    # its `registration` is the binding seam's half of the same
+                    # value and reached the seam above, and a servicer handed both
+                    # would hold a registration table it has no use for.
+                    searcher=search.searcher,
+                    binder=binder,
+                    policy=policy,
+                    trail=trail,
+                    now=_utcnow,
+                    id_factory=_uuid,
+                )
+            ),
             # Passed rather than defaulted, for the reason the ingestor's
             # ``conflict_limit`` is (ADR-0119 §9): this is the second cardinality
             # control, and its effective ``search`` limit is its own value —
@@ -1200,118 +1378,15 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # §3's ceiling permits and never a share, which it forbids.
             episodic_limit=EPISODIC_SUPPLEMENT_LIMIT,
         )
-        # ADR-0152 §10's marked clause: "It is implemented in `tools/`, and consumed
-        # in `orchestration` by the runner stage … **The composition root wires the
-        # one implementation.**" (#1138). PR #1135 landed the seam and gave
-        # ``StepRunner`` a ``binder`` defaulting to ``None``; this is the wiring it
-        # deferred, because ``records`` needs a connection store the root did not
-        # open until the connection surface arrived.
-        #
-        # **The same store object the provisioner writes**, not a second one over
-        # the same file. ADR-0152 §10 makes the seam read one connection record per
-        # egress call for its connectability and identity, and a second handle would
-        # let a provisioning act commit a revision this seam could not yet see —
-        # the split ADR-0102 §7 refuses one store over, arriving here.
-        #
-        # **`registrations` holds whatever `egress` above does, and nothing else.**
-        # How a tool comes to be registered against a connected account is
-        # `tools/`-internal and contracted nowhere (ADR-0152 §10), so `tools/` owns
-        # both derivations and this root performs neither: `egress_registrations`
-        # is the seam's half of the same value `build_default_registry` took the
-        # registry's half of. An unconfigured deployment still gets an **empty**
-        # table, and that is not an inert value — it is what keeps ADR-0152 §8's
-        # mis-registration refusal reachable, so a tool declaring either §3 keyword
-        # while bound to no connected account is refused rather than quietly
-        # answered ``None``.
-        #
-        # **`definitions` is the same object injected as ``ToolRegistry`` and
-        # ``ToolInvoker``**, so ADR-0152 §1's registry-original comparison and the
-        # one ``invoke`` makes read one table rather than two that must agree
-        # (ADR-0029 §1). ``canonicalises`` is left to its default, which is every
-        # protocol `tools.destinations` holds a canonicaliser for: it can only
-        # narrow that set, and narrowing here would manufacture ADR-0152 §3
-        # refusals for protocols the seam can in fact canonicalise.
-        # **The one configured search integration, where a deployment configured
-        # one** (ADR-0231 §5, §17). Built *after* the registry above and handed to
-        # it never: the search declaration is registered "at the egress seam
-        # against a connected account, and in no ``ToolRegistry``", which is the
-        # hinge ADR-0231 §5 rests on — a registry entry would put its capability in
-        # front of the planner, and the planner naming it is the outcome the whole
-        # design exists to make unreachable. `build_default_registry` takes no
-        # search argument, so that absence is a property of the signature rather
-        # than of a line somebody remembered not to write.
-        #
-        # **Constructed only where an account is connected** (§17), so a deployment
-        # that named neither `web_search_connection` nor `web_search_origin` holds
-        # no searcher at all — and `Settings` refuses half a pair, so this is whole
-        # or absent. `records`, `secrets` and the transport are the objects this
-        # root already holds, for the mail integration's reasons: a second store
-        # handle would let a provisioning act commit a revision one of them could
-        # not yet see, and constructing the transport inside the branch is what
-        # keeps "a subsystem handed no capability has no route to the world" true
-        # of the whole tree rather than of one argument list (ADR-0191 §1, §3).
-        #
-        # **The ledger and the gate are the same object the invoker is handed**
-        # (ADR-0192 §9, ADR-0194 §5): one object satisfies `AuditTrail`,
-        # `InvocationLedger`, `InvocationCompleter` and `SpendLedger` over one
-        # store, each consumer gets the face its job needs, and two holders keyed by
-        # those rows could otherwise disagree about a total.
-        #
-        # **No ``close`` is registered for it, and that is ADR-0042 §2 read rather
-        # than skipped.** That section's obligation is over "the resources it has
-        # opened"; a searcher opens none that outlives a call. ADR-0191 §3 makes the
-        # exchange open a channel per call and close it in a ``finally``, "retaining
-        # no pool, cache or keep-alive", and the connection store and the keyring it
-        # reads through are objects this root already closes. A no-op ``close``
-        # registered here would be a lifecycle nobody has, which is the shape
-        # ADR-0231 §6 refuses one clause over.
-        #
-        # **Nothing calls it yet.** ADR-0231 §17's Lane 5 is what wires a searcher
-        # into the turn's read servicer; a merged Lane 3 is "a searcher no turn
-        # reaches, in a deployment with no account connected".
-        search = (
-            None
-            if settings.web_search_connection is None or settings.web_search_origin is None
-            else build_web_search_integration(
-                connection=settings.web_search_connection,
-                origin=settings.web_search_origin,
-                records=connections,
-                secrets=integration_secrets,
-                transport=StreamOutboundTransport() if transport is None else transport,
-                ledger=trail,
-                gate=trail,
-                max_results=settings.search_max_results,
-                max_result_chars=settings.search_max_result_chars,
-                max_response_bytes=settings.search_max_response_bytes,
-            )
-        )
-
-        binder = EgressBindingSeam(
-            definitions=tools,
-            registrations=egress_registrations(egress, search),
-            records=connections,
-        )
         runner = StepRunner(
             plans=plans,
             registry=tools,
             binder=binder,
-            # The four gate thresholds are the operator's configuration (ADR-0021 §5,
-            # #239); the Settings defaults reproduce the policy's own, so an unset
-            # deployment keeps today's gate. The two floors take no setting.
-            policy=ThresholdActionPolicy(
-                confirm_at_risk=settings.confirm_at_risk,
-                confirm_at_reversibility=settings.confirm_at_reversibility,
-                deny_at_risk=settings.deny_at_risk,
-                deny_at_reversibility=settings.deny_at_reversibility,
-                # The **query face** of the store above and never the store
-                # (ADR-0193 §7): a policy handed the whole thing is one ``record``
-                # call away from authorising the send it is ruling on, and the
-                # annotation on its constructor is what removes the capability.
-                # Wiring it here is what makes ADR-0148 §3's route (b) reachable at
-                # all; until a surface offers the establishing act (§13) the store
-                # is empty, so every ruling is the one it was before.
-                grants=recipient_grants,
-            ),
+            # **The same object the search servicer rules with** (ADR-0231 §17):
+            # one deployment has one set of thresholds and one recipient-grant
+            # seam, so a step's send and a turn's search are ruled by one policy
+            # rather than by two that could disagree about either.
+            policy=policy,
             trail=trail,
             executor=StepExecutor(plans=plans, registry=tools, invoker=tools),
             # A parked confirmation's lifetime is a deployment value (#310); ``None``
