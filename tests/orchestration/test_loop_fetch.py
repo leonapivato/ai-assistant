@@ -81,12 +81,13 @@ from fetch_fixtures import fetcher as real_fetcher
 from pdf_fixtures import minimal_pdf
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, MutableMapping, Sequence
+    from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
     from pathlib import Path
 
     from ai_assistant.core.protocols import Fetcher, MemoryStore, Planner
     from ai_assistant.core.types import MemoryRecord, SourceListing, SourceListingEntry
     from ai_assistant.orchestration.loop import RespondedTurn
+    from ai_assistant.readers import LocalFileFetcher
 
 _NOW: Final = datetime(2026, 9, 3, 10, 0, tzinfo=UTC)
 
@@ -277,6 +278,32 @@ async def _prompt_over(responded: RespondedTurn) -> str:
 
 
 @pytest.fixture
+def on_disk() -> Iterator[Callable[..., LocalFileFetcher]]:
+    """A factory for real fetchers, whose root handles this fixture closes.
+
+    ``LocalFileFetcher`` opens its configured root at construction and holds the
+    descriptor for its life (ADR-0230 §6's stage 2), and ``close`` is deliberately not
+    a member of the ``Fetcher`` Protocol — so a *test* that builds one owns the same
+    obligation ``app/composition.py`` does, and a case building one inline would leak a
+    descriptor per run. This is that obligation held in one place, so no case has to
+    remember it and none can wrap a ``finally`` around only the assertions it expected
+    to reach.
+    """
+    built: list[LocalFileFetcher] = []
+
+    def build(root: Path, **figures: object) -> LocalFileFetcher:
+        fetcher = real_fetcher(root, **figures)  # type: ignore[arg-type]  # the fixture's own knobs
+        built.append(fetcher)
+        return fetcher
+
+    try:
+        yield build
+    finally:
+        for fetcher in built:
+            fetcher.close()
+
+
+@pytest.fixture
 def documents(tmp_path: Path) -> Path:
     """A real root holding a real PDF whose text carries the distinctive word."""
     root = tmp_path / "documents"
@@ -288,7 +315,7 @@ def documents(tmp_path: Path) -> Path:
 
 
 async def test_a_turn_whose_supply_knows_nothing_answers_from_the_document(
-    documents: Path,
+    documents: Path, on_disk: Callable[..., LocalFileFetcher]
 ) -> None:
     """§14 item 1: the reply carries the word, and it came from disk.
 
@@ -308,9 +335,9 @@ async def test_a_turn_whose_supply_knows_nothing_answers_from_the_document(
     await memory.add(_belief("belief-1", "the quarterly numbers came up last week"))
     planner = FakePlanner(now=_clock, read_request=_file("F1"))
 
-    responded = await _loop(
-        planner=planner, fetcher=real_fetcher(documents), memory=memory
-    ).respond("summarise the PDF I saved yesterday", narrow=_bounded())
+    responded = await _loop(planner=planner, fetcher=on_disk(documents), memory=memory).respond(
+        "summarise the PDF I saved yesterday", narrow=_bounded()
+    )
 
     assert _DISTINCTIVE not in _contents(planner.calls[0][2]), (
         "the supply the planner saw held nothing about the document"
@@ -323,7 +350,7 @@ async def test_a_turn_whose_supply_knows_nothing_answers_from_the_document(
 
 
 async def test_the_record_the_fetch_minted_is_the_one_adr_0230_s5_describes(
-    documents: Path,
+    documents: Path, on_disk: Callable[..., LocalFileFetcher]
 ) -> None:
     """§5's shape, over the record a **real** fetcher wrote from a **real** file.
 
@@ -334,7 +361,7 @@ async def test_the_record_the_fetch_minted_is_the_one_adr_0230_s5_describes(
     untouched — no instant taken from the file's mtime.
     """
     planner = FakePlanner(now=_clock, read_request=_file("F1"))
-    fetcher = real_fetcher(documents)
+    fetcher = on_disk(documents)
 
     responded = await _loop(planner=planner, fetcher=fetcher).respond(
         "summarise the PDF I saved yesterday", narrow=_bounded()
@@ -1185,7 +1212,9 @@ class _CapturingFetcher(_RecordingFetcher):
         return await super().fetch(listing, entry)
 
 
-async def test_a_stale_listing_is_never_carried_into_a_later_turn(tmp_path: Path) -> None:
+async def test_a_stale_listing_is_never_carried_into_a_later_turn(
+    tmp_path: Path, on_disk: Callable[..., LocalFileFetcher]
+) -> None:
     """§3's discipline, over **one** loop, a real fetcher, and inside its own TTL.
 
     §14 item 7's last arm asks for "**two consecutive turns** of one conversation whose
@@ -1206,7 +1235,7 @@ async def test_a_stale_listing_is_never_carried_into_a_later_turn(tmp_path: Path
     root = tmp_path / "documents"
     root.mkdir()
     (root / "first.md").write_text(f"turn one holds a {_DISTINCTIVE}", encoding="utf-8")
-    fetcher = real_fetcher(root, listing_ttl=timedelta(hours=1))
+    fetcher = on_disk(root, listing_ttl=timedelta(hours=1))
     planner = FakePlanner(now=_clock, read_request=_file("F1"))
     loop = _loop(planner=planner, fetcher=fetcher, memory=FakeMemoryStore(now=_clock))
 
