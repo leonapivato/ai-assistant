@@ -164,6 +164,7 @@ if TYPE_CHECKING:
         MemoryRecord,
         MemorySearchResult,
         MemoryWrite,
+        ShownFile,
     )
     from ai_assistant.orchestration.delivery import DeliveryOutbox
 
@@ -386,6 +387,7 @@ class OneStepPlanner:
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         step = PlanStep(
             id="step-1",
@@ -414,6 +416,7 @@ class NoStepPlanner:
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         self._calls += 1
         return ActionPlan(
@@ -816,6 +819,7 @@ async def test_converse_refuses_a_plan_built_for_another_goal() -> None:
             context: CurrentContext,
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
+            files: Sequence[ShownFile] = (),
         ) -> ActionPlan:
             step = PlanStep(id="step-1", intent="x", capability=CAPABILITY, parameters=PARAMETERS)
             return ActionPlan(
@@ -2131,6 +2135,7 @@ async def test_shutdown_drains_in_flight_work_before_closing() -> None:
             context: CurrentContext,
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
+            files: Sequence[ShownFile] = (),
         ) -> ActionPlan:
             entered.set()
             await release.wait()
@@ -2171,6 +2176,7 @@ async def test_a_cancelled_call_does_not_abandon_its_underlying_work() -> None:
             context: CurrentContext,
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
+            files: Sequence[ShownFile] = (),
         ) -> ActionPlan:
             entered.set()
             await release.wait()
@@ -2213,6 +2219,7 @@ async def test_cancelling_aclose_still_closes_the_resources() -> None:
             context: CurrentContext,
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
+            files: Sequence[ShownFile] = (),
         ) -> ActionPlan:
             entered.set()
             await release.wait()
@@ -2265,6 +2272,7 @@ class _NeverFinishing:
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         self.entered.set()
         try:
@@ -2343,6 +2351,7 @@ async def test_nothing_is_closed_until_the_cancelled_work_has_completed() -> Non
             context: CurrentContext,
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
+            files: Sequence[ShownFile] = (),
         ) -> ActionPlan:
             try:
                 await asyncio.Event().wait()
@@ -2391,6 +2400,7 @@ async def test_work_that_finishes_inside_the_budget_is_never_cancelled() -> None
             context: CurrentContext,
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
+            files: Sequence[ShownFile] = (),
         ) -> ActionPlan:
             await release.wait()
             finished.set()
@@ -3123,6 +3133,7 @@ async def test_concurrent_parks_get_distinct_tokens_despite_a_colliding_factory(
             context: CurrentContext,
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
+            files: Sequence[ShownFile] = (),
         ) -> ActionPlan:
             nonlocal seen
             seen += 1
@@ -3215,6 +3226,7 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
             context: CurrentContext,
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
+            files: Sequence[ShownFile] = (),
         ) -> ActionPlan:
             nonlocal seen
             seen += 1
@@ -4177,6 +4189,7 @@ class RecordingPlanner(OneStepPlanner):
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         self.seen.append(tuple(memories))
         return await super().plan(

@@ -90,6 +90,7 @@ if TYPE_CHECKING:
         MemoryRecord,
         MemorySearchResult,
         MemoryWrite,
+        ShownFile,
         SourceReading,
     )
 
@@ -126,6 +127,7 @@ class _FailingPlanner:
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         """Fail the way a planner with nothing to offer fails."""
         msg = "no plan for that"

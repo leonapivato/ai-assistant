@@ -55,6 +55,7 @@ from ai_assistant.core.types import (
     MemoryKind,
     MemorySource,
     Provenance,
+    ShownFile,
     TurnResult,
 )
 from ai_assistant.orchestration.conversations import BELIEF_KINDS
@@ -76,6 +77,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import (
         ContextProvider,
         FeedbackProcessor,
+        Fetcher,
         MemoryStore,
         Planner,
         ToolRegistry,
@@ -85,6 +87,7 @@ if TYPE_CHECKING:
         CurrentContext,
         FeedbackEvent,
         MemoryRecord,
+        SourceListing,
     )
     from ai_assistant.orchestration.writes import MemoryWriteStage, WriteOutcome
 
@@ -566,6 +569,56 @@ def _stop_reason(
     return None
 
 
+def _shown(listing: SourceListing | None) -> tuple[ShownFile, ...]:
+    """ADR-0230 §4's projection of a listing onto what a planner may be handed.
+
+    "The loop projects each ``SourceListingEntry`` of the listing it holds onto a
+    ``ShownFile`` — **positionally, in order, one for one, the whole sequence** — and
+    passes **that** to ``Planner.plan``." Every word of that is load-bearing here, and
+    each is a way this function could be wrong while looking right: a filtered
+    sequence, a reordered one or a truncated one would make the label rendered at
+    position *n* and the entry held at position *n* name different files, with nothing
+    to catch it — §2's whole scheme is that "both sides derive the label from the listing
+    and neither consults the other", which holds only while the two sequences have one
+    ordering and one length. So there is no sort, no filter and no cap here: the
+    ordering (most recently modified first) and the cap are the **fetcher's**, decided
+    once where the listing is minted (§6), and a second opinion about either taken on
+    this side would be a second authority on what is nameable.
+
+    **The projection is what keeps the capability out of `planning`, and it is a
+    property of the types rather than a rule a planner is trusted to keep** (§4). A
+    :class:`~ai_assistant.core.types.SourceListingEntry` carries the ``handle`` a fetch
+    is addressed by and a :class:`~ai_assistant.core.types.SourceListing` carries the
+    ``token`` that listing is authenticated by; a
+    :class:`~ai_assistant.core.types.ShownFile` carries neither, and has no field
+    either could sit in. So an implementation on the far side that rendered every field
+    of every value it received, logged them, or returned them discloses no capability,
+    because there is none on the value to disclose.
+
+    **No label is projected either** (§2). The label is the entry's 1-based ordinal in
+    the sequence, derived on each side from the sequence itself, so carrying one here
+    would be a second place for the two sides to disagree.
+
+    Args:
+        listing: The listing this turn read, or ``None`` where no fetcher is wired.
+
+    Returns:
+        One ``ShownFile`` per entry, in the listing's own order — and ``()`` for a
+        deployment with no fetcher and for a listing that came back empty, which are
+        the same case for the turn and which §3 forbids any consumer to tell apart.
+    """
+    if listing is None:
+        return ()
+    return tuple(
+        ShownFile(
+            name=entry.name,
+            size_bytes=entry.size_bytes,
+            modified_at=entry.modified_at,
+        )
+        for entry in listing.entries
+    )
+
+
 def _stamped(plan: ActionPlan, *, supersedes: str | None = None) -> ActionPlan:
     """Take ``supersedes`` for the loop, on every plan a planner returns (ADR-0228 §5).
 
@@ -713,6 +766,7 @@ class LearningLoop:
         planner: Planner,
         registry: ToolRegistry,
         feedback: FeedbackProcessor,
+        fetcher: Fetcher | None = None,
         retrieval_limit: int = _DEFAULT_RETRIEVAL_LIMIT,
         resolution_limit: int = _DEFAULT_RESOLUTION_LIMIT,
         episodic_limit: int | None = None,
@@ -765,6 +819,18 @@ class LearningLoop:
                 sense, exactly like the writer's above, and a root that wires a
                 processor minting fewer has mis-wired the loop. :meth:`learn` is
                 what stops a breach of it from being silent.
+            fetcher: The local-file seam a ``LOCAL_FILE`` ask is answered from
+                (ADR-0230 §3, §4), or ``None`` where no root is configured. Its
+                ``listing()`` is read **once per turn**, before the first planner
+                call, and the projection of what it answered is passed to both of a
+                turn's calls. **``None`` is the ordinary case and never an error**:
+                a deployment with no fetcher wired shows no listing, so no file is
+                nameable on any of its turns and the planner is handed ``()`` — §3's
+                default, read from the caller's side. A fetcher whose listing comes
+                back empty is the same case for the turn, and the emptiness carries
+                no further meaning: it does not distinguish unconfigured, an empty
+                root, an unreadable root or a failed read (§3), and nothing here
+                infers which it was.
             retrieval_limit: How many memories a turn retrieves. The **belief**
                 budget: it is never reduced, shared or made conditional by the
                 episodic supplement below (ADR-0158 §3).
@@ -813,6 +879,7 @@ class LearningLoop:
         self._planner = planner
         self._registry = registry
         self._feedback = feedback
+        self._fetcher = fetcher
         self._retrieval_limit = retrieval_limit
         self._resolution_limit = resolution_limit
         # Resolved after the check, and against the *validated* belief budget, so
@@ -1176,8 +1243,31 @@ class LearningLoop:
             # Everything after this line, this method's own return value
             # included, runs over what it returned.
             context, memories = _narrowed(narrow, context, memories, retrieved_ids)
+        # ADR-0230 §3: **once per turn, before the first planner call**, and the same
+        # sequence to both calls of a turn that revises. §3's restraint is explicit —
+        # "no lane adds a second listing read, and no lane re-reads it between a turn's
+        # two calls" — which is what makes a label's meaning stable across the two,
+        # where an `M` label's is not (ADR-0228 §8): the supply grows across a turn and
+        # the listing does not.
+        #
+        # **Unconditional on the channel, and that is ADR-0230 §7 applied rather than
+        # an oversight.** What ADR-0226 §5 scopes is the *servicing*: "a planner on
+        # such a turn is not told; what is scoped is the servicing, so the trigger goes
+        # on being measured on every channel". A loop that withheld the listing on an
+        # unbounded-audience turn would be telling the planner — by handing it §3's
+        # "no file is nameable" — and would make §14 item 14's turn unreachable, since
+        # a `LOCAL_FILE` ask cannot be emitted over a listing that was never shown.
+        #
+        # **The `SourceListing` itself stays in `orchestration`** (§3, §4). It is the
+        # authority a fetch is verified against and the sequence a label resolves by
+        # index into, and it carries the token and the entry handles — so what crosses
+        # into `planning` is the capability-free projection and nothing else.
+        listing = None if self._fetcher is None else await self._fetcher.listing()
+        files = _shown(listing)
         plans: tuple[ActionPlan, ...] = ()
-        plan = _stamped(await self._planned(goal, context=context, memories=memories, audit=audit))
+        plan = _stamped(
+            await self._planned(goal, context=context, memories=memories, files=files, audit=audit)
+        )
         plans += (plan,)
         while True:
             request = plan.read_request
@@ -1262,7 +1352,11 @@ class LearningLoop:
             # call did not return.
             audit.stop = StopReason.PLANNING_FAILED
             plan = _stamped(
-                await self._planned(goal, context=context, memories=memories, audit=audit),
+                # ADR-0230 §3: the **same** sequence as the first call was handed,
+                # not a second read — so `F3` names the same entry on both calls.
+                await self._planned(
+                    goal, context=context, memories=memories, files=files, audit=audit
+                ),
                 supersedes=plan.id,
             )
             plans += (plan,)
@@ -1303,6 +1397,7 @@ class LearningLoop:
         *,
         context: CurrentContext,
         memories: Sequence[MemoryRecord],
+        files: Sequence[ShownFile],
         audit: TurnReadAudit,
     ) -> ActionPlan:
         """Read the capability vocabulary, then plan over it (ADR-0211 §3).
@@ -1331,6 +1426,13 @@ class LearningLoop:
             memories: The supply **as it stands for this call** — three groups on a
                 turn's first, and those three plus the servicing's fourth on its
                 second (ADR-0228 §7).
+            files: The listing shown this turn, projected onto ``ShownFile``s
+                (ADR-0230 §3, §4). Read once per turn and passed **unchanged** on
+                both calls — required and undefaulted here, unlike on the contract,
+                because §3 has the loop pass it on *every* call and a defaulted
+                parameter on this side would let a call site forget it silently.
+                ``()`` where no fetcher is wired, which means no file is nameable on
+                this turn.
             audit: This turn's record, whose ``planner_calls`` this method advances.
                 **Counted here and nowhere else**, between the vocabulary read and the
                 call, which is what makes the field say what ADR-0228 §9 asks of it:
@@ -1355,7 +1457,11 @@ class LearningLoop:
         # it returns (ADR-0228 §9).
         audit.planner_calls += 1
         return await self._planner.plan(
-            goal, context=context, memories=memories, capabilities=capabilities
+            goal,
+            context=context,
+            memories=memories,
+            capabilities=capabilities,
+            files=files,
         )
 
     async def learn(self, event: FeedbackEvent) -> tuple[WriteOutcome, ...]:

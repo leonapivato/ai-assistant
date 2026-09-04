@@ -184,6 +184,7 @@ if TYPE_CHECKING:
         RoutedOperationRecord,
         SecretName,
         SecretValue,
+        ShownFile,
         SourceGrant,
         SourceListing,
         SourceListingEntry,
@@ -2802,6 +2803,7 @@ class Planner(Protocol):
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         """Produce a plan for ``goal``.
 
@@ -2922,8 +2924,9 @@ class Planner(Protocol):
 
         What the returned
         :class:`~ai_assistant.core.types.ActionPlan` may now carry is a
-        ``read_request``: **at most one**, over a closed enumeration of two kinds
-        (``SIGHTED_QUERY`` and ``CITATION_HOP``), stating one further read the
+        ``read_request``: **at most one**, over a closed enumeration of three kinds
+        (``SIGHTED_QUERY``, ``CITATION_HOP`` and — since ADR-0230 §1 — ``LOCAL_FILE``,
+        which names one entry of ``files`` below), stating one further read the
         planner judged this turn's supply too thin without. That is a third
         widening of this contract's documented meaning, flagged under golden rule 5
         for the same reason as the other two. It is **not** a compatibility break:
@@ -2958,6 +2961,57 @@ class Planner(Protocol):
         executor; the loop — never the planner, and never a tool — services it, and
         a planner performs no read of its own on account of one.
 
+        **``files`` is the listing the loop showed this turn, and it is the whole of
+        what a ``LOCAL_FILE`` ask may name** (ADR-0230 §§2-3). It carries the
+        planner-facing projection of what a configured local root held when the loop
+        listed it — one :class:`~ai_assistant.core.types.ShownFile` per entry, in the
+        listing's own order, the whole sequence — and it is read **once per turn**, so
+        a turn's two calls are handed the **same** sequence. That is where this scheme
+        differs from ``memories``', deliberately: ADR-0228 §8 lets an ``M`` label name
+        different records on a turn's two calls because the supply grows, and the
+        listing does not, so ``F3`` names the same entry on both calls of one turn.
+
+        **``()`` means no file is nameable on this turn**, and is the semantically
+        correct answer rather than a degradation: a deployment with no fetcher wired
+        passes it, a fetcher whose listing came back empty is the same case for the
+        turn, and no implementation reads it as an error or as an instruction to fetch
+        a default. The emptiness carries no further meaning — it does not distinguish
+        unconfigured, an empty root, an unreadable root or a failed read, and no
+        consumer may infer which it was.
+
+        **A file is named by an ordinal into this sequence and never by a path**
+        (ADR-0230 §2). The label of the entry at 1-based index *n* is the ASCII string
+        ``F`` followed by *n* in decimal with no padding — ``F`` and not ``M`` because
+        the two index different sequences — and both sides derive it from the sequence
+        itself: the planner renders each file's label from what it was given, and the
+        loop resolves a label by indexing the very sequence it passed on this call. No
+        mapping, no table and no path crosses between `planning` and `orchestration`.
+        A planner emits **no filesystem address of any kind**: not a path, not a name
+        it composed, not a name it read out of an utterance or a record's content, and
+        a label outside the shown set resolves to nothing and is discarded silently by
+        the loop, exactly as an out-of-range ``M`` label is.
+
+        **A ``ShownFile`` carries no capability, and that is a property of the type**
+        (ADR-0230 §4). The address a fetch is performed against lives on the
+        fetcher-facing :class:`~ai_assistant.core.types.SourceListingEntry`, which a
+        planner is never handed; an implementation that rendered every field of every
+        value it received, logged them, or returned them discloses nothing, because
+        there is nothing on the value to disclose. The listing is **external content**
+        under ADR-0098 §1 — this system authored no file's name and received it from
+        its user as no utterance — so an implementation rendering an entry into a
+        prompt escapes it for that target under ADR-0098 §2, as it does any other
+        external span, and renders none of it as a fact of the system's own.
+
+        **This one is a compatibility break, where the four widenings above were not**
+        (ADR-0230 §3, golden rule 5). The parameter is additive and defaulted, and
+        this contract does not argue itself out of the classification on that ground:
+        ``plan``'s other inputs are keyword-only, the loop passes ``files`` on **every**
+        call, and a ``plan`` declaring no such parameter raises ``TypeError`` when it is
+        called and fails structurally under ``mypy --strict`` besides. What survives
+        the widening is the **semantics**, not the signature — an implementation that
+        accepts the parameter and ignores its value means exactly what it meant, which
+        is what ``()``'s default encodes. Its declaration must move.
+
         Args:
             goal: The objective to plan for.
             context: The situational context assembled for this request.
@@ -2975,6 +3029,13 @@ class Planner(Protocol):
                 ``ToolRegistry`` object selection will resolve against, never
                 fetched here. Required; an empty vocabulary is legal and means the
                 behaviour above.
+            files: The listing the loop showed this turn (ADR-0230 §3) — the
+                planner-facing projection of a configured local root's entries, one
+                per entry in the listing's own order, read once per turn and the
+                **same** sequence on both of a turn's calls. It is the sequence a
+                ``LOCAL_FILE`` label indexes into, and the whole of what such an ask
+                may name (§2). Defaults to ``()``, which means no file is nameable on
+                this turn and is never an error.
 
         Returns:
             A frozen :class:`~ai_assistant.core.types.ActionPlan`, carrying a

@@ -79,6 +79,7 @@ if TYPE_CHECKING:
         MemoryKind,
         MemoryRecord,
         MemorySearchResult,
+        ShownFile,
     )
 
 #: The token the assistant introduced and the user never used. §11 item 1's whole
@@ -146,6 +147,7 @@ class _AskingPlanner(NoStepPlanner):
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         self.calls.append(tuple(memories))
         plan = await super().plan(
@@ -172,6 +174,7 @@ class _AskingOneStepPlanner(OneStepPlanner):
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         plan = await super().plan(
             goal, context=context, memories=memories, capabilities=capabilities

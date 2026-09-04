@@ -74,6 +74,7 @@ if TYPE_CHECKING:
         Goal,
         MemoryRecord,
         Message,
+        ShownFile,
         ToolCall,
         ToolResult,
         TurnOutcome,
@@ -1107,6 +1108,7 @@ class _RaisingPlanner:
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         """Raise ``PlanningError``, which is one of ``converse``'s declared failures."""
         del goal, context, memories, capabilities

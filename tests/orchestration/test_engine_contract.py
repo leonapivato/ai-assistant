@@ -158,6 +158,7 @@ if TYPE_CHECKING:
         FrozenJson,
         Goal,
         MemoryRecord,
+        ShownFile,
         SourceGrant,
     )
     from ai_assistant.tools.invocation import BoundImplementation
@@ -267,6 +268,7 @@ class _OneStepPlanner:
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         """Return a one-step plan for the goal."""
         step = PlanStep(
@@ -290,6 +292,7 @@ class _NoStepPlanner:
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         """Return an empty plan for the goal."""
         return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(), created_at=AT)

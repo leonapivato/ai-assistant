@@ -54,6 +54,7 @@ if TYPE_CHECKING:
         Goal,
         MemoryRecord,
         ReadRequest,
+        ShownFile,
         StepTransition,
     )
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
@@ -146,6 +147,20 @@ class FakePlanner:
     plan a planner returns, so a fake authoring one would be scripting a value its
     consumer discards; a test that wants to prove the discard scripts a plan carrying
     one and asserts what was persisted.
+
+    **It records the listing it was shown and reads nothing into it** (ADR-0230 §3).
+    ``files`` joins :attr:`calls` as a fifth element, so a consumer's test can assert
+    *what the planner was handed* — that the projection was positional, that the same
+    sequence reached both of a turn's calls, and that no capability came with it —
+    without standing a model up, which is the only place outside `orchestration` those
+    are checkable. Nothing here renders it, indexes it or judges it: what a planner
+    makes of a listing is an implementation's business (ADR-0211 §9 item 2), and a
+    ``LOCAL_FILE`` ask is scripted through ``read_request`` exactly as the other two
+    kinds are — **not** derived from ``files``, for the reason the request as a whole
+    is not derived from ``memories``. So a fake handed an empty listing and scripted to
+    name ``F1`` emits ``F1``, which is the unresolved-label population ADR-0226 §9's
+    audit exists to count and which a filtering fake would put out of a consumer's
+    reach.
     """
 
     def __init__(
@@ -202,13 +217,28 @@ class FakePlanner:
         #: call is made.
         self._first_id: str | None = None
         self._clock = checked_clock(now, owner="FakePlanner")
-        #: One entry per call: the goal, the context, the memories and the
-        #: capability vocabulary the caller stated (ADR-0211 §9 item 3). The
-        #: vocabulary is recorded so a test over the loop can assert *what the
-        #: planner was told* without standing a model up — which is the only way
-        #: ADR-0211 §3's same-object clause is checkable from outside `app`.
+        #: One entry per call: the goal, the context, the memories, the capability
+        #: vocabulary the caller stated (ADR-0211 §9 item 3) and the file listing it
+        #: was shown (ADR-0230 §3). The vocabulary is recorded so a test over the loop
+        #: can assert *what the planner was told* without standing a model up — which
+        #: is the only way ADR-0211 §3's same-object clause is checkable from outside
+        #: `app` — and the listing is recorded for the same reason: ADR-0230 §14 item
+        #: 20 asks that the value crossing the seam be "a sequence of ``ShownFile``,
+        #: one per entry in the listing's own order", which is a fact about the
+        #: **call** and about no return value.
+        #:
+        #: **A fifth element rather than a second attribute**, so the five facts of one
+        #: call cannot come apart: a parallel list is one `append` away from recording
+        #: a listing against the wrong call, and every consumer already reads this by
+        #: index.
         self.calls: list[
-            tuple[Goal, CurrentContext, tuple[MemoryRecord, ...], tuple[str, ...]]
+            tuple[
+                Goal,
+                CurrentContext,
+                tuple[MemoryRecord, ...],
+                tuple[str, ...],
+                tuple[ShownFile, ...],
+            ]
         ] = []
 
     def _now(self) -> datetime:
@@ -236,6 +266,7 @@ class FakePlanner:
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         """Return the scripted plan, recording the arguments it was given.
 
@@ -267,10 +298,13 @@ class FakePlanner:
         planner that knows nothing of the envelope does.
 
         **It emits the labels it was given, unfiltered.** Nothing here checks a
-        label against ``memories``: ADR-0226 §3 gives resolution to the loop, which
-        discards what does not resolve and records the drop in §9's audit, so a fake
-        that filtered its own emission would make that population unreachable from
-        a consumer's tests — which is precisely where it needs to be reachable.
+        label against ``memories`` or an ``entry`` against ``files``: ADR-0226 §3 and
+        ADR-0230 §2 both give resolution to the loop, which discards what does not
+        resolve and records the drop in §9's audit, so a fake that filtered its own
+        emission would make that population unreachable from a consumer's tests —
+        which is precisely where it needs to be reachable. A scripted ``LOCAL_FILE``
+        ask is therefore emitted on a turn that was shown no listing at all, which is
+        exactly the arm a consumer needs to drive an unresolved label.
 
         Args:
             goal: The objective to plan for.
@@ -279,8 +313,13 @@ class FakePlanner:
             capabilities: The vocabulary the registry advertised for this turn.
                 Required, exactly as the contract requires it; the empty
                 vocabulary is legal and changes nothing here (ADR-0211 §6).
+            files: The listing the loop showed this turn (ADR-0230 §3). Recorded and
+                **not acted on**, for ``capabilities``' own reason: the empty listing
+                is legal, means no file is nameable, and changes nothing about what
+                this fake returns. Frozen into a tuple, so a caller mutating the
+                sequence it passed cannot rewrite what this records.
         """
-        self.calls.append((goal, context, tuple(memories), tuple(capabilities)))
+        self.calls.append((goal, context, tuple(memories), tuple(capabilities), tuple(files)))
         ordinal = len(self.calls)
         if self._revision is not None:
             if ordinal > _CALLS_PER_TURN:

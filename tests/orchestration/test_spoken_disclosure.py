@@ -101,7 +101,7 @@ from ai_assistant.testing import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import MemoryWrite, TurnResult
+    from ai_assistant.core.types import MemoryWrite, ShownFile, TurnResult
 
 _AT: Final = datetime(2026, 8, 27, 12, 0, tzinfo=UTC)
 
@@ -681,6 +681,7 @@ class _EchoingPlanner:
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         """Record what this turn was supplied, and plan over exactly that."""
         supplied = tuple(memories)

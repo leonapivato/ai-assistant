@@ -100,6 +100,7 @@ if TYPE_CHECKING:
         EmailFacet,
         Goal,
         MemoryRecord,
+        ShownFile,
     )
 
 _log = structlog.get_logger(__name__)
@@ -141,6 +142,22 @@ _TAIL_HEADING: Final = "Recent conversation turns, in order:"
 #: reads a private name knowingly, which is cheaper than widening ``planning``'s
 #: public surface for a driver that is not a subsystem.
 _RETRIEVED_HEADING: Final = "Relevant memories about the user:"
+
+#: The heading the turn's file listing is printed under (ADR-0230 §2, §3).
+#:
+#: **A heading of its own, and never a group of ``memories``.** The two are
+#: different address spaces — an ``M`` label is an ordinal into this call's
+#: ``memories`` and an ``F`` label an ordinal into this call's ``files`` (§2) — and a
+#: listing printed under either memory heading would put two namespaces under one
+#: rubric at exactly the seam ADR-0226 §3 exists to keep unambiguous.
+#:
+#: **It says what the entries are, because a file's name is not a memory.** ADR-0098
+#: §1 makes the listing external content: this system authored no file's name and
+#: received it from its user as no utterance, so §2 requires that a reader of the
+#: assembled prompt can tell it from the system's own facts. The heading names the
+#: source as the device's disk and the bullets carry escaped spans, which is the same
+#: division ``_render_facets`` makes for a connected source's report.
+_FILES_HEADING: Final = "Files on this device, which you may ask to have read:"
 
 #: What each band's records are introduced as, for the non-episodic kinds
 #: (ADR-0072 §6). One clause per band, saying whose claim the content is: the
@@ -531,7 +548,69 @@ for returns the rest of that line — it is a bound on what you can answer from,
 and a turn printed that way is not itself worth naming in `labels`."""
 
 
-def _system_prompt(capabilities: Sequence[str]) -> str:
+#: ADR-0230 §2's third member of ``read_request``, stated only where it can name
+#: something.
+#:
+#: **Conditional, where :data:`_READ_REQUEST_GUIDANCE` is unconditional, and the
+#: asymmetry is ADR-0230 §2 rather than inconsistency.** ``_system_prompt``'s own
+#: reasoning for stating the memory block always is that "an empty supply changes no
+#: shape: it means no label is printed below". A listing is not that case. §2 rules
+#: that "a turn on which the loop passed no listing is a turn on which no file is
+#: nameable", and §3 that a deployment with no fetcher wired "renders no listing into
+#: any prompt" — so on such a turn this block would describe a member whose every
+#: possible value resolves to nothing. What that buys is not a low fire rate but a
+#: **wrong** one: ADR-0226 §3 sends an unresolvable label to §9's audit as a dropped
+#: label rather than to the drop counter, so a standing invitation to name a file that
+#: was never shown would fill the audit's unresolved population with emissions the
+#: prompt itself asked for, and §8's figure is read against that.
+#:
+#: **It corrects the block above rather than restating it**, because that block says
+#: "Both members of `read_request` are optional" and "nothing is looked up outside this
+#: system", and both sentences stop being the whole truth on a turn that shows a
+#: listing. A reader who met the first would send at most two members; one who met the
+#: second could reasonably read a file read as forbidden. So this block names the third
+#: member and says exactly what a file read is and is not — this device's own disk, no
+#: network, nothing sent anywhere — instead of leaving a model to reconcile two
+#: paragraphs.
+#:
+#: **It asks for a label and forecloses every other spelling** (§2). The namer rule is
+#: that the model may point outward at an address it was shown "and at nothing else",
+#: so the block refuses a path, a filename, a directory and a name composed from the
+#: conversation in terms — not because a path would be dangerous to honour (nothing
+#: downstream would honour one: the loop resolves an ordinal and hands the fetcher an
+#: entry the fetcher itself minted) but because a model writing one has asked for
+#: something and reached nothing, which costs the turn a read and the audit a drop.
+#:
+#: A separate constant for :data:`_STATED_FACT_GUIDANCE`'s reason: the prompt test can
+#: assert it **reaches the model** without string-matching its wording.
+_LOCAL_FILE_GUIDANCE = """\
+The next message also prints a short list of files on this device, under its own \
+heading, each with a label — `F1`, `F2`, `F3` and so on, in the order they appear. \
+Those files are the user's own, they are on the machine this assistant runs on, and \
+you may ask for ONE of them to be read for you.
+
+To ask, add a third member to the same `read_request` object:
+
+ "read_request": {"file": "F2"}
+
+`file` names exactly one of the labels printed under that heading, spelled exactly \
+as it is printed there. It may be sent on its own or beside `query` and `labels`; \
+send at most one file, and do not send the key at all unless you are asking for one.
+
+Do not write a filename, a path, a folder, an extension, or any name of your own — \
+not one from the conversation, not one from a memory below, and not one you have \
+worked out. Only a label printed under that heading reaches anything at all; \
+everything else reaches nothing, and asking that way costs you the read.
+
+Ask for a file where the goal turns on what a document actually says — a figure in \
+it, a wording, a detail — and neither the memories below nor the conversation \
+carries it. Where the file list is about something else entirely, or the answer is \
+already in front of you, ask for nothing. Reading one of these files runs no tool, \
+names no capability, sends nothing anywhere and reaches no network: it is this \
+device's own disk, read for this turn only."""
+
+
+def _system_prompt(capabilities: Sequence[str], *, files_shown: bool) -> str:
     """Build the planning system prompt over the vocabulary advertised this turn.
 
     A function rather than a constant because ADR-0211 §4 makes the vocabulary part
@@ -560,30 +639,46 @@ def _system_prompt(capabilities: Sequence[str]) -> str:
     label actually printed — already says what that leaves askable, without this
     function taking a second input to say it twice.
 
+    **:data:`_LOCAL_FILE_GUIDANCE` is the one block that is conditional, and it sits
+    last** (ADR-0230 §2, §3). It adds a third member to the request the block above
+    has just described, so a reader meeting it before that block would be told about
+    an addition to a shape they have not been shown; and it is stated only where the
+    loop passed a listing, because §2 makes a turn with no listing "a turn on which no
+    file is nameable" and a block describing an unaskable member would fill ADR-0226
+    §9's unresolved-label population with emissions the prompt asked for. That is why
+    this function takes a second input where the empty-supply case needed none: an
+    empty listing genuinely does change which shape is available, in the way an empty
+    vocabulary does.
+
     Args:
         capabilities: The vocabulary the registry advertised for this turn, taken
             as handed (ADR-0211 §1). Empty is legal (ADR-0211 §6).
+        files_shown: Whether this call's ``files`` held anything — i.e. whether a
+            listing will be printed in the next message and an ``F`` label can name
+            something (ADR-0230 §2). The *contents* decide nothing here; what the
+            prompt states is that the member exists.
 
     Returns:
         The system turn for this call.
     """
-    return "\n".join(
-        (
-            _PROMPT_OPENING,
-            _render_vocabulary(capabilities),
-            "",
-            _PROMPT_SHAPES,
-            _STATED_FACT_GUIDANCE,
-            "",
-            _UNAVAILABLE_GUIDANCE,
-            "",
-            _PROMPT_CLOSING,
-            "",
-            _READ_REQUEST_GUIDANCE,
-            "",
-            _ACT_RECORD_GUIDANCE,
-        )
-    )
+    blocks = [
+        _PROMPT_OPENING,
+        _render_vocabulary(capabilities),
+        "",
+        _PROMPT_SHAPES,
+        _STATED_FACT_GUIDANCE,
+        "",
+        _UNAVAILABLE_GUIDANCE,
+        "",
+        _PROMPT_CLOSING,
+        "",
+        _READ_REQUEST_GUIDANCE,
+        "",
+        _ACT_RECORD_GUIDANCE,
+    ]
+    if files_shown:
+        blocks += ["", _LOCAL_FILE_GUIDANCE]
+    return "\n".join(blocks)
 
 
 def _uuid() -> str:
@@ -691,6 +786,7 @@ class ModelBackedPlanner:
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         """Produce a frozen plan for ``goal`` (ADR-0047).
 
@@ -714,14 +810,25 @@ class ModelBackedPlanner:
         fails. What an out-of-vocabulary name still gets is what it always got —
         the alias layer, then ``NO_CAPABLE_TOOL`` (ADR-0037 §1).
 
+        **``files`` is the turn's listing, and it decides two things about the
+        prompt** (ADR-0230 §2, §3). Its entries are rendered as ``F``-labelled bullets
+        under their own heading (:func:`_render_files`), and its *emptiness* decides
+        whether the system turn states the ``file`` member at all
+        (:data:`_LOCAL_FILE_GUIDANCE`) — because §2 makes a turn with no listing one on
+        which no file is nameable, so describing the member would be inviting an
+        emission that can only resolve to nothing. Nothing here reaches a filesystem,
+        opens anything or holds a ``Fetcher``: the sequence is passed in exactly as
+        ``context`` and ``memories`` are, for ADR-0014 §6's reason, and what comes back
+        is a label the loop resolves.
+
         ``goal`` is observed **once**, on this coroutine's first executed line and
         before the first ``await`` (ADR-0065). ``Goal`` is mutable, the model call
         is the widest suspension window in the system, and a caller that mutated
         its own instance mid-flight would otherwise get an ``ActionPlan`` whose
         frozen, auditable ``goal_id`` names a goal the model was never shown. The
         prompt, the plan's ``goal_id`` and the failure message all derive from
-        that one snapshot. ``context``, ``memories`` and ``capabilities`` need no
-        snapshot: each is read once, into the prompt, before the same first
+        that one snapshot. ``context``, ``memories``, ``capabilities`` and ``files``
+        need no snapshot: each is read once, into the prompt, before the same first
         ``await`` and never again — the other discharge the clause allows.
 
         ``memories`` carries what the pipeline assembled for this turn, which
@@ -744,6 +851,12 @@ class ModelBackedPlanner:
                 before the first ``await``. An empty vocabulary is legal and is
                 stated as such (ADR-0211 §6); it raises nothing and drives no
                 repair round.
+            files: The listing the loop showed this turn (ADR-0230 §3), rendered
+                into the user turn as ``F``-labelled bullets in the order it was
+                handed — neither re-sorted, filtered nor capped, since the ordering
+                and the cap are the fetcher's and a second opinion here would put
+                the two sides' ordinals out of step. Empty is legal and is the
+                ordinary case: it renders no listing and states no ``file`` member.
 
         Returns:
             A frozen :class:`~ai_assistant.core.types.ActionPlan` for ``goal``.
@@ -759,9 +872,16 @@ class ModelBackedPlanner:
         # Deep, so nothing nested stays shared with the caller's instance; a
         # `model_copy(update=...)` here would be shallow and would not detach it.
         snapshot = goal.model_copy(deep=True)
+        shown = tuple(files)
         conversation: list[Message] = [
-            Message(role=Role.SYSTEM, content=_system_prompt(capabilities)),
-            Message(role=Role.USER, content=_render_request(snapshot, context, memories)),
+            Message(
+                role=Role.SYSTEM,
+                content=_system_prompt(capabilities, files_shown=bool(shown)),
+            ),
+            Message(
+                role=Role.USER,
+                content=_render_request(snapshot, context, memories, shown),
+            ),
         ]
 
         last_error: _ExtractionError | None = None
@@ -870,9 +990,10 @@ class ModelBackedPlanner:
 def _optional_read_request(envelope: dict[str, object]) -> ReadRequest | None:
     """Read ADR-0226 §4's ``read_request`` out of one envelope, or return ``None``.
 
-    Builds at most one ask of each kind from the two optional members the prompt
+    Builds at most one ask of each kind from the three optional members the prompt
     asks for — a non-blank ``query`` becomes a ``SIGHTED_QUERY`` ask, a list of one
-    or two label strings becomes a ``CITATION_HOP`` ask — and hands them to
+    or two label strings becomes a ``CITATION_HOP`` ask, and a non-blank ``file``
+    becomes a ``LOCAL_FILE`` ask (ADR-0230 §1) — and hands them to
     :class:`~ai_assistant.core.types.ReadRequest`, whose validators are the
     authority on every condition §4 states. An envelope carrying no ``read_request``,
     or one from which no ask could be built, yields ``None``, which ADR-0226 §4
@@ -928,6 +1049,10 @@ def _optional_read_request(envelope: dict[str, object]) -> ReadRequest | None:
     if labels is not None:
         asks += _hop_ask(labels)
 
+    file_label = raw.get("file")
+    if file_label is not None:
+        asks += _file_ask(file_label)
+
     if not asks:
         _log.info(_READ_REQUEST_DROPPED, reason="no_usable_ask")
         return None
@@ -967,12 +1092,59 @@ def _hop_ask(labels: object) -> list[ReadAsk]:
     return [ReadAsk(kind=ReadKind.CITATION_HOP, labels=tuple(named))]
 
 
+def _file_ask(entry: object) -> list[ReadAsk]:
+    """Build the ``LOCAL_FILE`` ask from an envelope's ``file``, or nothing.
+
+    The label is taken **verbatim**, as :func:`_hop_ask` takes a hop's labels and for
+    the same reason: ADR-0230 §2 gives resolution to the loop, which "resolves a label
+    by parsing *n* and indexing the very sequence it passed on this call" and discards
+    silently what does not resolve. So nothing here checks the label's ``F``-plus-ordinal
+    form, nothing checks the ordinal against the listing this call rendered, and nothing
+    rewrites a near miss into a hit.
+
+    **That is deliberate and it is where the audit's population comes from** (§2,
+    ADR-0226 §9). A label outside the shown set "resolves to nothing … discarded
+    silently — not an error, not a park, not a degradation of the turn — and recorded
+    in §9's audit as an unresolved label". A planner that quietly dropped its own
+    out-of-range or malformed labels would empty that field of exactly the emissions it
+    exists to count, and #1929's lesson is that this seam's numbers are the instrument
+    the milestone is read by.
+
+    **Nothing a model wrote is ever a filesystem address, whatever it wrote** (§2).
+    That is not this function's discipline to keep and it is not kept by inspecting the
+    string: the loop parses an ordinal and hands the fetcher an entry the fetcher itself
+    minted, so a value that is a path, a name from the conversation or an invention
+    reaches no filesystem call by any route. What the blank check below rejects is a
+    value ``ReadAsk``'s own validator would refuse — §1 requires a non-blank ``entry``
+    — so the drop is counted here rather than surfacing as a ``ValidationError`` that
+    would cost the whole request.
+
+    **One file and never several** (§1). A ``LOCAL_FILE`` ask "carries **one entry
+    label** and nothing else", so a list, a mapping or anything but a string is a drop
+    rather than an invitation to take the first element: reading two files for one ask
+    is refused in terms, and a decomposition of a question across sources is what
+    ADR-0226 §12 defers by name.
+
+    Args:
+        entry: The envelope's ``file`` member, whatever the model wrote there.
+
+    Returns:
+        A one-element list holding the ask, or an empty list where the member is not
+        a non-blank string.
+    """
+    if not isinstance(entry, str) or not entry.strip():
+        _log.info(_READ_REQUEST_DROPPED, reason="unusable_file")
+        return []
+    return [ReadAsk(kind=ReadKind.LOCAL_FILE, entry=entry)]
+
+
 def _render_request(
     goal: Goal,
     context: CurrentContext,
     memories: Sequence[MemoryRecord],
+    files: Sequence[ShownFile] = (),
 ) -> str:
-    """Render the goal, context and memories into the user-turn prompt.
+    """Render the goal, context, memories and file listing into the user-turn prompt.
 
     The memories are rendered by :func:`_render_record`, each tagged with its kind,
     its provenance source, its band and its confidence, because passing the
@@ -1007,6 +1179,17 @@ def _render_request(
     one, and the statement carries **no reply text** at all (ADR-0004 §5, ADR-0221
     §11's test 14). ADR-0222 §5 states why these two counts cannot ride an
     ``OPERATION`` trace instead.
+
+    **``files`` is printed last, under a heading of its own** (ADR-0230 §2, §3). It
+    is a second address space, not a fourth group of ``memories``: an ``M`` label is an
+    ordinal into this call's ``memories`` and an ``F`` label an ordinal into this call's
+    ``files``, and printing a listing under either memory heading would put two
+    namespaces under one rubric at the seam ADR-0226 §3 exists to keep unambiguous. It
+    sits below the memories because it is what a model reaches for when they did not
+    carry the answer, and because ``_split_conversation_tail``'s two groups keep the
+    positions ADR-0158 §4 gives them. An empty listing prints nothing at all — no
+    heading, no line, no mention of a root — which is §3's ruling that a deployment
+    with no fetcher and a root that held nothing are one case for the turn.
 
     ``context``'s facets are rendered by :func:`_render_facets` under the same
     "Current context:" heading as the four temporal scalars, and **below** them:
@@ -1058,6 +1241,11 @@ def _render_request(
             ]
     else:
         lines.append("No stored memories were retrieved for this goal.")
+
+    listing = _render_files(files)
+    if listing:
+        lines.append("")
+        lines += listing
 
     _log.info("planner_tail_replies_rendered", eligible=eligible, elided=elided)
     return "\n".join(lines)
@@ -1406,6 +1594,88 @@ def _label(ordinal: int) -> str:
         The label, e.g. ``"M3"``.
     """
     return f"M{ordinal}"
+
+
+def _file_label(ordinal: int) -> str:
+    """ADR-0230 §2's label for the file at 1-based ``ordinal`` of ``files``.
+
+    "The label of the entry at 1-based index *n* of the sequence the loop passed is
+    the ASCII string ``F`` followed by *n* in decimal with no padding. That is the
+    whole of the scheme."
+
+    **``F`` and not ``M``, because the two index different sequences.** §2 fixes the
+    letter for that reason and no other: a single namespace over ``memories`` and
+    ``files`` "would be a label whose meaning depends on which kind quoted it", which
+    is exactly the ambiguity ADR-0226 §3 exists to keep out of this seam. That is also
+    why ``ReadAsk`` carries ``entry`` beside ``labels`` rather than reusing it (§1).
+
+    **It is derived here and resolved there, and neither side consults the other**
+    (§2). The renderer takes the ordinal from the position in the sequence it was
+    given; the loop resolves a label by parsing *n* and indexing "the very sequence it
+    passed on this call". Nothing is shared — no table, no mapping, no path and no
+    capability — which is :func:`_label`'s own argument one sequence over, and the
+    reason this function is likewise **not** imported by `orchestration` and must not
+    become shared.
+
+    **The label outlives nothing.** §3 makes the listing this turn's: a label survives
+    the turn that rendered it and no implementation resolves one against a listing from
+    an earlier turn. Within a turn it *is* stable across both planner calls, which is
+    where this scheme differs from :func:`_label`'s — ADR-0228 §8 lets an ``M`` label
+    name different records on a turn's two calls because the supply grows, and a
+    listing does not.
+
+    Args:
+        ordinal: The file's 1-based position in this call's ``files``.
+
+    Returns:
+        The label, e.g. ``"F3"``.
+    """
+    return f"F{ordinal}"
+
+
+def _render_files(files: Sequence[ShownFile]) -> list[str]:
+    """Render this turn's listing as labelled bullets, or nothing at all.
+
+    One bullet per entry, in the order the loop passed them, each opening with
+    :func:`_file_label`'s ordinal so that a model naming one is naming the first token
+    it read — which is what :func:`_render_record` does for a memory and is the same
+    property for the same reason.
+
+    **The name is quoted and the other two fields cannot be spans** (ADR-0098 §2). A
+    listing is external content under §1 — this system authored no file's name and
+    received it from its user as no utterance — and ``ShownFile.name`` is
+    ``NonBlankEncodableText``, which permits every newline and bracket there is. So it
+    goes through :func:`_quoted_span`, and a name can then open no second bullet, forge
+    no second label and reopen no heading. ``size_bytes`` is an ``int`` and
+    ``modified_at`` a ``UtcInstant``, so neither is free text and neither needs the
+    transform; rendering them through it would only make the line harder to read.
+
+    **Nothing is sorted, filtered or capped here** (ADR-0230 §4, §6). The ordering is
+    the fetcher's — most recently modified first — and so is the cap; the loop's
+    projection is positional and one for one, so a second opinion taken at this site
+    would put the label this side renders at position *n* and the entry the loop holds
+    at position *n* out of step, with nothing to catch it.
+
+    **An empty sequence renders no heading and no line** (ADR-0230 §3). A deployment
+    with no fetcher wired and a root that held nothing are the same case for the turn,
+    and neither is distinguishable from the other in the assembled prompt — which is
+    §3's ruling and ``CurrentContext``'s own for an absent facet.
+
+    Args:
+        files: The listing shown this turn, as the loop projected it.
+
+    Returns:
+        The heading and its bullets, or an empty list.
+    """
+    if not files:
+        return []
+    lines = [_FILES_HEADING]
+    lines += [
+        f"  - {_file_label(ordinal)} {_quoted_span(shown.name)} "
+        f"({shown.size_bytes} bytes, last changed {shown.modified_at.isoformat()})"
+        for ordinal, shown in enumerate(files, start=1)
+    ]
+    return lines
 
 
 def _render_record(record: MemoryRecord, *, label: str | None = None) -> str:
