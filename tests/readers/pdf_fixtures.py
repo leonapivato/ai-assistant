@@ -717,3 +717,30 @@ def _assembled_with_xref_stream(
     )
     document += b"startxref\n" + str(start).encode() + b"\n%%EOF\n"
     return bytes(document)
+
+
+def unbuildable_font_pdf(*, decoded_bytes: int) -> bytes:
+    """A page whose font names a program under **two** ``/FontFile*`` keys.
+
+    ``Font._parse_font_descriptor`` raises ``PdfReadError`` on that, and
+    ``PageObject._extract_text`` builds a stream's fonts **before** it resolves the
+    content key while swallowing only ``AttributeError`` and ``TypeError`` — so the
+    page's content stream is parsed not at all, however large it is. A walk charging
+    the stream first answers ``TOO_LARGE`` for a document that is malformed, which is
+    the class confusion ADR-0232 §4 exists to prevent.
+    """
+    objects = _Objects()
+    program = objects.add(stream_object(type1_program(2_000)))
+    descriptor = objects.add(
+        b"<< /Type /FontDescriptor /FontName /Twice /Flags 4 /FontFile "
+        + program
+        + b" /FontFile2 "
+        + program
+        + b" >>"
+    )
+    font = objects.add(
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Twice /FontDescriptor " + descriptor + b" >>"
+    )
+    return document(
+        [Page(contents=[operators(decoded_bytes)], fonts={"/F1": font})], objects=objects
+    )
