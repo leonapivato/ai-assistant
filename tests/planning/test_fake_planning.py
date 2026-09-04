@@ -27,6 +27,7 @@ from ai_assistant.core.types import (
     ReadAsk,
     ReadKind,
     ReadRequest,
+    ShownFile,
     TimeOfDay,
 )
 from ai_assistant.testing import FakePlanner, FakePlanStore
@@ -99,6 +100,27 @@ class TestFakePlannerContract(PlannerContract):
             ),
         )
 
+    @pytest.fixture
+    def file_asking_planner(self) -> Planner | None:
+        """The fake arranged to name a file, so ADR-0230 §§1-2's arms bind on it.
+
+        All three kinds at once, which is now the widest emission the envelope admits
+        — one ask of each (ADR-0226 §2, unwidened by ADR-0230 §1). The ``entry`` is the
+        label the suite's own listing would carry at position 2, though nothing here
+        checks that: §2 gives resolution to the loop, and a fake that filtered its own
+        emission would hide the unresolved-label population §9's audit exists to count.
+        """
+        return FakePlanner(
+            now=_fixed_now,
+            read_request=ReadRequest(
+                asks=(
+                    ReadAsk(kind=ReadKind.LOCAL_FILE, entry="F2"),
+                    ReadAsk(kind=ReadKind.CITATION_HOP, labels=("M1", "M2")),
+                    ReadAsk(kind=ReadKind.SIGHTED_QUERY, query="which lender did you recommend?"),
+                )
+            ),
+        )
+
 
 async def test_a_fresh_fake_does_not_reuse_a_prior_instances_execution_id() -> None:
     """The fake matches ``InMemoryPlanStore``'s cross-restart non-reuse (#280).
@@ -139,13 +161,35 @@ async def test_fake_planner_records_what_it_was_asked() -> None:
         within_working_hours=True,
     )
 
-    await planner.plan(goal, context=context, capabilities=("send_email",))
+    shown = (
+        ShownFile(name="notes.md", size_bytes=12, modified_at=_fixed_now()),
+        ShownFile(name="roster.txt", size_bytes=300, modified_at=_fixed_now()),
+    )
+
+    await planner.plan(goal, context=context, capabilities=("send_email",), files=shown)
 
     assert len(planner.calls) == 1
     assert planner.calls[0][0].id == "g1"
     # ADR-0211 §9 item 3: the vocabulary is recorded as handed, so a test over the
     # loop can assert what the planner was told without standing a model up.
     assert planner.calls[0][3] == ("send_email",)
+    # ADR-0230 §14 item 20 asks that the value crossing the seam be asserted, which is
+    # a fact about the **call**: a consumer's test has no other place to read it.
+    assert planner.calls[0][4] == shown
+
+
+async def test_fake_planner_records_an_absent_listing_as_the_empty_one() -> None:
+    """ADR-0230 §3: ``()`` is the default and is what a caller that names none supplies.
+
+    Recorded rather than omitted, so a consumer asserting "this turn showed no file"
+    reads a value rather than an index error — and so the fifth element is present on
+    every call, which is what lets a case compare two calls' listings directly.
+    """
+    planner = FakePlanner(now=_fixed_now)
+
+    await planner.plan(_goal_for(), context=_context_for(), capabilities=())
+
+    assert planner.calls[0][4] == ()
 
 
 # --- ADR-0228 §3: a turn may call this fake twice ----------------------------
