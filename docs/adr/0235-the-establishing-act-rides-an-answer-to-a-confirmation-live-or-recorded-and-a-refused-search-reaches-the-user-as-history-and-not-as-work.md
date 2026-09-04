@@ -360,8 +360,8 @@ declared argument is admitted by that clause rather than by a change to it (§13
 > `AssistantError` subclass this ADR mints and the only one it mints **for a refusal
 > that records no answer** — §4's two `InvalidRecipientGrantError` subclasses are the
 > other two classes this ADR adds, and they name a refusal the store makes after the
-> answer rather than one this operation makes before it. The message names which condition failed and **no lane
-> branches on the message**; where more than one fails, the first in the order §3
+> answer rather than one this operation makes before it. The message names which
+> condition failed and **no lane branches on the message**; where more than one fails, the first in the order §3
 > states is the one named, so the refusal is deterministic across implementations.
 
 > **Normative.** One type rather than one per condition, because every one of them has
@@ -595,7 +595,7 @@ class AssistantEngine(Protocol):                       # core/protocols.py
     ) -> tuple[PermissionDecision, ...]: ...
 
     async def establish_recipient_grant(                       # §3
-        self, decision_id: str, *, expires_at: UtcInstant
+        self, decision_id: DurableIdentifier, *, expires_at: UtcInstant
     ) -> RecipientGrant: ...
 
     async def standing_recipient_grants(                       # §7
@@ -607,7 +607,7 @@ class AssistantEngine(Protocol):                       # core/protocols.py
     ) -> tuple[RecipientGrant, ...]: ...
 
     async def revoke_recipient_grant(                          # §7
-        self, grant_id: str
+        self, grant_id: DurableIdentifier
     ) -> RecipientGrant | None: ...
 
 
@@ -648,6 +648,18 @@ class PermissionDecision(BaseModel):                   # core/types.py
         decided_at: UtcInstant,
     ) -> PermissionDecision: ...
 ```
+
+> **Normative.** Both identifier arguments are **`DurableIdentifier` and not `str`**,
+> and `AssistantEngine`'s own second obligation is what fixes them: *"Every identifier
+> argument undergoes `Identifier` validation before any I/O"*, which both rejects a
+> blank value with `ValueError` and strips surrounding whitespace from the value the
+> implementation then uses. `decision_id` names a `PermissionDecision.id` and
+> `grant_id` a `RecipientGrant.id`, both of which are `DurableIdentifier` on the
+> records themselves, so the argument and the field it names carry one type and a
+> client cannot make `" id "` and `"id"` disagree at the seam. That obligation is
+> **inherited rather than restated**: this ADR adds no validation rule of its own, and
+> the refusal is the local one obligation 4 already requires (a blank identifier is
+> refused before any I/O), not a new error class.
 
 > **Normative.** `RecipientGrantOutcome` is the carrier §6 requires, and it carries
 > **exactly one** of its two members: `established` on an act that recorded a grant,
@@ -1071,6 +1083,42 @@ holds.
 > returns it, or returns `None` where the store holds no outstanding granting record
 > with that id. None of the three composes, filters, projects, enriches or summarises
 > what the store returns, and none reads any other store.
+
+> **Normative.** `revoke_recipient_grant` **loses a concurrent revocation gracefully,
+> and this ADR decides that rather than leaving it to an implementation.** Two callers
+> may both read the same outstanding grant and both build a revoking record; the first
+> is appended and the second meets `RecipientGrantStore.record`'s revocation
+> invariant — a revoking record *"is refused unless the named grant is present, is
+> itself a granting record, **is not already revoked**, and matches every transcribed
+> field"* — and is refused with `InvalidRecipientGrantError`. **Where `record` refuses
+> a revoking record this operation built, the operation re-reads
+> `RecipientGrantStore.outstanding(grant_id)` and returns `None` where it is now
+> absent**, which is §7's own second branch reached late rather than a third outcome;
+> the error propagates unchanged where the grant is still outstanding, because the
+> refusal was then not the race.
+
+> **Normative.** `None` is the honest answer to the loser and not a swallowed error:
+> by the time that call completes the store holds no outstanding granting record with
+> that id, which is exactly what `None` means here, and it is what a caller arriving a
+> moment later is told. **The user's recourse succeeded** — the grant they asked to
+> revoke is revoked — and ADR-0193 §1's *"the recourse is to revoke a grant they
+> hold"* would be undischarged by an operation that failed spuriously on the one act
+> the ceiling makes users perform. No lane retries, appends a second revoking record,
+> or reports the loss as a fault.
+
+> **Normative.** The re-read is decisive for §3's reason read one store over, and the
+> two clauses are **one shape and not two**: a revoked grant never becomes outstanding
+> again — re-granting an expired triple mints a **new** record with a new id
+> (`record`'s own duplicate-subject clause) — so *"this id is no longer outstanding"*
+> is monotonic, exactly as *"this confirmation is resolved"* is, and the read confirms
+> a fact that cannot change back. It is likewise the only ground that can newly become
+> true between the read and the write: `record`'s other refusals of a **revoking**
+> record — a duplicate id, a record failing its own model, a named grant that is
+> absent, is not a granting record, or whose transcribed fields differ — are stable
+> properties of the record this operation built and of a row it already read, and the
+> re-read leaves every one of them propagating. The ceiling and duplicate-subject
+> grounds cannot arise at all, because ADR-0193 §1 refuses a revoking record on
+> neither.
 
 > **Normative.** `recent_recipient_grants` is what makes ADR-0193 §1's stated
 > recourse reachable, and it is here for that reason rather than for completeness.
@@ -1652,6 +1700,18 @@ enumeration in its own text (§9).
 > recourse is an act the user can actually perform, and naming a second confirmation
 > is what makes it that assertion rather than the retry §6 forbids.
 
+> **Normative.** Lane 1 ships the **concurrent-revocation** pair for §7, deterministic
+> in the same way as §3's: with a second revoking record for the same grant appended
+> **between** `revoke_recipient_grant`'s `outstanding` read and its write, the call
+> returns **`None`** and raises nothing, the store holds **exactly one** revoking
+> record for that grant, and the grant is absent from `standing_recipient_grants`. Its
+> companion is the arm a roster would omit — an `InvalidRecipientGrantError` from a
+> revoking `record` while the grant **is** still outstanding **propagates unchanged**.
+> The first fails against an implementation that let the loser's refusal reach a user
+> performing ADR-0193 §1's stated recourse; the second against one that converted the
+> class rather than re-reading the store, which would report a fault as a completed
+> revocation.
+
 > **Normative.** Lane 1 ships a test asserting that `from_confirmation` **accepts no
 > parameter naming a subject** — by introspecting its signature, as
 > `established_from`'s own test does — and one asserting that it refuses a
@@ -1817,8 +1877,14 @@ obligation (ADR-0089 §1).
   — no lane adds a browser operation without its own ratified decision — and this ADR
   adds none.
 
-- **ADR-0193 — neither amended nor superseded; every clause is used as given.** §13's
-  deferral is *satisfied* rather than changed, on exactly the ground ADR-0193 §15 used
+- **ADR-0193 — partially superseded in §1's "one class rather than several" limb
+  alone, and otherwise used as given.** That limb is the one exception on this ADR and
+  it is recorded where it belongs: on the header above, on ADR-0193's own `Status`
+  in this same change, and argued in §11 — §4's two `InvalidRecipientGrantError`
+  subclasses are what supersede it, because on those two grounds the caller's recourse
+  is not identical and §1's ceiling clause obliges a surface to name one of them. This
+  bullet is the classification of **everything else**, and nothing below reaches that
+  limb. §13's deferral is *satisfied* rather than changed, on exactly the ground ADR-0193 §15 used
   for ADR-0148 §3: it names the surfaces as another lane's to decide and this is that
   decision. §2's clause that *"Which surfaces offer the act, and how they carry it, is
   not decided here"* stays true of ADR-0193. §2's construction-path clause is obeyed —
