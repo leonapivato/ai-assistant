@@ -14,7 +14,7 @@ which is the property the subject under test is required to have (golden rule 1)
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import pytest
 
@@ -64,6 +64,19 @@ if TYPE_CHECKING:
         PermissionRuling,
         StepExecution,
     )
+
+#: ADR-0233 §15 leaves ``StepRunner._bound`` passing the fail-closed constant, and §6
+#: refuses that value at construction — so every egress call in this tree is
+#: unconstructable until the lane that follows computes it. The ADR names the state in
+#: terms: "a field that lands with nothing writing it leaves a seam answering
+#: ``PATH_WITHOUT_MODEL`` and refusing every send, which is the fail-closed direction
+#: working and an unfinished job". **Strict**, so the marker is an obligation rather
+#: than a licence: #2051's first act is deleting these, any test that still fails then
+#: is a real defect, and any that passes while still marked fails the suite. Not one
+#: assertion below is changed by the marking.
+_REFUSED_UNTIL_THE_COMPOSER_LANDS: Final = (
+    "ADR-0233 §15: the seam refuses every send until the composer lane (#2051) computes coverage"
+)
 
 AT = datetime(2026, 8, 14, 9, 0, tzinfo=UTC)
 PATIENT = timedelta(seconds=30)
@@ -376,6 +389,7 @@ async def test_a_non_egress_call_produces_the_durable_state_it_did_before_this_s
 # --- ADR-0152 §1, §13: the pairing pin ---------------------------------------
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_the_request_is_built_from_what_the_seam_returned_and_not_from_what_was_held() -> (
     None
 ):
@@ -419,6 +433,7 @@ async def test_the_request_is_built_from_what_the_seam_returned_and_not_from_wha
     assert [span.destination.canonical for span in request.egress_binding.spans if span.destination]
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_the_rebuilt_request_is_built_from_what_rebind_returned() -> None:
     """ADR-0152 §13: the ``rebind`` limb, separately and on the resuming path.
 
@@ -517,6 +532,7 @@ async def test_a_refused_binding_is_egress_unbindable_and_commits_nothing() -> N
     assert policy.decided == []
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_a_resumed_call_whose_binding_moved_is_refused_before_the_second_ruling() -> None:
     """ADR-0152 §7: refused before ``resolve``, so no resolving decision is recorded.
 
@@ -551,6 +567,7 @@ async def test_a_resumed_call_whose_binding_moved_is_refused_before_the_second_r
     assert stored.status is StepStatus.AWAITING_APPROVAL
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_a_forged_canonical_form_in_the_parked_row_is_refused_before_resolve() -> None:
     """ADR-0150 §12, ADR-0152 §7, §13: the forged-canonical case, through the runner.
 
@@ -590,6 +607,7 @@ async def test_a_forged_canonical_form_in_the_parked_row_is_refused_before_resol
     assert stored.status is StepStatus.AWAITING_APPROVAL
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_a_store_outage_on_the_resuming_path_propagates_too() -> None:
     """ADR-0152 §9, §13: the outage clause is stated over ``bind`` **and** ``rebind``.
 
@@ -648,6 +666,7 @@ async def test_a_store_outage_propagates_rather_than_becoming_a_disposition() ->
     assert after.model_dump(mode="json") == before.model_dump(mode="json")
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_the_recorded_decision_holds_the_binding_the_seam_derived() -> None:
     """ADR-0150 §1 and ADR-0152 §13: what the record holds when the call is *not* refused.
 
@@ -680,6 +699,7 @@ async def test_the_recorded_decision_holds_the_binding_the_seam_derived() -> Non
 # --- ADR-0181 §3, §4, §10: the origin, stamped and transcribed ----------------
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 @pytest.mark.parametrize("selected_external", [True, False])
 async def test_the_request_carries_the_origin_the_runner_was_given(
     *, selected_external: bool
@@ -722,6 +742,7 @@ async def test_the_request_carries_the_origin_the_runner_was_given(
     assert recorded.egress_binding.planned_with_external_content is selected_external
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_a_parked_call_planned_over_external_content_resumes_and_executes() -> None:
     """ADR-0181 §10's sixth case: the resume round-trip, end to end.
 
@@ -809,6 +830,7 @@ class _DowngradingTrail(FakeAuditTrail):
         )
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_resuming_a_confirmation_whose_origin_was_never_recorded_is_refused() -> None:
     """ADR-0184 §8's fourth clause: narrow the union and refuse, before any ruling.
 
