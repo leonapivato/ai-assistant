@@ -593,7 +593,7 @@ def test_the_shipped_default_is_the_figure_the_decision_names() -> None:
 
 
 @pytest.mark.parametrize("over_the_bound", [True, False])
-@pytest.mark.parametrize("subtype", [b"/Type1", b"/MMType1", b"/TrueType", b"/Type3"])
+@pytest.mark.parametrize("subtype", [b"/Type1", b"/MMType1", b"/TrueType", b"/Type3", b"/Type0"])
 async def test_a_font_the_extraction_cannot_build_precedes_the_content_charge(
     root: Path, parsed: list[object], over_the_bound: bool, subtype: bytes
 ) -> None:
@@ -610,11 +610,15 @@ async def test_a_font_the_extraction_cannot_build_precedes_the_content_charge(
     prevent: "report a size refusal as an extraction failure and that operator goes
     looking for corrupt files", and the reverse sends them to bounds that are not the
     problem. Both directions are run, because the class must not depend on the size of a
-    stream nothing parses — and **every subtype that reaches that raise** is run,
-    because the library reaches it by two routes: three subtypes whenever a
-    ``/FontDescriptor`` is present, and ``/Type3`` only where the font is
-    *interpretable*, which with no ``/ToUnicode`` and no ``/CharProcs`` it is. A walk
-    mirroring the unconditional route alone passes three of these and fails the fourth.
+    stream nothing parses — and **every route the library reaches that raise by** is
+    run, because there are three and a walk *stating* the condition rather than asking
+    the library misses one at a time: three subtypes reach it whenever a
+    ``/FontDescriptor`` is present; ``/Type3`` reaches it only where the font is
+    *interpretable*, which with no ``/ToUnicode`` and no ``/CharProcs`` it is; and every
+    other subtype reaches it through each ``/DescendantFonts`` entry, so a composite
+    ``/Type0`` carries the malformed descriptor a level below where a top-level test
+    looks. Rounds 3, 4 and 5 of this PR's review found those three in that order, which
+    is why the implementation now calls ``Font.from_font_resource`` instead.
     """
     data = unbuildable_font_pdf(
         decoded_bytes=4_000_000 if over_the_bound else 1_000, subtype=subtype

@@ -82,8 +82,16 @@ def _escaped(line: str) -> bytes:
     return encoded
 
 
-def _assembled(objects: list[bytes]) -> bytes:
-    """Wrap numbered objects in a header, a cross-reference table and a trailer."""
+def _assembled(objects: list[bytes], *, root: int = 1) -> bytes:
+    """Wrap numbered objects in a header, a cross-reference table and a trailer.
+
+    ``root`` is the catalogue's object number, and it is a parameter rather than the
+    constant 1 because :class:`_Objects` lets a builder claim numbers for the objects a
+    page refers to *before* the page tree exists. A trailer naming the wrong object is
+    not a broken fixture — ``pypdf`` recovers by scanning for a ``/Catalog`` — which is
+    exactly why it has to be right: a document that reaches the extractor through the
+    library's **repair** path is not the document the test means to be asserting about.
+    """
     document = bytearray(b"%PDF-1.4\n")
     offsets: list[int] = []
     for number, obj in enumerate(objects, start=1):
@@ -97,7 +105,9 @@ def _assembled(objects: list[bytes]) -> bytes:
     document += (
         b"trailer\n<< /Size "
         + str(size).encode()
-        + b" /Root 1 0 R >>\nstartxref\n"
+        + b" /Root "
+        + reference(root)
+        + b" >>\nstartxref\n"
         + str(table).encode()
         + b"\n%%EOF\n"
     )
@@ -177,10 +187,10 @@ class _Objects:
         """Append an object, and answer the reference to it."""
         return self.put(self.reserve(), body)
 
-    def build(self) -> bytes:
-        """The assembled document."""
+    def build(self, *, root: int) -> bytes:
+        """The assembled document, whose trailer names ``root`` as the catalogue."""
         assert all(body is not None for body in self._bodies), "a reserved object is unfilled"
-        return _assembled([body for body in self._bodies if body is not None])
+        return _assembled([body for body in self._bodies if body is not None], root=root)
 
 
 def reference(number: int) -> bytes:
@@ -328,7 +338,7 @@ def document(
         + (b" /Resources " + tree_resources if tree_resources is not None else b"")
         + b" >>",
     )
-    return table.build()
+    return table.build(root=catalogue)
 
 
 def _page_body(page: Page, *, tree: int, objects: _Objects) -> bytes:
@@ -729,12 +739,14 @@ def unbuildable_font_pdf(*, decoded_bytes: int, subtype: bytes = b"/Type1") -> b
     the stream first answers ``TOO_LARGE`` for a document that is malformed, which is
     the class confusion ADR-0232 §4 exists to prevent.
 
-    ``subtype`` is a parameter because the library reaches that raise by two different
-    routes: ``/Type1``, ``/MMType1`` and ``/TrueType`` reach it whenever a
-    ``/FontDescriptor`` is present, while ``/Type3`` reaches it only where the font is
-    *interpretable* — which, with no ``/ToUnicode`` and no ``/CharProcs``, it is, since
-    ``all(...)`` over nothing is true. A walk mirroring only the first route reports
-    the second's document as over-bound.
+    ``subtype`` is a parameter because the library reaches that raise by **three**
+    different routes, and a walk stating the condition instead of asking the library
+    misses one of them at a time: ``/Type1``, ``/MMType1`` and ``/TrueType`` reach it
+    whenever a ``/FontDescriptor`` is present; ``/Type3`` reaches it only where the font
+    is *interpretable*, which with no ``/ToUnicode`` and no ``/CharProcs`` it is, since
+    ``all(...)`` over nothing is true; and every **other** subtype reaches it through
+    each entry of ``/DescendantFonts``, so a composite ``/Type0`` carries the malformed
+    descriptor a level down where a top-level ``/FontDescriptor`` test does not look.
     """
     objects = _Objects()
     program = objects.add(stream_object(type1_program(2_000)))
@@ -745,13 +757,26 @@ def unbuildable_font_pdf(*, decoded_bytes: int, subtype: bytes = b"/Type1") -> b
         + program
         + b" >>"
     )
-    font = objects.add(
-        b"<< /Type /Font /Subtype "
-        + subtype
-        + b" /BaseFont /Twice /FontDescriptor "
-        + descriptor
-        + b" >>"
-    )
+    if subtype == b"/Type0":
+        # A composite font carries no descriptor of its own: `from_font_resource`
+        # reaches `_parse_font_descriptor` through each `/DescendantFonts` entry.
+        descendant = objects.add(
+            b"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /Twice"
+            b" /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>"
+            b" /FontDescriptor " + descriptor + b" >>"
+        )
+        font = objects.add(
+            b"<< /Type /Font /Subtype /Type0 /BaseFont /Twice /Encoding /Identity-H"
+            b" /DescendantFonts [" + descendant + b"] >>"
+        )
+    else:
+        font = objects.add(
+            b"<< /Type /Font /Subtype "
+            + subtype
+            + b" /BaseFont /Twice /FontDescriptor "
+            + descriptor
+            + b" >>"
+        )
     return document(
         [Page(contents=[operators(decoded_bytes)], fonts={"/F1": font})], objects=objects
     )
