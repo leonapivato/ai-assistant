@@ -948,13 +948,13 @@ def test_the_supersession_token_matches_case_insensitively(tmp_path: Path) -> No
 
 @pytest.mark.parametrize(
     "separator",
-    [" ", "   ", "\t", " \t "],
-    ids=["single-space", "three-spaces", "tab", "mixed"],
+    [" ", "   ", "\t", " \t ", "\t \t"],
+    ids=["single-space", "three-spaces", "tab", "mixed", "tab-first-mixed"],
 )
 def test_a_record_is_found_however_its_two_words_were_separated(
     tmp_path: Path, separator: str
 ) -> None:
-    """§4's record name is two words, and the run between them is any spaces or tabs.
+    r"""§4's record name is two words, and the run between them is any spaces or tabs.
 
     Read through a *reported* disagreement rather than through silence, because
     silence is exactly what a dropped record produces: §6 prefers a benign miss
@@ -967,11 +967,15 @@ def test_a_record_is_found_however_its_two_words_were_separated(
     record is reported under the canonical name, which is the folding
     ``adr_status.field_records`` does on the name as well as on the value.
 
-    Checked against two mutations, and nothing else under ``tests/scripts/``
-    fails under either — which is the gap #2021 records, measured. Narrowing
-    the run to a literal space fails ``three-spaces``, ``tab`` and ``mixed``;
-    narrowing it to a *homogeneous* run (spaces or tabs, not both) fails
-    ``mixed`` alone, which is why that case is here.
+    Each case is here because some narrower matcher survives every case above
+    it, so the set is a measurement rather than a sample. Checked against three
+    of them, and nothing else under ``tests/scripts/`` fails under any:
+    narrowing the run to a literal space fails every case but the first; a
+    *homogeneous* run (spaces or tabs, but not both) fails ``mixed`` and
+    ``tab-first-mixed``; and ``(?: +|\t+| ?\t ?)``, which admits one
+    space-wrapped tab, fails ``tab-first-mixed`` alone. No finite set of
+    literal separators pins an arbitrary matcher — what this set pins is that
+    the run is read as a *class*, which is the property #2021 names.
     """
     _make_repo(
         tmp_path,
