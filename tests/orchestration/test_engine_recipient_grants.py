@@ -28,18 +28,26 @@ from test_engine import (
     egress_confirmable,
 )
 
-from ai_assistant.core.errors import RecipientGrantError, UngrantableActError
+from ai_assistant.core.errors import (
+    InvalidRecipientGrantError,
+    RecipientGrantError,
+    UngrantableActError,
+)
 from ai_assistant.core.types import (
+    ActionRequest,
     CanonicalDestination,
     ContinuationToken,
     DestinationProtocol,
     Disposition,
+    PermissionDecision,
     PermissionOutcome,
+    PermissionRuling,
+    RecipientGrant,
     RecipientGrantNotEstablished,
     StepStatus,
     TurnOutcome,
 )
-from ai_assistant.testing import FakeRecipientGrantStore
+from ai_assistant.testing import FakeActionPolicy, FakeRecipientGrantStore
 from ai_assistant.testing.recipient_grants import recipient_grant
 
 #: When the store reads the clock. Inside every grant this module establishes, so
@@ -388,9 +396,10 @@ async def test_a_store_fault_carries_store_unavailable_and_never_raises() -> Non
     ``REFUSED``, which is the misreport ADR-0235 §4 names: a surface reporting a disk
     fault as a refusal tells the user their request was declined when it was not.
     """
-    harness = _harness()
+    store = FakeRecipientGrantStore(now=lambda: _NOW)
+    harness = _harness(store=store)
     token = await _parked(harness)
-    harness.recipient_grants.fail_writes(RecipientGrantError("the disk went away"))
+    store.fail_writes(RecipientGrantError("the disk went away"))
 
     resumed = await harness.engine.resume(
         token, approved=True, timeout=PATIENT, remember_recipients_until=_UNTIL
@@ -508,3 +517,135 @@ def test_the_outcome_carries_the_member_the_adr_declared() -> None:
     """``TurnOutcome`` grows exactly one field, and it defaults to ``None`` (§4)."""
     assert TurnOutcome.model_fields["recipient_grant"].default is None
     assert TurnOutcome(turn=None).recipient_grant is None
+
+
+# --- §2, §4: the answer a policy declined, and the base refusal -------------
+
+
+class _DecliningPolicy(FakeActionPolicy):
+    """A policy that declines an approving answer, which ``resolve`` expressly permits.
+
+    ``ActionPolicy.resolve``'s second obligation admits a ``DENY`` to an
+    ``approved=True`` answer — ADR-0042 §4 guarantees only the other direction — and
+    no shipping policy in this tree reaches it from a fixture. ADR-0235 §2 rules what
+    happens then, so the case needs a subject that produces it.
+    """
+
+    async def resolve(
+        self,
+        confirmed: PermissionDecision,
+        *,
+        approved: bool,
+    ) -> PermissionRuling:
+        """Record the call as the fake does, then decline whatever the user said."""
+        await super().resolve(confirmed, approved=approved)
+        return PermissionRuling(outcome=PermissionOutcome.DENY, reason="the policy declined it")
+
+
+class _RefusingStore:
+    """A store whose ``record`` refuses with the **base** refusal class.
+
+    ADR-0235 §4's ``REFUSED`` is "every other ``InvalidRecipientGrantError`` that
+    operation can raise — the duplicate-id check and the revocation invariants —
+    which no surface distinguishes". Neither is reachable from a resume over an
+    empty store, so the ground is arranged here; what the case is about is that the
+    carrier is read from the refusal's **type** and never from its message.
+
+    Composition rather than inheritance, because
+    :class:`~ai_assistant.testing.FakeRecipientGrantStore` is ``@final``.
+    """
+
+    def __init__(self) -> None:
+        """Wrap an empty store."""
+        self.held = FakeRecipientGrantStore(now=lambda: _NOW)
+
+    async def record(self, grant: RecipientGrant) -> str:
+        """Refuse, with the base class and no subclass.
+
+        Raises:
+            InvalidRecipientGrantError: Always.
+        """
+        msg = "the store refused this record on a ground no surface distinguishes"
+        raise InvalidRecipientGrantError(msg)
+
+    async def covering(self, request: ActionRequest) -> RecipientGrant | None:
+        """Forward."""
+        return await self.held.covering(request)
+
+    async def outstanding(self, grant_id: str) -> RecipientGrant | None:
+        """Forward."""
+        return await self.held.outstanding(grant_id)
+
+    async def standing(self) -> list[RecipientGrant]:
+        """Forward."""
+        return await self.held.standing()
+
+    async def recent(self, *, limit: int = 50) -> list[RecipientGrant]:
+        """Forward."""
+        return await self.held.recent(limit=limit)
+
+    async def export(self) -> list[RecipientGrant]:
+        """Forward."""
+        return await self.held.export()
+
+    async def clear(self) -> int:
+        """Forward."""
+        return await self.held.clear()
+
+
+async def test_a_policy_deny_on_an_approving_answer_records_it_and_carries_declined() -> None:
+    """ADR-0235 §12's second non-establishing answer, and §2's clause about it.
+
+    "Where the policy answers a ``DENY`` to an ``approved=True`` resume — which
+    ``ActionPolicy.resolve``'s second obligation expressly permits — the ``DENY`` is
+    recorded as it is today and **no grant is established**." The establishment fails
+    with the ruling's own reason and nothing looser is minted in its place.
+
+    ``resume`` **returns** and carries ``DECLINED``, which is the member that never
+    reaches the store: the resolving ruling was not an ``ALLOW``, so
+    ``RecipientGrantStore.record`` was not called at all — asserted over a store
+    that would have raised had it been.
+    """
+    store = _RefusingStore()
+    definition = egress_confirmable()
+    harness = Harness(
+        tools=(definition,),
+        binder=bound_binder(definition),
+        recipient_grants=store,
+        policy=_DecliningPolicy(),
+    )
+    token = await _parked(harness)
+
+    resumed = await harness.engine.resume(
+        token, approved=True, timeout=PATIENT, remember_recipients_until=_UNTIL
+    )
+
+    assert resumed.step is not None
+    assert resumed.step.disposition is Disposition.DENIED
+    assert await _resolutions(harness) == [PermissionOutcome.DENY]
+    assert resumed.recipient_grant is not None
+    assert resumed.recipient_grant.not_established is RecipientGrantNotEstablished.DECLINED
+    assert await store.export() == []
+
+
+async def test_a_base_class_refusal_carries_refused_and_names_no_cause() -> None:
+    """ADR-0235 §12's mapping test, on the arm the two discriminators leave over.
+
+    A refusal carrying the **base** ``InvalidRecipientGrantError`` is ``REFUSED`` and
+    is never guessed at: the mapping is by type, so an implementation that read a
+    message, took a count of its own, or read any listing after the refusal would
+    have to answer something else here.
+    """
+    store = _RefusingStore()
+    definition = egress_confirmable()
+    harness = Harness(tools=(definition,), binder=bound_binder(definition), recipient_grants=store)
+    token = await _parked(harness)
+
+    resumed = await harness.engine.resume(
+        token, approved=True, timeout=PATIENT, remember_recipients_until=_UNTIL
+    )
+
+    assert resumed.step is not None
+    assert resumed.step.disposition is Disposition.EXECUTED
+    assert resumed.recipient_grant is not None
+    assert resumed.recipient_grant.not_established is RecipientGrantNotEstablished.REFUSED

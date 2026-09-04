@@ -18,12 +18,17 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from ai_assistant.core.errors import ConnectionStoreError, PermissionDeniedError
+from ai_assistant.core.errors import (
+    ConnectionStoreError,
+    PermissionDeniedError,
+    UngrantableActError,
+)
 from ai_assistant.core.types import (
     ActionPlan,
     ActionRequest,
     CarriedProvenance,
     CostBasis,
+    CoverageUnrecordedBinding,
     DataTier,
     DiscloserProvenance,
     Disposition,
@@ -812,27 +817,36 @@ class _DowngradingTrail(FakeAuditTrail):
     """
 
     def __init__(self) -> None:
-        """A trail downgrading nothing until told which id to downgrade."""
+        """A trail downgrading nothing until told which id to downgrade.
+
+        ``epoch`` selects **which** ended epoch the row decodes as. Origin is the
+        default because it is the epoch ADR-0184 §5 wrote this class for; coverage is
+        the second, and ADR-0233 §14 makes it a distinct case rather than a variant —
+        a coverage-unrecorded row *has* ``planned_with_external_content`` and falls
+        straight past the origin guard, which is why the refusals are two branches.
+        """
         super().__init__()
         self.downgrade: str | None = None
+        self.epoch: type[OriginUnrecordedBinding | CoverageUnrecordedBinding] = (
+            OriginUnrecordedBinding
+        )
 
     async def get(self, decision_id: str) -> PermissionDecision | None:
-        """Answer with the stored decision, its origin dropped where asked."""
+        """Answer with the stored decision, decoded into an ended epoch where asked."""
         stored = await super().get(decision_id)
         if stored is None or decision_id != self.downgrade:
             return stored
         binding = stored.egress_binding
         if not isinstance(binding, EgressBinding):
             return stored
-        return stored.model_copy(
-            update={
-                "egress_binding": OriginUnrecordedBinding(
-                    spans=binding.spans,
-                    account=binding.account,
-                    transport_endpoint=binding.transport_endpoint,
-                )
-            }
-        )
+        fields: dict[str, object] = {
+            "spans": binding.spans,
+            "account": binding.account,
+            "transport_endpoint": binding.transport_endpoint,
+        }
+        if self.epoch is CoverageUnrecordedBinding:
+            fields["planned_with_external_content"] = binding.planned_with_external_content
+        return stored.model_copy(update={"egress_binding": self.epoch(**fields)})  # type: ignore[arg-type]
 
 
 async def test_resuming_a_confirmation_whose_origin_was_never_recorded_is_refused() -> None:
@@ -1086,3 +1100,61 @@ async def test_a_fail_closed_coverage_is_forwarded_unchanged_and_refused_at_the_
     after = await _stored(harness.plans, state)
     assert after.status is StepStatus.PENDING
     assert after.model_dump(mode="json") == before.model_dump(mode="json")
+
+
+# --- ADR-0235 §2: the establishing act's own refusal, on all four shapes -----
+
+
+@pytest.mark.parametrize(
+    "epoch", [OriginUnrecordedBinding, CoverageUnrecordedBinding], ids=["origin", "coverage"]
+)
+async def test_an_act_on_a_binding_from_an_ended_epoch_is_ungrantable(
+    epoch: type[OriginUnrecordedBinding | CoverageUnrecordedBinding],
+) -> None:
+    """ADR-0235 §12's binding refusal, on the two shapes only a decoded row can carry.
+
+    §12 requires the refusal "for **each** of the four shapes it refuses — an
+    ``egress_binding`` of ``None``, an ``OriginUnrecordedBinding``, a
+    ``CoverageUnrecordedBinding``, and an ``EgressBinding`` carrying
+    ``planned_with_external_content``". The other two are reachable through a whole
+    engine and are pinned there; these two are not, because ADR-0184 §4 leaves no
+    producer for either shape — a store decoding a row from an ended epoch is the
+    one route, which is what :class:`_DowngradingTrail` stands in for.
+
+    **The type matters and is the point.** Without the argument, resuming such a
+    confirmation is a ``PermissionDeniedError`` — the case above — because the
+    *answer* is unanswerable. With it, the refusal is of the **act**, and ADR-0235 §2
+    gives it ``UngrantableActError`` so a surface has one handler for "the act was
+    not performed, nothing was recorded, nothing was sent, and the call may still be
+    answered without the standing request".
+
+    Four things are asserted because they are four claims: the refusal happened with
+    the act's own type, no ruling was sought, nothing was written, and the step is
+    still durably parked with its ``CONFIRM`` unresolved.
+    """
+    tool = _tool(egress=True)
+    binder = _WatchingBinder(_bound_binder(tool))
+    trail = _DowngradingTrail()
+    harness = _Harness(tool=tool, binder=binder, trail=trail)
+    state = await _an_execution(harness.plans, _step())
+    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    assert parked.decision_id is not None
+    binder.returned.clear()
+    trail.downgrade = str(parked.decision_id)
+    trail.epoch = epoch
+
+    with pytest.raises(UngrantableActError, match="recipients could be made standing"):
+        await harness.runner.resume(
+            parked.state,
+            STEP,
+            confirmation_id=str(parked.decision_id),
+            approved=True,
+            timeout=PATIENT,
+            remember_recipients_until=AT + timedelta(days=1),
+        )
+
+    assert binder.returned == []
+    assert harness.policy.resolutions == []
+    assert await harness.trail.get("d-2") is None
+    stored = await _stored(harness.plans, state)
+    assert stored.status is StepStatus.AWAITING_APPROVAL
