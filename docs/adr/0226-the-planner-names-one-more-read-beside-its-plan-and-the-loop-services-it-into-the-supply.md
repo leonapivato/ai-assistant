@@ -286,6 +286,43 @@
   This ADR's `Status` line carries the leading `Partially superseded by` token, so under
   ADR-0082 §2 no amendment qualifier is written on it and this note is the whole record.
   Appended note per ADR-0070 §1; no text below is rewritten. Refs #1996, #1908.
+- Amended: 2026-09-04 by ADR-0231 — **§2's membership sentence, §4's
+  not-ruled-on-by-the-permission-gate clause and §6's cross-kind precedence sentence,
+  in one respect each.** §2's membership sentence has already been amended once by
+  ADR-0230 §1;
+  [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
+  §1 adds a fourth member, `WEB_SEARCH`, so it undercounts the
+  enumeration again. §4 rules that a `ReadAsk` *"is not selected against the
+  capability vocabulary, not resolved to a tool, **not ruled on by the permission
+  gate**, and never reaches `StepExecutor` or `ExecutionState`"*, and ADR-0231 §9 puts
+  a `WEB_SEARCH` servicing's **send** in front of `ActionPolicy`. §6's precedence
+  sentence, as ADR-0230 §7 last restated it, gains a fourth position (ADR-0231 §11).
+  **No ruling is replaced.** §1's additive-entry clause is the licence ADR-0231 is
+  taken under and is quoted in its §1; §2's statement of what each named kind *is*,
+  its at-most-one-ask-of-each-kind rule and its closure against un-ADR'd additions
+  bind entire; and §4's other three prohibitions bind **verbatim and are
+  load-bearing** — a `WEB_SEARCH` ask is not a `PlanStep`, is not selected against the
+  capability vocabulary, is **not resolved to a tool** (ADR-0231 §5 holds its
+  declaration by value and resolves no id), and reaches neither `StepExecutor` nor
+  `ExecutionState`. §4's own reason for the amended clause — *"Reading the owner's own
+  store is not an act in the world"* — is why the amendment is confined to the one
+  kind whose servicing **is** an act in the world, and it is the sentence a later lane
+  should read before widening it further.
+
+  **§5 is not amended and is load-bearing.** Its ask-nothing, park-nothing,
+  never-fail-the-turn posture is what ADR-0231 §9's decline rests on, and its channel
+  scoping binds the new kind unchanged. **§9 is not amended either**: ADR-0231 §13
+  adds one field per servicing to the same event under the same key, as ADR-0230 §9
+  did, and its no-copy rule binds the new kind without qualification. §3's namer rule
+  binds and is satisfied by the user rather than by an ordinal, because a `WEB_SEARCH`
+  ask carries no argument at all. **§12's outward-fetch deferral is fired, not
+  moved** — it names *"The outward fetch"* and reaches web search by name; firing a
+  deferral is the deferral working, so no record is owed for it.
+
+  This ADR's `Status` line carries the leading `Partially superseded by` token, so
+  under ADR-0082 §2 no amendment qualifier is written on it and this note is the whole
+  record. Appended note per ADR-0070 §1; no text below is rewritten. Refs #1996,
+  #1908.
 
 ## Context
 

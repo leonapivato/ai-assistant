@@ -82,6 +82,50 @@
   ratification (§13).
 - Requires **new `core` contract surface** and lands none of it (§11). Flagged
   under golden rule 5.
+- Amended: 2026-09-04 by ADR-0231 — **§1's single-route clause and §9's first,
+  second and fourth clauses, in the single scope of a `WEB_SEARCH` servicing's send.**
+  §1 routes every send through `ToolInvoker.invoke`.
+  [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
+  §6 shows why that route is
+  unavailable to a planner-emitted web search: `ToolInvoker`'s contract is that *"An id
+  is invocable if and only if it is registered"* and that `all_tools()` and the
+  invocable set *"are the same set, always"*, so taking it would put the search
+  integration in the registry the turn path selects capabilities from — which #1908,
+  ADR-0170 §5a and ADR-0208 §1 all forbid for a mechanism that returns records rather
+  than a payload. §9's first clause rules that *"There is no egress outside a claimed
+  step"*, its second that *"`PermissionDecision.step_id` is set on every egress
+  decision"*, and its fourth that a pending attempt is reconciled by ADR-0014 §4's
+  recovery scan; a `WEB_SEARCH` servicing is not a plan step and has none.
+
+  **The property those clauses buy is kept, in the same change, and that is why this is
+  an amendment and not a supersession.** ADR-0017 §3's condition 12 — an attempt
+  identifier carrying an explicit outcome — is borne by ADR-0192's invocation ledger,
+  whose `claim_invocation(*, decision: PermissionDecision)` is keyed on the authorising
+  decision rather than on a step, and whose completion carries one of ADR-0029 §3's
+  outcomes. §9's own third clause makes *pending* one of the four, so a claim left open
+  by a crash is an outcome rather than the absence of one, and ADR-0231 §6 rules that
+  nothing reconciles it and nothing may: a servicing that produces **one** record has
+  no second record to disagree with, and ADR-0192 §3 already forbids reading such a
+  claim as `SUCCEEDED`, as `FAILED`, as "did not run" or as an omission. §9's **third**
+  clause is already partially superseded by ADR-0192 on *where* an outcome is recorded,
+  and ADR-0231 neither extends nor narrows that record.
+
+  **Everything else of this ADR binds entire and is load-bearing in ADR-0231**: §2's
+  canonical destination set, over which ADR-0231 §8 defines a second protocol's
+  canonical form; §3's recipient authorisation tracing to a user act, its refusal of
+  every near-miss — *"a tool's own declaration, the scope or audience of a credential,
+  a configured base URL or host, an allowlist the system assembled"* — and its route
+  (a)/(b) partition, which is the whole of ADR-0231 §9; §4's whole-set rule, which
+  holds over a singleton set; §6's determinism, which is why ADR-0231 §11 composes the
+  query before the binding is derived; §7's positional credential gate; and §8's
+  approver and its three floors, including the disclosure floor that makes every search
+  a `CONFIRM` until a standing grant covers its origin. No clause is relaxed: one route
+  is added beside one, for one kind, under conditions ADR-0231 §6 states.
+
+  This ADR's `Status` line carries the leading `Partially superseded by` token, so
+  under ADR-0082 §2 no amendment qualifier is written on it and this note is the whole
+  record. Appended note per ADR-0070 §1; no text below is rewritten. Refs #1996,
+  #1908.
 
 ## Context
 
