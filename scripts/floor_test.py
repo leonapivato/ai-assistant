@@ -1031,6 +1031,70 @@ def _source_lines(source: str) -> list[str]:
     return source.replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
 
+#: The fields of a ``class``/``def`` header — everything the statement is made of
+#: *except* its body. ``ast.walk`` over each reaches the line the last of them ends
+#: on, which is what makes ``value: int,`` on its own line part of the enclosing
+#: ``def``'s definition and a docstring in the body not part of the class's.
+_HEADER_FIELDS: dict[type[ast.AST], tuple[str, ...]] = {
+    ast.FunctionDef: ("args", "returns", "type_params"),
+    ast.AsyncFunctionDef: ("args", "returns", "type_params"),
+    ast.ClassDef: ("bases", "keywords", "type_params"),
+}
+
+
+def _statement_span(node: ast.stmt) -> range:
+    """Every line of a statement that *is* its own definition, body and all.
+
+    An assignment and a ``type`` alias have no body to exclude: the value is the
+    definition, so a change anywhere inside a multi-line one — a tuple gaining an
+    entry, a ``Field(...)`` call gaining a constraint — is a change to the name's
+    definition and binds.
+    """
+    return range(node.lineno, (node.end_lineno or node.lineno) + 1)
+
+
+def _header_span(node: ast.stmt) -> range:
+    """Every line of a ``class``/``def`` **header**: its decorators and signature.
+
+    The header and not the whole statement, and the difference is the whole of
+    what issue #2049 is about. ``end_lineno`` on a ``ClassDef`` is the last line
+    of its body, so attributing the class's name to that span would put every
+    docstring line in the class inside the definition of the class — and #2049's
+    move is a docstring edit inside ``class FetchRefusal``. Read that way the two
+    blobs the issue names return ``['FetchRefusal']`` where the pattern returned
+    ``['for']``: a different false bind on the same edit, on a name PRs actually
+    write. The body's own definitions are reached on their own lines, by their own
+    nodes, which is where they belong.
+
+    Both ends are widened past the ``def`` line, in the one direction ADR-0209 §5
+    prices. **Down** to the first decorator, because ``@property`` above an
+    otherwise untouched ``def`` changes what that name is. **Up** to the last line
+    any part of the signature ends on, because a parameter, an annotation, a
+    default, a base class or a type parameter on its own line is part of the
+    definition and a move can change one without touching the ``def`` line at all
+    — the pattern this replaces missed that too, and it is under-binding
+    (adversarial review of PR #2054, round 1, blocker 1).
+    """
+    start = node.lineno
+    end = node.lineno
+    for decorator in getattr(node, "decorator_list", ()):
+        start = min(start, decorator.lineno)
+    for name in _HEADER_FIELDS[type(node)]:
+        value = getattr(node, name, None)
+        for item in value if isinstance(value, list) else [value]:
+            if item is None:
+                continue
+            for sub in ast.walk(item):
+                end = max(end, getattr(sub, "end_lineno", None) or end)
+    return range(start, end + 1)
+
+
+def _record(sites: dict[int, set[str]], span: range, names: set[str]) -> None:
+    """Attribute ``names`` to every line of ``span``."""
+    for lineno in span:
+        sites.setdefault(lineno, set()).update(names)
+
+
 def _definition_sites(source: str, which: str) -> dict[int, set[str]]:
     """Every name whose **definition statement** stands on a given line.
 
@@ -1087,15 +1151,18 @@ def _definition_sites(source: str, which: str) -> dict[int, set[str]]:
     sites: dict[int, set[str]] = {}
     for node in ast.walk(tree):
         if isinstance(node, _NAMED_DEFINITIONS):
-            sites.setdefault(node.lineno, set()).add(node.name)
+            _record(sites, _header_span(node), {node.name})
         elif isinstance(node, ast.TypeAlias) and isinstance(node.name, ast.Name):
-            sites.setdefault(node.name.lineno, set()).add(node.name.id)
+            _record(sites, _statement_span(node), {node.name.id})
         elif isinstance(node, ast.Assign | ast.AnnAssign):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            for target in targets:
-                for bound in ast.walk(target):
-                    if isinstance(bound, ast.Name) and isinstance(bound.ctx, ast.Store):
-                        sites.setdefault(bound.lineno, set()).add(bound.id)
+            bound = {
+                name.id
+                for target in targets
+                for name in ast.walk(target)
+                if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store)
+            }
+            _record(sites, _statement_span(node), bound)
     return sites
 
 

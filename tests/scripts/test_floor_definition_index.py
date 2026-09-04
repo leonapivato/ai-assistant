@@ -1,6 +1,12 @@
-"""ADR-0209 §3's word "symbol": what this repository's Python actually defines.
+"""What this repository's Python defines, and which definition a moved line makes.
 
-`scripts/floor_test.py` binds a moved ADR that names "a symbol occurring in an
+Two questions ADR-0209 asks of the same grammar, and `scripts/floor_test.py`
+answers both with `ast`. §3's is *whether a token is a symbol at all*, answered
+across the whole tree by `defined_names`, and it is what the first half of this
+module covers. §4's second limb asks *whose definition this base move changed*,
+answered per line by `moved_definitions`, and it is what the second half covers.
+
+**§3's.** `floor_test` binds a moved ADR that names "a symbol occurring in an
 added or removed line of the PR's diff". A token is a symbol when it names a
 definition this repository carries — ADR-0088 §1(b)'s "a backticked name
 identifying something in the repository" — and `floor_test.defined_names` is what
@@ -28,8 +34,7 @@ bracket expression as the letter itself. That run is why Python is read with `as
 and why the other two languages are no longer read by a pattern at all: a pattern
 over a grammar is an enumeration of it, and the grammar kept winning.
 
-So the two groups here answer two different questions, and the split is not
-arbitrary:
+So the groups here answer different questions, and the split is not arbitrary:
 
 - **Python, by form.** `_python_definitions` is checked against small sources, one
   per binding form the language has and one per binding it must *not* treat as a
@@ -38,6 +43,10 @@ arbitrary:
   `class for` — which is itself the argument for `ast`.
 - **The corpus, both directions.** Real symbols this repository is built on must
   resolve, and issue #1799's ADR-header vocabulary must not.
+- **§4, by move.** `moved_definitions` is checked against pairs of endpoints, each
+  paired with what the line pattern it replaced returned over the same pair —
+  which is the whole of issue #2049, where that docstring-wrapping *did* happen,
+  in `core/types.py`, and bound every open lane on `for`.
 """
 
 from __future__ import annotations
@@ -198,9 +207,10 @@ def test_the_corpus_boilerplate_names_no_definition(token: str) -> None:
 # and the check is stated as `_REPLACED_PATTERN` so each parametrised case says
 # for itself which direction the pattern got wrong: it *matched* three lines of
 # docstring prose (issue #2049, the over-binding this closes), and it *missed* a
-# bare annotated field and a `type` alias (under-binding, the direction ADR-0209
-# §5 forbids). The cases where it agreed are marked so too, so that the
-# assertions below are not silently testing only the disagreements.
+# bare annotated field, a `type` alias, a decorator, and every multi-line header
+# and value whose changed part is not the line the name is on (under-binding, the
+# direction ADR-0209 §5 forbids). The cases where it agreed are marked so too, so
+# that the assertions below are not silently testing only the disagreements.
 
 _REPLACED_PATTERN = re.compile(
     r"^\s*(?:async\s+)?def\s+(?P<def>[^\W\d]\w*)"
@@ -291,12 +301,53 @@ _MOVES = {
         {"render"},
         {"render"},
     ),
-    # A decorator is not the definition's line, under either reading.
+    # `@property` above an otherwise untouched `def` changes what that name is, so
+    # the header span reaches down to the first decorator. The pattern read the
+    # decorator's own line and matched nothing on it.
     "a decorator added above an untouched def": (
         "class C:\n    def render(self) -> None: ...\n",
         "class C:\n    @property\n    def render(self) -> None: ...\n",
+        {"render"},
         set(),
+    ),
+    # Adversarial review of PR #2054, round 1, blocker 1: a multi-line header or
+    # value can change without the line carrying the name changing at all. Each of
+    # the next four is an under-bind the pattern had too — it reads one line, and
+    # `value: str,` on its own line matches none of its three alternatives.
+    "a parameter annotation on its own line": (
+        "def render(\n    value: int,\n) -> None: ...\n",
+        "def render(\n    value: str,\n) -> None: ...\n",
+        {"render"},
         set(),
+    ),
+    "a return annotation on its own line": (
+        "def render(\n    a: int,\n) -> None:\n    ...\n",
+        "def render(\n    a: int,\n) -> str:\n    ...\n",
+        {"render"},
+        set(),
+    ),
+    "a base class on its own line": (
+        "class Model(\n    Base,\n):\n    a: int\n",
+        "class Model(\n    Other,\n):\n    a: int\n",
+        {"Model"},
+        set(),
+    ),
+    "a multi-line value gaining an entry": (
+        "FIELDS = (\n    'a',\n)\n",
+        "FIELDS = (\n    'a',\n    'b',\n)\n",
+        {"FIELDS"},
+        set(),
+    ),
+    # And the boundary the same widening must not cross. `end_lineno` on a
+    # `ClassDef` is the last line of its *body*, so a whole-statement span would
+    # put every docstring line inside the definition of the class — which is
+    # #2049's move exactly (`class FetchRefusal`), read as a bind on a name PRs
+    # actually write instead of on `for`. The header stops at the signature.
+    "a docstring changed inside a multi-line class": (
+        'class Model:\n    """One.\n\n    Old.\n    """\n\n    a: int\n',
+        'class Model:\n    """One.\n\n    class for all of them rather\n    """\n\n    a: int\n',
+        set(),
+        {"for"},
     ),
     # The two the pattern *missed*. Both are under-binding, which ADR-0209 §5
     # names as the failure it must not have — a pydantic field and a `Protocol`
@@ -320,7 +371,7 @@ def test_a_moved_line_defines_what_python_says_it_defines(move: str) -> None:
 
 @pytest.mark.parametrize("move", _MOVES)
 def test_the_replaced_pattern_is_what_each_case_is_measured_against(move: str) -> None:
-    """Pin the mutation: without this, five of the cases above prove nothing.
+    """Pin the mutation: without this, ten of the cases above prove nothing.
 
     A case the pattern already got right is worth keeping — it is what says the
     narrowing did not throw the real answers out with the false one — but a case
