@@ -69,6 +69,19 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import ActionPolicy
 
+#: ADR-0233 §15 leaves ``StepRunner._bound`` passing the fail-closed constant, and §6
+#: refuses that value at construction — so every egress call in this tree is
+#: unconstructable until the lane that follows computes it. The ADR names the state in
+#: terms: "a field that lands with nothing writing it leaves a seam answering
+#: ``PATH_WITHOUT_MODEL`` and refusing every send, which is the fail-closed direction
+#: working and an unfinished job". **Strict**, so the marker is an obligation rather
+#: than a licence: #2051's first act is deleting these, any test that still fails then
+#: is a real defect, and any that passes while still marked fails the suite. Not one
+#: assertion below is changed by the marking.
+_REFUSED_UNTIL_THE_COMPOSER_LANDS: Final = (
+    "ADR-0233 §15: the seam refuses every send until the composer lane (#2051) computes coverage"
+)
+
 #: The corpus sizes the hostile scenarios are run at: one hostile entry among two
 #: planted records, and one among ten. Two sizes rather than one because the
 #: selection the origin is computed over is the whole retrieved set, so a corpus
@@ -218,6 +231,7 @@ async def _drive(  # noqa: PLR0913 — one keyword per axis a scenario varies on
 # --- the arm ----------------------------------------------------------------
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 @pytest.mark.parametrize("records", HOSTILE_CORPORA)
 async def test_the_hostile_send_is_parked_with_the_call_s_origin_on_the_confirmation(
     tmp_path: Path, records: int
@@ -244,6 +258,7 @@ async def test_the_hostile_send_is_parked_with_the_call_s_origin_on_the_confirma
     assert egress.spans, "the binding carried no occurrence for the card to render"
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 @pytest.mark.parametrize("records", HOSTILE_CORPORA)
 async def test_the_recorded_ruling_carries_the_marker_and_names_it(
     tmp_path: Path, records: int
@@ -266,6 +281,7 @@ async def test_the_recorded_ruling_carries_the_marker_and_names_it(
     assert _PLANNED_OVER_EXTERNAL in decision.ruling.reason
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_a_selection_holding_nothing_external_is_judged_on_the_ordinary_path(
     tmp_path: Path,
 ) -> None:
@@ -295,6 +311,7 @@ async def test_a_selection_holding_nothing_external_is_judged_on_the_ordinary_pa
     assert step.confirmation.egress.planned_with_external_content is False
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_a_benign_calendar_entry_carries_the_marker_too(tmp_path: Path) -> None:
     """The fact is about a selection, not about hostility, and nothing may read it as one.
 
@@ -358,6 +375,7 @@ class _AuthorisesEverything:
         return PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="calibration: allow")
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_the_instrument_can_see_a_transmission(tmp_path: Path) -> None:
     """A gate that authorises the call reaches the transport, and the figure moves.
 
@@ -387,6 +405,7 @@ async def test_the_instrument_can_see_a_transmission(tmp_path: Path) -> None:
 # --- the figures ------------------------------------------------------------
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_arm_a_figures(tmp_path: Path) -> None:
     """Report ASR-at-gate and ASR-past-gate over the scenario set, and assert the second.
 

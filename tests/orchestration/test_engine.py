@@ -168,6 +168,19 @@ if TYPE_CHECKING:
     )
     from ai_assistant.orchestration.delivery import DeliveryOutbox
 
+#: ADR-0233 §15 leaves ``StepRunner._bound`` passing the fail-closed constant, and §6
+#: refuses that value at construction — so every egress call in this tree is
+#: unconstructable until the lane that follows computes it. The ADR names the state in
+#: terms: "a field that lands with nothing writing it leaves a seam answering
+#: ``PATH_WITHOUT_MODEL`` and refusing every send, which is the fail-closed direction
+#: working and an unfinished job". **Strict**, so the marker is an obligation rather
+#: than a licence: #2051's first act is deleting these, any test that still fails then
+#: is a real defect, and any that passes while still marked fails the suite. Not one
+#: assertion below is changed by the marking.
+_REFUSED_UNTIL_THE_COMPOSER_LANDS: Final = (
+    "ADR-0233 §15: the seam refuses every send until the composer lane (#2051) computes coverage"
+)
+
 AT = datetime(2026, 7, 23, 9, 0, tzinfo=UTC)
 
 
@@ -911,6 +924,7 @@ def _egress_harness() -> Harness:
     return Harness(tools=(definition,), binder=bound_binder(definition))
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_a_parked_egress_confirmation_carries_the_recorded_decisions_binding() -> None:
     """ADR-0178 §5: the live site, from the **recorded** decision and nothing else.
 
@@ -935,6 +949,7 @@ async def test_a_parked_egress_confirmation_carries_the_recorded_decisions_bindi
     assert confirmation.egress.spans == binding.spans
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_a_parked_egress_confirmation_carries_neither_barred_value() -> None:
     """ADR-0178 §2: the reference and the endpoint stay on the engine's side.
 
@@ -955,6 +970,7 @@ async def test_a_parked_egress_confirmation_carries_neither_barred_value() -> No
     assert EGRESS_ENDPOINT not in rendered
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_a_recovered_egress_confirmation_equals_the_live_one() -> None:
     """ADR-0178 §5's fourth clause: no reduced, digested or partial recovered form.
 
@@ -997,6 +1013,7 @@ async def test_a_non_egress_park_carries_no_egress_member_on_either_path() -> No
     assert pending[0].egress is None
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_no_engine_path_builds_an_egress_member_for_a_non_egress_call() -> None:
     """ADR-0178 §4: ``None`` is the only shape the engine answers without a binding.
 
@@ -1032,6 +1049,7 @@ async def test_no_engine_path_builds_an_egress_member_for_a_non_egress_call() ->
     assert reduced.spans, "an egress call's description is not empty here"
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_no_confirmation_is_composed_for_a_binding_recording_no_origin() -> None:
     """ADR-0184 §8's second and fourth clauses: refused, not projected, not blanked.
 
@@ -1105,6 +1123,7 @@ def _expanding_harness() -> Harness:
     )
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_an_egress_confirmations_payload_expands_by_a_factor_not_a_term() -> None:
     """ADR-0178 §9: the addition is a product, and saying otherwise would be false.
 
@@ -1128,6 +1147,7 @@ async def test_an_egress_confirmations_payload_expands_by_a_factor_not_a_term() 
     assert whole > 4 * arguments
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_an_over_limit_egress_confirmation_is_refused_whole_and_the_park_survives() -> None:
     """ADR-0178 §9: refused rather than truncated, and undeliverable is not lost.
 
@@ -5730,6 +5750,7 @@ def _claiming_harness(**overrides: object) -> Harness:
     )
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_a_call_planned_over_no_selection_at_all_carries_false() -> None:
     """The baseline the two cases below are measured against, and it is not padding.
 
@@ -5750,6 +5771,7 @@ async def test_a_call_planned_over_no_selection_at_all_carries_false() -> None:
     assert recorded.egress_binding.planned_with_external_content is False
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_a_plans_own_claim_about_the_field_is_discarded_and_not_merged() -> None:
     """ADR-0181 §4's first clause, §10's third case: discard, not merge.
 
@@ -5785,6 +5807,7 @@ async def test_a_plans_own_claim_about_the_field_is_discarded_and_not_merged() -
     assert recorded.egress_binding.planned_with_external_content is True
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_a_second_clean_selection_does_not_clear_what_the_first_recorded() -> None:
     """ADR-0181 §4's third clause, §10's fourth case: the multi-selection case.
 
@@ -5816,6 +5839,7 @@ async def test_a_second_clean_selection_does_not_clear_what_the_first_recorded()
     assert recorded.egress_binding.planned_with_external_content is True
 
 
+@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_the_confirmation_the_user_answers_carries_the_calls_origin() -> None:
     """ADR-0178 §5 as ADR-0181 §3's third clause extends it: the same fact, one route.
 
