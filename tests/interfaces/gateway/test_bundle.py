@@ -1201,6 +1201,95 @@ def test_the_page_tells_a_terminal_value_from_a_body_that_simply_stopped() -> No
     assert script.count("ended before the gateway finished it") == 2
 
 
+def test_a_line_that_is_not_one_json_object_is_refused_by_the_reader_that_frames_it() -> None:
+    """#2008: ADR-0175 §2's second clause is exhaustive, so this is its second limb.
+
+    "Every stream ends in exactly one of two ways … the gateway wrote a **terminal**
+    value, or the body ended without one. A reader that reached a terminal value has the
+    whole of what the gateway sent; a reader that did not has a transport failure and
+    the front end reports it as one." A reader stopped by a line it cannot read reached
+    no terminal value, so reporting it as a transport failure applies that clause rather
+    than extending it, and no decision moves.
+
+    **The guard is in the reader and not at each consumer.** "One JSON object per line"
+    is ``streamValues``' own contract, so a line breaching it is refused where the
+    contract is stated — which is also what makes ``value.kind`` unable to be read off
+    something that cannot carry a kind, closing the second of #2008's two throw sites by
+    construction rather than by a second check.
+
+    **And it is refused as its own type.** A bare ``SyntaxError`` is indistinguishable
+    at the catch that has to choose between four endings — the owner's abort, a failed
+    connection, a body given up on, and this — so the throw carries which one it is.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+
+    assert "class MisframedValue extends Error {}" in script
+    framing = functions["frameOf"]
+    assert "value = JSON.parse(framed);" in framing
+    assert framing.count("throw new MisframedValue();") == 2
+    # A value is something a discriminator is read *from* (§2's first clause), and none
+    # of these can carry one. An object whose kind this page does not know is a
+    # different case and stays a value (ADR-0168 §10).
+    assert 'if (value === null || typeof value !== "object" || Array.isArray(value)) {' in framing
+    assert "TERMINAL_KINDS" not in framing
+    # The reader frames every line through it, and parses none of its own accord.
+    assert "yield frameOf(framed);" in functions["streamValues"]
+    assert script.count("JSON.parse(") == 1
+
+
+def test_a_misframed_answer_stream_is_not_told_as_a_gateway_that_had_gone() -> None:
+    """The ending #2008 is about, and the two sentences it is deliberately not.
+
+    It is not ``GATEWAY_GONE`` — "The gateway did not answer, so it may have stopped",
+    whose remedy is a restart and a fresh bootstrap value — because the gateway wrote a
+    head and a whole line of body. Announcing an act as an outcome it is known not to
+    have is ADR-0139 §4's direction breached, and the remedy threw the session away.
+
+    And it is not ``ANSWER_STREAM_CUT``, which opens "ended before the gateway finished
+    it": a gateway that wrote a whole unreadable line did not stop part way through
+    writing one, and saying it did would be a wrong explanation rather than a missing
+    one. ADR-0175 §2's third clause leaves "the exact framing of a value on a stream" to
+    the implementing lane, and this page already carries four sentences inside the one
+    transport-failure limb because "the condition is the same; what was cut is not".
+    """
+    script = _code("app.js")
+    stream = _functions(script)["askStreaming"]
+    said = _joined(_constant(script, "ANSWER_STREAM_MISFRAMED"))
+
+    assert "could not read as a value on it" in said
+    assert "what became of the turn is not known" in said
+    assert "The gateway did answer" in said
+    assert "Nothing was re-sent and nothing was cancelled." in said
+    assert _constant(script, "ANSWER_STREAM_MISFRAMED").rstrip().endswith("WHERE_TO_LOOK")
+    # Neither of the two sentences it exists to displace.
+    assert "ended before the gateway finished it" not in said
+    assert "may have stopped" not in said
+    # One declaration, and one site: the two arms of that site are one `fault` call.
+    assert script.count("ANSWER_STREAM_MISFRAMED") == 3
+    assert "ANSWER_STREAM_MISFRAMED" in stream
+
+    # Exactly one condition is taken from the read, and every other one is re-thrown to
+    # `ask`, which is where an abort is told from a connection that failed.
+    assert "if (!(error instanceof MisframedValue)) {" in stream
+    assert stream.index("if (!(error instanceof MisframedValue)) {") < stream.index("throw error;")
+    # The partial text goes where `ANSWER_STREAM_CUT` sends it, and the clause about the
+    # screen is added only where there was something on it.
+    misframed = stream.index("if (!(error instanceof MisframedValue)) {")
+    assert stream.index("clearNode(panel);", misframed) < stream.index(
+        "ANSWER_STREAM_MISFRAMED", misframed
+    )
+    assert stream.index('show("answer", false);', misframed) < stream.index(
+        "ANSWER_STREAM_MISFRAMED", misframed
+    )
+    assert "waiting.heard ? `${ANSWER_STREAM_MISFRAMED} ${PARTIAL_CLEARED}`" in stream
+    # And the owner's own act still wins: an abort raises on the *next* read, so a line
+    # already buffered can be found unreadable after `abandonAsk` has said what happened.
+    assert stream.index("if (waiting.stopping.signal.aborted) {", misframed) < stream.index(
+        "clearNode(panel);", misframed
+    )
+
+
 def test_a_cut_answer_stream_leaves_no_partial_answer_on_screen() -> None:
     """§2 makes a body that ended without a terminal value a **transport failure**, and
     ADR-0173 §3 makes the terminal outcome's ``reply`` the answer — "no front end
