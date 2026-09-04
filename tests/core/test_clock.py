@@ -308,6 +308,13 @@ def test_the_guard_depends_on_nothing_but_the_standard_library_and_core_types() 
     ``ai_assistant``, and the one intra-package import is the ADR-0030 §4
     direction: ``core/clock.py`` → ``core/types.py``, never the reverse.
     ``lint-imports`` polices the package boundary; this polices the module's.
+
+    ``typing`` left the set when ``Callable`` stopped being hidden behind
+    ``if TYPE_CHECKING:`` (#1706): :data:`~ai_assistant.core.clock.Clock` is a
+    PEP 695 alias, so its right-hand side is evaluated lazily and a name the
+    module never imported at runtime made ``Clock.__value__`` raise. The block
+    held nothing else, so it went with the import — the set is *smaller*, which
+    is the direction this assertion exists to protect.
     """
     import ast  # noqa: PLC0415 — the inspection is this test's subject
     import inspect  # noqa: PLC0415
@@ -329,7 +336,6 @@ def test_the_guard_depends_on_nothing_but_the_standard_library_and_core_types() 
     assert modules == {
         "__future__",
         "datetime",
-        "typing",
         "collections.abc",
         "ai_assistant.core.types",
     }
