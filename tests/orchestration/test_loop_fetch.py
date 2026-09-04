@@ -434,6 +434,40 @@ async def test_an_unresolvable_ordinal_is_audited_and_renders_nothing() -> None:
     assert _DISTINCTIVE not in await _prompt_over(responded)
 
 
+async def test_an_unresolvable_file_and_an_unresolvable_label_are_counted_together() -> None:
+    """ADR-0230 §9: the unresolved count is **one population across the kinds**.
+
+    "An ``F`` label outside the turn's listing never reached the fetcher and counts in
+    the existing unresolved-label count", which is ADR-0226 §3's count — so a request
+    naming an unresolvable file *and* a hop must report both, and the two arms below
+    are what a servicer assigning one kind's figure over the other's would fail.
+
+    The mixed arm is the one that matters: with a **resolvable** hop the file's drop is
+    the only thing in the count, so a servicer that overwrote it would report a turn
+    that dropped nothing at all — a false zero in exactly the population §8's rates are
+    read over, and invisible to a case asking for a file alone.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_belief("belief-1", "the quarterly margin", evidence=("cited-1",)))
+    await memory.add(_belief("cited-1", "an earlier quarterly exchange"))
+
+    for labels, expected, note in (
+        (("M1",), 1, "the file alone: the hop resolved"),
+        (("M9",), 2, "and both, where the hop's label is out of range too"),
+    ):
+        planner = FakePlanner(now=_clock, read_request=_file_and_hop("F9", *labels))
+        with structlog.testing.capture_logs() as captured:
+            await _loop(
+                planner=planner,
+                fetcher=FakeFetcher(_ROOT, read_at=_NOW),
+                memory=memory,
+                retrieval_limit=1,
+            ).respond("how did the quarter go", narrow=_bounded())
+
+        assert _serviced(captured)["labels_unresolved"] == expected, note
+        assert _serviced(captured)["refusal"] is None, "neither label reached the fetcher"
+
+
 async def test_a_named_file_on_a_turn_that_showed_no_listing_resolves_to_nothing() -> None:
     """§2: "a turn on which the loop passed no listing is a turn on which no file is
     nameable" — and §3, which makes no fetcher and an empty root the same case."""
