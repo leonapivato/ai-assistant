@@ -82,7 +82,12 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.recovery import RecoveryScan
 from ai_assistant.testing import FakePlanStore
 from ai_assistant.tools.egress import TransportPinError
-from ai_assistant.tools.web_search import WEB_SEARCH, WEB_SEARCH_SOURCE_NAME, WebSearchEgress
+from ai_assistant.tools.web_search import (
+    MAX_JSON_DEPTH,
+    WEB_SEARCH,
+    WEB_SEARCH_SOURCE_NAME,
+    WebSearchEgress,
+)
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import ToolCall
@@ -694,6 +699,58 @@ async def test_a_body_that_is_not_the_documented_shape_is_provider_refused(paylo
     outcome, _ = await _searched(channels=[far_end(response(payload=payload))])
 
     assert outcome.refusal is SearchRefusal.PROVIDER_REFUSED
+
+
+@pytest.mark.parametrize(
+    "depth",
+    [
+        pytest.param(MAX_JSON_DEPTH + 1, id="one-past-the-bound"),
+        pytest.param(200_000, id="deep-enough-to-exhaust-the-decoders-stack"),
+    ],
+)
+async def test_a_body_nested_past_the_bound_is_provider_refused(depth: int) -> None:
+    """A well-formed body the decoder cannot descend is a body, not a fault.
+
+    ``json``'s scanner descends one level per open bracket, so a response nested
+    deeply enough exhausts the interpreter's stack rather than failing to parse — and
+    that is reachable well inside ``search_max_response_bytes``' default megabyte,
+    which is what makes it a response a provider can actually send. ADR-0231 §17 says
+    this member raises for no source reason.
+
+    **The deep arm is the one that would fail a caught ``RecursionError``.** A stack
+    that has already overflowed is not one an ``except`` clause can be relied on to
+    unwind — the first attempt at this fix caught the error and the error left anyway
+    — so the depth is bounded off the octets before the decoder is entered, and this
+    arm is what says so. The boundary arm beside it fails a comparison the wrong way
+    round.
+    """
+    payload = b'{"web": ' + b"[" * depth + b"]" * depth + b"}"
+
+    outcome, _ = await _searched(
+        channels=[far_end(response(payload=payload))], max_response_bytes=len(payload) + 1024
+    )
+
+    assert outcome.refusal is SearchRefusal.PROVIDER_REFUSED
+
+
+async def test_a_body_at_the_nesting_bound_is_read_normally() -> None:
+    """The boundary's other half: a documented answer is four levels deep, not a hundred.
+
+    Without it the bound could be set to one and every case above would still pass
+    while the integration refused every real response.
+    """
+    padding = MAX_JSON_DEPTH - 4
+    nested = b"[" * padding + b"]" * padding
+    payload = (
+        b'{"padding": ' + nested + b', "web": {"results": [{"title": "t", '
+        b'"url": "https://a.invalid/x"}]}}'
+    )
+
+    outcome, _ = await _searched(
+        channels=[far_end(response(payload=payload))], max_response_bytes=len(payload) + 1024
+    )
+
+    assert [record.content for record in outcome.records] == ["t\nhttps://a.invalid/x"]
 
 
 async def test_a_channel_that_cannot_be_opened_is_transport_failed() -> None:

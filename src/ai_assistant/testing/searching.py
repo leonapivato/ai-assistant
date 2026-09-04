@@ -165,6 +165,71 @@ FAKE_WEB_SEARCH: Final = ToolDefinition(
 )
 
 
+def _check_bounds(max_results: int, max_result_chars: int) -> None:
+    """Refuse a bound outside ADR-0231 §5's stated domain for it.
+
+    Args:
+        max_results: ``Settings.search_max_results``.
+        max_result_chars: ``Settings.search_max_result_chars``.
+
+    Raises:
+        TypeError: If either is not an ``int``, ``bool`` included — the type is part of
+            the domain for the concrete searcher's reason, and the canonical fake must
+            not be the looser of the two.
+        ValueError: If either is below 1, or if ``max_results`` is above
+            :data:`DEFAULT_MAX_RESULTS`, which is §5's whole stated domain and not
+            merely its default.
+    """
+    for label, bound, ceiling in (
+        ("max_results", max_results, DEFAULT_MAX_RESULTS),
+        ("max_result_chars", max_result_chars, None),
+    ):
+        if isinstance(bound, bool) or type(bound) is not int:
+            msg = f"{label} must be an integer, got {bound!r}"
+            raise TypeError(msg)
+        if bound < 1:
+            msg = f"{label} must be at least 1, got {bound}"
+            raise ValueError(msg)
+        if ceiling is not None and bound > ceiling:
+            msg = f"{label} must be at most {ceiling} (ADR-0231 §5), got {bound}"
+            raise ValueError(msg)
+
+
+def _check_source(name: str, origin: str | None, reported_at: datetime) -> None:
+    """Refuse a source this fake could not mint an attested record for.
+
+    Every one of these is refused **where it is configured** rather than where it would
+    bite, which is the whole posture of a canonical fake: a state this fake cannot
+    answer from is one that raises out of :meth:`FakeWebSearcher.search` at an
+    arbitrary later call, and ADR-0231 §17 says only a cancellation leaves that member.
+
+    Args:
+        name: The source instance.
+        origin: The connected account's origin, or ``None`` for none.
+        reported_at: The instant a scripted response declares.
+
+    Raises:
+        ValueError: If ``name`` is blank or is a value ``Identifier`` would strip —
+            §17's clause, and §10 requires this value and a record's ``reported_by``
+            to be **equal**, so a searcher named ``" search "`` would mint one no
+            equality could hold; if ``origin`` is present and blank; or if
+            ``reported_at`` is not timezone-aware, which ``UtcInstant`` refuses in
+            every field this fake puts it in.
+    """
+    if not name.strip():
+        msg = f"name must be non-blank, got {name!r}"
+        raise ValueError(msg)
+    if name.strip() != name:
+        msg = f"name must be a value Identifier accepts unchanged, got {name!r}"
+        raise ValueError(msg)
+    if origin is not None and not origin.strip():
+        msg = f"origin must hold text, or be None entirely, got {origin!r}"
+        raise ValueError(msg)
+    if reported_at.tzinfo is None or reported_at.utcoffset() is None:
+        msg = f"reported_at must be timezone-aware, got {reported_at!r}"
+        raise ValueError(msg)
+
+
 @final
 class FakeWebSearcher:
     """A scriptable, conforming ``WebSearcher`` over a mapping (ADR-0231 §17)."""
@@ -205,8 +270,10 @@ class FakeWebSearcher:
                 refusal branch untestable in the one case it is easiest to write by
                 accident.
             reported_at: The instant a scripted response declares, on the provider's
-                own clock (ADR-0231 §10, ADR-0092 §3). Every minted record is
-                attested to it, which ``SearchOutcome`` enforces anyway.
+                own clock (ADR-0231 §10, ADR-0092 §3). Timezone-aware, which
+                ``UtcInstant`` requires and this refuses at construction rather than
+                at a mint. Every minted record is attested to it, which
+                ``SearchOutcome`` enforces anyway.
             max_results: The bound this searcher was configured with —
                 ``Settings.search_max_results``. At most this many records are
                 minted, whatever a script named. From 1 to
@@ -227,38 +294,14 @@ class FakeWebSearcher:
                 was scripted for.
             ValueError: If ``max_results`` or ``max_result_chars`` is below 1, if
                 ``max_results`` is above ADR-0231 §5's ceiling of three, if
+                ``reported_at`` is not timezone-aware, if
                 ``name`` is blank or is a value ``Identifier`` would strip, or if
                 ``origin`` is present and blank. Each is a state this fake could not
                 answer from, refused here rather than at an arbitrary later call —
                 which is the one thing ADR-0231 §17 says never leaves either member.
         """
-        for label, bound, ceiling in (
-            ("max_results", max_results, DEFAULT_MAX_RESULTS),
-            ("max_result_chars", max_result_chars, None),
-        ):
-            if isinstance(bound, bool) or type(bound) is not int:
-                msg = f"{label} must be an integer, got {bound!r}"
-                raise TypeError(msg)
-            if bound < 1:
-                msg = f"{label} must be at least 1, got {bound}"
-                raise ValueError(msg)
-            if ceiling is not None and bound > ceiling:
-                msg = f"{label} must be at most {ceiling} (ADR-0231 §5), got {bound}"
-                raise ValueError(msg)
-        if not name.strip():
-            msg = f"name must be non-blank, got {name!r}"
-            raise ValueError(msg)
-        if name.strip() != name:
-            # ADR-0231 §17's stripping clause, refused where it is configured rather
-            # than where it would bite: `Attestation.reported_by` is `Identifier`,
-            # which strips what it accepts, so a searcher named `" search "` would
-            # mint a record whose `reported_by` is `"search"` and fail the suite's
-            # equality — at a mint, far from the constructor that caused it.
-            msg = f"name must be a value Identifier accepts unchanged, got {name!r}"
-            raise ValueError(msg)
-        if origin is not None and not origin.strip():
-            msg = f"origin must hold text, or be None entirely, got {origin!r}"
-            raise ValueError(msg)
+        _check_bounds(max_results, max_result_chars)
+        _check_source(name, origin, reported_at)
         self._name = name
         self._origin = origin
         self._contents = {query: tuple(scripted) for query, scripted in (contents or {}).items()}

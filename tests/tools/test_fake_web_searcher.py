@@ -298,6 +298,17 @@ def test_a_scripted_refusal_that_is_not_a_member_is_refused_at_build() -> None:
         FakeWebSearcher(refusals={QUERY: "no_result"})  # type: ignore[dict-item]
 
 
+def test_a_naive_report_instant_is_refused_at_build() -> None:
+    """``UtcInstant`` refuses one, and every field this fake puts it in is one.
+
+    A fake that took a naive instant would raise a ``ValidationError`` out of
+    ``search`` — the one thing ADR-0231 §17 says never leaves that member — at a call
+    far from the constructor that caused it.
+    """
+    with pytest.raises(ValueError, match="reported_at must be timezone-aware"):
+        FakeWebSearcher(reported_at=datetime(2026, 9, 4, 12, 0))  # noqa: DTZ001
+
+
 def test_a_blank_origin_is_refused_at_build() -> None:
     """``None`` means "no account connected"; ``""`` means a mistake."""
     with pytest.raises(ValueError, match="origin must hold text"):
