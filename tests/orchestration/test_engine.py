@@ -494,6 +494,12 @@ class Harness:
         closers: Sequence[object] = (),
         loop_id_factory: Callable[[], str] | None = None,
         feedback: object | None = None,
+        # ADR-0230 §3's seam, so an engine-level case can drive a turn that **fetches**
+        # — which is what §14 item 10 needs and what no loop-level case can reach: the
+        # stamp it asserts is on a *captured episode*, and the consequence it asserts
+        # is a *later* turn's egress ruling. `None` is the default and is every other
+        # case's deployment: no root configured, so no file is nameable.
+        fetcher: object | None = None,
         observer: object | None = None,
         reader: object | None = None,
         email_reader: object | None = None,
@@ -695,6 +701,7 @@ class Harness:
             # a loop told one vocabulary while selection resolved against another
             # could plan a step the selecting registry never advertised.
             registry=self.invoker,
+            fetcher=fetcher,  # type: ignore[arg-type]  # the harness's own heterogeneous knobs
         )
         runner = StepRunner(
             plans=self.plans,
