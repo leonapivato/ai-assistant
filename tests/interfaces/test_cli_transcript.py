@@ -617,3 +617,36 @@ def test_a_failing_archive_is_rendered_and_mapped_to_a_non_zero_exit(
 
     assert code != 0
     assert screen  # the failure was rendered rather than raised through
+
+
+# --- a break the value supplied is a continuation, and is marked (#2072) ------
+
+
+def test_a_users_own_line_break_cannot_forge_a_field_of_the_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn's two halves are the one place a value's newline reaches an authored line.
+
+    :func:`~ai_assistant.interfaces.cli._safe` replaces a value's ``\\n`` precisely so it
+    cannot forge a second line (#1336), and this renderer interpolates
+    :func:`~ai_assistant.interfaces.cli._safe_prose` instead — whose newlines survive,
+    because a user's utterance is legitimately more than one line. So ``You:`` is one of
+    the three sites on this surface where the break is the *value's*, and a user typing
+    a line that looks like a field would otherwise have put a second ``Conversation:``
+    under the real one.
+
+    :func:`~ai_assistant.interfaces.cli._print` reads a break after a line's head as a
+    continuation of it, wherever the break came from, so the forged field arrives behind
+    the marker and reads as what it is: part of what the user said.
+    """
+    buffer = StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, force_terminal=False, width=200))
+    forged = "  Conversation: c9"
+
+    cli._render_transcript_entry(_entry(asked=f"where did I put the lease\n{forged}"))
+
+    lines = buffer.getvalue().splitlines()
+    assert "  You: where did I put the lease" in lines
+    assert f"  {cli._CONTINUATION}{forged}" in lines
+    assert forged not in lines  # it never reaches the screen as a field of the entry
+    assert len([line for line in lines if line.startswith("  Conversation: ")]) == 1
