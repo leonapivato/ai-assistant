@@ -38,6 +38,7 @@ production.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -50,9 +51,11 @@ from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import MemoryStoreError, PlanningError
 from ai_assistant.core.types import (
     BeliefBand,
+    CurrentContext,
     FeedbackKind,
     Goal,
     MemoryKind,
+    MemoryRecord,
     MemorySource,
     Provenance,
     ShownFile,
@@ -71,7 +74,7 @@ from ai_assistant.orchestration.reads import (
 from ai_assistant.orchestration.retrieval import assemble_by_band
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
@@ -82,13 +85,7 @@ if TYPE_CHECKING:
         Planner,
         ToolRegistry,
     )
-    from ai_assistant.core.types import (
-        ActionPlan,
-        CurrentContext,
-        FeedbackEvent,
-        MemoryRecord,
-        SourceListing,
-    )
+    from ai_assistant.core.types import ActionPlan, FeedbackEvent, SourceListing
     from ai_assistant.orchestration.writes import MemoryWriteStage, WriteOutcome
 
 _log = structlog.get_logger(__name__)
