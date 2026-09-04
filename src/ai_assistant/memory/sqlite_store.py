@@ -47,6 +47,7 @@ from ai_assistant.core.errors import (
     MemoryStoreStaleError,
 )
 from ai_assistant.core.types import (
+    Embedding,
     MemoryRecord,
     MemorySearchResult,
     MemorySource,
@@ -72,13 +73,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import Embedder, TraceSink
-    from ai_assistant.core.types import (
-        BeliefBand,
-        Embedding,
-        MemoryKind,
-        MemoryWrite,
-        WalkPosition,
-    )
+    from ai_assistant.core.types import BeliefBand, MemoryKind, MemoryWrite, WalkPosition
 
 _ADAPTER: TypeAdapter[MemoryRecord] = TypeAdapter(MemoryRecord)
 # **There is no candidate over-fetch, because there is nothing left to over-fetch
