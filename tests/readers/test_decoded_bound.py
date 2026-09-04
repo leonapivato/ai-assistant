@@ -44,6 +44,7 @@ from pdf_fixtures import (
     drawing,
     extracted_text_of,
     form_carried_amplification_pdf,
+    hollow_invocations_pdf,
     inherited_form_pdf,
     literal_do_pdf,
     minimal_pdf,
@@ -506,6 +507,52 @@ async def test_invocations_past_the_libraries_cap_are_parses_that_never_happen(
         assert outcome.record is not None
     else:
         assert outcome.refusal is FetchRefusal.TOO_LARGE
+
+
+@pytest.mark.parametrize("hollow", [_CAP, _CAP - 1])
+async def test_a_form_with_no_stream_data_still_spends_an_invocation(
+    root: Path, hollow: int
+) -> None:
+    """The cap is spent by every invocation the extraction reaches, not only the ones
+    this walk can descend into.
+
+    ``_extract_text__xform`` reads ``/Subtype``, returns for an ``/Image``, checks the
+    cycle and the cap, and **then** increments — before anything asks whether the object
+    has data to parse. So a bare ``<< /Subtype /Form >>`` spends an invocation, and a
+    page invoking one exactly ``_CAP`` times has no invocation left for the real form
+    that follows: its extraction parses none of it and the document must fetch. One
+    invocation fewer and the real form *is* parsed, so the same document is genuinely
+    over the bound.
+
+    Both sides, because either alone is passed by a walk that is wrong: skipping the
+    hollow form without counting it refuses the first document — §3's named harm, "it
+    refuses a document the stated quantity says must fetch" — and counting it without
+    the second document would be satisfied by a walk that had stopped descending
+    altogether.
+    """
+    outcome = await fetch(root, hollow_invocations_pdf(hollow=hollow, form_bytes=2_000_000))
+
+    if hollow == _CAP:
+        assert outcome.refusal is None
+        assert outcome.record is not None
+    else:
+        assert outcome.refusal is FetchRefusal.TOO_LARGE
+        assert outcome.record is None
+
+
+def test_the_library_extracts_the_document_whose_cap_the_hollow_forms_exhaust() -> None:
+    """The library fact the arm above rests on, asserted rather than assumed.
+
+    ``pypdf`` alone returns text for the document whose hollow invocations exhaust the
+    cap — it does not raise, and it never parses the real form behind them. Without this
+    the arm above could be read as asserting only that *something* refused, rather than
+    that the walk agreed with the extraction about which parses happen.
+    """
+    data = hollow_invocations_pdf(hollow=_CAP, form_bytes=2_000_000)
+
+    reader = pypdf.PdfReader(io.BytesIO(data))
+
+    assert reader.pages[0].extract_text() == ""
 
 
 async def test_a_resource_context_that_cannot_be_read_fails_closed(
