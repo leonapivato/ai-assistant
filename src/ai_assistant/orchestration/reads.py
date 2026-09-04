@@ -14,9 +14,28 @@ that decision (§10's "Lane B"), and it holds three things:
   well as that record's evidence, so the carrier holds records the fourth group does
   not, and §2 of that ADR is why the fourth group is nonetheless unmoved;
 * :func:`resolve_label`, §3's whole label scheme — an ordinal into the very
-  ``memories`` sequence the loop passed the planner on this call; and
+  ``memories`` sequence the loop passed the planner on this call;
+* :func:`resolve_entry`, ADR-0230 §2's label scheme one sequence over — an ordinal
+  into the very ``SourceListing`` the loop read for this turn and projected onto
+  what it passed the planner; and
 * :func:`emit_read_audit`, §9's record, written **once per turn whether or not the
   trigger fired**.
+
+**The third kind is an additive entry and not a second seam** (ADR-0230 §1). A
+``LOCAL_FILE`` ask is serviced here, from the same ``ReadRequest``, under the same
+budget of ten, into the same fourth group, and onto the same audit record: no second
+servicing site, no second budget, no second event key. What it adds is one position
+in the servicing order — ADR-0230 §7 puts the fetch **ahead of** the hop, because
+this kind is capped at one record where the hop is capped at two labels and the query
+at nothing — and one field on §9's record, the class a refusal resolved to.
+
+**No filesystem address is ever composed here** (ADR-0230 §2). This module parses an
+ordinal and indexes the listing it was handed; the value it passes ``Fetcher.fetch``
+is a :class:`~ai_assistant.core.types.SourceListingEntry` the *fetcher* minted,
+carrying the capability that fetch is verified by. No model-supplied string reaches a
+filesystem call, is joined to a root, or is assembled into an entry of this module's
+own — "a conforming implementation in which a model's output reaches a path is not
+this decision however carefully it is bounded".
 
 **What this module is not.** It is not a tool, is not registered, advertises no
 capability and is reachable through no ``ToolRegistry`` (§5): ADR-0208 §1's rule
@@ -60,8 +79,15 @@ from ai_assistant.orchestration.retrieval import assemble_by_band
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.protocols import MemoryStore
-    from ai_assistant.core.types import MemoryRecord, ReadAsk, ReadRequest
+    from ai_assistant.core.protocols import Fetcher, MemoryStore
+    from ai_assistant.core.types import (
+        FetchRefusal,
+        MemoryRecord,
+        ReadAsk,
+        ReadRequest,
+        SourceListing,
+        SourceListingEntry,
+    )
 
 _log = structlog.get_logger(__name__)
 
@@ -92,6 +118,18 @@ READ_AUDIT_EVENT: Final = "turn_read_request"
 #: way, and bounding the match keeps a model-supplied string of arbitrary length off
 #: :func:`int`.
 _LABEL_PATTERN: Final = re.compile(r"M[1-9][0-9]{0,8}")
+
+#: ADR-0230 §2's label form for a file, which is §3's scheme one sequence over:
+#: "the ASCII string ``F`` followed by *n* in decimal with no padding".
+#:
+#: ``F`` and not ``M`` because the two index different sequences — ``memories`` and
+#: the turn's listing — and "a single namespace over two sequences would be a label
+#: whose meaning depends on which kind quoted it". Every other property of the
+#: pattern is :data:`_LABEL_PATTERN`'s and is taken for its reasons: ASCII digits
+#: because the scheme is stated over ASCII, and a bounded length because an ordinal
+#: that long is past the end of any listing a turn could show, so bounding the match
+#: keeps a model-supplied string of arbitrary length off :func:`int`.
+_ENTRY_PATTERN: Final = re.compile(r"F[1-9][0-9]{0,8}")
 
 
 class TriggerOutcome(StrEnum):
@@ -186,11 +224,11 @@ class ServicedRead:
     Attributes:
         kinds: The kind of each ask this servicing's request carried, in the order
             the request carries them.
-        records: The fourth group, in §6's order: the hop's records first, then the
-            sighted query's, each already deduplicated against the pre-servicing
-            supply *and* against every record admitted before it (§7). Empty on a
-            failed or partial servicing, which "leaves the supply as planning saw
-            it" (§5).
+        records: The fourth group, in servicing order: the fetched file's one record
+            first (ADR-0230 §7), then the hop's records, then the sighted query's,
+            each already deduplicated against the pre-servicing supply *and* against
+            every record admitted before it (§7). Empty on a failed or partial
+            servicing, which "leaves the supply as planning saw it" (§5).
         returned: How many records the servicing carried into the union **before**
             deduplication. Never a per-ask tally of what each store call handed
             back, and zero on a failed servicing — §5 discards a partial read's
@@ -201,7 +239,21 @@ class ServicedRead:
             held them, whether from the pre-servicing supply or from an earlier
             arrival within this same servicing.
         labels_unresolved: How many labels resolved to nothing — malformed, out of
-            range, or naming a record that is no longer live (§3).
+            range, or naming a record that is no longer live (§3). **One population
+            across the kinds** (ADR-0230 §9): an ``F`` label outside the turn's
+            listing never reached the fetcher and counts here, exactly as an ``M``
+            label outside the supply does.
+        refusal: ADR-0230 §9's one added field: the class the ``LOCAL_FILE`` fetch
+            resolved to, where it resolved to one, and ``None`` where the fetch
+            returned a record or where this servicing carried no ``LOCAL_FILE`` ask.
+            **A refusal and an unresolved label are two facts and are recorded
+            separately** — "a label that resolved to nothing never reached the
+            fetcher; a refusal is a label that resolved to an entry the fetcher then
+            declined", and "an implementation that collapses them makes the two
+            indistinguishable, and they have different causes and different fixes".
+            A **member of a closed enumeration and never free text**, so there is
+            nowhere in this record for a path, a name, an excerpt or a library's
+            message to sit.
         truncated_kinds: Which kinds the budget cut short, in servicing order.
             Empty where it cut neither.
         failed: Whether the servicing failed. Where it did, every count above is
@@ -221,6 +273,7 @@ class ServicedRead:
     new: int = 0
     deduplicated: int = 0
     labels_unresolved: int = 0
+    refusal: FetchRefusal | None = None
     truncated_kinds: tuple[ReadKind, ...] = ()
     failed: bool = False
     failed_after_read_returned: bool = False
@@ -327,22 +380,32 @@ class _Union:
         return truncated
 
 
-async def service_read_request(
+async def service_read_request(  # noqa: PLR0913 — the store, the emission, and one parameter per thing a kind is serviced against; §7 admits one site and this is it
     store: MemoryStore,
     request: ReadRequest,
     *,
     supply: Sequence[MemoryRecord],
+    fetcher: Fetcher | None,
+    listing: SourceListing | None,
     audit: TurnReadAudit,
 ) -> tuple[str, ...]:
     """Service one emission, once, into the fourth group (ADR-0226 §§2, 6, 7).
 
-    **The citation hop is serviced first and the sighted query fills what remains**
-    (§6). Its size is bounded by §2's two-label cap where a query can return the
-    whole budget on every firing, so ordering the capped read ahead of the uncapped
-    one "makes the union the *measured* union in the ordinary case, and gives the
-    query up only where a hop genuinely reached ten records". Where the hop exhausts
-    the budget the query is serviced with whatever is left, which may be nothing,
-    and the truncation is recorded.
+    **The local file is serviced first, then the citation hop, then the sighted
+    query** (ADR-0230 §7, amending ADR-0226 §6's cross-kind precedence sentence in
+    that one respect). §6's decision is applied and not moved — the capped read ahead
+    of the uncapped one — and ADR-0230 §1 caps the fetch hardest of the three: one
+    label, one file, one record, always. "Where the fetch takes its slot the hop is
+    serviced with nine and the query with what remains; a fetch that refuses takes
+    none." The reverse order would let a hop that reached ten records starve the one
+    read the user pointed at.
+
+    A hop's size is bounded by §2's two-label cap where a query can return the whole
+    budget on every firing, so ordering the capped read ahead of the uncapped one
+    "makes the union the *measured* union in the ordinary case, and gives the query up
+    only where a hop genuinely reached ten records". Where the hop exhausts the budget
+    the query is serviced with whatever is left, which may be nothing, and the
+    truncation is recorded.
 
     **The budget is counted after deduplication** — ten records the turn's supply
     did not already hold — and the deduplication ranges over the whole union (§7).
@@ -364,11 +427,30 @@ async def service_read_request(
     read from the constant here and nowhere else. §12 is where a decision to move it
     goes.
 
+    **A refusal is not a failure, and that is the one disposition this kind adds**
+    (ADR-0230 §6). A ``FetchOutcome`` carrying a refusal "adds no record, fails no
+    turn, degrades no servicing and discards no other kind's records": the fetch takes
+    no slot, the hop and the query are serviced exactly as they would have been, and
+    §9's record carries the refusal's **class** beside the counts. That is ADR-0226
+    §3's disposition for a label that resolves to nothing — "not an error, not a park,
+    not a degradation of the turn" — applied to the outcome one step later, and it is
+    what distinguishes it from §5's all-or-nothing failure posture below.
+
+    **Nothing of a refusal is rendered** (ADR-0230 §6, §9). The class is a member of a
+    closed enumeration and the whole of the value, so no name, no excerpt and no
+    message from an extraction library exists here to reach a prompt, a reply or a
+    log; and this function puts no record in the supply for a refused fetch, so there
+    is nothing for the composing stage to render either.
+
     **A failure discards everything.** §5 makes the servicing all-or-nothing, so a
     ``MemoryStoreError`` from any read — the hop's ``get_many``, or any band of the
     query's composition — leaves the supply as planning saw it, and the record it
-    writes has every count zero. Only ``MemoryStoreError`` is *degraded*, which is
-    deliberately the same net
+    writes has every count zero. **A ``Fetcher`` contributes no such failure**:
+    ADR-0230 §4 rules that neither of its members raises for a source reason and adds
+    no error class to ``core/errors.py``, "because there is no failure a caller would
+    handle differently from a refusal it must already handle" — so the net below is
+    unwidened for this kind rather than silently extended to it. Only
+    ``MemoryStoreError`` is *degraded*, which is deliberately the same net
     :meth:`~ai_assistant.orchestration.loop.LearningLoop._retrieve` and
     ``_supplement`` already use: it is the failure the ``MemoryStore`` contract
     states, and widening the net here alone would claim a robustness the turn's two
@@ -433,7 +515,23 @@ async def service_read_request(
         supply: The three groups the loop passed
             :meth:`~ai_assistant.core.protocols.Planner.plan` **on this call**, in
             order. It is both §3's label space and §7's deduplication set, and it is
-            the same sequence for both because §3's label *is* a position in it.
+            the same sequence for both because §3's label *is* a position in it. It
+            is **not** the ``LOCAL_FILE`` label space, which is ``listing`` below —
+            "``M`` indexes ``memories``, ``F`` indexes the listing" (ADR-0230 §1).
+        fetcher: The seam a ``LOCAL_FILE`` ask is answered from, or ``None`` where no
+            root is configured. **Passed rather than defaulted**, so a caller states
+            the absence instead of inheriting it: a defaulted seam would let a later
+            call site silently service no file and read, in §9's record, exactly like
+            a turn on which the planner named none.
+        listing: The very ``SourceListing`` the loop read for this turn and projected
+            onto what it passed the planner, or ``None`` where no fetcher is wired.
+            It is ADR-0230 §2's label space **and** the authority the fetch is
+            verified against — "the loop resolves a label by parsing *n* and indexing
+            the very sequence it passed on this call, and fetches the entry at that
+            same position of the listing it holds". Both come from this one object,
+            which is what makes the projection's positional guarantee reach the fetch.
+            ``None`` and an empty listing are the same case for the turn: no file is
+            nameable, and every label resolves to nothing.
         audit: This turn's record. One :class:`ServicedRead` entry is appended to
             :attr:`TurnReadAudit.servicings` on every path out of this function, and
             :attr:`ServicedRead.records` is what the caller appends to the fourth
@@ -454,13 +552,50 @@ async def service_read_request(
     resolved_by_hop: tuple[MemoryRecord, ...] = ()
     hop = _ask_of(request, ReadKind.CITATION_HOP)
     query = _ask_of(request, ReadKind.SIGHTED_QUERY)
+    local_file = _ask_of(request, ReadKind.LOCAL_FILE)
     # `ReadAsk`'s validator makes a `SIGHTED_QUERY` ask's query non-``None`` (§4),
     # so this reads the guarantee rather than restating it as a policy: there is no
-    # branch here for an ask the model refuses to construct.
+    # branch here for an ask the model refuses to construct. A `LOCAL_FILE` ask's
+    # `entry` carries the same guarantee (ADR-0230 §1) and is read the same way.
     statement = None if query is None else query.query
+    named = None if local_file is None else local_file.entry
     truncated: list[ReadKind] = []
     unresolved = 0
+    refusal: FetchRefusal | None = None
     try:
+        if named is not None:
+            # ADR-0230 §7: **first**, ahead of the hop, because this kind is capped
+            # at one record and the hop at two labels — "at one slot, the cheapest
+            # precedence position this corpus has ever had to argue for".
+            entry = resolve_entry(named, listing)
+            if entry is None or fetcher is None or listing is None:
+                # ADR-0230 §2: a label outside the shown set — malformed, out of
+                # range, or named on a turn that showed no listing at all — "resolves
+                # to nothing … discarded silently, and recorded in §9's audit as an
+                # unresolved label". §9 puts it in **this** count and not beside the
+                # refusal: it "never reached the fetcher", and the two facts have
+                # different causes and different fixes.
+                unresolved += 1
+            else:
+                # The entry handed back is the one this fetcher minted, carried
+                # unaltered from the listing this loop holds (ADR-0230 §2, §4). No
+                # path is composed, no name is joined to a root, and no entry is
+                # assembled here.
+                outcome = await fetcher.fetch(listing, entry)
+                refusal = outcome.refusal
+                if outcome.record is not None:
+                    # §9's second failure field is stated over **reads** rather than
+                    # over asks, and a fetch that returned a record is a read this
+                    # servicing performed that returned one. So a hop raising after
+                    # the file came back is recorded as the partial servicing it was.
+                    reads.note(1)
+                    # One slot of ADR-0226 §6's ten, counted after deduplication and
+                    # drawn through the same union as every other kind — "not a
+                    # share, not a second budget". The budget cannot cut it: the
+                    # fetch is first and admits one record into ten empty slots, so
+                    # `LOCAL_FILE` never appears in `truncated_kinds`, which is §1's
+                    # cap of one showing up in the audit rather than a case elided.
+                    union.admit((outcome.record,))
         if hop is not None:
             reach = await _hop_records(store, hop, supply=supply, reads=reads)
             unresolved = reach.unresolved
@@ -497,6 +632,7 @@ async def service_read_request(
             new=len(union.admitted),
             deduplicated=union.deduplicated,
             labels_unresolved=unresolved,
+            refusal=refusal,
             truncated_kinds=tuple(truncated),
         )
         # ADR-0227 §3's carrier, computed on the success path alone and over
@@ -527,10 +663,20 @@ async def service_read_request(
         # failing ones carry the observer's own answer to §9's second failure
         # field. Written here rather than returned, so no path can leave the turn
         # with a record describing a servicing that did not happen.
+        #
+        # **The refusal rides on the failing record too, where every count is
+        # zero** (ADR-0230 §9). §5's zeroed counts say a *yield* was discarded, and
+        # a refusal yielded nothing there was to discard: §9 enumerates the two
+        # cases in which this field is empty — "where the fetch returned a record or
+        # where no ``LOCAL_FILE`` ask was made" — and a fetch that refused before
+        # the hop raised is neither. Dropping it would make that turn
+        # indistinguishable from one whose planner named no file at all, which is
+        # the collapse §9 refuses one field over for the unresolved-label count.
         audit.servicings += (
             completed
             or ServicedRead(
                 kinds=tuple(ask.kind for ask in request.asks),
+                refusal=refusal,
                 failed=True,
                 failed_after_read_returned=reads.returned_any,
             ),
@@ -572,6 +718,64 @@ def resolve_label(label: str, supply: Sequence[MemoryRecord]) -> MemoryRecord | 
     if ordinal > len(supply):
         return None
     return supply[ordinal - 1]
+
+
+def resolve_entry(label: str, listing: SourceListing | None) -> SourceListingEntry | None:
+    """Resolve one entry label to the file it names, or to nothing (ADR-0230 §2).
+
+    **An ordinal into the listing the loop passed, and that is the whole of the
+    scheme.** "The label of the entry at 1-based index *n* of the sequence the loop
+    passed is the ASCII string ``F`` followed by *n* in decimal with no padding."
+    Both sides derive it from the listing and neither consults the other: `planning`
+    renders the label from the ``ShownFile`` sequence it was given, and this function
+    parses *n* and indexes the ``SourceListing`` that sequence was projected from —
+    positionally, one for one, which is what makes the two agree with no table, no
+    mapping and no path crossing between the packages.
+
+    **The listing rather than the projection, and the difference is the capability.**
+    What crosses into `planning` is a :class:`~ai_assistant.core.types.ShownFile`,
+    which carries no ``handle``; what a fetch is addressed by is the
+    :class:`~ai_assistant.core.types.SourceListingEntry` at the same position of the
+    listing `orchestration` retained. Resolving here rather than there is what lets
+    the loop hand a fetcher an entry the *fetcher itself* minted while the model has
+    seen nothing it could forge one from.
+
+    **This is ADR-0226 §3's scheme one sequence over, and it is taken for §3's own
+    reason.** On a filesystem the property is worth strictly more than it is over a
+    store: the alternative is a path, and "a model-supplied path bounded by a
+    containment check is a whole class of defect this decision can simply not have —
+    ``..`` normalisation, a symlink pointing out of the root, a case-insensitive
+    filesystem, a Unicode normalisation the check and the kernel disagree about". An
+    ordinal cannot be *nearly* right. It is an index into a sequence, and an index
+    outside the range resolves to nothing.
+
+    **Every way of being outside the shown set lands here alike**: a string that does
+    not match the form, an *n* below 1, an *n* beyond the sequence's length, and a
+    turn that showed no listing at all — a deployment with no fetcher wired, or one
+    whose root came back empty, which §3 makes the same case. Each is discarded
+    silently — not an error, not a park, not a degradation of the turn — and counted
+    in §9's audit as an unresolved label. The remaining case, an entry the fetcher can
+    no longer resolve, is the fetcher's and comes back as a
+    :class:`~ai_assistant.core.types.FetchRefusal`.
+
+    Args:
+        label: What the planner named. Model-supplied text, treated as a label and
+            **never** as a filesystem address in any form (ADR-0230 §2): nothing here
+            constructs a path, joins a fragment to a root, or hands this string to a
+            filesystem call.
+        listing: The listing the loop read for this turn, or ``None`` where no
+            fetcher is wired — "a turn on which the loop passed no listing is a turn
+            on which no file is nameable".
+
+    Returns:
+        The entry at that position of that listing, or ``None``.
+    """
+    if listing is None or _ENTRY_PATTERN.fullmatch(label) is None:
+        return None
+    ordinal = int(label[1:])
+    if ordinal > len(listing.entries):
+        return None
+    return listing.entries[ordinal - 1]
 
 
 @dataclass(slots=True)
@@ -660,6 +864,26 @@ def emit_read_audit(
     the frozen ``ActionPlan`` the planning store already keeps, and this record
     neither copies it nor points at it.
 
+    **And no address, in any form** (ADR-0230 §9). No path, no root, no file name, no
+    extension, no size, no ``modified_at``, no excerpt of an extracted text and no
+    message from an extraction library appears anywhere in this event. A file name is
+    the same shape of value a query is — "it is chosen by whoever named the file, it
+    can carry anything a filename can carry" — so a Tier 2 event logging one would be
+    a Tier 1 leak on a value this system did not mint (ADR-0004 §5). The one field
+    this kind adds is a **class**: ``refusal`` is a
+    :class:`~ai_assistant.core.types.FetchRefusal` member or absent, which is why
+    §9's no-copy rule admits it. What keeps this record inside Tier 2 is these clauses
+    and not the redaction net.
+
+    **What the refusal rate is read from, and what it is not.** With the class beside
+    the kinds, the refusal rate **per kind** is readable over a population of turns
+    from this one event, exactly as the fire rate and the novelty rate are — computed
+    over a population and never as a per-turn quantity, and never called a precision
+    or a recall. A deployment with no root configured reads a 0% fire rate for
+    ``local_file``, and that is a true statement about that configuration rather than
+    a reading of a trigger: no figure for this kind is reported without saying whether
+    a root was configured.
+
     **The only identifier is the ambient correlation id** (ADR-0119 §4), read here
     with :func:`~ai_assistant.core.correlation.current_correlation` rather than
     inherited: ``core/logging.py`` merges ``structlog``'s own contextvars and
@@ -720,6 +944,7 @@ def emit_read_audit(
                 "new": read.new,
                 "deduplicated": read.deduplicated,
                 "labels_unresolved": read.labels_unresolved,
+                "refusal": None if read.refusal is None else read.refusal.value,
                 "truncated_kinds": tuple(kind.value for kind in read.truncated_kinds),
                 "failed": read.failed,
                 "failed_after_read_returned": read.failed_after_read_returned,

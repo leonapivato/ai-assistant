@@ -14,9 +14,11 @@ difference), and that no listing survives its turn.
 Item 20's remaining clause — "``F``\\ *n* fetches the entry at position *n* of the
 listing the loop holds" — and every other item of §14 turn on a fetch, a servicing,
 an audit field, a ``Settings`` bound or a version move. Those are Lane C1's and Lane
-C3's. **Between C2 and C3 there is no mechanism**: a ``LOCAL_FILE`` ask emitted on
-one of these turns reaches no fetcher, adds no record to any supply and changes no
-reply, and the cases below assert that rather than working around it.
+C3's, and Lane C3's live in ``test_loop_fetch.py``: the turns below emit a
+``LOCAL_FILE`` ask where a case needs one, but nothing here asserts what becomes of
+it. **Lane C2's own case for §13's intermediate state — that such an ask reached no
+fetcher at all — was true of a merged C2 and is false of a merged C3**, which is the
+lane that ends that state by design; ``test_loop_fetch.py`` holds what replaces it.
 
 Every case is a test over behaviour, as §14 requires: what the planner was handed,
 and what a prompt assembled from it carries. Where ``listing_count`` appears it is
@@ -487,31 +489,3 @@ async def test_an_unbounded_audience_turn_is_still_shown_the_listing() -> None:
     [call] = planner.calls
     assert [one.name for one in call[4]] == list(_ROOT)
     assert responded.turn.plan.read_request == _file_request(), "the emission is not suppressed"
-
-
-# --------------------------------------------------------------------------- #
-# §13: between C2 and C3 there is no mechanism                                 #
-# --------------------------------------------------------------------------- #
-
-
-async def test_a_local_file_ask_reaches_no_fetcher_and_changes_no_supply() -> None:
-    """§13's stated intermediate state, asserted rather than assumed.
-
-    "A C2 turn's ``LOCAL_FILE`` ask reaches no fetcher, adds no record to any supply,
-    changes no reply and changes nothing a capture records." The fetch is Lane C3's, so
-    this is what a merged C2 must be — and the arm that fails on a lane that reached
-    across its fence to service the ask it had just taught the planner to emit.
-    """
-    fetcher = FakeFetcher(_ROOT, read_at=_NOW)
-    planner = FakePlanner(now=_clock, read_request=_file_request())
-    before = fetcher.fetch_count
-
-    responded = await _loop(planner=planner, fetcher=fetcher).respond(
-        "how did the quarter go", narrow=_bounded()
-    )
-
-    assert fetcher.fetch_count == before
-    assert responded.turn.plan.read_request == _file_request()
-    assert responded.turn.memories == planner.calls[0][2], "no fourth group"
-    for record in responded.turn.memories:
-        assert "the margin held at 41 percent" not in record.content
