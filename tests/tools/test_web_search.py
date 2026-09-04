@@ -733,6 +733,48 @@ async def test_a_body_nested_past_the_bound_is_provider_refused(depth: int) -> N
     assert outcome.refusal is SearchRefusal.PROVIDER_REFUSED
 
 
+async def test_a_title_carrying_literal_brackets_is_transcribed_verbatim() -> None:
+    """§10's verbatim clause against the nesting bound: a bracket in a span is a word.
+
+    A result whose title happens to carry more brackets than the structural bound is
+    still four levels deep, and §10 admits exactly four drops — an ill-typed span, an
+    absent address, a line break, and a content over ``search_max_result_chars``.
+    "Carries a bracket" is not among them, so a depth counter that read one would
+    refuse a result this decision transcribes.
+    """
+    brackets = "[" * (MAX_JSON_DEPTH * 4)
+
+    outcome, _ = await _searched(
+        channels=[answering(result(title=brackets, url="https://a.invalid/x", description=None))]
+    )
+
+    assert [record.content for record in outcome.records] == [f"{brackets}\nhttps://a.invalid/x"]
+
+
+async def test_closers_inside_a_string_do_not_buy_a_deeper_response() -> None:
+    """The bound's other failure direction, which is the one an attacker would use.
+
+    A ``]`` inside an earlier string would *decrement* a naive running depth, so a
+    crafted body could carry real nesting past the bound and pass under it — reaching
+    the decoder this guard exists to keep it away from. Asserted over a payload whose
+    string closers alone would have paid for the nesting that follows.
+    """
+    payload = (
+        b'{"padding": "'
+        + b"]" * (MAX_JSON_DEPTH * 3)
+        + b'", "web": '
+        + b"[" * (MAX_JSON_DEPTH * 2)
+        + b"]" * (MAX_JSON_DEPTH * 2)
+        + b"}"
+    )
+
+    outcome, _ = await _searched(
+        channels=[far_end(response(payload=payload))], max_response_bytes=len(payload) + 1024
+    )
+
+    assert outcome.refusal is SearchRefusal.PROVIDER_REFUSED
+
+
 async def test_a_body_at_the_nesting_bound_is_read_normally() -> None:
     """The boundary's other half: a documented answer is four levels deep, not a hundred.
 

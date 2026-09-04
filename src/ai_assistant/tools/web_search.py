@@ -329,6 +329,11 @@ MAX_JSON_DEPTH: Final = 100
 _JSON_OPENERS: Final = frozenset(b"[{")
 _JSON_CLOSERS: Final = frozenset(b"]}")
 
+#: The two octets that decide where a JSON string ends, and so which brackets are
+#: structure and which are a third party's words (:func:`_too_deep`).
+_QUOTE: Final = ord('"')
+_BACKSLASH: Final = ord("\\")
+
 #: RFC 3986 §2.3's unreserved set, the characters a request target may carry
 #: unescaped. Everything else this integration writes into one is percent-encoded
 #: (:func:`_percent_encoded`).
@@ -516,23 +521,45 @@ def _decoded_object(body: bytes) -> dict[str, FrozenJson] | None:
 
 
 def _too_deep(body: bytes) -> bool:
-    """Whether ``body`` nests structures past what this integration will decode.
+    r"""Whether ``body`` nests structures past what this integration will decode.
 
-    Counted over the octets rather than over a parse, because the point is to decide
-    it **before** the decoder is entered: see :func:`_decoded_object`. It is an
-    over-count and deliberately so — every ``[`` and ``{`` counts, including one
-    inside a string literal — which errs towards refusing a response no documented
-    answer carries, and cannot admit one the decoder would then fail on.
+    Counted over the octets rather than over a parse, because the point is to decide it
+    **before** the decoder is entered: see :func:`_decoded_object`.
+
+    **String-aware, and that is the whole of the correctness here.** A bracket inside a
+    JSON string is a character in a third party's words and not a structure — ADR-0231
+    §10 transcribes such a span **verbatim** — so a counter that read one would refuse
+    a result whose title happens to carry brackets, which is a drop §10 does not admit.
+    And it fails in the other direction too: a ``]`` inside an earlier string would
+    *decrement* the running depth, so a crafted response could carry a real nesting
+    this bound was meant to catch and pass under it. Both lenses of round 3 found the
+    pair, and both are the same defect.
+
+    Only two escapes matter for finding where a string ends: ``\\`` and ``\"``, and
+    treating any ``\`` as consuming the next octet handles both. **UTF-8 makes the
+    scan safe over octets**: no byte of a multi-byte sequence is below ``0x80``, so
+    neither ``"`` nor ``\`` nor a bracket can appear inside one.
 
     Args:
         body: The response's octets.
 
     Returns:
-        Whether the running depth ever passes :data:`MAX_JSON_DEPTH`.
+        Whether the running structural depth ever passes :data:`MAX_JSON_DEPTH`.
     """
     depth = 0
+    in_string = False
+    escaped = False
     for octet in body:
-        if octet in _JSON_OPENERS:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif octet == _BACKSLASH:
+                escaped = True
+            elif octet == _QUOTE:
+                in_string = False
+        elif octet == _QUOTE:
+            in_string = True
+        elif octet in _JSON_OPENERS:
             depth += 1
             if depth > MAX_JSON_DEPTH:
                 return True
