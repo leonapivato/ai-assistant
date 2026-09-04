@@ -317,13 +317,14 @@ async def test_every_spans_value_is_on_the_screen_whole_and_above_the_control(
 
         shown = await _shown(drive)
 
+        # Every span's own value, each as itself and each **exactly once**: the body
+        # whole, and each recipient as the element it is rather than only inside the
+        # array's JSON — where a quotation mark is escaped and a newline would be the
+        # two characters `\n`. The equality is the half adversarial review's round 3
+        # is about: a card rendering the array beside its elements would put one value
+        # on the screen twice, free to disagree with itself.
         rendered = [one["text"] for one in shown["values"]]
-        # Every span's own value, each as itself: the body whole, and each recipient
-        # as the element it is rather than only inside the array's JSON — where a
-        # quotation mark is escaped and a newline would be two characters.
-        assert _BODY in rendered, rendered
-        for recipient in _RECIPIENTS:
-            assert recipient in rendered, rendered
+        assert rendered == [_BODY, *_RECIPIENTS], rendered
         for one in shown["values"]:
             assert one["whiteSpace"] == "pre-wrap", one
             assert not one["clipped"], one
@@ -658,3 +659,26 @@ async def test_a_confirmation_this_page_cannot_put_whole_is_not_put_at_all(
         assert _BODY not in said, (fault, said)
         assert "undefined" not in said, (fault, said)
         assert await card.locator("button").count() == 0
+
+
+async def test_an_argument_carrying_no_span_is_still_a_key_and_a_value_on_the_screen(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """ADR-0177 §8's "every key and every value the mapping carries", under the
+    span-by-span rendering ADR-0233 §8 asks for.
+
+    ADR-0150 §4 gives an **empty JSON array** no span — "a key whose value is an
+    empty JSON array is the ``argument`` of **no** span" — so a card that rendered
+    only the spans would drop that key silently. It is the one shape where the
+    decomposition is not total over the arguments, and the case exists because it is
+    exactly the shape a span-by-span renderer loses.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.parked["h-1"] = _confirmation(
+            _span("body", _BODY), parameters={"body": _BODY, "cc": ()}
+        )
+
+        shown = await _shown(drive)
+
+        assert [one["text"] for one in shown["values"]] == [_BODY, "[]"], shown["values"]
+        assert "cc =" in shown["cardText"], shown["cardText"]

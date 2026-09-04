@@ -5527,11 +5527,16 @@ def test_every_value_is_put_on_the_screen_whole_and_as_a_text_node() -> None:
     assert 'className = "argument-value"' in block
     for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "createContextualFragment"):
         assert sink not in block, sink
-    # The two renderers of a confirmation's content, and no third caller.
+    # One renderer of a confirmation's content, and no second caller: since
+    # adversarial review's round 3 every value is rendered exactly once, from the span
+    # it belongs to, so nothing on the screen can disagree with anything else on it.
     assert {name for name, body in functions.items() if "valueBlock(" in body} == {
         "valueBlock",
+        "renderValue",
+    }
+    assert {name for name, body in functions.items() if "renderValue(" in body} == {
+        "renderValue",
         "renderParameters",
-        "renderEgress",
     }
 
 
@@ -5560,22 +5565,24 @@ def test_the_values_are_rendered_before_there_is_anything_to_press() -> None:
     is the same obligation over the **content**, and it is a different assertion
     because a lane could put the values after the buttons and leave that one green.
 
-    The indexed spans' values are rendered inside ``renderEgress``, which
-    ``renderConfirmation`` calls before ``offerApproval``; the indexless ones are
-    ``renderParameters``' whole arguments, which it calls before both. So the check
-    is over the two functions that build the card between them.
+    Every value is rendered by ``renderParameters``, which ``renderConfirmation``
+    calls before both the egress facts and the control — so the check is that the one
+    renderer of content runs first and that the values it renders are the **spans'**,
+    which is what makes "every span's value" and "before the control" one ordering
+    rather than two.
     """
     functions = _functions(_code("app.js"))
     card = functions["renderConfirmation"]
-    egress = functions["renderEgress"]
+    arguments = functions["renderParameters"]
 
     assert card.index("renderParameters(") < card.index("offerApproval(")
     assert card.index("renderEgress(") < card.index("offerApproval(")
-    assert egress.index("valueBlock(") < egress.index("coverageWords(")
-    # An indexed span's value is rendered where the array's JSON does not spell it as
-    # itself; an indexless span's value is the whole argument `renderParameters` has
-    # already put on screen, and a second copy here would be one value twice.
-    assert "one.index !== null" in egress
+    assert card.index("renderParameters(") < card.index("renderEgress(")
+    # The values are the spans' own, keyed by the name that locates each one, and the
+    # keys carrying no span — ADR-0150 §4's empty arrays — are rendered too, so
+    # ADR-0177 §8's "every key and every value" survives the span-by-span rendering.
+    assert "egress.spans.forEach((one) => renderValue(item, spanKey(one), one.value));" in arguments
+    assert "!egress.spans.some((span) => span.argument === one.key)" in arguments
 
 
 def test_a_confirmation_that_cannot_be_shown_whole_is_not_shown_at_all() -> None:
