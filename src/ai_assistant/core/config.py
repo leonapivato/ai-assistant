@@ -3604,6 +3604,100 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- What one search may bring back (ADR-0231 §5, §10, §17) -----------
+    # The last two of ADR-0231 §5's four fields, landing with the searcher that
+    # enforces them, "since a bound nothing reads is a figure an operator can set
+    # and watch do nothing".
+    #
+    # **Both are the *searcher's* to enforce and never the model's** (§17).
+    # `SearchOutcome` carries neither bound and validates identically in every
+    # deployment, which is what makes the type shareable by two searchers
+    # configured differently in one process.
+    #
+    # **Three is a ceiling the setting narrows and never widens** (§5). §10's figure
+    # is the maximum, so `le=3` is part of the domain rather than a default: it is
+    # what keeps §11's precedence true in *every* configuration, so no deployment
+    # can make one search take a third of ADR-0226 §6's budget of ten.
+    search_max_results: _IntegerSetting = Field(
+        default=3,
+        ge=1,
+        le=3,
+        description=(
+            "The most records one web search may mint, one per result the provider "
+            "returned and in that order (ADR-0231 §5, §10). From 1 to 3: three is "
+            "ADR-0231 §10's ceiling and this setting only narrows it."
+        ),
+    )
+    # **Counted on the quoted rendering, exactly as ADR-0230 §6 counts a fetched
+    # document** — `json.dumps` at its default `ensure_ascii=True`, its two
+    # delimiters included — and never on the source. A ceiling on source characters
+    # would admit a result six or twelve times this long while claiming to admit
+    # this much (ADR-0222 §4), because an escaped BMP code point costs six output
+    # characters and an astral one twelve.
+    #
+    # **A result beyond it is dropped, never truncated** (§10): the remaining
+    # results are minted, and a response every result of which is dropped yields
+    # `SearchRefusal.NO_RESULT` rather than an empty success. Truncating would carry
+    # a fragment of a third party's words that no reader could tell from the whole.
+    search_max_result_chars: _IntegerSetting = Field(
+        default=2048,
+        ge=1,
+        lt=2**63,
+        description=(
+            "The most characters one minted search record's content may carry, "
+            "counted on its quoted rendering (ADR-0231 §5, §10; ADR-0230 §6's "
+            "measure). At least 1. A result beyond it is **dropped**, never "
+            "truncated, and its siblings are still minted."
+        ),
+    )
+
+    # --- The registered search account (ADR-0231 §5, §17) -----------------
+    # **Which connected account the web search is registered against, and the one
+    # origin it names.** Both, or neither: a deployment that names both gets a
+    # searcher registered at the egress seam and bound to that account; a
+    # deployment that names neither gets no searcher at all, and
+    # `WebSearcher.request` answers `None` — "a configuration fact and never a
+    # failure". The composition root derives the searcher and the seam's
+    # registration entry from this one pair, so they cannot disagree.
+    #
+    # **These are the connected account's configuration and not two more of
+    # ADR-0231 §5's four bounds.** That section adds exactly four `Settings`
+    # fields — `search_query_max_chars`, `search_max_results`,
+    # `search_max_result_chars` and `search_max_response_bytes` — each "with the
+    # named default, stated domain and load-time refusal ADR-0230 §6 requires of
+    # its own", and all four are above. What is here is the same pair every
+    # registering lane owes, in `send_email_connection`/`send_email_endpoint`'s
+    # own shape and for its own reason: §5 requires the request to be built "from
+    # the connected account's configuration alone" and pins the channel to "the
+    # one origin the connected account names", and nothing in the tree records
+    # either — ADR-0149 §13 rules that "a connection record carries no endpoint and
+    # no description". So an operator states both, exactly as they do for the mail
+    # integration.
+    #
+    # **The reference names an existing record; it does not propose one**
+    # (ADR-0151 §3), and an unknown or disconnected one is not validated at load:
+    # what the store holds is read per call by the binding seam, which refuses an
+    # unconnectable reference with the record in hand (ADR-0152 §6). Both are
+    # `send_email_connection`'s clauses for its reasons.
+    web_search_connection: str | None = Field(
+        default=None,
+        description=(
+            "The connection reference the web search is registered against — a "
+            "handle the provisioner minted, read out of the connections listing. "
+            "Set it together with web_search_origin, or set neither and no "
+            "searcher is built."
+        ),
+    )
+    web_search_origin: str | None = Field(
+        default=None,
+        description=(
+            "The one HTTPS origin the connected search account names, as "
+            "https://host[:port] (ADR-0231 §5, §8). The searcher pins the "
+            "authorised call to exactly this origin and opens a channel to no "
+            "other. Set it together with web_search_connection."
+        ),
+    )
+
     # --- The registered egress integration (ADR-0152 §10, ADR-0154 §6) ----
     # **Which connected account `send_email` is registered against, and where it
     # submits.** Both, or neither: a deployment that names both gets the tool
@@ -3963,7 +4057,9 @@ class Settings(BaseSettings):
                 raise ValueError(msg)
         return self
 
-    @field_validator("send_email_connection", "send_email_endpoint")
+    @field_validator(
+        "send_email_connection", "send_email_endpoint", "web_search_connection", "web_search_origin"
+    )
     @classmethod
     def _is_not_blank(cls, value: str | None) -> str | None:
         """Refuse a blank value, which the environment makes easy to produce.
@@ -4016,6 +4112,33 @@ class Settings(BaseSettings):
             f"the connected account it sends as and the endpoint it submits to "
             f"(ADR-0148 §6), so set {missing} as well or unset {set_one} to leave the "
             f"tool unregistered"
+        )
+        raise ValueError(msg)
+
+    @model_validator(mode="after")
+    def _the_search_registration_is_whole_or_absent(self) -> Settings:
+        """Refuse half a registration for the web search (ADR-0231 §5, §17).
+
+        The clause above, one field pair along and for exactly its reasons: an
+        account with no origin to ask, or an origin with no account to ask it as,
+        is a state the system cannot be in, and the quiet reading is the unsafe
+        one. "Later" here is a turn whose planner asked for a search and whose
+        searcher was never built, which an operator would read as the mechanism
+        being inert rather than as their configuration having half-landed.
+
+        Raises:
+            ValueError: If exactly one of the two is set.
+        """
+        connection, origin = self.web_search_connection, self.web_search_origin
+        if (connection is None) == (origin is None):
+            return self
+        set_one = "web_search_connection" if origin is None else "web_search_origin"
+        missing = "web_search_origin" if origin is None else "web_search_connection"
+        msg = (
+            f"{set_one} is set and {missing} is not; registering the web search needs "
+            f"both the connected account it asks as and the one origin it asks "
+            f"(ADR-0231 §5), so set {missing} as well or unset {set_one} to leave no "
+            f"searcher built"
         )
         raise ValueError(msg)
 
