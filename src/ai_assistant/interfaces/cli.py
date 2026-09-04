@@ -823,7 +823,7 @@ def main() -> None:
 @app.command()
 def version() -> None:
     """Print the installed version."""
-    console.print(f"ai-assistant [bold cyan]{__version__}[/]")
+    _print(f"ai-assistant [bold cyan]{__version__}[/]")
 
 
 @app.command()
@@ -2893,8 +2893,8 @@ async def _store_device_enrolment(hub_identity: str, read_credential: Callable[[
     except (AssistantError, TransportError, ValueError, OSError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
-    console.print(f"[green]Enrolled.[/] This device is now bound to hub {_safe(hub_identity)}.")
-    console.print(
+    _print(f"[green]Enrolled.[/] This device is now bound to hub {_safe(hub_identity)}.")
+    _print(
         "Set [bold]ASSISTANT_REMOTE_HUB_ADDRESS[/] to that hub's overlay address to reach it "
         "from here. The address is where to dial; the identity above is what the answer has "
         "to be, and changing one does not change the other."
@@ -2918,12 +2918,10 @@ async def _remove_device_enrolment() -> int:
         _render_error(exc)
         return _EXIT_ERROR
     if not removed:
-        console.print("This device held no enrolment; nothing changed.")
+        _print("This device held no enrolment; nothing changed.")
         return _EXIT_OK
-    console.print(
-        "[green]Removed[/] the credential and the hub identity from this machine's keyring."
-    )
-    console.print(
+    _print("[green]Removed[/] the credential and the hub identity from this machine's keyring.")
+    _print(
         "The hub still holds this device's enrolment until you revoke it there — run "
         "'ai-assistant-device revoke' on the hub's own machine."
     )
@@ -3082,7 +3080,7 @@ async def _serve_gateway() -> int:
         _render_error(exc)
         return _EXIT_ERROR
     except KeyboardInterrupt, asyncio.CancelledError:
-        console.print("[dim]Gateway stopped. Every session ended with it.[/]")
+        _print("[dim]Gateway stopped. Every session ended with it.[/]")
     return _EXIT_OK
 
 
@@ -3248,7 +3246,7 @@ def _report_gateway_note(note: Note) -> None:
         note: The condition the gateway reached.
     """
     with contextlib.suppress(OSError):
-        console.print(f"[yellow]{_GATEWAY_NOTES[note]}[/]")
+        _print(f"[yellow]{_GATEWAY_NOTES[note]}[/]")
 
 
 def _disclose_bootstrap(disclosure: Disclosure) -> None:
@@ -4350,16 +4348,16 @@ async def _drive_forget(
             return _EXIT_ERROR
         _render_forget_prompt(belief)
         if not confirm(belief):
-            console.print("[dim]Left alone. Nothing was forgotten.[/]")
+            _print("[dim]Left alone. Nothing was forgotten.[/]")
             return _EXIT_OK
         destroyed = await engine.forget(belief.id)
     except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
     if not destroyed:
-        console.print("[yellow]Nothing to forget:[/] that belief was already gone.")
+        _print("[yellow]Nothing to forget:[/] that belief was already gone.")
         return _EXIT_ERROR
-    console.print("[green]Forgotten.[/] That belief is destroyed — it is in no export.")
+    _print("[green]Forgotten.[/] That belief is destroyed — it is in no export.")
     return _EXIT_OK
 
 
@@ -4393,7 +4391,7 @@ async def _drive_resume(
     try:
         pending = await engine.pending_confirmations()
         if not pending:
-            console.print("[dim]Nothing is awaiting confirmation.[/]")
+            _print("[dim]Nothing is awaiting confirmation.[/]")
             return _EXIT_OK
         for confirmation in pending:
             if not _render_confirmation(confirmation):
@@ -4461,7 +4459,7 @@ def _may_ride_an_establishing_act(confirmation: Confirmation) -> bool:
 
 def _render_act_not_offered() -> None:
     """Say why one card took the answer without the standing request (ADR-0235 §2)."""
-    console.print(
+    _print(
         "[dim]Recipients not remembered for this one: it is not a call whose "
         "recipients can be made standing. Your answer was recorded as you gave "
         "it.[/]"
@@ -4538,7 +4536,7 @@ async def _drive_turn(  # noqa: PLR0913 — one parameter per seam a turn is dri
         )
         if settled is None:
             streamed.abandon()
-            console.print(
+            _print(
                 "[red]That turn's answer ended without a result[/], so I cannot say "
                 "what became of it. Nothing here was retried."
             )
@@ -4657,16 +4655,16 @@ async def _drive_forget_conversation(
             return _EXIT_ERROR
         _render_forget_conversation_prompt(digest)
         if not confirm(digest):
-            console.print("[dim]Left alone. Nothing was forgotten.[/]")
+            _print("[dim]Left alone. Nothing was forgotten.[/]")
             return _EXIT_OK
         destroyed = await engine.forget_conversation(digest.id)
     except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
     if not destroyed:
-        console.print("[yellow]Nothing to forget:[/] that conversation was already gone.")
+        _print("[yellow]Nothing to forget:[/] that conversation was already gone.")
         return _EXIT_ERROR
-    console.print("[green]Forgotten.[/] That conversation and everything it recorded are gone.")
+    _print("[green]Forgotten.[/] That conversation and everything it recorded are gone.")
     return _EXIT_OK
 
 
@@ -4778,16 +4776,16 @@ async def _drive_forget_transcript_entry(
         _render_forget_transcript_prompt(address, entry)
         _render_archive_size(size)
         if not confirm(entry):
-            console.print("[dim]Left alone. Nothing was destroyed.[/]")
+            _print("[dim]Left alone. Nothing was destroyed.[/]")
             return _EXIT_OK
         destroyed = await engine.forget_transcript_entry(address)
     except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
     if not destroyed:
-        console.print("[yellow]Nothing to destroy:[/] no transcript was held at that address.")
+        _print("[yellow]Nothing to destroy:[/] no transcript was held at that address.")
         return _EXIT_ERROR
-    console.print("[green]Destroyed.[/] That turn's transcript is gone.")
+    _print("[green]Destroyed.[/] That turn's transcript is gone.")
     return _EXIT_OK
 
 
@@ -4815,20 +4813,16 @@ async def _drive_forget_transcript_conversation(
         _render_forget_transcript_conversation_prompt(conversation_id, page)
         _render_archive_size(size)
         if not confirm(page):
-            console.print("[dim]Left alone. Nothing was destroyed.[/]")
+            _print("[dim]Left alone. Nothing was destroyed.[/]")
             return _EXIT_OK
         destroyed = await engine.forget_transcript_conversation(conversation_id)
     except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
     if not destroyed:
-        console.print(
-            "[yellow]Nothing to destroy:[/] no transcript was held under that conversation."
-        )
+        _print("[yellow]Nothing to destroy:[/] no transcript was held under that conversation.")
         return _EXIT_ERROR
-    console.print(
-        f"[green]Destroyed.[/] {destroyed} turn(s) of that conversation's transcript are gone."
-    )
+    _print(f"[green]Destroyed.[/] {destroyed} turn(s) of that conversation's transcript are gone.")
     return _EXIT_OK
 
 
@@ -4898,9 +4892,9 @@ async def _drive_forget_question(engine: AssistantEngine, question_id: str) -> i
         _render_error(exc)
         return _EXIT_ERROR
     if not destroyed:
-        console.print("[yellow]Nothing to forget:[/] no question has that id.")
+        _print("[yellow]Nothing to forget:[/] no question has that id.")
         return _EXIT_ERROR
-    console.print(
+    _print(
         "[green]Forgotten.[/] That question is destroyed. If an answer to it was "
         "already in flight, check 'assistant beliefs' — I cannot tell you whether "
         "that write landed — and use 'assistant learn' again if the correction is "
@@ -4972,7 +4966,7 @@ async def _drive_grant(
             return _EXIT_ERROR
         _render_grant_prompt(chosen, scope)
         if not confirm(chosen):
-            console.print("[dim]Left alone. Nothing was granted.[/]")
+            _print("[dim]Left alone. Nothing was granted.[/]")
             return _EXIT_OK
         # Relayed as the user typed it, and as the enumeration returned it: they are
         # equal by the check above, so this is the declared identity either way.
@@ -5009,13 +5003,13 @@ async def _drive_revoke(engine: AssistantEngine, source: str) -> int:
         _render_error(exc)
         return _EXIT_ERROR
     if withdrawn is None:
-        console.print(
+        _print(
             "[yellow]Nothing to withdraw:[/] no live grant covers that source. "
             "(That is about the grant, not about any read — see 'assistant grants' "
             "for what was granted and withdrawn.)"
         )
         return _EXIT_ERROR
-    console.print(
+    _print(
         f"[green]Withdrawn.[/] I will start no further read of "
         f"[bold]{_safe(withdrawn.source)}[/], and nothing a read still running "
         f"produces will be used. What I already believe from it is untouched — see "
@@ -5170,14 +5164,14 @@ async def _drive_revoke_recipient_grant(engine: AssistantEngine, grant_id: str) 
         _render_error(exc)
         return _EXIT_ERROR
     if revoked is None:
-        console.print(
+        _print(
             f"[yellow]Nothing to withdraw.[/] No standing recipient authorisation "
             f"{_safe(grant_id)} is outstanding — it may already have been withdrawn."
         )
-        console.print("[dim]'assistant recipient-grants' shows what stands now.[/]")
+        _print("[dim]'assistant recipient-grants' shows what stands now.[/]")
         return _EXIT_OK
-    console.print(f"[green]Withdrawn.[/] Recorded as {_safe(revoked.id)}.")
-    console.print(
+    _print(f"[green]Withdrawn.[/] Recorded as {_safe(revoked.id)}.")
+    _print(
         "[dim]Sends to those recipients will be put to you again. Nothing already "
         "sent is retired, and a send already going out is not stopped.[/]"
     )
@@ -5250,7 +5244,7 @@ async def _drive_amend(
         return _EXIT_ERROR
     _render_amend_prompt(chosen, scope)
     if not confirm(chosen):
-        console.print("[dim]Left alone. Nothing was withdrawn and nothing was granted.[/]")
+        _print("[dim]Left alone. Nothing was withdrawn and nothing was granted.[/]")
         return _EXIT_OK
 
     try:
@@ -5325,14 +5319,14 @@ async def _drive_dismiss_notification(engine: AssistantEngine, notification_id: 
         _render_error(exc)
         return _EXIT_ERROR
     if not dismissed:
-        console.print(
+        _print(
             "[yellow]Nothing to dismiss:[/] no notification with that id is still "
             "outstanding. It may never have existed, or it may already have been "
             "dismissed, expired, or ruled out — 'assistant notifications' lists what "
             "I am holding."
         )
         return _EXIT_ERROR
-    console.print(
+    _print(
         "[green]Dismissed.[/] It will not reach you, and the record is still there — "
         "'assistant forget-notification' destroys it. If I notice that again it is a "
         "new notification rather than a duplicate."
@@ -5348,9 +5342,9 @@ async def _drive_forget_notification(engine: AssistantEngine, notification_id: s
         _render_error(exc)
         return _EXIT_ERROR
     if not destroyed:
-        console.print("[yellow]Nothing to forget:[/] no notification has that id.")
+        _print("[yellow]Nothing to forget:[/] no notification has that id.")
         return _EXIT_ERROR
-    console.print(
+    _print(
         "[green]Forgotten.[/] That notification is destroyed — it is in no export. "
         "Because its record is also what stopped me raising the same thing twice, "
         "the next time I notice it, it is new to me."
@@ -5393,7 +5387,7 @@ async def _drive_tune(engine: AssistantEngine, asked: _Tuning) -> int:
     except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
-    console.print("[green]Tuned.[/] These are the settings in force now.\n")
+    _print("[green]Tuned.[/] These are the settings in force now.\n")
     _render_notification_settings(written)
     _render_reach_notice(current, asked)
     return _EXIT_OK
@@ -5969,12 +5963,12 @@ def _render_reach_notice(current: NotificationPreferences, asked: _Tuning) -> No
         # nothing on account of it and there is no consequence to announce.
         return
     if current.reach_for(asked.notification_class) is asked.reach:
-        console.print(
+        _print(
             "\n[dim]That class was already reaching you exactly that far in the settings "
             "I read, so this asked for no change to it.[/]"
         )
     elif asked.reach is NotificationReach.INTERRUPT:
-        console.print(
+        _print(
             "\n[dim]Anything of that class I am already holding is now due to be "
             "looked at again, on my next sweep rather than this instant — so one that "
             "named a moment it stops mattering can reach you without waiting for the "
@@ -5982,7 +5976,7 @@ def _render_reach_notice(current: NotificationPreferences, asked: _Tuning) -> No
             "long you wait: no reach setting makes it urgent.[/]"
         )
     elif asked.reach is NotificationReach.OFF:
-        console.print(
+        _print(
             "\n[dim]Anything of that class I am already holding is now due to be ruled "
             "out too, on my next sweep rather than this instant; it stays readable in "
             "'assistant notifications' either way. Nothing already sent is recalled.[/]"
@@ -6113,6 +6107,149 @@ def _safe_prose(value: str) -> str:
     return _safe(value.replace("\r\n", "\n").replace("\r", "\n"), keep_line_breaks=True)
 
 
+#: The marker every display line after a printed line's first one carries
+#: (:func:`_print`). No line this adapter authors begins with it — a field leads with
+#: its label, a listing row with its own indent, a citation with ``-`` — so a
+#: continuation can never be read as a line this adapter wrote fresh.
+#:
+#: **It is deliberately not :data:`_VALUE_GUTTER`'s ``│``**, and the two claims are
+#: why. That gutter says *this whole block is one value, rendered whole* and is what
+#: ADR-0233 §8's rendering floor rests on — "no line this confirmation card writes
+#: carries it" is the property that makes a forged field inside a value read as part of
+#: the value. This says only *this display line continues the one above*, which is a
+#: weaker claim and true of adapter text as often as of a value. Spelling both with one
+#: character would put the gutter on the card's own wrapped description lines and cost
+#: §8's marker the uniqueness an adversarial round bought it (#2069), to save a reader
+#: one glyph. The shape is the same one :func:`_render_content` and
+#: :func:`_render_egress_value` use — the adapter takes the wrapping and writes a marker
+#: onto every piece — and it is the shape rather than the character that is the
+#: convention.
+_CONTINUATION: Final = "↳ "
+
+
+def _print(line: str, *, to: Console | None = None) -> None:
+    r"""Print one line this adapter authored, marking every continuation of it (#2072).
+
+    **Almost every line this module writes interpolates an engine-supplied value into
+    text this adapter wrote** — ``  Why: {reason}``, ``    {key} = {value}``,
+    ``  {index}. {intent}``, a span line, a belief field. :func:`_safe` replaces the
+    value's newlines for exactly that reason (#1336): a newline would forge a second
+    line indistinguishable from one this adapter wrote. But the renderer inserts breaks
+    of its own that no neutralisation of the value can reach — Rich wraps at the
+    console width and **does not repeat a literal prefix on the continuations**, so a
+    long value's tail arrives at the margin carrying nothing that says it is data. At
+    width 40 a 500-character parameter value rendered as a dozen unmarked lines.
+
+    **What stood between that and a forgery was an accident of indentation.** A
+    continuation lands at column 0 while a card's fields carry a two- or four-space
+    indent, so a forged ``  Why: …`` did not line up with the real one *at that width*
+    and *while every caller kept its indent*. Neither is a property anything holds, so
+    the distinction is made deliberately here instead: the wrapping is taken by this
+    adapter and every display line after the first carries :data:`_CONTINUATION`.
+
+    **The shape is the one the two block renderers already use**, and adopting it
+    rather than inventing a third is the whole of the shape decision: the adapter takes
+    the wrapping itself, by Rich's own measurement, and writes a marker onto every
+    piece. :func:`_render_content` and :func:`_render_egress_value` do exactly that for
+    a value printed as a block of its own. What differs is the character, and
+    :data:`_CONTINUATION` records why — their ``│`` says *this block is one value,
+    whole*, and ADR-0233 §8's floor rests on no other line of the card carrying it.
+
+    **Every line goes through this, not only the ones a value reaches.** Whether a
+    composed line carries an engine-supplied value is not decidable at the call site:
+    the value often arrives through a helper that returns a whole phrase
+    (:func:`_egress_span_line`, :func:`_message_for`, :func:`_scope_phrase`), and a rule
+    that has to be re-decided at each future call site is precisely the defence #2072
+    found wanting. A line with no value in it costs a marker on a wrap that would
+    otherwise be ambiguous to the eye, which is not a cost worth a second convention.
+
+    **A line that fits is printed exactly as it was**, byte for byte, which is what
+    keeps this from being a change to every rendering in the module: only a line the
+    console would have broken is rendered differently, and only from its second display
+    line on. :func:`_render_content` takes the same care for the same reason.
+
+    **A ``\n`` in the composed string is this adapter's own**, since :func:`_safe` eats
+    a value's — and no line here carries one between two pieces of content, only ahead
+    of a block or after it. Those are reproduced as the blank lines they are. The
+    exception is the three sites that interpolate :func:`_safe_prose`, where a break
+    *is* the value's, and there the following lines are continuations and are marked as
+    such: a transcript entry's ``You:`` half can no longer put a second ``Conversation:``
+    field under the real one.
+
+    **Four site classes do not take this, and each has its own answer to the same
+    question.** A value printed as a block of its own is marked line by line by
+    :func:`_render_content` and :func:`_render_egress_value`, which wrap it themselves
+    and hand this console a :class:`~rich.text.Text` already measured to fit — a second
+    wrap would find nothing to break. A command hint goes through :func:`_print_hint`,
+    which asks the *terminal* to fold rather than breaking the line at all, because a
+    hint Rich broke pastes as two commands (#1023); the fold leaves no marked line, and
+    that is the trade #1023 made and this does not reopen. And the composed answer is
+    printed as the block of prose it is: no text this adapter wrote shares a line with
+    it, so a break in it forges nothing — which is the argument :func:`_safe_prose`
+    records for keeping its newlines in the first place.
+
+    **What wrapping costs is one space per break**, as :func:`_render_egress_value`
+    records: an unbroken run is folded and its pieces concatenate back to it, and a run
+    of words breaks at a space because on a screen the break *is* that space. Nothing
+    is truncated, elided or summarised here.
+
+    Rich markup is resolved once, by the console, and what is printed on a wrapped line
+    is a :class:`~rich.text.Text` — so the escaping :func:`_safe` applied cannot be
+    re-parsed by the print, which is :func:`_safe_prose`'s reason held one step later.
+
+    Args:
+        line: The line, with its markup, exactly as it would have been printed.
+        to: The console to write to. Defaults to :data:`console`, read at call time so
+            a test that substitutes it is honoured; the export path's error boundary
+            passes :data:`error_console` (ADR-0186 §9).
+    """
+    target = console if to is None else to
+    segments = line.split("\n")
+    lead = 0
+    while lead < len(segments) - 1 and not segments[lead]:
+        lead += 1
+    trail = len(segments)
+    while trail - 1 > lead and not segments[trail - 1]:
+        trail -= 1
+    for _ in range(lead):
+        target.print()
+    _print_marking_continuations(target, segments[lead:trail])
+    for _ in range(len(segments) - trail):
+        target.print()
+
+
+def _print_marking_continuations(target: Console, segments: Sequence[str]) -> None:
+    """Write one logical line, its first display line bare and the rest marked.
+
+    Split out of :func:`_print` so that the blank lines around a line are settled in
+    one place and the marking in another; see there for why the marker exists and why
+    a line that fits is printed untouched.
+
+    The gutter takes the head's own indentation, so a card's fields keep their column
+    and the marker sits where the eye already is. Below the gutter's own width there is
+    no rendering that both shows the text and marks it — the room is clamped to one
+    column and the marked line then wraps, which is the residual
+    :func:`_values_fit_this_terminal` refuses to render a *value* into.
+
+    Args:
+        target: The console to write to.
+        segments: The line's pieces, split on the newlines the composed string carries.
+            The first is the head; every later one is a continuation the value supplied.
+    """
+    head = segments[0]
+    if len(segments) == 1 and target.render_str(head).cell_len <= target.width:
+        target.print(head)
+        return
+    indent = head[: len(head) - len(head.lstrip(" "))]
+    gutter = Text(f"{indent}{_CONTINUATION}", style="dim")
+    room = max(target.width - gutter.cell_len, 1)
+    for position, segment in enumerate(segments):
+        body = segment[len(indent) :] if position == 0 else segment
+        for offset, piece in enumerate(target.render_str(body).wrap(target, room)):
+            marked = position > 0 or offset > 0
+            target.print((gutter if marked else Text(indent)) + piece)
+
+
 #: What may follow a ``[`` in Rich markup, taken from the character class its
 #: escaper and its parser share (``\[[a-z#/@][^[]*?]``). A ``[`` followed by
 #: anything else is text under both, so :func:`_settled_prefix` need not hold it.
@@ -6229,7 +6366,7 @@ class _StreamedReply:
         # ADR-0173 §3: "no implementation treats an accumulated chunk sequence as the
         # record of what the assistant said". The prose above is already on screen and
         # cannot be recalled, so it is disowned in words and the answer stated after it.
-        console.print(
+        _print(
             "[yellow]Note:[/] the hub did not confirm the text above as this turn's "
             "answer, so read what follows instead of it."
         )
@@ -6367,6 +6504,14 @@ def _print_hint(line: str) -> None:
     wherever the command sits; prose with no command in it keeps Rich's wrapping,
     which reads better and has nothing to lose.
 
+    **So a hint is the one line here that does not go through :func:`_print`**, and it
+    is the same decision seen from the other side: what that function does is take the
+    wrapping and mark what it broke, and what this one wants is not to break the line
+    at all. A folded hint carries no marker, which is #2072's exposure kept for
+    #1023's reason — a wrong command is worse than an unmarked continuation, and the
+    argument is quoted (:func:`_argument`) or withheld (:func:`_uncopyable`) before it
+    reaches the line.
+
     Args:
         line: The hint, with its markup, exactly as it would have been printed.
     """
@@ -6418,14 +6563,12 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
         # ADR-0074 §9 item 6: capture failure degrades the turn rather than failing
         # it — the answer is still the answer — but a user whose turns are silently
         # not being recorded would not find out until they tried to continue.
-        console.print(
+        _print(
             "[yellow]Note:[/] this turn was not recorded, so it will not be part of "
             "this conversation's history."
         )
     if turn is not None and turn.memory_degraded:
-        console.print(
-            "[yellow]Note:[/] personal memory was unavailable, so this answer is generic."
-        )
+        _print("[yellow]Note:[/] personal memory was unavailable, so this answer is generic.")
     _render_reply(outcome, streamed=streamed)
     routed = outcome.routed
     if routed is not None:
@@ -6436,13 +6579,11 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
     if turn is not None:
         plan = turn.plan
         if plan.rationale:
-            console.print(f"[bold]Plan:[/] {_safe(plan.rationale)}")
+            _print(f"[bold]Plan:[/] {_safe(plan.rationale)}")
         if not plan.steps:
-            console.print("[dim]No action was needed.[/]")
+            _print("[dim]No action was needed.[/]")
         for index, planned in enumerate(plan.steps, start=1):
-            console.print(
-                f"  {index}. {_safe(planned.intent)} [dim]({_safe(planned.capability)})[/]"
-            )
+            _print(f"  {index}. {_safe(planned.intent)} [dim]({_safe(planned.capability)})[/]")
 
     step = outcome.step
     if step is None or step.confirmation is not None:
@@ -6506,12 +6647,12 @@ def _render_reply(outcome: TurnOutcome, *, streamed: _StreamedReply | None = Non
     if not outcome.reply_degraded:
         return
     if outcome.reply is None:
-        console.print(
+        _print(
             "[yellow]Note:[/] no answer could be composed for this turn, so what "
             "follows is the record of what was done and nothing more."
         )
         return
-    console.print(
+    _print(
         "[yellow]Note:[/] that answer is incomplete — composing it did not finish, so "
         "it stops where it stops; what follows is the record of what was done."
     )
@@ -6559,7 +6700,7 @@ def _render_step(step: StepOutcome) -> bool:
         # ever is reached, "we cannot tell" must not render as success: that is the
         # whole of what #531 reported, and a green exit code for an unknown outcome
         # is the version of it a script would trust.
-        console.print(
+        _print(
             "[yellow]The step's own execution record could not be found, so whether it "
             "succeeded cannot be shown.[/]"
         )
@@ -6577,7 +6718,7 @@ def _render_step(step: StepOutcome) -> bool:
     # optionality rather than a state this can reach.
     cause = "" if failure is None else f" {_safe(failure.message)}"
     kind = "" if failure is None or failure.kind is None else f" [dim]({failure.kind.value})[/]"
-    console.print(f"{_step_headline(execution.status, tool)}{cause}{kind}")
+    _print(f"{_step_headline(execution.status, tool)}{cause}{kind}")
     return True
 
 
@@ -6779,7 +6920,7 @@ def _render_routed(routed: RoutedOperation) -> bool:
     if card is not None:
         _render_operation_confirmation(card)
         return False
-    console.print(_routed_headline(routed))
+    _print(_routed_headline(routed))
     listing = routed.listing
     if listing is not None:
         _render_routed_listing(routed.operation, routed.outcome, listing)
@@ -6933,9 +7074,9 @@ def _render_routed_candidates(operation: RoutableOperation, listing: RoutedListi
                 _render_question(question)
         case RoutableOperation.REVOKE:
             for grant in _routed_records(operation, listing, SourceGrant):
-                console.print(f"\n  [bold cyan]{_safe(grant.source)}[/]")
-                console.print(f"    [green]allowed for[/] {_scope_phrase(grant.scope)}")
-                console.print(f"    [dim]granted {_when(grant.decided_at)}[/]")
+                _print(f"\n  [bold cyan]{_safe(grant.source)}[/]")
+                _print(f"    [green]allowed for[/] {_scope_phrase(grant.scope)}")
+                _print(f"    [dim]granted {_when(grant.decided_at)}[/]")
         case _:  # pragma: no cover - unreachable by RoutedOperation's own validator
             # A read-only operation admits exactly `PERFORMED`, `UNRECORDED` and
             # `FAILED` (ADR-0197 §8), so neither ambiguous outcome reaches it.
@@ -6978,7 +7119,7 @@ def _render_operation_confirmation(card: OperationConfirmation) -> None:
         for belief in _routed_records(card.operation, card.subject, Belief):
             _render_forget_prompt(belief)
         return
-    console.print(f"\n[bold yellow]About to {_ROUTED_ASKED[card.operation]}[/]")
+    _print(f"\n[bold yellow]About to {_ROUTED_ASKED[card.operation]}[/]")
     if card.operation in _PLACEMENT_ACT_NOTE:
         # The belief without ADR-0073 §5's destruction ceremony, which would be false
         # here: an act changes who may receive the record and destroys nothing. What
@@ -6986,21 +7127,21 @@ def _render_operation_confirmation(card: OperationConfirmation) -> None:
         # what they are about to change the audience of.
         for belief in _routed_records(card.operation, card.subject, Belief):
             _render_belief(belief)
-        console.print(_PLACEMENT_ACT_NOTE[card.operation])
+        _print(_PLACEMENT_ACT_NOTE[card.operation])
         return
     if card.operation is RoutableOperation.REVOKE:
         for grant in _routed_records(card.operation, card.subject, SourceGrant):
-            console.print(f"\n  [bold cyan]{_safe(grant.source)}[/]")
-            console.print(f"    [green]currently allowed for[/] {_scope_phrase(grant.scope)}")
-            console.print(f"    [dim]granted {_when(grant.decided_at)}[/]")
-        console.print(
+            _print(f"\n  [bold cyan]{_safe(grant.source)}[/]")
+            _print(f"    [green]currently allowed for[/] {_scope_phrase(grant.scope)}")
+            _print(f"    [dim]granted {_when(grant.decided_at)}[/]")
+        _print(
             "\n  This stops me reading that source from now on. It destroys nothing "
             "I have already learned from it, and you can grant it again."
         )
         return
     for question in _routed_records(card.operation, card.subject, Question):
         _render_question(question)
-    console.print(
+    _print(
         "\n  This destroys the record of having been asked. Nothing I believe "
         "changes, and you can tell me the same thing again yourself."
     )
@@ -7027,7 +7168,7 @@ def _render_conversation_footer(outcome: TurnOutcome) -> None:
     """
     if outcome.conversation_id is None:
         return
-    console.print(
+    _print(
         f"\n[dim]Conversation:[/] {_safe(outcome.conversation_id)}  "
         f"[dim](continue with: assistant ask --conversation "
         f"{_safe(outcome.conversation_id)} ...)[/]"
@@ -7044,21 +7185,19 @@ def _render_conversations(
     answered by asking for the next page, exactly as the belief listing answers it.
     """
     if not page:
-        console.print("[dim]No conversations yet — 'assistant ask' starts one.[/]")
+        _print("[dim]No conversations yet — 'assistant ask' starts one.[/]")
         return
-    console.print(f"[bold]{len(page)} conversation(s)[/], most recently active first.")
+    _print(f"[bold]{len(page)} conversation(s)[/], most recently active first.")
     for conversation in page:
-        console.print(f"\n  [bold cyan]{_safe(conversation.id)}[/]")
-        console.print(f"  [dim]Started:[/] {_when(conversation.started_at)}")
-        console.print(f"  [dim]Last active:[/] {_when(conversation.last_active_at)}")
+        _print(f"\n  [bold cyan]{_safe(conversation.id)}[/]")
+        _print(f"  [dim]Started:[/] {_when(conversation.started_at)}")
+        _print(f"  [dim]Last active:[/] {_when(conversation.last_active_at)}")
         if conversation.last_turn_at is None:
-            console.print("  [dim]No turn has been recorded in it yet.[/]")
+            _print("  [dim]No turn has been recorded in it yet.[/]")
         else:
-            console.print(f"  [dim]Last recorded turn:[/] {_when(conversation.last_turn_at)}")
+            _print(f"  [dim]Last recorded turn:[/] {_when(conversation.last_turn_at)}")
     if limit and len(page) == limit:
-        console.print(
-            f"\n[dim]That is a full page; there may be more — try --offset {offset + limit}.[/]"
-        )
+        _print(f"\n[dim]That is a full page; there may be more — try --offset {offset + limit}.[/]")
 
 
 def _render_forget_conversation_prompt(digest: ConversationDigest) -> None:
@@ -7070,21 +7209,21 @@ def _render_forget_conversation_prompt(digest: ConversationDigest) -> None:
     expired or been deleted still happened, and saying otherwise would understate
     what is being destroyed.
     """
-    console.print("\n[bold yellow]About to forget this conversation[/]")
-    console.print(f"  [bold cyan]{_safe(digest.id)}[/]")
-    console.print(f"  [dim]Started:[/] {_when(digest.started_at)}")
+    _print("\n[bold yellow]About to forget this conversation[/]")
+    _print(f"  [bold cyan]{_safe(digest.id)}[/]")
+    _print(f"  [dim]Started:[/] {_when(digest.started_at)}")
     if digest.last_turn_at is None:
-        console.print("  [dim]Turns recorded:[/] none")
+        _print("  [dim]Turns recorded:[/] none")
     else:
-        console.print(
+        _print(
             f"  [dim]Turns recorded:[/] {digest.recorded_turns}, "
             f"the last at {_when(digest.last_turn_at)}"
         )
-    console.print(
+    _print(
         "\n  [yellow]This destroys the conversation and every episode it recorded: "
         "they leave memory, this listing, and any export.[/]"
     )
-    console.print(
+    _print(
         "  [dim]Turns already deleted or past their retention window stay gone; "
         "nothing is restored.[/]"
     )
@@ -7097,7 +7236,7 @@ def _render_no_such_conversation(conversation_id: str) -> None:
     three look the same from here on purpose, because a surface that distinguished
     them would report on conversations it is meant to have forgotten.
     """
-    console.print(
+    _print(
         f"[yellow]No conversation has the id[/] {_safe(conversation_id)}. "
         "It may never have existed, or you may have deleted it already — "
         "'assistant conversations' lists the ones that are still here."
@@ -7128,7 +7267,7 @@ def _render_transcript_notice() -> None:
     are looking at: nothing here reaches a reply, because nothing on the turn path can
     read it (§4).
     """
-    console.print(
+    _print(
         "[dim]A record of what was said — your words and mine, as they were said. "
         "Not what I believe, not what I retrieve, and not evidence for anything: "
         "nothing here reaches a reply.[/]"
@@ -7150,7 +7289,7 @@ def _render_archive_size(size: TranscriptArchiveSize) -> None:
     would fire it is on the screen every time the user looks.
     """
     turns = "turn" if size.entries == 1 else "turns"
-    console.print(
+    _print(
         f"[dim]Archive:[/] {size.entries:,} {turns} readable, "
         f"{_stored_bytes(size.stored_bytes)} on disk."
     )
@@ -7178,22 +7317,18 @@ def _render_transcript_hits(page: tuple[TranscriptHit, ...], *, limit: int, offs
     them more.
     """
     if not page:
-        console.print("[dim]Nothing matched.[/]")
+        _print("[dim]Nothing matched.[/]")
         return
-    console.print(f"[bold]{len(page)} match(es)[/], newest first.")
+    _print(f"[bold]{len(page)} match(es)[/], newest first.")
     for hit in page:
-        console.print(f"\n  [bold cyan]{_safe(hit.address)}[/]")
-        console.print(f"  [dim]When:[/] {_when(hit.occurred_at)}")
-        console.print(f"  [dim]Conversation:[/] {_safe(hit.conversation_id)}")
-        console.print(f"  {_safe_prose(hit.excerpt)}")
+        _print(f"\n  [bold cyan]{_safe(hit.address)}[/]")
+        _print(f"  [dim]When:[/] {_when(hit.occurred_at)}")
+        _print(f"  [dim]Conversation:[/] {_safe(hit.conversation_id)}")
+        _print(f"  {_safe_prose(hit.excerpt)}")
         if hit.elided:
-            console.print(
-                "  [dim]Shortened to fit — 'assistant transcript show' reads the turn whole.[/]"
-            )
+            _print("  [dim]Shortened to fit — 'assistant transcript show' reads the turn whole.[/]")
     if len(page) == limit:
-        console.print(
-            f"\n[dim]That is a full page; there may be more — try --offset {offset + limit}.[/]"
-        )
+        _print(f"\n[dim]That is a full page; there may be more — try --offset {offset + limit}.[/]")
 
 
 def _render_transcript_entries(
@@ -7208,15 +7343,13 @@ def _render_transcript_entries(
     all — which is a sentence rather than a shape.
     """
     if not page:
-        console.print(f"[dim]{empty}[/]")
+        _print(f"[dim]{empty}[/]")
         return
-    console.print(f"[bold]{len(page)} turn(s)[/].")
+    _print(f"[bold]{len(page)} turn(s)[/].")
     for entry in page:
         _render_transcript_entry(entry)
     if len(page) == limit:
-        console.print(
-            f"\n[dim]That is a full page; there may be more — try --offset {offset + limit}.[/]"
-        )
+        _print(f"\n[dim]That is a full page; there may be more — try --offset {offset + limit}.[/]")
 
 
 def _render_transcript_entry(entry: TranscriptEntry) -> None:
@@ -7230,20 +7363,20 @@ def _render_transcript_entry(entry: TranscriptEntry) -> None:
     The disposition is rendered for the reason §1 carries it: without it "a turn that
     parked reads in the transcript as a question nobody answered".
     """
-    console.print(f"\n  [bold cyan]{_safe(entry.address)}[/]")
-    console.print(f"  [dim]When:[/] {_when(entry.occurred_at)}")
-    console.print(
+    _print(f"\n  [bold cyan]{_safe(entry.address)}[/]")
+    _print(f"  [dim]When:[/] {_when(entry.occurred_at)}")
+    _print(
         f"  [dim]Conversation:[/] {_safe(entry.conversation_id)} "
         f"[dim]turn[/] {entry.ordinal} [dim]·[/] {_safe(entry.disposition.value)}"
     )
     if entry.asked is None:
-        console.print("  [dim]You said nothing on this turn.[/]")
+        _print("  [dim]You said nothing on this turn.[/]")
     else:
-        console.print(f"  [bold]You:[/] {_safe_prose(entry.asked)}")
+        _print(f"  [bold]You:[/] {_safe_prose(entry.asked)}")
     if entry.replied is None:
-        console.print("  [dim]I said nothing on this turn.[/]")
+        _print("  [dim]I said nothing on this turn.[/]")
     else:
-        console.print(f"  [bold]Me:[/] {_safe_prose(entry.replied)}")
+        _print(f"  [bold]Me:[/] {_safe_prose(entry.replied)}")
 
 
 def _render_no_such_transcript_entry(address: str) -> None:
@@ -7254,7 +7387,7 @@ def _render_no_such_transcript_entry(address: str) -> None:
     conflates its own three: a surface that told them apart would report on transcripts
     it is meant to have evicted.
     """
-    console.print(
+    _print(
         f"[yellow]No transcript is held at[/] {_safe(address)}. "
         "It may never have existed, it may have passed the archive's retention window, "
         "or you may have destroyed it already."
@@ -7270,16 +7403,16 @@ def _render_forget_transcript_prompt(address: str, entry: TranscriptEntry | None
     reads hide and a refusal here would put a hidden turn beyond the user's reach for
     good.
     """
-    console.print("\n[bold yellow]About to destroy this turn's transcript[/]")
+    _print("\n[bold yellow]About to destroy this turn's transcript[/]")
     if entry is None:
-        console.print(f"  [bold cyan]{_safe(address)}[/]")
-        console.print(
+        _print(f"  [bold cyan]{_safe(address)}[/]")
+        _print(
             "  [dim]Nothing readable is held at that address. It may be past the archive's "
             "retention window, in which case this still destroys it.[/]"
         )
     else:
         _render_transcript_entry(entry)
-    console.print(
+    _print(
         "\n  [yellow]This destroys the transcript of that turn and nothing else: "
         "what I believe is untouched, and 'assistant forget' is the command for that.[/]"
     )
@@ -7298,18 +7431,18 @@ def _render_forget_transcript_conversation_prompt(
     count from the first page would be worse than not showing one, because the user
     would read it as the number about to go.
     """
-    console.print("\n[bold yellow]About to destroy this conversation's transcript[/]")
-    console.print(f"  [bold cyan]{_safe(conversation_id)}[/]")
+    _print("\n[bold yellow]About to destroy this conversation's transcript[/]")
+    _print(f"  [bold cyan]{_safe(conversation_id)}[/]")
     if not page:
-        console.print(
+        _print(
             "  [dim]Nothing readable is held under that id. Turns past the archive's "
             "retention window are not shown here and are still destroyed.[/]"
         )
     else:
-        console.print(f"  [dim]The first {len(page)} turn(s) held under it:[/]")
+        _print(f"  [dim]The first {len(page)} turn(s) held under it:[/]")
         for entry in page:
             _render_transcript_entry(entry)
-    console.print(
+    _print(
         "\n  [yellow]This destroys every turn of this conversation's transcript — "
         "including any not shown above, and any the archive's retention window is "
         "hiding. What I believe is untouched.[/]"
@@ -7396,7 +7529,7 @@ def _render_disposition(disposition: Disposition, tool_id: str | None) -> None:
     }
     message = messages.get(disposition)
     if message is not None:
-        console.print(message)
+        _print(message)
 
 
 def _render_learn(outcome: LearnOutcome) -> None:
@@ -7414,14 +7547,14 @@ def _render_learn(outcome: LearnOutcome) -> None:
     still not answerable are four outcomes, and the line has to say which.
     """
     if not outcome.results:
-        console.print("[dim]Noted — nothing in that needed a memory update.[/]")
+        _print("[dim]Noted — nothing in that needed a memory update.[/]")
         return
-    console.print(
+    _print(
         f"[green]Learned.[/] Folded {len(outcome.results)} update(s) into memory "
         f"({outcome.stored} stored)."
     )
     for summary in outcome.results:
-        console.print(f"  - {_message_for(summary)} [dim]({_safe(summary.reason)})[/]")
+        _print(f"  - {_message_for(summary)} [dim]({_safe(summary.reason)})[/]")
 
 
 def _message_for(summary: IngestSummary) -> str:
@@ -7511,22 +7644,22 @@ def _render_observation(report: ObservationReport) -> None:
        learn" (ADR-0022 §3).
     """
     if report.conversation_id is None:
-        console.print("[dim]No conversation to observe yet — have one first with[/] assistant ask.")
+        _print("[dim]No conversation to observe yet — have one first with[/] assistant ask.")
         return
     if report.route is None:
-        console.print(
+        _print(
             f"[dim]Nothing to observe in conversation[/] {_safe(report.conversation_id)}[dim]: "
             "none of its recent turns still has a recorded episode, so no model was asked.[/]"
         )
         return
-    console.print(
+    _print(
         f"[bold]Observed[/] {report.episodes_read} episode(s) from conversation "
         f"{_safe(report.conversation_id)}, read by [bold cyan]{_safe(report.route)}[/]."
     )
     if not report.proposals:
-        console.print("[dim]Nothing in them was worth believing durably.[/]")
+        _print("[dim]Nothing in them was worth believing durably.[/]")
     else:
-        console.print(
+        _print(
             f"{len(report.proposals)} belief(s) proposed, {report.stored} stored. "
             "[dim]See them with[/] assistant beliefs[dim].[/]"
         )
@@ -7578,19 +7711,19 @@ def _render_observed_proposal(proposal: ObservedProposal) -> None:
     a citation's content — is neutralised for this terminal like any other
     (``_safe``, ADR-0042 §4).
     """
-    console.print(
+    _print(
         f"\n  [bold cyan]{proposal.step.value}[/] · {proposal.kind.value} · "
         f"confidence {proposal.confidence:.2f} · "
         f"from {proposal.evidence_count} episode(s)"
     )
-    console.print(f"  {_safe(proposal.content)}")
-    console.print(f"  [dim]Why:[/] {_safe(proposal.rationale)}")
+    _print(f"  {_safe(proposal.content)}")
+    _print(f"  [dim]Why:[/] {_safe(proposal.rationale)}")
     if not proposal.inspectable:
         _render_citations(proposal)
     if proposal.decision is None:
-        console.print(f"  [yellow]Not stored:[/] {_safe(proposal.reason)}.")
+        _print(f"  [yellow]Not stored:[/] {_safe(proposal.reason)}.")
         return
-    console.print(
+    _print(
         f"  [dim]Memory:[/] {_observed_message(proposal.decision)} "
         f"[dim]({_safe(proposal.reason)})[/]"
     )
@@ -7607,7 +7740,7 @@ def _render_observed_proposal(proposal: ObservedProposal) -> None:
     # says the one thing that holds on every branch — nothing was stored and an
     # answer is owed — and `assistant questions` documents itself.
     if proposal.record_id is not None:
-        console.print(f"  [dim]id:[/] {_safe(proposal.record_id)}")
+        _print(f"  [dim]id:[/] {_safe(proposal.record_id)}")
 
 
 def _render_citations(proposal: ObservedProposal) -> None:
@@ -7620,12 +7753,12 @@ def _render_citations(proposal: ObservedProposal) -> None:
     """
     if not proposal.evidence:
         return
-    console.print("  [dim]From:[/]")
+    _print("  [dim]From:[/]")
     for item in proposal.evidence:
         if item.content is None:
-            console.print("    [yellow]—[/] [dim]an episode stood here and is gone.[/]")
+            _print("    [yellow]—[/] [dim]an episode stood here and is gone.[/]")
         else:
-            console.print(f"    - {_safe(item.content)}")
+            _print(f"    - {_safe(item.content)}")
 
 
 def _render_observation_discards(report: ObservationReport) -> None:
@@ -7641,7 +7774,7 @@ def _render_observation_discards(report: ObservationReport) -> None:
     """
     if not report.discarded:
         return
-    console.print(
+    _print(
         f"\n[dim]Discarded {report.discarded}: "
         f"{report.discarded_unusable} unusable, "
         f"{report.discarded_over_limit} over the per-pass limit, "
@@ -7663,18 +7796,18 @@ def _render_questions(
     exactly as the belief and conversation listings answer it.
     """
     if not waiting and not stranded:
-        console.print("[dim]Nothing is waiting on your answer.[/]")
+        _print("[dim]Nothing is waiting on your answer.[/]")
         return
     if waiting:
-        console.print(f"[bold]{len(waiting)} question(s)[/] waiting on your answer, oldest first.")
+        _print(f"[bold]{len(waiting)} question(s)[/] waiting on your answer, oldest first.")
         for question in waiting:
             _render_question(question)
         if limit and len(waiting) == limit:
-            console.print(
+            _print(
                 f"\n[dim]That is a full page; there may be more — try --offset {offset + limit}.[/]"
             )
     if stranded:
-        console.print(
+        _print(
             f"\n[bold yellow]{len(stranded)} interrupted answer(s).[/] "
             "An answer to each of these was begun and its outcome was never recorded."
         )
@@ -7711,25 +7844,25 @@ def _render_question(question: Question) -> None:
     Engine-supplied text is neutralised for this terminal (``_safe``, ADR-0042 §4).
     The band, kind and state are this system's own closed vocabularies.
     """
-    console.print(f"\n  [bold cyan]{_safe(question.id)}[/]")
-    console.print(f"  [bold]{_safe(question.content)}[/]")
-    console.print(
+    _print(f"\n  [bold cyan]{_safe(question.id)}[/]")
+    _print(f"  [bold]{_safe(question.content)}[/]")
+    _print(
         f"  [dim]Would be held as:[/] {question.band.value} {question.kind.value} "
         f"[dim](not held yet — I am asking first)[/]"
     )
-    console.print(f"  [dim]Why I am asking:[/] {_safe(question.reason)}")
-    console.print(f"  [dim]Proposed because:[/] {_safe(question.rationale)}")
+    _print(f"  [dim]Why I am asking:[/] {_safe(question.reason)}")
+    _print(f"  [dim]Proposed because:[/] {_safe(question.rationale)}")
     origin = _proposal_origin(question)
     if origin:
-        console.print(f"  [dim]Where it came from:[/] {origin}")
+        _print(f"  [dim]Where it came from:[/] {origin}")
     _render_retirements(question)
-    console.print(f"  [dim]Asked:[/] {_when(question.asked_at)}")
+    _print(f"  [dim]Asked:[/] {_when(question.asked_at)}")
     if question.expires_at is None:
-        console.print("  [dim]Answerable:[/] indefinitely")
+        _print("  [dim]Answerable:[/] indefinitely")
     else:
-        console.print(f"  [dim]Answerable until:[/] {_when(question.expires_at)}")
+        _print(f"  [dim]Answerable until:[/] {_when(question.expires_at)}")
     if question.state is QuestionState.INTERRUPTED:
-        console.print(
+        _print(
             "  [yellow]An answer to this was begun and its outcome was never recorded.[/] "
             "I cannot tell you whether the change landed, so there is nothing to retry."
         )
@@ -7741,7 +7874,7 @@ def _render_question(question: Question) -> None:
             else f"  [dim]1.[/] Dispose of it with 'assistant forget-question'. "
             f"{_uncopyable('Its id')}"
         )
-        console.print(
+        _print(
             "  [dim]2.[/] Check 'assistant beliefs', and use 'assistant learn' again if "
             "the correction is missing."
         )
@@ -7925,21 +8058,19 @@ def _render_retirements(question: Question) -> None:
     forge the attribution of the span above or below it.
     """
     if not question.retires:
-        console.print("  [dim]Accepting would retire:[/] nothing")
+        _print("  [dim]Accepting would retire:[/] nothing")
         return
-    console.print("  [dim]Accepting would retire:[/]")
+    _print("  [dim]Accepting would retire:[/]")
     for retirement in question.retires:
         if retirement.content is None:
-            console.print(
+            _print(
                 f"    - [dim]{_safe(retirement.record_id)} — no longer held, so accepting "
                 f"would not touch it[/]"
             )
             continue
         lead, note = _retirement_origin(retirement.warrant)
-        console.print(
-            f"    - {lead} {_safe(retirement.content)} [dim]({_safe(retirement.record_id)})[/]"
-        )
-        console.print(f"      [dim]{note}[/]")
+        _print(f"    - {lead} {_safe(retirement.content)} [dim]({_safe(retirement.record_id)})[/]")
+        _print(f"      [dim]{note}[/]")
 
 
 def _render_successor(question: Question) -> None:
@@ -7958,24 +8089,22 @@ def _render_successor(question: Question) -> None:
     identifier = _safe(successor.id)
     match successor.state:
         case QuestionState.OPEN:
-            console.print(
+            _print(
                 f"  [dim]Your answer raised a further question, which is waiting:[/] "
                 f"[bold cyan]{identifier}[/]"
             )
         case QuestionState.DECLINED:
-            console.print(
+            _print(
                 f"  [dim]Your answer landed on a question you had already declined:[/] "
                 f"{identifier} [dim](forget it to be asked again)[/]"
             )
         case QuestionState.INTERRUPTED:
-            console.print(
+            _print(
                 f"  [dim]Your answer landed on another interrupted answer:[/] {identifier} "
                 f"[dim](dispose of that one too)[/]"
             )
         case QuestionState.APPLIED | QuestionState.STALE | QuestionState.REDEFERRED:
-            console.print(
-                f"  [dim]Your answer raised a further question, since settled:[/] {identifier}"
-            )
+            _print(f"  [dim]Your answer raised a further question, since settled:[/] {identifier}")
         case _:  # pragma: no cover — exhaustive over the enum
             assert_never(successor.state)
 
@@ -7997,22 +8126,22 @@ def _render_answer(outcome: AnswerOutcome) -> int:
     """
     match outcome.kind:
         case AnswerKind.APPLIED:
-            console.print(
+            _print(
                 f"[green]Applied.[/] That is what I believe now "
                 f"[dim]({_safe(outcome.record_id or '')})[/]"
             )
         case AnswerKind.REJECTED:
-            console.print(
+            _print(
                 "[green]Declined.[/] Nothing was written, and I will not ask you this again "
                 "— forget the question if you want to be asked."
             )
         case AnswerKind.STALE:
-            console.print(
+            _print(
                 "[yellow]Not applied.[/] What that question was about no longer applies, so "
                 "accepting it would have stored a belief that was already out of date."
             )
         case AnswerKind.NOT_OPEN:
-            console.print(
+            _print(
                 "[yellow]That question is not open.[/] It may never have existed, or it may "
                 "have lapsed, been answered, or have an answer already in flight — "
                 "'assistant questions' lists the ones that are still open."
@@ -8023,7 +8152,7 @@ def _render_answer(outcome: AnswerOutcome) -> int:
         case _:  # pragma: no cover — exhaustive over the enum
             assert_never(outcome.kind)
     if outcome.disposed:
-        console.print(
+        _print(
             "[dim]Note: that question was destroyed while your answer was being applied, "
             "so no record of the answer was kept.[/]"
         )
@@ -8038,14 +8167,14 @@ def _render_redeferral(outcome: AnswerOutcome) -> None:
     had no exemption to spend — the line says exactly that rather than pointing at a
     question that does not exist.
     """
-    console.print(
+    _print(
         "[yellow]Not applied yet.[/] Your answer was used, but it turned out to "
         "contradict something else you told me that you had not been shown."
     )
     successor = outcome.successor
     if successor is None:
         if outcome.successor_refused:
-            console.print(
+            _print(
                 "  [yellow]The question queue is full, so I could not put the follow-up to "
                 "you.[/] Answer or forget some of what is waiting, then teach me the "
                 "correction again."
@@ -8065,17 +8194,17 @@ def _render_redeferral(outcome: AnswerOutcome) -> None:
             )
             _print_hint(f"  [dim]Here is the follow-up:[/] [bold cyan]{identifier}[/] {offer}")
         case QuestionState.DECLINED:
-            console.print(
+            _print(
                 f"  [dim]That raises a question you had already declined:[/] {identifier} "
                 f"[dim](forget it to be asked again)[/]"
             )
         case QuestionState.INTERRUPTED:
-            console.print(
+            _print(
                 f"  [dim]That raises a question whose own answer was interrupted:[/] "
                 f"{identifier} [dim](dispose of that one first)[/]"
             )
         case QuestionState.APPLIED | QuestionState.STALE | QuestionState.REDEFERRED:
-            console.print(f"  [dim]That raises a question already settled:[/] {identifier}")
+            _print(f"  [dim]That raises a question already settled:[/] {identifier}")
         case _:  # pragma: no cover — exhaustive over the enum
             assert_never(successor.state)
 
@@ -8545,7 +8674,7 @@ def _render_content(content: str) -> None:
     """
     lines = _safe_prose(content).split("\n")
     if len(lines) == 1:
-        console.print(f"  {lines[0]}")
+        _print(f"  {lines[0]}")
         return
     gutter = Text("  │ ", style="dim")
     room = max(console.width - len(gutter), 1)
@@ -8604,16 +8733,16 @@ def _render_belief_fields(belief: Belief | BeliefSummary) -> None:
     terminal like any other (``_safe``, ADR-0042 §4). The band and kind are this
     system's own closed vocabularies, not carried data.
     """
-    console.print(
+    _print(
         f"\n  [bold cyan]{belief.band.value}[/] · {belief.kind.value} · "
         f"confidence {belief.confidence:.2f}"
     )
     _render_content(belief.content)
-    console.print(f"  [dim]Why:[/] {_why(belief)}")
-    console.print(f"  [dim]Last revised:[/] {_when(belief.last_updated)}")
+    _print(f"  [dim]Why:[/] {_why(belief)}")
+    _print(f"  [dim]Last revised:[/] {_when(belief.last_updated)}")
     if belief.valid_until is not None:
-        console.print(f"  [dim]Believed until:[/] {_when(belief.valid_until)}")
-    console.print(f"  [dim]id:[/] {_safe(belief.id)}")
+        _print(f"  [dim]Believed until:[/] {_when(belief.valid_until)}")
+    _print(f"  [dim]id:[/] {_safe(belief.id)}")
 
 
 def _render_evidence(belief: Belief) -> None:
@@ -8628,12 +8757,12 @@ def _render_evidence(belief: Belief) -> None:
     """
     if not belief.evidence:
         return
-    console.print("  [dim]Because:[/]")
+    _print("  [dim]Because:[/]")
     for item in belief.evidence:
         if item.content is None:
-            console.print("    [yellow]—[/] [dim]an item of evidence stood here and is gone.[/]")
+            _print("    [yellow]—[/] [dim]an item of evidence stood here and is gone.[/]")
         else:
-            console.print(f"    - {_safe(item.content)}")
+            _print(f"    - {_safe(item.content)}")
 
 
 def _render_beliefs(page: tuple[BeliefSummary, ...], *, limit: int, offset: int) -> None:
@@ -8644,15 +8773,13 @@ def _render_beliefs(page: tuple[BeliefSummary, ...], *, limit: int, offset: int)
     would fetch it, rather than implying a count nobody computed.
     """
     if not page:
-        console.print("[dim]No live belief matches.[/]")
+        _print("[dim]No live belief matches.[/]")
         return
-    console.print(f"[bold]{len(page)} belief(s)[/], most recently revised first.")
+    _print(f"[bold]{len(page)} belief(s)[/], most recently revised first.")
     for summary in page:
         _render_belief_summary(summary)
     if limit and len(page) == limit:
-        console.print(
-            f"\n[dim]That is a full page; there may be more — try --offset {offset + limit}.[/]"
-        )
+        _print(f"\n[dim]That is a full page; there may be more — try --offset {offset + limit}.[/]")
 
 
 def _render_forget_prompt(belief: Belief) -> None:
@@ -8670,15 +8797,15 @@ def _render_forget_prompt(belief: Belief) -> None:
        than retires, which is the contrast — kept versus destroyed — that a surface
        offering both a correction and a deletion owes (ADR-0073 §6).
     """
-    console.print("\n[bold yellow]About to forget this belief[/]")
+    _print("\n[bold yellow]About to forget this belief[/]")
     _render_belief(belief)
-    console.print(f"\n  [yellow]{_forget_warning(belief.band)}[/]")
-    console.print(
+    _print(f"\n  [yellow]{_forget_warning(belief.band)}[/]")
+    _print(
         "  This destroys the record: nothing of it is kept, not even in an export. "
         "To fix it instead, use [bold]assistant learn --kind correction[/], which "
         "retires the old belief and keeps it on the record."
     )
-    console.print(
+    _print(
         "  [dim]You are forgetting whatever belief that id names when you answer, "
         "which may have changed since it was shown.[/]"
     )
@@ -8693,7 +8820,7 @@ def _render_no_such_belief(belief_id: str) -> None:
     to erase such a record is not lost; what is missing is a surface for it, which
     belongs with the deferred history view (ADR-0073 §3, §10).
     """
-    console.print(
+    _print(
         f"[yellow]No live belief has the id[/] {_safe(belief_id)}. "
         "It may never have existed, or it may have been revised or forgotten already — "
         "this surface shows and destroys only beliefs held right now."
@@ -8742,24 +8869,24 @@ def _render_sources(offered: tuple[GrantableSource, ...]) -> None:
     clock had been corrected backwards. So this renders the field it was handed.
     """
     if not offered:
-        console.print(
+        _print(
             "[yellow]No sources are available to connect.[/] Nothing is configured "
             "for this installation to read. Configuration says *where* a source is; "
             "a grant says *whether* I may read it — and neither stands in for the "
             "other, so there is nothing to grant until one is configured."
         )
         return
-    console.print(f"[bold]{len(offered)}[/] source(s) you can connect me to:\n")
+    _print(f"[bold]{len(offered)}[/] source(s) you can connect me to:\n")
     for one in offered:
-        console.print(f"  [bold cyan]{_safe(one.source)}[/]")
+        _print(f"  [bold cyan]{_safe(one.source)}[/]")
         # The location is shown and comes to rest nowhere: it is on this response
         # and on no stored record, in no log and in no export (ADR-0097 §9a).
         where = "not configured" if one.location is None else _safe(one.location)
-        console.print(f"    reads from: {where}")
+        _print(f"    reads from: {where}")
         if one.live is None:
-            console.print("    [dim]not granted — I read nothing from it[/]")
+            _print("    [dim]not granted — I read nothing from it[/]")
         else:
-            console.print(
+            _print(
                 f"    [green]granted[/] for {_scope_phrase(one.live.scope)} "
                 f"(since {_when(one.live.decided_at)})"
             )
@@ -8780,16 +8907,16 @@ def _render_no_such_source(source: str, offered: tuple[GrantableSource, ...]) ->
     the hub's log. Guessing between them at a user's terminal would be inventing a
     diagnosis this process cannot make.
     """
-    console.print(
+    _print(
         f"[yellow]I cannot offer a source called[/] {_safe(source)}[yellow].[/] "
         "You can only grant a source I can show you first, which is what keeps a "
         "typo from becoming a permission."
     )
     if offered:
         names = ", ".join(_safe(one.source) for one in offered)
-        console.print(f"Available: {names}. See 'assistant sources' for the details.")
+        _print(f"Available: {names}. See 'assistant sources' for the details.")
     else:
-        console.print("Nothing is configured for me to read, so there is nothing to grant.")
+        _print("Nothing is configured for me to read, so there is nothing to grant.")
 
 
 def _render_grant_prompt(chosen: GrantableSource, scope: Sequence[GrantScope]) -> None:
@@ -8807,12 +8934,12 @@ def _render_grant_prompt(chosen: GrantableSource, scope: Sequence[GrantScope]) -
     source is absent from the enumeration, and :func:`_drive_grant` refuses to send
     ``grant`` for anything the enumeration did not carry.
     """
-    console.print(f"About to connect [bold cyan]{_safe(chosen.source)}[/].\n")
+    _print(f"About to connect [bold cyan]{_safe(chosen.source)}[/].\n")
     if chosen.location is None:
-        console.print("  [yellow]It has no configured location.[/]")
+        _print("  [yellow]It has no configured location.[/]")
     else:
-        console.print(f"  It reads from: [bold]{_safe(chosen.location)}[/]")
-    console.print(f"  You would be allowing: {_scope_phrase(scope)}.")
+        _print(f"  It reads from: [bold]{_safe(chosen.location)}[/]")
+    _print(f"  You would be allowing: {_scope_phrase(scope)}.")
     if chosen.live is not None:
         withdrawal = (
             f"first with 'assistant revoke {_argument(chosen.source)}'."
@@ -8824,7 +8951,7 @@ def _render_grant_prompt(chosen: GrantableSource, scope: Sequence[GrantScope]) -
             f"{_scope_phrase(chosen.live.scope)}. A source has one grant at a time, "
             f"so this will be refused — withdraw the current one {withdrawal}"
         )
-    console.print(
+    _print(
         "\n[dim]Withdrawing later stops further reads; it does not un-remember what "
         "was already read.[/]"
     )
@@ -8870,15 +8997,13 @@ def _render_grantable_decisions(offerable: tuple[PermissionDecision, ...], *, li
     :func:`_render_decision` is what renders the row, floor and all.
     """
     if not offerable:
-        console.print(
+        _print(
             "[dim]Nothing to answer.[/] No refused call is waiting for a decision "
             "about its recipients."
         )
         return
-    console.print(
-        f"[bold]{len(offerable)}[/] refused call(s) you can still decide about, newest first:\n"
-    )
-    console.print(
+    _print(f"[bold]{len(offerable)}[/] refused call(s) you can still decide about, newest first:\n")
+    _print(
         "[yellow]Each of these was refused and was not made.[/] Answering now does "
         "not make it — nothing is sent on account of your answer. What an answer "
         "establishes is a standing authorisation for the [bold]recipients[/] of "
@@ -8887,11 +9012,11 @@ def _render_grantable_decisions(offerable: tuple[PermissionDecision, ...], *, li
     for decision in offerable:
         _render_decision(decision)
     if len(offerable) == limit:
-        console.print(
+        _print(
             f"[dim]Read from the most recent {limit} rulings. Ask for more with "
             "--limit; a call older than that window is not offered here.[/]"
         )
-    console.print(
+    _print(
         "[dim]To remember one call's recipients: assistant remember-recipients "
         "<decision-id> --until <instant>[/]"
     )
@@ -8899,13 +9024,13 @@ def _render_grantable_decisions(offerable: tuple[PermissionDecision, ...], *, li
 
 def _render_recipient_grant_established(grant: RecipientGrant) -> None:
     """Say a grant was recorded, and say exactly what it covers (ADR-0235 §5)."""
-    console.print(f"[green]Remembered.[/] Recorded as {_safe(grant.id)}.")
-    console.print(f"  [bold]Account:[/] {_safe(grant.account.identity)}")
-    console.print("  [bold]Recipients:[/]")
+    _print(f"[green]Remembered.[/] Recorded as {_safe(grant.id)}.")
+    _print(f"  [bold]Account:[/] {_safe(grant.account.identity)}")
+    _print("  [bold]Recipients:[/]")
     for member in grant.destinations:
-        console.print(f"    {_recorded_destination_line(member)}")
-    console.print(f"  [bold]Until:[/] {_decided_at(grant.expires_at)}")
-    console.print(
+        _print(f"    {_recorded_destination_line(member)}")
+    _print(f"  [bold]Until:[/] {_decided_at(grant.expires_at)}")
+    _print(
         "[dim]Calls this covers will not be put to you again, so their payload "
         "description is not shown again. It authorises the recipients and never "
         "what is sent to them. 'assistant recipient-grants' shows what stands; "
@@ -8915,12 +9040,12 @@ def _render_recipient_grant_established(grant: RecipientGrant) -> None:
 
 def _render_ceiling_reached() -> None:
     """Name the ceiling and the recourse, and never the call (ADR-0193 §1, ADR-0235 §6)."""
-    console.print(
+    _print(
         "[yellow]Not remembered.[/] You are holding as many standing recipient "
         "authorisations as this deployment admits, so this one was refused. Nothing "
         "you already hold was evicted, narrowed or expired to make room."
     )
-    console.print(
+    _print(
         "[dim]Withdraw one you hold with 'assistant revoke-recipient-grant' — "
         "'assistant recipient-grant-log' lists them, expired ones included, which "
         "'assistant recipient-grants' correctly omits. Withdrawing frees a slot for "
@@ -8930,16 +9055,16 @@ def _render_ceiling_reached() -> None:
 
 def _render_already_standing() -> None:
     """Say the recipients were already authorised (ADR-0235 §4, §9)."""
-    console.print(
+    _print(
         "[yellow]Nothing to do.[/] Those recipients are already authorised for this "
         "account and this tool, so no second authorisation was recorded."
     )
-    console.print("[dim]'assistant recipient-grants' shows what stands.[/]")
+    _print("[dim]'assistant recipient-grants' shows what stands.[/]")
 
 
 def _render_grant_refused() -> None:
     """Say no authorisation was created, naming no cause it was not given (§4, §9)."""
-    console.print(
+    _print(
         "[yellow]Not remembered.[/] No standing authorisation was created. I was not "
         "told why, and I will not guess."
     )
@@ -8947,7 +9072,7 @@ def _render_grant_refused() -> None:
 
 def _render_grant_store_unavailable() -> None:
     """Say the store could not be written, and that the call was unaffected (§4, §9)."""
-    console.print(
+    _print(
         "[yellow]Not remembered.[/] The record of standing recipient authorisations "
         "could not be written, so nothing stands from this. That is a storage fault "
         "and not a refusal of what you asked for."
@@ -8956,7 +9081,7 @@ def _render_grant_store_unavailable() -> None:
 
 def _render_grant_declined() -> None:
     """Say the call was declined when it was ruled on, and settled (§2, §9)."""
-    console.print(
+    _print(
         "[yellow]Declined.[/] The call was declined when it was ruled on. That "
         "decision is recorded and settled, and nothing was made standing."
     )
@@ -8971,15 +9096,15 @@ def _render_ungrantable(exc: Exception, *, still_answerable: bool) -> None:
     and this does not say it — a surface that offered a retry it knows will not be
     there would be inviting the one thing ADR-0235 §6 forbids it to promise.
     """
-    console.print(f"[yellow]Not remembered.[/] {_safe(str(exc))}")
+    _print(f"[yellow]Not remembered.[/] {_safe(str(exc))}")
     if still_answerable:
-        console.print(
+        _print(
             "[dim]Nothing was recorded and nothing was sent. The call is still "
             "waiting for an answer: run 'assistant resume' again without "
             "--remember-recipients-until.[/]"
         )
     else:
-        console.print("[dim]Nothing was recorded and nothing was sent.[/]")
+        _print("[dim]Nothing was recorded and nothing was sent.[/]")
 
 
 def _render_recipient_grant_outcome(outcome: RecipientGrantOutcome | None) -> None:
@@ -9021,27 +9146,27 @@ def _render_recipient_grant_outcome(outcome: RecipientGrantOutcome | None) -> No
 def _render_standing_recipient_grants(standing: tuple[RecipientGrant, ...]) -> None:
     """What the user currently authorises sending to (ADR-0235 §7)."""
     if not standing:
-        console.print(
+        _print(
             "[yellow]Nothing standing.[/] No recipients are authorised in advance, "
             "so every outbound call is put to you."
         )
-        console.print(
+        _print(
             "[dim]This is not the same question as 'assistant granted', which is "
             "about reading your sources.[/]"
         )
         return
-    console.print(f"[bold]{len(standing)}[/] standing recipient authorisation(s):\n")
+    _print(f"[bold]{len(standing)}[/] standing recipient authorisation(s):\n")
     for grant in standing:
-        console.print(f"  [bold]{_safe(grant.id)}[/] [dim]until {_decided_at(grant.expires_at)}[/]")
-        console.print(
+        _print(f"  [bold]{_safe(grant.id)}[/] [dim]until {_decided_at(grant.expires_at)}[/]")
+        _print(
             f"    [bold]Tool:[/] {_safe(grant.tool.id)} "
             f"[dim](capability {_safe(grant.tool.capability)})[/]"
         )
-        console.print(f"    [bold]Account:[/] {_safe(grant.account.identity)}")
+        _print(f"    [bold]Account:[/] {_safe(grant.account.identity)}")
         for member in grant.destinations:
-            console.print(f"    {_recorded_destination_line(member)}")
+            _print(f"    {_recorded_destination_line(member)}")
         console.print()
-    console.print(
+    _print(
         "[dim]Each authorises the recipients and never what is sent to them. "
         "'assistant revoke-recipient-grant <id>' withdraws one. This is not "
         "'assistant granted', which is about reading your sources.[/]"
@@ -9051,24 +9176,22 @@ def _render_standing_recipient_grants(standing: tuple[RecipientGrant, ...]) -> N
 def _render_recipient_grant_log(recorded: tuple[RecipientGrant, ...], *, limit: int) -> None:
     """Every recipient act, granted and withdrawn, newest first (ADR-0235 §7)."""
     if not recorded:
-        console.print("[yellow]Nothing recorded.[/] No recipient act has been made yet.")
+        _print("[yellow]Nothing recorded.[/] No recipient act has been made yet.")
         return
-    console.print(f"[bold]{len(recorded)}[/] recipient act(s), newest first:\n")
+    _print(f"[bold]{len(recorded)}[/] recipient act(s), newest first:\n")
     for record in recorded:
         kind = "Withdrew" if record.revokes is not None else "Granted"
-        console.print(
-            f"  [bold]{kind}[/] {_safe(record.id)} [dim]{_decided_at(record.decided_at)}[/]"
-        )
+        _print(f"  [bold]{kind}[/] {_safe(record.id)} [dim]{_decided_at(record.decided_at)}[/]")
         if record.revokes is not None:
-            console.print(f"    [bold]Withdraws:[/] {_safe(record.revokes)}")
-        console.print(f"    [bold]Account:[/] {_safe(record.account.identity)}")
+            _print(f"    [bold]Withdraws:[/] {_safe(record.revokes)}")
+        _print(f"    [bold]Account:[/] {_safe(record.account.identity)}")
         for member in record.destinations:
-            console.print(f"    {_recorded_destination_line(member)}")
-        console.print(f"    [bold]Ends:[/] {_decided_at(record.expires_at)}")
+            _print(f"    {_recorded_destination_line(member)}")
+        _print(f"    [bold]Ends:[/] {_decided_at(record.expires_at)}")
         console.print()
     if len(recorded) == limit:
-        console.print(f"[dim]Showing {limit}. Ask for more with --limit.[/]")
-    console.print(
+        _print(f"[dim]Showing {limit}. Ask for more with --limit.[/]")
+    _print(
         "[dim]A record here says an act happened, never that it still stands — "
         "'assistant recipient-grants' is the honest answer to that. An expired grant "
         "is not live and still occupies a slot until you withdraw it.[/]"
@@ -9088,21 +9211,19 @@ def _render_grants(recorded: tuple[SourceGrant, ...], *, limit: int) -> None:
     grant on a source the hub holds no reader for.
     """
     if not recorded:
-        console.print("[yellow]Nothing recorded.[/] You have not granted or withdrawn anything.")
+        _print("[yellow]Nothing recorded.[/] You have not granted or withdrawn anything.")
         return
-    console.print(f"[bold]{len(recorded)}[/] record(s), most recent decision first:\n")
+    _print(f"[bold]{len(recorded)}[/] record(s), most recent decision first:\n")
     for record in recorded:
         act = "withdrew" if record.revokes is not None else "granted"
-        console.print(
+        _print(
             f"  [bold]{_when(record.decided_at)}[/] — {act} "
             f"[bold cyan]{_safe(record.source)}[/] for {_scope_phrase(record.scope)}"
         )
-        console.print(f"    [dim]{_safe(record.id)}[/]")
+        _print(f"    [dim]{_safe(record.id)}[/]")
     if len(recorded) == limit:
-        console.print(
-            f"\n[dim]Showing {limit}. Ask for more with --limit; there is no total count.[/]"
-        )
-    console.print(
+        _print(f"\n[dim]Showing {limit}. Ask for more with --limit; there is no total count.[/]")
+    _print(
         "\n[dim]Whether a source is granted *now* is 'assistant granted' — a record "
         "here says an act happened, not that it still stands.[/]"
     )
@@ -9143,16 +9264,16 @@ def _render_standing(standing: tuple[SourceGrant, ...]) -> None:
     bars, presenting an attempt as an event.
     """
     if not standing:
-        console.print(
+        _print(
             "[yellow]You have not granted anything.[/] I am allowed to read no "
             "source at all. 'assistant sources' lists what you could connect me to."
         )
         return
-    console.print(f"[bold]{len(standing)}[/] source(s) you currently allow me to read:\n")
+    _print(f"[bold]{len(standing)}[/] source(s) you currently allow me to read:\n")
     for record in standing:
-        console.print(f"  [bold cyan]{_safe(record.source)}[/]")
-        console.print(f"    [green]allowed for[/] {_scope_phrase(record.scope)}")
-        console.print(f"    [dim]granted {_when(record.decided_at)}[/]")
+        _print(f"  [bold cyan]{_safe(record.source)}[/]")
+        _print(f"    [green]allowed for[/] {_scope_phrase(record.scope)}")
+        _print(f"    [dim]granted {_when(record.decided_at)}[/]")
         withdrawal = (
             f"assistant revoke {_argument(record.source)}"
             if _is_pasteable(record.source)
@@ -9160,7 +9281,7 @@ def _render_standing(standing: tuple[SourceGrant, ...]) -> None:
         )
         _print_hint(f"    [dim]withdraw with '{withdrawal}'[/]")
         console.print()
-    console.print(
+    _print(
         "[dim]This is what you permitted, read from the record of your own "
         "decisions. It is not a list of what is configured — see 'assistant "
         "sources' — and it says nothing about what has actually been read: "
@@ -9182,14 +9303,14 @@ def _render_unamendable_source(source: str, offered: tuple[GrantableSource, ...]
     so a configuration edit can never make a grant unrevokable, and a user whose
     source has stopped being offered still has their whole remedy.
     """
-    console.print(
+    _print(
         f"[yellow]I cannot amend the grant on[/] {_safe(source)}[yellow].[/] "
         "Amending makes a new grant, and I only grant a source I can show you "
         "first — this one is not among the sources I can offer."
     )
     if offered:
         names = ", ".join(_safe(one.source) for one in offered)
-        console.print(f"Available to grant: {names}. See 'assistant sources'.")
+        _print(f"Available to grant: {names}. See 'assistant sources'.")
     withdrawal = (
         f"assistant revoke {_argument(source)}" if _is_pasteable(source) else "assistant revoke"
     )
@@ -9214,20 +9335,20 @@ def _render_amend_prompt(chosen: GrantableSource, scope: Sequence[GrantScope]) -
     it as incomplete (§3's third clause), so a person can see what they are
     replacing rather than what someone thought they should have asked for.
     """
-    console.print(f"About to change the grant on [bold cyan]{_safe(chosen.source)}[/].\n")
+    _print(f"About to change the grant on [bold cyan]{_safe(chosen.source)}[/].\n")
     if chosen.location is None:
-        console.print("  [yellow]It has no configured location.[/]")
+        _print("  [yellow]It has no configured location.[/]")
     else:
-        console.print(f"  It reads from: [bold]{_safe(chosen.location)}[/]")
+        _print(f"  It reads from: [bold]{_safe(chosen.location)}[/]")
     if chosen.live is None:
-        console.print(
+        _print(
             "  [yellow]It is not granted right now.[/] I will still withdraw first, "
             "then grant — that is the only shape this act has."
         )
     else:
-        console.print(f"  It is currently allowed for: {_scope_phrase(chosen.live.scope)}")
-    console.print(f"  It would then be allowed for: {_scope_phrase(scope)}")
-    console.print(
+        _print(f"  It is currently allowed for: {_scope_phrase(chosen.live.scope)}")
+    _print(f"  It would then be allowed for: {_scope_phrase(scope)}")
+    _print(
         "\n[dim]This is two acts: a withdrawal, then a new grant. Between them the "
         "source is allowed nothing, and I will tell you how each one went.[/]"
     )
@@ -9268,15 +9389,15 @@ def _render_act(
             found = ""
             if withdrew is False:
                 found = " (there was no live grant for it to withdraw)"
-            console.print(f"[green]The {act} landed.[/]{found}")
+            _print(f"[green]The {act} landed.[/]{found}")
         case _ActOutcome.NOT_LANDED:
-            console.print(
+            _print(
                 f"[red]The {act} is known not to have landed[/] — I was refused, so "
                 f"nothing was written: {_safe('; '.join(detail))}"
             )
         case _ActOutcome.UNKNOWN:
             because = f" {_safe('; '.join(detail))}" if detail else ""
-            console.print(
+            _print(
                 f"[yellow]The outcome of the {act} is not known.[/]{because} I did "
                 "not get an answer back, and it may have been done anyway."
             )
@@ -9294,13 +9415,13 @@ def _render_amendment_stopped(outcome: _ActOutcome) -> None:
     refusal is equally consistent with another client having granted in between.
     """
     if outcome is _ActOutcome.UNKNOWN:
-        console.print(
+        _print(
             "[yellow]I sent no new grant.[/] I could not tell whether the withdrawal "
             "happened, and sending a second act to find out would only give me an "
             "answer I could not read. The amendment is incomplete."
         )
         return
-    console.print("[yellow]I sent no new grant.[/] The amendment is incomplete.")
+    _print("[yellow]I sent no new grant.[/] The amendment is incomplete.")
 
 
 def _render_unread(source: str) -> None:
@@ -9314,7 +9435,7 @@ def _render_unread(source: str) -> None:
     act, says the source's state is unread, starts nothing, and lets the
     ``CancelledError`` leave.
     """
-    console.print(
+    _print(
         f"[dim]I have not read what {_safe(source)} is allowed for, so I am not "
         "saying. 'assistant granted' will tell you.[/]"
     )
@@ -9331,17 +9452,15 @@ def _render_state(source: str, state: SourceGrant | None | _Unread) -> None:
     and one is never read off the other.
     """
     if isinstance(state, _Unread):
-        console.print(
+        _print(
             f"[dim]I could not read what {_safe(source)} is allowed for, so I am not "
             "saying. Try 'assistant granted'.[/]"
         )
         return
     if state is None:
-        console.print(f"I read [bold]{_safe(source)}[/]'s state: nothing is granted on it.")
+        _print(f"I read [bold]{_safe(source)}[/]'s state: nothing is granted on it.")
         return
-    console.print(
-        f"I read [bold]{_safe(source)}[/]'s state: it is allowed {_scope_phrase(state.scope)}."
-    )
+    _print(f"I read [bold]{_safe(source)}[/]'s state: it is allowed {_scope_phrase(state.scope)}.")
 
 
 def _condition_phrase(condition: NotificationCondition) -> str:
@@ -9431,25 +9550,23 @@ def _render_notifications(
         # holding nothing" there would be a false absence, and a confident one:
         # `--limit 0` is accepted, exactly as it is on every other listing.
         if offset or not limit:
-            console.print(
+            _print(
                 "[dim]No notifications on this page.[/] That says nothing about what "
                 "is held — ask from the first page ('--offset 0' with a limit above 0) "
                 "to see."
             )
             return
-        console.print(
+        _print(
             "[dim]I am holding nothing for you.[/] Out of the box nothing reaches you "
             "unprompted — see 'assistant tune --help' for the three separate acts that "
             "arm it, and 'assistant notification-settings' for what is set now."
         )
         return
-    console.print(f"[bold]{len(page)} notification(s)[/] I am holding, oldest first.")
+    _print(f"[bold]{len(page)} notification(s)[/] I am holding, oldest first.")
     for record in page:
         _render_notification(record, now=now)
     if limit and len(page) == limit:
-        console.print(
-            f"\n[dim]That is a full page; there may be more — try --offset {offset + limit}.[/]"
-        )
+        _print(f"\n[dim]That is a full page; there may be more — try --offset {offset + limit}.[/]")
 
 
 def _render_notification(record: HeldNotification, *, now: datetime) -> None:
@@ -9486,25 +9603,25 @@ def _render_notification(record: HeldNotification, *, now: datetime) -> None:
         now: The instant to judge its expiry and actionability at.
     """
     candidate = record.candidate
-    console.print(f"\n  [bold cyan]{_safe(record.id)}[/]")
-    console.print(f"  [bold]{_safe(candidate.summary)}[/]")
+    _print(f"\n  [bold cyan]{_safe(record.id)}[/]")
+    _print(f"  [bold]{_safe(candidate.summary)}[/]")
     if candidate.detail is not None:
-        console.print(f"  {_safe(candidate.detail)}")
-    console.print(
+        _print(f"  {_safe(candidate.detail)}")
+    _print(
         f"  [dim]Class:[/] {_safe(candidate.notification_class)} "
         f"[dim](noticed by {_safe(candidate.producer)})[/]"
     )
     _render_notification_ruling(record)
-    console.print(f"  [dim]Noticed:[/] {_when(candidate.noticed_at)}")
+    _print(f"  [dim]Noticed:[/] {_when(candidate.noticed_at)}")
     if candidate.expires_at is None:
-        console.print("  [dim]Expires:[/] never — which is why it is held rather than urgent")
+        _print("  [dim]Expires:[/] never — which is why it is held rather than urgent")
     elif _has_perished(candidate, now):
-        console.print(
+        _print(
             f"  [yellow]Expired:[/] {_when(candidate.expires_at)} "
             f"[dim]— it is kept and readable, and it will not reach you[/]"
         )
     else:
-        console.print(f"  [dim]Expires:[/] {_when(candidate.expires_at)}")
+        _print(f"  [dim]Expires:[/] {_when(candidate.expires_at)}")
     _render_notification_acts(record, now=now)
 
 
@@ -9542,19 +9659,19 @@ def _render_notification_ruling(record: HeldNotification) -> None:
     """
     match record.kind:
         case NotificationDispositionKind.INTERRUPT:
-            console.print("  [dim]Ruled:[/] to reach you at the time")
+            _print("  [dim]Ruled:[/] to reach you at the time")
         case NotificationDispositionKind.HOLD:
-            console.print("  [dim]Ruled:[/] held for when you next look")
+            _print("  [dim]Ruled:[/] held for when you next look")
         case NotificationDispositionKind.DROP:
-            console.print(f"  [dim]Ruled:[/] ruled out — {_condition_phrase(record.reason)}")
+            _print(f"  [dim]Ruled:[/] ruled out — {_condition_phrase(record.reason)}")
         case _:  # pragma: no cover — exhaustive over the enum
             assert_never(record.kind)
     for condition in record.failed:
-        console.print(f"  [dim]Not now, because:[/] {_condition_phrase(condition)}")
+        _print(f"  [dim]Not now, because:[/] {_condition_phrase(condition)}")
     if record.dismissed_at is not None:
-        console.print(f"  [dim]Dismissed:[/] {_when(record.dismissed_at)}")
+        _print(f"  [dim]Dismissed:[/] {_when(record.dismissed_at)}")
     if record.dropped_at is not None:
-        console.print(f"  [dim]Ruled out:[/] {_when(record.dropped_at)}")
+        _print(f"  [dim]Ruled out:[/] {_when(record.dropped_at)}")
 
 
 def _render_notification_acts(record: HeldNotification, *, now: datetime) -> None:
@@ -9628,7 +9745,7 @@ def _render_notification_acts(record: HeldNotification, *, now: datetime) -> Non
     notification_class = record.candidate.notification_class
     if not _is_pasteable(record.id) or not _is_pasteable(notification_class):
         # Both acts go together here, because either value failing costs both hints.
-        console.print(
+        _print(
             "  "
             + _uncopyable(
                 "Its id or its class",
@@ -9638,7 +9755,7 @@ def _render_notification_acts(record: HeldNotification, *, now: datetime) -> Non
         return
     _print_hint(f"  [dim]Deal with it:[/] assistant dismiss {_argument(record.id)}")
     if NotificationCondition.PERISHABLE in record.failed:
-        console.print(
+        _print(
             "  [dim]No reach setting can make this one interrupt:[/] it names no "
             "moment it stops mattering, and that is the whole of what earns an "
             "interruption."
@@ -9695,27 +9812,27 @@ def _render_notification_settings(preferences: NotificationPreferences) -> None:
     reason: it is what governs every class no row mentions, which on a fresh
     installation is all of them.
     """
-    console.print("[bold]How far each class may reach you[/]")
+    _print("[bold]How far each class may reach you[/]")
     for row in preferences.reaches:
-        console.print(
+        _print(
             f"  {_safe(row.notification_class)}: [bold]{row.reach.value}[/] "
             f"[dim]— {_reach_phrase(row.reach)}[/]"
         )
-    console.print(
+    _print(
         f"  [dim]every other class:[/] [bold]{DEFAULT_NOTIFICATION_REACH.value}[/] "
         f"[dim]— {_reach_phrase(DEFAULT_NOTIFICATION_REACH)} (the shipped default)[/]"
     )
-    console.print("\n[bold]Quiet hours[/] [dim](read in your configured timezone)[/]")
+    _print("\n[bold]Quiet hours[/] [dim](read in your configured timezone)[/]")
     if not preferences.quiet_windows:
-        console.print("  [dim]none — no part of the day is quiet[/]")
+        _print("  [dim]none — no part of the day is quiet[/]")
     for window in preferences.quiet_windows:
-        console.print(f"  {window.start_time:%H:%M}-{window.end_time:%H:%M}")
-    console.print("\n[bold]Interruption budget[/]")
-    console.print(
+        _print(f"  {window.start_time:%H:%M}-{window.end_time:%H:%M}")
+    _print("\n[bold]Interruption budget[/]")
+    _print(
         f"  {preferences.interruption_budget} per {_hours(preferences.budget_window)}"
         f"{' [dim]— never interrupt[/]' if preferences.interruption_budget == 0 else ''}"
     )
-    console.print("\n[dim]Change any of these with 'assistant tune'.[/]")
+    _print("\n[dim]Change any of these with 'assistant tune'.[/]")
 
 
 def _confirm_forget(_belief: Belief) -> bool:
@@ -10064,7 +10181,11 @@ def _values_fit_this_terminal() -> bool:
     Nothing else on the card is measured, because nothing else on it is content the
     user is answering *about*: ADR-0178 §7's floor is a description this adapter
     authored around values `core` derived, and it wraps the way every other line in
-    this module wraps (#2072).
+    this module wraps — through :func:`_print`, which marks what it broke with
+    :data:`_CONTINUATION` rather than with this gutter (#2072). That marker is
+    deliberately not this one: what the width rule below protects is the claim that a
+    ``│`` line is the value, and a card whose wrapped description lines carried it
+    would have no such claim to protect.
 
     Returns:
         Whether the gutter and at least one column of value fit the console's width.
@@ -10215,11 +10336,11 @@ def _render_egress_values(values: Sequence[tuple[str, str]]) -> None:
     Args:
         values: One ``(key, value)`` pair per span, in the binding's own order.
     """
-    console.print("  What it would send, whole:")
+    _print("  What it would send, whole:")
     if not values:
-        console.print("    [dim](this call names no span, so it carries no value to show)[/]")
+        _print("    [dim](this call names no span, so it carries no value to show)[/]")
     for key, value in values:
-        console.print(f"    {key}:")
+        _print(f"    {key}:")
         _render_egress_value(value)
 
 
@@ -10250,17 +10371,17 @@ def _render_confirmation_egress(
     a property of the call rather than of a span — putting it among the occurrences
     would read as the per-span attribution §2's third clause refuses to mint.
     """
-    console.print(f"  [bold]Account:[/] {_safe(egress.account_identity)}")
-    console.print(f"  [bold]Planned over:[/] {_egress_origin_line(egress)}")
-    console.print("  Goes to:")
+    _print(f"  [bold]Account:[/] {_safe(egress.account_identity)}")
+    _print(f"  [bold]Planned over:[/] {_egress_origin_line(egress)}")
+    _print("  Goes to:")
     for member in egress.canonical_destination_set:
-        console.print(f"    {_egress_destination_line(member)}")
-    console.print("  Describing:")
+        _print(f"    {_egress_destination_line(member)}")
+    _print("  Describing:")
     if not egress.spans:
-        console.print("    [dim](the payload description names no span)[/]")
+        _print("    [dim](the payload description names no span)[/]")
     for span in egress.spans:
-        console.print(f"    {_egress_span_line(span)}")
-    console.print(f"  [bold]What it draws on:[/] {_coverage_line(egress.coverage)}")
+        _print(f"    {_egress_span_line(span)}")
+    _print(f"  [bold]What it draws on:[/] {_coverage_line(egress.coverage)}")
     _render_egress_values(values)
 
 
@@ -10335,15 +10456,15 @@ def _render_confirmation(confirmation: Confirmation) -> bool:
             )
             return False
         values = located
-    console.print("\n[bold yellow]Confirmation required[/]")
-    console.print(f"  Tool: {_safe(confirmation.tool_id)} — {_safe(confirmation.tool_description)}")
+    _print("\n[bold yellow]Confirmation required[/]")
+    _print(f"  Tool: {_safe(confirmation.tool_id)} — {_safe(confirmation.tool_description)}")
     if confirmation.parameters:
-        console.print("  With:")
+        _print("  With:")
         for key, raw in confirmation.parameters.items():
-            console.print(f"    {_safe(str(key))} = {_safe(str(raw))}")
+            _print(f"    {_safe(str(key))} = {_safe(str(raw))}")
     if egress is not None:
         _render_confirmation_egress(egress, values)
-    console.print(f"  Why: {_safe(confirmation.reason)}")
+    _print(f"  Why: {_safe(confirmation.reason)}")
     return True
 
 
@@ -10364,8 +10485,8 @@ def _render_withheld_confirmation(confirmation: Confirmation, *, because: str) -
         confirmation: The action that will not be put to the user.
         because: What could not be rendered, in words that name no value.
     """
-    console.print("\n[bold yellow]Confirmation withheld[/]")
-    console.print(
+    _print("\n[bold yellow]Confirmation withheld[/]")
+    _print(
         f"  I cannot show you everything {_safe(confirmation.tool_id)} would send — "
         f"{because} — so I am not asking you to approve it. Nothing was sent and "
         "nothing was declined; the step is still waiting."
@@ -10451,7 +10572,7 @@ def _assume_yes(confirmation: Confirmation) -> bool | None:
     """
     if confirmation.egress is None:
         return True
-    console.print(
+    _print(
         "[yellow]--yes does not answer this one.[/] It would send content off this "
         "device, so it is approved on a screen or not at all. Nothing was sent and "
         "nothing was declined: the step is still waiting. Answer it with "
@@ -10591,16 +10712,16 @@ def _render_recorded_egress(
     rows, not partial ones, so there is no elision here and no count standing in for
     an occurrence.
     """
-    console.print(f"  [bold]Account:[/] {_safe(binding.account.identity)}")
-    console.print(f"  [bold]Planned over:[/] {_recorded_origin_line(binding)}")
-    console.print("  Ruled over these recipients:")
+    _print(f"  [bold]Account:[/] {_safe(binding.account.identity)}")
+    _print(f"  [bold]Planned over:[/] {_recorded_origin_line(binding)}")
+    _print("  Ruled over these recipients:")
     for member in binding.canonical_destination_set:
-        console.print(f"    {_recorded_destination_line(member)}")
-    console.print("  Payload described as:")
+        _print(f"    {_recorded_destination_line(member)}")
+    _print("  Payload described as:")
     if not binding.spans:
-        console.print("    [dim](the payload description names no span)[/]")
+        _print("    [dim](the payload description names no span)[/]")
     for span in binding.spans:
-        console.print(f"    {_egress_span_line(span)}")
+        _print(f"    {_egress_span_line(span)}")
 
 
 def _authorisation_line(decision: PermissionDecision) -> str:
@@ -10772,23 +10893,23 @@ def _render_decision(decision: PermissionDecision) -> None:
     ``reason`` is policy-authored text, a ``supplied`` destination form is a string
     a model produced, and ``argument`` is a caller-influenced key (ADR-0150 §13).
     """
-    console.print(
+    _print(
         f"  {_decision_headline(decision.ruling.outcome)} "
         f"[dim]{_decided_at(decision.decided_at)}[/] [dim]{_safe(decision.id)}[/]"
     )
-    console.print(
+    _print(
         f"  [bold]Tool:[/] {_safe(decision.tool.id)} "
         f"[dim](capability {_safe(decision.tool.capability)})[/]"
     )
-    console.print(f"  [bold]Why:[/] {_safe(decision.ruling.reason)}")
-    console.print(
+    _print(f"  [bold]Why:[/] {_safe(decision.ruling.reason)}")
+    _print(
         f"  [bold]Digest:[/] {_safe(decision.parameters_digest)} "
         "[dim](a digest, never the arguments)[/]"
     )
     if decision.resolves is not None:
-        console.print(f"  [bold]Answers the question:[/] {_safe(decision.resolves)}")
+        _print(f"  [bold]Answers the question:[/] {_safe(decision.resolves)}")
     if decision.ruling.outcome is PermissionOutcome.ALLOW:
-        console.print(f"  {_authorisation_line(decision)}")
+        _print(f"  {_authorisation_line(decision)}")
     if decision.egress_binding is not None:
         _render_recorded_egress(decision.egress_binding)
     console.print()
@@ -10819,29 +10940,29 @@ def _render_decisions(recorded: tuple[PermissionDecision, ...], *, limit: int) -
         limit: The bound that was asked for, so a full page can say it is one.
     """
     if not recorded:
-        console.print("[yellow]Nothing recorded.[/] No ruling has been made yet.")
+        _print("[yellow]Nothing recorded.[/] No ruling has been made yet.")
         return
-    console.print(f"[bold]{len(recorded)}[/] ruling(s), newest ruling first:\n")
+    _print(f"[bold]{len(recorded)}[/] ruling(s), newest ruling first:\n")
     for decision in recorded:
         _render_decision(decision)
     if len(recorded) == limit:
-        console.print(
+        _print(
             f"[dim]Showing {limit}. Ask for more with --limit; there is no total "
             "count, and 'assistant export-decisions' writes the whole record.[/]"
         )
-    console.print(
+    _print(
         "[dim]Each row is a ruling that was made. It does not say the ruling still "
         "stands, that a grant is current, that an account is still connected, or that "
         "the tool is still registered under the identifier above — and it does not say "
         "the call ever ran: this record bounds what was decided, not what was carried "
         "out.[/]"
     )
-    console.print(
+    _print(
         "[dim]A question and the answer to it are two rows. An answer can fall outside "
         "this page, so a question with nothing answering it here is a fact about the "
         "page and not about the question.[/]"
     )
-    console.print(
+    _print(
         "[dim]A digest binds the arguments a ruling was taken over. The arguments "
         "themselves are not in this record and are not shown.[/]"
     )
@@ -11020,12 +11141,12 @@ def _render_read(record: SourceReadRecord) -> None:
     a renderer must not hand a terminal unescaped.
     """
     word, ending = _read_ending(record.outcome)
-    console.print(f"  {word} [dim]{_checked_at(record.checked_at)}[/] [dim]{_safe(record.id)}[/]")
-    console.print(f"    [dim]{ending}[/]")
-    console.print(f"  [bold]Source:[/] {_safe(record.source)} [dim](as the reader declares it)[/]")
-    console.print(f"  [bold]Read for:[/] {_scope_phrase((record.use,))}")
-    console.print(f"  [bold]Under grant:[/] {_read_grant_line(record)}")
-    console.print(
+    _print(f"  {word} [dim]{_checked_at(record.checked_at)}[/] [dim]{_safe(record.id)}[/]")
+    _print(f"    [dim]{ending}[/]")
+    _print(f"  [bold]Source:[/] {_safe(record.source)} [dim](as the reader declares it)[/]")
+    _print(f"  [bold]Read for:[/] {_scope_phrase((record.use,))}")
+    _print(f"  [bold]Under grant:[/] {_read_grant_line(record)}")
+    _print(
         f"  [bold]Produced:[/] {record.produced} item(s) "
         "[dim](a count of what the source returned, never the thing itself)[/]"
     )
@@ -11070,32 +11191,32 @@ def _render_reads(recorded: tuple[SourceReadRecord, ...], *, limit: int) -> None
         limit: The bound that was asked for, so a full page can say it is one.
     """
     if not recorded:
-        console.print("[yellow]Nothing recorded.[/] No attempt to read a source is in this record.")
-        console.print(
+        _print("[yellow]Nothing recorded.[/] No attempt to read a source is in this record.")
+        _print(
             "[dim]That is not a claim that nothing was ever read: this record states "
             "what it holds, the oldest attempts are dropped as it fills, and a fault "
             "can leave a read with no row.[/]"
         )
         return
-    console.print(f"[bold]{len(recorded)}[/] read attempt(s), newest recorded first:\n")
+    _print(f"[bold]{len(recorded)}[/] read attempt(s), newest recorded first:\n")
     for record in recorded:
         _render_read(record)
     if len(recorded) == limit:
-        console.print(
+        _print(
             f"[dim]Showing {limit}. Ask for more with --limit; there is no total "
             "count, and 'assistant export-reads' writes every attempt still held.[/]"
         )
-    console.print(
+    _print(
         "[dim]Each row is an attempt that was made. It does not say the source is "
         "still allowed, what you allow it for now, or that the grant named above "
         "still exists — 'assistant granted' is what states that.[/]"
     )
-    console.print(
+    _print(
         "[dim]What a source returned is counted here and never shown: this record "
         "holds no content at all. And a row says what was attempted, not what came "
         "of it: what any use then did with a reading is a different record.[/]"
     )
-    console.print(
+    _print(
         "[dim]The order is the order I recorded these in, newest first — not an "
         "ordering by the instant shown, which is when I checked whether you allowed "
         "the read. The oldest attempts are dropped as this record fills, so it "
@@ -11349,29 +11470,29 @@ def _render_invocation(recorded: RecordedInvocation) -> None:
     """
     row = recorded.invocation
     kind, states = _invocation_kind(row)
-    console.print(f"  {kind} [dim]{_recorded_at(row.recorded_at)}[/] [dim]{_safe(row.id)}[/]")
-    console.print(f"    [dim]{states}[/]")
-    console.print(
+    _print(f"  {kind} [dim]{_recorded_at(row.recorded_at)}[/] [dim]{_safe(row.id)}[/]")
+    _print(f"    [dim]{states}[/]")
+    _print(
         f"  [bold]Tool:[/] {_safe(recorded.tool)} [dim](capability {_safe(recorded.capability)})[/]"
     )
-    console.print(
+    _print(
         f"  [bold]Outbound call:[/] {'yes' if recorded.egress_call else 'no'} "
         "[dim](whether the ruling this row names carried an outbound binding; "
         "who or where is not on this row)[/]"
     )
-    console.print(
+    _print(
         f"  [bold]Under authorisation:[/] {_safe(row.decision_id)} "
         "[dim](what it cited then; it is not looked up now)[/]"
     )
     if row.outcome is not None:
         word, ending = _invocation_outcome(row.outcome, egress_call=recorded.egress_call)
-        console.print(f"  [bold]Ended:[/] {word} [dim]— {ending}[/]")
+        _print(f"  [bold]Ended:[/] {word} [dim]— {ending}[/]")
         if row.outcome is not ToolOutcome.SUCCEEDED:
-            console.print(f"  [bold]Failure kind:[/] {_invocation_failure_kind(row)}")
+            _print(f"  [bold]Failure kind:[/] {_invocation_failure_kind(row)}")
         # A completion always carries one; the model refuses one without
         # (``ToolInvocation._is_a_claim_or_a_completion``).
         if row.incurred_cost is not None:
-            console.print(f"  [bold]Cost:[/] {_incurred_cost(row.incurred_cost)}")
+            _print(f"  [bold]Cost:[/] {_incurred_cost(row.incurred_cost)}")
     console.print()
 
 
@@ -11476,36 +11597,36 @@ def _render_spend(totals: tuple[SpendTotal, ...]) -> None:
             f"{_bound(total.period_start, total.start_offset)} {_offset_label(total.start_offset)}"
         )
         closed = f"{_bound(total.period_end, total.end_offset)} {_offset_label(total.end_offset)}"
-        console.print(f"[bold]{name}[/]")
-        console.print(f"  [dim]from {opened}[/]")
-        console.print(f"  [dim]up to (not including) {closed}[/]")
+        _print(f"[bold]{name}[/]")
+        _print(f"  [dim]from {opened}[/]")
+        _print(f"  [dim]up to (not including) {closed}[/]")
         if total.currency is None:
-            console.print("  [dim]No spend currency is configured, so I am not keeping a total.[/]")
+            _print("  [dim]No spend currency is configured, so I am not keeping a total.[/]")
         elif total.accounted is None:
-            console.print(
+            _print(
                 f"  [yellow]Not measurable.[/] Something in this period has no price I may "
                 f"add — a call still in flight, or one whose cost nobody reported — so I "
                 f"will not state a {total.currency} figure I would be inventing."
             )
             if total.ceiling is not None:
-                console.print(
+                _print(
                     f"  [red]Nothing further will run in this period[/] while that is so: "
                     f"there is a ceiling of {total.ceiling} {total.currency} here and I "
                     f"cannot tell whether a call would cross it."
                 )
             else:
-                console.print(
+                _print(
                     "  [dim]Nothing is being refused on that account: you have set no "
                     "ceiling for this period.[/]"
                 )
         else:
             stated = f"  [bold]{total.accounted} {total.currency}[/]"
             if total.ceiling is None:
-                console.print(f"{stated} [dim]— no ceiling set for this period.[/]")
+                _print(f"{stated} [dim]— no ceiling set for this period.[/]")
             else:
-                console.print(f"{stated} [dim]of a ceiling of[/] {total.ceiling} {total.currency}")
+                _print(f"{stated} [dim]of a ceiling of[/] {total.ceiling} {total.currency}")
         console.print()
-    console.print(
+    _print(
         "[dim]These are the prices my own tools reported for the calls I made. They are "
         "not a bill, not an amount owed, and not checked against anyone's statement.[/]"
     )
@@ -11541,32 +11662,32 @@ def _render_invocations(recorded: tuple[RecordedInvocation, ...], *, limit: int)
         limit: The bound that was asked for, so a full page can say it is one.
     """
     if not recorded:
-        console.print("[yellow]Nothing recorded.[/] No act on an authorisation is in this record.")
-        console.print(
+        _print("[yellow]Nothing recorded.[/] No act on an authorisation is in this record.")
+        _print(
             "[dim]That is not a claim that nothing was ever attempted: this record "
             "states what it holds, and a fault can leave an act with fewer rows than "
             "it made.[/]"
         )
         return
-    console.print(f"[bold]{len(recorded)}[/] row(s), newest recorded first:\n")
+    _print(f"[bold]{len(recorded)}[/] row(s), newest recorded first:\n")
     for row in recorded:
         _render_invocation(row)
     if len(recorded) == limit:
-        console.print(
+        _print(
             f"[dim]Showing {limit}. Ask for more with --limit; there is no total "
             "count, and 'assistant export-invocations' writes the whole record.[/]"
         )
-    console.print(
+    _print(
         "[dim]One attempt is up to two rows — a call begun, and how a call finished. "
         "They are two rows and not one, and a row with no partner on this page is a "
         "fact about the page: the other half may be further back.[/]"
     )
-    console.print(
+    _print(
         "[dim]A row says I spent an authorisation and attempted a call. It does not "
         "say the authorisation still stands, that the tool is still registered under "
         "the identifier above, or that anything is still running.[/]"
     )
-    console.print(
+    _print(
         "[dim]Nothing here names who or where an outbound call went, and nothing "
         "here says what became of it at the other end — I do not observe that. "
         "'assistant decisions' is where a ruling's outbound binding is shown.[/]"
@@ -11634,8 +11755,8 @@ def _render_connection_intent(identity: str, *, reference: str | None = None) ->
     data, so it reaches no log line and no error message (ADR-0149 §3).
     """
     where = "" if reference is None else f" under [bold]{_safe(reference)}[/]"
-    console.print(f"About to connect the account [bold cyan]{_safe(identity)}[/]{where}.\n")
-    console.print(
+    _print(f"About to connect the account [bold cyan]{_safe(identity)}[/]{where}.\n")
+    _print(
         "[dim]That is the name I will record and show you, exactly as you typed it — "
         "I normalise nothing. If it is not the account you meant, or if it is your "
         "credential, stop here.[/]\n"
@@ -11651,7 +11772,7 @@ def _render_unusable_credential(exc: ValueError) -> None:
     length** of the rejected value. So it says which rule was broken and nothing
     about what broke it.
     """
-    console.print(f"[red]That credential cannot be used:[/] {_safe(str(exc))}. Nothing was sent.")
+    _print(f"[red]That credential cannot be used:[/] {_safe(str(exc))}. Nothing was sent.")
 
 
 def _render_connected(verb: str, record: ConnectedAccount) -> None:
@@ -11665,17 +11786,17 @@ def _render_connected(verb: str, record: ConnectedAccount) -> None:
     it inside the act, the user did not choose it, and every act after this one is
     performed against a value they read back off a listing.
     """
-    console.print(
+    _print(
         f"[green]{verb}.[/] [bold cyan]{_safe(record.identity)}[/] is connected, "
         f"at revision {record.revision}."
     )
-    console.print(f"  Its reference is [bold]{_safe(record.reference)}[/]")
+    _print(f"  Its reference is [bold]{_safe(record.reference)}[/]")
     _print_hint(
         "  [dim]Read it back any time with 'assistant connections'. Replace its "
         "credential with 'assistant reconnect', or end it with "
         f"{_reference_hint(record.reference, 'assistant disconnect')}[/]"
     )
-    console.print(
+    _print(
         "\n[dim]This is a connection, not a permission: it authorises nothing on its "
         "own. What I am allowed to read is 'assistant granted'.[/]"
     )
@@ -11691,7 +11812,7 @@ def _render_cancelled_act(act: str) -> None:
     ``CancelledError`` then leaves unconverted, which ADR-0060 requires and which no
     report satisfies.
     """
-    console.print(
+    _print(
         f"[yellow]The outcome of the {act} is not known.[/] It was cancelled, and a "
         "cancelled act leaves exactly the states a lost answer does — it may have "
         "been done anyway."
@@ -11719,7 +11840,7 @@ def _render_unknown_outcome(act: str, exc: Exception) -> None:
         if isinstance(exc, OversizedValueError)
         else ""
     )
-    console.print(
+    _print(
         f"[yellow]The outcome of the {act} is not known.[/] "
         f"{_safe('; '.join(_leaf_messages(exc)))}.{remedy} I am not saying it landed "
         "and I am not saying it did not."
@@ -11748,19 +11869,19 @@ def _render_provisioning_outcome(act: str, exc: Exception, *, reference: str | N
     named = "that reference" if reference is None else f"[bold]{_safe(reference)}[/]"
     match exc:
         case UnusableIdentityError():
-            console.print(
+            _print(
                 f"[red]The {act} is known not to have landed[/] — I refused the "
                 f"account name before anything was sent, so your credential never "
                 f"left this machine: {_safe(str(exc))}."
             )
         case UnknownConnectionError():
-            console.print(
+            _print(
                 f"[red]The {act} is known not to have landed[/] — I hold no "
                 f"connection under {named}, so nothing was written. "
                 "'assistant connections' lists the references I do hold."
             )
         case DisplacedProvisioningError():
-            console.print(
+            _print(
                 f"[red]The {act} was not performed.[/] Another act took {named} over "
                 "while this one was running, so no record I wrote is that "
                 "reference's live one. Nothing was rolled back, and this act may "
@@ -11769,7 +11890,7 @@ def _render_provisioning_outcome(act: str, exc: Exception, *, reference: str | N
                 "again; read what is connected first."
             )
         case IncompleteProvisioningError():
-            console.print(
+            _print(
                 f"[yellow]The {act} did not complete.[/] The reference {named} "
                 "[bold]exists[/] — I wrote its record — and the credential you gave me "
                 "was never put into use, so it will not become the live one. This "
@@ -11777,7 +11898,7 @@ def _render_provisioning_outcome(act: str, exc: Exception, *, reference: str | N
                 "reference, or disconnect it; both are safe."
             )
         case ProvisioningOutcomeUnknownError():
-            console.print(
+            _print(
                 f"[yellow]The outcome of the {act} is not known.[/] The reference "
                 f"{named} [bold]exists[/]; whether the credential you gave me is now "
                 "in use I cannot say, because the store may have committed and failed "
@@ -11810,8 +11931,8 @@ def _render_residual_credential(landed: str, exc: Exception, *, reference: str |
     inattentive client suppresses by rendering the success and dropping the flag.
     """
     where = "" if reference is None else f" for [bold]{_safe(reference)}[/]"
-    console.print(f"[green]{landed}[/]")
-    console.print(
+    _print(f"[green]{landed}[/]")
+    _print(
         f"[yellow]A credential I was to delete{where} is still there:[/] "
         f"{_safe('; '.join(_leaf_messages(exc)))}. Nothing reads it and no live "
         "record names it, but it has not gone."
@@ -11832,7 +11953,7 @@ def _render_connections_unread() -> None:
     read of ``connected_accounts`` **once the store is readable**, which is a later
     command rather than a second call now.
     """
-    console.print(
+    _print(
         "[dim]I have not read what is connected, and there is no reference to name. "
         "'assistant connections' will tell you, once the hub can answer.[/]"
     )
@@ -11847,7 +11968,7 @@ def _render_connection_unread(reference: str) -> None:
     so this says the state is unread, starts nothing, and lets the
     ``CancelledError`` leave.
     """
-    console.print(
+    _print(
         f"[dim]I have not read the state of {_safe(reference)}, so I am not saying. "
         "'assistant connections' will tell you.[/]"
     )
@@ -11863,17 +11984,17 @@ def _render_connection_state(reference: str, state: ConnectedAccount | None | _U
     for it that no live record names (ADR-0149 §3, §5).
     """
     if isinstance(state, _Unread):
-        console.print(
+        _print(
             f"[dim]I could not read the state of {_safe(reference)}, so I am not "
             "saying. Try 'assistant connections'.[/]"
         )
         return
     if state is None:
-        console.print(
+        _print(
             f"I read the store: nothing is connected under [bold]{_safe(reference)}[/] right now."
         )
         return
-    console.print(
+    _print(
         f"I read the store: [bold]{_safe(reference)}[/] holds "
         f"[bold cyan]{_safe(state.identity)}[/] at revision {state.revision}, "
         f"{_connection_state_phrase(state.state)}."
@@ -11900,21 +12021,21 @@ def _render_connections(connected: tuple[ConnectedAccount, ...]) -> None:
     integration *is* yet, so there is nothing honest to put there (ADR-0151 §18).
     """
     if not connected:
-        console.print(
+        _print(
             "[yellow]Nothing is connected.[/] 'assistant connect' adds an account; "
             "it is a different question from 'assistant granted', which is what I am "
             "allowed to read."
         )
         return
-    console.print(f"[bold]{len(connected)}[/] connection(s):\n")
+    _print(f"[bold]{len(connected)}[/] connection(s):\n")
     for record in connected:
-        console.print(f"  [bold cyan]{_safe(record.identity)}[/]")
-        console.print(f"    [dim]{_safe(record.reference)}[/] — revision {record.revision}")
+        _print(f"  [bold cyan]{_safe(record.identity)}[/]")
+        _print(f"    [dim]{_safe(record.reference)}[/] — revision {record.revision}")
         if record.state is ProvisioningState.ACTIVE:
-            console.print(f"    [green]{_connection_state_phrase(record.state)}[/]")
+            _print(f"    [green]{_connection_state_phrase(record.state)}[/]")
         else:
-            console.print(f"    [yellow]{_connection_state_phrase(record.state)}[/]")
-            console.print(
+            _print(f"    [yellow]{_connection_state_phrase(record.state)}[/]")
+            _print(
                 "    [yellow]Nothing is in progress and nothing will finish it.[/] "
                 "Run the act again with 'assistant reconnect', or end it below."
             )
@@ -11922,7 +12043,7 @@ def _render_connections(connected: tuple[ConnectedAccount, ...]) -> None:
             f"    [dim]end it with {_reference_hint(record.reference, 'assistant disconnect')}[/]"
         )
         console.print()
-    console.print(
+    _print(
         "[dim]This is a snapshot taken when you asked, not a claim that stays true. "
         "It says nothing about what I am permitted to do — a connection is not an "
         "authorisation; see 'assistant granted' — and it carries no times.[/]"
@@ -11948,14 +12069,14 @@ def _render_connection_acts(acts: tuple[ConnectionAct, ...], *, limit: int) -> N
     more (ADR-0151 §4, §9).
     """
     if not acts:
-        console.print("[yellow]Nothing recorded.[/] No connection has been made or ended.")
+        _print("[yellow]Nothing recorded.[/] No connection has been made or ended.")
         return
-    console.print(f"[bold]{len(acts)}[/] act(s), in the order I recorded them, newest first:\n")
+    _print(f"[bold]{len(acts)}[/] act(s), in the order I recorded them, newest first:\n")
     for act in acts:
         if act.account is None:
-            console.print(f"  [bold]disconnected[/] [dim]{_safe(act.reference)}[/]")
+            _print(f"  [bold]disconnected[/] [dim]{_safe(act.reference)}[/]")
         elif act.account.state is ProvisioningState.ACTIVE:
-            console.print(
+            _print(
                 f"  [bold]connected[/] [bold cyan]{_safe(act.account.identity)}[/] "
                 f"[dim]{_safe(act.reference)}[/]"
             )
@@ -11964,16 +12085,14 @@ def _render_connection_acts(acts: tuple[ConnectionAct, ...], *, limit: int) -> N
             # (ADR-0151 §9), and "connected" over an act that never activated would
             # be that claim in one word. What the state says here is how far this
             # act got, which is the whole of what the row carries.
-            console.print(
+            _print(
                 f"  [bold]tried to connect[/] [bold cyan]{_safe(act.account.identity)}[/] "
                 f"[dim]{_safe(act.reference)}[/] — [yellow]the act never completed[/]"
             )
-        console.print(f"    [dim]revision {act.revision}[/]")
+        _print(f"    [dim]revision {act.revision}[/]")
     if len(acts) == limit:
-        console.print(
-            f"\n[dim]Showing {limit}. Ask for more with --limit; there is no total count.[/]"
-        )
-    console.print(
+        _print(f"\n[dim]Showing {limit}. Ask for more with --limit; there is no total count.[/]")
+    _print(
         "\n[dim]There are no times here: a position is where I recorded the act and "
         "nothing else. What is connected [bold]now[/] is 'assistant connections' — a "
         "row here says an act happened, not that it still stands.[/]"
@@ -11996,12 +12115,12 @@ def _render_disconnected(record: ConnectedAccount) -> None:
     discharged their delete right, and presenting it as either would be a purge that
     skips a scope arriving by composition instead of by omission.
     """
-    console.print(
+    _print(
         f"[green]Disconnected.[/] [bold cyan]{_safe(record.identity)}[/] was live at "
         f"revision {record.revision}; no live record names any credential for "
         f"[bold]{_safe(record.reference)}[/] any more."
     )
-    console.print(
+    _print(
         "[dim]That is the whole of what I can promise: it does not stop anything "
         "already in flight, it does not cancel an act that is running, and it is not "
         "a guarantee that my keyring holds nothing at all for that reference. "
@@ -12019,7 +12138,7 @@ def _render_nothing_removed(reference: str) -> None:
     wording has to refuse at once, which is why it says the one true thing and then
     points at the command that answers the question the user probably has.
     """
-    console.print(
+    _print(
         f"[yellow]Nothing was removed:[/] no live record for "
         f"[bold]{_safe(reference)}[/] when the call ran. That is not a "
         "disconnection, and it does not say the reference is unknown to me — "
@@ -12057,9 +12176,9 @@ def _render_error(exc: Exception, *, to_stderr: bool = False) -> None:
     """
     target = error_console if to_stderr else console
     if isinstance(exc, TransportError):
-        target.print(f"[red]The assistant hub is not reachable:[/] {_safe(str(exc))}")
+        _print(f"[red]The assistant hub is not reachable:[/] {_safe(str(exc))}", to=target)
         return
-    target.print(f"[red]Error:[/] {_safe('; '.join(_leaf_messages(exc)))}")
+    _print(f"[red]Error:[/] {_safe('; '.join(_leaf_messages(exc)))}", to=target)
 
 
 def _leaf_messages(exc: BaseException) -> list[str]:
