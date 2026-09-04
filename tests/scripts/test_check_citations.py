@@ -948,8 +948,8 @@ def test_the_supersession_token_matches_case_insensitively(tmp_path: Path) -> No
 
 @pytest.mark.parametrize(
     "separator",
-    [" ", "   ", "\t"],
-    ids=["single-space", "three-spaces", "tab"],
+    [" ", "   ", "\t", " \t "],
+    ids=["single-space", "three-spaces", "tab", "mixed"],
 )
 def test_a_record_is_found_however_its_two_words_were_separated(
     tmp_path: Path, separator: str
@@ -967,9 +967,11 @@ def test_a_record_is_found_however_its_two_words_were_separated(
     record is reported under the canonical name, which is the folding
     ``adr_status.field_records`` does on the name as well as on the value.
 
-    Checked against that mutation: narrowing the run to a literal space fails
-    the ``three-spaces`` and ``tab`` cases here and nothing else under
-    ``tests/scripts/``, which is the gap #2021 records.
+    Checked against two mutations, and nothing else under ``tests/scripts/``
+    fails under either — which is the gap #2021 records, measured. Narrowing
+    the run to a literal space fails ``three-spaces``, ``tab`` and ``mixed``;
+    narrowing it to a *homogeneous* run (spaces or tabs, not both) fails
+    ``mixed`` alone, which is why that case is here.
     """
     _make_repo(
         tmp_path,
