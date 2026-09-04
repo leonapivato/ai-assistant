@@ -986,8 +986,11 @@ judgement being made in this ADR's text, which is where it is reviewed.
 - **ADR-0184.** A record **is** owed and is in this ADR's header: §2's roster
   sentence and §9's one-sibling clause. What is *not* owed there is a record about
   §9's *deferral*, which is unmarked prose in a marked ADR (ADR-0089 §3) and is
-  discharged rather than amended, and none about §3, §5, §6 or §7, each of which stays
-  true and is relied on by §14 below.
+  discharged rather than amended, and none about §3, §5, §6, §7 or §8, each of which
+  stays true and is relied on by §14 below. §5's readers and §8's refusals speak of the
+  *origin*-unrecorded shape and keep speaking of it exactly; §14 states the parallel
+  rules for the new sibling in this ADR's own text rather than widening theirs, which
+  is the same instrument §7's floor is extended by.
 - **ADR-0152.** No record on §7's substance; its "exactly one" count was already
   narrowed to two by ADR-0181 §3's fifth clause, and §5 above narrows the same count
   to three by the identical route. ADR-0181 §3 recorded that narrowing in its own text
@@ -1034,6 +1037,35 @@ judgement being made in this ADR's text, which is where it is reviewed.
 > fact the ruling would rest on was never recorded. The clause is stated on the
 > `ActionPolicy` Protocol and asserted in `ActionPolicyContract`, beside ADR-0184 §7's,
 > and no signature moves.
+
+> **Normative.** The park route is closed to this epoch too, by cause rather than by
+> re-argument. `AuditTrail.pending_confirmation` answers `None` for a decision whose
+> `egress_binding` is a `CoverageUnrecordedBinding`, detected on the decoded value's
+> type and carrying its own condition name in the log; the step stays durably
+> `AWAITING_APPROVAL` with its `CONFIRM` unresolved and its row intact, nothing is
+> written, and nothing here makes such a park resumable (ADR-0184 §5's second and third
+> clauses). The four history readers return the row as history exactly as §5's first
+> clause already makes them, and `EgressBinder.rebind` never receives one (ADR-0184
+> §8's third clause).
+
+> **Normative.** Both `ConfirmationEgress` assembly sites narrow the union and
+> **refuse** a `CoverageUnrecordedBinding`, which is ADR-0184 §8's fourth clause
+> applied one epoch on — every site reading a decision's `egress_binding` refuses the
+> unrecorded case rather than assuming it away, whatever the reachability argument
+> says. No lane mints a coverage-unrecorded confirmation shape, gives
+> `ConfirmationEgress.coverage` a default or a nullable member, or renders a
+> confirmation for such a row (ADR-0184 §8's second clause, read the same way).
+
+**The origin guard does not catch this epoch, which is why the refusal is stated and
+not inherited.** `_egress_of` in `orchestration/engine.py` refuses an
+`OriginUnrecordedBinding` before it composes anything, and its own docstring rests the
+floor on `pending_confirmation` answering `None` for such a row. A coverage-unrecorded
+row does not trip that `isinstance`: it **has** `planned_with_external_content`, so it
+falls past the origin guard and reaches the constructor, where a required `coverage`
+can be neither transcribed from a binding that does not carry it nor honestly
+invented — the fabrication ADR-0184 exists to avoid, at the surface where the user is
+being asked to approve something. The two clauses close it at both ends: the first
+keeps the row from reaching the site, the second refuses it there regardless.
 
 **The sibling rather than the version, and the reason is a fact ADR-0184 §9 did not
 have.** §9 offered the version as the answer that "would make the next epoch cheap",
@@ -1147,6 +1179,11 @@ builds the case rather than inventing one:
   first decision does not authorise.
 - A confirmation on `converse_spoken` speaks `SPOKEN_PARK_SENTENCE` and no part of the
   content, exactly as ADR-0207 §2 already requires.
+- A `CONFIRM` **persisted** before `coverage` existed is not offered by
+  `pending_confirmation`, no `Confirmation` is assembled from it at either site, and
+  the step stays `AWAITING_APPROVAL` with its row intact — the shape ADR-0184 §5 gives
+  the origin epoch, asserted over a row read back from storage rather than over a
+  value constructed in the test.
 - A decision recorded before `coverage` reads back as a `CoverageUnrecordedBinding`,
   renders its account, destinations and description as legible history, and `resolve`
   returns no `ALLOW` on it.
@@ -1160,9 +1197,9 @@ builds the case rather than inventing one:
 This ADR is in **ADR-0089's marked regime**: the marked clauses are the whole of what
 it obligates, and the prose beside them determines what they mean and supplies no
 obligation of its own (ADR-0089 §3). Marking is forward-only, so nothing this ADR
-cites is retro-marked (§5). What binds is **seventy clauses**: §1's three, §2's
+cites is retro-marked (§5). What binds is **seventy-two clauses**: §1's three, §2's
 three, §3's two, §4's eight, §5's three, §6's four, §7's two, §8's eleven, §9's four,
-§10's four, §11's six, §12's three, §13's two, §14's five and §15's ten. Each is a
+§10's four, §11's six, §12's three, §13's two, §14's seven and §15's ten. Each is a
 block quote at column 0 preceded by a blank line, stating one obligation with its own
 scope (§2); passages stating two separable obligations were split in drafting for that
 reason.
