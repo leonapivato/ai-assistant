@@ -5702,7 +5702,10 @@ def test_a_confirmation_that_cannot_be_shown_whole_is_not_shown_at_all() -> None
     assert "Array.isArray(confirmation.parameters)" in reader
     assert "Array.isArray(egress.spans)" in egress
     assert "Array.isArray(egress.destinations)" in egress
-    assert "Object.hasOwn(COVERAGE_WORDS, egress.coverage)" in egress
+    # Text **before** the lookup, because a property key is coerced: without it the
+    # array ``["not_covered"]`` answers the vocabulary as that state's own name
+    # (adversarial review, round 9).
+    assert "isText(egress.coverage) || !Object.hasOwn(COVERAGE_WORDS, egress.coverage)" in egress
     assert 'typeof egress.planned_with_external_content !== "boolean"' in egress
     # Every entry is read before any span is, so the locator lookup below may ask how
     # many entries carry a locator without asking again what an entry is.
