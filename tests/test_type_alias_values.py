@@ -28,10 +28,30 @@ the bound, the constraints and the default of a type parameter are each
 evaluated as lazily as the value is, and each raises on first read. An inline
 ``[T: Hidden]`` and a legacy ``T = TypeVar("T", bound="Hidden")`` the value
 picks up are the same kind of object, so both reach the walk by the same branch
-and each resolves against the module that *declared* it. Nothing in ``src/``
+— but **they do not share a scope**, and getting that wrong is not a near-miss.
+A legacy parameter resolves against the module that declared it. An inline one
+has no declaring module to speak of: CPython stamps it ``'typing'``, so
+deriving a scope from ``__module__`` resolves the alias's own header against
+`typing`'s namespace, which reported ``[T: "Local"]`` broken and — far worse —
+let ``[T: "Sequence[int]"]`` pass, because `typing` exports a ``Sequence``.
+That is this arm calling a real instance of its own defect sound, and it is
+what :func:`_declaring_namespace` exists to prevent. Nothing in ``src/``
 reaches a type parameter today, so this arm guards no live defect — it is here
 so the first alias that does is not the one that finds out, which is the same
 reason the walk exists at all.
+
+**That arm is capped, and the cap is the fixtures below (#2044).** ``src/``
+holds no generic alias at all — every one of the eight is parameterless — so
+each generic case here was found by reading the machinery rather than by a
+failure, and its right answer was argued rather than read off the tree. What
+the arm covers is therefore exactly what
+:func:`test_the_check_catches_a_type_checking_only_name` names, and shapes it
+does not name are deferred rather than silently claimed: a subscripted generic
+alias, a ``ParamSpec`` in a ``Concatenate``, a default that is itself a generic
+alias, an imported generic alias whose parameters must resolve where they were
+declared. **A live generic alias landing in ``src/`` is what widens this**,
+because it turns each of those from a hypothesis about the traversal into a
+case the tree can settle.
 
 **The exposure is real rather than theoretical**, because the reader is never
 this repository's own code. ``typing.get_type_hints`` resolves aliases it meets;
@@ -191,6 +211,32 @@ def _namespace_of(value: object) -> dict[str, object]:
     return {} if module is None else vars(module)
 
 
+def _declaring_namespace(parameter: object) -> dict[str, object] | None:
+    """The globals of the module that *declared* ``parameter``, or `None`.
+
+    A type parameter's ``__module__`` is only trustworthy when that module can
+    be seen to hold the parameter under its own name. A legacy
+    ``T = TypeVar("T", bound="Hidden")`` satisfies that, and its quoted bound
+    belongs to the module that wrote it however far the alias using it travels.
+    An **inline** ``[T: "Hidden"]`` does not: CPython stamps it ``'typing'``,
+    which is not where it was written and whose namespace happens to answer for
+    a great many single-letter names — ``typing.T`` exists, so a cross-parameter
+    reference resolved there passes against the wrong object, and
+    ``typing.Sequence`` exists, so a genuinely hidden bound is silently accepted.
+
+    The test is identity rather than ``__module__ != "typing"``, because the
+    question is whether the module declares *this* parameter and not whether it
+    is spelled ``typing``: a real ``TypeVar`` declared in `typing` itself
+    (``AnyStr``) answers yes, and an inline parameter answers no even if some
+    future interpreter stamps it elsewhere.
+    """
+    candidate = _namespace_of(parameter)
+    name = getattr(parameter, "__name__", None)
+    if isinstance(name, str) and candidate.get(name) is parameter:
+        return candidate
+    return None
+
+
 def _type_arguments(value: object) -> tuple[object, ...]:
     """The parts of ``value`` that are themselves types, and none that are not.
 
@@ -239,7 +285,9 @@ _LAZY_TYPE_PARAMETER_ATTRIBUTES: Final = ("__bound__", "__constraints__", "__def
 _TYPE_PARAMETER_KINDS: Final = (TypeVar, ParamSpec, TypeVarTuple)
 
 
-def _resolve_type_parameter(parameter: object, seen: list[object], errors: list[str]) -> None:
+def _resolve_type_parameter(
+    parameter: object, namespace: dict[str, object], seen: list[object], errors: list[str]
+) -> None:
     """Follow the bound, constraints and default one type parameter carries.
 
     ``type Bucket[T: Hidden] = list[T]`` resolves its *value* to ``list[T]``
@@ -250,17 +298,26 @@ def _resolve_type_parameter(parameter: object, seen: list[object], errors: list[
     Reached from two directions, which is why it is a walk step rather than a
     pass over ``__type_params__``: an inline ``[T: Hidden]`` *is* a ``TypeVar``,
     and so is a legacy ``T = TypeVar("T", bound="Hidden")`` that an alias picks
-    up from its value. Both arrive here, and each resolves in the module that
-    declared it rather than the one that used it. Nothing in ``src/`` reaches a
-    type parameter at all today; this is here so the first alias that does is
-    not the one that finds out.
+    up from its value. **They do not share a scope**, and round 7 found this
+    branch giving both the same one. A legacy parameter carries the module that
+    declared it, and its quoted bound belongs there however far the alias using
+    it travels. An inline parameter carries ``'typing'``, which declared
+    nothing: its bound is written inside the alias's own header, so its scope is
+    the alias's — module globals plus the parameter names, which is precisely
+    the ``namespace`` the caller already holds. Deriving it from
+    ``__module__`` instead reported ``[T: "Local"]`` broken and let
+    ``[T: "Sequence[int]"]`` pass, the second being a live instance of the
+    defect this arm was added to catch.
+
+    Nothing in ``src/`` reaches a type parameter at all today; this is here so
+    the first alias that does is not the one that finds out.
 
     ``getattr``'s default swallows ``AttributeError`` and nothing else, which is
     what is wanted: a parameter kind that carries no such attribute — a
     ``TypeVarTuple`` has no bound — is not a finding, and a ``NameError`` raised
     *by* the attribute is.
     """
-    namespace = _namespace_of(parameter)
+    scope = _declaring_namespace(parameter) or namespace
     for attribute in _LAZY_TYPE_PARAMETER_ATTRIBUTES:
         try:
             carried: object = getattr(parameter, attribute, None)
@@ -269,7 +326,7 @@ def _resolve_type_parameter(parameter: object, seen: list[object], errors: list[
             continue
         if carried is None or carried is NoDefault or (isinstance(carried, tuple) and not carried):
             continue
-        _resolve(carried, namespace, seen, errors)
+        _resolve(carried, scope, seen, errors)
 
 
 def _resolve_alias(alias: TypeAliasType, seen: list[object], errors: list[str]) -> None:
@@ -321,7 +378,7 @@ def _resolve(
         _resolve_alias(value, seen, errors)
         return
     if isinstance(value, _TYPE_PARAMETER_KINDS):
-        _resolve_type_parameter(value, seen, errors)
+        _resolve_type_parameter(value, namespace, seen, errors)
         return
     for argument in _type_arguments(value):
         _resolve(argument, namespace, seen, errors)
@@ -475,6 +532,21 @@ def test_the_check_catches_a_type_checking_only_name(tmp_path: Path) -> None:
       alias would fail here, and ``Identity`` — round 6's shape, a quoted
       reference to the alias's *own* parameter, which has no global to resolve
       against and must not be reported — is the second.
+    * ``Pair``, ``HiddenQuoted`` and ``LocalQuoted`` are round 7's, and what
+      they pin is the *scope* a type parameter's attributes resolve in rather
+      than another attribute. All three carry a quoted bound on an inline
+      parameter, and deriving that scope from ``__module__`` — which for an
+      inline parameter is ``'typing'`` — got two of the three wrong in opposite
+      directions. ``LocalQuoted[T: 'Local']`` names a class its own module
+      defines and was **reported**, because `typing` has no ``Local``.
+      ``HiddenQuoted[T: 'Sequence[int]']`` names the hidden import and was
+      **not** reported, because `typing` exports a ``Sequence`` — this arm
+      calling a real instance of its own defect sound, and the reason round 7
+      was owed rather than cosmetic. ``Pair[T, U: 'T']`` is the cross-parameter
+      control: it must be silent, and it *was* silent before the fix, but only
+      because `typing` happens to export an unrelated ``T``. It earns its place
+      against the opposite error — a scope that forgot the sibling parameters —
+      not against the one round 7 found.
     * ``LegacyBound`` is round 5's: the same defect carried by a ``TypeVar``
       *object* the alias picks up from its value rather than by an inline
       parameter. The two are the same kind of object, which is why one branch
@@ -497,12 +569,16 @@ def test_the_check_catches_a_type_checking_only_name(tmp_path: Path) -> None:
         "type Defaulted[T = Sequence[int]] = list[T]\n"
         "type Generic[T: int] = list[T]\n"
         "type Identity[T] = tuple['T']\n"
+        "type Pair[T, U: 'T'] = tuple[T, U]\n"
+        "type HiddenQuoted[T: 'Sequence[int]'] = list[T]\n"
+        "type LocalQuoted[T: 'Local'] = list[T]\n"
         "_Legacy = TypeVar('_Legacy', bound='Sequence[int]')\n"
         "type LegacyBound = list[_Legacy]\n"
         "_Plain = TypeVar('_Plain', bound=int)\n"
         "type LegacyFine = list[_Plain]\n"
         "type Fine = tuple[int, ...]\n"
-        "class DefinedLater: ...\n",
+        "class DefinedLater: ...\n"
+        "class Local: ...\n",
         encoding="utf-8",
     )
     spec = importlib.util.spec_from_file_location("hidden_name_alias", source)
@@ -523,6 +599,9 @@ def test_the_check_catches_a_type_checking_only_name(tmp_path: Path) -> None:
             "Defaulted",
             "Generic",
             "Identity",
+            "Pair",
+            "HiddenQuoted",
+            "LocalQuoted",
             "LegacyBound",
             "LegacyFine",
             "Fine",
@@ -536,8 +615,9 @@ def test_the_check_catches_a_type_checking_only_name(tmp_path: Path) -> None:
         "Bounded",
         "Constrained",
         "Defaulted",
+        "HiddenQuoted",
         "LegacyBound",
     }
     assert "Callable" in failures["Hidden"][0]
-    for name in ("Nested", "Bounded", "Constrained", "Defaulted", "LegacyBound"):
+    for name in ("Nested", "Bounded", "Constrained", "Defaulted", "HiddenQuoted", "LegacyBound"):
         assert "Sequence" in failures[name][0], name
