@@ -44,7 +44,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final, final
 
-from ai_assistant.core.types import QueryOutcome, QueryRefusal
+from ai_assistant.core.types import QueryOutcome, QueryRefusal, encodable_text
 from ai_assistant.testing.cancellation import SuspendableResource
 
 if TYPE_CHECKING:
@@ -100,10 +100,11 @@ class FakeQueryComposer:
                 type is part of the domain for the concrete composer's reason, and
                 the canonical fake must not be the looser of the two.
             ValueError: If ``max_chars`` is below 1; or if ``query`` or any value of
-                ``queries`` is blank, since
-                :class:`~ai_assistant.core.types.QueryOutcome` refuses a blank query
-                and a fake configurable into a state it cannot answer from is a fake
-                that fails its own conformance suite at an arbitrary later call.
+                ``queries`` is blank or has no UTF-8 encoding — both halves of what
+                :attr:`~ai_assistant.core.types.QueryOutcome.query` accepts, refused
+                here because a fake configurable into a state it cannot answer from
+                is one that raises out of :meth:`compose` at an arbitrary later call,
+                which is the one thing ADR-0231 §3 says never leaves that member.
         """
         if isinstance(max_chars, bool) or type(max_chars) is not int:
             msg = f"max_chars must be an integer, got {max_chars!r}"
@@ -119,6 +120,18 @@ class FakeQueryComposer:
                     f"{composition!r} for {utterance!r}"
                 )
                 raise ValueError(msg)
+            try:
+                encodable_text(composition)
+            except ValueError as exc:
+                # Both halves of what `QueryOutcome.query` accepts, decided here with
+                # the field's own function: a fake scripted with a lone surrogate
+                # would raise out of `compose` at an arbitrary later call, which is
+                # the one thing ADR-0231 §3 says never leaves that member.
+                msg = (
+                    f"a scripted composition must have a UTF-8 encoding, got "
+                    f"{composition!r} for {utterance!r}"
+                )
+                raise ValueError(msg) from exc
         self._queries = scripted
         self._query = query
         self._refusals = dict(refusals or {})

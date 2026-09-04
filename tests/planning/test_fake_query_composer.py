@@ -2,10 +2,18 @@
 
 This is what lets other subsystems trust ``ai_assistant.testing.FakeQueryComposer``
 as a stand-in for a composer: it is held to the same contract the model-backed one
-is (ADR-0231 §17). The suite itself lives beside the production implementation in
-``tests/planning/``; what is here is the binding, plus the scripting behaviour the
-suite does not reach — which is the half ADR-0231 §18's arms 4 and 4a will drive at
-the servicer, and therefore the half that has to be right before they are written.
+is (ADR-0231 §17). Beyond the binding, what is here is the scripting behaviour the
+suite does not reach — the half ADR-0231 §18's arms 4 and 4a will drive at the
+servicer, and therefore the half that has to be right before they are written.
+
+**Here and not under ``tests/testing/``**, for the reason ``test_fake_planning.py``
+is here: the suite this binds lives beside the production composer in this package,
+and pytest's ``prepend`` import mode puts a test module's *own* directory on
+``sys.path`` and no other's. A binding one directory over would import
+``query_composer_contract`` only in a whole-suite run, and would fail to collect on
+its own — leaving the fake's conformance unavailable to exactly the narrowed runs
+that most want it. ``tests/conftest.py`` pins ``tests/core`` for the suites with no
+owning subsystem package; this one has one.
 """
 
 from __future__ import annotations
@@ -141,6 +149,21 @@ def test_a_bound_below_one_is_refused_at_construction(max_chars: int) -> None:
     """A bound that refuses every composition while appearing configured (§5)."""
     with pytest.raises(ValueError, match="at least 1"):
         FakeQueryComposer(max_chars=max_chars)
+
+
+@pytest.mark.parametrize("unwritable", ["\ud800", "porto \udfff"])
+def test_a_scripted_composition_with_no_utf_8_encoding_is_refused(unwritable: str) -> None:
+    """The other half of what ``QueryOutcome.query`` accepts, refused at construction.
+
+    A lone surrogate is a ``str`` Python holds happily and cannot encode, so a fake
+    scripted with one would raise out of ``compose`` at an arbitrary later call —
+    which is the one thing ADR-0231 §3 says never leaves that member.
+    """
+    with pytest.raises(ValueError, match="UTF-8"):
+        FakeQueryComposer({UTTERANCE: unwritable})
+
+    with pytest.raises(ValueError, match="UTF-8"):
+        FakeQueryComposer(query=unwritable)
 
 
 @pytest.mark.parametrize("blank", ["", "   ", "\n"])
