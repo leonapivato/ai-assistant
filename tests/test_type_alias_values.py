@@ -68,7 +68,16 @@ import pkgutil
 import sys
 from importlib import import_module
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, ForwardRef, TypeAliasType, get_args
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Final,
+    ForwardRef,
+    Literal,
+    TypeAliasType,
+    get_args,
+    get_origin,
+)
 
 import pytest
 
@@ -166,6 +175,52 @@ def _namespace_of(alias: TypeAliasType) -> dict[str, object]:
     return {} if module is None else vars(module)
 
 
+def _type_arguments(value: object) -> tuple[object, ...]:
+    """The parts of ``value`` that are themselves types, and none that are not.
+
+    **A string is a forward reference everywhere except two places**, and both
+    are excluded here rather than trusted not to occur. ``Literal["json"]``'s
+    arguments are *values* — a string there is the datum, and evaluating it as a
+    name is how a perfectly resolvable alias gets reported broken.
+    ``Annotated[T, "note"]``'s tail is metadata of arbitrary type, of which only
+    ``T`` is a type at all. `typing` resolves neither, so neither does this: a
+    check stricter than the machinery it stands in for produces false findings,
+    and those cost more than the true ones it would buy.
+    """
+    origin = get_origin(value)
+    if origin is Literal:
+        return ()
+    if origin is Annotated:
+        return get_args(value)[:1]
+    arguments = get_args(value)
+    if arguments:
+        return arguments
+    # `get_args(Callable[[A, B], R])` hands back the parameter list itself.
+    return tuple(value) if isinstance(value, list | tuple) else ()
+
+
+def _resolve_reference(
+    reference: ForwardRef, namespace: dict[str, object], seen: list[object], errors: list[str]
+) -> None:
+    """Evaluate one forward reference, and follow whatever it produces."""
+    try:
+        evaluated: object = reference.evaluate(globals=namespace, locals=namespace)
+    except Exception as exc:  # the failure *is* the finding
+        errors.append(f"{reference.__forward_arg__!r} — {type(exc).__name__}: {exc}")
+        return
+    _resolve(evaluated, namespace, seen, errors)
+
+
+def _resolve_alias(alias: TypeAliasType, seen: list[object], errors: list[str]) -> None:
+    """Read one alias's value, and follow it in *its own* module's namespace."""
+    try:
+        value: object = alias.__value__
+    except Exception as exc:  # the failure *is* the finding
+        errors.append(f"{alias.__name__} — {type(exc).__name__}: {exc}")
+        return
+    _resolve(value, _namespace_of(alias), seen, errors)
+
+
 def _resolve(
     value: object, namespace: dict[str, object], seen: list[object], errors: list[str]
 ) -> None:
@@ -187,28 +242,13 @@ def _resolve(
         value = ForwardRef(value)
         seen.append(value)
     if isinstance(value, ForwardRef):
-        try:
-            evaluated: object = value.evaluate(globals=namespace, locals=namespace)
-        except Exception as exc:  # the failure *is* the finding
-            errors.append(f"{value.__forward_arg__!r} — {type(exc).__name__}: {exc}")
-            return
-        _resolve(evaluated, namespace, seen, errors)
+        _resolve_reference(value, namespace, seen, errors)
         return
     if isinstance(value, TypeAliasType):
-        try:
-            inner: object = value.__value__
-        except Exception as exc:  # the failure *is* the finding
-            errors.append(f"{value.__name__} — {type(exc).__name__}: {exc}")
-            return
-        _resolve(inner, _namespace_of(value), seen, errors)
+        _resolve_alias(value, seen, errors)
         return
-    arguments = get_args(value)
-    for argument in arguments:
+    for argument in _type_arguments(value):
         _resolve(argument, namespace, seen, errors)
-    if not arguments and isinstance(value, list | tuple):
-        # `get_args(Callable[[A, B], R])` hands back the parameter list itself.
-        for argument in value:
-            _resolve(argument, namespace, seen, errors)
 
 
 def resolution_errors(alias: TypeAliasType) -> list[str]:
@@ -341,22 +381,28 @@ def test_the_check_catches_a_type_checking_only_name(tmp_path: Path) -> None:
       ``orchestration.engine``: ``__value__`` *succeeds* into a ``ForwardRef``
       whose name is hidden. A resolver that stopped at the first level would
       pass it, which is the regression this alias exists to catch.
-    * ``Later`` is the control that keeps the check from over-firing. Its
+    * ``Later``, ``Format`` and ``Tagged`` are the controls that keep the check
+      from over-firing, and each covers a different way it could. ``Later``'s
       forward reference names a class defined further down the same module — a
       genuine forward reference, resolvable the moment the module finishes
-      executing — and it must **not** be reported. Without it, a resolver that
-      failed every ``ForwardRef`` on sight would look correct.
+      executing; without it a resolver that failed every ``ForwardRef`` on sight
+      would look correct. ``Format`` and ``Tagged`` hold strings that are not
+      references at all — a ``Literal`` value and ``Annotated`` metadata — and
+      round 3 found the resolver reporting exactly those as undefined names.
+      None of the three may be reported.
     * ``Fine`` names nothing at all.
     """
     source = tmp_path / "hidden_name_alias.py"
     source.write_text(
         "from __future__ import annotations\n"
-        "from typing import TYPE_CHECKING\n"
+        "from typing import TYPE_CHECKING, Annotated, Literal\n"
         "if TYPE_CHECKING:\n"
         "    from collections.abc import Callable, Sequence\n"
         "type Hidden = Callable[[], int]\n"
         "type Nested = tuple['Sequence[int] | None', str]\n"
         "type Later = tuple['DefinedLater', int]\n"
+        "type Format = Literal['json', 'yaml']\n"
+        "type Tagged = Annotated[int, 'metadata']\n"
         "type Fine = tuple[int, ...]\n"
         "class DefinedLater: ...\n",
         encoding="utf-8",
@@ -368,7 +414,14 @@ def test_the_check_catches_a_type_checking_only_name(tmp_path: Path) -> None:
     sys.modules[spec.name] = module
     try:
         spec.loader.exec_module(module)
-        assert set(module_aliases(module)) == {"Hidden", "Nested", "Later", "Fine"}
+        assert set(module_aliases(module)) == {
+            "Hidden",
+            "Nested",
+            "Later",
+            "Format",
+            "Tagged",
+            "Fine",
+        }
         failures = unresolved(module)
     finally:
         del sys.modules[spec.name]
