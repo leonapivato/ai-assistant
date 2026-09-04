@@ -1,6 +1,6 @@
 # 234. The `/ToUnicode` CMap comes inside the extraction's bound, on two quantities rather than one, and the object stream's deferral stands on a measurement
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-04
 - **Partially supersedes**
   [ADR-0232](0232-the-extractions-cost-is-bounded-on-decoded-bytes-and-the-file-bound-stays-the-files-own-size.md)
