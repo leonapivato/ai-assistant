@@ -1429,6 +1429,46 @@ def _checked_duration(field: str, value: object) -> timedelta:
     return timedelta.__sub__(value, timedelta(0))
 
 
+#: What a type refusal names when the type will not say what it is called.
+_UNNAMEABLE_TYPE: Final = "an unnameable type"
+
+
+def _type_name_of(value: object) -> str:
+    """``type(value).__name__``, or a fixed literal where reading it will not answer.
+
+    **The name read is itself a call into the refused object's class**, which is
+    the half of #1978 that survived substituting ``repr``: a metaclass may
+    override ``__getattribute__`` for ``"__name__"`` and raise, or answer with
+    something that is not a built-in ``str`` whose own rendering then raises.
+    Either takes the refusal down with the value it was refusing — the same
+    wrong-exception-class escape one level in, so a guard that reaches for a type
+    name owes this read the same distrust it gives the value.
+
+    :func:`~ai_assistant.core.types.fault_class_of` guards the same read for the
+    same reason and this mirrors its shape rather than inventing a second one:
+    ``Exception`` is caught and ``BaseException`` is **not**, so a
+    ``CancelledError`` raised by the name read is delivered onward (ADR-0060 §1).
+    ``type(name) is str`` rather than ``isinstance`` for :func:`_checked_int`'s
+    reason — a ``str`` subclass is a second object with a second chance to raise,
+    and this one is asked to render itself into the message.
+
+    Args:
+        value: The refused object, asked only what its type is called.
+
+    Returns:
+        The type's name, or :data:`_UNNAMEABLE_TYPE` where it could not be read.
+    """
+    try:
+        name = type(value).__name__
+        nameable = type(name) is str and bool(name)
+    # A blind `except Exception` on purpose — see the docstring; `BaseException`
+    # is deliberately not caught. `BLE` is not enabled in this tree and `RUF100`
+    # fails the gate on an unused directive, so the reason stays a comment.
+    except Exception:
+        return _UNNAMEABLE_TYPE
+    return name if nameable else _UNNAMEABLE_TYPE
+
+
 def _checked_int(field: str, value: object, domain: str) -> int:
     """A configured figure as a built-in ``int``, or a refusal naming its type.
 
@@ -1444,7 +1484,9 @@ def _checked_int(field: str, value: object, domain: str) -> int:
     that refuses it — a hostile one then raises straight past the guard, turning
     the wrong-exception-class defect the guard exists to fix into a different
     one. That is :func:`_checked_path`'s discipline, and it is why the type
-    refusal names ``type(value).__name__``. Below this guard ``repr`` is not
+    refusal names the type — through :func:`_type_name_of`, because the name read
+    is a call into the refused object's class and owes the same distrust. Below
+    this guard ``repr`` is not
     merely safe but *right*: what a caller needs from a range violation is
     ``got 0``, and ``got int`` tells them nothing.
 
@@ -1470,7 +1512,7 @@ def _checked_int(field: str, value: object, domain: str) -> int:
         ValueError: If ``value`` is not exactly an ``int``.
     """
     if type(value) is not int:
-        msg = f"{field} must be {domain}, got {type(value).__name__}"
+        msg = f"{field} must be {domain}, got {_type_name_of(value)}"
         raise ValueError(msg)
     return value
 
