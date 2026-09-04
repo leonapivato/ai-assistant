@@ -778,10 +778,14 @@ def test_a_spec_refuses_a_live_count_that_is_not_a_whole_number() -> None:
     for below_one in (0, -5):
         with pytest.raises(ValueError, match=r"live must be an integer >= 1"):
             AgedStoreSpec(live=below_one, topics=1)
-    # A `bool` is an `int` in Python and is taken as the count it equals rather
-    # than refused: `range(True)` already means `range(1)`, so the spec this
-    # builds is the one it reports.
-    assert AgedStoreSpec(live=True, topics=True).cluster_density == 1.0
+    # The type test is exact, so an `int` *subclass* is refused as well — and
+    # `bool` is the one the standard library ships, which makes this the
+    # regression test for the whole class. A subclass reaches `value < 1` and the
+    # `topics > live` comparison with its own operators: one whose `__lt__`
+    # returns `False` would plant a zero-record population under a spec that
+    # documents at least one.
+    with pytest.raises(ValueError, match=r"live must be an integer >= 1"):
+        AgedStoreSpec(live=True, topics=1)
 
 
 def test_a_spec_refuses_a_topic_count_that_is_not_a_whole_number() -> None:
