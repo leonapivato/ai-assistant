@@ -29,6 +29,7 @@ deadline row alone.
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal
 from typing import TYPE_CHECKING, Final, final
 
 import pytest
@@ -715,6 +716,37 @@ async def test_a_bound_below_one_is_refused_at_construction() -> None:
     """
     with pytest.raises(ValueError, match="at least 1"):
         HttpsExchange(transport=FakeOutboundTransport(), max_response_bytes=0)
+
+
+@pytest.mark.parametrize(
+    "bound",
+    [
+        pytest.param(1.5, id="a-fractional-bound"),
+        pytest.param(float(BOUND), id="an-integral-float-bound"),
+        pytest.param(True, id="a-flag-where-a-count-belongs"),
+        pytest.param(Decimal(BOUND), id="a-decimal-bound"),
+    ],
+)
+async def test_a_bound_that_is_not_an_exact_integer_is_refused_before_a_channel_opens(
+    bound: object,
+) -> None:
+    """The type, not only the range — and refused before anything is transmitted.
+
+    ``Settings`` refuses every one of these at load (``_exactly_an_integer``), so
+    none reaches here on the configured path; what this pins is the constructor
+    seam a test or a second composition root reaches directly, which is the same
+    reachability that guard was written for. The range check alone was not enough:
+    ``True`` satisfies it as a **one-byte** bound, and a ``float`` satisfies it and
+    is then handed to :meth:`ByteChannel.read` — so the failure was a ``TypeError``
+    no ``Raises`` block declares, arriving **after** the request and its credential
+    had been written. The transport is asserted untouched for that reason.
+    """
+    transport = FakeOutboundTransport()
+
+    with pytest.raises(ValueError, match="exact int"):
+        HttpsExchange(transport=transport, max_response_bytes=bound)  # type: ignore[arg-type]
+
+    assert transport.attempts == ()
 
 
 # --------------------------------------------------------------------------- #

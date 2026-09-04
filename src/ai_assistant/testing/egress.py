@@ -209,8 +209,154 @@ def _check_domain(domain: str) -> None:
             raise ValueError(msg)
 
 
+#: ADR-0231 §8's host grammar: ASCII letters, digits, ``-`` and ``.``, and the two
+#: ceilings it states. Spelled here for :data:`_ATEXT`'s reason — ``testing`` may
+#: not import ``tools``, which is what makes this a second *implementation*.
+_HOST_CHARACTERS: Final = frozenset(string.ascii_letters + string.digits + "-.")
+_MAX_HOST_LENGTH: Final = 253
+_MAX_HOST_LABEL: Final = 63
+
+#: The port's domain, as §8 states it: one to five decimal digits without a
+#: leading zero, denoting 1-65535.
+_MAX_HTTPS_PORT: Final = 65535
+_HTTPS_DEFAULT_PORT: Final = 443
+
+
+def _is_number_label(label: str) -> bool:
+    """Whether ``label`` is ADR-0231 §8's *number*, which makes a host an IP literal.
+
+    §8 makes the IP-literal test decidable rather than a judgement: *"a host whose
+    rightmost label is a **number** — one or more ASCII decimal digits, or
+    ``0x``/``0X`` followed by one or more ASCII hexadecimal digits — is an IP
+    literal and is refused"*. Written from that sentence, which is why a bare
+    ``0x`` is **not** a number here: the clause says *followed by one or more*, and
+    an implementation refusing it would be applying a rule the ratified test does
+    not state (issue #2075).
+
+    Args:
+        label: The host's rightmost label.
+
+    Returns:
+        Whether it is a number in either notation.
+    """
+    if label[:2].lower() == "0x":
+        digits = label[2:]
+        return bool(digits) and all(character in string.hexdigits for character in digits)
+    return label.isascii() and label.isdigit()
+
+
+def _check_https_host(host: str) -> None:
+    """Require ADR-0231 §8's host: labelled, ASCII, bounded, and not a number.
+
+    Raises:
+        ValueError: If the host is empty, carries a character outside the grammar,
+            has a leading, trailing or doubled ``.``, has a label over 63
+            characters or one beginning or ending with ``-``, exceeds 253
+            characters, or is an IP literal in any notation.
+    """
+    if not host:
+        msg = "an https destination names a non-empty host (ADR-0231 §8)"
+        raise ValueError(msg)
+    if len(host) > _MAX_HOST_LENGTH:
+        msg = f"an https host is at most {_MAX_HOST_LENGTH} characters (ADR-0231 §8)"
+        raise ValueError(msg)
+    if any(character not in _HOST_CHARACTERS for character in host):
+        msg = "an https host holds only ASCII letters, digits, '-' and '.' (ADR-0231 §8)"
+        raise ValueError(msg)
+    labels = host.split(".")
+    for label in labels:
+        if not label:
+            msg = "an https host carries no leading, trailing or doubled '.' (ADR-0231 §8)"
+            raise ValueError(msg)
+        if len(label) > _MAX_HOST_LABEL:
+            msg = f"an https host label is at most {_MAX_HOST_LABEL} characters (ADR-0231 §8)"
+            raise ValueError(msg)
+        if label.startswith("-") or label.endswith("-"):
+            msg = "an https host label neither begins nor ends with '-' (ADR-0231 §8)"
+            raise ValueError(msg)
+    if _is_number_label(labels[-1]):
+        msg = "an https host whose rightmost label is a number is an IP literal (ADR-0231 §8)"
+        raise ValueError(msg)
+
+
+def _https_port(written: str | None) -> int:
+    """The port ``written`` states, or 443 where it states none.
+
+    Args:
+        written: The text after the port separator, or ``None`` where no separator
+            was written. The two are **not** the same: §8 makes a separator with
+            nothing after it a refusal rather than an omitted port.
+
+    Returns:
+        The port, in 1-65535.
+
+    Raises:
+        ValueError: If the text is not one to five decimal digits without a
+            leading zero denoting a value in that range.
+    """
+    if written is None:
+        return _HTTPS_DEFAULT_PORT
+    if not (1 <= len(written) <= len(str(_MAX_HTTPS_PORT))):
+        msg = "an https port is one to five decimal digits (ADR-0231 §8)"
+        raise ValueError(msg)
+    if not written.isascii() or not written.isdigit() or written.startswith("0"):
+        # Checked before the conversion rather than after: ``int`` accepts a sign,
+        # surrounding whitespace and ``_`` separators, so a port written in a
+        # spelling no other reader agrees on would otherwise convert.
+        msg = "an https port is decimal digits with no leading zero (ADR-0231 §8)"
+        raise ValueError(msg)
+    port = int(written)
+    if not 1 <= port <= _MAX_HTTPS_PORT:
+        msg = f"an https port denotes a value in 1-{_MAX_HTTPS_PORT} (ADR-0231 §8)"
+        raise ValueError(msg)
+    return port
+
+
+def _canonical_https(supplied: str) -> str:
+    """This implementation's HTTPS canonicaliser: ADR-0231 §8's origin, and nothing below it.
+
+    §8 fixes the canonical form as ``https://<host>:<port>`` — *"always all three,
+    with the port rendered explicitly even where the supplied form omitted it"* —
+    carrying no path, query, fragment, userinfo or trailing separator. The
+    equivalences it establishes are **exactly three**: the scheme differs only by
+    ASCII case, the host differs only by ASCII case, and one form omits the port
+    where the other states 443. Every other difference makes two destinations, so
+    everything else is a refusal rather than a normalisation.
+
+    **Its accept/refuse boundary is the conformance suite's, not this module's**,
+    for :func:`_canonical_smtp`'s reason: ``EgressBinderContract`` states the
+    corpora both implementations must agree on, and porting
+    :mod:`ai_assistant.tools.destinations`' rules across the import boundary
+    ``lint-imports`` forbids would be the second copy ADR-0148 §2's sixth clause
+    exists to prevent.
+
+    Raises:
+        ValueError: If the supplied form is not one this implementation will
+            assert a canonical form for. No message names the value (ADR-0004 §1).
+    """
+    if not supplied.isascii():
+        msg = "a destination that is not ASCII has no canonical form here"
+        raise ValueError(msg)
+    scheme, separator, authority = supplied.partition("://")
+    if not separator or scheme.lower() != "https":
+        msg = "an https destination names the https scheme (ADR-0231 §8)"
+        raise ValueError(msg)
+    if any(character in authority for character in "/?#@"):
+        msg = (
+            "an https destination is an origin: it carries no path, query, "
+            "fragment, userinfo or trailing separator (ADR-0231 §8)"
+        )
+        raise ValueError(msg)
+    host, colon, written_port = authority.rpartition(":")
+    if not colon:
+        host = authority
+    _check_https_host(host)
+    return f"https://{host.lower()}:{_https_port(written_port if colon else None)}"
+
+
 _CANONICALISERS: Final[Mapping[DestinationProtocol, Callable[[str], str]]] = {
     DestinationProtocol.SMTP: _canonical_smtp,
+    DestinationProtocol.HTTPS: _canonical_https,
 }
 
 
