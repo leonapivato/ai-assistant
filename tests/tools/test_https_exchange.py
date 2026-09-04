@@ -491,6 +491,26 @@ async def test_a_certificate_that_does_not_verify_reaches_no_write() -> None:
             id="a-negative-length",
         ),
         pytest.param(
+            b"HTTP/1.1 200 OK\r\nContent-Length: " + b"1" * 5000 + b"\r\n\r\nx",
+            "decimal number",
+            id="a-length-longer-than-python-will-convert",
+        ),
+        pytest.param(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nnot a field\r\n\r\n",
+            "not a header",
+            id="a-trailer-that-is-not-a-header-field",
+        ),
+        pytest.param(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\tfolded: x\r\n\r\n",
+            "not a header",
+            id="a-trailer-that-is-an-obsolete-line-fold",
+        ),
+        pytest.param(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX-Caf\xc3\xa9: x\r\n\r\n",
+            "non-ASCII",
+            id="a-non-ascii-trailer",
+        ),
+        pytest.param(
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nab\r\n0\r\n\r\n",
             "hexadecimal",
             id="a-chunk-size-that-is-not-hexadecimal",
@@ -774,3 +794,64 @@ async def test_a_header_this_seam_will_not_write_opens_no_channel(
 
     assert value not in str(raised.value)
     assert transport.attempts == ()
+
+
+async def test_a_well_formed_trailer_is_read_and_discarded() -> None:
+    """The other side of the trailer arms above, so the grammar is not read as a ban.
+
+    RFC 9112 §7.1.2 allows a trailer section and this exchange discards it: what
+    the arms above assert is that it is discarded *after* being read under the
+    header section's own grammar, not that a conforming one is refused.
+    """
+    body = b"3\r\nabc\r\n0\r\nX-Trailer: 1\r\nX-Another: 2\r\n\r\n"
+    channel = far_end(response(headers=["Transfer-Encoding: chunked"], body=body))
+    subject, _ = exchange(channel)
+
+    answer = await subject.get(origin=ORIGIN, target=TARGET)
+
+    assert answer.body == b"abc"
+    assert answer.headers == (("transfer-encoding", "chunked"),)
+
+
+async def test_an_oversized_body_behind_a_well_formed_head_yields_no_response() -> None:
+    """ADR-0231 §5's "nothing is parsed", asserted as what a caller can observe.
+
+    The head is valid and is read before the body's size is known — it has to be,
+    since it is what says where the body ends, and §5's own last clause forbids the
+    alternative ("no implementation **buffers a whole response**"). What §5 buys is
+    therefore not that no octet is ever looked at, but that an over-bound response
+    yields **no value at all**: no `HttpsResponse` reaches the caller, so no body
+    reaches a decoder and no record can be minted from one.
+
+    Driven with the head and the body delivered as separate chunks, so the far end
+    really does answer its status and fields before the octet that passes the bound
+    exists — which is the arrangement adversarial round 1 asked for.
+    """
+    head = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n"
+    bound = len(head) + 8
+    channel = far_end(head, b'{"results"', b": [1,2,3]}")
+    subject, _ = exchange(channel, bound=bound)
+
+    with pytest.raises(HttpsResponseTooLargeError):
+        await subject.get(origin=ORIGIN, target=TARGET)
+
+    assert channel.closed
+
+
+async def test_a_head_alone_past_the_bound_is_refused_before_the_body_is_reached() -> None:
+    """And the bound bites inside the field section too, which is the same counter.
+
+    §5 counts "over the bytes taken off the channel", so a far end that never
+    stops sending header fields buys no more than one that never stops sending a
+    body. An implementation whose bound was a *body* bound with a header allowance
+    beside it would read this whole head and then start counting.
+    """
+    head = b"HTTP/1.1 200 OK\r\n" + b"X-Filler: " + b"x" * 4000 + b"\r\n\r\n"
+    channel = far_end(head + b"body")
+    subject, _ = exchange(channel, bound=64)
+
+    with pytest.raises(HttpsResponseTooLargeError):
+        await subject.get(origin=ORIGIN, target=TARGET)
+
+    assert await drained(channel) == len(head) + len(b"body") - 65
+    assert channel.closed

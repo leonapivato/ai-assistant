@@ -2131,6 +2131,17 @@ _RESERVED_FIELD_NAMES: Final = frozenset(
     {"host", "connection", "content-length", "transfer-encoding"}
 )
 
+#: The most decimal digits a ``Content-Length`` may be written in. ``Settings``
+#: bounds ``search_max_response_bytes`` below ``2**63``, so a length needing more
+#: digits than that names no response any configured bound could read whole. It is
+#: checked **before** the conversion for :func:`_port`'s reason (#1147): CPython
+#: refuses ``int()`` on a string of more than 4300 digits, so a header of five
+#: thousand ASCII digits would otherwise satisfy every character test and raise a
+#: bare ``ValueError`` out of the conversion — an exception no ``Raises`` block on
+#: this path declares, arriving from a far end that chose the header's length.
+#: Adversarial review found it on round 1.
+_MAX_CONTENT_LENGTH_DIGITS: Final = len(str(2**63 - 1))
+
 #: The most hexadecimal digits a chunk size may be written in. ``int(text, 16)``
 #: on a very long string is the same denial-of-service ``_MAX_PORT_DIGITS`` closes
 #: for a port (#1147), and no chunk this exchange could accept needs more: the
@@ -2193,6 +2204,25 @@ class _BoundedReader:
     the headers included, which is §5's "counted over the bytes taken off the
     channel" read as it is written. It is not a body bound with a header allowance
     beside it, and nothing here subtracts one from the other.
+
+    **Framing is read incrementally, and that is §5 as written rather than against
+    it.** §5 says the bound is enforced "while the response is read and before any
+    part of it is parsed", and its last clause says what that rules out: "No
+    implementation buffers a whole response, parses incrementally past the bound,
+    or measures a response after assembling it." All three are properties of this
+    reader. Nothing is parsed **past** the bound, because the fill that would pass
+    it raises before its octets reach the buffer; nothing is measured after
+    assembly, because the count is taken on the read; and nothing buffers a whole
+    response, which is the clause a "read it all, then parse" implementation would
+    breach — and it could not be satisfied anyway for the close-framed response
+    this exchange's own ``Connection: close`` asks for, whose length is not knowable
+    without reading to end of stream. What §5's "nothing is parsed" buys is that an
+    over-bound response yields **no value at all**: no :class:`HttpsResponse` is
+    returned, no body reaches a decoder, and no record can be minted from it.
+    Reading the status line and the field section is what tells this reader where
+    the body ends, so it is the bound being enforced rather than a step ahead of it
+    (adversarial round 1 read the clause the other way; the direction it gave is
+    the clause's own first prohibition).
     """
 
     __slots__ = ("_bound", "_buffer", "_channel", "_ended", "_taken")
@@ -2670,18 +2700,44 @@ async def _headers_of(reader: _BoundedReader) -> tuple[tuple[str, str], ...]:
         line = await reader.line()
         if not line:
             return tuple(fields)
-        if not line.isascii():
-            msg = "the far end sent a header line carrying a non-ASCII octet"
-            raise MalformedHttpResponseError(msg)
-        name, separator, value = line.decode("ascii").partition(":")
-        if (
-            not separator
-            or not name
-            or any(character not in _FIELD_NAME_CHARACTERS for character in name)
-        ):
-            msg = "the far end sent a line that is not a header field"
-            raise MalformedHttpResponseError(msg)
-        fields.append((name.lower(), value.strip(" \t")))
+        fields.append(_field_of(line))
+
+
+def _field_of(line: bytes) -> tuple[str, str]:
+    """One header field, name lowercased and value stripped (RFC 9110 §5).
+
+    Shared by the header section and the trailer section, so that the two cannot
+    be read under different grammars — which is the whole of what makes the
+    trailer's discard safe. Adversarial review found the trailer accepting
+    arbitrary octets on round 1.
+
+    Args:
+        line: The field line, without its terminator.
+
+    Returns:
+        The name, ASCII-lowercased, and the value with its surrounding space and
+        horizontal tab removed as RFC 9110 §5.5 directs.
+
+    Raises:
+        MalformedHttpResponseError: If the line is not a field, or carries an
+            octet outside ASCII. Obsolete line folding — a field continued on a
+            line beginning with space or tab — is refused with them: RFC 9112 §5
+            deprecates it, and reading it is the leniency response splitting is
+            built out of. The message names the defect and never the line: a far
+            end's octets are a third party's text, and a refusal reaches a log.
+    """
+    if not line.isascii():
+        msg = "the far end sent a header line carrying a non-ASCII octet"
+        raise MalformedHttpResponseError(msg)
+    name, separator, value = line.decode("ascii").partition(":")
+    if (
+        not separator
+        or not name
+        or any(character not in _FIELD_NAME_CHARACTERS for character in name)
+    ):
+        msg = "the far end sent a line that is not a header field"
+        raise MalformedHttpResponseError(msg)
+    return name.lower(), value.strip(" \t")
 
 
 async def _body_of(reader: _BoundedReader, headers: tuple[tuple[str, str], ...]) -> bytes:
@@ -2705,7 +2761,7 @@ async def _body_of(reader: _BoundedReader, headers: tuple[tuple[str, str], ...])
     Raises:
         MalformedHttpResponseError: On two framings at once, a transfer coding
             other than ``chunked``, a ``Content-Length`` that is not one decimal
-            number, or a stream ending inside any of them.
+            number this seam will read, or a stream ending inside any of them.
         HttpsResponseTooLargeError: If reading it passed the bound.
         TransportError: If the connection could not be continued.
     """
@@ -2724,7 +2780,7 @@ async def _body_of(reader: _BoundedReader, headers: tuple[tuple[str, str], ...])
             raise MalformedHttpResponseError(msg)
         return await _chunked(reader)
     if length is not None:
-        if not length.isascii() or not length.isdigit():
+        if not length.isascii() or not length.isdigit() or len(length) > _MAX_CONTENT_LENGTH_DIGITS:
             msg = "the far end's content length is not a decimal number of octets"
             raise MalformedHttpResponseError(msg)
         return await reader.take(int(length))
@@ -2766,8 +2822,8 @@ async def _chunked(reader: _BoundedReader) -> bytes:
 
     Raises:
         MalformedHttpResponseError: On a chunk size that is not hexadecimal, a
-            chunk not followed by its terminator, or a stream ending inside
-            either.
+            chunk not followed by its terminator, a trailer line that is not a
+            header field, or a stream ending inside any of them.
         HttpsResponseTooLargeError: If reading it passed the bound.
         TransportError: If the connection could not be continued.
     """
@@ -2783,9 +2839,13 @@ async def _chunked(reader: _BoundedReader) -> bytes:
     # The trailer section, which RFC 9112 §7.1.2 allows and this seam discards:
     # a trailer is a header field arriving after the body, and nothing here reads
     # one. It is still *read*, because the octets are on the channel either way and
-    # the bound counts them.
-    while await reader.line():
-        pass
+    # the bound counts them — and it is read under the **same grammar** the header
+    # section is, because a section this exchange would refuse before the body is
+    # not one it accepts after it. Discarding without validating would have made
+    # the trailer the one place arbitrary octets were admitted, which is the
+    # leniency this module refuses everywhere else (adversarial round 1).
+    while line := await reader.line():
+        _field_of(line)
     return bytes(body)
 
 
