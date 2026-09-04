@@ -598,7 +598,13 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
                     union.admit((outcome.record,))
         if hop is not None:
             reach = await _hop_records(store, hop, supply=supply, reads=reads)
-            unresolved = reach.unresolved
+            # **Accumulated and never assigned** (ADR-0230 §9). The count is one
+            # population across the kinds — "an ``F`` label outside the turn's listing
+            # counts in the existing unresolved-label count" — so a request naming an
+            # unresolvable file *and* a resolvable hop must report both. An assignment
+            # here reported the hop's figure alone and silently erased the file's,
+            # which is a turn the audit would have shown as having dropped nothing.
+            unresolved += reach.unresolved
             resolved_by_hop = reach.expansion
             # ADR-0229 §2: the union is offered the **evidence** alone. A named
             # record is in the pre-servicing supply by construction, so admitting it
