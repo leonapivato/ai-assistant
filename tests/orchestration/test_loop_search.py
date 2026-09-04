@@ -21,7 +21,7 @@ one-record local file and ahead of the hop and the query, out of ADR-0226 §6's 
 budget of ten; and that ADR-0226 §9's record gains one field which is a class and
 carries no query, no origin and no result.
 
-**One deviation from §18's letter, and it is recorded rather than glossed** (issue
+**One deviation from §18's letter, and it is pinned rather than glossed** (issue
 #2111). Item 1 wants the search ``ALLOW``ed on ADR-0148 §3's route (b), and the
 declaration both the production searcher and the canonical fake carry declares
 ``cost=UNKNOWN`` — which fires ``ThresholdActionPolicy``'s second floor beside the
@@ -32,7 +32,10 @@ the arm is unreachable as merged. :data:`_COSTED` is that configured deployment
 modelled — a per-call figure declared where one is known, which is §5's own case and
 **not** ADR-0231 §9's forbidden weakening: nothing is narrowed, restated or declared
 ``FREE`` where the figure is unknown. Every other arm here runs the production
-``ThresholdActionPolicy`` over the fake's own declaration unchanged.
+``ThresholdActionPolicy`` over the fake's own declaration unchanged, and
+:func:`test_a_covering_grant_reaches_an_allow_only_on_a_declared_cost` asserts both
+rulings side by side so the gap is a **recorded** fact of this suite rather than
+something the substitution hides.
 """
 
 from __future__ import annotations
@@ -141,6 +144,7 @@ from ai_assistant.testing.searching import (
     DEFAULT_SEARCH_SOURCE_NAME,
     FAKE_WEB_SEARCH,
 )
+from ai_assistant.tools.web_search import WEB_SEARCH
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, MutableMapping, Sequence
@@ -1754,3 +1758,67 @@ async def test_the_degradation_line_carries_the_class_and_no_tier_1_value(
     assert _SUPPLY_SPAN not in written, "no span of the supply"
     assert DEFAULT_SEARCH_ORIGIN not in written, "and no origin"
     assert "conn-0001" not in written, "not the connection reference the fault named either"
+
+
+# --------------------------------------------------------------------------- #
+# The production declaration's ruling, pinned rather than assumed (issue #2111) #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("declaration", "expected"),
+    [(WEB_SEARCH, PermissionOutcome.CONFIRM), (_COSTED, PermissionOutcome.ALLOW)],
+    ids=["the production declaration", "an operator's configured per-call figure"],
+)
+async def test_a_covering_grant_reaches_an_allow_only_on_a_declared_cost(
+    declaration: Any, expected: PermissionOutcome
+) -> None:
+    """What a covering grant does to the **production** search declaration, today.
+
+    Round 4's adversarial blocker, waived on this branch and filed as issue #2111,
+    pinned here so it is a recorded fact rather than something ``_COSTED`` hides.
+    ``ThresholdActionPolicy`` fires two floors on ``tools/web_search.py``'s
+    ``WEB_SEARCH``: ADR-0021 §5's disclosure floor, which ADR-0193 §3's route (b)
+    exists to discharge, **and** ADR-0016 §4's ``UNKNOWN``-cost floor, which is "not
+    configurable" and which a grant "satisfies no floor stated over any fact but
+    recipient authorisation". ``_only_the_disclosure_floor`` therefore never admits
+    route (b) and the seam is not even consulted.
+
+    So on ``origin/main`` a search is `CONFIRM` for **two** reasons, and ADR-0231 §9
+    names one: "the disclosure floor fires and ``ActionPolicy`` returns ``CONFIRM``",
+    with §19's grant surface as the firing condition. ADR-0231 §5 admits the other's
+    remedy in terms — "a ``cost`` that is the operator's configured per-call figure
+    where one is configured" — but adds no ``Settings`` field for one and
+    ``build_web_search_integration`` takes no parameter for one, so no deployment can
+    be that deployment. Closing it is a decision (a fifth ``Settings`` field ADR-0231
+    §5 closes at four, or a clause ruling the search ``CONFIRM``-forever), and both
+    lie outside this lane's fence.
+
+    The second row is what the rest of this module drives, and it is the *same*
+    declaration with the *same* grant and one field ADR-0231 §5 admits — which is
+    what makes it a configured deployment modelled rather than ADR-0231 §9's
+    forbidden weakening: nothing is narrowed, nothing is restated, and nothing is
+    declared ``FREE`` where the figure is unknown.
+    """
+    binder = _binder(definition=declaration)
+    proposed = await _CostedSearcher(FakeWebSearcher()).request("porto bell tower")
+    assert proposed is not None
+    bound = await binder.bind(
+        declaration,
+        parameters=proposed.parameters,
+        provenance=CarriedProvenance(
+            spans={}, planned_with_external_content=False, coverage=SpanCoverage.NOT_COVERED
+        ),
+    )
+    assert bound is not None
+    grant = _grant().model_copy(update={"tool": declaration})
+    policy = ThresholdActionPolicy(grants=FakeRecipientGrants([grant], now=_clock))
+
+    ruled = await policy.decide(
+        ActionRequest(tool=bound.tool, parameters=bound.parameters, egress_binding=bound.binding)
+    )
+
+    assert ruled.outcome is expected
+    assert (ruled.authorised_by == "g-search") is (expected is PermissionOutcome.ALLOW), (
+        "route (b) names the grant where it is reached, and is not reached otherwise"
+    )
