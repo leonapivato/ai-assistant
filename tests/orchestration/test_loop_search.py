@@ -57,12 +57,14 @@ from test_engine import (
 )
 from test_engine_capture import _captured, _replying
 
+from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import (
     AuditError,
     ConnectionStoreError,
     MemoryStoreError,
     PermissionDeniedError,
 )
+from ai_assistant.core.logging import configure_logging
 from ai_assistant.core.types import (
     ActionPlan,
     ActionRequest,
@@ -869,6 +871,7 @@ async def test_the_budget_admits_the_records_that_fit_and_no_more() -> None:
 
     disposition = await _serviced_search(
         _servicer(searcher=_CostedSearcher(FakeWebSearcher(results=results)), granted=True),
+        ReadAsk(kind=ReadKind.WEB_SEARCH),
         _ASK,
         union=union,
         supply=(),
@@ -1699,3 +1702,55 @@ async def test_a_fault_the_searcher_raised_degrades_the_servicing(error: Excepti
     assert entry["new"] == 0
     assert entry["returned"] == 0
     assert entry["kinds"] == (ReadKind.WEB_SEARCH.value,), "and the record says which kind"
+
+
+async def test_the_degradation_line_carries_the_class_and_no_tier_1_value(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ADR-0004 §5, over the **rendered** output rather than the event dict.
+
+    Round 2's architecture blocker, and it is about the *renderer*: ``core.logging``
+    renders through ``structlog.dev.ConsoleRenderer``, whose default exception
+    formatter is ``rich``'s with ``show_locals=True``, so an ``exc_info=True`` on the
+    degradation line writes the raising frames' locals into the log — and those frames
+    hold the turn's own utterance, the composed query, the request and the bound call.
+    ``redact_sensitive`` cannot reach any of it: it runs **before** the renderer and
+    over the event dict's keys, and a rendered traceback is neither.
+
+    Asserted over ``capsys`` and never over ``structlog.testing.capture_logs``, for
+    ``tests/permissions/test_action_policy.py``'s reason one seam over: that fixture
+    replaces the processor chain, so a "does not leak" test written against it passes
+    while the real emission path leaks.
+
+    What the line keeps is what an operator acts on: that a servicing degraded, and
+    the **class** that refused — both Tier 2, and enough to tell a connection outage
+    from a refused ledger claim.
+    """
+    utterance = "where is that quinoa-flavoured stroopwafel bakery in Porto"
+    composed = "porto stroopwafel bakery address"
+    configure_logging(Settings())
+    capsys.readouterr()
+
+    await service_read_request(
+        FakeMemoryStore(now=_clock),
+        _search(),
+        supply=(_belief("belief-1", _SUPPLY_SPAN),),
+        fetcher=None,
+        listing=None,
+        search=_servicer(
+            composer=FakeQueryComposer({utterance: composed}),
+            searcher=_FaultingSearcher(ConnectionStoreError("conn-0001 could not be read")),
+            granted=True,
+        ),
+        utterance=utterance,
+        audit=TurnReadAudit(),
+    )
+
+    written = capsys.readouterr().out
+    assert "read_request_degraded" in written, "the operator is told the servicing degraded"
+    assert "ConnectionStoreError" in written, "and which class refused"
+    assert utterance not in written, "no utterance"
+    assert composed not in written, "no composed query"
+    assert _SUPPLY_SPAN not in written, "no span of the supply"
+    assert DEFAULT_SEARCH_ORIGIN not in written, "and no origin"
+    assert "conn-0001" not in written, "not the connection reference the fault named either"
