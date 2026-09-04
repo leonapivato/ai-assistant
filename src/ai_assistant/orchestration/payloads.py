@@ -53,6 +53,8 @@ from ai_assistant.core.types import (
     GrantScope,
     Identifier,
     NonBlankEncodableText,
+    UtcInstant,
+    describe_untrusted,
     encodable_text,
 )
 
@@ -98,6 +100,7 @@ _MINUTES_PER_HOUR: Final[int] = 60
 
 _IDENTIFIER: Final = TypeAdapter[str](Identifier)
 _NON_BLANK_TEXT: Final = TypeAdapter[str](NonBlankEncodableText)
+_UTC_INSTANT: Final = TypeAdapter[datetime](UtcInstant)
 
 
 def _instant(value: datetime) -> str:
@@ -442,6 +445,61 @@ def check_arguments(method: str, *, max_bytes: int, **arguments: object) -> None
     """
     passed = {name: value for name, value in arguments.items() if value is not None}
     check_payload(passed, max_bytes=max_bytes, subject=f"the arguments to {method}()")
+
+
+def utc_instant(value: object, *, name: str) -> datetime:
+    """Validate one timezone-aware instant argument, before any I/O (ADR-0085 §9).
+
+    :func:`identifier`'s shape for the surface's first
+    :data:`~ai_assistant.core.types.UtcInstant` **arguments** (ADR-0235 §1, §4), and
+    it exists because the annotation alone enforces nothing in process.
+    ``UtcInstant`` is a pydantic ``Annotated`` alias: a wire request is validated
+    against it by ``wire/surface.py`` before dispatch, and an in-process caller hands
+    the value straight through. Without this the two implementations refuse different
+    values, which is exactly what §9 forbids.
+
+    **Two failures it closes, and the second is the quiet one.** A naive
+    ``datetime`` reaches a comparison against an aware one and raises a bare
+    ``TypeError`` — not an :class:`~ai_assistant.core.errors.AssistantError`, so it
+    escapes a command's error boundary as an uncaught traceback, the failure ADR-0042
+    §7 forbids. And ADR-0087 §2d's encoder spells every instant with a ``Z``, so a
+    naive value that reached the wire would be **relabelled as UTC** rather than
+    refused: an expiry an hour or eight wrong, recorded as though the user had chosen
+    it. ADR-0023 §3 is the clause both rest on — ``core`` cannot tell a dropped offset
+    from a wall-clock time, so it refuses rather than attributing one.
+
+    **The value is returned normalised**, which is the load-bearing half:
+    ``UtcInstant`` converts an aware value to UTC, and ADR-0023 §2's reason for that
+    is comparison — two aware datetimes sharing a ``tzinfo`` compare by wall clock and
+    ignore ``fold``, so an unconverted value is orderable and chronologically false
+    for one hour a year. Every comparison this argument reaches is an ordering one.
+
+    Args:
+        value: The instant as the caller passed it.
+        name: The parameter's name, for the message.
+
+    Returns:
+        The instant, in UTC.
+
+    Raises:
+        TypeError: If the value is not a ``datetime``. Checked before the offset,
+            for :func:`page_argument`'s reason: a ``str`` that pydantic would parse
+            is a caller passing the wrong thing, and parsing it would make the
+            in-process surface accept what no annotation declares.
+        ValueError: If it carries no determinate offset (ADR-0023 §3).
+    """
+    if not isinstance(value, datetime):
+        msg = f"{name} must be a timezone-aware datetime, got {describe_untrusted(value)}"
+        raise TypeError(msg)
+    try:
+        return _UTC_INSTANT.validate_python(value)
+    except ValidationError as exc:
+        msg = (
+            f"{name} must carry a determinate UTC offset: a naive instant is a "
+            f"wall-clock time or a dropped offset and this layer cannot tell them "
+            f"apart, so it refuses rather than attributing one (ADR-0023 §3)"
+        )
+        raise ValueError(msg) from exc
 
 
 def identifier(value: str, *, name: str) -> str:

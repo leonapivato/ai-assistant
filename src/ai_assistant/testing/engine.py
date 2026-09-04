@@ -142,6 +142,7 @@ from ai_assistant.orchestration.payloads import (
     non_blank_text,
     page_argument,
     positive_page_argument,
+    utc_instant,
 )
 from ai_assistant.orchestration.recipient_grants import (
     record_the_grant,
@@ -880,13 +881,23 @@ class FakeAssistantEngine:
         and is unchanged: it is claimed once and atomically, and a second presentation of
         its token still falls through to the refusal below.
         """
+        # Validated locally and before any I/O, exactly as the concrete engine
+        # validates it (ADR-0085 §9): ``UtcInstant`` is a pydantic annotation, so an
+        # in-process caller is not checked against it by anything else, and a fake
+        # that let a naive instant through would certify a consumer against a hub
+        # that refuses it.
+        until = (
+            None
+            if remember_recipients_until is None
+            else utc_instant(remember_recipients_until, name="remember_recipients_until")
+        )
         check_arguments(
             "resume",
             max_bytes=self._max_payload_bytes,
             token=token,
             approved=approved,
             timeout=timeout,
-            remember_recipients_until=remember_recipients_until,
+            remember_recipients_until=until,
         )
         self.calls.append(("resume", {"token": token.handle, "approved": approved}))
         if token.handle in self.routed_parked:
@@ -911,9 +922,9 @@ class FakeAssistantEngine:
         # §2), so the park survives them and the same token answers it again without
         # the argument.
         establishing_at: datetime | None = None
-        if remember_recipients_until is not None and approved:
+        if until is not None and approved:
             self._check_establishable(token.handle)
-            establishing_at = self._establishing_instant(remember_recipients_until)
+            establishing_at = self._establishing_instant(until)
         confirmation = self.parked.pop(token.handle)
         # **A denial is a result, not an exception** (ADR-0042 §4): the adapter
         # conveys consent, the policy rules on it, and the engine records and
@@ -964,7 +975,7 @@ class FakeAssistantEngine:
         recipient_grant = await self._establish_recipients(
             token.handle,
             approved=approved,
-            remember_recipients_until=remember_recipients_until,
+            remember_recipients_until=until,
             establishing_at=establishing_at,
         )
         # ``turn`` is ``None`` here because this engine parks nothing from a live
@@ -2058,21 +2069,22 @@ class FakeAssistantEngine:
         this double invents a lever for.
         """
         named = identifier(decision_id, name="decision_id")
+        until = utc_instant(expires_at, name="expires_at")
         check_arguments(
             "establish_recipient_grant",
             max_bytes=self._max_payload_bytes,
             decision_id=named,
-            expires_at=expires_at,
+            expires_at=until,
         )
         self.calls.append(
-            ("establish_recipient_grant", {"decision_id": named, "expires_at": expires_at})
+            ("establish_recipient_grant", {"decision_id": named, "expires_at": until})
         )
         confirmed = await self._offerable_decision(named)
         decided_at = self.recipient_grant_clock()
-        if expires_at <= decided_at:
+        if until <= decided_at:
             msg = (
                 f"a standing recipient grant expires strictly after the answer that "
-                f"establishes it; {expires_at.isoformat()} is at or before "
+                f"establishes it; {until.isoformat()} is at or before "
                 f"{decided_at.isoformat()}, the instant this answer would carry, so nothing "
                 f"was recorded (ADR-0235 §1)"
             )
@@ -2088,7 +2100,7 @@ class FakeAssistantEngine:
         )
         await self.trail.record(answer)
         grant = RecipientGrant.established_from(
-            confirmed, answer, id=f"recipient-grant-{named}", expires_at=expires_at
+            confirmed, answer, id=f"recipient-grant-{named}", expires_at=until
         )
         await self.recipient_grants.record(grant)
         return self._checked(grant, "establish_recipient_grant")

@@ -73,6 +73,7 @@ from ai_assistant.wire.codec import (
     positive_page_argument,
     project,
     usable_identity,
+    utc_instant,
 )
 from ai_assistant.wire.errors import (
     ConnectionClosedError,
@@ -479,15 +480,16 @@ class HubClient:
         two calls is one a client can half-perform, and the half that survives is an
         approval the user believed was standing.
 
-        **No local refusal to add for the new argument.** Every one of the act's
-        refusals is a fact about a record only the hub holds — the confirmation's
-        binding, and the instant the hub's own clock will stamp on the answer — so
-        there is nothing to validate before the round trip, and the refusals arrive
-        as ``UngrantableActError`` in a typed error frame like any other (ADR-0085
-        §9's "refused locally" reaches nothing here). An **absent** argument is
-        absent from the payload rather than ``null`` (ADR-0085 §10), which
-        :func:`~ai_assistant.wire.codec.arguments_object` does for every optional
-        argument on this client.
+        **One local refusal, and it is the argument's own type rather than the act's**
+        (ADR-0085 §9). Every refusal of the *act* is a fact about a record only the
+        hub holds — the confirmation's binding, and the instant the hub's own clock
+        will stamp on the answer — so those arrive as ``UngrantableActError`` in a
+        typed error frame like any other. What is refused here is a value with no
+        determinate offset: ADR-0087 §2d's encoder spells every instant with a ``Z``,
+        so a naive one would cross **relabelled as UTC** rather than refused. An
+        **absent** argument is absent from the payload rather than ``null`` (ADR-0085
+        §10), which :func:`~ai_assistant.wire.codec.arguments_object` does for every
+        optional argument on this client.
 
         Args:
             token: The continuation the confirmation carried.
@@ -502,12 +504,17 @@ class HubClient:
             What the resumed pass did, carrying what became of the standing request
             on ``recipient_grant`` where one was made.
         """
+        until = (
+            None
+            if remember_recipients_until is None
+            else utc_instant(remember_recipients_until, name="remember_recipients_until")
+        )
         return await self._call(  # type: ignore[no-any-return]
             "resume",
             token=token,
             approved=approved,
             timeout=timeout,
-            remember_recipients_until=remember_recipients_until,
+            remember_recipients_until=until,
         )
 
     async def learn(self, event: FeedbackEvent) -> LearnOutcome:
@@ -1122,8 +1129,9 @@ class HubClient:
             The grant the hub's store accepted.
         """
         named = identifier(decision_id, name="decision_id")
+        until = utc_instant(expires_at, name="expires_at")
         return await self._call(  # type: ignore[no-any-return]
-            "establish_recipient_grant", decision_id=named, expires_at=expires_at
+            "establish_recipient_grant", decision_id=named, expires_at=until
         )
 
     async def standing_recipient_grants(self) -> tuple[RecipientGrant, ...]:

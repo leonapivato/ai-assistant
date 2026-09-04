@@ -50,6 +50,7 @@ from ai_assistant.core.types import (
     GrantScope,
     Identifier,
     NonBlankEncodableText,
+    UtcInstant,
     encodable_text,
 )
 
@@ -84,6 +85,7 @@ _MINUTES_PER_HOUR: Final[int] = 60
 
 _IDENTIFIER: Final = TypeAdapter[str](Identifier)
 _NON_BLANK_TEXT: Final = TypeAdapter[str](NonBlankEncodableText)
+_UTC_INSTANT: Final = TypeAdapter[datetime](UtcInstant)
 
 
 def _instant(value: datetime) -> str:
@@ -429,6 +431,52 @@ def identifier(value: str, *, name: str) -> str:
         return _IDENTIFIER.validate_python(value)
     except ValidationError as exc:
         msg = f"{name} must be a non-blank identifier"
+        raise ValueError(msg) from exc
+
+
+def utc_instant(value: object, *, name: str) -> datetime:
+    """Validate one timezone-aware instant argument, locally (ADR-0085 §9).
+
+    :func:`identifier`'s shape for the surface's first
+    :data:`~ai_assistant.core.types.UtcInstant` **arguments** (ADR-0235 §1, §4), and
+    it is stated here as well as on the in-process side for §9's own reason — "so
+    both implementations refuse the same values without a round trip and neither is
+    silently more permissive".
+
+    **On this side it also closes a quiet mislabel.** :func:`project` spells every
+    instant with ADR-0087 §2d's ``Z``, unconditionally, so a **naive** value that
+    reached the encoder would cross the wire *relabelled as UTC* rather than
+    refused — an expiry hours away from the one the user chose, recorded as though
+    they had chosen it. ADR-0023 §3 is why that is a refusal rather than an
+    attribution: this layer cannot tell a dropped offset from a wall-clock time.
+
+    The value is returned **in UTC**, which is what is then sent: ADR-0023 §2
+    converts so that comparison is by instant rather than by wall clock, and every
+    comparison this argument reaches on the far side is an ordering one.
+
+    Args:
+        value: The instant as the caller passed it.
+        name: The parameter's name, for the message.
+
+    Returns:
+        The instant, in UTC.
+
+    Raises:
+        TypeError: If the value is not a ``datetime``. Checked before the offset, for
+            :func:`page_argument`'s reason.
+        ValueError: If it carries no determinate offset.
+    """
+    if not isinstance(value, datetime):
+        msg = f"{name} must be a timezone-aware datetime"
+        raise TypeError(msg)
+    try:
+        return _UTC_INSTANT.validate_python(value)
+    except ValidationError as exc:
+        msg = (
+            f"{name} must carry a determinate UTC offset: a naive instant is a "
+            f"wall-clock time or a dropped offset and this layer cannot tell them "
+            f"apart, so it refuses rather than attributing one (ADR-0023 §3)"
+        )
         raise ValueError(msg) from exc
 
 

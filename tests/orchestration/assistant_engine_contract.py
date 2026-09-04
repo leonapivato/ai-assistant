@@ -186,6 +186,11 @@ _PATIENT = timedelta(seconds=30)
 #: about an *availability* refusal never trips ADR-0235 §1's expiry check instead.
 _FAR_FUTURE = datetime(2099, 1, 1, tzinfo=UTC)
 
+#: The same instant with its offset dropped — a wall-clock time or a UTC timestamp
+#: read back through a format that lost it, and ADR-0023 §3's point is that this
+#: layer cannot tell which.
+_NAIVE = datetime(2099, 1, 1)  # noqa: DTZ001 — the value under test is the naive one
+
 #: A limit large enough that an ordinary ``learn`` call — argument *and* result —
 #: fits inside it, and small enough that a handful of stored beliefs does not.
 #:
@@ -5944,6 +5949,52 @@ class AssistantEngineContract(ABC):
         """The type, checked before the range and before any I/O."""
         with pytest.raises(TypeError, match=r"\w"):
             await getattr(engine, method)(limit=bad)
+
+    @pytest.mark.parametrize("bad", [_NAIVE, "2099-01-01T00:00:00Z", 0, None])
+    async def test_an_instant_with_no_determinate_offset_is_refused_locally(
+        self, engine: AssistantEngine, bad: object
+    ) -> None:
+        """ADR-0085 §9 on the surface's first :data:`UtcInstant` **arguments**.
+
+        ``UtcInstant`` is a pydantic ``Annotated`` alias: a wire request is validated
+        against it by ``wire/surface.py`` before dispatch and an in-process call is
+        not, so without a local refusal the two implementations accept different
+        values — which is exactly what §9 forbids.
+
+        **Two failures, and the second is the quiet one.** A naive ``datetime``
+        reaches ADR-0235 §1's ordering comparison and raises a bare ``TypeError``,
+        which is not an ``AssistantError`` and so escapes a command's error boundary
+        (ADR-0042 §7). And ADR-0087 §2d's encoder spells every instant with a ``Z``
+        unconditionally, so a naive one that reached the wire would cross
+        **relabelled as UTC** — an expiry hours from the one the user chose, recorded
+        as though they had chosen it. ADR-0023 §3 is why this is a refusal rather
+        than an attribution.
+
+        A ``str`` is refused too, and by ``TypeError`` rather than by parsing: the
+        annotation declares a ``datetime``, and an implementation that parsed one
+        would accept what no other implementation does.
+        """
+        with pytest.raises((TypeError, ValueError), match=r"\w"):
+            await engine.establish_recipient_grant("d-1", expires_at=bad)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("bad", [_NAIVE, "2099-01-01T00:00:00Z", 0])
+    async def test_a_resume_refuses_an_instant_with_no_determinate_offset_locally(
+        self, engine: AssistantEngine, bad: object
+    ) -> None:
+        """The same refusal on ``resume``'s argument (ADR-0235 §2).
+
+        Reached with a token this engine does not hold, so what the case pins is that
+        the **argument** is refused before the token is even resolved: a refusal that
+        arrived only on a real park would leave the value's validity a property of
+        whether a confirmation happened to be waiting.
+        """
+        with pytest.raises((TypeError, ValueError), match=r"\w"):
+            await engine.resume(
+                ContinuationToken(handle="nothing-holds"),
+                approved=True,
+                timeout=_PATIENT,
+                remember_recipients_until=bad,  # type: ignore[arg-type]
+            )
 
     async def test_the_standing_listing_takes_no_page_argument(self) -> None:
         """ADR-0235 §7: no ``limit``, for ``connected_accounts``' stated reason.
