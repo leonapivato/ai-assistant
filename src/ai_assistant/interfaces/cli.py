@@ -9407,9 +9407,15 @@ def _render_egress_value(value: str) -> None:
     line it emits the gutter once and puts the remainder at the margin, so a long
     body would run past the marker within a line or two. The value is therefore
     wrapped to the room beside the gutter, by Rich's own measurement, and the
-    gutter is written onto each piece. Wrapping loses nothing — the pieces of a
-    line concatenate back to it — so the value stays whole on the screen as well as
-    in the buffer.
+    gutter is written onto each piece.
+
+    **What wrapping costs is one space per break and nothing else**, which is not
+    the abbreviation §8's second clause forbids. An unbroken run is *folded*, so its
+    pieces concatenate back to it character for character; a run of words breaks at
+    a space and consumes it, because on a screen the break **is** that space. No
+    word, no line and no fragment of the value is missing either way — a reader
+    reading the block reads the value the seam would transmit, which is what the
+    clause is stated for.
 
     Rich markup is escaped over the **whole** value before it is split, never per
     line, for the reason :func:`_safe_prose` records: Rich's tag pattern matches
