@@ -29,8 +29,11 @@
   each member is still declared exactly once, on a private base chain the three
   models inherit — and no member is restated. §3's structural, total and mutually
   exclusive discrimination is preserved and extended by one rung. §4's
-  nothing-is-written rule, §5's five readers and §6's `authorises` ruling bind
-  unchanged. §7's floor is **extended by cause, not replaced**: `resolve` returns no
+  nothing-is-written rule, §5's five readers, §6's `authorises` ruling and §8's
+  second, third and fourth clauses bind unchanged, each still speaking of the
+  *origin*-unrecorded shape and only of it; ADR-0233 §14 states the parallel park
+  refusal and assembly refusal for the new sibling in its own text rather than
+  widening theirs. §7's floor is **extended by cause, not replaced**: `resolve` returns no
   `ALLOW` on the new sibling for §7's own reason, that the fact a ruling would rest
   on was never recorded. §11's partial supersession of ADR-0150 §1 is untouched.
 - **Decides `core/types.py` surface and one `core/protocols.py` obligation.** One
