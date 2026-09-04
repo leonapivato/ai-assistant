@@ -1053,7 +1053,24 @@ def _statement_span(node: ast.stmt) -> range:
     return range(node.lineno, (node.end_lineno or node.lineno) + 1)
 
 
-def _header_span(node: ast.stmt) -> range:
+def _statement_start(node: ast.stmt) -> int:
+    """A statement's first physical line — its first decorator, where it has one.
+
+    ``lineno`` on a decorated ``class`` or ``def`` is the ``class``/``def``
+    keyword's line and the decorators sit above it, so this is the line the
+    statement actually begins on. It is read at both ends of :func:`_header_span`:
+    a definition's own span starts here, and an enclosing header stops just short
+    of where its first body statement starts. Reading the bare ``lineno`` for the
+    second of those puts a decorator on the *body's* first member inside the
+    enclosing class's header, which binds the class on a member's ``@property``.
+    """
+    decorators: list[ast.expr] = []
+    if isinstance(node, _NAMED_DEFINITIONS):
+        decorators = node.decorator_list
+    return min([node.lineno, *(decorator.lineno for decorator in decorators)])
+
+
+def _header_span(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> range:
     """Every line of a ``class``/``def`` **header**: its decorators and signature.
 
     The header and not the whole statement, and the difference is the whole of
@@ -1068,17 +1085,34 @@ def _header_span(node: ast.stmt) -> range:
 
     Both ends are widened past the ``def`` line, in the one direction ADR-0209 §5
     prices. **Down** to the first decorator, because ``@property`` above an
-    otherwise untouched ``def`` changes what that name is. **Up** to the last line
-    any part of the signature ends on, because a parameter, an annotation, a
-    default, a base class or a type parameter on its own line is part of the
-    definition and a move can change one without touching the ``def`` line at all
-    — the pattern this replaces missed that too, and it is under-binding
-    (adversarial review of PR #2054, round 1, blocker 1).
+    otherwise untouched ``def`` changes what that name is. **Up** through the last
+    line before the body begins, which is two widenings at once and both are
+    under-binds adversarial review of this PR found:
+
+    - to the last line any part of the signature ends on, because a parameter, an
+      annotation, a default, a base class or a type parameter written on its own
+      line is part of the definition and a move can change one without touching
+      the ``def`` line at all (round 1, blocker 1);
+    - and then to ``body[0].lineno - 1``, which is what reaches the closing
+      ``):`` and PEP 484's long-form function type comment, the one on its own
+      line under the signature. That comment is the callable's declared type and
+      this repository's gate accepts it — measured: ``ruff check`` and strict
+      ``mypy`` both pass a file carrying one (round 2, blocker 1).
+
+    That second widening is stated as "before the body" rather than as a comment
+    rule on purpose, and it is why no comment is read here to get it. The region
+    between a signature and its first statement holds only the rest of the
+    signature, comments and blank lines — never a docstring, because a docstring
+    *is* ``body[0]``. So it reaches the type comment without a tokenizer, without
+    a second parse mode, and without any reading that could turn a comment into a
+    name. #2049 stays closed by construction rather than by care. The three other
+    type-comment placements need none of this: the same-line ``def f(a):  # type:
+    ...`` is on the ``def`` line, a per-argument one is on its argument's line,
+    and a variable one is on its assignment's line — all three already inside a
+    span, which is what makes this the only gap of the four.
     """
-    start = node.lineno
+    start = _statement_start(node)
     end = node.lineno
-    for decorator in getattr(node, "decorator_list", ()):
-        start = min(start, decorator.lineno)
     for name in _HEADER_FIELDS[type(node)]:
         value = getattr(node, name, None)
         for item in value if isinstance(value, list) else [value]:
@@ -1086,7 +1120,7 @@ def _header_span(node: ast.stmt) -> range:
                 continue
             for sub in ast.walk(item):
                 end = max(end, getattr(sub, "end_lineno", None) or end)
-    return range(start, end + 1)
+    return range(start, max(end, _statement_start(node.body[0]) - 1) + 1)
 
 
 def _record(sites: dict[int, set[str]], span: range, names: set[str]) -> None:

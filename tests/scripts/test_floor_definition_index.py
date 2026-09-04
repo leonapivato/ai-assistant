@@ -349,6 +349,63 @@ _MOVES = {
         set(),
         {"for"},
     ),
+    "a docstring changed inside a def": (
+        'def render() -> None:\n    """One.\n\n    Old.\n    """\n',
+        'def render() -> None:\n    """One.\n\n    class for all of them\n    """\n',
+        set(),
+        {"for"},
+    ),
+    # A body statement is its own definition and not the enclosing function's:
+    # `a` binds, `render` does not. This is the same boundary from the other
+    # side, and it is what stops a whole-statement span by construction.
+    "a statement changed inside a def body": (
+        "def render() -> None:\n    a = 1\n    return None\n",
+        "def render() -> None:\n    a = 2\n    return None\n",
+        {"a"},
+        {"a"},
+    ),
+    # PEP 484's four type-comment placements (adversarial review of PR #2054,
+    # round 2, blocker 1). Three of them already sat on a line inside a span —
+    # the `def` line, the argument's line, the assignment's line. The fourth is
+    # the long form on its own line under the signature, and it is the only one
+    # the span had to be widened for: the header now runs to the line before the
+    # body begins, which is a region that can hold the rest of a signature,
+    # comments and blank lines but never a docstring. Measured, not assumed: a
+    # file carrying one passes this repository's `ruff check` and strict `mypy`.
+    "a same-line function type comment": (
+        "def render(value):  # type: (int) -> None\n    ...\n",
+        "def render(value):  # type: (str) -> None\n    ...\n",
+        {"render"},
+        {"render"},
+    ),
+    "a per-argument type comment": (
+        "def render(\n    value,  # type: int\n):\n    ...\n",
+        "def render(\n    value,  # type: str\n):\n    ...\n",
+        {"render"},
+        set(),
+    ),
+    "a long-form function type comment": (
+        "def render(value):\n    # type: (int) -> None\n    ...\n",
+        "def render(value):\n    # type: (str) -> None\n    ...\n",
+        {"render"},
+        set(),
+    ),
+    "a variable type comment": (
+        "seen = []  # type: list[int]\n",
+        "seen = []  # type: list[str]\n",
+        {"seen"},
+        {"seen"},
+    ),
+    # The same widening's incidental reach, recorded so it is not mistaken for an
+    # accident: a plain comment between a signature and its body binds too. It is
+    # over-binding on a line that is about the signature, priced by ADR-0209 §5,
+    # and it is the price of not reading comments to find the type ones.
+    "a comment between the signature and the body": (
+        "def render(\n    a: int,\n):\n    return a\n",
+        "def render(\n    a: int,\n):\n    # a note\n    return a\n",
+        {"render"},
+        set(),
+    ),
     # The two the pattern *missed*. Both are under-binding, which ADR-0209 §5
     # names as the failure it must not have — a pydantic field and a `Protocol`
     # member are exactly what `core/types.py` and `core/protocols.py` carry.
@@ -371,11 +428,14 @@ def test_a_moved_line_defines_what_python_says_it_defines(move: str) -> None:
 
 @pytest.mark.parametrize("move", _MOVES)
 def test_the_replaced_pattern_is_what_each_case_is_measured_against(move: str) -> None:
-    """Pin the mutation: without this, ten of the cases above prove nothing.
+    """Pin the mutation: without this, every case above restates the code it tests.
 
     A case the pattern already got right is worth keeping — it is what says the
     narrowing did not throw the real answers out with the false one — but a case
-    it got *wrong* is the regression, and this is what distinguishes them.
+    it got *wrong* is the regression, and this is what distinguishes them. No
+    count is written here on purpose: it would be a number to refresh every time a
+    case is added, and the fourth field of each tuple already says which kind that
+    case is.
     """
     old, new, _, by_pattern = _MOVES[move]
     assert _pattern_names(old, new) == by_pattern, move
