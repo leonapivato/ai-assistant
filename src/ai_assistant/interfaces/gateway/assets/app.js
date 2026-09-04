@@ -1241,15 +1241,30 @@ const CONFIRMATION_NOT_WHOLE =
 // under a check for `null` alone was rendered as the word "undefined" where the bytes
 // should have been.
 //
-// **An indexless span's value must be the argument this page renders.** That value is
-// on screen through `renderParameters`, from the `parameters` list, and this is the
-// join: ADR-0233 §2 records that the description and the arguments "cannot come
-// apart, and the recomputation is the join", which `ActionRequest` performs at
-// construction over the same two things. Where they disagree here, the card shows one
-// text and approves a request carrying another — so the page checks the join rather
-// than trusting it, and refuses the whole card where it fails. The comparison is
-// against the argument's **rendered** text, which is what makes it a check of what is
-// on the screen rather than of what was intended for it.
+// **An indexless span's value must be the argument the body carries beside it.** This
+// is the join: ADR-0233 §2 records that the description and the arguments "cannot
+// come apart, and the recomputation is the join", which `ActionRequest` performs at
+// construction over the same two things — and the two reach this page as two members
+// of one body, so a disagreement between them is a gateway that contradicts itself
+// and a card that gets refused.
+//
+// **There is no equivalent test for an indexed span, and the reason is that no
+// lossless one exists** (adversarial review, round 3). An element could only be
+// checked against its argument by parsing that argument's JSON here and re-spelling
+// the element — which is a second derivation of a `core` rule in the page's language
+// (ADR-0178 §3) and, worse, is **lossy** in the exact direction `_parameter_text`
+// exists to prevent: `JSON.parse` reads `9007199254740993` as `9007199254740992`, and
+// a re-spelled float, object or non-ASCII string need not come back the way Python
+// wrote it. A comparison that can differ for a **correct** confirmation would refuse
+// a real approval, which is a worse failure than the one it guards.
+//
+// What is closed instead is the half this page controls: since round 3 an argument's
+// own JSON is no longer rendered beside its elements, so nothing on the screen can
+// disagree with anything else on the screen — every value is rendered once, from the
+// span it belongs to. A body that forged a span's value would be a gateway lying to
+// the page it served, which it can also do by serving a different `app.js`; the page
+// is loaded from that origin and no other (ADR-0168 §10), and no check written in it
+// reaches outside that.
 //
 // **The call's coverage must be one this page has words for.** §8 obliges a surface
 // to state it "in all three states", and a value outside the three is not one of them
@@ -1289,7 +1304,7 @@ function renderConfirmation(parent, confirmation) {
     return;
   }
   line(item, `${confirmation.tool_id} — ${confirmation.tool_description}`, "reply");
-  renderParameters(item, confirmation.parameters);
+  renderParameters(item, confirmation.parameters, confirmation.egress);
   // `egress` absent is ADR-0178 §4's discriminator, and all it states is that the
   // ruling was taken over no egress binding. So this branch renders the four other
   // members and says **nothing** about recipients — not that there are none, and not
@@ -1321,21 +1336,55 @@ function renderConfirmation(parent, confirmation) {
 // the surface where "whole" is the thing being answered about. The key still names
 // every argument and no value is omitted, so ADR-0177 §8's own clause is unreduced.
 //
-// **This is where the value of every span whose `index` is absent is rendered**, and
-// it is why `renderEgress` renders only the indexed ones: ADR-0150 §4 makes such a
-// span's own value the argument's whole value, which is this line, and a second copy
-// beside the description would be one value on the screen twice — with the second
-// free to disagree with the first, which is the shape ADR-0150 §1 is named against.
-function renderParameters(item, parameters) {
+// **On an egress confirmation the values are the spans' own, and they are rendered
+// exactly once** (ADR-0233 §8, ADR-0150 §4, and adversarial review's round-3
+// `blocker`). ADR-0150 §4's decomposition is total over the arguments — every
+// top-level key whose value is not an empty array is the argument of at least one
+// span — so rendering span by span renders every key and every value, and an
+// argument's own JSON is never rendered *beside* its elements. That matters for more
+// than tidiness: an array's JSON spells a multi-line element with the two characters
+// `\n` and escapes its quotation marks, so it is not that element's value whole; and
+// a card rendering both would be putting one value on the screen twice, free to
+// disagree with itself, which is the shape ADR-0150 §1 is named against.
+//
+// **The keys carrying no span are the empty arrays, and they are rendered here.**
+// ADR-0150 §4 gives an empty array no span at all, so a span-only rendering would
+// drop the key — and ADR-0177 §8 requires "every key and every value the mapping
+// carries". They are the exception rather than the rule, so they come after.
+//
+// **A confirmation with no egress binding has no spans to render from**, and its
+// arguments are rendered as themselves. It owes ADR-0233 §8 nothing (§8's last
+// clause) and this clause of ADR-0177 §8 exactly as it always did.
+function renderParameters(item, parameters, egress) {
   if (parameters.length === 0) {
     line(item, "It would run with no arguments.", "hint");
     return;
   }
   line(item, "It would run with these arguments, as the assistant wrote them:", "hint");
-  parameters.forEach((one) => {
-    line(item, `${one.key} =`, "hint");
-    valueBlock(item, one.value);
-  });
+  if (egress === null) {
+    parameters.forEach((one) => renderValue(item, one.key, one.value));
+    return;
+  }
+  egress.spans.forEach((one) => renderValue(item, spanKey(one), one.value));
+  parameters
+    .filter((one) => !egress.spans.some((span) => span.argument === one.key))
+    .forEach((one) => renderValue(item, one.key, one.value));
+}
+
+// One argument, or one element of one, under the name that locates it.
+function renderValue(item, key, value) {
+  line(item, `${key} =`, "hint");
+  valueBlock(item, value);
+}
+
+// Where a span came from, as ADR-0150 §4 identifies it: the argument, and the
+// position within it where the argument's value is an array.
+//
+// **One spelling, used by the value above and by the description below**, so the two
+// halves of what a card says about one span cannot come to name it differently — the
+// name is the whole of what joins them on the screen.
+function spanKey(span) {
+  return span.index === null ? span.argument : `${span.argument}[${span.index}]`;
 }
 
 // ADR-0148 §8's fourth clause, before the answer is collected: the connected
@@ -1347,14 +1396,11 @@ function renderParameters(item, parameters) {
 // going to; the occurrences are ADR-0150 §10's third clause, so one recipient named by
 // `to` and again by `bcc` is one member of the set and two disclosures here.
 //
-// **An indexed span's own value follows its description, and an indexless one's does
-// not** (ADR-0233 §8, ADR-0150 §4). A span with no `index` describes the argument's
-// **whole** value, which `renderParameters` has already put on screen above, whole and
-// unabridged; rendering it again here would put one value on the screen twice. A span
-// **with** an `index` describes one element of an array, which the line above spells
-// only inside that array's JSON — where a newline is the two characters `\n` and a
-// quotation mark is escaped — so its own value is rendered here, as itself. Between
-// the two, every span's value is on screen whole and before the control.
+// **The values are not here, and that is deliberate** (adversarial review, round 3).
+// Every span's own value is on screen above, rendered by `renderParameters` from the
+// spans themselves and rendered **once**; this function renders the payload
+// *description*, which holds no content. The two halves are joined by `spanKey`,
+// which names a span the same way in both.
 //
 // **The call's coverage is last of the egress block and is a statement about the
 // call** (ADR-0233 §8). It is rendered in all three states, beside the values and
@@ -1370,12 +1416,7 @@ function renderEgress(item, egress) {
   if (egress.spans.length === 0) {
     line(item, "the payload description names no span", "hint");
   }
-  egress.spans.forEach((one) => {
-    line(item, spanWords(one), "hint");
-    if (one.index !== null) {
-      valueBlock(item, one.value);
-    }
-  });
+  egress.spans.forEach((one) => line(item, spanWords(one), "hint"));
   line(item, `About this call as a whole: ${coverageWords(egress.coverage)}.`, "hint");
 }
 
@@ -1494,7 +1535,7 @@ function destinationWords(member) {
 // it is and names no recipient; dropping it, or rendering it as though it named one,
 // would fail the whole-rendering clause in the two opposite directions.
 function spanWords(span) {
-  const where = span.index === null ? span.argument : `${span.argument}[${span.index}]`;
+  const where = spanKey(span);
   const facts = [disclosureWords(span.provenance), `${span.extent} code points`];
   if (span.tier !== null) {
     facts.push(`tier ${span.tier}`);
