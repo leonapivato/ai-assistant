@@ -29,7 +29,6 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Final
 
-import pytest
 from test_engine import (
     AT,
     CAPABILITY,
@@ -79,19 +78,6 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.types import MemoryRecord, ShownFile
-
-#: ADR-0233 §15 leaves ``StepRunner._bound`` passing the fail-closed constant, and §6
-#: refuses that value at construction — so every egress call in this tree is
-#: unconstructable until the lane that follows computes it. The ADR names the state in
-#: terms: "a field that lands with nothing writing it leaves a seam answering
-#: ``PATH_WITHOUT_MODEL`` and refusing every send, which is the fail-closed direction
-#: working and an unfinished job". **Strict**, so the marker is an obligation rather
-#: than a licence: #2051's first act is deleting these, any test that still fails then
-#: is a real defect, and any that passes while still marked fails the suite. Not one
-#: assertion below is changed by the marking.
-_REFUSED_UNTIL_THE_COMPOSER_LANDS: Final = (
-    "ADR-0233 §15: the seam refuses every send until the composer lane (#2051) computes coverage"
-)
 
 #: The ask. It carries the seeded records' own terms so the store's lexical search
 #: selects them — the supply has to *contain* the record for the disjunction to have
@@ -302,7 +288,6 @@ async def test_a_pass_with_no_steps_stamps_the_same_value_as_one_with_a_step() -
 # --- §10 test 4: one value, two consumers --------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_the_episodes_stamp_and_the_runners_origin_are_the_same_value() -> None:
     """§10's test 4: §2's invariant, exercised where the value is ``True``.
 
@@ -335,7 +320,6 @@ async def test_the_episodes_stamp_and_the_runners_origin_are_the_same_value() ->
 # --- §10 test 5: the parked turn's own value, retained -------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_a_stamped_parks_resolution_is_stamped_though_the_resolving_pass_is_clean() -> None:
     """§10's test 5: §3's second case, exercised in the direction a recompute fails.
 
@@ -416,7 +400,6 @@ async def test_a_routed_parks_resolution_captures_false() -> None:
     assert resolution.provenance.derived_from_external is False
 
 
-@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_a_resumption_recovered_from_durable_state_captures_false() -> None:
     """§10's test 6, third arm: no live turn, so nothing to retain.
 
@@ -446,7 +429,6 @@ async def test_a_resumption_recovered_from_durable_state_captures_false() -> Non
 # --- §10 test 9: §6's product sentence, pinned ---------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_a_second_turn_after_a_stamped_first_turn_gets_no_allow() -> None:
     """§10's test 9: the egress consequence §6 accepts, end to end.
 
@@ -492,7 +474,6 @@ async def test_a_second_turn_after_a_stamped_first_turn_gets_no_allow() -> None:
     )
 
 
-@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_a_conversation_that_never_held_an_external_record_keeps_its_allow() -> None:
     """The control for the case above, and it is not padding.
 
@@ -656,7 +637,6 @@ def _fetching_egress_harness() -> Harness:
     )
 
 
-@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_a_turn_that_fetched_stamps_its_capture_and_the_next_turn_asks() -> None:
     """ADR-0230 §14 item 10, end to end and not at the predicate.
 
@@ -712,7 +692,6 @@ async def test_a_turn_that_fetched_stamps_its_capture_and_the_next_turn_asks() -
     )
 
 
-@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_a_conversation_whose_root_showed_a_file_nobody_named_keeps_its_allow() -> None:
     """The control: a wired fetcher is not itself a taint.
 

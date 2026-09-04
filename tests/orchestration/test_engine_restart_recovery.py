@@ -19,10 +19,9 @@ import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from itertools import count
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
-import pytest
 import structlog.testing
 
 from ai_assistant.core.types import (
@@ -84,19 +83,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ai_assistant.core.types import CurrentContext, FrozenJson, Goal, MemoryRecord, ShownFile
-
-#: ADR-0233 §15 leaves ``StepRunner._bound`` passing the fail-closed constant, and §6
-#: refuses that value at construction — so every egress call in this tree is
-#: unconstructable until the lane that follows computes it. The ADR names the state in
-#: terms: "a field that lands with nothing writing it leaves a seam answering
-#: ``PATH_WITHOUT_MODEL`` and refusing every send, which is the fail-closed direction
-#: working and an unfinished job". **Strict**, so the marker is an obligation rather
-#: than a licence: #2051's first act is deleting these, any test that still fails then
-#: is a real defect, and any that passes while still marked fails the suite. Not one
-#: assertion below is changed by the marking.
-_REFUSED_UNTIL_THE_COMPOSER_LANDS: Final = (
-    "ADR-0233 §15: the seam refuses every send until the composer lane (#2051) computes coverage"
-)
 
 AT = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
 
@@ -428,7 +414,6 @@ async def test_a_recovered_confirmation_can_be_denied_across_a_restart(tmp_path:
 # --- A pre-ADR-0181 row, through the engine that would rebuild its park -------
 
 
-@pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
 async def test_a_park_whose_row_predates_the_origin_field_is_not_offered_after_a_restart(
     tmp_path: Path,
 ) -> None:

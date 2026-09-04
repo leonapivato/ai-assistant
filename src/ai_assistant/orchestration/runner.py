@@ -70,7 +70,6 @@ from ai_assistant.core.types import (
     PermissionOutcome,
     PlanStep,
     SkipReason,
-    SpanCoverage,
     StepStatus,
     StepTransition,
     ToolCall,
@@ -483,14 +482,16 @@ class StepRunner:
                 the executor. The caller's budget, not the tool's property
                 (ADR-0029 §4).
             origin: What the material this system selected into the model call
-                whose output produced this step rests on (ADR-0181 §2, §4) —
-                stamped onto the carrier :meth:`_bound` hands the egress seam, and
-                read there and nowhere else. **Required with no default**, for the
-                reason ADR-0181 §3 gives the ``core`` field: the safe-looking
-                default is "nothing external was selected", which is a claim about
-                a selection the defaulting caller never made, and a lane that never
-                wired a selection through would get it for free. A caller that
-                genuinely selected nothing passes
+                whose output produced this step rests on (ADR-0181 §2, §4), and
+                what that supply makes of the call under ADR-0155 §3's partition
+                (ADR-0233 §4, §5) — **both** stamped onto the carrier :meth:`_bound`
+                hands the egress seam, and read there and nowhere else.
+                **Required with no default**, for the reason ADR-0181 §3 and
+                ADR-0233 §4 each give their ``core`` field: the safe-looking
+                defaults are "nothing external was selected" and "nothing is
+                covered", which are claims about a selection the defaulting caller
+                never made, and a lane that never wired a selection through would
+                get both for free. A caller that genuinely selected nothing passes
                 :data:`~ai_assistant.orchestration.origin.NOTHING_EXTERNAL`, in
                 code a reviewer can see.
 
@@ -760,15 +761,29 @@ class StepRunner:
         deliberately rather than defaulted, which is why
         :class:`~ai_assistant.core.types.CarriedProvenance` has no default for it.
 
-        **``planned_with_external_content`` is the caller's ``origin``, unchanged**
-        (ADR-0181 §3, §4). It is stamped here, before the request reaches the seam,
-        and this is the only place it is written on the ``bind`` path. Nothing is
-        derived for it, nothing merged into it, and no value a model, a tool, a
-        declaration or a plan emitted is consulted: a producer's claim has no code
-        path by which to have an effect, which is what makes ADR-0181 §4's
-        discard-not-merge total rather than a rule to remember. The resuming path
-        does not come through here at all — :meth:`_rebound` transcribes the field
-        from the approved binding instead (ADR-0181 §3's fifth clause).
+        **``planned_with_external_content`` and ``coverage`` are both the caller's
+        ``origin``, unchanged** (ADR-0181 §3, §4; ADR-0233 §4, §5). They are stamped
+        here, before the request reaches the seam, and this is the only place either
+        is written on the ``bind`` path. Nothing is derived for them, nothing merged
+        into them, and no value a model, a tool, a declaration or a plan emitted is
+        consulted: a producer's claim has no code path by which to have an effect,
+        which is what makes ADR-0181 §4's and ADR-0233 §5's discard-not-merge total
+        rather than a rule to remember. The resuming path does not come through here
+        at all — :meth:`_rebound` transcribes both from the approved binding instead
+        (ADR-0181 §3's fifth clause, ADR-0233 §4's sixth).
+
+        **``coverage`` is computed and not stated, which is ADR-0233 §15's whole
+        assignment to this lane.** ADR-0233 §5 puts the computation on "the component
+        that composed the call's arguments", and this package is it: it chose the
+        records the planner was shown, and
+        :meth:`~ai_assistant.orchestration.origin.SelectionOrigin.over` decides from
+        that selection which of ADR-0155 §3's two prohibitions governs what the call
+        would carry. A supply drawn from this system's stores makes the arguments
+        covered content every covered path of which runs through the planner's model
+        call — ``MODEL_ON_EVERY_PATH``; an empty supply makes them covered by nothing
+        — ``NOT_COVERED``. Neither is a constant here: this method reads the answer
+        the composing pass computed and writes it through, so a change in what the
+        pass selected changes what the binding records.
 
         Returns:
             The derived binding beside the detached call, or ``None``.
@@ -787,19 +802,12 @@ class StepRunner:
             provenance=CarriedProvenance(
                 spans={},
                 planned_with_external_content=origin.planned_with_external_content,
-                # ADR-0233 §15: the **fail-closed** constant, at the one site whose
-                # composer does not yet compute the value. `coverage` is required
-                # with no default and this method composes nothing it could read the
-                # answer off, so it states the value ADR-0233 §4's last clause gives
-                # a component holding no recorded origin: a component that wrongly
-                # says this gets its call refused at construction and someone
-                # notices immediately, while one that wrongly said `NOT_COVERED`
-                # would send the user's accumulated model to a third party and
-                # nobody would notice at all. The consequence is stated rather than
-                # hidden — until the lane that makes this compute lands, this seam
-                # answers `PATH_WITHOUT_MODEL` and every send is refused, which is
-                # the fail-closed direction working and an unfinished job (#2051).
-                coverage=SpanCoverage.PATH_WITHOUT_MODEL,
+                # ADR-0233 §5, §15: the caller's `origin` again, unchanged. It is
+                # **computed** over the very selections the boolean above is
+                # computed over, on the one pass, by the component that composed
+                # what the model was shown — never a constant, never inferred here,
+                # and never read off the payload (`SelectionOrigin.over`).
+                coverage=origin.coverage,
             ),
         )
 
