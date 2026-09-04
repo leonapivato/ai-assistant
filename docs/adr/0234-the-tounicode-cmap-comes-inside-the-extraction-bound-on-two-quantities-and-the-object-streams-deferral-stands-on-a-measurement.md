@@ -135,8 +135,17 @@ must be bounded, and neither one bounds the other.
   consequence and its second left standing.
 - **`prepare_cm` reads a stream or synthesises a constant.** Where `/ToUnicode` resolves
   to a `StreamObject` it calls `get_data()`; otherwise it uses a fixed 44-byte literal
-  declaring two mappings. A `/ToUnicode` that is a name is therefore a quantity no
-  document controls, and is charged nothing by either field below.
+  declaring two mappings, and parses that literal on every font-build. Nothing is decoded
+  for it — so there is no decoded length to charge — but the two mappings are built as
+  often as the document asks for a font-build, which is a number the document controls
+  entirely.
+- **The number of font-builds is itself an amplifier, and it is not this ADR's to
+  bound.** One font object under a thousand resource names, on fifty pages, is fifty
+  thousand `Font.from_font_resource` calls from a **608 KB** file: **3.08 s** where those
+  fonts carry a name-valued `/ToUnicode`, and **5.23 s** where they carry none at all and
+  no `/FontFile` either — about 62 to 105 µs a build, of which the `/ToUnicode` parse is a
+  small part. §1 below charges the mappings, which bounds the first class; the second is
+  charged nothing by ADR-0232 or by this ADR, and §9 defers the quantity by name.
 - **The mappings a parse builds are not the dictionary that survives it.** A CMap whose
   ranges overlap in their source codes declares more mappings than it leaves keys: 90,000
   declared through `bfrange` lines that wrap the two-byte code space builds 90,000 and
@@ -200,11 +209,15 @@ which enumerates that member's causes and gains a fourth.
 > already resolved — ADR-0232 §3's own standard, and the one PR #2037's rounds 3 to 5
 > established is the only completable one against this library.
 
-> **Normative.** A `/ToUnicode` that is **not** a stream is charged **nothing**, by either
-> field. `prepare_cm` synthesises a fixed 44-byte literal for that case — a single
-> `beginbfrange` line spanning `<0000>` to `<0001>` — declaring two mappings. It is a
-> constant of the adopted version rather than a quantity a document controls, and a bound
-> that counted it would be counting the library instead of the file.
+> **Normative.** A `/ToUnicode` that is **not** a stream is charged **nothing** on
+> `fetch_max_decoded_bytes` and **two mappings, per font-build,** on
+> `fetch_max_character_mappings`. `prepare_cm` reads no stream for that case — it
+> synthesises a fixed 44-byte literal, a single `beginbfrange` line spanning `<0000>` to
+> `<0001>` — so nothing is decoded and there is no decoded length to charge. But it
+> **parses** that literal and builds its two mappings on every font-build, and the number
+> of font-builds is a quantity the document controls entirely: the size of the literal is
+> the library's, the number of times it is parsed is the file's. §2's stated quantity is
+> the mappings the extraction **builds**, and these are built.
 
 > **Normative.** **The charge is per parse because the extraction re-parses the CMap per
 > parse**, and the multiplier is therefore the page count — the identical argument
@@ -440,10 +453,12 @@ a bound this system states as its own*. Nothing here does: the bound is
 `fetch_max_character_mappings`, this system enforces it, and the disclosure above is a
 statement about a residual rather than about a bound. Nor is this §3's second-parse price
 repeated: §3 pays for parsing an admitted document's content streams twice, once by the
-walk and once by the extraction. Here the walk parses each CMap **once per fetch** where
-the extraction parses it once per **page**, so the walk's own work is smaller than the
-extraction's by exactly the multiplier this ADR exists to bound — and on a refused
-document the extraction never runs at all.
+walk and once by the extraction. Here the walk parses a CMap named by F distinct fonts at
+most **F + 1** times for the whole fetch, where the extraction parses it F times **per
+page** — so on a one-page document the walk pays one parse more than the extraction, and
+on every longer one it pays less, by the page count. It is the multiplier this ADR exists
+to bound that the walk does not pay; and on a refused document the extraction never runs
+at all.
 
 **What that buys, in the terms ADR-0232 §5 sets for honesty.** This decision does not
 claim to bound the *time* a CMap parse takes. It claims that the two quantities that time
@@ -650,12 +665,17 @@ ever true.
    arm that fails an implementation taking the size of the surviving dictionary** — the
    quantity `Font.character_map` carries and the obvious thing to reach for — which
    under-charges exactly the document that declares the most.
-5. **A `/ToUnicode` that is not a stream is charged nothing.** A document whose font's
-   `/ToUnicode` is a **name** fetches at a `fetch_max_character_mappings` of 1 and a
-   `fetch_max_decoded_bytes` that the page's own stream alone fits inside, its text
-   reaching the record. This is the arm that fails an implementation charging
-   `prepare_cm`'s synthesised constant, which is a property of the library rather than of
-   the file.
+5. **A name-valued `/ToUnicode` is charged its two mappings and no bytes, both ways.** Two
+   arms. A document whose pages carry many font entries with a **name**-valued
+   `/ToUnicode` — one shared font object under many resource names, so the extraction
+   builds it once per name per page — is **refused** `TOO_LARGE` at a
+   `fetch_max_character_mappings` just under twice its font-build count and **fetches**
+   just at it, with `fetch_max_decoded_bytes` raised so only the mapping bound can decide
+   it. **This is the arm that fails an implementation exempting a non-stream
+   `/ToUnicode`**, and the boundary is exactly two mappings a build. And the same document
+   at a raised mapping bound fetches with **nothing** charged to
+   `fetch_max_decoded_bytes` for those fonts — the arm that fails an implementation
+   charging the synthesised literal's bytes, which are never decoded.
 6. **The predicate is `/ToUnicode` present, in both directions.** Two arms. A font carrying
    a `/ToUnicode` and a `/Subtype` that is **not** `/Type1` **is** charged — the arm that
    fails any implementation carrying ADR-0232 §3's three-key font-program predicate over to
@@ -789,6 +809,21 @@ two per-fetch memos §3 requires — one on the font, one on its CMap stream.
   defaults. **Fired by** that audit, or by a `pypdf` release that stops rebuilding fonts
   per page. Not fired by raising a default, which §5 measures and rejects for the same
   reason ADR-0232 §2 did.
+- **The number of font-builds an extraction performs.** Measured above: fifty thousand
+  builds from a 608 KB file cost 3.08 s with a name-valued `/ToUnicode` and 5.23 s with
+  none, and most of that is not the `/ToUnicode` parse — it is `/Encoding` resolution,
+  width tables and the rest of `Font.from_font_resource`, run once per resource name per
+  page. §1's two-mapping charge bounds the first class **loosely** and says so: at the
+  default it admits 200,000 builds, measured at about 12 s, where the figure is chosen to
+  be worth 1.3 s. And it bounds the second not at all — a font with **no** `/ToUnicode`
+  and no `/FontFile` is charged nothing by ADR-0232 §3 and nothing here, and its builds
+  are limited only by `fetch_max_file_bytes`. **This is a fourth quantity — font-builds,
+  whose consumer is the font builder — and bounding it tightly means a figure of its own,
+  argued as §5 argues these two, with its own arms.** It is not reached here because it is
+  not a `/ToUnicode` question: the same document costs more with the CMap removed.
+  **Fired by** ADR-0230 §9's audit showing `TOO_LARGE` at a rate this charge cannot
+  explain, or by a measurement showing a font-build class reaching the instruction class
+  with both of this ADR's fields inside their defaults.
 - **A descent-depth bound for the form-invocation chain.** #2045 records that the walk
   descends further into a chain of Form XObjects than the interpreter's recursion limit
   lets the extraction descend, so between the two depths it charges forms the extraction
