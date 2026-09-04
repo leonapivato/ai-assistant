@@ -880,12 +880,10 @@ of them. Both are real; the owner ruled; this section records what was bought.
 
 ### 13. What is not decided here, each with its reason
 
-> **Normative.** Beyond §1's three clauses, §2's three, §3's two, §4's eight, §5's
-> three, §6's four, §7's two, §8's eleven, §9's four, §10's four, §11's six, §12's
-> three, §13's two, §14's five and §15's nine, this ADR decides nothing. It registers no tool, designates no seam,
-> adds no `DestinationProtocol` member, changes no Protocol signature, authorises no
-> dependency or destination, and attests, relaxes or adds no condition of ADR-0017 §3
-> or ADR-0154 §4.
+> **Normative.** Beyond the marked clauses §16 enumerates, this ADR decides nothing.
+> It registers no tool, designates no seam, adds no `DestinationProtocol` member,
+> changes no Protocol signature, authorises no dependency or destination, and attests,
+> relaxes or adds no condition of ADR-0017 §3 or ADR-0154 §4.
 
 > **Normative.** This ADR discharges **no part** of ADR-0150 §6's tier residue. A
 > value this system already holds at a tier, carried into a field that establishes
@@ -1136,7 +1134,7 @@ This section is direction for the lanes that build it, and it binds them as mark
 > **Normative.** `PROTOCOL_VERSION` moves, because `ConfirmationEgress` gains a member
 > and that value crosses the wire (ADR-0178 §6's rule).
 
-> **Normative.** The `ActionPolicy` clause §14's last clause states is stated on the
+> **Normative.** The `ActionPolicy` clause §14's fifth clause states is stated on the
 > Protocol and asserted in the shared `ActionPolicyContract` suite, beside ADR-0184
 > §7's, in the same change as the type. No method is added, no argument widened and no
 > return annotation changed.
@@ -1220,7 +1218,9 @@ three, §3's two, §4's eight, §5's three, §6's four, §7's two, §8's eleven,
 §10's four, §11's six, §12's three, §13's two, §14's eight and §15's ten. Each is a
 block quote at column 0 preceded by a blank line, stating one obligation with its own
 scope (§2); passages stating two separable obligations were split in drafting for that
-reason.
+reason. §13's first clause states the same bound by pointing here rather than by
+restating this list, so the enumeration has one home and cannot drift out of step with
+itself — which it twice did while this ADR was under review.
 
 The Context's account of the tree, §12's argument about what the owner bought, §14's
 ADR-0082 §1 classifications and every argument in this document are deliberately
