@@ -1407,7 +1407,12 @@ rather than as an impossibility, because a later ADR reordering the kinds or rai
 the file's cap would reach it and because a clause that holds only under an
 arithmetic elsewhere is a clause a reader cannot check locally. What no reader should
 take from it is that this kind is ever starved on `origin/main`'s ordering: it is not,
-and the fewer-than-one-slot clause above is unreachable for the same reason.
+and the fewer-than-one-slot clause above is unreachable for the same reason. So §13's
+`NO_BUDGET` disposition and §18's seventh test describe a **branch** rather than an
+outcome this ordering produces: an operator reading zero for that disposition is
+reading the servicing order, not a fault and not a thing that failed to happen, and
+§18 drives both branches at the servicer rather than through a turn that would have to
+violate §11 to reach them.
 
 **Compose before bind, because the query is what is being ruled on.** ADR-0148 §6
 makes the payload description a deterministic derivation of the request's own
@@ -2021,9 +2026,21 @@ for less.
    supply planning saw, no record enters the fourth group, the read budget is
    unspent, the assembled prompt is **byte-identical** to the same turn with no
    `WEB_SEARCH` ask, and §13's disposition names the `CONFIRM`.
-7. **No budget, no request.** A turn whose local-file fetch and whose earlier yield
-   leave no slot: no query is composed, no ruling is sought, `search` is never reached,
-   and the disposition says so.
+7. **The two budget branches are driven at the servicer, and no test asserts a turn
+   that reaches them.** §11's fewer-than-one-slot guard and its truncation rule are
+   branches of the servicer's own budget arithmetic, and the ordering §11 fixes reaches
+   neither: the search is serviced second, only the one-record local file precedes it,
+   and nine of the ten slots always remain against a cap of three. So both are driven
+   **directly over the servicer, with the remaining count supplied**, rather than by
+   constructing a turn that cannot exist. With no slot remaining: no query is composed,
+   no ruling is sought, `search` is never reached, and the disposition is `NO_BUDGET`.
+   With fewer slots remaining than the search returned results: exactly the slots that
+   remain are admitted, in the order §10 minted them, the rest are not, and the fourth
+   group is no larger than ADR-0226 §6 admits. **Neither arm is written as a
+   production-turn scenario**, because an implementation cannot be asked to satisfy a
+   premise this ADR's own order forbids; they are the forward-compatibility guard §11
+   states in terms, and the lane that makes them reachable is the one that reorders the
+   kinds or raises the file's cap.
 8. **A response declaring no report instant mints nothing.** The searcher's own test,
    over a response the provider shape admits and that carries no declared instant: the
    outcome is a refusal, and the suite's unconstructability clause covers the type-level
