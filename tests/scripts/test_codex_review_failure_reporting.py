@@ -146,19 +146,71 @@ def test_a_turn_that_fails_while_the_process_exits_zero_is_quoted(tmp_path: Path
     assert "the turn failed mid-stream" in result.stderr
 
 
-def _loop_lock(repo: Path, base: str = "main") -> Path:
-    """The review-loop lock file for this repo's current branch and base.
+def _loop_key(repo: Path, base: str = "main") -> str:
+    """This repo's loop key for the current branch and base: ``sha1-sha1``.
 
     Computed the way the script computes it — ``sha1(branch)-sha1(base_sha)`` —
-    because a test that guessed the path would silently stop holding anything the
-    day the key changed, and the assertion it supports would still pass.
+    because a test that guessed a session path would silently stop naming
+    anything the day the key changed, and the assertions it supports would still
+    pass: a lock nobody holds is taken instantly, and a log nobody wrote is
+    empty.
     """
     branch = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
     base_sha = _git(repo, "merge-base", base, "HEAD")
-    key = f"{sha1(branch.encode()).hexdigest()}-{sha1(base_sha.encode()).hexdigest()}"  # noqa: S324
+    return f"{sha1(branch.encode()).hexdigest()}-{sha1(base_sha.encode()).hexdigest()}"  # noqa: S324
+
+
+def _loop_lock(repo: Path, base: str = "main") -> Path:
+    """The review-loop lock file for this repo's current branch and base."""
     session = repo / ".review" / "session"
     session.mkdir(parents=True, exist_ok=True)
-    return session / f"{key}.lock"
+    return session / f"{_loop_key(repo, base)}.lock"
+
+
+def _round_log(repo: Path, persona: str = "adversarial", base: str = "main") -> Path:
+    """The log a detached round of ``persona`` writes, named as the script names it.
+
+    Read only to *diagnose* a round that never recorded anything — the log is
+    this file's whole subject, and a helper that gave up on a round without
+    quoting it would be the mute failure issues #1674 and #1675 record.
+    """
+    session = repo / ".review" / "session"
+    return session / f"{_loop_key(repo, base)}.{persona}.log"
+
+
+#: The point at which "not recorded yet" stops meaning slow and starts meaning
+#: dead. Deliberately not load-bearing: a round here is a fake ``codex`` and a
+#: handful of git commands, under a second on an idle box, and nothing waits this
+#: out on the passing path. It exists to make the dead case legible.
+_RECORDING_SECONDS = 120.0
+
+
+def _the_round_records_its_artifact(repo: Path, persona: str = "adversarial") -> Path:
+    """Block until the round detached into ``repo`` records its artifact, and return it.
+
+    The state a caller of ``--start`` is really waiting for, established here
+    rather than inferred from ``--wait``'s exit status. In the window this
+    module's grace-expiry test is about, ``--wait`` answers exit 4 — "no round in
+    flight" — about a round that is alive and working (issue #1730), so a test
+    that asked ``--wait`` for "did the round survive?" would be asserting on that
+    gap and not on the round. Measured, not reasoned: under artificial load, 1 in
+    8 runs of that test saw exit 4 while ``ps`` showed the round's own process
+    alive, and the artifact it went on to record appeared moments later
+    (issue #1871).
+    """
+    sha = _git(repo, "rev-parse", "HEAD")
+    deadline = time.monotonic() + _RECORDING_SECONDS
+    while time.monotonic() < deadline:
+        recorded = artifact_for(repo, sha, persona)
+        if recorded is not None:
+            return recorded
+        time.sleep(0.05)
+    log = _round_log(repo, persona)
+    output = log.read_text() if log.exists() else "<the round wrote no log at all>"
+    raise AssertionError(
+        f"the detached '{persona}' round recorded no artifact for {sha} within "
+        f"{_RECORDING_SECONDS:g}s — it died rather than finished. Its own output:\n{output}"
+    )
 
 
 #: Long enough that nothing below can outlast it, because nothing below waits for
@@ -268,7 +320,23 @@ def test_an_unconfirmed_start_leads_with_the_action_not_with_a_failure(
     assert "pgrep" not in started.stderr
     assert "relaunching IS" in started.stderr
     # The round it could not confirm is still a real round, and finishes.
-    assert _run(repo, env, "--wait", "adversarial", "main", "--timeout", "60").returncode == 0
+    #
+    # Awaited through the artifact the round records, and only then asked of
+    # `--wait`. This line used to be a bare `--wait` immediately after the lock
+    # was released, which is an assertion about the very gap the message above
+    # warns of: the round claims the loop some time after the hold ends, and
+    # until it does, `--wait` reads neither the marker nor the lock and answers
+    # exit 4 about a live round (issue #1730). Under load that is not a narrow
+    # window — 1 run in 8 with the box four-way oversubscribed, with `ps` showing
+    # the round's own process alive at the moment of the 4 and its artifact
+    # recorded a moment later (issue #1871). So the state is established first
+    # and the report asserted over it, rather than raced for.
+    recorded = _the_round_records_its_artifact(repo)
+    waited = _run(repo, env, "--wait", "adversarial", "main", "--timeout", "60")
+    assert waited.returncode == 0, waited.stderr
+    # And it reports THAT round's artifact — the one the unconfirmed start
+    # launched — rather than merely exiting zero about some record of the tree.
+    assert _fields(waited.stdout)["artifact"] == f".review/{recorded.name}"
 
 
 def test_a_foreground_round_is_not_described_as_a_detached_one(tmp_path: Path) -> None:
