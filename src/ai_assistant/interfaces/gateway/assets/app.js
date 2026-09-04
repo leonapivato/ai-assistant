@@ -1218,33 +1218,72 @@ function renderStep(body, step) {
 // is that the failure it guards is silent, and its cost is an approval given over
 // bytes the owner never saw.
 const CONFIRMATION_NOT_WHOLE =
-  "One of the arguments this confirmation carries cannot be shown here in full, so " +
-  "this page does not put it to you: approving what is only partly on screen would " +
+  "Part of what this confirmation would have to put on screen cannot be rendered " +
+  "here, so it is not put to you at all: approving what is only partly shown would " +
   "be answering about something else.";
 
-// One span whose own value did not reach this page, in every way it can fail to.
+// Whether this page can put the whole of what ADR-0233 §8 obliges it to put.
 //
-// **Asked as "is this text", not as "is this null"**, which is adversarial review's
-// round-1 `major` and is the fail-closed direction ADR-0233 §8 requires rather than a
-// tidier spelling of one test. `null` is what the gateway sends for a span its
-// arguments do not locate — but nothing in this page validates the body it was
-// handed against a schema, so a `value` that is **absent**, a number, an object or a
-// boolean is equally a value that is not on the screen. Under a check for `null`
-// alone, `undefined` would slip past it and `valueBlock` would render the word
-// "undefined" as the bytes the owner is approving.
+// **Asked over the whole card before any of it is built**, because §8's refusal is
+// of the confirmation and not of a line: "a partial content-bearing confirmation is
+// worse than none, because it looks like a whole one".
 //
-// Text is the whole of what a located value can be: every one is spelled by the
-// gateway with `_parameter_text`, so a JSON `null` argument arrives as the four
-// characters `null` and a number arrives as its digits. Anything else is this page
-// and the process that served it disagreeing, which is a card that gets refused.
-function unlocated(span) {
-  return typeof span.value !== "string";
+// **And asked as three type tests rather than as three equalities**, which is
+// adversarial review's rounds 1 and 2 and is the fail-closed direction §8 requires.
+// Nothing in this page validates the body it was handed against a schema, so every
+// member it reads can be absent, a number or an object as easily as it can be the
+// thing the gateway sends — and the narrower each test is, the more shapes walk
+// past it into a card that looks whole.
+//
+// **A value must be text.** Every located value is spelled by the gateway with
+// `_parameter_text`, so a JSON `null` argument arrives as the four characters `null`
+// and a number arrives as its digits; a `value` that is missing is `undefined`, which
+// under a check for `null` alone was rendered as the word "undefined" where the bytes
+// should have been.
+//
+// **An indexless span's value must be the argument this page renders.** That value is
+// on screen through `renderParameters`, from the `parameters` list, and this is the
+// join: ADR-0233 §2 records that the description and the arguments "cannot come
+// apart, and the recomputation is the join", which `ActionRequest` performs at
+// construction over the same two things. Where they disagree here, the card shows one
+// text and approves a request carrying another — so the page checks the join rather
+// than trusting it, and refuses the whole card where it fails. The comparison is
+// against the argument's **rendered** text, which is what makes it a check of what is
+// on the screen rather than of what was intended for it.
+//
+// **The call's coverage must be one this page has words for.** §8 obliges a surface
+// to state it "in all three states", and a value outside the three is not one of them
+// — an absent one rendered as `undefined`, and a number as a digit, both of which are
+// a sentence about the call this page invented. An earlier shape of this function
+// rendered such a value as itself, on `disclosureWords`' precedent; that precedent is
+// about a span's *discloser*, which is beside the floor, and this is the floor.
+function shownWhole(confirmation) {
+  const egress = confirmation.egress;
+  if (egress === null) {
+    return true;
+  }
+  if (!Object.hasOwn(COVERAGE_WORDS, egress.coverage)) {
+    return false;
+  }
+  return egress.spans.every((span) => shownSpan(span, confirmation.parameters));
+}
+
+// Whether one span's own value is on the screen, as itself (ADR-0233 §8).
+function shownSpan(span, parameters) {
+  if (typeof span.value !== "string") {
+    return false;
+  }
+  if (span.index !== null) {
+    return true;
+  }
+  const named = parameters.filter((one) => one.key === span.argument);
+  return named.length === 1 && named[0].value === span.value;
 }
 
 function renderConfirmation(parent, confirmation) {
   const item = document.createElement("div");
   item.className = "confirmation-row";
-  if (confirmation.egress !== null && confirmation.egress.spans.some(unlocated)) {
+  if (!shownWhole(confirmation)) {
     line(item, CONFIRMATION_NOT_WHOLE, "notice");
     parent.appendChild(item);
     return;
@@ -1409,27 +1448,25 @@ function originWords(plannedWithExternalContent) {
 // material *selected into the planning call* carried the external mark, which is a
 // different question, and the two are rendered as two sentences for that reason.
 //
-// **A member this page has no words for is shown as the value it is**, which is
-// `disclosureWords`' own arrangement and is the honest arm: inventing a sentence for
-// a state this page does not know — or, worse, falling through to a reassuring one —
-// would be a fabrication at the surface where the owner approves something.
+// **A member this page has no words for gets no card**, rather than being rendered
+// as the value it is. `disclosureWords` does render an unknown member as itself, and
+// that precedent does not reach here: a span's discloser sits *beside* the floor,
+// while this is the floor, and §8 obliges the surface to state it in all three states
+// or not to put the confirmation. So the three below are the whole vocabulary, the
+// card is refused where the value is outside them (`shownWhole`), and this function
+// has no fallthrough to invent a fourth sentence with.
+const COVERAGE_WORDS = {
+  not_covered:
+    "nothing it would send was recorded as drawn from what this system stores, " +
+    "which is what was recorded and not a statement that the send is safe",
+  model_on_every_path:
+    "some of what it would send was composed by a model that had been shown " +
+    "something this system stores",
+  path_without_model: "it would send something taken from what this system stores directly",
+};
+
 function coverageWords(coverage) {
-  if (coverage === "not_covered") {
-    return (
-      "nothing it would send was recorded as drawn from what this system stores, " +
-      "which is what was recorded and not a statement that the send is safe"
-    );
-  }
-  if (coverage === "model_on_every_path") {
-    return (
-      "some of what it would send was composed by a model that had been shown " +
-      "something this system stores"
-    );
-  }
-  if (coverage === "path_without_model") {
-    return "it would send something taken from what this system stores directly";
-  }
-  return coverage;
+  return COVERAGE_WORDS[coverage];
 }
 
 // One member of the set `core` derived, in the two shapes it has and no third.

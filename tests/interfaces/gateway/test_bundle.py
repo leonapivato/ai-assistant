@@ -5492,6 +5492,17 @@ def test_the_page_says_who_disclosed_a_span_in_every_word_core_has() -> None:
         assert f'"{provenance.value}"' in body, provenance.value
 
 
+def _vocabulary(script: str) -> str:
+    """The ``COVERAGE_WORDS`` map's own text.
+
+    The page's whole vocabulary for ADR-0233 §4's three states — the sentences and the
+    enumeration in one place, so ``coverageWords`` and the refusal in ``shownWhole``
+    cannot come to disagree about which states exist.
+    """
+    opened = script.index("const COVERAGE_WORDS = {")
+    return script[opened : script.index("\n};", opened)]
+
+
 def test_every_value_is_put_on_the_screen_whole_and_as_a_text_node() -> None:
     """ADR-0233 §8's rendering floor, at the half a reading of the file decides.
 
@@ -5575,27 +5586,37 @@ def test_a_confirmation_that_cannot_be_shown_whole_is_not_shown_at_all() -> None
     of the tool line, the arguments, the egress facts and the control — a card refused
     after half of it is on screen is the partial confirmation the clause is against.
     What it says is asserted too, because "and says so" is half the clause.
+
+    **Three tests, each of them a type test rather than an equality against one
+    value** (adversarial review, rounds 1 and 2). Nothing in this page validates the
+    body it was handed, so every member it reads can be absent, a number or an object:
+    a ``value`` that is missing is ``undefined``, which a check for ``null`` alone let
+    through to be rendered as the word "undefined"; a ``coverage`` outside the three
+    is a sentence about the call this page would be inventing; and an indexless span
+    whose ``value`` disagrees with the argument on screen is a card showing one text
+    and approving a request carrying another.
+
+    **The third is the join, and it is checked rather than trusted.** ADR-0233 §2
+    records that the description and the arguments "cannot come apart, and the
+    recomputation is the join" — which ``ActionRequest`` performs at construction over
+    the same two things, and which this page performs over what actually reached it.
     """
     script = _code("app.js")
-    card = _functions(script)["renderConfirmation"]
+    functions = _functions(script)
+    card = functions["renderConfirmation"]
 
     assert card.index("CONFIRMATION_NOT_WHOLE") < card.index("confirmation.tool_id")
     assert card.index("CONFIRMATION_NOT_WHOLE") < card.index("offerApproval(")
-    assert "spans.some(unlocated)" in card
-    assert "cannot be shown here in full" in _joined(
+    assert "if (!shownWhole(confirmation)) {" in card
+    assert "so it is not put to you at all" in _joined(
         script[script.index("const CONFIRMATION_NOT_WHOLE") :]
     )
-    # **The test is a type test and not an equality against one value** (adversarial
-    # review, round 1). Nothing validates the body this page was handed, so a `value`
-    # that is absent, a number or an object is as unrendered as one that is `null` —
-    # and a check for `null` alone lets `undefined` through to be rendered as the word
-    # "undefined" where the bytes should be. Text is the whole of what a located value
-    # can be, because the gateway spells every one of them.
-    assert (
-        _functions(script)["unlocated"]
-        .strip()
-        .endswith('return typeof span.value !== "string";\n}')
-    )
+
+    whole = functions["shownWhole"]
+    span = functions["shownSpan"]
+    assert "Object.hasOwn(COVERAGE_WORDS, egress.coverage)" in whole
+    assert 'typeof span.value !== "string"' in span
+    assert "named[0].value === span.value" in span
 
 
 def test_the_call_carries_one_coverage_line_in_every_state_core_has() -> None:
@@ -5613,12 +5634,18 @@ def test_the_call_carries_one_coverage_line_in_every_state_core_has() -> None:
     axes — a page reading the origin boolean or a span's provenance to decide what to
     say here would be asserting a marker no ADR mints (ADR-0233 §4, §8).
     """
-    functions = _functions(_code("app.js"))
-    words = functions["coverageWords"]
+    script = _code("app.js")
+    functions = _functions(script)
+    words = _vocabulary(script)
 
     assert "egress.coverage" in functions["renderEgress"]
     for state in SpanCoverage:
-        assert f'"{state.value}"' in words, state.value
+        assert f"{state.value}:" in words, state.value
+    # Three keys and no fourth, so the map the sentences come from and the test the
+    # card is refused by (``shownWhole``) are one enumeration rather than two that can
+    # drift apart.
+    assert words.count(":") == len(SpanCoverage)
+    assert "return COVERAGE_WORDS[coverage];" in functions["coverageWords"]
     for axis in ("planned_with_external_content", "provenance", "tier", "extent", "span"):
         assert axis not in words, axis
 
@@ -5640,8 +5667,9 @@ def test_no_arm_of_the_coverage_line_is_an_assurance_a_verdict_or_a_span() -> No
     Adjacent string literals are joined first, so the assertions read the sentences
     the browser would show rather than however the source happens to wrap them.
     """
-    functions = _functions(_code("app.js"))
-    joined = _joined(functions["coverageWords"])
+    script = _code("app.js")
+    functions = _functions(script)
+    joined = _joined(_vocabulary(script))
 
     assert (
         "About this call as a whole: ${coverageWords(egress.coverage)}" in functions["renderEgress"]

@@ -45,7 +45,7 @@ from ai_assistant.core.types import (
 from ai_assistant.interfaces.gateway.server import _confirmation_view
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
     from pathlib import Path
 
     from browser_drive import Drive
@@ -576,8 +576,8 @@ async def test_a_confirmation_whose_value_cannot_be_located_is_not_put_at_all(
         card = drive.page.locator("#confirmation-list .confirmation-row")
 
         said = await card.inner_text()
-        assert "cannot be shown here in full" in said, said
-        assert "approving what is only partly on screen" in said, said
+        assert "so it is not put to you at all" in said, said
+        assert "approving what is only partly shown" in said, said
         # Nothing of the confirmation is put: not the values, not the description, not
         # the reason, and not a control to answer it with.
         assert _BODY not in said, said
@@ -585,44 +585,68 @@ async def test_a_confirmation_whose_value_cannot_be_located_is_not_put_at_all(
         assert await card.locator("button").count() == 0
 
 
-@pytest.mark.parametrize(
-    ("fault", "replacement"),
-    [("omitted", None), ("a number", 12), ("an object", {"text": "hello"})],
-    ids=["an omitted value", "a numeric value", "an object value"],
-)
-async def test_a_span_whose_value_is_not_text_is_refused_as_hard_as_a_missing_one(
-    gateway_browser: Browser, tmp_path: Path, fault: str, replacement: object
+#: Every way the body this page was handed can fail to carry ADR-0233 §8's floor,
+#: each as a mutation of the view the gateway itself built. They are stated as
+#: mutations rather than as hand-written bodies so that what is under test is one
+#: fault at a time against an otherwise correct card — a body written from scratch
+#: would be refused for whatever else it got wrong.
+#:
+#: The first three are a span's value arriving as something other than the text the
+#: gateway spells (adversarial review, round 1); the fourth is the **join** — an
+#: indexless span whose value is not the argument this page renders, which is a card
+#: showing one text while approving a request that carries another; and the last three
+#: are a call-level coverage outside the three states §8 obliges the surface to state
+#: (both round 2's blockers).
+_FAULTS: dict[str, Callable[[dict[str, Any]], None]] = {
+    "an omitted value": lambda view: view["egress"]["spans"][1].pop("value"),
+    "a numeric value": lambda view: view["egress"]["spans"][1].update({"value": 12}),
+    "an object value": lambda view: view["egress"]["spans"][1].update({"value": {"a": "b"}}),
+    "a value the argument disagrees with": lambda view: view["egress"]["spans"][0].update(
+        {"value": "a body this call would not send"}
+    ),
+    "an omitted coverage": lambda view: view["egress"].pop("coverage"),
+    "an unknown coverage": lambda view: view["egress"].update({"coverage": "probably_fine"}),
+    "a numeric coverage": lambda view: view["egress"].update({"coverage": 1}),
+}
+
+
+@pytest.mark.parametrize("fault", list(_FAULTS), ids=list(_FAULTS))
+async def test_a_confirmation_this_page_cannot_put_whole_is_not_put_at_all(
+    gateway_browser: Browser, tmp_path: Path, fault: str
 ) -> None:
-    """Adversarial review, round 1, ``major``: the fail-closed test is a type test.
+    """Adversarial review, rounds 1 and 2: the fail-closed tests are type tests.
 
     ``null`` is what *this* gateway sends for a span its arguments do not locate, and
     a check for it alone reads the body this page was handed as though something had
     validated it. Nothing did: the page parses the response with ``JSON.parse`` and
     reads named members, so a ``value`` that is **absent** is ``undefined``, which is
-    not ``null`` — and under the narrower check the card was built and
-    ``valueBlock`` put the word ``undefined`` on the screen as the bytes being
-    approved.
+    not ``null`` — and under the narrower check the card was built and ``valueBlock``
+    put the word ``undefined`` on the screen as the bytes being approved. The same
+    argument reaches ``coverage``, where an absent one rendered as ``undefined.`` and
+    left the controls live.
 
-    So the three shapes are driven, not argued about: the request really goes to the
+    **And it reaches the join**, which is the fault no type test finds: an indexless
+    span's value is on screen through ``renderParameters``, from the ``parameters``
+    list, so a body whose span value and argument value **disagree** shows one text
+    and approves a request carrying the other. ADR-0233 §2 records that the two
+    "cannot come apart, and the recomputation is the join"; this page checks that join
+    over what actually reached it rather than trusting the process that sent it.
+
+    Every case is driven rather than argued about: the request really goes to the
     gateway, the gateway really answers it, and only the **body** is replaced — the
-    condition #1622 names, and the same device ``test_browser_answers.py`` uses for
-    its own unreadable answers. What is read back is the refusal, whole: the notice,
-    and no control to answer with.
+    condition #1622 names, and the same ``window.fetch`` hold
+    ``test_browser_answers.py`` uses for its own unreadable answers. What is read back
+    is the refusal, whole: the notice, and no control to answer with.
 
     Args:
         gateway_browser: The one browser this run launched.
         tmp_path: The case's data directory.
-        fault: What is wrong with the span's value, for the case's own name.
-        replacement: What stands where the located text should be. ``None`` removes
-            the key, which is the shape a check for ``null`` alone lets through.
+        fault: Which of :data:`_FAULTS` the body carries.
     """
     async with driving(gateway_browser, tmp_path) as drive:
         drive.engine.parked["h-1"] = _email()
         view = _confirmation_view(_email())
-        if replacement is None:
-            del view["egress"]["spans"][1]["value"]
-        else:
-            view["egress"]["spans"][1]["value"] = replacement
+        _FAULTS[fault](view)
         await _substitute(drive, path="/confirmations", body=json.dumps({"confirmations": [view]}))
 
         await drive.page.click("#confirmations-button")
@@ -630,7 +654,7 @@ async def test_a_span_whose_value_is_not_text_is_refused_as_hard_as_a_missing_on
         card = drive.page.locator("#confirmation-list .confirmation-row")
 
         said = await card.inner_text()
-        assert "cannot be shown here in full" in said, (fault, said)
+        assert "so it is not put to you at all" in said, (fault, said)
         assert _BODY not in said, (fault, said)
         assert "undefined" not in said, (fault, said)
         assert await card.locator("button").count() == 0
