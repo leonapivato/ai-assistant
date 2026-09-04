@@ -30,6 +30,7 @@ from ai_assistant.core.types import (
     Provenance,
     ReadKind,
     ReadRequest,
+    ShownFile,
     TimeOfDay,
 )
 
@@ -102,6 +103,28 @@ def _fourth_group() -> tuple[EpisodicMemory, ...]:
             provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.8, last_updated=_WHEN),
         )
         for ordinal in (1, 2)
+    )
+
+
+def _listing() -> tuple[ShownFile, ...]:
+    """A three-entry listing, so a call has positions for ADR-0230 §2 to label.
+
+    "Most recently modified first" is the fetcher's ordering (§6) and this sequence
+    is written in it; nothing here asserts the order, because what a planner owes is
+    to take the sequence **as handed** and derive its labels from position, not to
+    have an opinion about how it was sorted. What the entries hold decides nothing:
+    this suite asserts that a conforming planner accepts the widened input and that
+    an ``entry`` it emits is an ordinal into it, never what it makes of a file.
+    """
+    return tuple(
+        ShownFile(
+            name=name,
+            size_bytes=size,
+            modified_at=datetime(2026, 1, 1, 12 - ordinal, tzinfo=UTC),
+        )
+        for ordinal, (name, size) in enumerate(
+            (("quarterly-review.pdf", 4096), ("notes.md", 12), ("roster.txt", 300))
+        )
     )
 
 
@@ -267,9 +290,19 @@ class PlannerContract:
                 assert ask.query is not None
                 assert ask.query.strip()
                 assert ask.labels == ()
-            else:
+                assert ask.entry is None
+            elif ask.kind is ReadKind.CITATION_HOP:
                 assert ask.query is None
                 assert 1 <= len(ask.labels) <= MAX_HOP_LABELS
+                assert ask.entry is None
+            else:
+                # ADR-0230 §1: "one entry label and nothing else" — one file, never
+                # two, and no argument belonging to another kind.
+                assert ask.kind is ReadKind.LOCAL_FILE
+                assert ask.entry is not None
+                assert ask.entry.strip()
+                assert ask.query is None
+                assert ask.labels == ()
 
     async def test_a_request_it_returns_cannot_be_edited(
         self, asking_planner: Planner | None
@@ -388,6 +421,133 @@ class PlannerContract:
                 assert label not in {record.id for record in supply}, (
                     "a label is a position, never an identifier (ADR-0226 §3)"
                 )
+
+    # --- ADR-0230 §§2-3: the listing across the seam ---------------------------
+    # §3 obliges Lane C2 to extend this suite "for the widened input, so the
+    # model-backed planner and the canonical fake are both held to it", for the reason
+    # ADR-0226 §10 gives — "a canonical fake updated without the suite is an unverified
+    # fake". The widening is a **compatibility break** (§3, golden rule 5): a `plan`
+    # declaring no `files` parameter does not conform, and these arms are where that is
+    # held for every implementation rather than for the one this lane happened to edit.
+
+    @pytest.fixture
+    def file_asking_planner(self) -> Planner | None:
+        """The same implementation, arranged to emit a ``LOCAL_FILE`` ask — or ``None``.
+
+        Optional for ``asking_planner``'s reason and one step further: ADR-0230 §3
+        makes ``files`` additive and defaulted, and §1 makes the kind an additive
+        member, so a ``Planner`` that never names a file conforms exactly as one that
+        never asks for a read does. A suite requiring an emission would refuse it.
+
+        Returns:
+            A planner of the implementation under test that names a file, or ``None``
+            where the implementation never names one.
+        """
+        return None
+
+    async def test_accepts_the_listing_it_was_shown(self, planner: Planner) -> None:
+        """The listing is pushed in, and a conforming planner takes it (ADR-0230 §3).
+
+        ``files`` carries "the planner-facing projection of a configured local root's
+        entries, one per entry in the listing's own order", read once per turn by the
+        loop and passed on every call. A planner neither reaches for one, holds a
+        ``Fetcher``, nor opens anything — the same push ADR-0014 §6 makes for
+        ``context`` and ``memories``, for the same reason.
+
+        **What is asserted is acceptance**, and deliberately nothing more: ADR-0211 §9
+        item 2 forbids this suite asserting which envelope an implementation returns
+        for a goal, and whether a listing is worth naming is a model's judgement that
+        §2 leaves to an implementation.
+        """
+        plan = await planner.plan(
+            _goal(),
+            context=_context(),
+            memories=_supply(),
+            capabilities=_VOCABULARY,
+            files=_listing(),
+        )
+        assert plan.goal_id == "g1"
+
+    async def test_an_empty_listing_raises_nothing(self, planner: Planner) -> None:
+        """``()`` is a legal input and never an error (ADR-0230 §3).
+
+        "``()`` means **no file is nameable on this turn** and is the semantically
+        correct answer for a deployment with no fetcher wired and for a ``Planner``
+        that knows nothing of this kind; no implementation reads it as an error, a
+        degradation, or an instruction to fetch a default." It is also the default, so
+        it is what every caller predating this widening supplies — which is why it is
+        pinned rather than left to an implementation's judgement.
+        """
+        plan = await planner.plan(
+            _goal(), context=_context(), memories=_supply(), capabilities=_VOCABULARY, files=()
+        )
+        assert plan.goal_id == "g1"
+
+    async def test_the_listing_need_not_be_a_tuple(self, planner: Planner) -> None:
+        """``Sequence[ShownFile]`` is the contract, and a list satisfies it.
+
+        The loop projects a tuple today, so an implementation could pass its whole
+        test suite while quietly requiring one — indexing and iteration are common to
+        both, ``isinstance(value, tuple)`` and equality against a tuple literal are
+        not. Pinned here for ``capabilities``' own reason: the divergence is invisible
+        until the first caller that assembles the sequence by other means.
+        """
+        plan = await planner.plan(
+            _goal(),
+            context=_context(),
+            memories=_supply(),
+            capabilities=_VOCABULARY,
+            files=list(_listing()),
+        )
+        assert plan.goal_id == "g1"
+
+    async def test_a_file_it_names_is_an_ordinal_into_the_listing_it_was_shown(
+        self, file_asking_planner: Planner | None
+    ) -> None:
+        """ADR-0230 §2's namer rule, asserted over what a planner actually emitted.
+
+        "The label of the entry at 1-based index *n* of the sequence the loop passed
+        is the ASCII string ``F`` followed by *n* in decimal with no padding. That is
+        the whole of the scheme." ``F`` and not ``M`` because the two index different
+        sequences, and a single namespace over both "would be a label whose meaning
+        depends on which kind quoted it".
+
+        **And a planner emits no filesystem address, in any form** (§2): not a path,
+        not a name it composed, and not a file's own name copied out of the listing it
+        was shown. That last arm is the one that fails on an implementation which
+        rendered the listing correctly and then echoed a name back, which would look
+        entirely reasonable in a prompt and reach nothing at all.
+
+        What a planner owes is the form and the origin — not a guarantee that every
+        label lands, since a label outside the shown set resolves to nothing and is
+        discarded silently by the loop (§2).
+        """
+        if file_asking_planner is None:
+            pytest.skip("this implementation never names a file (ADR-0230 §§1, 3)")
+        shown = _listing()
+        plan = await file_asking_planner.plan(
+            _goal(),
+            context=_context(),
+            memories=_supply(),
+            capabilities=_VOCABULARY,
+            files=shown,
+        )
+        request = plan.read_request
+        assert request is not None, "the fixture promises an implementation that names one"
+
+        named = [ask for ask in request.asks if ask.kind is ReadKind.LOCAL_FILE]
+        assert named, "the fixture promises a LOCAL_FILE ask"
+        assert len(named) == 1, "at most one ask of each kind (ADR-0226 §2)"
+        [ask] = named
+        assert ask.entry is not None
+        assert ask.entry.startswith("F"), "the ordinal form ADR-0230 §2 fixes"
+        assert ask.entry[1:].isdigit()
+        assert ask.entry[1] != "0", "no padding, and no zeroth position"
+        assert ask.entry not in {one.name for one in shown}, (
+            "a label is a position, never an address (ADR-0230 §2)"
+        )
+        assert "/" not in ask.entry
+        assert "\\" not in ask.entry
 
     async def test_it_sets_no_supersedes(self, planner: Planner) -> None:
         """ADR-0228 §5: that field is the loop's, on every plan a planner returns.
