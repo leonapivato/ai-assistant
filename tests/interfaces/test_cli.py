@@ -1084,7 +1084,9 @@ def test_a_terminal_too_narrow_to_mark_a_value_withholds_the_whole_card(
         assert cli._render_confirmation(confirmation) is False, width
         # Squashed rather than flowed: at one column every character is its own line,
         # so the words themselves are what survive and the layout is not the subject.
-        rendered = "".join(output.getvalue().split())
+        # The continuation marker goes with the wrapping that wrote it, as `_flat`
+        # records — below the marker's own width it is on nearly every line (#2072).
+        rendered = "".join(output.getvalue().replace("\u21b3", " ").split())
         assert "Confirmationwithheld" in rendered, width
         assert "toonarrow" in rendered, width
         assert "Nothingwassentandnothingwasdeclined" in rendered, width
@@ -2550,7 +2552,7 @@ def test_render_learn_points_a_queued_deferral_at_the_question_it_parked(
         )
     )
     cli._render_learn(outcome)
-    rendered = " ".join(output.getvalue().split())
+    rendered = _flat(output.getvalue())
     assert "Not stored yet" in rendered
     assert "q-7" in rendered, "the user is pointed at the question, not left guessing"
     assert "assistant questions" in rendered
@@ -2581,7 +2583,7 @@ def test_render_learn_keeps_the_non_answerable_line_for_a_secret_tier_deferral(
         )
     )
     cli._render_learn(outcome)
-    rendered = " ".join(output.getvalue().split())
+    rendered = _flat(output.getvalue())
     assert "cannot be done from here" in rendered
     assert "assistant questions" not in rendered, "there is no question to answer"
 
@@ -2620,7 +2622,7 @@ def test_render_learn_says_which_question_stands_in_the_way_and_in_what_state(
         )
     )
     cli._render_learn(outcome)
-    rendered = " ".join(output.getvalue().split())
+    rendered = _flat(output.getvalue())
     assert expected in rendered
     assert "q-3" in rendered
 
@@ -2646,7 +2648,7 @@ def test_render_learn_reports_a_full_queue_rather_than_saying_nothing(
         )
     )
     cli._render_learn(outcome)
-    rendered = " ".join(output.getvalue().split())
+    rendered = _flat(output.getvalue())
     assert "queue is full" in rendered
     assert "assistant questions" in rendered, "and says what to do about it"
 
@@ -2791,8 +2793,16 @@ _GONE = Evidence()
 
 
 def _flat(rendered: str) -> str:
-    """Collapse Rich's line wrapping, so an assertion is about words and not width."""
-    return " ".join(rendered.split())
+    """Collapse Rich's line wrapping, so an assertion is about words and not width.
+
+    The continuation marker goes with it (#2072). It is written *by* the wrapping —
+    :func:`cli._print` marks every display line a line runs onto — so a helper that
+    removed the break and kept the marker would leave a ``↳`` between two words of one
+    sentence, which is the failure this helper exists to prevent. It is not the ``│``
+    :func:`_help_text` drops: that one is Typer's own panel border, and
+    :data:`_VALUE_GUTTER`'s marker, which a case here does assert on.
+    """
+    return " ".join(rendered.replace("\u21b3", " ").split())
 
 
 class _RecordingBeliefEngine:
@@ -5277,7 +5287,7 @@ def test_observe_names_what_was_read_and_which_model_read_it(
     result = CliRunner().invoke(cli.app, ["observe"])
 
     assert result.exit_code == 0
-    rendered = " ".join(output.getvalue().split())
+    rendered = _flat(output.getvalue())
     assert "3 episode(s)" in rendered
     assert "conv-1" in rendered
     assert OBSERVER_ROUTE in rendered
@@ -5312,7 +5322,7 @@ def test_observe_shows_each_belief_with_its_step_evidence_and_ruling(
     result = CliRunner().invoke(cli.app, ["observe"])
 
     assert result.exit_code == 0
-    rendered = " ".join(output.getvalue().split())
+    rendered = _flat(output.getvalue())
     assert "observed" in rendered
     assert "semantic" in rendered
     assert "0.60" in rendered
@@ -5362,7 +5372,7 @@ def test_observe_renders_a_deferral_in_full_and_claims_nothing_about_the_queue(
 
     assert result.exit_code == 0
     # Flattened: Rich wraps at the console width, so a long reason spans lines.
-    rendered = " ".join(output.getvalue().split())
+    rendered = _flat(output.getvalue())
     assert "the user works from Lisbon" in rendered  # the candidate, not just a ruling
     assert "an inference never silently overrides an assertion" in rendered
     assert "Not stored — it needs your answer" in rendered
@@ -5402,7 +5412,7 @@ def test_observe_reports_a_proposal_the_write_path_refused_for_lost_evidence(
     result = CliRunner().invoke(cli.app, ["observe"])
 
     assert result.exit_code == 0
-    rendered = " ".join(output.getvalue().split())
+    rendered = _flat(output.getvalue())
     assert "Not stored" in rendered
     assert "the evidence it cited went away" in rendered
 
@@ -5422,7 +5432,7 @@ def test_observe_reports_what_was_thrown_away(
     result = CliRunner().invoke(cli.app, ["observe"])
 
     assert result.exit_code == 0
-    rendered = " ".join(output.getvalue().split())
+    rendered = _flat(output.getvalue())
     assert "Discarded 6" in rendered
     assert "2 unusable" in rendered
     assert "1 over the per-pass limit" in rendered
@@ -5455,7 +5465,7 @@ def test_observe_does_not_claim_a_route_when_no_model_was_asked(
     result = CliRunner().invoke(cli.app, ["observe"])
 
     assert result.exit_code == 0
-    rendered = " ".join(output.getvalue().split())
+    rendered = _flat(output.getvalue())
     assert OBSERVER_ROUTE not in rendered
     assert "Nothing to observe" in rendered
     assert "no model was asked" in rendered
@@ -5855,7 +5865,7 @@ def test_questions_renders_the_question_the_band_it_would_enter_and_what_it_reti
     result = CliRunner().invoke(cli.app, ["questions"])
 
     assert result.exit_code == 0
-    rendered = " ".join(output.getvalue().split())
+    rendered = _flat(output.getvalue())
     assert "q-1" in rendered
     assert "the user works from Lisbon" in rendered
     assert "Would be held as" in rendered, "a conditional, never a belief held"
@@ -6231,7 +6241,7 @@ def test_questions_keeps_the_interrupted_list_separate_and_offers_no_retry(
     result = CliRunner().invoke(cli.app, ["questions"])
 
     assert result.exit_code == 0
-    rendered = " ".join(output.getvalue().split())
+    rendered = _flat(output.getvalue())
     assert "1 question(s) waiting" in rendered
     assert "1 interrupted answer(s)" in rendered, "a separate section, not one merged list"
     assert "outcome was never recorded" in rendered
@@ -6375,7 +6385,7 @@ def test_questions_renders_a_stranded_parents_successor_by_that_rows_own_state(
     result = CliRunner().invoke(cli.app, ["questions"])
 
     assert result.exit_code == 0
-    rendered = " ".join(output.getvalue().split())
+    rendered = _flat(output.getvalue())
     assert "q-next" in rendered
     assert expected in rendered
 
@@ -6444,7 +6454,7 @@ def test_answer_renders_an_applied_correction_with_the_record_it_left_live(
     result = CliRunner().invoke(cli.app, ["answer", "q-1", "--accept"])
 
     assert result.exit_code == 0
-    rendered = " ".join(output.getvalue().split())
+    rendered = _flat(output.getvalue())
     assert "Applied" in rendered
     assert "rec-9" in rendered
 
@@ -6471,7 +6481,7 @@ def test_answer_renders_a_re_deferral_as_a_completed_answer_with_the_next_questi
     result = CliRunner().invoke(cli.app, ["answer", "q-1", "--accept"])
 
     assert result.exit_code == 0
-    rendered = " ".join(output.getvalue().split())
+    rendered = _flat(output.getvalue())
     assert "Your answer was used" in rendered
     assert "Here is the follow-up" in rendered
     assert "q-2" in rendered
@@ -6530,7 +6540,7 @@ def test_answer_says_no_follow_up_could_be_queued_rather_than_naming_one(
     result = CliRunner().invoke(cli.app, ["answer", "q-1", "--accept"])
 
     assert result.exit_code == 0
-    rendered = " ".join(output.getvalue().split())
+    rendered = _flat(output.getvalue())
     assert "queue is full" in rendered
     assert "could not put the follow-up" in rendered
     assert "destroyed while your answer was being applied" in rendered
@@ -6547,7 +6557,7 @@ def test_answer_reports_a_stale_answer_without_calling_the_user_slow(
     result = CliRunner().invoke(cli.app, ["answer", "q-1", "--accept"])
 
     assert result.exit_code == 0
-    rendered = " ".join(output.getvalue().split())
+    rendered = _flat(output.getvalue())
     assert "no longer applies" in rendered
     assert "too slow" not in rendered
 
@@ -6583,7 +6593,7 @@ def test_forget_question_destroys_it_and_says_what_it_does_not_undo(
 
     assert result.exit_code == 0
     assert engine.disposed == ["q-1"]
-    rendered = " ".join(output.getvalue().split())
+    rendered = _flat(output.getvalue())
     assert "Forgotten" in rendered
     assert "assistant beliefs" in rendered
     assert "cannot tell you whether that write landed" in rendered
@@ -7869,9 +7879,11 @@ def _flowed(rendered: str) -> str:
 
     A command line printed as a hint is exactly the sort of string that straddles a
     wrap, and a test matching only what fits on one line pins the console width
-    rather than the message.
+    rather than the message. The continuation marker :func:`cli._print` writes onto a
+    wrapped line is dropped with the break that produced it, for :func:`_flat`'s
+    reason (#2072).
     """
-    return " ".join(rendered.split())
+    return " ".join(rendered.replace("\u21b3", " ").split())
 
 
 def _pasted(rendered: str, start: str, until: str) -> list[str]:
@@ -9253,7 +9265,7 @@ def test_a_gateway_whose_port_is_taken_renders_one_line_rather_than_a_traceback(
 
     # Unwrapped before it is read: the console wraps at its width, so a phrase this
     # case is about can arrive with a newline through the middle of it.
-    rendered = " ".join(output.getvalue().split())
+    rendered = _flat(output.getvalue())
 
     assert result.exit_code == 1
     assert "Traceback" not in rendered
@@ -9343,7 +9355,7 @@ def test_a_pre_bind_failure_is_rendered_without_being_called_a_bind(
     monkeypatch.setattr(cli, "run_gateway", unreadable)
 
     result = CliRunner().invoke(cli.app, ["gateway"])
-    rendered = " ".join(output.getvalue().split())
+    rendered = _flat(output.getvalue())
 
     assert result.exit_code == 1
     assert "Traceback" not in rendered

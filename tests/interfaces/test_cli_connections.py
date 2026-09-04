@@ -209,8 +209,12 @@ def _flat(rendered: str) -> str:
     arrive split across two lines. Collapsing runs of whitespace lets a case assert
     the *sentence* rather than the width it happened to be rendered at, which is the
     thing under test — none of the clauses below says anything about a line break.
+
+    The continuation marker goes with it (#2072): :func:`cli._print` writes ``↳`` onto
+    every display line a wrapped line runs onto, so keeping it while removing the break
+    would leave the marker between two words of one sentence.
     """
-    return " ".join(rendered.split())
+    return " ".join(rendered.replace("\u21b3", " ").split())
 
 
 def _pasted(rendered: str, command: str, closer: str = "'.") -> list[str]:
