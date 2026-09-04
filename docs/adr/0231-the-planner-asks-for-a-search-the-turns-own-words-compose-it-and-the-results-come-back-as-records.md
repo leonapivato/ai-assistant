@@ -1302,6 +1302,18 @@ disk, on the stronger case; this one needs no argument at all.
 > no query is composed after the ruling — the ruling is over the request the query is
 > in, which is ADR-0148 §6's determinism and ADR-0150 §4's binding read forward.
 
+> **Normative.** **The only value `WebSearcher.request` is ever passed is the `query`
+> of a `QueryOutcome` the `QueryComposer` returned in that same servicing, byte for
+> byte.** `orchestration` composes no search request from a supply value, from a
+> context facet, from a listing, from the utterance directly, from a stored or cached
+> query, or from any value a record carries; it does not repair, extend, truncate or
+> re-case what the composer returned; and where the composition returned a
+> `QueryRefusal` there is **no request at all** — no ruling is sought, no channel is
+> opened, and §13's disposition names the refusal. **No component outside
+> `service_read_request` calls `request`**: `app/composition.py` wires the searcher
+> into that one site and into nothing else, no other subsystem holds the reference,
+> and no lane adds a second caller under §17's no-second-servicing-site clause.
+
 > **Normative.** **The `planned_with_external_content` on a search request's binding
 > is the disjunction of `rests_on_recorded_external_content` over the turn's
 > pre-servicing supply and over every record this servicing has already contributed**,
@@ -1361,6 +1373,31 @@ the query existed would be a ruling about a call whose payload nobody had. It co
 composer's model call on a turn whose search is then refused — a real cost, paid by
 every deployment with no grant — and the alternative costs correctness, which is not a
 trade this corpus makes. §13 records the disposition so the cost is visible.
+
+**The clause above is a prohibition where §3's is a signature, and the difference is
+worth stating rather than glossing.** §3 says of `compose` that its signature *"is the
+mechanism, and this is the one paragraph of this ADR a reviewer should check hardest"*,
+and that guarantee is structural because the member has **no parameter** through which
+a store value could arrive: the property is decidable by reading the declaration. At
+`WebSearcher.request` the parameter **is** the query, so no type distinguishes text a
+composer produced from text a caller assembled, and nothing of that kind is available
+here. Removing the entry point would leave the searcher no way to receive a query at
+all; a `core` value only the composition path could mint is not achievable either,
+because every `core` model is a frozen pydantic model any caller can construct
+directly and no validator can check that a string came from an utterance — such a
+value would move the hole rather than close it, which is why §19 defers it by name
+instead of inventing it here.
+
+**So what carries the guarantee at this seam is the three things this corpus uses when
+a type cannot**: one call site, named in the clause above and kept there by §17's
+Lane 5 wiring and its no-second-site clause; a clause saying exactly what may be
+passed; and a representative test (§18's arm 4a) that fails an implementation passing
+anything else. That is weaker than §3's, and the weakness is stated plainly here so
+that no reader takes the utterance-only guarantee to be structural at **both** seams
+when it is structural at one. §17 already names the class this belongs to — four
+rulings that are *"deliberately **not** suite clauses, and putting them there would be
+the error"* — for the same reason: a generic suite cannot see a composition, and a
+prohibition over one call site is a property of a wiring, asserted where the wiring is.
 
 ### 12. The steered loop: what closes it, and what it does not catch
 
@@ -1920,6 +1957,19 @@ for less.
    that span**, no tail, no listing and no rationale. This is #1154's shape asked of one
    payload: the general absence is untouched, and what is asserted here is what this
    payload was built from.
+4a. **`request` receives the composer's own output and nothing else.** Driven over the
+    production `service_read_request` with a recording `QueryComposer` fake and a
+    recording `WebSearcher` fake, in three arms. The string `request` receives is
+    asserted **byte-identical** to the `query` the composer returned on that turn — not
+    merely containing it, since an implementation that appended a site filter or
+    stripped punctuation would pass a containment assertion. A servicing whose
+    composition returned a `QueryRefusal` reaches `request` **not at all**, which fails
+    an implementation that falls back to the utterance, to a supply value or to a
+    cached query when a composition refuses. And a turn whose supply carries a record
+    with a distinctive span asserts that span appears in **no** value `request`
+    received. This is #1154's shape asked at the second seam: test 4 asserts what the
+    **composer** was given, and this asserts what the **searcher** was given, which is
+    the seam §11's tenth clause governs and the one at which no signature can decide it.
 5. **A `WEB_SEARCH` ask carrying an argument is unconstructable.** `ReadAsk(kind=WEB_SEARCH, query=…)`,
    `labels=…` and `entry=…` each refuse at construction, and a bare `WEB_SEARCH` ask
    validates — the arm of §1 asserted at the model, not at a caller.
@@ -2077,6 +2127,18 @@ for less.
   bounded rather than measured and §1 admits one request per ask. Fired by §13's audit
   showing what turns actually needed — raising the ceiling is an ADR, narrowing it
   under it is a `Settings` value. Not fired by a lane finding three results thin.
+- **An unforgeable composed-query value in `core`**, which would make §11's tenth
+  clause structural rather than stated. The type would be a value `WebSearcher.request`
+  accepts that only the utterance-only composition path can produce, so that a caller
+  holding a record's content has nothing to pass and the guarantee is decidable from
+  the declaration as §3's is. This ADR must not invent it in passing: it is `core`
+  surface, and golden rule 5 makes a Protocol or type change its own ratified ADR,
+  merged ahead of anything implementing against it. Fired by an ADR deciding how this
+  corpus expresses provenance-in-a-type at all — a question larger than this kind,
+  since a frozen model any caller can construct directly is no such value and the same
+  gap stands wherever a contract takes text a prior stage was supposed to have written.
+  Not fired by a lane finding §11's tenth clause unenforced; that clause and §18's arm
+  4a are what this ADR ships instead.
 - **Model-spend accounting for the composer's call** (§15). Nothing in this system
   meters model spend. Fired by the ADR that decides a model-spend surface.
 - **Telling the user that a search was refused.** §9 gives the composing stage nothing,
@@ -2296,9 +2358,9 @@ is that statement, and it answers #95 for nothing else.
 This ADR is in **ADR-0089's marked regime**: it carries well-formed clauses, so the
 marked clauses are the whole of what it obligates and the prose beside them supplies
 nothing. ADR-0089 §5 makes marking forward-only, so nothing this ADR cites is
-retro-marked. What binds is **one hundred and four clauses**: §1's four, §2's two,
+retro-marked. What binds is **one hundred and five clauses**: §1's four, §2's two,
 §3's eight, §4's two, §5's ten, §6's seven, §8's eight, §9's five, §10's eight,
-§11's nine, §12's four, §13's seven, §14's five, §15's three, §16's eight, §17's
+§11's ten, §12's four, §13's seven, §14's five, §15's three, §16's eight, §17's
 thirteen and §18's one. §7's table, §19's
 list, §20's classification and every argument in this document are deliberately
 unmarked: they are attestation, deferral and argument, which ADR-0089 §1 classifies as
