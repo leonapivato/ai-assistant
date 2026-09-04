@@ -90,6 +90,7 @@ from ai_assistant.core.types import (
     PlacementReach,
     PlacementSetter,
     QuestionState,
+    RecipientGrantNotEstablished,
     Reversibility,
     RiskLevel,
     RoutableOperation,
@@ -1315,3 +1316,48 @@ async def test_a_successful_act_leaves_a_reference_that_resolves() -> None:
     assert answering.resolves == confirmed.id
     assert resumed.recipient_grant is not None
     assert resumed.recipient_grant.established is not None
+
+
+async def test_a_declined_act_records_the_deny_the_carrier_claims() -> None:
+    """ADR-0235 §2, §4: ``DECLINED`` asserts a recorded answer, so one is recorded.
+
+    Supplied beside ``approved=False`` the argument "establishes nothing and changes
+    nothing else: the answer is recorded as a ``DENY`` exactly as it is today" —
+    ADR-0042 §4's guarantee — and the carrier's ``DECLINED`` is what says on the
+    outcome that this happened. A fake carrying it over an empty trail would let a
+    consumer's test pass against a state no conforming hub is ever in: production
+    exposes an auditable settled decision there, and the double would not.
+
+    The store is asserted empty beside it, because ``DECLINED`` is the one member
+    that never reaches ``RecipientGrantStore.record`` at all.
+    """
+    engine = FakeAssistantEngine()
+    binding = _binding()
+    confirmed = PermissionDecision.from_request(
+        ActionRequest(
+            tool=_TRANSMITTING_TOOL,
+            parameters={"to": "Alice@Example.ORG", "body": "hello"},
+            egress_binding=binding,
+        ),
+        PermissionRuling(outcome=PermissionOutcome.CONFIRM, reason="it discloses off-device"),
+        id="d-confirm",
+        decided_at=_RECIPIENT_AT,
+    )
+    await engine.trail.record(confirmed)
+    engine.hold_confirmation_decision("park-1", confirmed)
+    parked = engine.park("park-1", egress=binding)
+
+    resumed = await engine.resume(
+        parked.token,
+        approved=False,
+        timeout=timedelta(seconds=30),
+        remember_recipients_until=_RECIPIENT_AT + timedelta(days=1),
+    )
+
+    assert resumed.step is not None
+    assert resumed.step.disposition is Disposition.DENIED
+    assert resumed.recipient_grant is not None
+    assert resumed.recipient_grant.not_established is RecipientGrantNotEstablished.DECLINED
+    answers = [row for row in await engine.trail.export() if row.resolves == confirmed.id]
+    assert [row.ruling.outcome for row in answers] == [PermissionOutcome.DENY]
+    assert await engine.recipient_grants.export() == []
