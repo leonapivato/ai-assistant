@@ -6061,6 +6061,130 @@ class ActionPlan(BaseModel):
         return value
 
 
+# --- the search seam: what one composition of a query produced (ADR-0231 §3) --
+# The composer's half of a search. Both types cross the `QueryComposer` seam, so
+# both are `core`'s; the servicer's own account of why a servicing did not yield is
+# `orchestration`'s and lives beside `TurnReadAudit` (ADR-0231 §13).
+#
+# **Neither carries a bound.** `search_query_max_chars` is a `Settings` field the
+# *composer* enforces and the model never sees, so a `QueryOutcome` validates
+# identically in every deployment and two composers configured differently in one
+# process produce values one model reads the same way (ADR-0231 §3). That is
+# ADR-0230 §6's own division of a bound from the value it bounds.
+
+
+class QueryRefusal(StrEnum):
+    """Why a composition produced no query (ADR-0231 §3).
+
+    A **closed** enumeration with exactly four members, each valued by its
+    lower-cased name. The vocabulary is **added to and never renamed**, and no later
+    lane adds a member without the ADR that decides it — ADR-0221 §5's pattern, for
+    its reason: a vocabulary that grows by implementation grows without anyone
+    having decided what the new member means.
+
+    **Every member is returned and none is raised** (§3).
+    :meth:`~ai_assistant.core.protocols.QueryComposer.compose` raises for no
+    composition reason, so a non-yield is a value the audit can count and the turn
+    can ignore rather than an exception every call site must catch correctly. That
+    is ADR-0230 §4's posture on the fetch seam, and ADR-0231 adds no error class to
+    ``core/errors.py`` for the same reason: there is no failure a caller would
+    handle differently from a refusal it must already handle.
+
+    **The four are carried across one for one into ``SearchDisposition``**
+    (ADR-0231 §13), which is why there are four causes rather than one: a decline is
+    the composer judging, an unavailable model is an outage, a malformed answer is a
+    model defect, and an over-long one is a bound the operator set. An operator acts
+    on each differently, so collapsing any two would make that audit field useless
+    at exactly the moment someone reads it.
+
+    **A refusal names a class and carries nothing else** — no utterance, no
+    fragment of one, no length, no message from a provider. The whole value is one
+    of these members, so there is nowhere for one to sit.
+    """
+
+    DECLINED = "declined"
+    """The composer judged the turn to be one no web search would answer (§3).
+
+    A resolved outcome and not a failure: it fails no turn, degrades no servicing
+    and discards no other kind's records."""
+
+    UNAVAILABLE = "unavailable"
+    """The model call did not produce an answer (§3).
+
+    A transport, auth, rate-limit or content-filter failure at the
+    :class:`~ai_assistant.core.protocols.ModelProvider` seam. It is a statement
+    about this system's own model access and says nothing about the utterance."""
+
+    MALFORMED = "malformed"
+    """The answer could not be read as a query (§3).
+
+    Distinct from :attr:`UNAVAILABLE` because the model *answered*: what it returned
+    was not a composition. An operator reading a run of these is looking at a model
+    or a prompt, not at an outage."""
+
+    TOO_LONG = "too_long"
+    """The answer exceeded ``search_query_max_chars`` (§3, §5).
+
+    **A composition over the bound is refused rather than truncated.** A prefix of a
+    query is a different question, and one no reader of the outcome — the servicer,
+    the audit, or the user — could tell from the question that was asked. The bound
+    is counted in Unicode code points and is the configured composer's to enforce;
+    no model is told it."""
+
+
+class QueryOutcome(BaseModel):
+    """What one composition produced: a query, or a refusal (ADR-0231 §3).
+
+    **Exactly one of the two, enforced here rather than by a caller.** Neither both
+    nor neither: a value carrying both would be two answers wearing one outcome's
+    name, and one carrying neither would be the outcome §3 says a composition never
+    has. Stating the condition on the model rather than on its producers is what
+    makes it decidable in any process and true of every ``QueryComposer`` this
+    system ever wires, the canonical fake included.
+
+    **What a successful composition carries is one string and no provenance.** A
+    composed query is *"a model completion with no recorded origin"* (§3), of the
+    same class as :attr:`ActionPlan.rationale` (ADR-0226 §9, ADR-0228 §11): wherever
+    it is rendered, read back or exported it is treated as that class already is,
+    and nothing about its having been composed over the user's own words makes it a
+    better class than one composed over a wider supply.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    query: NonBlankEncodableText | None = Field(
+        default=None,
+        description=(
+            "The query one composition wrote, for the turn's own utterance and from "
+            "nothing else (ADR-0231 §3, §4). Non-blank, carried byte for byte to the "
+            "seam, and None where the composition was refused."
+        ),
+    )
+    refusal: QueryRefusal | None = Field(
+        default=None,
+        description=(
+            "Why no query was composed (ADR-0231 §3). None where one was. A "
+            "**class** and nothing else: no utterance, no fragment, no length, no "
+            "provider message."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _exactly_one_of_a_query_and_a_refusal(self) -> QueryOutcome:
+        """Refuse an outcome carrying both answers, and one carrying neither.
+
+        Raises:
+            ValueError: If both fields are set, or neither is.
+        """
+        if self.query is not None and self.refusal is not None:
+            msg = "a query outcome carries a query or a refusal, never both"
+            raise ValueError(msg)
+        if self.query is None and self.refusal is None:
+            msg = "a query outcome carries a query or a refusal, never neither"
+            raise ValueError(msg)
+        return self
+
+
 # --- planning: the step-status vocabulary (ADR-0014 §4) ----------------------
 # The statuses, and the sets drawn over them. Only the sets live here: the
 # transition *graph* is `planning`'s, because it is not intrinsic to the type

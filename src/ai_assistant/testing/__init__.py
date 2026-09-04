@@ -85,6 +85,11 @@ from ai_assistant.testing.permissions import (
 )
 from ai_assistant.testing.planning import FakePlanner, FakePlanStore
 from ai_assistant.testing.policy import FakeMemoryPolicy, PolicyCall
+from ai_assistant.testing.queries import (
+    DEFAULT_COMPOSED_QUERY,
+    DEFAULT_QUERY_MAX_CHARS,
+    FakeQueryComposer,
+)
 from ai_assistant.testing.readers import (
     DEFAULT_READER_NAME,
     FakeReader,
@@ -164,6 +169,7 @@ __all__ = [
     "DEFAULT_BATCH_ISSUER",
     "DEFAULT_BATCH_REPLY",
     "DEFAULT_CHECKED_AT",
+    "DEFAULT_COMPOSED_QUERY",
     "DEFAULT_DECIDED_AT",
     "DEFAULT_FETCHER_NAME",
     "DEFAULT_GRANTED_SOURCE",
@@ -173,6 +179,7 @@ __all__ = [
     "DEFAULT_MAX_PROPOSALS",
     "DEFAULT_MAX_ROWS",
     "DEFAULT_OCCURRED_AT",
+    "DEFAULT_QUERY_MAX_CHARS",
     "DEFAULT_READER_NAME",
     "DEFAULT_READ_SOURCE",
     "DEFAULT_STREAM_DELTAS",
@@ -223,6 +230,7 @@ __all__ = [
     "FakeOutboundTransport",
     "FakePlanStore",
     "FakePlanner",
+    "FakeQueryComposer",
     "FakeReader",
     "FakeRecipientGrantResolution",
     "FakeRecipientGrantStore",

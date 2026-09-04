@@ -3515,6 +3515,33 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- The query one search is composed into (ADR-0231 §3, §5) ----------
+    # **The bound the composer enforces, and the model never sees.** ADR-0231 §3
+    # divides a bound from the value it bounds exactly as ADR-0230 §6 does: the
+    # figure is a `Settings` field with a named default, a stated domain and a
+    # load-time refusal, `QueryOutcome` carries none of it, and the *configured
+    # composer* is what refuses over it. So an outcome validates identically in
+    # every deployment, and two composers configured differently in one process
+    # produce values one model reads the same way.
+    #
+    # **A composition over it is refused, never truncated** — `QueryRefusal.TOO_LONG`
+    # — because a prefix of a query is a different question, and one no reader of
+    # the outcome could tell from the question that was asked.
+    #
+    # ADR-0231 §5 adds three further fields for the searcher and its transport;
+    # they land with the lanes that enforce them, since a bound nothing reads is a
+    # figure an operator can set and watch do nothing.
+    search_query_max_chars: _IntegerSetting = Field(
+        default=256,
+        ge=1,
+        lt=2**63,
+        description=(
+            "The most **Unicode code points** a composed web-search query may carry "
+            "(ADR-0231 §3, §5). At least 1. Enforced by the composer, never by the "
+            "model: a composition beyond it is refused `TOO_LONG` and never truncated."
+        ),
+    )
+
     # --- The registered egress integration (ADR-0152 §10, ADR-0154 §6) ----
     # **Which connected account `send_email` is registered against, and where it
     # submits.** Both, or neither: a deployment that names both gets the tool
