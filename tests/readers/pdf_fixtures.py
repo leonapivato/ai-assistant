@@ -719,7 +719,7 @@ def _assembled_with_xref_stream(
     return bytes(document)
 
 
-def unbuildable_font_pdf(*, decoded_bytes: int) -> bytes:
+def unbuildable_font_pdf(*, decoded_bytes: int, subtype: bytes = b"/Type1") -> bytes:
     """A page whose font names a program under **two** ``/FontFile*`` keys.
 
     ``Font._parse_font_descriptor`` raises ``PdfReadError`` on that, and
@@ -728,6 +728,13 @@ def unbuildable_font_pdf(*, decoded_bytes: int) -> bytes:
     page's content stream is parsed not at all, however large it is. A walk charging
     the stream first answers ``TOO_LARGE`` for a document that is malformed, which is
     the class confusion ADR-0232 §4 exists to prevent.
+
+    ``subtype`` is a parameter because the library reaches that raise by two different
+    routes: ``/Type1``, ``/MMType1`` and ``/TrueType`` reach it whenever a
+    ``/FontDescriptor`` is present, while ``/Type3`` reaches it only where the font is
+    *interpretable* — which, with no ``/ToUnicode`` and no ``/CharProcs``, it is, since
+    ``all(...)`` over nothing is true. A walk mirroring only the first route reports
+    the second's document as over-bound.
     """
     objects = _Objects()
     program = objects.add(stream_object(type1_program(2_000)))
@@ -739,7 +746,11 @@ def unbuildable_font_pdf(*, decoded_bytes: int) -> bytes:
         + b" >>"
     )
     font = objects.add(
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Twice /FontDescriptor " + descriptor + b" >>"
+        b"<< /Type /Font /Subtype "
+        + subtype
+        + b" /BaseFont /Twice /FontDescriptor "
+        + descriptor
+        + b" >>"
     )
     return document(
         [Page(contents=[operators(decoded_bytes)], fonts={"/F1": font})], objects=objects

@@ -593,8 +593,9 @@ def test_the_shipped_default_is_the_figure_the_decision_names() -> None:
 
 
 @pytest.mark.parametrize("over_the_bound", [True, False])
+@pytest.mark.parametrize("subtype", [b"/Type1", b"/MMType1", b"/TrueType", b"/Type3"])
 async def test_a_font_the_extraction_cannot_build_precedes_the_content_charge(
-    root: Path, parsed: list[object], over_the_bound: bool
+    root: Path, parsed: list[object], over_the_bound: bool, subtype: bytes
 ) -> None:
     """§3's fail-closed branch reached through font *initialisation*, not resources.
 
@@ -609,9 +610,15 @@ async def test_a_font_the_extraction_cannot_build_precedes_the_content_charge(
     prevent: "report a size refusal as an extraction failure and that operator goes
     looking for corrupt files", and the reverse sends them to bounds that are not the
     problem. Both directions are run, because the class must not depend on the size of a
-    stream nothing parses.
+    stream nothing parses — and **every subtype that reaches that raise** is run,
+    because the library reaches it by two routes: three subtypes whenever a
+    ``/FontDescriptor`` is present, and ``/Type3`` only where the font is
+    *interpretable*, which with no ``/ToUnicode`` and no ``/CharProcs`` it is. A walk
+    mirroring the unconditional route alone passes three of these and fails the fourth.
     """
-    data = unbuildable_font_pdf(decoded_bytes=4_000_000 if over_the_bound else 1_000)
+    data = unbuildable_font_pdf(
+        decoded_bytes=4_000_000 if over_the_bound else 1_000, subtype=subtype
+    )
     with pytest.raises(Exception, match="More than one /FontFile"):
         pypdf.PdfReader(io.BytesIO(data)).pages[0].extract_text()
     parsed.clear()  # that demonstration is this test's own and not the fetch's
