@@ -580,8 +580,30 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     None of the seven is a browser operation either: ADR-0225 §8 requires the CLI and
     *permits* a gateway page "as its own lane touching ``interfaces/`` alone", so
     ADR-0177 §1's thirty-one is unmoved again.
+
+    ADR-0235 §4's **five** take it to fifty-four: the offerable rulings a user may
+    still decide about, the act that decides one, the standing listing, the bounded
+    history, and the revocation. **Five and not fewer**, and §4 argues each: without
+    ``grantable_decisions`` an adapter would read ``recent_decisions`` and join rows
+    to find which confirmations are unanswered, which is business logic in
+    ``interfaces``; without ``standing_recipient_grants`` there is no surface showing
+    what the user currently authorises and ADR-0193 §9's revocation right has nowhere
+    to sit; without ``recent_recipient_grants`` an expired grant occupies a slot
+    against the ceiling and appears in no listing, so ADR-0193 §1's stated recourse
+    names an act the user cannot perform; and without ``revoke_recipient_grant`` the
+    only exit from a grant is ``clear`` on a store no surface holds.
+
+    ``resume`` deliberately gains an **argument** and not a method, so the count moves
+    by five and not six: ADR-0235 §2 has the act ride the answer, because a park has
+    exactly one answer and an operation that established a grant from an
+    already-recorded one would be a second act on a settled binding.
+
+    None of the five is a browser operation: ADR-0235 §9 leaves the browser to a later
+    consumer lane with its own ratified decision, so ADR-0177 §1's thirty-one is
+    unmoved once more, and ``resume``'s new argument is admitted by §1's fourth clause
+    rather than by a change to the enumeration.
     """
-    assert len(_method_names()) == 49
+    assert len(_method_names()) == 54
 
 
 def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> None:
@@ -953,6 +975,21 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     :class:`~ai_assistant.core.protocols.WebSearcher`, are on neither the promoted
     surface nor any earlier bump's ground.
 
+    **ADR-0235 §10 is the first entry under both limbs at once**, and it moves the
+    set to **fifty-four** and the version to **31**. The first limb twice over: the
+    promoted method set grows by five (§4), and ``resume``'s declared arguments grow
+    by one, ``remember_recipients_until`` (§2) — an argument a version 30 hub's own
+    adapter does not know. The second limb beside them: ``TurnOutcome`` gains
+    ``recipient_grant``, which crosses on **every** turn call's result payload, and
+    that model sets ``extra="forbid"`` while the projection dumps every field, so a
+    version 30 client fails ``extra_forbidden`` on the first turn a version 31 hub
+    answers. Each ground obliges the move on its own and §10 requires the entry to
+    record all three rather than fold them into one.
+
+    **ADR-0235 fixes no number and says why**: "any figure written here is a fact
+    about a tree that may move again before the lane does", so the lane read the
+    constant at 30 and moved it by one. That is what this pin is for.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -961,7 +998,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (49, 30), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (54, 31), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"
