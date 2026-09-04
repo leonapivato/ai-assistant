@@ -287,6 +287,7 @@ from ai_assistant.core.types import (
     BeliefBand,
     ClassReach,
     CostBasis,
+    CoverageUnrecordedBinding,
     DiscloserProvenance,
     Disposition,
     FeedbackEvent,
@@ -9277,7 +9278,9 @@ def _decision_headline(outcome: PermissionOutcome) -> str:
     assert_never(outcome)
 
 
-def _recorded_origin_line(binding: EgressBinding | OriginUnrecordedBinding) -> str:
+def _recorded_origin_line(
+    binding: EgressBinding | CoverageUnrecordedBinding | OriginUnrecordedBinding,
+) -> str:
     """The call's origin in **three** states, none rendered as any other (ADR-0186 §7).
 
     The two recorded states are :func:`_origin_line`'s, unchanged — a history row
@@ -9311,6 +9314,16 @@ def _recorded_origin_line(binding: EgressBinding | OriginUnrecordedBinding) -> s
             "origin of a call, so the record states nothing either way about the "
             "material it selected"
         )
+    # A `CoverageUnrecordedBinding` reaches the second branch and is *right* to:
+    # such a row records the origin of the call (ADR-0233 §14 puts
+    # ``planned_with_external_content`` on the rung it shares with
+    # :class:`~ai_assistant.core.types.EgressBinding`), so the sentence this line
+    # states about it is the one the record actually supports. What such a row does
+    # not record is its **coverage**, which is a different axis and which no clause
+    # of ADR-0186 §7 or ADR-0233 §8 obliges a history row to state — §8's floor is
+    # stated over a surface rendering a ``Confirmation``, and this renders a
+    # recorded decision. Widening the annotation is therefore the whole of what this
+    # epoch costs here.
     return _origin_line(planned_with_external_content=binding.planned_with_external_content)
 
 
@@ -9338,7 +9351,9 @@ def _recorded_destination_line(member: CanonicalDestination) -> str:
     return _recipient_line(member.protocol, member.canonical)
 
 
-def _render_recorded_egress(binding: EgressBinding | OriginUnrecordedBinding) -> None:
+def _render_recorded_egress(
+    binding: EgressBinding | CoverageUnrecordedBinding | OriginUnrecordedBinding,
+) -> None:
     """ADR-0178 §7's content obligations over a recorded binding, in full (ADR-0186 §7).
 
     :func:`_render_confirmation_egress`'s facts in its order — the connected

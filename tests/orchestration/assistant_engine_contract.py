@@ -136,6 +136,7 @@ from ai_assistant.core.types import (
     RoutedOperation,
     RouteOutcome,
     SourceReadRecord,
+    SpanCoverage,
     SpendPeriod,
     SpokenAudio,
     SpokenAudioFormat,
@@ -2751,6 +2752,7 @@ class AssistantEngineContract(ABC):
             account=BoundAccount(identity=egress.account_identity, reference="conn-rebuilt"),
             transport_endpoint="test://rebuilt",
             planned_with_external_content=egress.planned_with_external_content,
+            coverage=SpanCoverage.NOT_COVERED,
         )
 
         ours = egress.canonical_destination_set

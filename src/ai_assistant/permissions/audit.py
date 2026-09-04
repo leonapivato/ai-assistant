@@ -52,6 +52,7 @@ from ai_assistant.core.errors import (
     UnrecordedAuthorisationError,
 )
 from ai_assistant.core.types import (
+    CoverageUnrecordedBinding,
     DurableIdentifier,
     EgressBinding,
     Idempotency,
@@ -100,6 +101,12 @@ _log = structlog.get_logger(__name__)
 #: constant rather than a literal so a test asserts the *name* a reader will meet
 #: in the log rather than a spelling of it.
 ORIGIN_UNRECORDED = "origin-unrecorded"
+
+#: The named condition a park is refused under when the row it would be rebuilt from
+#: predates ADR-0233's ``coverage``. Its **own** name rather than a reuse of the one
+#: above (ADR-0233 §14), for that constant's reason: a reader meeting it in the log
+#: learns which fact the row is missing, and the two epochs are different epochs.
+COVERAGE_UNRECORDED = "coverage-unrecorded"
 
 _OWNER_ONLY = 0o600
 
@@ -1259,13 +1266,14 @@ class SqliteAuditTrail:
     async def record(self, decision: PermissionDecision) -> str:
         """Append ``decision`` and return its id.
 
-        **A decision carrying an ``OriginUnrecordedBinding`` is refused**
-        (ADR-0184 §4, :func:`_revalidated`): that shape is only ever read out of a
-        row written before ADR-0181 and never minted into one.
+        **A decision carrying an ``OriginUnrecordedBinding`` or a
+        ``CoverageUnrecordedBinding`` is refused** (ADR-0184 §4, ADR-0233 §14,
+        :func:`_refuse_origin_unrecorded`): each shape is only ever read out of a row
+        written before the member its name states existed, and never minted into one.
 
         Raises:
             AuditError: If the decision does not satisfy its own model, carries an
-                ``OriginUnrecordedBinding``, or the
+                ``OriginUnrecordedBinding`` or a ``CoverageUnrecordedBinding``, or the
                 database refuses the write. Pydantic's ``ValidationError`` is
                 deliberately not allowed to escape: CONTRIBUTING has this layer
                 raise only from the ``AssistantError`` hierarchy, and a caller
@@ -1592,15 +1600,22 @@ class SqliteAuditTrail:
         by ``decided_at`` descending, ``id`` ascending, or ``None`` if the binding
         carries none. Query-only, returning a detached snapshot rebuilt from JSON.
 
-        **A third way to answer ``None``: the ``CONFIRM`` is there and its origin
-        was never recorded** (:data:`ORIGIN_UNRECORDED`). A row written before
-        ADR-0181 §3 added ``planned_with_external_content`` decodes carrying an
-        :class:`~ai_assistant.core.types.OriginUnrecordedBinding` (ADR-0184 §2), and
-        such a call's origin cannot be established at all: §3 forbids a default and
-        §4's second clause forbids a seam inventing one, which rules out ``False``
-        and ``True`` alike. ADR-0181 §5's second clause then leaves no route by which
-        any authorisation covers it — so there is no answerable question here to hand
-        back, and this returns ``None`` rather than a decision.
+        **A third and a fourth way to answer ``None``: the ``CONFIRM`` is there and
+        a fact its question rests on was never recorded**
+        (:data:`ORIGIN_UNRECORDED`, :data:`COVERAGE_UNRECORDED`). A row written
+        before ADR-0181 §3 added ``planned_with_external_content`` decodes carrying
+        an :class:`~ai_assistant.core.types.OriginUnrecordedBinding` (ADR-0184 §2);
+        one written before ADR-0233 §4 added ``coverage`` decodes carrying a
+        :class:`~ai_assistant.core.types.CoverageUnrecordedBinding` (ADR-0233 §14).
+        Neither fact can be established at all: each is required with no default and
+        each ADR forbids a seam inventing one, which rules out every value alike.
+        ADR-0181 §5's second clause then leaves no route by which any authorisation
+        covers such a call — so there is no answerable question here to hand back,
+        and this returns ``None`` rather than a decision. **Each carries its own
+        condition name**, because a reader meeting one in the log learns which fact
+        the row is missing, and the second is detected in its own narrowing rather
+        than inherited: a coverage-unrecorded row *has*
+        ``planned_with_external_content`` and falls straight past the first.
 
         **What ADR-0184 changed here is only the detection.** The case is recognised
         on the decoded value's **type** rather than on the shape of a
@@ -1652,15 +1667,30 @@ class SqliteAuditTrail:
         if data is None:
             return None
         park = _decode(data)
-        if not isinstance(park.egress_binding, OriginUnrecordedBinding):
-            return park
-        _log.info(
-            ORIGIN_UNRECORDED,
-            execution_id=execution_id,
-            step_id=step_id,
-            refused="park",
-        )
-        return None
+        if isinstance(park.egress_binding, OriginUnrecordedBinding):
+            _log.info(
+                ORIGIN_UNRECORDED,
+                execution_id=execution_id,
+                step_id=step_id,
+                refused="park",
+            )
+            return None
+        # ADR-0233 §14: the same refusal one epoch on, detected on the decoded
+        # value's type and carrying **its own** condition name. Written rather than
+        # inherited because such a row *has* ``planned_with_external_content`` and
+        # so falls straight past the narrowing above. Nothing is written, the step
+        # stays durably ``AWAITING_APPROVAL`` with its ``CONFIRM`` unresolved and its
+        # row intact, and one such park does not hide another binding's live one —
+        # the four history readers go on returning the row as history (ADR-0184 §5).
+        if isinstance(park.egress_binding, CoverageUnrecordedBinding):
+            _log.info(
+                COVERAGE_UNRECORDED,
+                execution_id=execution_id,
+                step_id=step_id,
+                refused="park",
+            )
+            return None
+        return park
 
     def _pending_confirmation_sync(self, execution_id: str, step_id: str) -> str | None:
         """The open ``CONFIRM`` for this binding, read as **one** observation.
@@ -2690,7 +2720,8 @@ def _revalidated(decision: PermissionDecision) -> PermissionDecision:
 
     Raises:
         AuditError: If the value is not a valid record at all, does not satisfy the
-            model, or rebuilds carrying an ``OriginUnrecordedBinding``.
+            model, or rebuilds carrying an ``OriginUnrecordedBinding`` or a
+            ``CoverageUnrecordedBinding``.
     """
     snapshot = _rebuilt(decision)
     _refuse_origin_unrecorded(snapshot)
@@ -2710,14 +2741,15 @@ def _rebuilt(decision: PermissionDecision) -> PermissionDecision:
     them here rather than letting them vanish at serialisation and make the
     stored record differ from the one that reloads.
 
-    **An ``OriginUnrecordedBinding`` is refused here** (ADR-0184 §4), and it is the
-    one refusal the model cannot make for itself: that shape is a *valid*
-    ``PermissionDecision``, because it has to be for a stored row to decode into
-    one. It represents a row from an epoch that has ended, so it is only ever read
-    out of a store and never minted into one — a caller bypassing ``from_request``
-    could otherwise construct such a decision and append it, fabricating history
-    rather than a value. ``record`` is where the trail already enforces what a model
-    cannot see for itself (ADR-0021 §4), and this is one more clause of that kind.
+    **An ``OriginUnrecordedBinding`` and a ``CoverageUnrecordedBinding`` are refused
+    here** (ADR-0184 §4, ADR-0233 §14), and it is the one refusal the model cannot
+    make for itself: each shape is a *valid* ``PermissionDecision``, because each has
+    to be for a stored row to decode into one. Each represents a row from an epoch
+    that has ended, so each is only ever read out of a store and never minted into
+    one — a caller bypassing ``from_request`` could otherwise construct such a
+    decision and append it, fabricating history rather than a value. ``record`` is
+    where the trail already enforces what a model cannot see for itself (ADR-0021
+    §4), and this is one more clause of that kind.
 
     **The refusal is named from the snapshot too**, because a caller can hand over a
     raw mapping: it validates into a decision — that is the ordering above — and
@@ -2756,7 +2788,8 @@ def _rebuilt(decision: PermissionDecision) -> PermissionDecision:
 
     Raises:
         AuditError: If the value is not a valid record at all, or does not satisfy
-            the model. The ``OriginUnrecordedBinding`` refusal is
+            the model. The ``OriginUnrecordedBinding`` and
+            ``CoverageUnrecordedBinding`` refusals are
             :func:`_refuse_origin_unrecorded`'s, called by :func:`_revalidated`
             immediately after this and by ``record`` a step later.
     """
@@ -2779,23 +2812,38 @@ def _rebuilt(decision: PermissionDecision) -> PermissionDecision:
 
 
 def _refuse_origin_unrecorded(snapshot: PermissionDecision) -> None:
-    """Refuse a decision carrying an ``OriginUnrecordedBinding`` (ADR-0184 §4).
+    """Refuse a decision from an ended epoch (ADR-0184 §4, ADR-0233 §14).
 
     Split out of :func:`_revalidated` so ``record`` can run ADR-0193 §6's
     store-free route-(b) refusals **first** — which is what makes a route-(b) row
-    carrying that shape land as an ``InvalidAuthorisationError`` rather than as a
+    carrying such a shape land as an ``InvalidAuthorisationError`` rather than as a
     bare ``AuditError``. Nothing about the rule changes: every other path still
     reaches it in the same place, and a decision not in route-(b) scope is refused
     here exactly as before.
 
+    **Two shapes rather than one since ADR-0233 §14**, which extends ADR-0184 §4's
+    second clause **by cause**: each names a row from an epoch that has ended, each
+    is only ever read out of a store and never minted into one, and each is refused
+    with the trail's existing ``AuditError`` and no new error class. The second is
+    written rather than inherited because a coverage-unrecorded row *has*
+    ``planned_with_external_content`` and so falls past the first narrowing, and each
+    message names the fact its own epoch was missing.
+
     Raises:
-        AuditError: If the binding records no origin.
+        AuditError: If the binding records no origin, or no coverage.
     """
     if isinstance(snapshot.egress_binding, OriginUnrecordedBinding):
         msg = (
             f"decision {snapshot.id!r} is not a valid record: its egress binding "
             f"records no origin, which is a shape only a row written before "
             f"ADR-0181 can have; the trail reads such rows and never writes one"
+        )
+        raise AuditError(msg)
+    if isinstance(snapshot.egress_binding, CoverageUnrecordedBinding):
+        msg = (
+            f"decision {snapshot.id!r} is not a valid record: its egress binding "
+            f"records no coverage, which is a shape only a row written before "
+            f"ADR-0233 can have; the trail reads such rows and never writes one"
         )
         raise AuditError(msg)
 
@@ -2910,16 +2958,19 @@ def _detached_cost(value: ToolCost) -> ToolCost:
 def _decode(data: str) -> PermissionDecision:
     """Rebuild a stored decision from its JSON.
 
-    **A row recorded before ADR-0181 §3's ``planned_with_external_content`` decodes
-    rather than raising** (ADR-0184 §2, §5), carrying an
-    :class:`~ai_assistant.core.types.OriginUnrecordedBinding` in place of an
-    ``EgressBinding``. Nothing here recognises it: the discrimination is structural,
-    done by the union on :attr:`PermissionDecision.egress_binding` and by
-    ``extra="forbid"`` on both models, so there is no predicate to widen and no
-    branch to take. The tolerance is exactly one shape wide — a row that is *also*
-    faulty elsewhere satisfies neither arm of the union and still raises below,
-    which is what the retired ``_is_origin_unrecorded`` bought with a hand-written
-    check over ``exc.errors()``.
+    **A row recorded before ADR-0181 §3's ``planned_with_external_content``, or
+    before ADR-0233 §4's ``coverage``, decodes rather than raising** (ADR-0184 §2,
+    §5, ADR-0233 §14), carrying an
+    :class:`~ai_assistant.core.types.OriginUnrecordedBinding` or a
+    :class:`~ai_assistant.core.types.CoverageUnrecordedBinding` in place of an
+    ``EgressBinding``. Nothing here recognises either: the discrimination is
+    structural, done by the union on :attr:`PermissionDecision.egress_binding` and by
+    ``extra="forbid"`` on the shared chain, so there is no predicate to widen and no
+    branch to take. The tolerance is exactly as many shapes wide as there are epochs
+    — a row that is *also* faulty elsewhere, and one carrying ``coverage`` without
+    ``planned_with_external_content``, satisfy no arm of the union and still raise
+    below, which is what the retired ``_is_origin_unrecorded`` bought with a
+    hand-written check over ``exc.errors()``.
 
     Nothing is written back for such a row and nothing is fabricated on the way out:
     the model carries no ``planned_with_external_content`` member, so a
@@ -3163,13 +3214,13 @@ def _check_standing_shape(decision: PermissionDecision) -> None:
     """Refuse the route-(b) defects decidable from the decision alone (ADR-0193 §6).
 
     Three of ADR-0193 §6's eight checks and its pairing clause need no store, so
-    they are made here — **before** the ``OriginUnrecordedBinding`` refusal
-    ADR-0184 §4 states over every decision. The order is what makes the
-    origin-unrecorded case land as an
+    they are made here — **before** the ended-epoch refusals ADR-0184 §4 and
+    ADR-0233 §14 state over every decision. The order is what makes an
+    origin-unrecorded or coverage-unrecorded case land as an
     :class:`~ai_assistant.core.errors.InvalidAuthorisationError` rather than as a
-    bare ``AuditError``, which ADR-0193 §14 requires by type; ADR-0184 §4 is
+    bare ``AuditError``, which ADR-0193 §14 requires by type; both clauses are
     satisfied either way, since the row is still refused and this class *is* an
-    ``AuditError``. A decision carrying that shape and **not** in route-(b) scope
+    ``AuditError``. A decision carrying either shape and **not** in route-(b) scope
     is untouched here and still refused there, exactly as before.
 
     **The origin check is stated over the binding's arm, not over a field's

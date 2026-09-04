@@ -33,6 +33,7 @@ from ai_assistant.core.types import (
     ProvisioningState,
     SecretName,
     SecretScope,
+    SpanCoverage,
     parameter_violations,
 )
 from ai_assistant.testing import FakeAuditTrail
@@ -246,7 +247,9 @@ async def test_the_derived_extent_is_the_one_core_recomputes(value: FrozenJson) 
     bound = await harness.seam.bind(
         tool,
         parameters={"to": ["a@example.com"], "payload": value},
-        provenance=CarriedProvenance(spans={}, planned_with_external_content=False),
+        provenance=CarriedProvenance(
+            spans={}, planned_with_external_content=False, coverage=SpanCoverage.NOT_COVERED
+        ),
     )
 
     assert bound is not None
@@ -355,7 +358,9 @@ async def test_no_refusal_message_renders_a_destination_form_or_an_identity() ->
             await harness.seam.bind(
                 SEND_EMAIL,
                 parameters=cast("dict[str, FrozenJson]", arguments),
-                provenance=CarriedProvenance(spans={}, planned_with_external_content=False),
+                provenance=CarriedProvenance(
+                    spans={}, planned_with_external_content=False, coverage=SpanCoverage.NOT_COVERED
+                ),
             )
         refusals.append(str(raised.value))
 
@@ -364,7 +369,9 @@ async def test_no_refusal_message_renders_a_destination_form_or_an_identity() ->
         await harness.seam.bind(
             SEND_EMAIL,
             parameters={"to": [address], "subject": "s", "body": "b"},
-            provenance=CarriedProvenance(spans={}, planned_with_external_content=False),
+            provenance=CarriedProvenance(
+                spans={}, planned_with_external_content=False, coverage=SpanCoverage.NOT_COVERED
+            ),
         )
     refusals.append(str(pending.value))
 

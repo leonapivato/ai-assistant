@@ -104,6 +104,7 @@ from ai_assistant.core.types import (
     PlacementReach,
     PlacementSetter,
     RoutableOperation,
+    SpanCoverage,
 )
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire import (
@@ -242,6 +243,7 @@ def _binding() -> EgressBinding:
         account=BoundAccount(identity="work@example.com", reference="conn-0001"),
         transport_endpoint="test://endpoint/one",
         planned_with_external_content=False,
+        coverage=SpanCoverage.NOT_COVERED,
     )
 
 

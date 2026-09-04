@@ -974,7 +974,46 @@ from ai_assistant.wire.errors import (
 #: released**, exactly as the entry above says of itself: #1956's window stays
 #: open, and ADR-0230 §12 states in terms that it "neither repairs nor inherits"
 #: it.
-PROTOCOL_VERSION: Final[int] = 28
+#:
+#: **29 since ADR-0233 §4**, which adds a **fourth** field, ``coverage``, to
+#: :class:`~ai_assistant.core.types.ConfirmationEgress`. The same limb of ADR-0124
+#: §9 that decided 10 and 11 decides this, and ADR-0233 §15 names the obligation
+#: rather than weighs it: "``PROTOCOL_VERSION`` moves, because
+#: ``ConfirmationEgress`` gains a member and that value crosses the wire (ADR-0178
+#: §6's rule)." It is the same field on the same model that moved 11, so the
+#: arithmetic is that entry's, checked again rather than inherited, and it bites in
+#: **both** directions — which is what makes it a bump rather than a widening one
+#: side can absorb. The field is **required with no default** (ADR-0233 §4), so a
+#: version 29 client decoding a version 28 hub's confirmation fails with
+#: ``missing``; and ``ConfirmationEgress`` sets ``extra="forbid"`` while
+#: ``wire.codec``'s ``project`` renders a model by ``model_dump()``, so a version 29
+#: hub emits the member on every egress confirmation and a version 28 client fails
+#: with ``extra_forbidden`` on it. Both delivery routes are affected by 11's route —
+#: a ``Confirmation`` reaches a client on ``TurnOutcome.step.confirmation``
+#: (``converse``, ``converse_streaming``) and as the element type of
+#: ``pending_confirmations``.
+#:
+#: **The value is a ``StrEnum`` and mints no row in ADR-0087 §2c's scalar table**:
+#: ``project`` already renders every ``Enum`` as its ``value``, which is a string,
+#: exactly as it renders :class:`~ai_assistant.core.types.DiscloserProvenance` on
+#: the spans this same model carries. Nothing else under ``wire/`` changes — not the
+#: framing, the connect exchange, the frame kinds, the codec's dispatch,
+#: ``surface.METHODS`` or either adapter.
+#:
+#: **The method set does not move and stands at forty-nine**, and ADR-0177 §1's
+#: browser enumeration does not move either and stands at thirty-one: ADR-0233 adds
+#: no Protocol, no method and no gateway route (ADR-0233 §13's first clause). The
+#: three ``core`` models the trail reads and no peer emits —
+#: :class:`~ai_assistant.core.types.CoverageUnrecordedBinding` among them — are a
+#: second ground for nothing: ``PermissionDecision`` is named nowhere under
+#: ``wire/`` and is returned by no promoted method, so widening its
+#: ``egress_binding`` union changes no value a peer emits or decodes (ADR-0184 §8's
+#: first clause, still true one epoch on).
+#:
+#: **This move covers the shape going forward and repairs nothing already
+#: released**, on the chain the two entries above are on: #1956's window stays open
+#: and this entry neither repairs it nor inherits it.
+PROTOCOL_VERSION: Final[int] = 29
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

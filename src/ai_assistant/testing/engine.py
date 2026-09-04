@@ -2344,8 +2344,11 @@ class FakeAssistantEngine:
 
         **The egress member is reduced from the binding by the same rule the real
         engine uses** (ADR-0178 §5): ``account_identity`` from
-        ``egress.account.identity`` and ``spans`` from ``egress.spans``, and
-        ``None`` where no binding is given. That identity is what makes this fake a
+        ``egress.account.identity``, ``spans`` from ``egress.spans``, and each of
+        ``planned_with_external_content`` and ``coverage`` transcribed from the
+        binding's own (ADR-0181 §3, ADR-0233 §4) — never a constant of this fake's,
+        which would be the second carriage those clauses forbid. ``None`` where no
+        binding is given. That identity is what makes this fake a
         producer the shared contract's ADR-0178 §3 clause can be held to — a fake
         assembling the member some other way would pass a suite written against
         itself.
@@ -2373,6 +2376,7 @@ class FakeAssistantEngine:
                     account_identity=egress.account.identity,
                     spans=egress.spans,
                     planned_with_external_content=egress.planned_with_external_content,
+                    coverage=egress.coverage,
                 )
             ),
         )

@@ -115,6 +115,7 @@ from ai_assistant.core.types import (
     ConfirmationEgress,
     ContinuationToken,
     ConversationSummary,
+    CoverageUnrecordedBinding,
     DeferralAdmissionOutcome,
     Disposition,
     Evidence,
@@ -1119,18 +1120,26 @@ def _confirmation_egress(recorded: PermissionDecision) -> ConfirmationEgress | N
     round-trips whole (ADR-0150 §9) and both sites hold a whole decision. There is
     no reduced, digested or partial recovered form.
 
-    **An origin-unrecorded binding is refused rather than assumed away**
-    (ADR-0184 §8). ``ConfirmationEgress.planned_with_external_content`` is required
-    with no default, so composing one for a row that never recorded the value would
-    demand exactly the fabrication ADR-0184 exists to avoid — at the surface where
-    the user is being asked to approve something, which is the worst place in the
-    system to invent a fact. ``None`` is not the answer either: ADR-0178 §4 makes it
-    the discriminator for "the ruling was not taken over an egress binding at all",
+    **Neither unrecorded binding is assumed away; each is refused**
+    (ADR-0184 §8, ADR-0233 §14). ``ConfirmationEgress``'s
+    ``planned_with_external_content`` and ``coverage`` are both required with no
+    default, so composing one for a row that never recorded the value would demand
+    exactly the fabrication ADR-0184 exists to avoid — at the surface where the user
+    is being asked to approve something, which is the worst place in the system to
+    invent a fact. ``None`` is not the answer either: ADR-0178 §4 makes it the
+    discriminator for "the ruling was not taken over an egress binding at all",
     which for a row naming an account and a recipient would be false. So the absence
-    is answered by not asking the question, and neither assembly site can reach one:
-    both are fed by ``AuditTrail.pending_confirmation``, which answers ``None`` for
-    such a row (ADR-0184 §5), and by a decision this process has just recorded,
-    which ``record`` refuses to be one (§4).
+    is answered by not asking the question, and neither assembly site can reach
+    either shape: both are fed by ``AuditTrail.pending_confirmation``, which answers
+    ``None`` for both (ADR-0184 §5, ADR-0233 §14), and by a decision this process
+    has just recorded, which ``record`` refuses to be either (§4).
+
+    **The coverage-unrecorded refusal is stated and not inherited**, because the
+    origin guard does not catch that epoch: such a row **has**
+    ``planned_with_external_content``, so it is not an ``OriginUnrecordedBinding``
+    and falls straight past the ``isinstance`` written for one, reaching the
+    constructor where a required ``coverage`` can be neither transcribed from a
+    binding that does not carry it nor honestly invented.
 
     Args:
         recorded: The recorded ``CONFIRM`` this confirmation is about.
@@ -1141,9 +1150,9 @@ def _confirmation_egress(recorded: PermissionDecision) -> ConfirmationEgress | N
         egress binding and nothing more.
 
     Raises:
-        PlanningError: If the decision's binding records no origin. Unreachable
-            from either assembly site, and stated as a floor rather than a route
-            that exists.
+        PlanningError: If the decision's binding records no origin, or records no
+            coverage. Unreachable from either assembly site, and stated as a floor
+            rather than a route that exists.
     """
     binding = recorded.egress_binding
     if binding is None:
@@ -1154,10 +1163,17 @@ def _confirmation_egress(recorded: PermissionDecision) -> ConfirmationEgress | N
             "no origin: the value the user would be shown was never recorded"
         )
         raise PlanningError(msg)
+    if isinstance(binding, CoverageUnrecordedBinding):
+        msg = (
+            "a confirmation cannot be composed for a decision whose egress binding records "
+            "no coverage: the value the user would be shown was never recorded"
+        )
+        raise PlanningError(msg)
     return ConfirmationEgress(
         account_identity=binding.account.identity,
         spans=binding.spans,
         planned_with_external_content=binding.planned_with_external_content,
+        coverage=binding.coverage,
     )
 
 

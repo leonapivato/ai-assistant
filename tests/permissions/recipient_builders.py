@@ -35,6 +35,7 @@ from ai_assistant.core.types import (
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
+    SpanCoverage,
 )
 from ai_assistant.testing.recipient_grants import (
     RECIPIENT_GRANT_ACCOUNT,
@@ -111,6 +112,7 @@ def binding(
         account=account,
         transport_endpoint=ENDPOINT,
         planned_with_external_content=external,
+        coverage=SpanCoverage.NOT_COVERED,
     )
 
 

@@ -495,8 +495,15 @@ def _downgrade_egress_rows(audit_path: Path) -> None:
     """Rewrite every stored egress binding as a pre-ADR-0181 build wrote it.
 
     Rewritten from what this build actually stored rather than hand-built, so the
-    fixture is the current encoding minus exactly one key — a hand-written row could
-    drift into a shape no build ever produced, and would then be testing nothing.
+    fixture is the current encoding minus exactly the keys that epoch had not begun
+    writing — a hand-written row could drift into a shape no build ever produced, and
+    would then be testing nothing.
+
+    **Two keys rather than one since ADR-0233 §14**, because the epochs are ordered:
+    a build predating ``planned_with_external_content`` necessarily predates
+    ``coverage`` too, so a genuine pre-origin row lacks both. A row lacking only the
+    origin key is nobody's epoch and satisfies no rung of the union at all, which
+    ``tests/permissions/test_audit.py`` pins.
     """
     conn = sqlite3.connect(audit_path)
     try:
@@ -507,6 +514,7 @@ def _downgrade_egress_rows(audit_path: Path) -> None:
             if binding is None:
                 continue
             del binding["planned_with_external_content"]
+            del binding["coverage"]
             conn.execute("UPDATE decisions SET data = ? WHERE id = ?", (json.dumps(stored), row_id))
         conn.commit()
     finally:

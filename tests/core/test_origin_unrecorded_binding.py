@@ -36,6 +36,7 @@ from ai_assistant.core.types import (
     CanonicalDestination,
     ConfirmationEgress,
     CostBasis,
+    CoverageUnrecordedBinding,
     DataTier,
     DestinationProtocol,
     DiscloserProvenance,
@@ -49,6 +50,7 @@ from ai_assistant.core.types import (
     PermissionRuling,
     Reversibility,
     RiskLevel,
+    SpanCoverage,
     ToolCost,
     ToolDefinition,
     _EgressBindingBase,
@@ -80,8 +82,8 @@ _SHARED: dict[str, object] = {
     "transport_endpoint": _ENDPOINT,
 }
 
-_UNION = TypeAdapter[EgressBinding | OriginUnrecordedBinding | None](
-    EgressBinding | OriginUnrecordedBinding | None
+_UNION = TypeAdapter[EgressBinding | CoverageUnrecordedBinding | OriginUnrecordedBinding | None](
+    EgressBinding | CoverageUnrecordedBinding | OriginUnrecordedBinding | None
 )
 
 
@@ -108,7 +110,11 @@ def _pair(*spans: EgressSpan) -> tuple[EgressBinding, OriginUnrecordedBinding]:
     """The two siblings over identical shared members, for a correspondence case."""
     shared: dict[str, object] = {**_SHARED, "spans": spans}
     return (
-        EgressBinding(**shared, planned_with_external_content=False),  # type: ignore[arg-type]  # heterogeneous test kwargs
+        EgressBinding(
+            **shared,  # type: ignore[arg-type]  # heterogeneous test kwargs
+            planned_with_external_content=False,
+            coverage=SpanCoverage.NOT_COVERED,
+        ),
         OriginUnrecordedBinding(**shared),  # type: ignore[arg-type]  # heterogeneous test kwargs
     )
 
@@ -180,13 +186,16 @@ def test_the_two_rosters_differ_by_exactly_the_origin_field() -> None:
         "account",
         "transport_endpoint",
         "planned_with_external_content",
+        "coverage",
     )
 
 
 # --- §2, §10: the shared base, asserted structurally --------------------------
 
 
-@pytest.mark.parametrize("model", [EgressBinding, OriginUnrecordedBinding])
+@pytest.mark.parametrize(
+    "model", [EgressBinding, CoverageUnrecordedBinding, OriginUnrecordedBinding]
+)
 @pytest.mark.parametrize(
     "declared",
     [
@@ -311,15 +320,30 @@ def test_the_sibling_refuses_the_span_tuples_a_binding_refuses() -> None:
     with pytest.raises(ValidationError, match=r"described twice"):
         OriginUnrecordedBinding(**{**_SHARED, "spans": duplicated})  # type: ignore[arg-type]  # heterogeneous test kwargs
     with pytest.raises(ValidationError, match=r"described twice"):
-        EgressBinding(**{**_SHARED, "spans": duplicated}, planned_with_external_content=False)  # type: ignore[arg-type]  # heterogeneous test kwargs
+        EgressBinding(
+            **{**_SHARED, "spans": duplicated},  # type: ignore[arg-type]  # heterogeneous kwargs
+            planned_with_external_content=False,
+            coverage=SpanCoverage.NOT_COVERED,
+        )
 
 
 # --- §3: the discrimination is total and mutually exclusive -------------------
 
 
 def test_a_stored_object_carrying_the_origin_validates_as_the_binding_alone() -> None:
-    """§3's first row: the flag present selects the flagged model, and nothing else."""
-    stored = {**_SHARED, "planned_with_external_content": True}
+    """§3's first row as ADR-0233 §14 restates it: both keys select ``EgressBinding``.
+
+    §3's *property* — structural, total and mutually exclusive, with no discriminator
+    field — is preserved exactly; it is the two-shape **sentence** ADR-0233 §14
+    replaces with a three-rung one. A row carrying ``planned_with_external_content``
+    alone is now the middle rung, which
+    ``tests/core/test_coverage_unrecorded_binding.py`` owns.
+    """
+    stored = {
+        **_SHARED,
+        "planned_with_external_content": True,
+        "coverage": SpanCoverage.NOT_COVERED,
+    }
 
     decoded = _UNION.validate_python(stored)
 
@@ -328,11 +352,17 @@ def test_a_stored_object_carrying_the_origin_validates_as_the_binding_alone() ->
 
 
 def test_a_stored_object_without_the_origin_validates_as_the_sibling_alone() -> None:
-    """§3's second row: the flag absent selects the flagless model, and nothing else."""
+    """§3's second row as ADR-0233 §14 restates it: **neither** key selects this rung.
+
+    The epochs are totally ordered, so a row lacking ``planned_with_external_content``
+    necessarily lacks ``coverage`` too — which is why the roster this model declares
+    is ADR-0184 §1's with the second name added and its narrowness untouched.
+    """
     decoded = _UNION.validate_python(dict(_SHARED))
 
     assert isinstance(decoded, OriginUnrecordedBinding)
     assert not isinstance(decoded, EgressBinding)
+    assert not isinstance(decoded, CoverageUnrecordedBinding)
 
 
 def test_a_stored_object_missing_the_origin_and_faulty_elsewhere_still_raises() -> None:
@@ -399,7 +429,11 @@ def test_a_decision_carrying_the_sibling_authorises_nothing(offered_origin: bool
         parameters={},
         step_id="step-1",
         execution_id="exec-1",
-        egress_binding=EgressBinding(**_SHARED, planned_with_external_content=offered_origin),  # type: ignore[arg-type]  # heterogeneous test kwargs
+        egress_binding=EgressBinding(
+            **_SHARED,  # type: ignore[arg-type]  # heterogeneous test kwargs
+            planned_with_external_content=offered_origin,
+            coverage=SpanCoverage.NOT_COVERED,
+        ),
     )
     recorded = PermissionDecision(
         id="d-1",
@@ -444,7 +478,11 @@ def test_from_request_transcribes_the_narrow_field_and_makes_no_sibling() -> Non
         tool=_TOOL,
         parameters={},
         step_id="step-1",
-        egress_binding=EgressBinding(**_SHARED, planned_with_external_content=True),  # type: ignore[arg-type]  # heterogeneous test kwargs
+        egress_binding=EgressBinding(
+            **_SHARED,  # type: ignore[arg-type]  # heterogeneous test kwargs
+            planned_with_external_content=True,
+            coverage=SpanCoverage.NOT_COVERED,
+        ),
     )
 
     recorded = PermissionDecision.from_request(

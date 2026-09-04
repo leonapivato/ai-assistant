@@ -8821,6 +8821,81 @@ class DiscloserProvenance(StrEnum):
     SYSTEM_SELECTED = "system_selected"
 
 
+class SpanCoverage(StrEnum):
+    """Which of ADR-0155 §3's two prohibitions governs what a call would carry (ADR-0233 §4).
+
+    One three-valued fact about the **call**, over every span it would transmit.
+    ADR-0155 §3's first clause defines *covered content* — everything this
+    system's stores touch, and everything any operation supplied with it produces
+    — and makes the character of each *covered path* three-valued at every supply
+    site: covered with a model call on the path, covered with none, or not
+    covered. These are those three states and no others. This type restates,
+    narrows and widens **nothing** of that clause; it is the recorded answer to
+    it, and every member below means what that clause means (ADR-0233 §3).
+
+    **Three members rather than a boolean, because the two prohibitions are
+    different prohibitions.** A boolean "is this covered" cannot tell the
+    absolutely forbidden case from the approvable one, and a boolean "is this
+    approvable" would put the partition's own reasoning inside a field name where
+    no reviewer can check it against ADR-0155 §3. The members are named for the
+    quantifier each clause carries — *every* path versus *some* path — because the
+    quantifiers are what make the partition exhaustive. No lane adds a fourth
+    member, an "unknown" member or a ``None``-valued absence.
+
+    **Carried, never derived, and never weakened.** The value is computed by the
+    component that composed the call's arguments, from the membership and path
+    character of what it supplied (ADR-0233 §5). Nothing derives it by inspecting
+    an argument's value, its name, its field, its shape or its resemblance to
+    anything — that is ADR-0146 §2's forbidden inference and ADR-0098 §5's
+    unrecoverable relation, read on this axis. Where several components composed
+    over several supplies the value is the **strongest** of their states under the
+    total order below, and no re-composition, re-planning, re-rendering,
+    translation, summarisation, excerpting or round trip through a model improves
+    one. ADR-0155 §3 already forecloses the laundering route: the overlap "falls to
+    the absolute clause", because one non-model path keeps content under it
+    **forever**.
+
+    **A third axis, and not a reading of either of the other two.** It is not
+    :class:`DiscloserProvenance`, not a :class:`DataTier`, and not
+    ``planned_with_external_content`` — which answers a different question, whether
+    the material *selected into the planning call* carried the external mark. No
+    lane reads one of the three off another, at any site, and no surface renders
+    one as the other (ADR-0233 §4, §8).
+
+    **The order is total and is ADR-0155 §3's own, not this type's invention**:
+    ``NOT_COVERED`` < ``MODEL_ON_EVERY_PATH`` < ``PATH_WITHOUT_MODEL``. A call is
+    governed by the most restrictive clause any part of it reaches, which is
+    strictly conservative and is the direction §3 already chose. The member order
+    below is that order; nothing compares two members by their values, because
+    ``StrEnum`` compares as text and ``"model_on_every_path" < "not_covered"``
+    lexically — a lane needing the order writes it out rather than reading it off
+    the strings.
+    """
+
+    #: No covered path, so nothing the call would carry is covered content at all
+    #: (ADR-0233 §4). **Never rendered as an assurance**: it states that no covered
+    #: path was recorded for this call, never that nothing in it relates to
+    #: anything the user has told this system, and never that the send is safe
+    #: (ADR-0233 §8).
+    NOT_COVERED = "not_covered"
+    #: Covered, and every covered path of everything the call would carry contains
+    #: a model call — ADR-0155 §3's **third** clause's subject, and the only class
+    #: this system may carry, under the four conjunctive conditions ADR-0233 §9
+    #: states.
+    MODEL_ON_EVERY_PATH = "model_on_every_path"
+    #: Covered, and at least one covered path of something the call would carry
+    #: contains **no** model call — ADR-0155 §3's **second** clause's subject,
+    #: which is absolute and which no authorisation, user act, policy or grant
+    #: cures. :class:`EgressBinding` refuses it at construction (ADR-0233 §6), so a
+    #: call carrying it is unconstructable rather than merely forbidden. It is also
+    #: the **fail-closed** value: a component holding no recorded origin answers it,
+    #: because a component that wrongly says this gets its call refused and someone
+    #: notices immediately, while one that wrongly says ``NOT_COVERED`` sends the
+    #: user's accumulated model to a third party and nobody notices at all
+    #: (ADR-0233 §4, ADR-0146 §2's fail-closed rule read on this axis).
+    PATH_WITHOUT_MODEL = "path_without_model"
+
+
 class EgressDestination(BaseModel):
     """One **occurrence** of a recipient, in both the forms ADR-0148 §2 requires.
 
@@ -9148,15 +9223,27 @@ class EgressSpan(BaseModel):
 
 
 class _EgressBindingBase(BaseModel):
-    """The members an egress binding carries, whatever epoch recorded it (ADR-0184 §2).
+    """The members every egress binding carries, whatever epoch recorded it (ADR-0184 §2).
 
-    A private base with two public siblings, which is the shape this file already
-    uses for ``_SeverityScale``, ``MemoryBase`` and ``ContextFacet``.
-    :class:`EgressBinding` is the whole binding a live call carries;
-    :class:`OriginUnrecordedBinding` is the same three facts read back out of a row
-    recorded before ADR-0181 §3 added ``planned_with_external_content``. The three
-    members, their validators and the derived :attr:`canonical_destination_set` are
-    declared **once**, here, and neither sibling restates any of them.
+    The root of a private **chain** with three public leaves, which is the shape
+    this file already uses for ``_SeverityScale``, ``MemoryBase`` and
+    ``ContextFacet``. :class:`EgressBinding` is the whole binding a live call
+    carries; :class:`CoverageUnrecordedBinding` is a row recorded between
+    ``planned_with_external_content``'s arrival and ``coverage``'s;
+    :class:`OriginUnrecordedBinding` is these three facts alone, read back out of a
+    row recorded before ADR-0181 §3 added ``planned_with_external_content``. The
+    three members declared here, their validators and the derived
+    :attr:`canonical_destination_set` are declared **once**, here, and no leaf
+    restates any of them (ADR-0233 §14).
+
+    **A chain rather than a matrix, because the epochs are totally ordered in
+    time.** A row lacking ``planned_with_external_content`` necessarily lacks
+    ``coverage`` too, so each shape is the next one minus a field and no fourth
+    combination exists to represent: this base carries what every epoch recorded,
+    :class:`_OriginRecordedBindingBase` beneath it adds the member the second
+    epoch began recording, and :class:`EgressBinding` adds the third's. Each
+    member is therefore still declared exactly once, which is ADR-0184 §2's rule
+    obeyed rather than narrowed.
 
     **Declaring them once is what makes "the same three facts" true by
     construction** rather than by review, and ADR-0184 §2 names what a second
@@ -9174,14 +9261,19 @@ class _EgressBindingBase(BaseModel):
     every live binding, so the one narrowing every consumer performs would silently
     misfire (ADR-0184 §2).
 
-    **Not a value in its own right.** Nothing constructs this base, no field is
-    annotated with it, and no lane widens a field to it to avoid narrowing a union.
-    ``extra="forbid"`` is declared here and inherited by both siblings, which is
-    what makes that union total and mutually exclusive with no discriminator field
-    (ADR-0184 §3): a stored object carrying ``planned_with_external_content``
-    validates as :class:`EgressBinding` and as nothing else, one without it
-    validates as :class:`OriginUnrecordedBinding` and as nothing else, and one that
-    is faulty in any further way still raises.
+    **Not a value in its own right.** Nothing constructs this base or the one
+    beneath it, no field is annotated with either, and no lane widens a field to
+    one to avoid narrowing a union. ``extra="forbid"`` is declared here and
+    inherited by all three leaves, which is what makes that union total and
+    mutually exclusive with no discriminator field (ADR-0184 §3, ADR-0233 §14): a
+    stored object carrying **both** ``planned_with_external_content`` and
+    ``coverage`` validates as :class:`EgressBinding` and as nothing else; one
+    carrying ``planned_with_external_content`` but **not** ``coverage`` validates
+    as :class:`CoverageUnrecordedBinding` and as nothing else; one carrying
+    **neither** validates as :class:`OriginUnrecordedBinding` and as nothing else;
+    and one faulty in any further way — including a row carrying ``coverage``
+    without ``planned_with_external_content``, a shape no epoch wrote — still
+    raises. The tolerance stays exactly as many shapes wide as there are epochs.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
@@ -9359,7 +9451,42 @@ class _EgressBindingBase(BaseModel):
         return self
 
 
-class EgressBinding(_EgressBindingBase):
+class _OriginRecordedBindingBase(_EgressBindingBase):
+    """The members a binding recorded from ADR-0181 §3 onwards carries (ADR-0233 §14).
+
+    The chain's second rung: :class:`_EgressBindingBase`'s three members plus
+    ``planned_with_external_content``, shared by :class:`EgressBinding` and
+    :class:`CoverageUnrecordedBinding` and by nothing else. It exists so that
+    ``planned_with_external_content`` is declared **once** across the two shapes
+    that carry it, which is ADR-0184 §2's declare-each-member-once rule obeyed at
+    the rung the second epoch begins.
+
+    **Not a value in its own right**, exactly as its own base is not: nothing
+    constructs it, no field is annotated with it, and no lane widens a field to it
+    to avoid narrowing a union. A consumer that must tell the shapes apart narrows
+    with ``isinstance`` against a **leaf**; ``isinstance(binding,
+    _OriginRecordedBindingBase)`` is not a discrimination this corpus performs, and
+    a private name is not one an adapter may reach for at all.
+    """
+
+    planned_with_external_content: bool = Field(
+        description=(
+            "The value the seam was handed on "
+            ":attr:`CarriedProvenance.planned_with_external_content`, unchanged "
+            "(ADR-0181 §3). Fixed in the :class:`ActionRequest` before the ruling "
+            "and transcribed verbatim into the recorded decision, exactly as every "
+            "other member of the binding is (ADR-0148 §6). **Required with no "
+            "default**, like every field ADR-0150 §2 names, and for the reason "
+            "ADR-0181 §3 gives: a defaulted False would state that no external "
+            "material was selected, on behalf of a lane that made no selection. "
+            "``rebind`` **transcribes** it from the approved binding rather than "
+            "re-deriving it, which is the second of the three things ADR-0152 §7's "
+            "count now admits (ADR-0181 §3's fifth clause, ADR-0233 §4)."
+        )
+    )
+
+
+class EgressBinding(_OriginRecordedBindingBase):
     """The whole egress binding: surface (a) of ADR-0148 §11 (ADR-0150 §1).
 
     One value rather than several fields, for three reasons and the third is the
@@ -9395,29 +9522,175 @@ class EgressBinding(_EgressBindingBase):
     checked by its validator against its own arguments, where both sides are in
     hand.
 
-    **Three of its four members are declared on the private base it shares with**
-    :class:`OriginUnrecordedBinding` (ADR-0184 §2). Nothing about *this* model
-    moves: ``planned_with_external_content`` stays ``bool``, required, with no
-    default; no member is added to it, removed from it or re-typed; and every
-    ADR-0181 §10 invariant over a binding that has the field holds exactly as
-    ratified. What changed is only where the other three are written down.
+    **Four of its five members are declared on the private chain it shares with**
+    :class:`CoverageUnrecordedBinding` and :class:`OriginUnrecordedBinding`
+    (ADR-0184 §2, ADR-0233 §14). Nothing about the members themselves moves:
+    ``planned_with_external_content`` stays ``bool``, required, with no default;
+    none is removed or re-typed; and every ADR-0181 §10 invariant over a binding
+    that has the field holds exactly as ratified. What changed is only where four
+    of the five are written down.
+
+    **``coverage`` rides here rather than on a span**, for
+    ``planned_with_external_content``'s own reason one axis over (ADR-0233 §4).
+    The fact is about the **call** — ADR-0155 §3's two prohibitions are about what
+    an egress call may carry, and a call carrying one forbidden span is a forbidden
+    call — so a per-span field would look like a span-level claim, would cost two
+    amendments to ratified clauses (ADR-0150 §10's per-span enumeration and
+    ADR-0148 §6's three determinism inputs), and would half-build the per-span
+    classification ADR-0150 §6 reserves to the ADR that closes the **tier** axis.
+    :class:`EgressSpan` gains nothing, so ADR-0150 §5's marker, ADR-0150 §10's
+    enumeration and ADR-0148 §6's three inputs are untouched at the fields they
+    govern.
     """
 
-    planned_with_external_content: bool = Field(
+    coverage: SpanCoverage = Field(
         description=(
-            "The value the seam was handed on "
-            ":attr:`CarriedProvenance.planned_with_external_content`, unchanged "
-            "(ADR-0181 §3). Fixed in the :class:`ActionRequest` before the ruling "
-            "and transcribed verbatim into the recorded decision, exactly as every "
-            "other member of the binding is (ADR-0148 §6). **Required with no "
-            "default**, like every field ADR-0150 §2 names, and for the reason "
-            "ADR-0181 §3 gives: a defaulted False would state that no external "
-            "material was selected, on behalf of a lane that made no selection. "
-            "``rebind`` **transcribes** it from the approved binding rather than "
-            "re-deriving it, which is the second of the two things ADR-0152 §7's "
-            "count now admits (ADR-0181 §3's fifth clause)."
+            "Which of ADR-0155 §3's two prohibitions governs what this call would "
+            "carry, over **every** span it would transmit, taken from "
+            ":attr:`CarriedProvenance.coverage` unchanged (ADR-0233 §4). Where the "
+            "spans differ the value is the **strongest** of their states under "
+            ":class:`SpanCoverage`'s total order, because ADR-0155 §3 rules that "
+            '"the overlap falls to the absolute clause". **Required with no '
+            "default**, for ADR-0181 §3's reason read one axis over: the "
+            "safe-looking default is ``NOT_COVERED``, which asserts that nothing in "
+            "the call came from anywhere near this system's stores — the exact claim "
+            "§3's partition exists to stop anyone making by accident. "
+            "``PATH_WITHOUT_MODEL`` is refused at construction (ADR-0233 §6), and "
+            "``rebind`` **transcribes** the value from the approved binding rather "
+            "than re-deriving it, which is the third of the three things ADR-0152 "
+            "§7's count now admits."
         )
     )
+
+    @model_validator(mode="after")
+    def _refuses_a_path_without_a_model_call(self) -> Self:
+        """Refuse ``PATH_WITHOUT_MODEL`` at construction, unconditionally (ADR-0233 §6).
+
+        ADR-0155 §3's **second** clause — a span may not carry covered content some
+        covered path of which contains no model call — gets its first mechanism
+        here. The refusal admits no argument, no tool, no account, no
+        configuration, no policy and no user act, and no lane adds a parameter, a
+        flag or a subclass through which one could be admitted.
+
+        **At construction rather than at the ruling**, because ADR-0155 §3's fourth
+        clause makes authorisation irrelevant to it: "No authorisation makes a
+        transmission either prohibition above forbids lawful." A refusal a policy
+        could be replaced out of is not the refusal that clause asks for, which is
+        also why ADR-0233 §6 adds no ``ActionPolicy`` floor for this case — a
+        request carrying the value is unconstructable, so a policy clause would be a
+        second statement of one invariant with nothing to rule on.
+
+        **The whole call is refused rather than the span, and that is the
+        conservative direction.** ADR-0155 §3's clauses are stated over a span, so a
+        per-span refusal would let the rest of a call through; refusing the call
+        refuses a superset and never admits a span either clause forbids. It also
+        matches what the seam can do — ADR-0150 §4 makes the spans the arguments,
+        and a send missing an argument is not a narrower send but a different one.
+
+        **This discharges ADR-0155 §4's marked clause only to the extent the value
+        was honestly recorded**, and no lane states or implies more. Nothing here
+        detects a component that records ``NOT_COVERED`` for a call carrying a store
+        value, and nothing inspects content to check a recorded state against it.
+
+        **The message names no value** (ADR-0150 §8): the state is what names the
+        defect, and it is a recorded classification rather than any part of the
+        payload.
+
+        Raises:
+            ValueError: If ``coverage`` is ``PATH_WITHOUT_MODEL``.
+        """
+        if self.coverage is SpanCoverage.PATH_WITHOUT_MODEL:
+            msg = (
+                "an egress call carrying covered content some covered path of which "
+                "contains no model call is forbidden absolutely, whatever any "
+                "authorisation, policy, grant or user answer says, so no binding "
+                "describes one (ADR-0155 §3, ADR-0233 §6)"
+            )
+            raise ValueError(msg)
+        return self
+
+
+class CoverageUnrecordedBinding(_OriginRecordedBindingBase):
+    """A recorded egress binding from before the coverage field existed (ADR-0233 §14).
+
+    Read out of the permission trail and **never** minted, exactly as
+    :class:`OriginUnrecordedBinding` is. It represents a decision row written
+    between ``planned_with_external_content``'s arrival on :class:`EgressBinding`
+    (ADR-0181 §3) and ``coverage``'s (ADR-0233 §4): a stored binding carrying every
+    member ``EgressBinding`` requires **but** ``coverage``, each required with no
+    default and each satisfying every invariant ``EgressBinding`` enforces over
+    those members. A row failing in any other way, in any additional way, or at any
+    other position is a corrupted or downgraded store exactly as it was before
+    (ADR-0184 §1).
+
+    **This is ADR-0184 §9's deferral answered, and answered the other way.** §9
+    deferred a stored payload version for the trail's ``data`` column and named its
+    firing condition — the next member added required-with-no-default to a model
+    the trail stores — obliging the ADR adding that member to choose between a
+    second sibling and a version. ADR-0233 §14 chooses the sibling, because **a
+    version key names a schema and supplies no representable value for a row
+    lacking a required field**: a stored binding missing one still decodes into no
+    type, so a row at an older version would be neither typed nor legible, which is
+    the failure ADR-0184 is titled against. §9's objection to accumulating siblings
+    does not bite either, and the reason is structural: six pairwise discriminations
+    is the cost of *unordered* variants, and these are **ordered**, so each shape is
+    the next one minus a field and the discrimination is two field-presence tests
+    taken in one direction. No lane adds a further member to this union on the
+    strength of this ADR; an ADR adding another member required with no default to a
+    model the trail stores makes §9's choice again, in its own text, with three data
+    points.
+
+    **The shape of the stored value is the whole of the condition.** No lane
+    recognises such a row by ``decided_at``, by a date range, by a schema-version
+    marker, by a table column or by a deployment identifier (ADR-0184 §1).
+
+    **It carries the facts the row recorded rather than standing for their
+    absence.** A user reading their exported trail sees the connected account, every
+    occurrence in both forms, the payload description, the transport endpoint and
+    the recorded origin of the call — everything the row actually holds — and learns
+    exactly one thing more: that the coverage of this call was never recorded.
+
+    **Nothing is fabricated, in either direction.** ``coverage`` is required with no
+    default and ADR-0233 §5 forbids a seam inventing one, so every member of
+    :class:`SpanCoverage` is out; this model does not carry the member at all, so
+    ``model_dump`` emits no key for it and an export is a faithful copy of what the
+    row says. Nothing is written back either: no migration rewrites, backfills,
+    annotates, versions, re-keys or deletes such a row, and
+    :meth:`~ai_assistant.core.protocols.AuditTrail.record` refuses a decision
+    carrying this shape, so it is only ever read out of a store and never minted
+    into one (ADR-0184 §4, ADR-0233 §14).
+
+    **A decision carrying one authorises nothing.**
+    :meth:`PermissionDecision.authorises` answers ``False`` for it against every
+    request, and no conjunct was added to make that true: the binding is compared
+    whole and by value (ADR-0150 §9, ADR-0181 §3), pydantic's equality is per class,
+    so a model of this class never equals an :class:`EgressBinding` whatever its
+    members hold, and ``None`` equals neither (ADR-0184 §6).
+    :meth:`~ai_assistant.core.protocols.ActionPolicy.resolve` returns no ``ALLOW``
+    on a ``confirmed`` carrying one, whatever ``approved`` says, for ADR-0184 §7's
+    own reason extended by cause: the fact the ruling would rest on was never
+    recorded.
+
+    **Unconstructable from any live path.** :attr:`ActionRequest.egress_binding`
+    stays ``EgressBinding | None`` and :meth:`PermissionDecision.from_request`
+    transcribes the binding from the request, so no builder can mint this shape and
+    no request can carry one (ADR-0184 §2, §4). No lane composes a
+    :class:`ConfirmationEgress` from one either — that model's ``coverage`` is
+    required with no default, so composing one would demand the fabrication this
+    representation exists to avoid, at the surface where a user is being asked to
+    approve something (ADR-0233 §14).
+
+    **The origin guard does not catch this epoch, which is why every refusal for it
+    is stated rather than inherited.** Such a row **has**
+    ``planned_with_external_content``, so it is not an
+    :class:`OriginUnrecordedBinding` and trips no ``isinstance`` written for that
+    class; it falls past every origin guard and reaches the site regardless.
+
+    **A consumer tells the three apart with** ``isinstance`` **and nothing else.**
+    No tag, no version key, no ``Literal`` member and no ``Field(discriminator=...)``
+    is added to any of the three — ``extra="forbid"`` on the shared chain already
+    does the job — and no convenience is minted for the narrowing (ADR-0184 §2, §3).
+    """
 
 
 class OriginUnrecordedBinding(_EgressBindingBase):
@@ -9427,13 +9700,16 @@ class OriginUnrecordedBinding(_EgressBindingBase):
     row written between ``egress_binding``'s arrival on
     :class:`PermissionDecision` (ADR-0150 §1) and
     ``planned_with_external_content``'s (ADR-0181 §3): a stored binding carrying
-    every member :class:`EgressBinding` requires **except** that one, each
-    satisfying its own constraint, and carrying no member ``EgressBinding`` does not
-    declare. A row failing in any other way, in any additional way, or at any other
-    position is a corrupted or downgraded store exactly as it was before (ADR-0184
-    §1). ADR-0184 §9 authorises exactly this one sibling for exactly that one epoch;
-    a further member added required-with-no-default to a stored model decides its
-    own history representation in its own ADR rather than inheriting this one.
+    every member :class:`EgressBinding` requires **except** that one **and**
+    ``coverage`` — a genuine pre-origin row lacks both, because the epochs are
+    totally ordered and it predates each (ADR-0233 §14) — each satisfying its own
+    constraint, and carrying no member ``EgressBinding`` does not declare. A row
+    failing in any other way, in any additional way, or at any other position is a
+    corrupted or downgraded store exactly as it was before (ADR-0184 §1). ADR-0184
+    §9 authorised exactly this one sibling for exactly that one epoch and obliged
+    the next such member to decide its own history representation in its own text;
+    ADR-0233 §14 is that decision, and :class:`CoverageUnrecordedBinding` is the
+    shape it mints for the epoch after this one.
 
     **The shape of the stored value is the whole of the condition.** No lane
     recognises such a row by ``decided_at``, by a date range, by a schema-version
@@ -9453,7 +9729,8 @@ class OriginUnrecordedBinding(_EgressBindingBase):
     **Nothing is fabricated, in either direction.** ADR-0181 §3 makes
     ``planned_with_external_content`` required with no default and §4's second
     clause forbids a seam inventing it, so ``False`` and ``True`` are both out; this
-    model does not carry the member at all, so ``model_dump`` emits no key for it
+    model carries neither that member nor ``coverage``, so ``model_dump`` emits no
+    key for either
     and an export is a faithful copy of what the row says. Nothing is written back
     either: no migration rewrites, backfills, annotates, versions, re-keys or
     deletes such a row, and
@@ -9473,16 +9750,16 @@ class OriginUnrecordedBinding(_EgressBindingBase):
     **Unconstructable from any live path.** :attr:`ActionRequest.egress_binding`
     stays ``EgressBinding | None`` and :meth:`PermissionDecision.from_request`
     transcribes the binding from the request, so no builder can mint this shape and
-    no request can carry one (ADR-0184 §2, §4). Nothing under ``wire/`` changes
-    either, and no lane composes a ``ConfirmationEgress`` from one — that model's
+    no request can carry one (ADR-0184 §2, §4). No lane composes a
+    ``ConfirmationEgress`` from one — that model's
     ``planned_with_external_content`` is required with no default, so composing one
     would demand the fabrication this whole representation exists to avoid, at the
     surface where a user is being asked to approve something (ADR-0184 §8).
 
-    **A consumer tells the two apart with** ``isinstance`` **and nothing else.** No
-    tag, no version key, no ``Literal`` member and no ``Field(discriminator=...)``
-    is added to either model — ``extra="forbid"`` on the shared base already does
-    the job — and ADR-0184 §2 declines to mint a convenience for the narrowing.
+    **A consumer tells the three apart with** ``isinstance`` **and nothing else.**
+    No tag, no version key, no ``Literal`` member and no ``Field(discriminator=...)``
+    is added to any of the three — ``extra="forbid"`` on the shared chain already
+    does the job — and ADR-0184 §2 declines to mint a convenience for the narrowing.
     """
 
 
@@ -9504,8 +9781,18 @@ class ConfirmationEgress(BaseModel):
     *floor*. One value is either whole or absent, and the absent case is a fact
     about the call rather than a state to reason about (:attr:`Confirmation.egress`).
 
-    **Three fields since ADR-0181 §3, not two.** ADR-0178 §2's "exactly two
-    fields" is narrowed by a count and by nothing else (ADR-0181 §11):
+    **Four fields since ADR-0233 §4, not three and not two.** ADR-0178 §2's
+    "exactly two fields" was narrowed to three by ADR-0181 §3 and is narrowed to
+    four here, by a count and by nothing else (ADR-0181 §11, ADR-0233 §14): each
+    added member is the recorded decision's own value, reaching a surface by
+    ADR-0178 §5's transcription rather than as a second carriage of it. ADR-0178
+    §10's ``model_fields`` roster test moves by one further entry and keeps its
+    subject, which is that no field of this model is named or typed for a
+    connection reference, a transport endpoint, a :class:`BoundAccount` or a
+    :class:`SecretName` — and ``coverage`` is none of those.
+
+    **``planned_with_external_content`` since ADR-0181 §3.** It is narrowed by a
+    count and by nothing else (ADR-0181 §11):
     ``planned_with_external_content`` is the recorded decision's own value, reaching
     a surface by ADR-0178 §5's transcription rather than as a second carriage of it
     (ADR-0150 §1). It is a fact about the **call** — that the material this system
@@ -9600,6 +9887,28 @@ class ConfirmationEgress(BaseModel):
             ":attr:`EgressBinding.spans` and for the same reason: a defaulted "
             "description would let a producer omit the field and get an empty "
             "payload description rather than having to state one."
+        )
+    )
+    coverage: SpanCoverage = Field(
+        description=(
+            "The recorded decision's :attr:`EgressBinding.coverage`, populated from "
+            ":attr:`PermissionDecision.egress_binding` at both assembly sites and by "
+            "no other route (ADR-0178 §5, ADR-0233 §4). A **transcription** and not "
+            "a second carriage (ADR-0150 §1): it mints no type, carries no second "
+            "copy of anything else, and is not a :class:`ConfirmationDestination`. "
+            "**Required with no default**, like the three members above — which is "
+            "also why a :class:`CoverageUnrecordedBinding` is refused at both "
+            "assembly sites rather than filled in, since a row that never recorded "
+            "the fact offers nothing to transcribe and inventing one at the surface "
+            "where a user is asked to approve something is the fabrication ADR-0184 "
+            "exists to avoid. **What a surface owes for it is ADR-0233 §8's**: a "
+            "statement about **the call**, rendered before the answer is collected, "
+            "beside the span values and never in place of any of them, in **all "
+            "three** states; never a per-span claim, never a detection, a score, a "
+            "risk level or a warning, never conflated with "
+            "``planned_with_external_content``, and — for ``NOT_COVERED`` — never an "
+            "assurance. Carrying the fact here is what makes those lanes possible; "
+            "it asserts nothing about whether either renderer has landed it yet."
         )
     )
     planned_with_external_content: bool = Field(
@@ -10002,6 +10311,14 @@ class CarriedProvenance(BaseModel):
     recorded origin constructs one over an empty mapping and passes it
     deliberately. This is ADR-0150 §5's no-default reasoning applied at the seam
     that would otherwise inherit the permissive answer for free.
+
+    **``coverage`` rides here beside ``planned_with_external_content`` and
+    ``spans`` is untouched** (ADR-0233 §4). Its key type, its value type, its
+    detachment validator and its serializer all stand: ``coverage`` is a fact about
+    the **call** rather than about a span, so it is a member of this carrier and not
+    an entry in its mapping, and the seam writes the binding's value from it
+    unchanged exactly as ADR-0181 §3 makes it write
+    ``planned_with_external_content``.
     """
 
     model_config = ConfigDict(
@@ -10021,6 +10338,29 @@ class CarriedProvenance(BaseModel):
             "absent from it is SYSTEM_SELECTED, written by the seam that builds "
             "the span rather than defaulted by a field (ADR-0146 §2). Required "
             "with no default."
+        )
+    )
+    coverage: SpanCoverage = Field(
+        description=(
+            "Which of ADR-0155 §3's two prohibitions governs what this call would "
+            "carry, over every span it would transmit (ADR-0233 §4, §5). Computed "
+            "by the component that **composed the call's arguments**, from the "
+            "membership and path character of what it supplied to the operations "
+            "that produced them, and written here before the request reaches "
+            ":meth:`~ai_assistant.core.protocols.EgressBinder.bind`. A value a "
+            "model, a tool, a declaration or a plan emitted for it is **discarded, "
+            "not merged**, and nothing derives it by inspecting an argument's value, "
+            "its name, its field, its shape or its resemblance to anything — that is "
+            "ADR-0146 §2's forbidden inference and ADR-0098 §5's unrecoverable "
+            "relation read on this axis. Where several components composed over "
+            "several supplies the value is the **strongest** of their states under "
+            ":class:`SpanCoverage`'s total order, and no re-composition, "
+            "re-planning, re-rendering, translation, summarisation, excerpting or "
+            "round trip through a model improves one. **Required with no default**: "
+            "the safe-looking default is ``NOT_COVERED``, which asserts that nothing "
+            "in the call came from anywhere near this system's stores, so a caller "
+            "holding no recorded origin passes ``PATH_WITHOUT_MODEL`` deliberately "
+            "and has its call refused at construction, in code a reviewer can see."
         )
     )
     planned_with_external_content: bool = Field(
@@ -10507,20 +10847,22 @@ class PermissionDecision(BaseModel):
             "deployment that set no confirmation lifetime."
         ),
     )
-    egress_binding: EgressBinding | OriginUnrecordedBinding | None = Field(
-        default=None,
-        description=(
-            "The binding the ruling was taken over, transcribed verbatim from the "
-            "request by :meth:`from_request` and never supplied by a caller "
-            "(ADR-0150 §9). ``None`` for every decision about a non-egress call, "
-            "and it continues to mean exactly that and nothing else (ADR-0150 §1). "
-            "An :class:`OriginUnrecordedBinding` is the third arm and arrives by "
-            "**one** route only: a store decoding a row recorded before ADR-0181 §3 "
-            "added ``planned_with_external_content`` (ADR-0184 §2). It is one field "
-            "still, with that name and that default; a consumer that must tell the "
-            "two bindings apart narrows with ``isinstance``, and no convenience is "
-            "minted for it."
-        ),
+    egress_binding: EgressBinding | CoverageUnrecordedBinding | OriginUnrecordedBinding | None = (
+        Field(
+            default=None,
+            description=(
+                "The binding the ruling was taken over, transcribed verbatim from the "
+                "request by :meth:`from_request` and never supplied by a caller "
+                "(ADR-0150 §9). ``None`` for every decision about a non-egress call, "
+                "and it continues to mean exactly that and nothing else (ADR-0150 §1). "
+                "The two unrecorded arms arrive by **one** route only: a store decoding "
+                "a row from an epoch that ended — before ADR-0181 §3 added "
+                "``planned_with_external_content`` (ADR-0184 §2), or before ADR-0233 §4 "
+                "added ``coverage`` (ADR-0233 §14). It is one field still, with that "
+                "name and that default; a consumer that must tell the three bindings "
+                "apart narrows with ``isinstance``, and no convenience is minted for it."
+            ),
+        )
     )
 
     @classmethod

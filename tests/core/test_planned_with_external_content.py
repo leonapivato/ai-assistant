@@ -44,6 +44,7 @@ from ai_assistant.core.types import (
     PermissionRuling,
     Reversibility,
     RiskLevel,
+    SpanCoverage,
     ToolCost,
     ToolDefinition,
 )
@@ -80,6 +81,7 @@ def _binding(*, planned_with_external_content: bool) -> EgressBinding:
         account=_ACCOUNT,
         transport_endpoint=_ENDPOINT,
         planned_with_external_content=planned_with_external_content,
+        coverage=SpanCoverage.NOT_COVERED,
     )
 
 
@@ -110,14 +112,17 @@ def _allowing(request: ActionRequest) -> PermissionDecision:
 def test_a_carrier_refuses_construction_with_the_field_omitted() -> None:
     """ADR-0181 §3's first clause: required, with no default."""
     with pytest.raises(ValidationError, match=r"planned_with_external_content"):
-        CarriedProvenance(spans={})  # type: ignore[call-arg]  # the omission under test
+        CarriedProvenance(spans={}, coverage=SpanCoverage.NOT_COVERED)  # type: ignore[call-arg]  # the omission under test
 
 
 def test_a_binding_refuses_construction_with_the_field_omitted() -> None:
     """ADR-0181 §3's second clause: required, with no default."""
     with pytest.raises(ValidationError, match=r"planned_with_external_content"):
         EgressBinding(  # type: ignore[call-arg]  # the omission under test
-            spans=(_SPAN,), account=_ACCOUNT, transport_endpoint=_ENDPOINT
+            spans=(_SPAN,),
+            account=_ACCOUNT,
+            transport_endpoint=_ENDPOINT,
+            coverage=SpanCoverage.NOT_COVERED,
         )
 
 
@@ -125,7 +130,7 @@ def test_a_confirmation_egress_refuses_construction_with_the_field_omitted() -> 
     """ADR-0181 §3's third clause: required, with no default."""
     with pytest.raises(ValidationError, match=r"planned_with_external_content"):
         ConfirmationEgress(  # type: ignore[call-arg]  # the omission under test
-            account_identity=_ACCOUNT.identity, spans=(_SPAN,)
+            account_identity=_ACCOUNT.identity, spans=(_SPAN,), coverage=SpanCoverage.NOT_COVERED
         )
 
 
@@ -138,12 +143,15 @@ def test_each_model_keeps_the_value_it_was_given(stated: bool) -> None:
     surface with nothing to render on exactly the calls whose silence a user learns
     to read as clearance.
     """
-    carrier = CarriedProvenance(spans={}, planned_with_external_content=stated)
+    carrier = CarriedProvenance(
+        spans={}, planned_with_external_content=stated, coverage=SpanCoverage.NOT_COVERED
+    )
     binding = _binding(planned_with_external_content=stated)
     reduced = ConfirmationEgress(
         account_identity=_ACCOUNT.identity,
         spans=(_SPAN,),
         planned_with_external_content=stated,
+        coverage=SpanCoverage.NOT_COVERED,
     )
 
     assert carrier.planned_with_external_content is stated
@@ -151,24 +159,32 @@ def test_each_model_keeps_the_value_it_was_given(stated: bool) -> None:
     assert reduced.planned_with_external_content is stated
 
 
-def test_the_carrier_holds_the_two_facts_it_carries_and_no_third() -> None:
-    """ADR-0181 §3: one field added to the carrier, and ADR-0152 §1's is unchanged.
+def test_the_carrier_holds_the_three_facts_it_carries_and_no_fourth() -> None:
+    """ADR-0181 §3 and ADR-0233 §4: two fields added, and ADR-0152 §1's is unchanged.
 
     The span mapping still answers ADR-0146 §1's axis — *who disclosed this span* —
-    and the new field answers ADR-0181 §1's third: whether this system's selection
-    rested on recorded external content. §1's third clause forbids reading either as
-    an answer on the other, and the type keeps them apart by holding both.
+    and each added field answers an axis of its own: ADR-0181 §1's third, whether
+    this system's selection rested on recorded external content, and ADR-0233 §4's,
+    which of ADR-0155 §3's two prohibitions governs what the call would carry. Each
+    ADR forbids reading any of the three as an answer on another, and the type keeps
+    them apart by holding all three.
     """
-    assert set(CarriedProvenance.model_fields) == {"spans", "planned_with_external_content"}
+    assert set(CarriedProvenance.model_fields) == {
+        "spans",
+        "planned_with_external_content",
+        "coverage",
+    }
     assert all(field.is_required() for field in CarriedProvenance.model_fields.values())
 
     carrier = CarriedProvenance(
         spans={EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED},
         planned_with_external_content=True,
+        coverage=SpanCoverage.MODEL_ON_EVERY_PATH,
     )
 
     assert carrier.spans[EgressSpanLocator(argument="body")] is DiscloserProvenance.USER_AUTHORED
     assert carrier.planned_with_external_content is True
+    assert carrier.coverage is SpanCoverage.MODEL_ON_EVERY_PATH
 
 
 # --- §3's fourth clause, §10: `authorises` compares it with the rest -----------

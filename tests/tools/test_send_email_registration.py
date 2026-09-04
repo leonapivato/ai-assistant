@@ -58,6 +58,7 @@ from ai_assistant.core.types import (
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
+    SpanCoverage,
     ToolCall,
     ToolOutcome,
     parameter_violations,
@@ -296,7 +297,9 @@ async def test_a_send_with_no_connected_account_is_refused_not_answered_none() -
         await seam.bind(
             SEND_EMAIL,
             parameters=arguments(),
-            provenance=CarriedProvenance(spans={}, planned_with_external_content=False),
+            provenance=CarriedProvenance(
+                spans={}, planned_with_external_content=False, coverage=SpanCoverage.NOT_COVERED
+            ),
         )
 
 
@@ -363,7 +366,9 @@ async def test_an_authorised_call_reaches_the_transport_and_the_message_goes_out
     bound = await seam.bind(
         SEND_EMAIL,
         parameters=parameters,
-        provenance=CarriedProvenance(spans={}, planned_with_external_content=False),
+        provenance=CarriedProvenance(
+            spans={}, planned_with_external_content=False, coverage=SpanCoverage.NOT_COVERED
+        ),
     )
     assert bound is not None
 
@@ -421,7 +426,9 @@ async def test_the_singular_phrasing_validates_binds_and_reaches_the_wire() -> N
     bound = await seam.bind(
         SEND_EMAIL,
         parameters=parameters,
-        provenance=CarriedProvenance(spans={}, planned_with_external_content=False),
+        provenance=CarriedProvenance(
+            spans={}, planned_with_external_content=False, coverage=SpanCoverage.NOT_COVERED
+        ),
     )
     assert bound is not None
     recipients = [span for span in bound.binding.spans if span.destination is not None]
@@ -456,7 +463,9 @@ async def test_a_transport_refusal_comes_back_as_a_classified_failure_not_an_esc
     bound = await seam.bind(
         SEND_EMAIL,
         parameters=parameters,
-        provenance=CarriedProvenance(spans={}, planned_with_external_content=False),
+        provenance=CarriedProvenance(
+            spans={}, planned_with_external_content=False, coverage=SpanCoverage.NOT_COVERED
+        ),
     )
     assert bound is not None
     moved = bound.binding.model_copy(update={"transport_endpoint": "smtps://elsewhere.invalid:465"})
@@ -524,6 +533,7 @@ async def test_an_ordinary_callable_reached_with_a_binding_is_refused() -> None:
             account=BoundAccount(identity=IDENTITY, reference=REFERENCE),
             transport_endpoint=ENDPOINT,
             planned_with_external_content=False,
+            coverage=SpanCoverage.NOT_COVERED,
         ),
     )
     decision = PermissionDecision.from_request(

@@ -31,12 +31,14 @@ from permission_builders import action, decision, ruling, tool
 from ai_assistant.core.types import (
     BoundAccount,
     CostBasis,
+    CoverageUnrecordedBinding,
     DataTier,
     EgressBinding,
     OriginUnrecordedBinding,
     PermissionOutcome,
     Reversibility,
     RiskLevel,
+    SpanCoverage,
     ToolCost,
     ToolDefinition,
 )
@@ -89,7 +91,10 @@ def _name_tiers(tiers: tuple[DataTier, ...]) -> str:
 #: marker: the binding still names an account and still derives a non-empty canonical
 #: set (ADR-0148 §2's third clause), and ``egress_binding is None`` is the
 #: discriminator (ADR-0178 §4).
-_SHARED_MEMBERS: dict[str, object] = {
+#: The four members :class:`EgressBinding` and :class:`CoverageUnrecordedBinding`
+#: share; :func:`_origin_unrecorded` takes the three of them that reach the rung it
+#: sits on (ADR-0233 §14).
+_ORIGIN_RECORDED_MEMBERS: dict[str, object] = {
     "spans": (),
     "account": BoundAccount(identity="work@example.com", reference="conn-0001"),
     "transport_endpoint": "test://endpoint/one",
@@ -102,10 +107,14 @@ def _planned_over_external(*, marked: bool) -> EgressBinding:
     Built here rather than in ``permission_builders`` because only this suite rules
     over it: ADR-0181 §5's obligation is the ``ActionPolicy`` contract's, and the
     trail's suite has no clause that reads the field. Everything else is
-    :data:`_SHARED_MEMBERS`, which leaves nothing but this field for a refusal to be
-    about.
+    :data:`_ORIGIN_RECORDED_MEMBERS`, which leaves nothing but this field for a
+    refusal to be about.
     """
-    return EgressBinding(**_SHARED_MEMBERS, planned_with_external_content=marked)  # type: ignore[arg-type]  # heterogeneous shared members
+    return EgressBinding(
+        **_ORIGIN_RECORDED_MEMBERS,  # type: ignore[arg-type]  # heterogeneous shared members
+        planned_with_external_content=marked,
+        coverage=SpanCoverage.NOT_COVERED,
+    )
 
 
 def _origin_unrecorded() -> OriginUnrecordedBinding:
@@ -116,15 +125,37 @@ def _origin_unrecorded() -> OriginUnrecordedBinding:
     ``AuditTrail.record`` refuses it outright. What a suite may do is what a **store
     decoding a row** does, which is this.
 
-    Sharing ``_SHARED_MEMBERS`` with :func:`_planned_over_external` is what makes the
-    boundary case sharp: the two subjects differ in their *class* and in nothing
-    else, so a policy refusing the legacy one on some unrelated ground would fail
-    the pair rather than pass the clause.
+    Sharing ``_ORIGIN_RECORDED_MEMBERS`` with :func:`_planned_over_external` is what
+    makes the boundary case sharp: the two subjects differ in their *class* and in
+    nothing else, so a policy refusing the legacy one on some unrelated ground would
+    fail the pair rather than pass the clause.
     """
-    return OriginUnrecordedBinding(**_SHARED_MEMBERS)  # type: ignore[arg-type]  # heterogeneous shared members
+    return OriginUnrecordedBinding(**_ORIGIN_RECORDED_MEMBERS)  # type: ignore[arg-type]  # heterogeneous shared members
 
 
-def _confirmed_with(binding: EgressBinding | OriginUnrecordedBinding) -> PermissionDecision:
+def _coverage_unrecorded() -> CoverageUnrecordedBinding:
+    """The pre-ADR-0233 binding, over the exact members its twins above carry.
+
+    :func:`_origin_unrecorded`'s reasoning one epoch on (ADR-0233 §14): ADR-0184 §4
+    as ADR-0233 extends it leaves no producer that can make one either, so this is
+    built directly, exactly as a store decoding a row produces it.
+
+    **The boundary this sharpens is the one the origin guard does not catch.** Such a
+    row *has* ``planned_with_external_content``, so a policy narrowing only against
+    :class:`OriginUnrecordedBinding` lets it through — which is why ADR-0233 §14
+    states the ``resolve`` floor for this shape rather than leaving it inherited, and
+    why this subject differs from :func:`_planned_over_external`'s in its *class* and
+    in nothing else.
+    """
+    return CoverageUnrecordedBinding(
+        **_ORIGIN_RECORDED_MEMBERS,  # type: ignore[arg-type]  # heterogeneous shared members
+        planned_with_external_content=False,
+    )
+
+
+def _confirmed_with(
+    binding: EgressBinding | CoverageUnrecordedBinding | OriginUnrecordedBinding,
+) -> PermissionDecision:
     """A recorded ``CONFIRM`` carrying ``binding``, whichever class it is.
 
     ``model_copy`` rather than the builder for the legacy arm, and deliberately: the
@@ -665,6 +696,67 @@ class ActionPolicyContract:
 
         assert ordinary.outcome is baseline.outcome, (
             "a binding whose origin was recorded is judged as any confirmation is"
+        )
+        if baseline.outcome is PermissionOutcome.ALLOW:
+            assert refused.outcome is not PermissionOutcome.ALLOW
+
+    # --- ADR-0233 §14: the same floor, one epoch on
+
+    @pytest.mark.parametrize("approved", [True, False])
+    async def test_resolve_returns_no_allow_on_a_binding_recording_no_coverage(
+        self, policy: ActionPolicy, *, approved: bool
+    ) -> None:
+        """ADR-0233 §14's fifth clause: no ``ALLOW``, whatever was answered.
+
+        ADR-0184 §7's floor extended **by cause** and for §7's own reason. Such a
+        decision records a call made before ADR-0233 §4's ``coverage`` existed, so
+        nothing says which of ADR-0155 §3's two prohibitions governs what it would
+        carry: §4 forbids a default and §5's second clause forbids a seam inventing
+        one, which rules out every member of ``SpanCoverage`` alike. The fact the
+        ruling would rest on was never recorded, and no authorisation — the user's
+        own answer included — supplies it.
+
+        **Parametrised over both answers for the case above's reason.** The declining
+        arm passes on ADR-0021 §3 alone; the approving arm is what separates a policy
+        honouring the floor from one that treats consent as sufficient.
+
+        **The clause needed stating rather than inheriting, and this is the case that
+        proves it.** A coverage-unrecorded row *has*
+        ``planned_with_external_content``, so it is not an ``OriginUnrecordedBinding``
+        and an implementation narrowing only against that class lets it straight
+        through — passing every case above while failing this one.
+        """
+        unrecorded = _confirmed_with(_coverage_unrecorded())
+
+        resolved = await policy.resolve(unrecorded, approved=approved)
+
+        assert resolved.outcome is not PermissionOutcome.ALLOW
+        assert resolved.authorised_by is None
+
+    async def test_resolve_judges_a_recorded_coverage_on_the_ordinary_path(
+        self, policy: ActionPolicy
+    ) -> None:
+        """ADR-0233 §14's fifth clause: the boundary, so the floor is not a blanket.
+
+        :meth:`test_resolve_judges_a_whole_binding_on_the_ordinary_path`'s reasoning
+        one epoch on. The two subjects carry the **same** spans, account, transport
+        endpoint and recorded origin and differ only in their class, so a policy that
+        refused every egress confirmation would pass the case above and fail this
+        one — and "return no ``ALLOW`` on a binding recording no coverage" would
+        otherwise be satisfied by an implementation that stopped approving anything
+        with a binding at all, refusing exactly the calls ADR-0233 exists to put to
+        the user.
+        """
+        whole = _confirmed_with(_planned_over_external(marked=False))
+        unrecorded = _confirmed_with(_coverage_unrecorded())
+        unbound = decision("d-plain", ruled=ruling(PermissionOutcome.CONFIRM))
+
+        ordinary = await policy.resolve(whole, approved=True)
+        baseline = await policy.resolve(unbound, approved=True)
+        refused = await policy.resolve(unrecorded, approved=True)
+
+        assert ordinary.outcome is baseline.outcome, (
+            "a binding whose coverage was recorded is judged as any confirmation is"
         )
         if baseline.outcome is PermissionOutcome.ALLOW:
             assert refused.outcome is not PermissionOutcome.ALLOW

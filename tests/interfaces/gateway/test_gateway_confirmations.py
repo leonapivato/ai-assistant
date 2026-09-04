@@ -38,6 +38,7 @@ from ai_assistant.core.types import (
     EgressDestination,
     EgressSpan,
     ExecutionState,
+    SpanCoverage,
     StepOutcome,
     TurnOutcome,
 )
@@ -128,6 +129,7 @@ def _confirmation(
                 account_identity=identity,
                 spans=spans,
                 planned_with_external_content=planned_with_external_content,
+                coverage=SpanCoverage.NOT_COVERED,
             )
             if egress
             else None

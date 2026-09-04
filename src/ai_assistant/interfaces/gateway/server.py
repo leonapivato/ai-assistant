@@ -163,6 +163,7 @@ from ai_assistant.core.types import (
     ContinuationToken,
     ConversationDigest,
     ConversationSummary,
+    CoverageUnrecordedBinding,
     Disposition,
     EgressSpan,
     Evidence,
@@ -4833,7 +4834,7 @@ def _is_unreadable_ruling(decision: PermissionDecision) -> bool:
 
 
 def _recorded_binding_view(
-    binding: EgressBinding | OriginUnrecordedBinding | None,
+    binding: EgressBinding | CoverageUnrecordedBinding | OriginUnrecordedBinding | None,
 ) -> dict[str, Any] | None:
     """The binding a ruling was taken over, in ADR-0178 §7's facts (ADR-0186 §7).
 
@@ -4852,6 +4853,16 @@ def _recorded_binding_view(
     a row states nothing either way about the material the call was planned over, and
     a page reading a missing boolean as ``false`` would turn "not recorded" into "no
     external content", which is a claim the record does not make.
+
+    **A ``CoverageUnrecordedBinding`` is not that arm and is not rendered as one**
+    (ADR-0233 §14). Such a row *does* record the origin of the call — the member
+    rides the rung it shares with :class:`~ai_assistant.core.types.EgressBinding` —
+    so ``origin_unrecorded`` is ``false`` for it and
+    ``planned_with_external_content`` carries the value the row actually holds. What
+    it does not record is its **coverage**, a different axis that no clause of
+    ADR-0186 §7 or ADR-0233 §8 obliges a history row to state: §8's floor is stated
+    over a surface rendering a ``Confirmation``, and this view renders a recorded
+    decision.
     """
     if binding is None:
         return None

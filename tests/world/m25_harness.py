@@ -86,6 +86,7 @@ from ai_assistant.core.types import (
     PermissionRuling,
     Reversibility,
     RiskLevel,
+    SpanCoverage,
     ToolCall,
     ToolCost,
     ToolDefinition,
@@ -671,6 +672,7 @@ def binding(reference: str) -> EgressBinding:
         account=BoundAccount(identity=IDENTITY, reference=reference),
         transport_endpoint=ENDPOINT,
         planned_with_external_content=False,
+        coverage=SpanCoverage.NOT_COVERED,
     )
 
 

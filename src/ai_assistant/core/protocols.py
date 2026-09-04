@@ -4080,6 +4080,21 @@ class ActionPolicy(Protocol):
           gains no matching clause and no lane adds one, because
           :attr:`~ai_assistant.core.types.ActionRequest.egress_binding` stays narrow
           and the case is unconstructable at that member (ADR-0184 §2, §7).
+        * **A ``confirmed`` whose ``egress_binding`` is a**
+          :class:`~ai_assistant.core.types.CoverageUnrecordedBinding` **must not
+          produce an ``ALLOW``, whatever ``approved`` says** (ADR-0233 §14). ADR-0184
+          §7's floor extended **by cause** and for §7's own reason: the fact the
+          ruling would rest on was never recorded, so nothing says which of ADR-0155
+          §3's two prohibitions governs what such a call would carry, and no
+          authorisation — the user's own answer included — supplies one. The clause
+          is stated separately rather than inherited because the origin guard does
+          not catch this epoch: such a row **has**
+          ``planned_with_external_content``, so it is not an
+          ``OriginUnrecordedBinding`` and trips no ``isinstance`` written for that
+          class. It is a floor on the same terms as the clause above —
+          ``AuditTrail.pending_confirmation`` answers ``None`` for such a row too,
+          so nothing in the tree hands one here today — and ``decide`` gains no
+          matching clause for the same reason.
 
         A resolving ``ALLOW`` sets ``authorised_by`` to ``confirmed.id`` — this
         is the one path that may set it, and what it sets is verifiable, since
@@ -4318,16 +4333,21 @@ class AuditTrail(Protocol):
     out a page.
 
     **A history read hands back what the row says, including a binding recorded
-    before ADR-0181 §3's ``planned_with_external_content`` existed** (ADR-0184 §5).
-    ``get``, ``recent``, ``export`` and ``resolution_of`` return such a decision
-    carrying an :class:`~ai_assistant.core.types.OriginUnrecordedBinding` as
-    history, rather than failing — and a ``recent`` or an ``export`` over a trail
-    holding one returns it **together with** every other row, which is the
-    all-or-nothing failure that closes. ``pending_confirmation`` still answers
-    ``None`` for it: a park is a question put to the user and there is no
-    answerable question in one whose origin was never recorded, while a history
-    read states what was recorded. Every *other* unreadable row is reported exactly
-    as before; the tolerance is one shape wide (ADR-0184 §1).
+    before a member of :class:`~ai_assistant.core.types.EgressBinding` existed**
+    (ADR-0184 §5, ADR-0233 §14). ``get``, ``recent``, ``export`` and
+    ``resolution_of`` return such a decision — carrying an
+    :class:`~ai_assistant.core.types.OriginUnrecordedBinding` for a row written
+    before ADR-0181 §3's ``planned_with_external_content``, or a
+    :class:`~ai_assistant.core.types.CoverageUnrecordedBinding` for one written
+    before ADR-0233 §4's ``coverage`` — as history, rather than failing; and a
+    ``recent`` or an ``export`` over a trail holding one returns it **together
+    with** every other row, which is the all-or-nothing failure that closes.
+    ``pending_confirmation`` still answers ``None`` for **either**: a park is a
+    question put to the user and there is no answerable question in one whose
+    origin, or whose coverage, was never recorded, while a history read states what
+    was recorded. Every *other* unreadable row is reported exactly as before; the
+    tolerance is exactly as many shapes wide as there are epochs (ADR-0184 §1,
+    ADR-0233 §14).
 
     That obligation is stated here and pinned in each implementation's own tests
     rather than in the shared conformance suite, for ADR-0049 §5's reason: it is a
@@ -4423,11 +4443,18 @@ class AuditTrail(Protocol):
         settled once, not that the answer is spent on exactly one call.
 
         **Refuses a decision whose ``egress_binding`` is an**
-        :class:`~ai_assistant.core.types.OriginUnrecordedBinding` (ADR-0184 §4),
-        with the trail's existing ``AuditError`` for a decision that is not a valid
-        record and no new error class. That shape represents a row written before
-        ADR-0181 §3 added ``planned_with_external_content``, so it is only ever
-        **read** out of a store and never minted into one: a caller bypassing
+        :class:`~ai_assistant.core.types.OriginUnrecordedBinding` **or a**
+        :class:`~ai_assistant.core.types.CoverageUnrecordedBinding` (ADR-0184 §4,
+        ADR-0233 §14), with the trail's existing ``AuditError`` for a decision that
+        is not a valid record and no new error class. ADR-0184 §4's second clause
+        extended **by cause**, exactly as ADR-0184 §7's floor is: each shape
+        represents a row written in an epoch that has ended — before ADR-0181 §3
+        added ``planned_with_external_content``, or before ADR-0233 §4 added
+        ``coverage`` — so each is only ever **read** out of a store and never minted
+        into one. ``PermissionDecision.from_request`` gains no route to either,
+        because :attr:`~ai_assistant.core.types.ActionRequest.egress_binding` stays
+        narrow, so every live path is closed by construction and ``record`` is the
+        floor for a caller that assembles a decision by hand: a caller bypassing
         ``PermissionDecision.from_request`` could otherwise construct such a
         decision and append it, minting a new row in an epoch that has ended — a
         fabrication of *history*, and the harder one to notice later than a
@@ -4494,8 +4521,9 @@ class AuditTrail(Protocol):
         the caller records, the trail validates what it holds both halves of.
 
         Raises:
-            AuditError: If the decision is not a valid record, which now includes
-                one carrying an ``OriginUnrecordedBinding``.
+            AuditError: If the decision is not a valid record, which includes one
+                carrying an ``OriginUnrecordedBinding`` or a
+                ``CoverageUnrecordedBinding``.
             DuplicateDecisionError: If a decision with this ``id`` is already
                 recorded.
             InvalidResolutionError: If ``resolves`` is set and the invariant
@@ -10973,7 +11001,8 @@ class AssistantEngine(Protocol):
         over "a surface" so that every adapter inherits it: the ruling's outcome,
         its reason, the instant, and the recorded ``ToolDefinition``'s identifier
         and capability read from the row rather than a registry; ADR-0178 §7's
-        content obligations in full over an ``EgressBinding`` or an
+        content obligations in full over an ``EgressBinding``, a
+        :class:`~ai_assistant.core.types.CoverageUnrecordedBinding` or an
         :class:`~ai_assistant.core.types.OriginUnrecordedBinding`; the call's origin
         in **three** distinct states, the third — never recorded — rendered as
         neither of the other two (ADR-0184 §2); nothing at all asserted where the
@@ -11004,10 +11033,11 @@ class AssistantEngine(Protocol):
             TypeError: If ``limit`` is not an integer, or is a ``bool``.
             ValueError: If ``limit`` is not in ``[1, 2**63)``.
             AuditError: If the trail cannot be read, or holds a row that no longer
-                validates. A row whose binding records no origin is **not** such a
-                row: it comes back as history, carrying an
-                :class:`~ai_assistant.core.types.OriginUnrecordedBinding`, together
-                with every other row (ADR-0184 §5).
+                validates. A row whose binding records no origin, or no coverage, is
+                **not** such a row: it comes back as history, carrying an
+                :class:`~ai_assistant.core.types.OriginUnrecordedBinding` or a
+                :class:`~ai_assistant.core.types.CoverageUnrecordedBinding`, together
+                with every other row (ADR-0184 §5, ADR-0233 §14).
             OversizedValueError: If the page exceeds the contract limit.
         """
         ...

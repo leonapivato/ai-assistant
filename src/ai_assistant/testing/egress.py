@@ -46,6 +46,7 @@ from ai_assistant.core.types import (
     EgressSpanLocator,
     FrozenJsonMapping,
     ProvisioningState,
+    SpanCoverage,
     ToolDefinition,
 )
 from ai_assistant.testing.cancellation import LoopSuspension
@@ -440,6 +441,7 @@ class FakeEgressBinder:
             registration,
             carried.spans,
             carried.planned_with_external_content,
+            carried.coverage,
         )
         self._refuse_unlocated(binding, carried.spans)
         return self._pair(binding, checked, arguments)
@@ -494,6 +496,9 @@ class FakeEgressBinder:
             registration,
             carried,
             was.planned_with_external_content,
+            # ADR-0233 §4's sixth clause, one field over from the clause above and
+            # for its reason: transcribed from ``approved``, never re-derived.
+            was.coverage,
         )
         if binding != was:
             msg = (
@@ -703,13 +708,16 @@ class FakeEgressBinder:
         registration: _Registration,
         provenance: Mapping[EgressSpanLocator, DiscloserProvenance],
         planned_with_external_content: bool,
+        coverage: SpanCoverage,
     ) -> EgressBinding:
         """Derive every field of the binding from the declaration and the arguments.
 
-        Two members are **carried** rather than derived and both arrive resolved:
-        each span's ``provenance`` (ADR-0146 §2) and the call's
-        ``planned_with_external_content`` (ADR-0181 §3, §4). Nothing here computes,
-        infers or defaults either.
+        Three members are **carried** rather than derived and each arrives resolved:
+        each span's ``provenance`` (ADR-0146 §2), the call's
+        ``planned_with_external_content`` (ADR-0181 §3, §4) and its ``coverage``
+        (ADR-0233 §4, §5). Nothing here computes, infers or defaults any of them,
+        and a ``PATH_WITHOUT_MODEL`` coverage is refused by the construction below
+        rather than by a check of this fake's own (ADR-0233 §6).
         """
         spans: list[EgressSpan] = []
         for argument in sorted(parameters):
@@ -746,9 +754,14 @@ class FakeEgressBinder:
                 account=account,
                 transport_endpoint=registration.transport_endpoint,
                 planned_with_external_content=planned_with_external_content,
+                coverage=coverage,
             )
         except ValidationError as exc:
-            msg = f"{tool.id}: the spans derived for this call do not form a well-formed binding"
+            msg = (
+                f"{tool.id}: this call does not form a well-formed binding — either its "
+                f"spans do not describe one decomposition, or it carries covered content "
+                f"some covered path of which contains no model call (ADR-0233 §6)"
+            )
             raise _refuse(msg) from exc
 
     def _refuse_unshaped(self, tool: ToolDefinition, argument: str, value: FrozenJson) -> None:

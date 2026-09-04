@@ -44,6 +44,7 @@ from ai_assistant.core.types import (
     ProvisioningState,
     Reversibility,
     RiskLevel,
+    SpanCoverage,
     ToolCost,
     ToolDefinition,
 )
@@ -235,7 +236,9 @@ REFUSES: Final = (
 
 def _no_provenance() -> CarriedProvenance:
     """A carrier over an empty mapping, passed deliberately (ADR-0152 §1)."""
-    return CarriedProvenance(spans={}, planned_with_external_content=False)
+    return CarriedProvenance(
+        spans={}, planned_with_external_content=False, coverage=SpanCoverage.NOT_COVERED
+    )
 
 
 class EgressBinderContract(ABC):
@@ -1154,6 +1157,7 @@ class EgressBinderContract(ABC):
             provenance=CarriedProvenance(
                 spans={EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED},
                 planned_with_external_content=False,
+                coverage=SpanCoverage.NOT_COVERED,
             ),
         )
 
@@ -1183,6 +1187,7 @@ class EgressBinderContract(ABC):
                         EgressSpanLocator(argument="attachment"): DiscloserProvenance.USER_AUTHORED
                     },
                     planned_with_external_content=False,
+                    coverage=SpanCoverage.NOT_COVERED,
                 ),
             )
 
@@ -1251,6 +1256,7 @@ class EgressBinderContract(ABC):
         user_authored = CarriedProvenance(
             spans={EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED},
             planned_with_external_content=False,
+            coverage=SpanCoverage.NOT_COVERED,
         )
 
         bound = await binder.bind(
@@ -1449,6 +1455,7 @@ class EgressBinderContract(ABC):
         carrier = CarriedProvenance(
             spans={EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED},
             planned_with_external_content=False,
+            coverage=SpanCoverage.NOT_COVERED,
         )
         held = self.suspend_next_read(binder)
 
@@ -1549,7 +1556,9 @@ class EgressBinderContract(ABC):
         the way in and was corrupted afterwards.
         """
         tool = self._bypass_subject(binder, registered=registered)
-        carrier = CarriedProvenance(spans={}, planned_with_external_content=False)
+        carrier = CarriedProvenance(
+            spans={}, planned_with_external_content=False, coverage=SpanCoverage.NOT_COVERED
+        )
         object.__setattr__(carrier, "spans", {object(): object()})
 
         with pytest.raises(EgressBindingError) as raised:
@@ -1844,6 +1853,7 @@ class EgressBinderContract(ABC):
             provenance=CarriedProvenance(
                 spans={EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED},
                 planned_with_external_content=False,
+                coverage=SpanCoverage.NOT_COVERED,
             ),
         )
         assert first is not None
@@ -1874,7 +1884,11 @@ class EgressBinderContract(ABC):
         bound = await binder.bind(
             SEND_EMAIL,
             parameters={"to": ["a@example.com"], "subject": "s", "body": "b"},
-            provenance=CarriedProvenance(spans={}, planned_with_external_content=selected_external),
+            provenance=CarriedProvenance(
+                spans={},
+                planned_with_external_content=selected_external,
+                coverage=SpanCoverage.NOT_COVERED,
+            ),
         )
 
         assert bound is not None
@@ -1905,7 +1919,9 @@ class EgressBinderContract(ABC):
         first = await binder.bind(
             SEND_EMAIL,
             parameters=parameters,
-            provenance=CarriedProvenance(spans={}, planned_with_external_content=True),
+            provenance=CarriedProvenance(
+                spans={}, planned_with_external_content=True, coverage=SpanCoverage.NOT_COVERED
+            ),
         )
         assert first is not None
         assert first.binding.planned_with_external_content is True
@@ -1938,7 +1954,9 @@ class EgressBinderContract(ABC):
         first = await binder.bind(
             SEND_EMAIL,
             parameters=parameters,
-            provenance=CarriedProvenance(spans={}, planned_with_external_content=False),
+            provenance=CarriedProvenance(
+                spans={}, planned_with_external_content=False, coverage=SpanCoverage.NOT_COVERED
+            ),
         )
         assert first is not None
 

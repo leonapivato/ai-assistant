@@ -76,6 +76,7 @@ from ai_assistant.core.types import (
     EgressSpanLocator,
     FrozenJsonMapping,
     ProvisioningState,
+    SpanCoverage,
     ToolDefinition,
 )
 from ai_assistant.tools.destinations import (
@@ -473,6 +474,7 @@ class EgressBindingSeam:
             registration,
             carried.spans,
             carried.planned_with_external_content,
+            carried.coverage,
         )
         self._refuse_unlocated_provenance(binding, carried.spans)
         return self._returned(binding, checked, arguments)
@@ -527,6 +529,14 @@ class EgressBindingSeam:
             # ADR-0152 §7's own argument for transcribing the provenance, arriving
             # at the second field and narrowing its count to exactly two.
             was.planned_with_external_content,
+            # ADR-0233 §4's sixth clause: **transcribed** from ``approved`` too, for
+            # the identical reason one field over. The fact is about a composition
+            # made before the confirmation was parked, plausibly before a restart,
+            # and ``rebind`` receives nothing to recompute it from — so a member
+            # that re-derived it would compare unequal to the approved binding and
+            # refuse the very call the user was shown and approved. This is the
+            # third of the three things ADR-0152 §7's count now admits.
+            was.coverage,
         )
         if binding != was:
             msg = (
@@ -677,6 +687,7 @@ class EgressBindingSeam:
         registration: EgressRegistration,
         provenance: Mapping[EgressSpanLocator, DiscloserProvenance],
         planned_with_external_content: bool,
+        coverage: SpanCoverage,
         /,
     ) -> EgressBinding:
         """Derive the whole binding from the declaration and the arguments.
@@ -685,21 +696,30 @@ class EgressBindingSeam:
         would otherwise reach — and every value it reads is a detached copy
         (ADR-0152 §1, §5).
 
-        **Two of the binding's members are carried rather than derived**, and both
-        arrive here already resolved by the member that called this: each span's
-        ``provenance`` (ADR-0146 §2, ADR-0152 §7) and the call's
-        ``planned_with_external_content`` (ADR-0181 §3, §4). Nothing here computes,
-        infers, defaults or amends either — in particular, no origin is recovered by
-        reading an argument's value, its field or its shape, which is ADR-0146 §2's
-        forbidden inference on the first axis and ADR-0181 §4's second clause on the
-        second.
+        **Three of the binding's members are carried rather than derived**, and each
+        arrives here already resolved by the member that called this: each span's
+        ``provenance`` (ADR-0146 §2, ADR-0152 §7), the call's
+        ``planned_with_external_content`` (ADR-0181 §3, §4) and its ``coverage``
+        (ADR-0233 §4, §5). Nothing here computes, infers, defaults or amends any of
+        them — in particular, no origin is recovered by reading an argument's value,
+        its field or its shape, which is ADR-0146 §2's forbidden inference on the
+        first axis, ADR-0181 §4's second clause on the second and ADR-0233 §5's
+        second clause on the third.
+
+        **A ``PATH_WITHOUT_MODEL`` coverage is refused by the construction below**,
+        which is ADR-0233 §6's refusal reaching this seam without a check of its
+        own: the model refuses unconditionally, so a call carrying that value is
+        unconstructable rather than merely forbidden, and this member converts the
+        refusal into the seam's own ``EgressBindingError`` exactly as it converts
+        every other one ADR-0150 states.
 
         Raises:
             EgressBindingError: If a destination-bearing argument's value is not a
                 JSON string or a JSON array of JSON strings; if a supplied form has
                 no canonical form; if a span of a destination-bearing argument
-                would carry no destination; or if the binding does not survive its
-                own construction under ADR-0150 §3, §4 or §8.
+                would carry no destination; if the call's coverage is
+                ``PATH_WITHOUT_MODEL`` (ADR-0233 §6); or if the binding does not
+                survive its own construction under ADR-0150 §3, §4 or §8.
         """
         spans: list[EgressSpan] = []
         for argument in sorted(parameters):
@@ -712,11 +732,15 @@ class EgressBindingSeam:
                 account=account,
                 transport_endpoint=registration.transport_endpoint,
                 planned_with_external_content=planned_with_external_content,
+                coverage=coverage,
             )
         except ValidationError as exc:
             msg = (
-                f"{declaration.tool_id}: the spans derived for this call do not form a "
-                f"well-formed binding, so no partial one is produced (ADR-0150 §3, §4)"
+                f"{declaration.tool_id}: this call does not form a well-formed binding, so "
+                f"no partial one is produced — either its spans do not describe one "
+                f"decomposition (ADR-0150 §3, §4) or it carries covered content some "
+                f"covered path of which contains no model call, which is forbidden "
+                f"absolutely (ADR-0155 §3, ADR-0233 §6)"
             )
             raise _refuse(msg) from exc
         self._refuse_omitted_destination(declaration, binding)
@@ -929,16 +953,17 @@ class EgressBindingSeam:
     ) -> Mapping[EgressSpanLocator, DiscloserProvenance]:
         """The approved binding's provenance, keyed by locator (ADR-0152 §7).
 
-        The **first of the two** things ``rebind`` takes from ``approved``, the
-        second being ``planned_with_external_content`` (ADR-0181 §3's fifth clause,
-        which narrows ADR-0152 §7's count from exactly one to exactly two and
-        narrows nothing else in it: everything else is still re-derived and the
-        equality refusal is unchanged). Transcribing it is forced: a recorded origin
-        is a fact about an act that happened before the confirmation was parked,
-        plausibly before a restart, and a member that re-derived it would describe
-        every span as ``SYSTEM_SELECTED`` and refuse every resumed call whose user
-        typed anything. The second is transcribed for the same reason one field
-        over, and has no accessor of its own because it is a single scalar read
+        The **first of the three** things ``rebind`` takes from ``approved``, the
+        other two being ``planned_with_external_content`` (ADR-0181 §3's fifth
+        clause) and ``coverage`` (ADR-0233 §4's sixth clause) — which between them
+        narrow ADR-0152 §7's count from exactly one to exactly three and narrow
+        nothing else in it: everything else is still re-derived and the equality
+        refusal is unchanged. Transcribing it is forced: a recorded origin is a fact
+        about an act that happened before the confirmation was parked, plausibly
+        before a restart, and a member that re-derived it would describe every span
+        as ``SYSTEM_SELECTED`` and refuse every resumed call whose user typed
+        anything. The other two are transcribed for the same reason one field over,
+        and neither has an accessor of its own because each is a single scalar read
         straight off the approved binding rather than a mapping to rebuild.
         """
         return {
