@@ -135,11 +135,12 @@ _MAX_XFORM_INVOCATIONS: Final = 5_000
 _FONT_FILE_KEYS: Final = ("/FontFile", "/FontFile2", "/FontFile3")
 
 #: The subtypes for which the adopted extraction reaches ``_parse_font_descriptor``
-#: **unconditionally**. ``/Type3`` also reaches it, but only where the font is
-#: *interpretable* — a property of its ``/CharProcs`` glyph names — so it is left out
-#: here on purpose: over-approximating this set would refuse a document the extraction
-#: fetches, which is the one direction ADR-0232 §3 is least entitled to be wrong in.
-_DESCRIPTOR_SUBTYPES: Final = ("/Type1", "/MMType1", "/TrueType")
+#: at all. Three of them reach it unconditionally; ``/Type3`` reaches it only where
+#: the font is *interpretable*, which :func:`_reaches_the_font_descriptor` decides the
+#: way the library decides it. Neither approximation of this set is safe to guess at:
+#: too wide refuses a document the extraction fetches, too narrow reports a malformed
+#: document as over-bound.
+_DESCRIPTOR_SUBTYPES: Final = ("/Type1", "/MMType1", "/TrueType", "/Type3")
 
 
 class ExtractionFailedError(Exception):
@@ -398,6 +399,35 @@ def _charged_font_program(font: PdfObject) -> StreamObject | None:
     return resolved if isinstance(resolved, StreamObject) else None
 
 
+def _reaches_the_font_descriptor(font: DictionaryObject) -> bool:
+    """Whether building this font reaches ``Font._parse_font_descriptor``.
+
+    ``Font.from_font_resource``'s own condition, key for key. Three subtypes reach it
+    whenever a ``/FontDescriptor`` is present. ``/Type3`` reaches it only when the font
+    is **interpretable**, which the library defines as carrying a ``/ToUnicode`` or
+    having every ``/CharProcs`` glyph name in Adobe's standard set — "Type3 fonts that
+    do not specify a ``/ToUnicode`` mapping cannot be reliably converted into character
+    codes unless all named chars in ``/CharProcs`` map to a standard adobe glyph".
+
+    The glyph table is read **lazily and only here**, on a path a document reaches only
+    once it already carries two font programs in one descriptor (below). A release that
+    moved or dropped it therefore raises ``ImportError`` on that path alone, which
+    :func:`_extract_pdf` turns into ``EXTRACTION_FAILED`` — the fail-closed answer
+    ADR-0232 §3 prescribes where the walk cannot establish what the extraction will do,
+    and the right answer for that document in any case.
+    """
+    subtype = font.get("/Subtype", "")
+    if subtype not in _DESCRIPTOR_SUBTYPES:
+        return False
+    if subtype != "/Type3" or "/ToUnicode" in font:
+        return True
+    from pypdf._codecs.adobe_glyphs import (  # noqa: PLC0415 — see the docstring
+        adobe_glyphs,
+    )
+
+    return all(name in adobe_glyphs for name in font.get("/CharProcs") or [])
+
+
 def _refuse_unbuildable_font(font: PdfObject) -> None:
     """Refuse where the extraction's own font *initialisation* will raise.
 
@@ -412,32 +442,43 @@ def _refuse_unbuildable_font(font: PdfObject) -> None:
     decoding it produces: ``Font._parse_font_descriptor`` raises ``PdfReadError`` where
     one ``/FontDescriptor`` names a program under more than one of
     :data:`_FONT_FILE_KEYS`. It is decided here from keys, before anything is decoded,
-    which is the same standard §3 sets for the font predicate itself.
+    which is the same standard §3 sets for the font predicate itself — and both halves
+    of the condition are the library's own rather than a forecast of it, the second
+    being :func:`_reaches_the_font_descriptor`.
 
     **The residual is stated rather than hidden.** Font initialisation can also raise
     from a limit only *doing the work* discovers — a ``/ToUnicode`` past
-    ``MAPPING_DICTIONARY_SIZE_LIMIT``, a ``/Widths`` past ``MAX_WIDTH_ENTRY_COUNT``.
-    Establishing those would mean decoding and parsing, in the walk, an input ADR-0232
-    §2 and §10 leave uncharged and unbounded by name — paying the cost the bound exists
-    to refuse, before it has refused anything. So a document that is **both** malformed
-    that way **and** over the bound is reported ``TOO_LARGE`` rather than
-    ``EXTRACTION_FAILED``. It is refused either way; what is lost is which of two
-    refusals an operator is shown, and buying it back costs the property that makes the
-    bound a bound.
+    ``MAPPING_DICTIONARY_SIZE_LIMIT``, a ``/Widths`` or a descendant ``/W`` past
+    ``MAX_WIDTH_ENTRY_COUNT`` or ``MAX_CID_WIDTH_ENTRY_COUNT``. Establishing those means
+    either decoding, in the walk, an input ADR-0232 §2 and §10 leave uncharged and
+    unbounded by name — paying the cost the bound exists to refuse, before it has
+    refused anything — or re-implementing the library's width grammar, which is the
+    second grammar §3 forbids for content streams and forbids here for the same reason.
+    So a document that is **both** malformed that way **and** over the bound is reported
+    ``TOO_LARGE`` rather than ``EXTRACTION_FAILED``. **It is refused either way**: §3's
+    harm clause is about refusing a document "the stated quantity says must fetch", and
+    no reading fetches this one. What is lost is which of two refusals an operator is
+    shown, and buying it back costs the property that makes the bound a bound.
 
     Raises:
         ExtractionFailedError: Where the extraction's font initialisation will raise.
     """
-    if not isinstance(font, DictionaryObject):
-        return
-    if font.get("/Subtype", "") not in _DESCRIPTOR_SUBTYPES:
-        return
-    if "/FontDescriptor" not in font:
+    if not isinstance(font, DictionaryObject) or "/FontDescriptor" not in font:
         return
     descriptor = font["/FontDescriptor"]
     if not isinstance(descriptor, DictionaryObject):
         return
-    if sum(key in descriptor for key in _FONT_FILE_KEYS) > 1:
+    if sum(key in descriptor for key in _FONT_FILE_KEYS) <= 1:
+        # The cheap, decisive half first: one program or none is a font the extraction
+        # builds, whatever else is true of it, so nothing further need be asked.
+        return
+    try:
+        reaches = _reaches_the_font_descriptor(font)
+    except AttributeError, TypeError:
+        # `_extract_text` swallows exactly these while building a font and carries on
+        # to parse the content stream, so this is a parse that *does* happen.
+        return
+    if reaches:
         raise ExtractionFailedError(_UNBUILDABLE_FONT)
 
 
