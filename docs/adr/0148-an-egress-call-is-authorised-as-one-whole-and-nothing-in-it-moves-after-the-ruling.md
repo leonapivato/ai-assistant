@@ -2,6 +2,27 @@
 
 - Status: Partially superseded by ADR-0192 (§9's third clause, as it reaches where an attempt's outcome is recorded and not which four outcomes there are)
 - Date: 2026-08-13
+- **Amended: 2026-09-04 by ADR-0233 — §6's determinism clause, by a count and by
+  nothing else.** That clause makes the payload description "a function of exactly
+  **three** things — the request's own arguments … the provenance the request
+  carries for their spans, and the registry's definition for the bound tool — and of
+  nothing else". ADR-0233 §4 adds `EgressSpan.coverage`, a recorded three-valued
+  fact per span saying which of ADR-0155 §3's two prohibitions governs that span's
+  value, carried on the request exactly as provenance is. So the inputs become
+  **four** and a reader holding only this ADR would read the enumeration as closed.
+  **This record was commissioned in terms**: ADR-0150 §6's last clause rules that the
+  lane closing the recorded-per-span-classification residue "amends that clause and
+  records it under ADR-0082 §1".
+  **Determinism itself is unchanged and is the reason the amendment is a count.** The
+  fourth input is a fact the request *carries*, like the second, so two derivations of
+  one request's description still agree and the clause's exclusion — "no clock, no
+  configuration, no store read, no network" — is untouched. §6's coverage clause,
+  its binding roster, its connected-account rules and its provisioning order are
+  unaffected. §8's approver clause is not amended: ADR-0233 §8 adds an obligation on
+  top of §8's floor and of ADR-0178 §7's, and every sentence of both stays true —
+  what the confirmation must *name* is what it was, and what a surface must now also
+  *render* is the argument values `Confirmation.parameters` has carried since
+  ADR-0042 §4. §9's four outcomes are untouched, and ADR-0233 adds no fifth.
 - Partially superseded: 2026-08-24 by ADR-0192 — **one clause of §9, on *where* an
   attempt's outcome is recorded.** §9's third clause rules that "The four outcomes
   ADR-0017 §3 requires are the step's and no others", and the unmarked reasoning

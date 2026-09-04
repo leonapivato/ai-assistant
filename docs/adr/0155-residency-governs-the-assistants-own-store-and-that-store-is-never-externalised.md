@@ -1,7 +1,34 @@
 # 155. Residency governs the assistant's own store, and that store is never externalised
 
-- Status: Accepted
+- Status: Accepted, §3's third clause amended by ADR-0233 (its closing sentence alone, on the owner's ruling of 2026-09-04 taking arm (b); §3's second clause and every other clause of this ADR stand)
 - Date: 2026-08-14
+- **Amended: 2026-09-04 by ADR-0233 — §3's third clause, in its closing sentence and nothing else.**
+  That sentence reads *"An owner ruling alone does not relax this clause; relaxation
+  requires the commissioned ADR and its approval surface, ratified, and **until then
+  every lane implements the prohibition as written**."* The owner ruled arm **(b)**
+  on 2026-09-04 (#1996), and ADR-0233 is the ADR that arm commissions: it designs the
+  content-bearing approval surface, states its privacy consequences, and states the
+  four conditions under which this clause no longer forbids a span. A reader holding
+  only this ADR would read "until then" as still running, which is ADR-0070 §1's
+  first limb, so the record is made here.
+  **What is *not* changed, and a reader stopping at the qualifier will get this
+  wrong.** Ratifying ADR-0233 relaxes nothing for any call: its condition is a
+  property of a call — the span's coverage recorded, a per-call `CONFIRM` answered
+  by the user, a confirmation that carried the span's own bytes under its surface
+  floor, and those bytes bound by `parameters_digest` — so before that mechanism
+  exists in code no call can meet it and this clause binds exactly as written.
+  §3's **second** clause is untouched, unrelaxed and now *more* strictly enforced:
+  ADR-0233 §6 makes a span carrying covered content with a covered path containing
+  no model call refusable at `EgressBinding` construction, which is the first
+  mechanism any clause of §3 has ever had. §3's first, fourth, fifth and sixth
+  clauses bind entire, and ADR-0233 is neither the export ADR §3's fifth clause
+  reserves nor cited toward one. §4's marked clause is discharged only for spans
+  whose coverage was honestly recorded, and ADR-0233 §6 says so in its own marked
+  clause rather than claiming more. §4's *account of the tree* is unmarked and has
+  since gone stale in two respects that change no obligation: `send_email` **is**
+  now registered at the seam (`build_send_email_integration`, wired in
+  `app/composition.py`), so #1154's stated trigger has fired, and `recall_memory`
+  was removed by ADR-0208 §1.
 - **Note (2026-08-14): ratified.** `Proposed` → `Accepted` on the repaired tree
   `953aec450d77`, printed round 25, churn ratio 2.8. Adversarial returned **APPROVE
   with no findings**, recording that it checked the repaired clause references and
