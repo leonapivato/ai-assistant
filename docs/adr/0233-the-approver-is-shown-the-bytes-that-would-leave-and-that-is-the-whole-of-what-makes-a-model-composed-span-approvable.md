@@ -986,9 +986,10 @@ judgement being made in this ADR's text, which is where it is reviewed.
 - **ADR-0184.** A record **is** owed and is in this ADR's header: §2's roster
   sentence and §9's one-sibling clause. What is *not* owed there is a record about
   §9's *deferral*, which is unmarked prose in a marked ADR (ADR-0089 §3) and is
-  discharged rather than amended, and none about §3, §5, §6, §7 or §8, each of which
-  stays true and is relied on by §14 below. §5's readers and §8's refusals speak of the
-  *origin*-unrecorded shape and keep speaking of it exactly; §14 states the parallel
+  discharged rather than amended, and none about §3, §4, §5, §6, §7 or §8, each of
+  which stays true and is relied on by §14 below. §4's write-path refusal, §5's readers
+  and §8's refusals speak of the *origin*-unrecorded shape and keep speaking of it
+  exactly; §14 states the parallel
   rules for the new sibling in this ADR's own text rather than widening theirs, which
   is the same instrument §7's floor is extended by.
 - **ADR-0152.** No record on §7's substance; its "exactly one" count was already
@@ -1037,6 +1038,17 @@ judgement being made in this ADR's text, which is where it is reviewed.
 > fact the ruling would rest on was never recorded. The clause is stated on the
 > `ActionPolicy` Protocol and asserted in `ActionPolicyContract`, beside ADR-0184 §7's,
 > and no signature moves.
+
+> **Normative.** The write path is closed to it as well, and ADR-0184 §4's second
+> clause is extended **by cause** exactly as §7's floor is: `AuditTrail.record`
+> refuses a decision whose `egress_binding` is a `CoverageUnrecordedBinding`, with the
+> trail's existing `AuditError` for a decision that is not a valid record and no new
+> error class, asserted in the shared `AuditTrailContract` suite beside ADR-0184 §4's.
+> This shape too is only ever **read** out of a store and never minted into one.
+> `PermissionDecision.from_request` gains no route to it either, because the clause
+> above leaves `ActionRequest.egress_binding` narrow — so every live path is closed by
+> construction and `record` is the floor for a caller that assembles a decision by
+> hand.
 
 > **Normative.** The park route is closed to this epoch too, by cause rather than by
 > re-argument. `AuditTrail.pending_confirmation` answers `None` for a decision whose
@@ -1105,18 +1117,21 @@ This section is direction for the lanes that build it, and it binds them as mark
 > **Normative.** "Before anything implements against it" bounds that PR by a test and
 > not by a list: outside `core` it carries exactly what this ADR's own clauses make
 > unsatisfiable, or the tree unbuildable, without it — and nothing else. As this ADR
-> stands that is four things. The fail-closed `PATH_WITHOUT_MODEL` at every existing
+> stands that is five things. The fail-closed `PATH_WITHOUT_MODEL` at every existing
 > construction site whose composer does not yet compute the value, because `coverage`
 > is required with no default and the tree must build. §4's transcription of
 > `coverage` from the recorded decision's `egress_binding` at both `ConfirmationEgress`
 > assembly sites, because §4 admits no other route and a constant there would be a
 > second carriage. The `PROTOCOL_VERSION` move the next clause requires. The
-> `ActionPolicyContract` assertion the clause after it requires. Two things it does
+> `ActionPolicyContract` assertion the clause after it requires. §14's
+> `AuditTrailContract` assertion of the `record` refusal, for the same reason as the
+> `ActionPolicy` one: the type it refuses lands in this PR and nothing later is owed
+> it. Two things it does
 > **not** carry, and they are what the first sentence is for: the composer's
 > computation of the value, which is the lane below, and any change to a rendering
 > surface, which is §8's lanes. A lane that finds a fifth thing the contract makes
 > unavoidable carries it under this test and records that it did, rather than reading
-> the four as exhaustive.
+> the five as exhaustive.
 
 > **Normative.** `PROTOCOL_VERSION` moves, because `ConfirmationEgress` gains a member
 > and that value crosses the wire (ADR-0178 §6's rule).
@@ -1179,6 +1194,9 @@ builds the case rather than inventing one:
   first decision does not authorise.
 - A confirmation on `converse_spoken` speaks `SPOKEN_PARK_SENTENCE` and no part of the
   content, exactly as ADR-0207 §2 already requires.
+- A `PermissionDecision` assembled by hand around a `CoverageUnrecordedBinding` is
+  refused by `AuditTrail.record` with `AuditError`, so the shape cannot be minted into
+  a trail and back-dated as history it is not.
 - A `CONFIRM` **persisted** before `coverage` existed is not offered by
   `pending_confirmation`, no `Confirmation` is assembled from it at either site, and
   the step stays `AWAITING_APPROVAL` with its row intact — the shape ADR-0184 §5 gives
@@ -1197,9 +1215,9 @@ builds the case rather than inventing one:
 This ADR is in **ADR-0089's marked regime**: the marked clauses are the whole of what
 it obligates, and the prose beside them determines what they mean and supplies no
 obligation of its own (ADR-0089 §3). Marking is forward-only, so nothing this ADR
-cites is retro-marked (§5). What binds is **seventy-two clauses**: §1's three, §2's
+cites is retro-marked (§5). What binds is **seventy-three clauses**: §1's three, §2's
 three, §3's two, §4's eight, §5's three, §6's four, §7's two, §8's eleven, §9's four,
-§10's four, §11's six, §12's three, §13's two, §14's seven and §15's ten. Each is a
+§10's four, §11's six, §12's three, §13's two, §14's eight and §15's ten. Each is a
 block quote at column 0 preceded by a blank line, stating one obligation with its own
 scope (§2); passages stating two separable obligations were split in drafting for that
 reason.
