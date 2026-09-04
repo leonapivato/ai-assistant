@@ -39,11 +39,16 @@
   written"*, which §10 obeys rather than extends; and §15's first entry, which leaves
   this lane its questions open and which §1, §2 and §5 below answer one by one.
 - **Amends** [ADR-0148](0148-an-egress-call-is-authorised-as-one-whole-and-nothing-in-it-moves-after-the-ruling.md)
-  — **§1's single-route clause and §9's first, second and fourth clauses, in the
-  single scope of a `WEB_SEARCH` servicing's send, and nothing else.** §1 routes every
-  send through `ToolInvoker.invoke`; §6 below shows why that route is unavailable to
-  this send and what replaces it. §9's first clause rules that *"There is no egress
-  outside a claimed step"*, its second that *"`PermissionDecision.step_id` is set on
+  — **§1's single-route clause, §7's first clause and §9's first, second and fourth
+  clauses, in the single scope of a `WEB_SEARCH` servicing's send, and nothing else.**
+  §1 routes every send through `ToolInvoker.invoke`; §6 below shows why that route is
+  unavailable to this send and what replaces it. §7's first clause reads a credential
+  only from *"inside a callable reached by `ToolInvoker.invoke` on a `ToolCall`, and
+  only after ADR-0029 §2's three seam checks have passed"*; §5 below moves that
+  position to `WebSearcher.search` after those same three checks and keeps every
+  prohibition the clause states, including — by §7's own fourth clause, which binds
+  here as it binds there — its reconciliation with §6's discard clause. §9's first
+  clause rules that *"There is no egress outside a claimed step"*, its second that *"`PermissionDecision.step_id` is set on
   every egress decision"*, and its fourth that the reconciliation path for a pending
   attempt is ADR-0014 §4's recovery scan; §6 below keeps the **property** all three
   buy — ADR-0017 §3's condition 12, an attempt identifier carrying an explicit
@@ -54,7 +59,8 @@
   extends nor narrows that record. **Everything else in ADR-0148 binds entire and is
   load-bearing here**: §2's canonical destination set, §3's recipient authorisation
   tracing to a user act and its refusal of every near-miss, §4's whole-set rule, §6's
-  determinism, §7's positional credential gate, §8's approver and its three floors,
+  determinism, §7's remaining five clauses — its fourth among them, which is what
+  reconciles §6's discard with its first — §8's approver and its three floors,
   §9's four outcomes with *pending* among them, and §9's prohibition on resolving a
   pending attempt by guessing. No clause of ADR-0148 is relaxed; one route is added
   beside one, under conditions §6 states.
@@ -606,20 +612,32 @@ the other's input.
 > word changed, the position being this member rather than a callable
 > `ToolInvoker.invoke` reached, and the property it states unchanged: no component
 > reads one to decide whether it may be read, to construct a client for a call not yet
-> ruled on, to canonicalise a destination, to build a payload description, or on any
-> path a refusal can reach. **No credential crosses the `QueryComposer` or
+> ruled on, to canonicalise a destination, or to build a payload description.
+> **ADR-0148 §7's fourth clause binds here as it binds there.** That clause reconciles
+> the prohibitions above with ADR-0148 §6's discard clause — the prohibitions govern a
+> call that was **refused**, which constructs no `ToolCall` and reaches no callable, so
+> nothing is read, while the discard governs a call that was **authorised** and whose
+> account changed under it after the read, where the credential is in hand and the rule
+> is that it is not used — and it reconciles the clause below with this one in exactly
+> those terms. **No credential crosses the `QueryComposer` or
 > `WebSearcher` seams in either direction**, and no component outside `tools/` holds
 > one on account of this decision.
 
-> **Normative.** **ADR-0148 §6's post-read discard clause binds this callable
-> verbatim.** After the credential is in hand and **before any byte is transmitted**,
+> **Normative.** **ADR-0148 §6's one-step clause and its post-read discard clause
+> both bind this callable verbatim.** Reading the identity, revision, provisioning
+> state and slot recorded for the bound reference and calling `Secrets.get` for **that
+> slot** are **one step, with no `await` between them** — ADR-0097 §5a's rule for a
+> grant and a read, transposed onto the credential as ADR-0148 §6 transposes it, so
+> that the revision the check below compares against cannot have been read across a
+> suspension and the slot read from cannot be one a displacing act has already
+> retired. Then, after the credential is in hand and **before any byte is transmitted**,
 > the searcher re-reads the recorded identity, revision and provisioning state and
 > **discards the credential without transmitting** unless the record is still active,
 > the identity still equals the one the binding carries, and the revision equals the
 > one read before the credential read; a read that cannot be answered is treated as a
-> changed one. The refusal is `SearchRefusal.PROVIDER_REFUSED`. Nothing about this
+> changed one. The refusal is `SearchRefusal.PROVIDER_REFUSED`. Nothing about either
 > clause is relaxed by the send leaving through a different member, and no lane reads
-> §6 of this ADR as having moved it.
+> §6 of this ADR as having moved either.
 
 **The registration-without-a-registry-entry is the hinge of this whole design, and it
 is a fact about the tree rather than a device invented here.**
@@ -1893,8 +1911,17 @@ for less.
     while the read is suspended, and on release **no byte is written to the channel**,
     the credential is discarded, and the outcome is `PROVIDER_REFUSED`. A third arm
     over a record whose read cannot be answered asserts the same, which is ADR-0148
-    §6's fail-closed limb. An implementation that reads the credential and transmits
-    passes every other test here and fails these.
+    §6's fail-closed limb. A fourth arm puts the change **between the pre-read and the
+    credential access**, which is the interleaving ADR-0148 §6's one-step clause
+    forbids: a reprovisioning task is queued to run at the first suspension the
+    searcher offers after it has read the identity, revision, provisioning state and
+    slot. A conforming implementation offers none before `Secrets.get`, so the arm
+    asserts that the task has **not** run when the `Secrets` fake is called, that the
+    slot asked for is the one that pre-read named and **never the successor's**, and
+    that the send is then discarded `PROVIDER_REFUSED` by the post-read check. An
+    implementation that reads the credential and transmits passes every other test here
+    and fails these; one with an `await` in that gap reads a credential the pre-read
+    did not name and fails the fourth.
 13b. **The three bounds are tested at the boundary and not only over it.** A response
     of exactly `search_max_response_bytes` is read whole and mints records, and one of
     that plus one byte is refused `RESPONSE_TOO_LARGE` with nothing parsed; a result
@@ -1979,7 +2006,7 @@ for less.
 ### 20. Scope, and what this records against earlier ADRs
 
 **This ADR amends four ratified ADRs — ADR-0226 in three scopes, ADR-0230, ADR-0148
-in two scopes and ADR-0154 in one each — and supersedes none.** That is a
+in three scopes and ADR-0154 in one each — and supersedes none.** That is a
 classification of this change and is therefore stated as prose rather than marked
 (ADR-0089 §1). The header carries each record; what follows is the working under
 ADR-0082 §1's test, and the clauses a reader would most expect to have moved and which
@@ -1991,8 +2018,8 @@ below the answer is no: ADR-0226 §2's membership sentence undercounts a closed
 enumeration a reader can read off `ReadKind`; §4's not-ruled-on clause is true of the
 three kinds it was written about and of every kind whose servicing reads the owner's
 own store; §6's and ADR-0230 §7's precedence sentences state an order that is still
-correct on the reads they name; ADR-0148 §1's single route and §9's claimed step are
-true of every tool call, which is every send this system makes today; and ADR-0154 §2's
+correct on the reads they name; ADR-0148 §1's single route, §7's position and §9's
+claimed step are true of every tool call, which is every send this system makes today; and ADR-0154 §2's
 restatement is true of every send at the seam until Lane 3 lands. A reader holding only
 the earlier text would in each case read a sentence **more widely than it now holds** —
 ADR-0082 §1's test — and would not be led into an error. So each is a record on the
@@ -2130,8 +2157,8 @@ is that statement, and it answers #95 for nothing else.
 This ADR is in **ADR-0089's marked regime**: it carries well-formed clauses, so the
 marked clauses are the whole of what it obligates and the prose beside them supplies
 nothing. ADR-0089 §5 makes marking forward-only, so nothing this ADR cites is
-retro-marked. What binds is **one hundred and two clauses**: §1's four, §2's two,
-§3's eight, §4's two, §5's nine, §6's seven, §8's seven, §9's five, §10's eight,
+retro-marked. What binds is **one hundred and three clauses**: §1's four, §2's two,
+§3's eight, §4's two, §5's ten, §6's seven, §8's seven, §9's five, §10's eight,
 §11's nine, §12's four, §13's seven, §14's five, §15's three, §16's eight, §17's
 thirteen and §18's one. §7's table, §19's
 list, §20's classification and every argument in this document are deliberately
