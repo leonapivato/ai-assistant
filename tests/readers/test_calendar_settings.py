@@ -26,6 +26,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from hostile_values import (
+    UNNAMEABLE_KINDS,
     ClassRaises,
     Hostile,
     HostilePath,
@@ -34,6 +35,7 @@ from hostile_values import (
     Unnameable,
     UnrebuildablePath,
     impostor_of,
+    unnameable,
 )
 from pydantic import ValidationError
 
@@ -212,26 +214,8 @@ def test_the_constructor_refuses_a_source_that_is_not_a_path(value: object) -> N
         CalendarReader(value)  # type: ignore[arg-type]
 
 
-#: The two ways a type can fail to name itself: the read of ``__name__`` raises, or
-#: it answers with something that is not a ``str`` whose own rendering would then
-#: raise (#2104). Named rather than built here — see :func:`_unnameable`.
-_UNNAMEABLE: Final = ["unreadable", "not-a-str"]
-
 #: Every duration this constructor guards, spelled as the keyword a caller passes.
 _DURATION_GUARDS: Final = ["window_past", "window_future", "read_timeout"]
-
-
-def _unnameable(kind: str) -> object:
-    """An instance of a class that will not say what it is called.
-
-    **Built inside the arm rather than passed to it**, which is not a style
-    preference: pytest renders a failing test's arguments, and rendering *this* one
-    asks the class the very question it refuses — so a regression that ought to
-    show as one red assertion crashes the whole session with an ``INTERNALERROR``
-    from inside pytest's own traceback formatter instead. Verified by mutation.
-    """
-    metaclass = Unnameable if kind == "unreadable" else NumericName
-    return metaclass("Evil", (), {})()
 
 
 def test_a_hostile_repr_does_not_raise_past_the_source_guard() -> None:
@@ -251,7 +235,7 @@ def test_a_hostile_repr_does_not_raise_past_the_zone_guard() -> None:
         CalendarReader(_ABSOLUTE, timezone=Hostile())  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("kind", _UNNAMEABLE)
+@pytest.mark.parametrize("kind", UNNAMEABLE_KINDS)
 def test_a_hostile_type_name_does_not_raise_past_the_source_guard(kind: str) -> None:
     """The half of #1978 that survives substituting ``repr``, at the source guard.
 
@@ -264,22 +248,22 @@ def test_a_hostile_type_name_does_not_raise_past_the_source_guard(kind: str) -> 
     """
     expected = "the calendar source must be a Path, got an unnameable type"
     with pytest.raises(ValueError, match=expected):
-        CalendarReader(_unnameable(kind))  # type: ignore[arg-type]
+        CalendarReader(unnameable(kind))  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("kind", _UNNAMEABLE)
+@pytest.mark.parametrize("kind", UNNAMEABLE_KINDS)
 def test_a_hostile_type_name_does_not_raise_past_the_zone_guard(kind: str) -> None:
     """#2104 at the zone guard."""
     expected = "the calendar timezone must be a str, got an unnameable type"
     with pytest.raises(ValueError, match=expected):
-        CalendarReader(_ABSOLUTE, timezone=_unnameable(kind))  # type: ignore[arg-type]
+        CalendarReader(_ABSOLUTE, timezone=unnameable(kind))  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("field", _DURATION_GUARDS)
-@pytest.mark.parametrize("kind", _UNNAMEABLE)
+@pytest.mark.parametrize("kind", UNNAMEABLE_KINDS)
 def test_a_hostile_type_name_does_not_raise_past_a_duration_guard(field: str, kind: str) -> None:
     """#2104 at each of the three duration guards."""
-    kwargs: dict[str, Any] = {field: _unnameable(kind)}
+    kwargs: dict[str, Any] = {field: unnameable(kind)}
     expected = re.escape(f"calendar_{field} must be a timedelta, got an unnameable type")
     with pytest.raises(ValueError, match=expected):
         CalendarReader(_ABSOLUTE, **kwargs)

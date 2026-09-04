@@ -27,13 +27,13 @@ import pypdf
 import pytest
 from fetch_fixtures import fetcher as build
 from hostile_values import (
+    UNNAMEABLE_KINDS,
     ClassRaises,
     Hostile,
     HostilePath,
-    NumericName,
-    Unnameable,
     UnrebuildablePath,
     impostor_of,
+    unnameable,
 )
 from pdf_fixtures import amplified_page_tree_pdf, extracted_text_of, minimal_pdf
 
@@ -594,22 +594,6 @@ _DOMAIN_GUARDS: Final = [
     ("max_character_mappings", "an integer of at least 1"),
 ]
 
-#: The two ways a type can fail to name itself: the read of ``__name__`` raises, or it
-#: answers with something that is not a ``str`` whose own rendering would then raise.
-_UNNAMEABLE: Final = ["unreadable", "not-a-str"]
-
-
-def _unnameable(kind: str) -> object:
-    """An instance of a class that will not say what it is called.
-
-    **Built inside the arm rather than passed to it**: pytest renders a failing test's
-    arguments, and rendering *this* one asks the class the very question it refuses —
-    so a regression that ought to show as one red assertion crashes the session with
-    an ``INTERNALERROR`` from inside pytest's own traceback formatter instead.
-    """
-    metaclass = Unnameable if kind == "unreadable" else NumericName
-    return metaclass("Evil", (), {})()
-
 
 @pytest.mark.parametrize(("figure", "domain"), _DOMAIN_GUARDS)
 def test_a_hostile_repr_does_not_raise_past_a_domain_guard(
@@ -630,7 +614,7 @@ def test_a_hostile_repr_does_not_raise_past_a_domain_guard(
 
 
 @pytest.mark.parametrize(("figure", "domain"), _DOMAIN_GUARDS)
-@pytest.mark.parametrize("kind", _UNNAMEABLE)
+@pytest.mark.parametrize("kind", UNNAMEABLE_KINDS)
 def test_a_hostile_type_name_does_not_raise_past_a_domain_guard(
     root: Path, figure: str, domain: str, kind: str
 ) -> None:
@@ -644,7 +628,7 @@ def test_a_hostile_type_name_does_not_raise_past_a_domain_guard(
     """
     expected = re.escape(f"fetch_{figure} must be {domain}, got an unnameable type")
     with pytest.raises(ConfigurationError, match=expected):
-        build(root, **{figure: _unnameable(kind)})  # type: ignore[arg-type]
+        build(root, **{figure: unnameable(kind)})  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(("figure", "domain"), _DOMAIN_GUARDS)
@@ -684,12 +668,12 @@ def test_a_hostile_repr_does_not_raise_past_the_root_guard() -> None:
         LocalFileFetcher(Hostile())  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("kind", _UNNAMEABLE)
+@pytest.mark.parametrize("kind", UNNAMEABLE_KINDS)
 def test_a_hostile_type_name_does_not_raise_past_the_root_guard(kind: str) -> None:
     """#2104's rule at the guard #2101 adds, so the new guard is not a new escape."""
     expected = "the fetch root must be a Path, got an unnameable type"
     with pytest.raises(ConfigurationError, match=expected):
-        LocalFileFetcher(_unnameable(kind))  # type: ignore[arg-type]
+        LocalFileFetcher(unnameable(kind))  # type: ignore[arg-type]
 
 
 def test_a_path_subclass_cannot_lie_its_way_past_the_root_guard() -> None:
