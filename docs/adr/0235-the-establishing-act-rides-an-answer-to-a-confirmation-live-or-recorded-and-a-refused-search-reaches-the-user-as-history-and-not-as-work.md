@@ -1,6 +1,6 @@
 # 235. The establishing act rides an answer to a confirmation, live or recorded, and a refused search reaches the user as history and not as work
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-04
 - Decides: the establishing surface ADR-0193 §13 defers — which surfaces offer the
   act, where the act's `answer` comes from on each population it rides, what a
