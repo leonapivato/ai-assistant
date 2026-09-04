@@ -121,15 +121,16 @@ if TYPE_CHECKING:
 #: of its type and may hold the type's bare name.
 FILE_FETCHER_NAME: Final = "files"
 
-#: ADR-0230 §4's and §6's named defaults, and ADR-0232 §2's, restated here because
-#: the constructor is a second seam a test or a second composition root reaches
-#: directly, and §6 puts every refusal at construction rather than at the first
-#: fetch (ADR-0093 §5).
+#: ADR-0230 §4's and §6's named defaults, ADR-0232 §2's and ADR-0234 §2's, restated
+#: here because the constructor is a second seam a test or a second composition root
+#: reaches directly, and §6 puts every refusal at construction rather than at the
+#: first fetch (ADR-0093 §5).
 DEFAULT_FETCH_LISTING_TTL: Final = timedelta(minutes=5)
 DEFAULT_FETCH_LISTING_MAX_ENTRIES: Final = 40
 DEFAULT_FETCH_MAX_FILE_BYTES: Final = 4 * 1024 * 1024
 DEFAULT_FETCH_MAX_CONTENT_BYTES: Final = 32 * 1024
 DEFAULT_FETCH_MAX_DECODED_BYTES: Final = 1024 * 1024
+DEFAULT_FETCH_MAX_CHARACTER_MAPPINGS: Final = 400_000
 
 #: What a fetched record's report is worth (ADR-0230 §5). Below 1.0 — nothing
 #: forces that in the ``ATTESTED`` band, since a connected source may legitimately
@@ -289,7 +290,7 @@ class LocalFileFetcher:
     listing, never a ``FetchRefusal`` and never a degraded turn (ADR-0230 §6).
     """
 
-    def __init__(  # noqa: PLR0913 — one root, two clocks, five configured figures and the platform view; each is one knob
+    def __init__(  # noqa: PLR0913 — one root, two clocks, six configured figures and the platform view; each is one knob
         self,
         root: Path,
         *,
@@ -300,6 +301,7 @@ class LocalFileFetcher:
         max_file_bytes: int = DEFAULT_FETCH_MAX_FILE_BYTES,
         max_content_bytes: int = DEFAULT_FETCH_MAX_CONTENT_BYTES,
         max_decoded_bytes: int = DEFAULT_FETCH_MAX_DECODED_BYTES,
+        max_character_mappings: int = DEFAULT_FETCH_MAX_CHARACTER_MAPPINGS,
         tables: PlatformTables | None = None,
         id_factory: Callable[[], str] | None = None,
     ) -> None:
@@ -329,6 +331,12 @@ class LocalFileFetcher:
                 bytes one extraction may **parse**, summed once per parse
                 (ADR-0232 §2) — a third quantity with a third consumer, the parser
                 rather than the disk or the prompt.
+            max_character_mappings: ``fetch_max_character_mappings``. At least 1. The
+                ``/ToUnicode`` mappings one extraction may **build**, summed once per
+                font-build (ADR-0234 §2) — a fourth quantity with a fourth consumer,
+                the mapping-dictionary build, and not a function of the third: 65,000
+                mappings arrive in 927,031 bytes of ``bfchar`` or in 178 of
+                ``bfrange``.
             tables: The platform's mount and device view for §6's stage 1. Defaults
                 to this machine's own ``/proc`` and ``/sys``.
             id_factory: Mints each record's id. Defaulted to a fresh UUID; a caller
@@ -349,6 +357,7 @@ class LocalFileFetcher:
             max_file_bytes=max_file_bytes,
             max_content_bytes=max_content_bytes,
             max_decoded_bytes=max_decoded_bytes,
+            max_character_mappings=max_character_mappings,
         )
         if not root.is_absolute():
             msg = f"the fetch root must be an absolute path, got {str(root)!r} (ADR-0230 §6)"
@@ -360,6 +369,7 @@ class LocalFileFetcher:
         self._max_file_bytes = max_file_bytes
         self._max_content_bytes = max_content_bytes
         self._max_decoded_bytes = max_decoded_bytes
+        self._max_character_mappings = max_character_mappings
         self._id_factory = id_factory
         # Generated here and never leaving: it is what makes a token and a handle
         # unforgeable, and ADR-0230 §4 requires the state be private to the fetcher.
@@ -510,6 +520,7 @@ class LocalFileFetcher:
                 suffix,
                 max_rendered_bytes=self._max_content_bytes,
                 max_decoded_bytes=self._max_decoded_bytes,
+                max_character_mappings=self._max_character_mappings,
             )
         except ContentTooLargeError as exc:
             raise _FileTooLargeError from exc
@@ -716,15 +727,16 @@ def _is_one_component(name: str) -> bool:
     return bool(name) and name not in {".", ".."} and not {"/", "\\", "\x00"} & set(name)
 
 
-def _refuse_out_of_domain(
+def _refuse_out_of_domain(  # noqa: PLR0913 — one keyword per configured figure; a tuple would hide which
     *,
     listing_ttl: timedelta,
     listing_max_entries: int,
     max_file_bytes: int,
     max_content_bytes: int,
     max_decoded_bytes: int,
+    max_character_mappings: int,
 ) -> None:
-    """Refuse a figure outside ADR-0230 §6's or ADR-0232 §2's domain, at construction.
+    """Refuse a figure outside ADR-0230 §6's, ADR-0232 §2's or ADR-0234 §2's domain.
 
     ``Settings`` states the same rules again, and this is not duplication for its own
     sake: §6 puts the refusal at load *and* this constructor is a second seam a test
@@ -756,6 +768,7 @@ def _refuse_out_of_domain(
         ("fetch_max_file_bytes", max_file_bytes, "ADR-0230 §6"),
         ("fetch_max_content_bytes", max_content_bytes, "ADR-0230 §6"),
         ("fetch_max_decoded_bytes", max_decoded_bytes, "ADR-0232 §2"),
+        ("fetch_max_character_mappings", max_character_mappings, "ADR-0234 §2"),
     ):
         if type(figure) is not int or figure < 1:
             msg = f"{label} must be an integer of at least 1, got {figure!r} ({citation})"

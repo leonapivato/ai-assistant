@@ -6,7 +6,13 @@ implementation can make both true (issue #2022). ADR-0232 keeps the file bound o
 read and adds ``fetch_max_decoded_bytes`` for the third quantity, with the parser as
 its consumer: the decoded bytes an extraction **parses, summed once per parse**.
 
-§8 is the list of arms this file owes, and it fixes how each is observed. **Every
+§8 is the list of arms this file owes, and it fixes how each is observed. **Two of
+them moved.** ADR-0234 partially supersedes ADR-0232 over one input: §8 arm 11's
+``/ToUnicode`` half becomes a *refusal* arm, and the walk's deliberate refusal to parse
+a CMap becomes a bounded ceiling on how often it does. Both live in
+``test_character_mapping_bound.py`` with the rest of ADR-0234 §7; what stays here is
+arm 11's ``/ObjStm`` half, which ADR-0234 §6 re-states on a measurement rather than
+fires, and arm 11's ``/FontFile2``-behind-a-``/ToUnicode`` half, which stands entire. **Every
 refusal arm asserts that the parse was not entered, and none asserts a wall-clock
 duration.** The observation is ``pypdf``'s own ``PageObject.extract_text`` — not called
 for a page the bound refuses — which is deterministic, independent of the machine the
@@ -37,10 +43,10 @@ import pypdf
 import pytest
 from fetch_fixtures import fetcher as build
 from pdf_fixtures import (
+    SMALLEST_TO_UNICODE,
     amplified_content_stream_pdf,
     capped_invocations_pdf,
     charged_font_programs_pdf,
-    cmap_pages_pdf,
     content_array_pdf,
     drawing,
     extracted_text_of,
@@ -59,7 +65,6 @@ from pdf_fixtures import (
     unbuildable_font_pdf,
     unreadable_resources_pdf,
 )
-from pypdf import _cmap as cmap_module
 
 from ai_assistant.core.types import FetchOutcome, FetchRefusal
 from ai_assistant.readers import DEFAULT_FETCH_MAX_DECODED_BYTES
@@ -446,21 +451,26 @@ async def test_a_font_program_the_extraction_never_decodes_is_charged_nothing(
     assert outcome.record.content == "A"
 
 
-async def test_the_inputs_read_once_and_cached_are_not_charged(root: Path) -> None:
-    """§8 arm 11 — the boundary §2 and §3 draw, and "the clause a later reader is most
-    likely to widen back".
+async def test_the_object_stream_read_once_and_cached_is_not_charged(root: Path) -> None:
+    """§8 arm 11's ``/ObjStm`` half, which ADR-0234 §7 arm 12 keeps **verbatim**.
 
-    A 2 MB compressed object stream and a 2 MB ``/ToUnicode`` CMap, both decoded whole
-    during this fetch and both far over the bound, in a document of under 5 KB. Neither
-    is charged, and the ground is neither their cost per byte nor any limit ``pypdf``
-    happens to carry: each is read **once and cached**, so no per-parse multiplier acts
-    on either. §10 defers both by name, with what fires them.
+    A 2 MB compressed object stream, decoded whole during this fetch and far over the
+    bound, in a document of under 5 KB. It is not charged, and the ground is neither its
+    cost per byte nor any limit ``pypdf`` happens to carry: it is read **once and
+    cached**, so no per-parse multiplier acts on it. ADR-0234 §6 re-states that deferral
+    on the measurement ADR-0232 §10 was missing — ``_get_object_from_stream`` entered
+    **once** at 1, 5, 20 and 50 pages — and neither widens nor narrows what fires it.
 
     The object stream is genuinely resolved rather than merely present — the page's font
     lives inside it, so the fetch below cannot succeed without
     ``PdfReader._get_object_from_stream`` having decoded it whole.
+
+    **Its CMap sibling left this arm**, and that is the whole of ADR-0234: the same
+    document with a *large* ``/ToUnicode`` now refuses at the defaults and fetches only
+    with both of ADR-0234's figures raised, which is
+    ``tests/readers/test_character_mapping_bound.py``'s arm 12.
     """
-    data = object_stream_and_cmap_pdf(objstm_bytes=2_000_000, cmap_bytes=2_000_000)
+    data = object_stream_and_cmap_pdf(objstm_bytes=2_000_000, cmap_bytes=len(SMALLEST_TO_UNICODE))
     resources = pypdf.PdfReader(io.BytesIO(data)).pages[0]["/Resources"]
     font = resources["/Font"]["/F1"]  # type: ignore[index]
     assert font["/BaseFont"] == "/Uncharged", "the object stream was not resolved"
@@ -798,40 +808,3 @@ async def test_a_font_the_extraction_cannot_build_precedes_the_content_charge(
     assert outcome.refusal is FetchRefusal.EXTRACTION_FAILED
     assert outcome.record is None
     assert parsed == []
-
-
-async def test_the_walk_does_not_reparse_a_to_unicode_cmap(
-    root: Path, parsed: list[object], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The walk adds no parse of an input ADR-0232 leaves uncharged and unbounded.
-
-    A ``/ToUnicode`` CMap is decoded and **parsed** once per page — ``get_data`` caches
-    the decompression, not ``prepare_cm``'s normalisation or the mapping dictionary it
-    builds — and §2 and §10 leave it uncharged and unbounded by name. So a walk that
-    established every font by building it would double a per-page cost this system does
-    not govern, which is unratified work on the seam the bound exists to make honest.
-    ``_establish_font`` therefore asks only about a font carrying no ``/ToUnicode``.
-
-    Asserted on the **count of parses**, not on elapsed time: one per page extracted,
-    never two. A duration would flake and would prove less, which is §8's own standard
-    for every other arm here. That the per-page multiplier exists at all is issue #2042,
-    which fires §10's deferral and is not this PR's to close.
-    """
-    prepared: list[object] = []
-    real = cmap_module.prepare_cm
-
-    def counted(font: object) -> bytes:
-        prepared.append(font)
-        return real(font)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(cmap_module, "prepare_cm", counted)
-    pages = 3
-    outcome = await fetch(root, cmap_pages_pdf(pages=pages, cmap_bytes=200_000))
-
-    assert outcome.refusal is None
-    assert outcome.record is not None
-    assert len(parsed) == pages
-    assert len(prepared) == pages, (
-        f"the CMap was prepared {len(prepared)} times over {pages} extracted pages; "
-        f"the walk must add no parse of an input the bound does not charge"
-    )

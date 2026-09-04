@@ -2404,6 +2404,7 @@ def _build_local_file_fetcher(settings: Settings) -> LocalFileFetcher | None:
         max_file_bytes=settings.fetch_max_file_bytes,
         max_content_bytes=settings.fetch_max_content_bytes,
         max_decoded_bytes=settings.fetch_max_decoded_bytes,
+        max_character_mappings=settings.fetch_max_character_mappings,
     )
 
 

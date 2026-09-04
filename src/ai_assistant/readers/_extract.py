@@ -62,6 +62,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
 import pypdf
+from pypdf._cmap import _parse_to_unicode
 from pypdf._font import Font
 from pypdf.generic import (
     ArrayObject,
@@ -146,6 +147,22 @@ _MAX_XFORM_INVOCATIONS: Final = 5_000
 #: is still ``fetch_max_decoded_bytes``.
 _MAX_CONTENT_ARRAY_MEMBERS: Final = 10_000
 
+#: How many mappings ``prepare_cm`` builds for a ``/ToUnicode`` that is **not** a
+#: stream. It synthesises a fixed 44-byte literal — a single ``beginbfrange`` line
+#: spanning ``<0000>`` to ``<0001>`` — so nothing is decoded and there is no decoded
+#: length to charge, but the two mappings that line declares are built on **every**
+#: font-build, and the number of font-builds is a quantity the document controls
+#: entirely: the size of the literal is the library's, the number of times it is
+#: parsed is the file's (ADR-0234 §1).
+#:
+#: **Pinned by a test rather than asserted here**, as the two caps above are:
+#: ``tests/readers/test_character_mapping_bound.py`` fails if ``prepare_cm``'s
+#: literal stops declaring this many, in either direction. It is charged rather
+#: than parsed for because there is no stream to parse and the literal is a
+#: constant — the mapping count of a real CMap is taken by asking the library
+#: (:func:`_mapping_count`), which is the case §3's clause is about.
+_SYNTHESISED_MAPPINGS: Final = 2
+
 
 class ExtractionFailedError(Exception):
     """The file is of a supported format and its text could not be decoded.
@@ -187,7 +204,14 @@ def _rendered_body_length(text: str) -> int:
     return len(json.dumps(text)) - _DELIMITERS
 
 
-def extract(data: bytes, suffix: str, *, max_rendered_bytes: int, max_decoded_bytes: int) -> str:
+def extract(
+    data: bytes,
+    suffix: str,
+    *,
+    max_rendered_bytes: int,
+    max_decoded_bytes: int,
+    max_character_mappings: int,
+) -> str:
     """The text ``data`` encodes, refused if either bound passes.
 
     Args:
@@ -200,6 +224,12 @@ def extract(data: bytes, suffix: str, *, max_rendered_bytes: int, max_decoded_by
             has no decoding step — the extractor parses the file's own bytes, which
             ``fetch_max_file_bytes`` already bounds at the read — so there is no
             ratio between bytes read and bytes parsed for the bound to refuse (§3).
+        max_character_mappings: ``fetch_max_character_mappings``, on the ``/ToUnicode``
+            mappings this extraction **builds**, summed once per font-build
+            (ADR-0234 §2). **Plain text and Markdown count zero for it and never
+            consult it**, for the same reason: their extraction has no decoding step,
+            so it builds no mapping, and a ``.txt`` or ``.md`` file is never refused
+            on this bound.
 
     Returns:
         The file's text, verbatim, whose :func:`rendered_length` is at most
@@ -209,9 +239,9 @@ def extract(data: bytes, suffix: str, *, max_rendered_bytes: int, max_decoded_by
         ExtractionFailedError: If the bytes are not the format the suffix names, if
             the library cannot decode them, or if the walk cannot establish what the
             extraction will parse (ADR-0232 §3's one fail-closed branch).
-        ContentTooLargeError: If either bound passes. Raised as soon as it does, so
-            no more of the text is produced — and no more of the document parsed —
-            than was needed to know.
+        ContentTooLargeError: If any of the three bounds passes. Raised as soon as
+            one does, so no more of the text is produced — and no more of the document
+            parsed — than was needed to know.
         ValueError: If ``suffix`` is not supported. Unreachable from the fetch — the
             listing shows no other type, and ``fetch`` re-checks — and stated so that
             a future caller does not read a silent empty string as an answer.
@@ -223,6 +253,7 @@ def extract(data: bytes, suffix: str, *, max_rendered_bytes: int, max_decoded_by
             data,
             max_rendered_bytes=max_rendered_bytes,
             max_decoded_bytes=max_decoded_bytes,
+            max_character_mappings=max_character_mappings,
         )
     msg = f"no extraction is defined for the {suffix!r} suffix"
     raise ValueError(msg)
@@ -247,12 +278,18 @@ def _extract_text(data: bytes, *, max_rendered_bytes: int) -> str:
 
 
 class _Budget:
-    """The running total of decoded bytes this fetch's extraction will parse.
+    """One running total for the whole fetch, refusing the moment it is passed.
 
-    One object for the whole fetch, so the bound is a total across pages rather than
-    a per-page ceiling: "a per-page bound would admit an unbounded document made of
-    bounded pages, which is the defect ``fetch_max_content_bytes`` is already summed
-    to avoid" (ADR-0232 §3).
+    Two of these are kept — the decoded bytes this fetch's extraction will parse
+    (ADR-0232 §2) and the ``/ToUnicode`` mappings it will build (ADR-0234 §2) — and
+    they are two objects because they are two quantities: "neither field may absorb
+    the other's quantity, and in particular no implementation converts mappings into
+    notional bytes to charge them to ``fetch_max_decoded_bytes``".
+
+    One object per quantity for the whole fetch, so each bound is a total across
+    pages rather than a per-page ceiling: "a per-page bound would admit an unbounded
+    document made of bounded pages, which is the defect ``fetch_max_content_bytes``
+    is already summed to avoid" (ADR-0232 §3).
 
     Every charge is followed **immediately** by the comparison, which is what puts a
     refusal before the *next* decode rather than after a page's streams have been
@@ -270,14 +307,55 @@ class _Budget:
         self.total = 0
 
     def charge(self, count: int) -> None:
-        """Add ``count`` decoded bytes, and refuse the moment the total passes.
+        """Add ``count`` to the total, and refuse the moment the total passes.
 
         Raises:
-            ContentTooLargeError: As soon as the total is over ``max_decoded_bytes``.
+            ContentTooLargeError: As soon as the total is over the configured figure.
         """
         self.total += count
         if self.total > self._limit:
             raise ContentTooLargeError(_OVER_BOUND)
+
+
+@dataclass(slots=True)
+class _Fetch:
+    """The two running totals and the two memos one fetch carries across its pages.
+
+    ADR-0234 §3 fixes a **ceiling** on the walk's own parses rather than an
+    instrument: "the walk parses a distinct ``/ToUnicode`` stream at most once for
+    the count and at most once for each distinct font naming it, per fetch — and
+    never once per parse". Two memos, because two questions are being asked of the
+    same bytes and neither answer serves the other — the count is
+    ``_parse_to_unicode``'s pre-deduplication tally, which ``from_font_resource``
+    does not expose, and the font-establishment outcome is the whole of
+    ``from_font_resource``, of which the CMap parse is one step.
+
+    **Both memos are sound because both answers are functions of the resolved object
+    alone.** The extraction builds the same font from the same bytes on every page
+    and fails or succeeds identically, and a CMap's mapping count is a property of
+    the stream; so a walk that asks once and remembers agrees with the extraction
+    exactly where a walk that asks every time does. What the memos do **not** touch
+    is the *charge*, which stays per font entry per parse: the count is a property of
+    the stream and the charge is a property of the build, and "an implementation
+    charging one CMap once per page would disagree with the extraction about which
+    parses happen" (§3).
+
+    **Each memo holds the object beside its answer**, keyed by ``id``. A dictionary
+    keyed on an address alone would be wrong the moment the object it described was
+    collected and that address reused; holding a reference makes the key valid for as
+    long as the entry is.
+
+    Attributes:
+        decoded: ``fetch_max_decoded_bytes``, over the bytes the extraction parses.
+        mappings: ``fetch_max_character_mappings``, over the mappings it builds.
+        counted: Mapping counts by ``/ToUnicode`` stream.
+        established: Font dictionaries this walk has already built.
+    """
+
+    decoded: _Budget
+    mappings: _Budget
+    counted: dict[int, tuple[StreamObject, int]] = field(default_factory=dict)
+    established: dict[int, DictionaryObject] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -295,13 +373,13 @@ class _Walk:
     Attributes:
         pdf: The reader every indirect object resolves against — the extraction's own,
             so the walk sees the same cached objects it will.
-        budget: The running total for the whole fetch, which refuses as it passes.
+        fetch: The whole fetch's running totals and memos, which refuse as they pass.
         performed: How many form invocations this page's extraction has performed.
         path: The forms currently being walked, held by identity.
     """
 
     pdf: object
-    budget: _Budget
+    fetch: _Fetch
     performed: int = 0
     path: list[PdfObject] = field(default_factory=list)
 
@@ -421,7 +499,119 @@ def _charged_font_program(font: PdfObject) -> StreamObject | None:
     return resolved if isinstance(resolved, StreamObject) else None
 
 
-def _establish_font(font: PdfObject) -> None:
+def _to_unicode_stream(font: DictionaryObject) -> StreamObject | None:
+    """The ``/ToUnicode`` stream this font's extraction will decode, or ``None``.
+
+    ``prepare_cm``'s own branch, read from the same key by the same test: where
+    ``ft["/ToUnicode"]`` is a ``StreamObject`` it calls ``get_data()``; otherwise it
+    synthesises a fixed literal and decodes nothing. **The predicate is
+    ``/ToUnicode`` present and resolving to a stream, and that is the whole of it**
+    (ADR-0234 §1) — no ``/Subtype`` test, no ``/FontDescriptor`` test, and no test of
+    which fonts the operators select, because ``PageObject._extract_text`` builds
+    every entry of the ``/Font`` resource dictionary **before** it resolves the
+    content key. Resolving the entry is ``get_object()``, which does not decode, so
+    the predicate is decided from dictionaries the walk has already resolved
+    (ADR-0232 §3's own standard).
+
+    Returns:
+        The stream whose decoded length is charged and whose parse the mapping count
+        comes from, or ``None`` where this font has no ``/ToUnicode`` at all or one
+        that is not a stream. The two ``None`` cases are told apart by the caller,
+        which charges nothing for the first and :data:`_SYNTHESISED_MAPPINGS` for the
+        second.
+    """
+    target = font["/ToUnicode"]
+    return target if isinstance(target, StreamObject) else None
+
+
+def _mapping_count(font: DictionaryObject, cmap: StreamObject, fetch: _Fetch) -> int:
+    """How many mappings the extraction's own parse of this CMap builds.
+
+    **Established by the extraction's own parse and never by a second grammar over
+    the CMap's bytes** (ADR-0234 §3). A scan of its own that computed a range's span,
+    counted ``bfchar`` tokens or recognised a ``beginbfrange`` would be exactly the
+    re-implementation ADR-0232 §3 forbids for content streams, in a grammar with more
+    shapes to get wrong: a multi-line range continued across lines, a bracketed
+    destination list, a ``<<`` block, a comment, a broken line the library skips with
+    a warning.
+
+    **The quantity is the mappings the parse *builds*, never the size of the mapping
+    dictionary that survives it.** ``_parse_to_unicode`` returns its ``int_entry``
+    list beside that dictionary, appending one member per mapping *inserted*; it is
+    the tally ``_check_mapping_size`` compares, and it is what the build costs. A CMap
+    whose ranges send two source codes to one key pays for both — 90,000 built against
+    65,536 kept, measured — and a count taken after duplicates collapse under-charges
+    exactly the document that declares the most.
+
+    **Asked once per stream for the whole fetch**, which is §3's ceiling and what
+    makes the walk's own parses affordable: the extraction parses this CMap once per
+    font naming it *per page*, and the walk at most once. The charge is not memoised
+    and stays per font entry per parse.
+
+    Raises:
+        ExtractionFailedError: Where the library's own parser will not read this CMap
+            — a document of a supported format whose text could not be decoded, under
+            ADR-0232 §3's one fail-closed branch and adding no member. ``pypdf``'s own
+            ``LimitReachedError`` past ``MAPPING_DICTIONARY_SIZE_LIMIT`` propagates out
+            of ``extract_text`` too, so no document changes class on account of this
+            establishing parse.
+    """
+    remembered = fetch.counted.get(id(cmap))
+    if remembered is not None:
+        return remembered[1]
+    try:
+        _, built = _parse_to_unicode(font)
+    except AttributeError, TypeError:
+        # `_extract_text` swallows exactly these while building a font and carries on
+        # to parse the content stream, so a font it cannot build past this point is
+        # one whose CMap it never finishes parsing either.
+        return 0
+    except Exception as exc:  # a parser's own class is not this seam's vocabulary
+        raise ExtractionFailedError(_UNBUILDABLE_FONT) from exc
+    count = len(built)
+    fetch.counted[id(cmap)] = (cmap, count)
+    return count
+
+
+def _charge_to_unicode(font: PdfObject, fetch: _Fetch) -> None:
+    """ADR-0234 §1's charge for one font entry of one parse, in §3's fixed order.
+
+    **The order is fixed, and it is what makes the walk's own parses affordable**
+    (§3): the stream's decoded length is charged and compared *before* the parse that
+    takes its mapping count is entered, so the walk never normalises a buffer
+    ``fetch_max_decoded_bytes`` has not already admitted — ``prepare_cm``'s
+    normalisation being linear in those bytes. Then the count is charged and compared
+    before the font itself is established.
+
+    **Charged once per font entry per parse**, because that is how often the
+    extraction pays it: ``PageObject._extract_text`` rebuilds a stream's fonts on
+    every call, and two font dictionaries in one resource context naming the *same*
+    ``/ToUnicode`` stream make it parse that CMap twice on that page. "A quantity
+    charged once when the extraction pays it many times is not a bound" (ADR-0232 §3).
+
+    **A ``/ToUnicode`` that is not a stream is charged nothing on
+    ``fetch_max_decoded_bytes`` and two mappings per font-build.** ``prepare_cm``
+    reads no stream for that case, so there is no decoded length to charge; but it
+    parses its synthesised literal and builds those two mappings every time, and the
+    number of font-builds is a quantity the document controls entirely.
+    """
+    if not isinstance(font, DictionaryObject) or "/ToUnicode" not in font:
+        return
+    try:
+        cmap = _to_unicode_stream(font)
+    except AttributeError, TypeError:
+        # As in `_mapping_count`: `prepare_cm` reads the same key, so a font whose
+        # `/ToUnicode` the library cannot resolve is one it swallows and builds no
+        # mapping for.
+        return
+    if cmap is None:
+        fetch.mappings.charge(_SYNTHESISED_MAPPINGS)
+        return
+    fetch.decoded.charge(len(cmap.get_data()))
+    fetch.mappings.charge(_mapping_count(font, cmap, fetch))
+
+
+def _establish_font(font: PdfObject, fetch: _Fetch) -> None:
     """Build this font the way the extraction does, so its failures are its own.
 
     ``PageObject._extract_text`` builds a stream's fonts **before** it resolves the
@@ -445,58 +635,83 @@ def _establish_font(font: PdfObject) -> None:
     completeness is a property of that dependency's source; asking it is exact by
     construction and gets smaller with every version.
 
-    **It is asked only of a font carrying no ``/ToUnicode``, and that boundary is the
-    bound's own rather than a convenience.** Building a font parses its ``/ToUnicode``
-    CMap — ``get_data`` caches the decompression, not ``prepare_cm``'s normalisation or
-    the mapping dictionary it builds — and that CMap is an input ADR-0232 §2 and §10
-    leave **uncharged and unbounded by name**. Asking here would double a per-page cost
-    this system does not govern: ten pages sharing a 2 MB CMap measured 0.092 s under
-    the extraction alone and 0.161 s with the ask, which is unratified work added to the
-    seam this bound exists to make honest. Where there is no ``/ToUnicode``, the only
-    input building the font reads is the ``/Type1`` program the caller has **just
-    charged**, so what doubles is a quantity the bound governs — which is exactly the
-    price §3 already accepts for parsing a content stream twice. That the extraction
-    re-parses the CMap per page at all is issue #2042, which fires §10's deferral and is
-    not this lane's to close.
+    **It is asked of *every* font, and the ``/ToUnicode`` exclusion is gone**
+    (ADR-0234 §4). ADR-0232's implementation asked only of a font carrying no
+    ``/ToUnicode``, on the stated ground that the CMap parse was an input that ADR
+    left uncharged and unbounded by name; ADR-0234 §1 charges it, which is exactly the
+    ground removed. **#2043's first residual closes as a consequence of that decision
+    and not as a separate repair**: a font carrying a ``/ToUnicode`` the extraction
+    cannot build no longer lets the content stream be charged, so that document stops
+    being refused ``TOO_LARGE`` where the extraction alone answers
+    ``EXTRACTION_FAILED``. **#2043's second residual is untouched and stays open** — a
+    font program is still charged before the font is built, because ADR-0232 §3
+    requires the comparison to precede the work it bounds, and closing it would mean
+    scanning a program before charging it, which is the property that makes the bound a
+    bound.
 
-    **Two residuals follow, both stated rather than hidden, and both on a document that
-    is refused either way** (issue #2043). A font *with* a ``/ToUnicode`` is not
-    established here, so one that is also unbuildable lets the content stream be
-    charged. And a font program is charged *before* this runs, because §3 requires the
-    comparison to precede the work it bounds — "the total is compared before the
-    operators it counts are parsed" — so a document whose charged programs alone cross
-    the bound crosses first. Both report ``TOO_LARGE`` where the extraction alone would
-    report ``EXTRACTION_FAILED``; §3's harm clause is about refusing a document "the
-    stated quantity says must fetch", and no reading fetches either. Closing them means
-    parsing an unbounded input, or scanning a program before charging it, which is the
-    property that makes the bound a bound.
+    **Asked once per font dictionary for the whole fetch**, which is ADR-0234 §3's
+    ceiling: the outcome is a function of the font dictionary alone, so a walk that
+    asks once and remembers agrees with the extraction exactly where a walk that asks
+    every time does. Asking per parse cost nothing while the CMap was excluded and
+    would cost the whole of this bound's multiplier once it is not — a font established
+    on forty pages would have its CMap parsed forty times by the walk on top of the
+    forty the extraction pays.
 
     Raises:
         ExtractionFailedError: Where the extraction's own font initialisation raises
             anything it would not itself swallow.
     """
-    if not isinstance(font, DictionaryObject) or "/ToUnicode" in font:
+    if not isinstance(font, DictionaryObject) or id(font) in fetch.established:
         return
     try:
         Font.from_font_resource(font)
     except AttributeError, TypeError:
         # `_extract_text` swallows exactly these while building a font and carries on
         # to parse the content stream, so this is a parse that *does* happen.
-        return
+        pass
     except Exception as exc:  # a parser's own class is not this seam's vocabulary
         raise ExtractionFailedError(_UNBUILDABLE_FONT) from exc
+    # Remembered on the swallowed outcome as well as the clean one: what the memo
+    # records is that this dictionary has been asked, and the answer either way is a
+    # function of the dictionary alone.
+    fetch.established[id(font)] = font
 
 
-def _charge_font_programs(resources: DictionaryObject, budget: _Budget) -> None:
-    """Charge every font program this one parse will decode, one decode at a time.
+def _charge_font(font: PdfObject, fetch: _Fetch) -> None:
+    """Everything one font entry of one parse costs, in ADR-0234 §3's fixed order.
 
-    Charged **per parse** rather than per distinct program, because the adopted
-    extraction rebuilds a stream's fonts on every ``_extract_text`` call while
-    ``get_data`` caches only the decompression: what repeats is the scan of the
-    program's clear part, once per page. "A quantity charged once when the extraction
-    pays it many times is not a bound" (ADR-0232 §3) — a 0.217 MiB document of 2,000
-    content-free pages sharing a 40 MB program **fetched** after 257 s when it was
-    measured, with a bound on instructions alone standing at zero throughout.
+    A font is charged an embedded program **or** a ``/ToUnicode``, never both: ADR-0232
+    §3's program predicate begins with *no* ``/ToUnicode``, and this one begins with
+    ``/ToUnicode`` present. The establishment comes last for the reason it always did —
+    ADR-0232 §3 requires the comparison to precede the work it bounds — and now for a
+    second: the CMap the establishing parse reads has had its bytes and its mappings
+    charged and compared first.
+    """
+    program = _charged_font_program(font)
+    if program is not None:
+        fetch.decoded.charge(len(program.get_data()))
+    _charge_to_unicode(font, fetch)
+    _establish_font(font, fetch)
+
+
+def _charge_fonts(resources: DictionaryObject, fetch: _Fetch) -> None:
+    """Charge every font this one parse will build, one input at a time.
+
+    Charged **per parse** rather than per distinct font, because the adopted extraction
+    rebuilds a stream's fonts on every ``_extract_text`` call while ``get_data`` caches
+    only the decompression: what repeats is the scan of an embedded program's clear
+    part and ``prepare_cm``'s normalisation and mapping-dictionary build, once per page.
+    "A quantity charged once when the extraction pays it many times is not a bound"
+    (ADR-0232 §3) — a 0.217 MiB document of 2,000 content-free pages sharing a 40 MB
+    program **fetched** after 257 s when it was measured, and a 568 KB document of
+    2,000 pages sharing a 225-byte CMap declaring 90,000 mappings **fetched** after
+    279 s (ADR-0234 §5).
+
+    **Every entry, and no test of which the operators select** (ADR-0234 §1).
+    ``_extract_text`` iterates the whole ``/Font`` resource dictionary and builds each
+    entry before it resolves the content key, whether or not any ``Tf`` names it — so
+    two entries naming one font object are two builds, and two font dictionaries naming
+    one ``/ToUnicode`` stream are two CMap parses.
     """
     fonts = resources.get("/Font")
     if fonts is None or is_null_or_none(fonts):
@@ -509,12 +724,9 @@ def _charge_font_programs(resources: DictionaryObject, budget: _Budget) -> None:
             font = resolved[name]
         except AttributeError, TypeError, KeyError:
             # `_extract_text` swallows exactly this while building its fonts, so a
-            # font it cannot resolve is a font it decodes no program for.
+            # font it cannot resolve is a font it decodes nothing for.
             continue
-        program = _charged_font_program(font)
-        if program is not None:
-            budget.charge(len(program.get_data()))
-        _establish_font(font)
+        _charge_font(font, fetch)
 
 
 def _invoked_form(
@@ -567,18 +779,23 @@ def _invoked_form(
 def _charge_parse(obj: DictionaryObject, walk: _Walk, *, is_page: bool) -> None:
     """Charge one parse and everything reached from it, refusing as the bound passes.
 
-    ADR-0232 §3's named construction, which is required to have the property rather
-    than to be this shape: resolve the inherited resources and **stop there, charging
-    nothing, where the extraction would**; otherwise add each charged font program's
-    length and compare, add each decoded stream's length and compare, then parse the
-    stream **with the adopted library's own content-stream parser**, take the ``Do``
-    operations it reports, resolve each against those same resources, and recurse.
+    ADR-0232 §3's named construction, extended by ADR-0234 §1 and §3 and still
+    required to have the property rather than to be this shape: resolve the inherited
+    resources and **stop there, charging nothing, where the extraction would**;
+    otherwise charge each font entry — its embedded program's length, or its
+    ``/ToUnicode`` stream's decoded length and then the mappings that stream's own
+    parse builds — comparing after each, add each decoded stream's length and compare,
+    then parse the stream **with the adopted library's own content-stream parser**,
+    take the ``Do`` operations it reports, resolve each against those same resources,
+    and recurse.
 
     **Fonts are charged and built before the content stream because that is the order
     the extraction works in**, and the order decides a *class* rather than a number: a
     page whose font initialisation raises is a page whose content stream the extraction
     parses not at all, so charging that stream would answer ``TOO_LARGE`` where the
-    document is malformed (:func:`_establish_font`).
+    document is malformed (:func:`_establish_font`). Within a font, ADR-0234 §3 fixes
+    the order too — a ``/ToUnicode`` stream's bytes, then its mappings, then the
+    establishment — and each charge is followed by its own comparison.
 
     **The library's own parser rather than a second grammar**, which costs an admitted
     document a second parse and is the price of agreement. A stream can carry the
@@ -589,14 +806,16 @@ def _charge_parse(obj: DictionaryObject, walk: _Walk, *, is_page: bool) -> None:
 
     Args:
         obj: The page or form whose parse is being charged.
-        walk: This page's reader, running total, invocation count and path.
+        walk: This page's reader, the fetch's running totals and memos, and this
+            page's invocation count and path.
         is_page: Whether ``obj``'s stream is named by ``/Contents`` (a page) or is
             ``obj`` itself (a form).
 
     Raises:
-        ContentTooLargeError: The moment the running total passes the bound.
+        ContentTooLargeError: The moment either running total passes its bound.
         ExtractionFailedError: Where a resource context is present and unreadable,
-            where a font the extraction cannot build precedes the content charge, or
+            where a font the extraction cannot build precedes the content charge,
+            where the library's own parser will not read a ``/ToUnicode`` CMap, or
             where an array-based ``/Contents`` is over the parser's own cardinality
             guard — each a page whose extraction parses nothing at all.
     """
@@ -609,10 +828,10 @@ def _charge_parse(obj: DictionaryObject, walk: _Walk, *, is_page: bool) -> None:
     # ADR-0232 §3's to fix — "the property is required and no construction is" — and
     # what it does fix, that each decode is followed by its own comparison, holds
     # either way round.
-    _charge_font_programs(resources, walk.budget)
+    _charge_fonts(resources, walk.fetch)
     content, streams = _content_of(obj, is_page=is_page)
     for stream in streams:
-        walk.budget.charge(len(stream.get_data()))
+        walk.fetch.decoded.charge(len(stream.get_data()))
     if content is None:
         return
     for operands, operator in ContentStream(content, walk.pdf, "bytes").operations:
@@ -637,7 +856,7 @@ def _charge_parse(obj: DictionaryObject, walk: _Walk, *, is_page: bool) -> None:
             walk.path.pop()
 
 
-def _charge_page(page: pypdf.PageObject, budget: _Budget) -> None:
+def _charge_page(page: pypdf.PageObject, fetch: _Fetch) -> None:
     """Charge everything this page's extraction will parse, before it is entered.
 
     Whether the whole of a page's count is established before ``extract_text`` is
@@ -648,10 +867,16 @@ def _charge_page(page: pypdf.PageObject, budget: _Budget) -> None:
     shape as the page loop one level up, and is why this is a bound on an *input*
     rather than an observation of work in progress (ADR-0232 §5).
     """
-    _charge_parse(page, _Walk(pdf=page.pdf, budget=budget), is_page=True)
+    _charge_parse(page, _Walk(pdf=page.pdf, fetch=fetch), is_page=True)
 
 
-def _extract_pdf(data: bytes, *, max_rendered_bytes: int, max_decoded_bytes: int) -> str:
+def _extract_pdf(
+    data: bytes,
+    *,
+    max_rendered_bytes: int,
+    max_decoded_bytes: int,
+    max_character_mappings: int,
+) -> str:
     """Extract a PDF's text a page at a time, refusing as soon as a bound passes.
 
     Page-at-a-time is what makes §6's "enforces the bound **while** extracting rather
@@ -692,14 +917,17 @@ def _extract_pdf(data: bytes, *, max_rendered_bytes: int, max_decoded_bytes: int
     only once the whole stream has been parsed.
 
     So :func:`_charge_page` establishes what a page's extraction will parse **before**
-    ``extract_text`` is entered for it, against ``fetch_max_decoded_bytes`` — a running
-    total over the whole fetch, compared after each decoded stream and before the next
-    is decoded, and refused as ``TOO_LARGE``. The same 47 KB document is refused in a
-    hundredth of a second.
+    ``extract_text`` is entered for it, against **two** running totals over the whole
+    fetch — ``fetch_max_decoded_bytes`` and ``fetch_max_character_mappings``, each
+    compared the moment it is added to and before the next input is read, and each
+    refused as ``TOO_LARGE``. The same 47 KB document is refused in a hundredth of a
+    second.
 
     **What is counted, established against ``pypdf`` 6.16.2 rather than recalled**
     (ADR-0232 §6 requires this record at the code, and requires a later lane to
-    re-establish it against whatever ``uv.lock`` then fixes):
+    re-establish it against whatever ``uv.lock`` then fixes; ADR-0234 §8 requires this
+    lane's own re-establishment, and each fact below was checked at the code and by an
+    arm in ``tests/readers/``):
 
     * **Every content stream the extraction parses, once per parse.** A page's own,
       and every Form XObject reached from it, once for each ``Do`` that invokes it.
@@ -715,16 +943,43 @@ def _extract_pdf(data: bytes, *, max_rendered_bytes: int, max_decoded_bytes: int
       ``get_data`` caches only the decompression, so the scan of the program's clear
       part repeats once per page: a **0.217 MiB** document of 2,000 content-free pages
       sharing a 40 MB program **fetched** after **257 s** with nothing refusing it.
+    * **The decoded length of every ``/ToUnicode`` CMap that resolves to a stream, per
+      font entry per parse** (ADR-0234 §1), in :func:`_charge_to_unicode`. **Every font
+      in a parse's resource context is built before the content key is resolved**,
+      whether or not any ``Tf`` names it — ``_extract_text`` iterates the whole
+      ``/Font`` dictionary, swallowing only ``AttributeError`` and ``TypeError`` —
+      re-established here against the resolved version. ``get_data`` caches the
+      decompression, but ``prepare_cm``'s whole-buffer normalisation is re-run per
+      page and is linear in these bytes: held at 1,800 mappings, a CMap's marginal cost
+      runs 0.006 s a page at 25 KB to **0.037 s** at 8 MB. Cheap per byte, and "cheap
+      per byte times an unbounded page count is not cheap" (ADR-0232 §2).
+    * **The mappings each such parse builds**, against the second figure, in
+      :func:`_mapping_count` — and **two** mappings per font-build where ``/ToUnicode``
+      is present but is not a stream, ``prepare_cm`` synthesising a fixed 44-byte
+      literal it decodes nothing for and parses every time
+      (:data:`_SYNTHESISED_MAPPINGS`), both branches re-established here at the code.
+      **This is a second quantity rather than more of the first because neither is a
+      function of the other**: 65,000 mappings arrive in 927,031 bytes of ``bfchar`` or
+      in **178** of ``bfrange``, a factor of about 5,200, because ``parse_bfrange``
+      builds ``b - a + 1`` mappings from one range line. A 568 KB document of 2,000
+      pages sharing a 225-byte CMap declaring 90,000 mappings charges **450,000**
+      bytes — under half the byte default — and **fetched** after **279 s** yielding no
+      text at all. Under these bounds it is refused before its first page is parsed.
 
     **What is decoded and is *not* charged, which is a boundary rather than a gap**
-    (ADR-0232 §2, §3, and deferred by name in §10). A compressed **object stream**
-    (``/ObjStm``) is decoded whole by ``PdfReader._get_object_from_stream`` during
-    ordinary indirect-object resolution — before any per-page loop, so before any
-    total exists — and a font's **``/ToUnicode`` CMap** is decoded once. Each is read
-    **once and cached**, so no per-parse multiplier acts on either, and that absence is
-    the whole of the ground: not their cost per byte, and not any limit the library
-    happens to carry. Neither is bounded by anything this system owns, and
-    ``fetch_max_file_bytes`` does not bound them — it bounds the bytes **read from
+    (ADR-0232 §2, §3, deferred by name in §10, and re-stated on a measurement in
+    ADR-0234 §6). A compressed **object stream** (``/ObjStm``) is decoded whole by
+    ``PdfReader._get_object_from_stream`` during ordinary indirect-object resolution —
+    before any per-page loop, so before any total exists. It is read **once and
+    cached**, so no per-parse multiplier acts on it, and that absence is the whole of
+    the ground: not its cost per byte, and not any limit the library happens to carry.
+    Instrumented against 6.16.2, ``_get_object_from_stream`` is entered **once** at 1,
+    5, 20 and 50 pages of a document whose page font lives inside a 2 MB stream — it
+    parses every object in one pass and caches each, and ``get_object`` consults that
+    cache first. That is flat where the CMap's per-page cost is linear, which is the
+    whole of the difference between the two halves of ADR-0232 §10's class and why the
+    CMap left it. It is bounded by nothing this system owns, and
+    ``fetch_max_file_bytes`` does not bound it — that bounds the bytes **read from
     disk**, and a small ``/ObjStm`` can expand to tens of MiB.
 
     **The residual this leaves is stated rather than hidden.** Obtaining a stream's
@@ -737,6 +992,20 @@ def _extract_pdf(data: bytes, *, max_rendered_bytes: int, max_decoded_bytes: int
     ``EXTRACTION_FAILED``. That is **evidence about a resolved version and never a
     bound this system relies on** (ADR-0232 §6); ``pypdf`` is adopted ranged, so
     nothing this project declares carries it.
+
+    **The mapping half has the same shape of residual, and ADR-0234 §3 bounds it.**
+    A CMap's mapping count cannot be had without parsing it, so the parse that crosses
+    ``fetch_max_character_mappings`` completes before the comparison that refuses it.
+    What bounds the parses *before* it is the bound itself: every font the walk
+    establishes has had its CMap's bytes and mappings charged already, so across a
+    fetch the walk's own parses build at most **twice** what the figure admits plus one
+    font's worth. What bounds that one CMap is the adopted version's own
+    ``MAPPING_DICTIONARY_SIZE_LIMIT`` — 100,000 mappings, about 0.32 s — which is
+    evidence about a version and not a bound this project declares, and whose
+    ``LimitReachedError`` propagates out of ``extract_text`` too, so no document changes
+    class on account of the establishing parse. The other half is bounded outright:
+    ``prepare_cm``'s normalisation is linear in bytes the walk charged and compared
+    first, so it never normalises a buffer ``fetch_max_decoded_bytes`` has not admitted.
 
     **Measuring the length costs the extraction nothing**, which is why the comparison
     can sit before the parse rather than being a second decode: ``pypdf`` caches a
@@ -764,9 +1033,13 @@ def _extract_pdf(data: bytes, *, max_rendered_bytes: int, max_decoded_bytes: int
     # The delimiters are paid once, up front, so the running comparison is against
     # the same number `rendered_length` would report for the whole.
     total = _DELIMITERS
-    # One budget for the whole document: the decoded bound is a running total across
-    # pages, never a per-page ceiling (ADR-0232 §3).
-    budget = _Budget(max_decoded_bytes)
+    # One pair of budgets for the whole document, and the memos beside them: each
+    # bound is a running total across pages, never a per-page ceiling (ADR-0232 §3,
+    # ADR-0234 §2).
+    fetch = _Fetch(
+        decoded=_Budget(max_decoded_bytes),
+        mappings=_Budget(max_character_mappings),
+    )
     index = 0
     while True:
         try:
@@ -776,7 +1049,7 @@ def _extract_pdf(data: bytes, *, max_rendered_bytes: int, max_decoded_bytes: int
         except Exception as exc:  # as above; every failure of extraction is one class
             raise ExtractionFailedError(_UNDECODABLE) from exc
         try:
-            _charge_page(page, budget)
+            _charge_page(page, fetch)
         except ContentTooLargeError, ExtractionFailedError:
             # Both are already this seam's vocabulary: the first is the bound
             # refusing, the second is §3's fail-closed branch. Neither is a library

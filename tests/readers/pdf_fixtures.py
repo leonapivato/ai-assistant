@@ -494,7 +494,7 @@ def tounicode_font_pdf(*, program_bytes: int) -> bytes:
     descriptor = objects.add(
         b"<< /Type /FontDescriptor /FontName /Uncharged /Flags 4 /FontFile2 " + program + b" >>"
     )
-    cmap = objects.add(stream_object(_TO_UNICODE))
+    cmap = objects.add(stream_object(SMALLEST_TO_UNICODE))
     font = objects.add(
         b"<< /Type /Font /Subtype /TrueType /BaseFont /Uncharged /FontDescriptor "
         + descriptor
@@ -507,8 +507,10 @@ def tounicode_font_pdf(*, program_bytes: int) -> bytes:
     )
 
 
-#: The smallest ``/ToUnicode`` CMap ``pypdf`` will read as one.
-_TO_UNICODE: Final = (
+#: The smallest ``/ToUnicode`` CMap ``pypdf`` will read as one. One ``bfrange`` line
+#: spanning a single code, so it declares exactly **one** mapping — the figure every
+#: arm whose subject is the byte term rather than the mapping term wants (ADR-0234 §2).
+SMALLEST_TO_UNICODE: Final = (
     b"/CIDInit /ProcSet findresource begin\n"
     b"12 dict begin begincmap\n"
     b"1 begincodespacerange\n<00> <FF>\nendcodespacerange\n"
@@ -772,7 +774,7 @@ def object_stream_and_cmap_pdf(*, objstm_bytes: int, cmap_bytes: int) -> bytes:
     fixture here uses, because an object inside an ``/ObjStm`` is reachable only through
     a type-2 entry, which a classic table has no way to spell.
     """
-    cmap = _TO_UNICODE + b"\n%" + b"C" * max(cmap_bytes - len(_TO_UNICODE) - 2, 1)
+    cmap = SMALLEST_TO_UNICODE + b"\n%" + b"C" * max(cmap_bytes - len(SMALLEST_TO_UNICODE) - 2, 1)
     font_body = b"<< /Type /Font /Subtype /TrueType /BaseFont /Uncharged /ToUnicode 6 0 R >>"
     header = b"4 0 "
     objstm_data = header + font_body
@@ -903,7 +905,7 @@ def cmap_pages_pdf(*, pages: int, cmap_bytes: int) -> bytes:
     once, so what the arm measures is the normalisation rather than a contrived parse.
     """
     objects = _Objects()
-    cmap = objects.add(stream_object(_TO_UNICODE + b"\n%" + b"C" * cmap_bytes))
+    cmap = objects.add(stream_object(SMALLEST_TO_UNICODE + b"\n%" + b"C" * cmap_bytes))
     font = objects.add(
         b"<< /Type /Font /Subtype /TrueType /BaseFont /Mapped /ToUnicode " + cmap + b" >>"
     )

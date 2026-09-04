@@ -3437,8 +3437,9 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return expanded
 
-    # **Every one of the five below has a stated domain, and a value outside it is
-    # a load-time configuration error** (ADR-0230 §6, ADR-0232 §2). Zero and negative values are
+    # **Every one of the six below has a stated domain, and a value outside it is
+    # a load-time configuration error** (ADR-0230 §6, ADR-0232 §2, ADR-0234 §2). Zero
+    # and negative values are
     # refused rather than given a meaning, and the refusal is `Settings`'s own — at
     # load, before any fetcher is built and before any filesystem call — for
     # ADR-0093 §5's reason. A zero entry cap is a mechanism that shows nothing
@@ -3512,6 +3513,42 @@ class Settings(BaseSettings):
             "`/Subtype` `/Type1`, and a `/FontDescriptor` carrying `/FontFile`. "
             "Plain text and Markdown have no decoding step and count zero. A "
             "document beyond it is refused `TOO_LARGE`, never truncated."
+        ),
+    )
+
+    # **The fourth quantity, and the fourth consumer** (ADR-0234 §2). Its consumer
+    # is the mapping-dictionary build, and it is a second field rather than more of
+    # the one above because **neither quantity is a function of the other**:
+    # `pypdf`'s `parse_bfrange` builds `b - a + 1` mappings from a single range
+    # line, so 65,000 mappings arrive in 927,031 bytes of `bfchar` or in **178** of
+    # `bfrange` — a factor of about 5,200. A byte charge on that input is "a number
+    # that looks like a bound, is checkable, and is not a function of the cost it
+    # claims to bound": a 225-byte CMap declaring 90,000 mappings costs 0.147 s a
+    # page, so two thousand pages sharing it is a 568 KB file `extract_text` spends
+    # **279 s** on while charging 450,000 bytes — under half the figure above.
+    #
+    # **Mappings built, never the dictionary that survives.** A CMap whose ranges
+    # send two source codes to one key pays for both, because the cost is in the
+    # insertions and a count taken after duplicates collapse under-charges exactly
+    # the document that declares the most.
+    #
+    # **Neither field absorbs the other's quantity** (ADR-0234 §2): no
+    # implementation converts mappings into notional bytes to charge them above, at
+    # an exchange rate no operator chose and no document respects. It is an
+    # independent figure and never a derived one.
+    fetch_max_character_mappings: _IntegerSetting = Field(
+        default=400_000,
+        ge=1,
+        lt=2**63,
+        description=(
+            "The most `/ToUnicode` character mappings one fetch's extraction may "
+            "**build**, summed once per font-build and compared before the font is "
+            "built (ADR-0234 §1, §2, §3). For PDF that is, per parse, every font in "
+            "the parse's resource context: the mappings its `/ToUnicode` stream's "
+            "own parse builds, or **two** where the `/ToUnicode` is not a stream and "
+            "`prepare_cm` synthesises its fixed literal. Plain text and Markdown "
+            "build no mapping and count zero. A document beyond it is refused "
+            "`TOO_LARGE`, never truncated."
         ),
     )
 

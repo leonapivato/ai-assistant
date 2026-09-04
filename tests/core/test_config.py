@@ -1009,6 +1009,14 @@ def test_every_integer_setting_is_discovered() -> None:
         "fetch_max_file_bytes",
         "fetch_max_content_bytes",
         "fetch_max_decoded_bytes",
+        # ADR-0234 §2's fifth, on a quantity that is not bytes at all: the
+        # `/ToUnicode` mappings one extraction builds. Acknowledged here for the four
+        # above's reason, and the `bool` argument is the sharpest of the group —
+        # `fetch_max_character_mappings=True` is a bound of one mapping, and
+        # `prepare_cm` builds **two** for a `/ToUnicode` that is not even a stream, so
+        # every PDF carrying a font is refused `TOO_LARGE` by a deployment that looks
+        # configured.
+        "fetch_max_character_mappings",
         # ADR-0231 §5's bound on a composed web-search query, acknowledged here for
         # the fetch bounds' reason and with the same ``bool`` argument:
         # ``search_query_max_chars=True`` is a bound of one Unicode code point, so
