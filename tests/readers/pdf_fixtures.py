@@ -682,6 +682,40 @@ def capped_invocations_pdf(*, form_bytes: int, invocations: int) -> bytes:
     )
 
 
+def hollow_invocations_pdf(*, hollow: int, form_bytes: int) -> bytes:
+    """A page invoking a **data-less** form ``hollow`` times, then one real form.
+
+    ``<< /Type /XObject /Subtype /Form >>`` with no stream: ``_extract_text__xform``
+    reads its ``/Subtype``, finds no cycle, checks the cap and **increments the count**
+    before anything asks whether the object has data, so each of these spends an
+    invocation exactly as a real form does. At ``hollow`` equal to the cap the real form
+    that follows is skipped and the document's extraction parses none of it; one
+    invocation fewer and it is parsed in full.
+
+    So the pair separates a walk counting the extraction's invocations from one counting
+    only the invocations it can itself descend into — the second charges the real form
+    in both documents and refuses one ADR-0232 §2's stated quantity requires this seam
+    to fetch, which is §3's named harm rather than a class divergence.
+    """
+    objects = _Objects()
+    drawn = b"0 0 m 1 1 l S\n"
+    hollow_form = objects.add(
+        b"<< /Type /XObject /Subtype /Form /Resources << /ProcSet [/PDF] >> >>"
+    )
+    real = objects.add(
+        form_object(drawn * (form_bytes // len(drawn)), resources=b"<< /ProcSet [/PDF] >>")
+    )
+    return document(
+        [
+            Page(
+                contents=[b"/H Do\n" * hollow + b"/R Do\n"],
+                forms={"/H": hollow_form, "/R": real},
+            )
+        ],
+        objects=objects,
+    )
+
+
 def object_stream_and_cmap_pdf(*, objstm_bytes: int, cmap_bytes: int) -> bytes:
     """A document whose large ``/ObjStm`` and large ``/ToUnicode`` are both decoded.
 

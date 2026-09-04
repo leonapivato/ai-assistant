@@ -517,7 +517,9 @@ def _charge_font_programs(resources: DictionaryObject, budget: _Budget) -> None:
         _establish_font(font)
 
 
-def _invoked_form(resources: DictionaryObject, operands: list[PdfObject]) -> StreamObject | None:
+def _invoked_form(
+    resources: DictionaryObject, operands: list[PdfObject]
+) -> DictionaryObject | None:
     """The Form XObject a ``Do`` descends into, resolved where the extraction does.
 
     The operand is resolved against the **inherited** ``/Resources`` of the object
@@ -528,15 +530,29 @@ def _invoked_form(resources: DictionaryObject, operands: list[PdfObject]) -> Str
     the descent does not happen, and a parse that does not happen costs nothing to
     charge for (ADR-0232 §3). An ``/Image`` is not a form and is not parsed.
 
+    **A form carrying no stream data is still an invocation**, which is why this
+    answers the object the extraction reached rather than only the ones it can parse.
+    ``_extract_text__xform`` reads ``/Subtype``, returns for an ``/Image``, checks the
+    cycle and the cap, and *then* increments its count — before anything asks whether
+    the object has data to parse. So five thousand invocations of a bare
+    ``<< /Subtype /Form >>`` exhaust the cap exactly as five thousand real ones do, and
+    a walk skipping them without counting would descend into a form the extraction
+    skips and refuse a document ADR-0232 §2's stated quantity requires this seam to
+    fetch. What such a form costs is decided one level up and is not zero by
+    assumption: the extraction builds a resource dictionary's fonts *before* it
+    resolves any content, so :func:`_charge_parse` charges those programs and then
+    finds nothing to parse (:func:`_content_of`).
+
     Returns:
-        The form's stream, or ``None`` where the extraction descends nowhere.
+        The object the extraction's descent reaches, or ``None`` where it descends
+        nowhere at all.
     """
     try:
         xobjects = resources["/XObject"]
         if not isinstance(xobjects, DictionaryObject):
             return None
         form = xobjects[operands[0]]
-        if not isinstance(form, StreamObject):
+        if not isinstance(form, DictionaryObject):
             return None
         is_image = form["/Subtype"] == NameObject("/Image")
     except Exception:
@@ -609,6 +625,10 @@ def _charge_parse(obj: DictionaryObject, walk: _Walk, *, is_page: bool) -> None:
             # The extraction returns the empty string and **skips** the form past
             # this point rather than raising, so these are parses that never happen.
             continue
+        # Counted here, before anything asks what this form holds, because that is
+        # where `_extract_text__xform` counts it: a form with no stream data is an
+        # invocation the extraction spends and this walk must spend too
+        # (`_invoked_form`).
         walk.performed += 1
         walk.path.append(form)
         try:
