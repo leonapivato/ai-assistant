@@ -902,20 +902,22 @@ Named individually:
   if it ever fires, is an owner ruling that the assistant should warn — which is a
   decision about a feature, not about this floor.
 - **#1379 — the confirmation payload exceeding the frame limit.** Not answered, and
-  the arithmetic is stated rather than denied. This ADR adds one short enum value per
-  span to the description and **no content to the frame**, because
-  `Confirmation.parameters` already travels (ADR-0042 §4) and the payload the wire
-  measures already includes it. §4 adds one short enum value to the **binding**, once
-  per call, and nothing to `EgressSpan`, so #1379's product term — `EgressSpan.argument`
-  repeated once per span — is untouched and the payload grows by a constant. ADR-0178 §9's figures do not move, its no-truncation clause is reinforced by
-  §8's whole-rendering clause, and the compact-locator decision #1379 asks for stays
-  where its firing condition leaves it. What this ADR does add is a reason to expect a
+  the arithmetic is stated rather than denied. §4 adds **one** short enum value to the
+  **binding**, once per call, and nothing to `EgressSpan` and nothing to the payload
+  description — so #1379's product term, `EgressSpan.argument` repeated once per span,
+  is untouched and the confirmation grows by a constant. It adds **no content to the
+  frame** either, because `Confirmation.parameters` already travels (ADR-0042 §4) and
+  the payload the wire measures already includes it. ADR-0178 §9's figures do not move,
+  its no-truncation clause is reinforced by §8's whole-rendering clause, and the
+  compact-locator decision #1379 asks for stays where its firing condition leaves it. What this ADR does add is a reason to expect a
   *larger* `parameters` in practice, since a model-composed body is longer than the
   test payloads the seam has carried so far; that is an operator's
   `hub_max_frame_bytes` question and is named here rather than discovered.
-- **#57 — the payload manifest's granularity.** Untouched. §4 adds a field to the
-  description; it does not make the description a projection of a richer artifact, and
-  ADR-0150 §10's fifth clause governs one if it is ever built.
+- **#57 — the payload manifest's granularity.** Untouched, and untouched more
+  completely than an earlier draft of this ADR would have left it: §4 adds **nothing**
+  to the payload description, so the granularity question arrives at ADR-0150 §10
+  exactly as ADR-0148 §13 and ADR-0155 §7 left it, and §10's fifth clause governs a
+  richer artifact if one is ever built.
 - **#1154 — the enforcement point.** Partly discharged and honestly so. §4 makes the
   fact recordable, §5 says who records it, and §6 refuses on it; what remains open is
   everything §6's fourth clause names — nothing detects a component that records the
@@ -1139,6 +1141,21 @@ ADR-0082 §1 classifications and every argument in this document are deliberatel
 unmarked: they are argument and attestation, which ADR-0089 §1 classifies as
 non-normative however load-bearing.
 
+**The ADR-0082 §1 records this ADR owes are made by this change, while it is
+`Proposed`, and that is the corpus's own practice rather than a convenience.**
+Architecture review asked twice for them to be deferred to a PR after ratification.
+Three things decide it the other way. ADR-0082 §1 puts the judgement "in the later
+ADR's text, which is where it is reviewed", and a record written in a later PR is a
+record no reviewer of the decision ever saw. ADR-0165 §2 makes the ratification flip
+**one ADR file and one changed line**, so the flip cannot carry them and a third PR
+would be a second lane for one decision. And the practice is uniform: ADR-0230's own
+authoring commit `6c148a29` wrote its records onto ADR-0092, ADR-0226 and ADR-0228 in
+the same change, and ADR-0228's `Status` line has read "amended by ADR-0230" since —
+written while ADR-0230 was `Proposed`. A record made by a `Proposed` ADR states what
+that ADR decides, and its ratification is what makes the decision binding; the note on
+ADR-0155 says so in terms, and §1's second clause is what makes the distinction have
+no operational consequence in the meantime.
+
 **Required reviews: adversarial *and* architecture.** This is a contract-surface change
 in `CONTRIBUTING.md`'s sense on both available grounds — §4 decides `core/types.py`
 surface, and the document moves the clause every egress decision in the corpus is
@@ -1172,10 +1189,13 @@ surface.
   the whole spoken surface and this ADR does not widen it; a voice-only deployment
   waits for a screen. That is a real product cost of ADR-0199's audience rule and it is
   paid here rather than carved around.
-- **The trail gains a payload version, and the next `core` field on a stored model is
-  cheap.** ADR-0184 §9's deferral is spent by the route §9 offered, at the epoch §9
-  named, and the third epoch — ADR-0150 §6's tier residue — will find the machinery
-  already there.
+- **The trail gains a third binding shape, and ADR-0184 §9's deferred payload version
+  stays deferred.** §9's choice is made at the epoch §9 named and made the other way:
+  `CoverageUnrecordedBinding`, because a version key names a schema and supplies no
+  value for a row missing a required field. What the union buys is that every arm names
+  the fact it does not have; what it costs is one more arm, and a fourth `core` field
+  on a stored model puts §9's choice again — with three data points, and with the
+  representability finding this loop produced already on the record.
 - **The egress binding now carries two call-level facts and the corpus knows what each
   is for.** Whether the material selected into the planning call was marked as external
   (ADR-0181), and where what this call would send came from (this ADR). The per-span
