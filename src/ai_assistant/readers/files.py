@@ -105,6 +105,7 @@ from ai_assistant.readers._extract import (
     ExtractionFailedError,
     extract,
 )
+from ai_assistant.readers._guards import type_name_of
 from ai_assistant.readers._locality import PlatformTables, ProcPlatformTables
 
 if TYPE_CHECKING:
@@ -764,11 +765,11 @@ def _refuse_out_of_domain(  # noqa: PLR0913 — one keyword per configured figur
     message that refuses it, and a hostile one raises straight past the guard,
     turning the wrong-exception-class defect the guard exists to fix into a
     different one. The type refusal therefore names the type, through
-    :func:`_type_name_of` because that read is itself a call into the refused
-    object's class. Below the type test ``repr`` is not merely safe but *right*:
-    what a caller needs from a range violation is ``got 0``, and ``got int`` tells
-    them nothing. Both refusals phrase the domain once and share it, so the two
-    halves of one rule cannot drift into two rules.
+    :func:`~ai_assistant.readers._guards.type_name_of` because that read is itself a
+    call into the refused object's class. Below the type test ``repr`` is not merely
+    safe but *right*: what a caller needs from a range violation is ``got 0``, and
+    ``got int`` tells them nothing. Both refusals phrase the domain once and share
+    it, so the two halves of one rule cannot drift into two rules.
 
     The exact-type tests are what make the range messages safe without any
     canonicalisation: no subclass is accepted at either, so a figure that reaches a
@@ -780,8 +781,7 @@ def _refuse_out_of_domain(  # noqa: PLR0913 — one keyword per configured figur
     ttl_domain = "a strictly positive timedelta"
     if type(listing_ttl) is not timedelta:
         msg = (
-            f"fetch_listing_ttl must be {ttl_domain}, got "
-            f"{_type_name_of(listing_ttl)} (ADR-0230 §6)"
+            f"fetch_listing_ttl must be {ttl_domain}, got {type_name_of(listing_ttl)} (ADR-0230 §6)"
         )
         raise ConfigurationError(msg)
     if listing_ttl <= timedelta(0):
@@ -796,59 +796,11 @@ def _refuse_out_of_domain(  # noqa: PLR0913 — one keyword per configured figur
         ("fetch_max_character_mappings", max_character_mappings, "ADR-0234 §2"),
     ):
         if type(figure) is not int:
-            msg = f"{label} must be {figure_domain}, got {_type_name_of(figure)} ({citation})"
+            msg = f"{label} must be {figure_domain}, got {type_name_of(figure)} ({citation})"
             raise ConfigurationError(msg)
         if figure < 1:
             msg = f"{label} must be {figure_domain}, got {figure!r} ({citation})"
             raise ConfigurationError(msg)
-
-
-#: What a type refusal names when the type will not say what it is called.
-_UNNAMEABLE_TYPE: Final = "an unnameable type"
-
-
-def _type_name_of(value: object) -> str:
-    """``type(value).__name__``, or a fixed literal where reading it will not answer.
-
-    **The name read is itself a call into the refused object's class**, which is the
-    half of #1978 that survives substituting ``repr``: a metaclass may override
-    ``__getattribute__`` for ``"__name__"`` and raise, or answer with something that
-    is not a built-in ``str`` whose own rendering then raises. Either takes the
-    refusal down with the value it was refusing — the same wrong-exception-class
-    escape one level in, so a guard that reaches for a type name owes this read the
-    same distrust it gives the value.
-
-    :func:`~ai_assistant.core.types.fault_class_of` guards the same read for the
-    same reason and this mirrors its shape rather than inventing a second one:
-    ``Exception`` is caught and ``BaseException`` is **not**, so a
-    ``CancelledError`` raised by the name read is delivered onward (ADR-0060 §1).
-    ``type(name) is str`` rather than ``isinstance``, because a ``str`` subclass is
-    a second object with a second chance to raise and this one is asked to render
-    itself into the message.
-
-    **A third statement of the same guard**, beside ``readers/calendar.py``'s and
-    ``readers/email.py``'s, and deliberately not a fourth home for it: the shared
-    home would be a new private module in this package, which is a decision about
-    the package's shape rather than about this defect, and ``fault_class_of`` itself
-    cannot serve — it takes an ``Exception``, because it classifies a fault, while a
-    configuration guard refuses a value of arbitrary type. Collapsing the three is
-    #2110.
-
-    Args:
-        value: The refused object, asked only what its type is called.
-
-    Returns:
-        The type's name, or :data:`_UNNAMEABLE_TYPE` where it could not be read.
-    """
-    try:
-        name = type(value).__name__
-        nameable = type(name) is str and bool(name)
-    # A blind `except Exception` on purpose — see the docstring; `BaseException`
-    # is deliberately not caught. `BLE` is not enabled in this tree and `RUF100`
-    # fails the gate on an unused directive, so the reason stays a comment.
-    except Exception:
-        return _UNNAMEABLE_TYPE
-    return name if nameable else _UNNAMEABLE_TYPE
 
 
 def _checked_root(value: object) -> Path:
@@ -890,7 +842,7 @@ def _checked_root(value: object) -> Path:
     override to raise. Catching that and refusing is what makes §6's promise — that
     an ineligible configuration is a ``ConfigurationError`` — true rather than
     nearly true. ``Exception`` is caught and ``BaseException`` deliberately is not,
-    for :func:`_type_name_of`'s reason (ADR-0060 §1).
+    for :func:`~ai_assistant.readers._guards.type_name_of`'s reason (ADR-0060 §1).
 
     Args:
         value: The configured root, disbelieved until it has been checked.
@@ -903,7 +855,7 @@ def _checked_root(value: object) -> Path:
             or is not absolute.
     """
     if not issubclass(type(value), Path):
-        msg = f"the fetch root must be a Path, got {_type_name_of(value)} (ADR-0230 §6)"
+        msg = f"the fetch root must be a Path, got {type_name_of(value)} (ADR-0230 §6)"
         raise ConfigurationError(msg)
     # `issubclass(type(...))` establishes the type without asking the object, but it
     # narrows nothing for `mypy`; the cast records what the line above proved.
@@ -914,7 +866,7 @@ def _checked_root(value: object) -> Path:
     except Exception as exc:
         msg = (
             f"the fetch root must be a Path that rebuilds to a built-in one, got "
-            f"{_type_name_of(value)} (ADR-0230 §6)"
+            f"{type_name_of(value)} (ADR-0230 §6)"
         )
         raise ConfigurationError(msg) from exc
     if not root.is_absolute():

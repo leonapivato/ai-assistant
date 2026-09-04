@@ -42,7 +42,7 @@ guard reported the value's *type* and never asked the value about itself.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 
 class Hostile:
@@ -171,3 +171,29 @@ class ClassRaises:
     @property  # type: ignore[misc]  # a read-only `__class__`; the hostile case
     def __class__(self) -> type:
         raise RuntimeError("a hostile __class__ must not raise past a guard")
+
+
+#: The two ways a type can fail to name itself: the read of ``__name__`` raises, or
+#: it answers with something that is not a ``str`` whose own rendering would then
+#: raise (#2104). Named rather than built here — see :func:`unnameable`.
+UNNAMEABLE_KINDS: Final = ["unreadable", "not-a-str"]
+
+
+def unnameable(kind: str) -> object:
+    """An instance of a class that will not say what it is called.
+
+    **Built inside the arm rather than passed to it**, which is not a style
+    preference: pytest renders a failing test's arguments, and rendering *this* one
+    asks the class the very question it refuses — so a regression that ought to
+    show as one red assertion crashes the whole session with an ``INTERNALERROR``
+    from inside pytest's own traceback formatter instead. Verified by mutation. So
+    an arm takes :data:`UNNAMEABLE_KINDS`' ``str`` and calls this in its body, and
+    what this returns never reaches a parameter list.
+
+    Defined once here for the reason every other probe in this module is (#2110):
+    each of the three reader suites held its own copy, and a builder redefined per
+    suite is one more chance for one of them to drift into a class that no longer
+    refuses.
+    """
+    metaclass = Unnameable if kind == "unreadable" else NumericName
+    return metaclass("Evil", (), {})()

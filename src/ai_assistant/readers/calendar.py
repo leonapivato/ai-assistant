@@ -232,6 +232,7 @@ from ai_assistant.core.types import (
     SemanticMemory,
     SourceReading,
 )
+from ai_assistant.readers._guards import type_name_of
 from ai_assistant.readers._occurrences import (
     occurrences_in_window,
     saturating_add,
@@ -930,8 +931,9 @@ def _checked_path(value: object) -> Path:
     refusal statically unreachable, which is the reasoning that let the value
     through. The type refusal names the type rather than the value — a hostile
     ``__repr__`` must not raise past a guard (#1978) — and it reaches that name
-    through :func:`_type_name_of`, because the read is itself a call into the
-    refused object's class and owes it the same distrust (#2104).
+    through :func:`~ai_assistant.readers._guards.type_name_of`, because the read
+    is itself a call into the refused object's class and owes it the same
+    distrust (#2104).
 
     **The type test is put to the *real* class, never to the object.**
     ``isinstance`` falls back to ``value.__class__`` when the concrete type does not
@@ -959,7 +961,7 @@ def _checked_path(value: object) -> Path:
     override to raise. Catching that and refusing is what makes "nothing but a
     ``ValueError`` leaves this constructor" true rather than nearly true.
     ``Exception`` is caught and ``BaseException`` deliberately is not, for
-    :func:`_type_name_of`'s reason (ADR-0060 §1).
+    :func:`~ai_assistant.readers._guards.type_name_of`'s reason (ADR-0060 §1).
 
     Returns:
         The same location as a built-in ``Path``, whatever subclass carried it.
@@ -971,7 +973,7 @@ def _checked_path(value: object) -> Path:
             degrades under ADR-0093 §8.
     """
     if not issubclass(type(value), Path):
-        msg = f"the calendar source must be a Path, got {_type_name_of(value)}"
+        msg = f"the calendar source must be a Path, got {type_name_of(value)}"
         raise ValueError(msg)
     # `issubclass(type(...))` establishes the type without asking the object, but it
     # narrows nothing for `mypy`; the cast records what the line above proved.
@@ -982,7 +984,7 @@ def _checked_path(value: object) -> Path:
     except Exception as exc:
         msg = (
             f"the calendar source must be a Path that rebuilds to a built-in one, "
-            f"got {_type_name_of(value)}"
+            f"got {type_name_of(value)}"
         )
         raise ValueError(msg) from exc
     if not source.is_absolute():
@@ -1020,7 +1022,7 @@ def _checked_zone(value: object) -> ZoneInfo:
         ValueError: If ``value`` is not a ``str``, or is not a known IANA zone.
     """
     if not issubclass(type(value), str):
-        msg = f"the calendar timezone must be a str, got {_type_name_of(value)}"
+        msg = f"the calendar timezone must be a str, got {type_name_of(value)}"
         raise ValueError(msg)
     name = str.__str__(value)
     try:
@@ -1048,8 +1050,8 @@ def _checked_duration(field: str, value: object) -> timedelta:
     this guard is reached by a value of *arbitrary* type, so a hostile
     ``__repr__`` would raise straight past a refusal whose whole purpose is that
     nothing but a ``ValueError`` leaves this constructor — and the type is named
-    through :func:`_type_name_of`, because the name read is itself a call into
-    the refused object's class (#2104).
+    through :func:`~ai_assistant.readers._guards.type_name_of`, because the name
+    read is itself a call into the refused object's class (#2104).
 
     **The type test is put to the *real* class, never to the object.**
     ``isinstance`` falls back to ``value.__class__`` when the concrete type does not
@@ -1084,7 +1086,7 @@ def _checked_duration(field: str, value: object) -> timedelta:
         ValueError: If ``value`` is not a ``timedelta``.
     """
     if not issubclass(type(value), timedelta):
-        msg = f"{field} must be a timedelta, got {_type_name_of(value)}"
+        msg = f"{field} must be a timedelta, got {type_name_of(value)}"
         raise ValueError(msg)
     # `issubclass(type(...))` establishes the type without asking the object, but it
     # narrows nothing for `mypy`; the cast records what the line above proved.
@@ -1112,46 +1114,6 @@ def _checked_window(field: str, value: object, *, allow_zero: bool) -> timedelta
     return duration
 
 
-#: What a type refusal names when the type will not say what it is called.
-_UNNAMEABLE_TYPE: Final = "an unnameable type"
-
-
-def _type_name_of(value: object) -> str:
-    """``type(value).__name__``, or a fixed literal where reading it will not answer.
-
-    **The name read is itself a call into the refused object's class**, which is
-    the half of #1978 that survived substituting ``repr``: a metaclass may
-    override ``__getattribute__`` for ``"__name__"`` and raise, or answer with
-    something that is not a built-in ``str`` whose own rendering then raises.
-    Either takes the refusal down with the value it was refusing — the same
-    wrong-exception-class escape one level in, so a guard that reaches for a type
-    name owes this read the same distrust it gives the value.
-
-    :func:`~ai_assistant.core.types.fault_class_of` guards the same read for the
-    same reason and this mirrors its shape rather than inventing a second one:
-    ``Exception`` is caught and ``BaseException`` is **not**, so a
-    ``CancelledError`` raised by the name read is delivered onward (ADR-0060 §1).
-    ``type(name) is str`` rather than ``isinstance`` for :func:`_checked_int`'s
-    reason — a ``str`` subclass is a second object with a second chance to raise,
-    and this one is asked to render itself into the message.
-
-    Args:
-        value: The refused object, asked only what its type is called.
-
-    Returns:
-        The type's name, or :data:`_UNNAMEABLE_TYPE` where it could not be read.
-    """
-    try:
-        name = type(value).__name__
-        nameable = type(name) is str and bool(name)
-    # A blind `except Exception` on purpose — see the docstring; `BaseException`
-    # is deliberately not caught. `BLE` is not enabled in this tree and `RUF100`
-    # fails the gate on an unused directive, so the reason stays a comment.
-    except Exception:
-        return _UNNAMEABLE_TYPE
-    return name if nameable else _UNNAMEABLE_TYPE
-
-
 def _checked_int(field: str, value: object, domain: str) -> int:
     """A configured figure as a built-in ``int``, or a refusal naming its type.
 
@@ -1167,11 +1129,11 @@ def _checked_int(field: str, value: object, domain: str) -> int:
     that refuses it — a hostile one then raises straight past the guard, turning
     the wrong-exception-class defect the guard exists to fix into a different
     one. That is :func:`_checked_path`'s discipline, and it is why the type
-    refusal names the type — through :func:`_type_name_of`, because the name read
-    is a call into the refused object's class and owes the same distrust. Below
-    this guard ``repr`` is not
-    merely safe but *right*: what a caller needs from a range violation is
-    ``got 0``, and ``got int`` tells them nothing.
+    refusal names the type — through
+    :func:`~ai_assistant.readers._guards.type_name_of`, because the name read is
+    a call into the refused object's class and owes the same distrust. Below this
+    guard ``repr`` is not merely safe but *right*: what a caller needs from a
+    range violation is ``got 0``, and ``got int`` tells them nothing.
 
     **Exact rather than ``isinstance``**, which is what draws both lines at
     once: ``bool`` is an ``int`` by inheritance, so ``max_entries=True`` passes
@@ -1195,7 +1157,7 @@ def _checked_int(field: str, value: object, domain: str) -> int:
         ValueError: If ``value`` is not exactly an ``int``.
     """
     if type(value) is not int:
-        msg = f"{field} must be {domain}, got {_type_name_of(value)}"
+        msg = f"{field} must be {domain}, got {type_name_of(value)}"
         raise ValueError(msg)
     return value
 
