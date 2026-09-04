@@ -389,7 +389,27 @@ declared argument is admitted by that clause rather than by a change to it (§13
 > returned, so a grantable decision older than the window is not offered and the
 > operation makes no unbounded read of a Tier 1 store. The recourse is a larger
 > `limit`, which is `assistant decisions --limit`'s own shape. This ADR mints no
-> filtered, indexed or per-kind read of the trail (§11).
+> filtered, indexed or per-kind read of the trail and adds no member to `AuditTrail`
+> (§11).
+
+> **Normative.** A decision is offered only where the window read is **complete for
+> it** — which holds when the read returned fewer rows than `limit`, and otherwise
+> when that decision's `decided_at` is **strictly after** the `decided_at` of the
+> oldest row the read returned. A decision at that boundary instant is **not
+> offered**, whatever else it satisfies, and the recourse is a larger `limit`.
+
+> **Normative.** That rule is what makes the fourth availability condition —
+> "the trail holds no decision resolving it" — decidable from the window, and it is
+> stated rather than left to an implementation because the naive reading is wrong. It
+> rests on two clauses of the `AuditTrail` contract and on nothing else: `record`
+> refuses a resolution whose confirmation "was decided *after* the resolution
+> answering it", so a resolution's `decided_at` is at or after its confirmation's,
+> **equal timestamps included**; and `recent` returns the newest rows ordered by
+> `decided_at` descending, ties broken by `id` ascending. Every row strictly newer
+> than the oldest returned is therefore inside the window, so a candidate strictly
+> newer than the boundary has any resolution of it inside the window too — while a
+> candidate sharing the boundary instant may have one tie-broken just outside it, and
+> offering that one would be offering a confirmation the user has already answered.
 
 > **Normative.** The engine **composes no answer of its own** on either operation.
 > `ActionPolicy.resolve` authors every ruling, the trail records it, `core`
@@ -998,12 +1018,21 @@ enumeration in its own text (§9).
 > is the pair below.
 
 > **Normative.** Lane 1 ships the test for §2's binding refusal on the **held**
-> population: a `resume` carrying `remember_recipients_until` on a durably parked
-> confirmation whose `EgressBinding` carries `planned_with_external_content` records
-> no answer, executes nothing, raises, and leaves the step `AWAITING_APPROVAL` with
-> its `CONFIRM` unresolved — after which the same token answers it without the
-> argument. It fails against an implementation that sought the ruling first, which is
-> the implementation that would have sent the call.
+> population, for **each** of the four shapes it refuses — an `egress_binding` of
+> `None`, an `OriginUnrecordedBinding`, a `CoverageUnrecordedBinding`, and an
+> `EgressBinding` carrying `planned_with_external_content` — and not for the last
+> alone. Each asserts that a `resume` carrying `remember_recipients_until` on such a
+> durably parked confirmation seeks no ruling, records no answer, executes nothing,
+> raises, and leaves the step `AWAITING_APPROVAL` with its `CONFIRM` unresolved,
+> after which the same token answers it without the argument. The `None` arm is the
+> one a roster would omit and the one that would otherwise record an `ALLOW` and send
+> the call before `established_from` refused a binding that is not there.
+
+> **Normative.** Lane 1 ships the test pinning §3's window-completeness rule: a
+> confirmation sharing the oldest returned row's `decided_at` is **not** returned by
+> `grantable_decisions` at that `limit`, and is returned at a larger one. It fails
+> against an implementation that read the window and filtered on resolution alone,
+> which is the implementation that would offer an answered confirmation.
 
 > **Normative.** Lane 1 ships the pair that pins §1's **scoping** of that check, and
 > it is the arm a roster would omit: a `resume` carrying an expiry at or before the
