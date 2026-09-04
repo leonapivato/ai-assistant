@@ -212,10 +212,11 @@ which the third clause's prohibition lifts.
 
 > **Normative.** Ratifying this ADR relaxes nothing for any call. §9's condition is a
 > property of a **call** and not of a date, a tree state or a merged PR: a call whose
-> spans do not carry §4's fact, and whose confirmation did not put §6's question,
-> does not meet it, and §3's third clause forbids that call exactly as written. Until
-> the surface §5 to §8 describe exists in code, no call can meet the condition, so
-> nothing is relaxed by this document alone and no lane reads it as a permission.
+> binding does not carry §4's `coverage`, or whose confirmation did not put §8's
+> question, does not meet it, and §3's third clause forbids that call exactly as
+> written. Until the surface §5 to §8 describe exists in code, no call can meet the
+> condition, so nothing is relaxed by this document alone and no lane reads it as a
+> permission.
 
 > **Normative.** No lane cites this ADR toward a designation, a registration, a
 > destination, a `DestinationProtocol` member, a standing authorisation or a
@@ -230,7 +231,7 @@ in a PR no reviewer reads as an ADR change, which is the instrument ADR-0082 §2
 not offer; and it makes the question "has the mechanism landed yet?" a matter of
 judgement, which is exactly the kind of question ADR-0155 §3 spent twelve rounds
 learning not to leave open. Stated over the call, it is self-enforcing: a request
-whose spans carry no coverage cannot be built at all once §4's field exists, and
+whose binding carries no coverage cannot be built at all once §4's field exists, and
 cannot exist at all before it does. The ADR-0082 §1 record on ADR-0155 is therefore
 made **here**, by this change, because it is this document that makes §3's closing
 sentence over-wide.
