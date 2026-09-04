@@ -37,6 +37,16 @@ over a ``LearningLoop`` under ``tests/orchestration/``.
 ``ProcPlatformTables`` is fail-closed by decision, so a container's ``overlay`` root
 or a CI runner's device chain may legitimately refuse — and a test of the *wiring* has
 no business being decided by the machine it runs on.
+
+**And every configured bound reaches the fetcher, which is its own arm** (ADR-0232 §9).
+The bounds are passed explicitly here and the fetcher defaults each one, so a figure
+left off this call site is not a build failure: it is an operator's configured value
+silently ignored, while the field goes on validating at load and the fetcher goes on
+enforcing a number nobody chose. The last arm in this file is the one that fails on
+that, and it supplies the platform view a second way — patching the tables the *real*
+:func:`~ai_assistant.app.composition._build_local_file_fetcher` builds for itself,
+rather than standing in for that function — because a double reproducing the call site
+cannot tell anyone whether the call site is right.
 """
 
 from __future__ import annotations
@@ -51,11 +61,14 @@ import pytest
 sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "readers"))
 
 from fetch_fixtures import vouching
+from pdf_fixtures import drawing, pages_sharing_a_font
 
 from ai_assistant.app import composition
 from ai_assistant.app.composition import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
+from ai_assistant.core.types import FetchRefusal
 from ai_assistant.readers import LocalFileFetcher
+from ai_assistant.readers import files as files_module
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -90,6 +103,7 @@ def vouched(monkeypatch: pytest.MonkeyPatch) -> list[LocalFileFetcher]:
             listing_max_entries=settings.fetch_listing_max_entries,
             max_file_bytes=settings.fetch_max_file_bytes,
             max_content_bytes=settings.fetch_max_content_bytes,
+            max_decoded_bytes=settings.fetch_max_decoded_bytes,
         )
         built.append(fetcher)
         return fetcher
@@ -238,3 +252,56 @@ async def test_a_deployment_with_no_root_leaves_the_loop_no_fetcher(tmp_path: Pa
         assert engine._loop._fetcher is None  # no public reader on either
     finally:
         await engine.aclose()
+
+
+@pytest.mark.parametrize("configured_below_the_documents_charge", [True, False])
+async def test_a_configured_decoded_bound_reaches_the_fetcher(
+    tmp_path: Path,
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configured_below_the_documents_charge: bool,
+) -> None:
+    """ADR-0232 §9's wiring clause, over the **real** builder and over behaviour.
+
+    "Without it an operator's configured value reaches ``readers`` never, and the bound
+    is a field nothing enforces." ``LocalFileFetcher`` defaults every figure, so a bound
+    missing from ``_build_local_file_fetcher`` builds and runs and refuses nothing an
+    operator asked it to — which is why this arm cannot be a call-count or a keyword
+    assertion and cannot go through the ``vouched`` double above: both would be
+    asserting about a copy of the call site rather than about the call site.
+
+    So the *real* builder runs, with the platform view supplied by patching the tables
+    it constructs for itself, and the same document is fetched under two configured
+    values either side of its counted quantity. Only the pair is evidence: the refusal
+    alone would pass on a fetcher refusing everything, and the fetch alone on one
+    refusing nothing — and **both** values are non-default, so a wiring that dropped the
+    figure would take the 1 MiB default and admit the document in both directions.
+    """
+    document = pages_sharing_a_font([drawing(10_000)])
+    (root / "drawn.pdf").write_bytes(document)
+    charge = len(drawing(10_000))
+    assert charge < 1024 * 1024, "the shipped default must admit this document"
+    configured = charge - 1 if configured_below_the_documents_charge else charge
+
+    monkeypatch.setattr(files_module, "ProcPlatformTables", lambda: vouching(root))
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        fetch_root_path=root,
+        fetch_max_decoded_bytes=configured,
+    )
+    fetcher = composition._build_local_file_fetcher(settings)
+
+    assert fetcher is not None
+    try:
+        listing = await fetcher.listing()
+        entry = next(one for one in listing.entries if one.name == "drawn.pdf")
+        outcome = await fetcher.fetch(listing, entry)
+    finally:
+        fetcher.close()
+
+    if configured_below_the_documents_charge:
+        assert outcome.refusal is FetchRefusal.TOO_LARGE
+        assert outcome.record is None
+    else:
+        assert outcome.refusal is None
+        assert outcome.record is not None

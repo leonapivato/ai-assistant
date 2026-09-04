@@ -2375,9 +2375,17 @@ def _build_local_file_fetcher(settings: Settings) -> LocalFileFetcher | None:
     nothing at this layer has a second clock to hand it, and inventing one would be
     the second source ADR-0026 exists to prevent.
 
+    **Every configured figure is passed explicitly, and that is what makes the
+    settings reach `readers` at all.** The fetcher defaults each one, so a bound
+    left off here is not a build failure — it is an operator's configured value
+    silently ignored while the field goes on validating at load, which is a knob
+    that does nothing. ADR-0232 §9 says so of its own figure in terms: "without it
+    an operator's configured value reaches ``readers`` never, and the bound is a
+    field nothing enforces".
+
     Args:
-        settings: Loaded application settings — the root and ADR-0230 §4 and §6's four
-            figures, each already refused at load.
+        settings: Loaded application settings — the root, ADR-0230 §4 and §6's four
+            figures and ADR-0232 §2's fifth, each already refused at load.
 
     Returns:
         The fetcher, or ``None`` when ``fetch_root_path`` is unset.
@@ -2395,6 +2403,7 @@ def _build_local_file_fetcher(settings: Settings) -> LocalFileFetcher | None:
         listing_max_entries=settings.fetch_listing_max_entries,
         max_file_bytes=settings.fetch_max_file_bytes,
         max_content_bytes=settings.fetch_max_content_bytes,
+        max_decoded_bytes=settings.fetch_max_decoded_bytes,
     )
 
 
