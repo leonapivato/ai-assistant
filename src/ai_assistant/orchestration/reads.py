@@ -598,6 +598,17 @@ class _Union:
 class _ServicingFailedError(Exception):
     """A seam's own fault, carried to ADR-0226 §5's one degradation site.
 
+    **It carries the fault's class name and nothing else** (ADR-0004 §5). Not the
+    exception, not a chain to it and not a message: ``core/logging.py`` renders
+    through ``structlog.dev.ConsoleRenderer``, whose exception formatter is ``rich``'s
+    with ``show_locals=True``, so anything reaching a rendered traceback writes the
+    raising frames' locals into the log — here the turn's own utterance, the composed
+    query, the request and the bound call. ``redact_sensitive`` cannot reach any of
+    it: it runs *before* the renderer and over the event dict's keys, and a rendered
+    traceback is neither. A class name is Tier 2 and is the whole of what an operator
+    needs to tell a connection outage from a refused claim, which is
+    ``ThresholdActionPolicy``'s own answer at ``recipient_grant_seam_unreadable``.
+
     **Not an error class and not on any contract**: it is module-private, it is
     never raised across a call this package does not make, and it adds nothing to
     ``core/errors.py`` — which ADR-0231 forbids in terms. What it does is let one
@@ -619,7 +630,20 @@ class _ServicingFailedError(Exception):
     happens to them: "a servicing failure degrades the turn and never fails it",
     all-or-nothing, "the records that did come back are discarded with the rest" —
     which is exactly the record the ``finally`` below writes.
+
+    Attributes:
+        fault: The class name of the fault the seam raised.
     """
+
+    def __init__(self, fault: str) -> None:
+        """Carry one fault's class to the degradation site.
+
+        Args:
+            fault: ``type(exc).__name__`` of the fault the seam raised. A class, and
+                never the exception, for the reason above.
+        """
+        super().__init__(fault)
+        self.fault = fault
 
 
 @dataclass(frozen=True, slots=True)
@@ -963,6 +987,28 @@ class SearchServicer:
         return recorded if recorded == decision else None
 
 
+def _degraded(refused_by: str) -> None:
+    """Say that one servicing degraded, and say it in Tier 2 alone (ADR-0004 §5).
+
+    **The class, and no traceback.** This line carried ``exc_info=True`` until a
+    ``WEB_SEARCH`` ask put the turn's own utterance into
+    :func:`service_read_request`'s frame beside the supply and the composed sighted
+    query — and ``core/logging.py`` renders through ``structlog.dev.ConsoleRenderer``,
+    whose exception formatter is ``rich``'s with ``show_locals=True``, so a rendered
+    traceback writes a frame's locals into the log where ``redact_sensitive`` cannot
+    reach them: it runs *before* the renderer and over the event dict's keys, and a
+    rendered traceback is neither. What an operator needs from this line is that the
+    servicing degraded and what class refused, and both are Tier 2 — which is
+    ``ThresholdActionPolicy``'s own answer at ``recipient_grant_seam_unreadable``,
+    one seam over.
+
+    Args:
+        refused_by: The class name of what refused. Never a message, never an
+            instance and never a value it was carrying.
+    """
+    _log.warning("read_request_degraded", stage="service_read_request", refused_by=refused_by)
+
+
 async def service_read_request(  # noqa: PLR0913 — the store, the emission, and one parameter per thing a kind is serviced against; §7 admits one site and this is it
     store: MemoryStore,
     request: ReadRequest,
@@ -1161,8 +1207,11 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
     truncated: list[ReadKind] = []
     unresolved = 0
     refusal: FetchRefusal | None = None
+    # Assigned before the `try`, because ADR-0231 §13's field rides on the failing
+    # record too and a fault raised *by* the search leaves the call that would have
+    # assigned it unreturned — where the honest value is the empty one §5's
+    # degradation carries (issue #2112).
     disposition: SearchDisposition | None = None
-    searched = _ask_of(request, ReadKind.WEB_SEARCH)
     try:
         if named is not None:
             # ADR-0230 §7: **first**, ahead of the hop, because this kind is capped
@@ -1197,27 +1246,28 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
                     # `LOCAL_FILE` never appears in `truncated_kinds`, which is §1's
                     # cap of one showing up in the audit rather than a case elided.
                     union.admit((outcome.record,))
-        if searched is not None:
-            # ADR-0231 §11: **second**, after the one-record local file and ahead
-            # of the hop and the query. ADR-0226 §6's decision is applied and not
-            # moved — the capped read ahead of the uncapped one — and sorting the
-            # four kinds by their caps gives one file, three results, ten via two
-            # labels, and then the uncapped query. Servicing it last is the
-            # position at which the budget is ordinarily gone, which would make the
-            # kind's availability a function of how full the budget happened to be
-            # rather than of what the planner asked for.
-            #
-            # A `WEB_SEARCH` ask carries no argument at all (§1), so there is
-            # nothing to read off it: its presence *is* the whole of the ask, and
-            # the query is composed from the utterance alone.
-            disposition = await _serviced_search(
-                search,
-                utterance,
-                union=union,
-                supply=supply,
-                reads=reads,
-                truncated=truncated,
-            )
+        # ADR-0231 §11: **second**, after the one-record local file and ahead of the
+        # hop and the query. ADR-0226 §6's decision is applied and not moved — the
+        # capped read ahead of the uncapped one — and sorting the four kinds by their
+        # caps gives one file, three results, ten via two labels, and then the
+        # uncapped query. Servicing it last is the position at which the budget is
+        # ordinarily gone, which would make the kind's availability a function of how
+        # full the budget happened to be rather than of what the planner asked for.
+        #
+        # A `WEB_SEARCH` ask carries no argument at all (§1), so there is nothing to
+        # read off it: its presence *is* the whole of the ask, and the query is
+        # composed from the utterance alone — which is why the ask is passed whole
+        # and the absence of one is answered where every other absence this kind has
+        # is (:func:`_serviced_search`).
+        disposition = await _serviced_search(
+            search,
+            _ask_of(request, ReadKind.WEB_SEARCH),
+            utterance,
+            union=union,
+            supply=supply,
+            reads=reads,
+            truncated=truncated,
+        )
         if hop is not None:
             reach = await _hop_records(store, hop, supply=supply, reads=reads)
             # **Accumulated and never assigned** (ADR-0230 §9). The count is one
@@ -1280,12 +1330,16 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
             for identifier in dict.fromkeys(record.id for record in resolved_by_hop)
             if identifier in union.held
         )
-    except MemoryStoreError, _ServicingFailedError:
+    except MemoryStoreError as store_fault:
         # §5's whole posture, and the archive's for the same reason ADR-0225 §2
         # gives: "a turn that answered from the supply it had is a worse turn, not
         # a broken one, and a mechanism whose whole purpose is a marginal
         # improvement in reach must never be able to take the reply down with it".
-        _log.warning("read_request_degraded", stage="service_read_request", exc_info=True)
+        _degraded(type(store_fault).__name__)
+    except _ServicingFailedError as failed:
+        # The searcher's own fault, arriving through the carrier rather than as
+        # itself, so this frame never holds it (ADR-0004 §5).
+        _degraded(failed.fault)
     finally:
         # One record, on every path out of this function — the completed servicing,
         # the degraded one, and the one a cancellation carried away — and the
@@ -1322,8 +1376,9 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
     return reached
 
 
-async def _serviced_search(  # noqa: PLR0913 — the seam, the composer's one input, and the three things ADR-0231 §11 states this kind's budget clause over; §7 admits one servicing site and this is that site's fourth kind
+async def _serviced_search(  # noqa: PLR0913 — the seam, the ask, the composer's one input, and the three things ADR-0231 §11 states this kind's budget clause over; §7 admits one servicing site and this is that site's fourth kind
     search: SearchServicer | None,
+    ask: ReadAsk | None,
     utterance: str,
     *,
     union: _Union,
@@ -1372,6 +1427,10 @@ async def _serviced_search(  # noqa: PLR0913 — the seam, the composer's one in
         search: The wired servicer, or ``None`` where this deployment connected no
             search account — §13's :attr:`SearchDisposition.NOT_CONFIGURED`, and
             never an error.
+        ask: The emission's ``WEB_SEARCH`` ask, or ``None`` where it carried none.
+            Passed whole rather than as a boolean because §1 makes its presence the
+            entire content of the ask: it has no argument to read, so there is
+            nothing else this function could want from it.
         utterance: The turn's own words, the composer's only input (§3, §4).
         union: The fourth group under construction. Its unspent slot count is what
             §11's two budget branches are decided on, and it is what the minted
@@ -1390,14 +1449,20 @@ async def _serviced_search(  # noqa: PLR0913 — the seam, the composer's one in
             §11 states the clause as a rule rather than as an impossibility.
 
     Returns:
-        §13's disposition, or ``None`` where the search yielded records and where it
-        reached the provider and returned none.
+        §13's disposition, or ``None`` in each of the cases §13 leaves the field
+        empty: where no ``WEB_SEARCH`` ask was made, where the search yielded
+        records, and where it reached the provider and returned none.
 
     Raises:
         _ServicingFailedError: If the searcher raised a fault of its own. Carried to
             ADR-0226 §5's degradation rather than reported as a disposition, for the
             reason that class records.
     """
+    if ask is None:
+        # §13's second absence: "nothing where … no ``WEB_SEARCH`` ask was made".
+        # Answered before the deployment is consulted, so a turn nobody asked a
+        # search of reads the same on a wired deployment and an unwired one.
+        return None
     if search is None:
         return SearchDisposition.NOT_CONFIGURED
     try:
@@ -1422,7 +1487,12 @@ async def _serviced_search(  # noqa: PLR0913 — the seam, the composer's one in
         # either, so the ratified answer is ADR-0226 §5's all-or-nothing degradation
         # — which is what this reaches, and which leaves the supply as planning saw
         # it with every count zero.
-        raise _ServicingFailedError from exc
+        #
+        # **``from None``, and the class name rather than the exception** (ADR-0004
+        # §5): the chain this suppresses would put ``search.service``'s frames — the
+        # utterance, the composed query, the request and the bound call — into any
+        # rendered traceback, and every one of those is Tier 1.
+        raise _ServicingFailedError(type(exc).__name__) from None
     reads.note(len(found.records))
     if union.admit(found.records):
         truncated.append(ReadKind.WEB_SEARCH)
