@@ -635,6 +635,10 @@ async def test_no_identifier_the_hop_carried_reaches_a_prompt_a_log_or_the_audit
         "new",
         "deduplicated",
         "labels_unresolved",
+        # ADR-0230 §9's one added field. It is a closed-enumeration member or absent,
+        # and on this turn — a hop, with no ``LOCAL_FILE`` ask — it is absent, which
+        # is one of the two cases §9 enumerates for an empty one.
+        "refusal",
         "truncated_kinds",
         "failed",
         "failed_after_read_returned",
