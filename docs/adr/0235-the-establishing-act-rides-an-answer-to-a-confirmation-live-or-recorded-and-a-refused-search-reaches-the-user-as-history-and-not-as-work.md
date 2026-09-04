@@ -189,7 +189,8 @@ lane's own decision.**
 > trail, no grant, and a user told nothing they could act on. It is the shape §3's
 > seventh condition closes one axis over, closed the same way and for the same
 > reason: a precondition on the act is checked where the act is offered, not where
-> the record is built.
+> the record is built. Where it refuses on `resume` the step stays durably parked and
+> answerable, exactly as §2's binding refusal leaves it.
 
 > **Normative.** That check is **scoped to the establishing path and reaches no other
 > outcome**. Where the ruling is not an `ALLOW` — a declining answer on `resume`, or a
@@ -247,12 +248,38 @@ lane's own decision.**
 > and an argument that could suppress the record of a decision would be the failure
 > that obligation exists to prevent.
 
-> **Normative.** **No surface offers the standing control beside a declining
-> answer.** The shape above is therefore unreachable from a conforming surface, and
-> the clause exists so that the Protocol has a defined answer for a client that sends
-> it anyway. A surface that has collected a decline states, if it says anything at
-> all, that a declined call establishes nothing (ADR-0193 §2) — never that the
-> standing request was recorded, deferred, remembered or will be offered again.
+> **Normative.** `resume` **refuses the whole call, before any ruling is sought and
+> before anything is recorded**, where `remember_recipients_until` is supplied,
+> `approved` is true, and the confirmation's `egress_binding` is not an
+> `EgressBinding` whose `planned_with_external_content` is `False` — the same two
+> conditions §3's sixth and seventh place on the recorded population, on the held one.
+> The step stays durably parked and answerable, no answer and no execution follow, and
+> the user may answer again without the standing request. The clause is scoped to an
+> approving answer because the clause above governs a declining one, and a refusal
+> that suppressed a `DENY` would be the exception to ADR-0042 §4 this ADR does not
+> state.
+
+> **Normative.** The **asymmetry with the declining answer above is deliberate**, and
+> it is stated so that no lane repairs it into consistency. A decline carries
+> ADR-0042 §4's guarantee that the `DENY` is recorded, so the answer is recorded and
+> the argument establishes nothing; an approving answer carries no such guarantee, the
+> park survives a refusal, and the user may answer again. So the refusal costs a
+> second call where recording would cost an egress call nobody can un-send, and
+> fail-closed is available on one and forbidden on the other.
+
+> **Normative.** That refusal takes the shape `StepRunner.resume` already uses for a
+> binding it may not resume — refused by name before any ruling is sought, so nothing
+> is written and the step stays parked (ADR-0184 §8's fourth clause, ADR-0233 §14). It
+> is not a new mechanism and no lane builds one for it.
+
+> **Normative.** **No surface offers the standing control beside a declining answer,
+> and none offers it on a confirmation §3's sixth and seventh conditions exclude**
+> (§5's rendering floor is what tells the surface which). Both shapes above are
+> therefore unreachable from a conforming surface, and the clauses exist so that the
+> Protocol has a defined answer for a client that sends one anyway. A surface that has
+> collected a decline states, if it says anything at all, that a declined call
+> establishes nothing (ADR-0193 §2) — never that the standing request was recorded,
+> deferred, remembered or will be offered again.
 
 > **Normative.** Where the policy answers a `DENY` to an `approved=True` resume —
 > which `ActionPolicy.resolve`'s second obligation expressly permits — the `DENY` is
@@ -962,11 +989,21 @@ enumeration in its own text (§9).
 > **no** grant were recorded, and each asserts that `grantable_decisions` does not
 > return the decision either.
 
-> **Normative.** Lane 1 ships the expiry pair, on **both** operations: an expiry at
-> or before the instant the answer would carry records neither the answer nor the
-> grant and raises, and one strictly after it establishes the grant. The first fails
-> against an implementation that let the record's own validator do the refusing,
-> which is the outcome §1's clause forbids.
+> **Normative.** Lane 1 ships the expiry pair, on **both** operations and in each
+> case **over a confirmation the policy rules `ALLOW` on**: an expiry at or before the
+> instant the answer would carry records neither the answer nor the grant and raises,
+> and one strictly after it establishes the grant. The first fails against an
+> implementation that let the record's own validator do the refusing, which is the
+> outcome §1's clause forbids. Neither arm is stated over a non-`ALLOW` ruling, which
+> is the pair below.
+
+> **Normative.** Lane 1 ships the test for §2's binding refusal on the **held**
+> population: a `resume` carrying `remember_recipients_until` on a durably parked
+> confirmation whose `EgressBinding` carries `planned_with_external_content` records
+> no answer, executes nothing, raises, and leaves the step `AWAITING_APPROVAL` with
+> its `CONFIRM` unresolved — after which the same token answers it without the
+> argument. It fails against an implementation that sought the ruling first, which is
+> the implementation that would have sent the call.
 
 > **Normative.** Lane 1 ships the pair that pins §1's **scoping** of that check, and
 > it is the arm a roster would omit: a `resume` carrying an expiry at or before the
