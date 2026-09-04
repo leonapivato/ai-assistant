@@ -325,7 +325,9 @@ class Part:
         correction: §5's correction rate.
         beliefs_per_correction: §5's diagnostic: beliefs retired per corrective
             act, computed from ``total`` so a truncated set costs it nothing.
-        repeated_explanation: §6's rate, over direct user acts only.
+        repeated_explanation: §6's rate, over direct user acts only. A **lower
+            bound** under ADR-0121 §7, which :data:`_REPEATED_EXPLANATION_LIMIT`
+            states on the page beside it.
         observe_share: §6's diagnostic, "labelled as the observation stage's
             re-mining overlap" and never a substitute for the rate above.
     """
@@ -696,8 +698,34 @@ class MeasureReport:
         return lines
 
 
+#: ADR-0121 §7's second normative clause: "The report labels the repeated-explanation
+#: rate as a lower bound, naming that agreement is judged by exact restatement and that
+#: a paraphrase is not counted." The reason is §1's predicate, which admits only the
+#: four transformations that change no word, so "a user who repeats themselves in
+#: different words is not counted" and the figure "is a **floor**: the true rate is at
+#: least the reported one". It qualifies that figure alone: no other measure here is
+#: computed from an agreement test.
+#:
+#: The rendered lines cite no ADR, which is deliberate. A bare ``§7`` beside this
+#: figure would read as ADR-0120's §7, since every other reference in the block is
+#: to the ADR the block's figures come from; and a report that cites ``ADR-0121``
+#: obliges ``--help`` to name it, in ``service`` and outside this change. The limit
+#: is stated so it needs neither — it says what it is, and why.
+_REPEATED_EXPLANATION_LIMIT = (
+    "    — a lower bound: agreement is judged by exact restatement, so a paraphrase of",
+    "      an earlier explanation is not counted and the true rate is at least this one",
+)
+
+
 def _part_lines(part: Part, label: str) -> list[str]:
-    """One block of measures, headed by which window it is over."""
+    """One block of measures, headed by which window it is over.
+
+    Each figure whose ADR states a limit on it carries that limit on the lines
+    directly under it — ADR-0121 §7's lower bound on the repeated-explanation rate,
+    and ADR-0120 §6's labelling of the ``observe`` share as re-mining overlap rather
+    than a repeated explanation — so that no figure can be read off the page without
+    the caveat its own ADR attaches to it.
+    """
     return [
         f"{label}  [{part.start:%Y-%m-%dT%H:%M:%S%z}, {part.end:%Y-%m-%dT%H:%M:%S%z})",
         f"  memory precision (§4)          {part.user.rendered_precision()}",
@@ -705,6 +733,7 @@ def _part_lines(part: Part, label: str) -> list[str]:
         f"  correction rate (§5)           {part.correction.rendered()}",
         f"  beliefs per correction (§5)    {part.beliefs_per_correction.rendered()}",
         f"  repeated-explanation rate (§6) {part.repeated_explanation.rendered()}",
+        *_REPEATED_EXPLANATION_LIMIT,
         f"  observe reinforcement share    {part.observe_share.rendered()}",
         "    — the observation stage's re-mining overlap, not a repeated explanation",
     ]
