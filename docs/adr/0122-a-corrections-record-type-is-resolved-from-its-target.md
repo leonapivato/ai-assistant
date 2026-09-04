@@ -2,6 +2,38 @@
 
 - Status: Accepted
 - Date: 2026-08-09
+- **Note (2026-09-03): §11's residue bullet calls the cross-kind misresolution
+  "visible"; read that as §3's and §4's "discoverable by belief inspection".**
+  §11's fourth bullet, under "What this ADR does not decide", closes with
+  "Bounded, visible, and answered by §6's pin — but real, and the reason §4's
+  best-ranked rule keeps an escape hatch rather than standing alone." **The two
+  clauses it summarises say the narrower thing, and §4 rules the wider word out
+  in terms.** §3 writes that "The misresolution is *discoverable* by belief
+  inspection — the same surface that would show today's mis-filing", and §4 that
+  "Discoverable is the accurate word and "visible in the outcome" is not:
+  `IngestSummary` carries a decision and a record id and no `MemoryKind`, so a
+  correct resolution and a wrong one can both report "Replaced a prior memory" —
+  against different records." A wrong resolution is therefore not visible in the
+  outcome the caller is handed; it is found on `assistant beliefs`, the
+  belief-inspection surface §4 names, which shows each record and its kind. The
+  bullet was written before the rounds that produced §4's sentence, and was not
+  pulled into line with it.
+  **Nothing decided changes and no reader acts differently as to the decision**
+  (ADR-0070 §1, and its 2026-07-31 §1 note on what "differently" means). This ADR
+  is a marked one, so its marked clauses are the whole of what it obligates and
+  unmarked text supplies no obligation (ADR-0089 §3); §11 carries no mark, it is
+  the section naming what this ADR does *not* decide, and the bullet summarises
+  §3's analysis rather than adding to it. No normative clause turns on the word —
+  §3's resolution rule, §4's best-ranked rule and its one-proposal bound, §5's
+  `SEMANTIC` fallback and §7's refusal all read identically either way — and the
+  residue itself is unchanged in extent: same cause, same bound, same remedy in
+  §6's pin. A reader acting on the corrected reading looks for a misresolution
+  exactly where §3 and §4 already send them, and the escape hatch the bullet
+  points at is the same one.
+  This is an internal contradiction in this ADR's own words — ADR-0070 §1's first
+  term — with no other ADR as its cause, so it is recorded as this appended dated
+  note, §11's text below is **not** rewritten, and no `Status` edit is owed
+  (ADR-0082 §1). Refs #873.
 - **Decides `core` surface and implements none of it.** One field on
   `FeedbackEvent` in `core/types.py` becomes **optional** — `memory_kind` gains
   `None` and a default (§1). **No new Protocol and no new member**:
