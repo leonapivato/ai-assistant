@@ -1009,6 +1009,13 @@ def test_every_integer_setting_is_discovered() -> None:
         "fetch_max_file_bytes",
         "fetch_max_content_bytes",
         "fetch_max_decoded_bytes",
+        # ADR-0231 §5's bound on a composed web-search query, acknowledged here for
+        # the fetch bounds' reason and with the same ``bool`` argument:
+        # ``search_query_max_chars=True`` is a bound of one Unicode code point, so
+        # every composition a model could write is refused ``TOO_LONG`` — a
+        # deployment that looks configured and silently never searches, with §13's
+        # audit field reporting a composer fault for every turn.
+        "search_query_max_chars",
         # ADR-0159 §3's spend bound, acknowledged here with the same `bool`
         # argument the caps above carry: `reconciler_max_conflicts=True` is a
         # bound of one, which asks the model about the best-ranked conflict alone
