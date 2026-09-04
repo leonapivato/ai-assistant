@@ -153,9 +153,9 @@ from ai_assistant.wire import TransportError
 from ai_assistant.wire.address import sun_path_limit
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
-    from ai_assistant.core.types import MemoryRecord, ShownFile, SourceGrant
+    from ai_assistant.core.types import FrozenJson, MemoryRecord, ShownFile, SourceGrant
 
 
 AT = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
@@ -447,23 +447,55 @@ def _egress_span(  # noqa: PLR0913 — one keyword per field of the span being b
     )
 
 
+def _parameters_for(spans: Sequence[EgressSpan]) -> dict[str, FrozenJson]:
+    """The arguments ``spans`` decompose, built so the fixture is a real request.
+
+    ADR-0150 §4 makes the spans the arguments and
+    :class:`~ai_assistant.core.types.ActionRequest` refuses a binding that does not
+    describe the call's own parameters, so a confirmation whose spans name nothing
+    the parameters hold is a shape production cannot reach. ADR-0233 §8 renders each
+    span's value *from* ``parameters``, which is what makes the correspondence
+    load-bearing here rather than incidental: a fixture that kept a fixed pair of
+    arguments would leave every case in this block testing the withheld-card path.
+
+    An occurrence's own supplied form is used where it carries one, because
+    :func:`~ai_assistant.core.types._span_defect` refuses a span whose destination
+    states a supplied form the argument's value does not hold. Everything else is
+    filled to the span's stated extent.
+    """
+    built: dict[str, FrozenJson] = {}
+    indexed: dict[str, dict[int, str]] = {}
+    for span in spans:
+        occurrence = span.destination
+        value = occurrence.supplied if occurrence is not None else "x" * span.extent
+        if span.index is None:
+            built[span.argument] = value
+        else:
+            indexed.setdefault(span.argument, {})[span.index] = value
+    for argument, elements in indexed.items():
+        built[argument] = [elements[index] for index in sorted(elements)]
+    return built
+
+
 def _egress_confirmation(
     *spans: EgressSpan,
     identity: str = _EGRESS_IDENTITY,
     planned_with_external_content: bool = False,
+    coverage: SpanCoverage = SpanCoverage.NOT_COVERED,
+    parameters: Mapping[str, FrozenJson] | None = None,
 ) -> Confirmation:
-    """A parked egress confirmation carrying ``spans``."""
+    """A parked egress confirmation carrying ``spans``, over the arguments they name."""
     return Confirmation(
         tool_id="smtp",
         tool_description="Send an email.",
-        parameters={"to": "Alice@Example.ORG", "body": "hello"},
+        parameters=_parameters_for(spans) if parameters is None else parameters,
         reason="this discloses data off-device",
         token=ContinuationToken(handle="tok"),
         egress=ConfirmationEgress(
             account_identity=identity,
             spans=spans,
             planned_with_external_content=planned_with_external_content,
-            coverage=SpanCoverage.NOT_COVERED,
+            coverage=coverage,
         ),
     )
 
@@ -618,6 +650,11 @@ def test_a_non_egress_confirmation_renders_as_it_did_and_claims_nothing(
         # origin line too, and asserts neither of its arms.
         "Planned over:",
         "external content",
+        # ADR-0233 §8's last clause, one axis over: neither the coverage line nor the
+        # values block, and no claim in either direction about what it draws on.
+        "What it draws on:",
+        "What it would send",
+        "this assistant stores",
     ):
         assert absent not in rendered
 
@@ -723,9 +760,9 @@ def test_neither_arm_names_a_source_a_span_or_a_verdict(output: StringIO) -> Non
     named in the ADR in terms), no attribution to an argument or a recipient, and
     no detection, score, risk level or claim that the call is malicious.
 
-    ``parameters`` carries ``to``/``body`` on this fixture and the floor names both
-    arguments, so the span check is scoped to the origin line itself rather than to
-    the whole render.
+    The floor names the argument each occurrence was selected by, and ADR-0233 §8's
+    block prints that argument's value under the same key, so the span check is
+    scoped to the origin line itself rather than to the whole render.
     """
     for planned in (True, False):
         output.truncate(0)
@@ -755,6 +792,489 @@ def test_neither_arm_names_a_source_a_span_or_a_verdict(output: StringIO) -> Non
         # Never a statement about a span (§6's fifth clause).
         for span_word in ("alice@example.org", "Alice@Example.ORG", "argument", "recipient"):
             assert span_word not in origin, (planned, span_word)
+
+
+# --- ADR-0233 §8: the floor a content-bearing confirmation owes --------------
+# One block, for the reason the ADR-0178 block above gives. The three floors §15
+# names — rendering, coverage and control — are asserted over this surface's own
+# output, because §9's third condition is discharged by tests over each surface
+# and by nothing a component could check at the ruling.
+
+#: The gutter every line of a rendered value carries (:func:`cli._render_egress_value`).
+#: Spelled here so a case asserts the marker rather than re-deriving it, and so a
+#: renderer that dropped it on the continuations fails rather than passing on the
+#: first line.
+_VALUE_GUTTER: Final = "    \u2502 "
+
+
+def _value_lines(rendered: str) -> list[str]:
+    """The rendered value block's lines, gutter stripped, in the order printed."""
+    return [
+        line[len(_VALUE_GUTTER) :]
+        for line in rendered.split("\n")
+        if line.startswith(_VALUE_GUTTER)
+    ]
+
+
+def _coverage_slice(rendered: str) -> str:
+    """Just the coverage line, flowed — the subject of §8's own per-line clauses."""
+    flowed = _flowed(rendered)
+    return flowed[flowed.index("What it draws on:") :].split("What it would send")[0]
+
+
+def test_every_spans_value_is_rendered_whole_before_the_answer(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0233 §8's first two clauses, over the case the ADR is actually about.
+
+    "For every span the ``spans`` tuple carries, that span's own value, taken from
+    ``Confirmation.parameters`` under ADR-0150 §4's decomposition" — and rendered
+    **before it collects the user's answer**. The ordering is asserted at the moment
+    the control is offered rather than by comparing two offsets in a buffer, because
+    what §8 requires is that the bytes were on the screen when the question was put.
+    """
+    body = "Dear Alice,\n\nYou asked me to remind you about June.\n\nBest,\nLeo"
+    confirmation = _egress_confirmation(
+        _egress_span("body", extent=len(body)),
+        _egress_span("to", canonical="alice@example.org", extent=17),
+        parameters={"body": body, "to": "alice@example.org"},
+    )
+    shown: list[str] = []
+
+    def _at_the_prompt(_text: str, *, default: bool = False) -> bool:
+        shown.append(output.getvalue())
+        return False
+
+    monkeypatch.setattr(typer, "confirm", _at_the_prompt)
+    assert cli._prompt_for_approval(confirmation) is False
+
+    assert len(shown) == 1  # one control, offered once
+    at_the_prompt = shown[0]
+    assert _value_lines(at_the_prompt) == [*body.split("\n"), "alice@example.org"]
+    # Keyed by ADR-0150 §4's own pair, so a reader can carry their eye from the
+    # description to the value it describes.
+    assert "    body:" in at_the_prompt
+    assert "    to:" in at_the_prompt
+
+
+def test_a_value_is_rendered_beside_the_description_and_never_instead_of_it(
+    output: StringIO,
+) -> None:
+    """ADR-0233 §8's fourth clause: ADR-0178 §7's floor is unreduced beneath it.
+
+    Both are on the screen now, which is why §7's sixth clause binds harder than
+    before: a surface that merged them would be claiming the description states what
+    the value says. So the account, the origin, the set, every occurrence and the
+    payload description are all asserted here, in their order, with the values after
+    them and before the reason.
+    """
+    cli._render_confirmation(
+        _egress_confirmation(
+            _egress_span("body", extent=5),
+            _egress_span(
+                "to", canonical="alice@example.org", supplied="Alice@Example.ORG", extent=17
+            ),
+        )
+    )
+    rendered = _flowed(output.getvalue())
+
+    for kept in (
+        _EGRESS_IDENTITY,  # the connected account
+        "Planned over:",  # ADR-0181 §6's origin line
+        "Goes to:",  # the canonical destination set
+        "Describing:",  # the payload description
+        "5 code points",  # which still states an extent rather than the text
+    ):
+        assert kept in rendered
+    assert rendered.index("Describing:") < rendered.index("What it draws on:")
+    assert rendered.index("What it draws on:") < rendered.index("What it would send, whole:")
+    assert rendered.index("What it would send, whole:") < rendered.index("Why:")
+
+
+def test_an_indexed_span_renders_its_own_element_and_not_the_whole_argument(
+    output: StringIO,
+) -> None:
+    """ADR-0233 §8: "that argument's value's element at ``index``".
+
+    An array-valued argument decomposes into one span per element (ADR-0150 §4), so
+    each is shown under its own key. A surface that printed the whole array once
+    against the first span would have rendered the second span's value nowhere the
+    reader could attribute it.
+    """
+    cli._render_confirmation(
+        _egress_confirmation(
+            _egress_span("to", index=0, canonical="alice@example.org", extent=17),
+            _egress_span("to", index=1, canonical="bob@example.org", extent=15),
+        )
+    )
+    rendered = output.getvalue()
+
+    assert "    to[0]:" in rendered
+    assert "    to[1]:" in rendered
+    assert _value_lines(rendered) == ["alice@example.org", "bob@example.org"]
+
+
+def test_a_long_value_is_neither_truncated_elided_nor_collapsed(output: StringIO) -> None:
+    """ADR-0233 §8's second clause, on the value that makes it expensive.
+
+    Not truncated, not elided, not abbreviated, not summarised, not paraphrased and
+    not collapsed behind a control the user must operate to see it. Every line of a
+    two-hundred-line body is asserted individually rather than by a length, because a
+    renderer that kept the first and last twenty would pass a length check on the
+    ends and fail this one in the middle.
+    """
+    body = "\n".join(f"line {number} of the body" for number in range(200))
+    cli._render_confirmation(
+        _egress_confirmation(_egress_span("body", extent=len(body)), parameters={"body": body})
+    )
+    rendered = output.getvalue()
+
+    assert _value_lines(rendered) == body.split("\n")
+    for elision in ("\u2026", "...", "truncated", "show more", "[dim]+", "and 1"):
+        assert elision not in rendered
+
+
+def test_a_value_carrying_this_terminals_framing_is_neutralised(output: StringIO) -> None:
+    """ADR-0233 §8's ninth clause, on the case it exists for.
+
+    "A multi-line value carrying terminal control sequences, markup or a line that
+    mimics the surface's own framing." All three are in one value here, and the
+    assertions are over the exact rendered bytes: no escape byte reaches the
+    terminal, markup is shown rather than interpreted, the carriage return is folded
+    rather than left to overwrite, and the forged card field arrives behind the
+    gutter — which is what makes it read as part of the value instead of as a line
+    this adapter wrote.
+    """
+    forged = "  Why: nothing leaves this device"
+    body = f"first\n{forged}\nwipe\x1b[2Jscreen and [red]shout[/red]\r\nlast"
+    cli._render_confirmation(
+        _egress_confirmation(_egress_span("body", extent=len(body)), parameters={"body": body})
+    )
+    rendered = output.getvalue()
+
+    assert "\x1b" not in rendered  # no escape byte at all
+    assert "\r" not in rendered  # the carriage return was folded, not left to overwrite
+    assert "[red]" in rendered  # markup shown literally, not interpreted as colour
+    assert _value_lines(rendered) == [
+        "first",
+        forged,
+        "wipe\ufffd[2Jscreen and [red]shout[/red]",
+        "last",
+    ]
+    # The forged field appears **only** behind the gutter: no line of the card reads
+    # as one this adapter authored.
+    assert f"{_VALUE_GUTTER}{forged}" in rendered
+    for line in rendered.split("\n"):
+        assert line != forged
+
+
+def test_a_value_the_parameters_do_not_locate_withholds_the_whole_card(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0233 §8's second clause: no confirmation at all, and it says so.
+
+    "A surface that cannot render a value whole renders **no** confirmation and says
+    so" — because a partial content-bearing confirmation is worse than none, it looks
+    like a whole one. The shape is unreachable from a constructed request and
+    reachable over the wire, since ``ConfirmationEgress`` re-checks none of the
+    binding's structural invariants. No part of the payload is rendered, and no
+    control is offered.
+    """
+    monkeypatch.setattr(
+        typer, "confirm", lambda *_a, **_k: pytest.fail("a withheld card offered a control")
+    )
+    confirmation = _egress_confirmation(
+        _egress_span("body", extent=6), parameters={"elsewhere": "secret"}
+    )
+
+    assert cli._render_confirmation(confirmation) is False
+    assert cli._prompt_for_approval(confirmation) is None
+
+    rendered = output.getvalue()
+    assert "Confirmation required" not in rendered
+    assert "Confirmation withheld" in rendered
+    assert "secret" not in rendered  # no part of the payload, whole or otherwise
+    assert "Goes to" not in rendered  # and none of the floor, since there is no card
+
+
+def test_all_three_coverage_states_render_and_none_is_the_same_sentence(
+    output: StringIO,
+) -> None:
+    """ADR-0233 §8's fifth clause: rendered in **all three** states.
+
+    Total over the enum rather than over the states a lane believes it will meet —
+    ``PATH_WITHOUT_MODEL`` is unreachable in a confirmation, because §6 refuses it at
+    binding construction, and is rendered anyway for ADR-0181 §6's fourth clause's
+    reason: a fact shown only when it is alarming is one a user learns to read as an
+    alarm, and its absence as clearance. The iteration is over the enum itself, so a
+    fourth member could not be added without failing here.
+    """
+    sentences: set[str] = set()
+    for coverage in SpanCoverage:
+        output.truncate(0)
+        output.seek(0)
+        cli._render_confirmation(
+            _egress_confirmation(_egress_span("body", extent=5), coverage=coverage)
+        )
+        line = _coverage_slice(output.getvalue())
+        assert line.strip() != "What it draws on:"  # a state, never a blank
+        sentences.add(line)
+
+    assert len(sentences) == len(SpanCoverage) == 3
+
+
+def test_no_coverage_state_is_an_assurance_a_warning_or_a_verdict(output: StringIO) -> None:
+    """ADR-0233 §8's fifth, seventh and eighth clauses, as absences on every arm.
+
+    ``NOT_COVERED`` never says the send is safe or that nothing relates to what the
+    user has told this assistant; no arm is a detection, a score, a risk level, a
+    recommendation or a claim that the call is malicious; and none names a record, a
+    record identifier, an episode, a store-side key, a schema field or a kind of
+    source.
+    """
+    for coverage in SpanCoverage:
+        output.truncate(0)
+        output.seek(0)
+        cli._render_confirmation(
+            _egress_confirmation(_egress_span("body", extent=5), coverage=coverage)
+        )
+        line = _coverage_slice(output.getvalue()).lower()
+
+        for forbidden in (
+            "safe",
+            "secure",
+            "harmless",
+            "nothing to worry",
+            "risk",
+            "warning",
+            "malicious",
+            "suspicious",
+            "untrusted",
+            "unsafe",
+            "detected",
+            "score",
+            "recommend",
+            "you should",
+            # §8: no record identifier, no episode, no store-side key, no field name
+            # of any store's schema and no memory. The *verb* "recorded" is not one
+            # of those and is what ADR-0181 §6's own line already says — the bar is
+            # on naming a thing in a store, not on saying that something was
+            # recorded.
+            "memory",
+            "episode",
+            "belief",
+            "conversation",
+            "field",
+            # ...and no kind of source, in the two forms ADR-0181 §6 names in terms.
+            "source you connected",
+            "connected source",
+        ):
+            assert forbidden not in line, (coverage, forbidden)
+
+
+def test_the_coverage_line_is_never_a_claim_about_a_span(output: StringIO) -> None:
+    """ADR-0233 §8's sixth clause: not attributed to an argument, a position or a destination.
+
+    The recorded fact is a disjunction over the **call**, so a per-span rendering
+    would assert a marker §4 deliberately does not mint. This is ADR-0181 §6's fifth
+    clause read one axis over, and it is checked the same way: over a card whose
+    floor names two arguments and a recipient, none of which may appear in the line.
+    """
+    for coverage in SpanCoverage:
+        output.truncate(0)
+        output.seek(0)
+        cli._render_confirmation(
+            _egress_confirmation(
+                _egress_span("body", extent=5),
+                _egress_span("to", canonical="alice@example.org", extent=17),
+                coverage=coverage,
+            )
+        )
+        line = _coverage_slice(output.getvalue())
+
+        for span_word in ("body", "alice@example.org", "argument", "recipient", "span", "["):
+            assert span_word not in line, (coverage, span_word)
+
+
+def test_the_coverage_line_is_not_the_origin_line_in_either_direction(
+    output: StringIO,
+) -> None:
+    """ADR-0233 §8's eighth clause: no surface conflates the two.
+
+    "The two answer different questions — where what this call would send came from,
+    and whether the material selected into the planning call carried the external
+    mark." Both are on the card in every combination, each in its own words: the
+    origin line's own vocabulary is absent from the coverage line and the coverage
+    line's from the origin line, so neither could be read as a restatement of the
+    other.
+    """
+    for coverage in SpanCoverage:
+        for planned in (True, False):
+            output.truncate(0)
+            output.seek(0)
+            cli._render_confirmation(
+                _egress_confirmation(
+                    _egress_span("body", extent=5),
+                    coverage=coverage,
+                    planned_with_external_content=planned,
+                )
+            )
+            flowed = _flowed(output.getvalue())
+            expected = _PLANNED_OVER_EXTERNAL if planned else _PLANNED_OVER_NOTHING_MARKED
+            assert expected in flowed  # ADR-0181 §6's line, unmoved and unreduced
+            line = _coverage_slice(flowed)
+
+            for origin_word in ("external content", "selected", "marked as resting"):
+                assert origin_word not in line, (coverage, planned, origin_word)
+            origin = flowed[flowed.index("Planned over:") :].split("Goes to:")[0]
+            for coverage_word in ("draws on", "composed by a model", "stores"):
+                assert coverage_word not in origin, (coverage, planned, coverage_word)
+
+
+def test_the_reveal_is_a_separate_step_from_the_approval(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0233 §8's ninth clause: "no control that both reveals a value and approves it".
+
+    Rendering the card offers nothing to operate — a control raised here would fail —
+    and the values are all on the screen before any control exists. So the two acts
+    are separable in the only sense this surface can be asked for: reading costs
+    nothing and answering is its own act.
+    """
+    monkeypatch.setattr(
+        typer, "confirm", lambda *_a, **_k: pytest.fail("the reveal operated a control")
+    )
+    body = "the whole body, read before anything is offered"
+
+    assert (
+        cli._render_confirmation(
+            _egress_confirmation(_egress_span("body", extent=len(body)), parameters={"body": body})
+        )
+        is True
+    )
+    assert _value_lines(output.getvalue()) == [body]
+
+
+def test_the_prompt_takes_no_affirmative_default_and_needs_the_token_typed(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0233 §8's ninth clause: no affirmative default, no lower-effort yes.
+
+    Driven through the real prompt with a scripted standard input, because "the
+    default is ``False``" is a claim about what a bare Enter does and only the prompt
+    itself can answer it. A blank line declines; the approving token has to be typed.
+    """
+    confirmation = _egress_confirmation(_egress_span("body", extent=5))
+
+    monkeypatch.setattr("sys.stdin", StringIO("\n"))
+    assert cli._prompt_for_approval(confirmation) is False  # a bare Enter is not approval
+
+    monkeypatch.setattr("sys.stdin", StringIO("y\n"))
+    assert cli._prompt_for_approval(confirmation) is True  # the token, typed
+
+
+def test_one_prompt_answers_one_confirmation(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0233 §8's ninth clause: "no control that answers more than one confirmation".
+
+    Two cards, two prompts, and each answered on its own — the second is put after the
+    first was answered, so no control reaches past the confirmation it was offered
+    for. A surface that had asked once and applied the answer twice would show one
+    prompt here.
+    """
+    answers = iter([True, False])
+    asked: list[str] = []
+
+    def _one_at_a_time(_text: str, *, default: bool = False) -> bool:
+        asked.append(output.getvalue())
+        return next(answers)
+
+    monkeypatch.setattr(typer, "confirm", _one_at_a_time)
+    first = _egress_confirmation(_egress_span("body", extent=5))
+    second = _egress_confirmation(_egress_span("to", canonical="bob@example.org", extent=15))
+
+    assert cli._prompt_for_approval(first) is True
+    assert cli._prompt_for_approval(second) is False
+    assert len(asked) == 2
+    # The second card was on the screen before its own prompt, and not before the first's.
+    assert "bob@example.org" not in asked[0]
+    assert "bob@example.org" in asked[1]
+
+
+def test_yes_answers_a_confirmation_that_carries_no_egress(output: StringIO) -> None:
+    """ADR-0233 §8's last clause: a confirmation whose ``egress`` is ``None`` owes none of it.
+
+    ``--yes`` is unchanged there, which is the whole of ADR-0052 §4's and ADR-0073
+    §5's idiom: the flag supplies the answer and never the rendering.
+    """
+    assert (
+        cli._assume_yes(
+            Confirmation(
+                tool_id="notes",
+                tool_description="Write a note.",
+                parameters={"body": "hello"},
+                reason="an unknown cost",
+                token=ContinuationToken(handle="tok"),
+                egress=None,
+            )
+        )
+        is True
+    )
+    assert output.getvalue() == ""  # it answers, and says nothing about a floor it owes none of
+
+
+def test_yes_does_not_answer_an_egress_confirmation_and_declines_nothing(
+    output: StringIO,
+) -> None:
+    """ADR-0233 §8's ninth clause and §9's second condition, on the one control that spans cards.
+
+    §8 bars a control that "answers more than one confirmation" or "pre-selects an
+    affirmative answer", and a flag typed before the request existed does both — on
+    ``resume`` one ``--yes`` answers every pending card. §9's second condition admits
+    a model-composed span only where the ``CONFIRM`` was answered by the user "on
+    **that** request", which a standing flag is not.
+
+    ``None`` rather than ``False``: the user refused nothing, so nothing is recorded
+    as a refusal, and the step stays parked to be answered on a screen.
+    """
+    answer = cli._assume_yes(
+        _egress_confirmation(
+            _egress_span("body", extent=5), coverage=SpanCoverage.MODEL_ON_EVERY_PATH
+        )
+    )
+
+    assert answer is None
+    rendered = _flowed(output.getvalue())
+    assert "--yes does not answer this one" in rendered
+    assert "Nothing was sent and nothing was declined" in rendered
+    assert "assistant resume" in rendered  # what to do instead
+
+
+async def test_an_unanswered_confirmation_stays_parked_and_exits_nonzero(
+    output: StringIO,
+) -> None:
+    """The driver's half of the two clauses above: no ruling is recorded either way.
+
+    An approver returning ``None`` — a withheld card, or ``--yes`` meeting an egress
+    confirmation — leaves the recovered step exactly as it was: ``resume`` is not
+    called, so nothing is sent and no ``DENY`` is recorded, and the exit is non-zero
+    so a caller cannot read "everything was resolved" off the run.
+    """
+    engine = _engine(tools=(confirmable(),))
+    await engine.converse("send it", timeout=PATIENT)
+    engine._parked.clear()
+
+    code = await cli._drive_resume(engine, timeout=PATIENT, approver=lambda _c: None)
+
+    assert code == 1
+    rendered = output.getvalue()
+    assert "Confirmation required" in rendered  # it was still shown
+    assert "Done" not in rendered  # and nothing ran
+    assert "Declined" not in rendered  # and nothing was refused
+    still_parked = await engine.pending_confirmations()
+    assert len(still_parked) == 1  # the step is exactly where it was
+    await engine.aclose()
 
 
 def test_the_cli_mints_no_ruling_and_authorises_nothing(output: StringIO) -> None:

@@ -315,6 +315,7 @@ from ai_assistant.core.types import (
     SecretScope,
     SourceGrant,
     SourceReadRecord,
+    SpanCoverage,
     SpendPeriod,
     SpendTotal,
     StepStatus,
@@ -3094,8 +3095,8 @@ async def _ask(
     conversation (ADR-0074 §1).
     """
     timeout = timedelta(seconds=timeout_seconds)  # already validated positive + finite
-    approver: Callable[[Confirmation], bool] = (
-        (lambda _confirmation: True) if assume_yes else _prompt_for_approval
+    approver: Callable[[Confirmation], bool | None] = (
+        _assume_yes if assume_yes else _prompt_for_approval
     )
     # A routed card is rendered by `_render_turn` before this is reached (ADR-0197 §7,
     # ADR-0073 §5), so `--yes` supplies the answer and never the rendering here either:
@@ -3247,9 +3248,7 @@ async def _resume_pending(*, timeout_seconds: float, assume_yes: bool) -> int:
     # _drive_resume renders each recovered action itself (below), so the approver
     # only decides yes/no — a bare confirm, not _prompt_for_approval, or the action
     # would be rendered twice interactively.
-    approver: Callable[[Confirmation], bool] = (
-        (lambda _confirmation: True) if assume_yes else _confirm
-    )
+    approver: Callable[[Confirmation], bool | None] = _assume_yes if assume_yes else _confirm
     try:
         engine = await _open_engine()
     except (AssistantError, TransportError) as exc:
@@ -4051,7 +4050,7 @@ async def _drive_resume(
     engine: AssistantEngine,
     *,
     timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, relayed to the façade (ADR-0029 §4)
-    approver: Callable[[Confirmation], bool],
+    approver: Callable[[Confirmation], bool | None],
 ) -> int:
     """Recover the pending confirmations and resolve each one.
 
@@ -4062,6 +4061,15 @@ async def _drive_resume(
     interactive or supplied by ``--yes`` (ADR-0052 §4): a non-interactive approval
     must not run a recovered action the user never saw. An :class:`AssistantError`
     from any stage is rendered and mapped to a non-zero exit code.
+
+    **Two ways a card goes unanswered, and neither is a ruling** (ADR-0233 §8). The
+    render can be withheld, because a value could not be shown whole; and the
+    approver can decline to answer, which is what ``--yes`` does to a confirmation
+    carrying an egress. Either leaves that step parked with its recorded decision
+    untouched — nothing is sent and nothing is denied — and the loop moves to the
+    next card rather than stopping, since one unanswerable card is no reason to
+    leave the rest unread. The exit code is non-zero, because a caller must not read
+    "everything was resolved" off a run that left one pending.
     """
     failed = False
     try:
@@ -4070,8 +4078,13 @@ async def _drive_resume(
             console.print("[dim]Nothing is awaiting confirmation.[/]")
             return _EXIT_OK
         for confirmation in pending:
-            _render_confirmation(confirmation)
+            if not _render_confirmation(confirmation):
+                failed = True
+                continue
             approved = approver(confirmation)
+            if approved is None:
+                failed = True
+                continue
             resumed = await engine.resume(confirmation.token, approved=approved, timeout=timeout)
             failed = _render_turn(resumed) or failed
             _render_conversation_footer(resumed)
@@ -4086,7 +4099,7 @@ async def _drive_turn(  # noqa: PLR0913 — one parameter per seam a turn is dri
     utterance: str,
     *,
     timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, relayed to the façade (ADR-0029 §4)
-    approver: Callable[[Confirmation], bool],
+    approver: Callable[[Confirmation], bool | None],
     confirm_operation: Callable[[OperationConfirmation], bool],
     conversation_id: str | None = None,
 ) -> int:
@@ -4162,10 +4175,18 @@ async def _drive_turn(  # noqa: PLR0913 — one parameter per seam a turn is dri
         routed = outcome.routed
         if step is not None and step.confirmation is not None:
             approved = approver(step.confirmation)
-            outcome = await engine.resume(
-                step.confirmation.token, approved=approved, timeout=timeout
-            )
-            failed = _render_turn(outcome)
+            if approved is None:
+                # The question was not put — the card was withheld, or the answer was
+                # a flag this one does not take (ADR-0233 §8). The step stays parked
+                # with its recorded decision untouched: nothing was sent, nothing was
+                # denied, and the exit is non-zero so a scripted caller does not read
+                # a completed turn off one that is still waiting.
+                failed = True
+            else:
+                outcome = await engine.resume(
+                    step.confirmation.token, approved=approved, timeout=timeout
+                )
+                failed = _render_turn(outcome)
         elif routed is not None and routed.confirmation is not None:
             # The card is already on screen — `_render_turn` put it there above, which
             # is what makes `--yes` safe (ADR-0073 §5) — so `confirm_operation` reads
@@ -9052,6 +9073,32 @@ def _recipient_line(protocol: DestinationProtocol | None, canonical: str | None)
     return f"{_safe(canonical or '')} [dim]({_safe(named)})[/]"
 
 
+def _span_where(span: EgressSpan) -> str:
+    """The span's key, ADR-0150 §4's pair in the one spelling both blocks use.
+
+    A span is identified by ``(argument, index)``, and two blocks of the
+    confirmation card name it: :func:`_egress_span_line`, which states what the
+    description says about it, and :func:`_render_egress_values`, which prints the
+    value it locates (ADR-0233 §8). Spelling the key once is what lets a reader
+    carry their eye from one to the other — two spellings of one key would be two
+    things to keep in step, and the reader would be the one keeping them.
+
+    The argument is neutralised because a caller, or a model composing the call,
+    can put content of its own choosing into a *key* (ADR-0150 §13). The index is
+    an ``int`` the type validated and needs none.
+
+    Args:
+        span: The occurrence being named.
+
+    Returns:
+        ``argument`` where the span carries no index, ``argument[index]`` where it
+        does, neutralised for this terminal.
+    """
+    if span.index is None:
+        return _safe(span.argument)
+    return f"{_safe(span.argument)}[{span.index}]"
+
+
 def _egress_span_line(span: EgressSpan) -> str:
     """One occurrence of the payload description, whole (ADR-0178 §7).
 
@@ -9069,7 +9116,7 @@ def _egress_span_line(span: EgressSpan) -> str:
     supplied form from a canonical one, and nothing presents a canonical form as
     the form the user or the model wrote (ADR-0148 §14).
     """
-    where = _safe(span.argument) if span.index is None else f"{_safe(span.argument)}[{span.index}]"
+    where = _span_where(span)
     facts = [_egress_disclosure_phrase(span.provenance), f"{span.extent} code points"]
     if span.tier is not None:
         facts.append(f"tier {_safe(span.tier.value)}")
@@ -9151,7 +9198,267 @@ def _origin_line(*, planned_with_external_content: bool) -> str:
     )
 
 
-def _render_confirmation_egress(egress: ConfirmationEgress) -> None:
+def _coverage_line(coverage: SpanCoverage) -> str:
+    """The call's coverage, in all three states and at the recorded strength (ADR-0233 §8).
+
+    **A statement about the call, and about the record rather than about the
+    words.** :class:`~ai_assistant.core.types.SpanCoverage` is one three-valued
+    fact over every span the call would transmit (ADR-0233 §4), written by the
+    component that composed the arguments from what it supplied to the operations
+    that produced them (§5). Nothing inspected the text to obtain it, so no arm
+    here claims anything was found in the text.
+
+    **Never a statement about a span.** ADR-0233 §8 bars attributing it to an
+    argument, a position or a destination, and bars saying or implying that any
+    particular value is the covered one — the recorded fact is a disjunction over
+    the call, so a per-span rendering would assert a marker §4 deliberately does
+    not mint. The middle arm says so in terms rather than leaving the reader to
+    infer it, because that is the arm a reader would otherwise try to pin on one
+    of the values printed beside it.
+
+    **``NOT_COVERED`` is not an assurance**, and is worded so it cannot be read as
+    one (§8): it states that no covered path was *recorded* for this call, never
+    that nothing in it relates to anything the user has told this assistant, and
+    never that the send is safe. Each arm is a self-contained sentence rather than
+    a "no" against another, for :func:`_origin_line`'s reason — a reader in one
+    state never sees the others and would have no antecedent for a bare negation.
+
+    **Rendered in all three states, the unreachable one included.** ADR-0233 §6
+    refuses ``PATH_WITHOUT_MODEL`` at :class:`~ai_assistant.core.types.EgressBinding`
+    construction, so no confirmation can carry it; §8 renders it anyway "so that a
+    surface's rendering is total over the enum rather than over the states a lane
+    believes it will meet", which is ADR-0181 §6's fourth clause read one axis over.
+
+    **It names no record and no kind of source** (§8, ADR-0150 §10's second
+    clause): no record identifier, no episode, no store-side key, no field name of
+    any store's schema and no memory. And it is none of the things §8's eighth
+    clause bars — not a detection, a score, a risk level, a recommendation or a
+    warning that the call is malicious — nor is it
+    ``planned_with_external_content``, which :func:`_origin_line` states in its own
+    words about a different question: where the material *selected into the
+    planning call* came from, not where what this call would send came from.
+
+    Args:
+        coverage: The value the confirmation's egress carries.
+
+    Returns:
+        The sentence for whichever of the three states the call is in.
+    """
+    match coverage:
+        case SpanCoverage.NOT_COVERED:
+            return (
+                "nothing this call would send was recorded as drawn from what this "
+                "assistant stores. That is what was recorded when this call was "
+                "composed, and not a check of the text above"
+            )
+        case SpanCoverage.MODEL_ON_EVERY_PATH:
+            return (
+                "some of what this call would send was composed by a model that had "
+                "been shown things this assistant stores. Which part is not recorded, "
+                "so this says nothing about any one value above"
+            )
+        case SpanCoverage.PATH_WITHOUT_MODEL:
+            return (
+                "this call would carry something taken from what this assistant stores "
+                "directly. A call recorded that way is refused when it is built, so it "
+                "never reaches this screen"
+            )
+        case _:  # pragma: no cover - exhaustive
+            assert_never(coverage)
+
+
+#: Returned by :func:`_locate_span_value` for a span the parameters do not locate,
+#: which ``None`` cannot stand for: JSON null is a value an argument may hold, and
+#: a surface that read "absent" off it would render nothing where it owed a value.
+_UNLOCATABLE: Final = object()
+
+
+def _locate_span_value(parameters: Mapping[str, object], span: EgressSpan) -> object:
+    """The span's own value, under ADR-0150 §4's decomposition (ADR-0233 §8).
+
+    "The argument's whole value where ``index`` is absent, and that argument's
+    value's element at ``index`` otherwise" — §8's own words, and the same two
+    locatable shapes `core` recomputes a span's extent over. There is no third
+    shape: ADR-0150 §4 makes an argument's spans either exactly one indexless span
+    or a contiguous ``0..k-1`` run over a JSON array, and the request a ruling is
+    taken over is refused at construction where its binding says otherwise.
+
+    **It is looked up rather than assumed, because this type does not carry that
+    invariant.** :class:`~ai_assistant.core.types.ConfirmationEgress` deliberately
+    re-checks none of the binding's structural rules — a copy of them there would
+    be the second statement of one invariant ADR-0150 is named against — and a
+    ``Confirmation`` crosses the wire. So the lookup can fail here even though the
+    request it was built from could not have been constructed, and
+    :data:`_UNLOCATABLE` is what the caller acts on: ADR-0233 §8 has a surface that
+    cannot render a value whole render **no** confirmation, because a partial
+    content-bearing confirmation is worse than none — it looks like a whole one.
+
+    Args:
+        parameters: The confirmation's arguments, thawed to plain JSON.
+        span: The occurrence whose value is wanted.
+
+    Returns:
+        The located value, or :data:`_UNLOCATABLE` where the parameters do not
+        hold one for this span.
+    """
+    if span.argument not in parameters:
+        return _UNLOCATABLE
+    held = parameters[span.argument]
+    if span.index is None:
+        return held
+    if not isinstance(held, list) or not 0 <= span.index < len(held):
+        return _UNLOCATABLE
+    return held[span.index]
+
+
+def _span_value_text(value: object) -> str:
+    """One located value as text, ready to be neutralised and printed.
+
+    **A JSON string is itself**, which is the case ADR-0233 is actually about: an
+    email body, a search query, the words that would leave. Nothing is added around
+    it, so what the user reads is the value and not a rendering of one.
+
+    **Every other JSON value is written in the encoding `core` already counts it
+    in.** ADR-0150 §4 fixes a span's extent as the code-point count of its value —
+    a JSON string directly, and anything else in the canonical JSON form
+    ``parameters_digest`` is taken over — so writing a boolean, a number or an
+    object that way is what makes the extent printed beside it the count of the
+    text printed here. It is a **rendering choice** and no invariant rests on it:
+    the encoding that fixes the digest is `core`'s, is never restated by this
+    adapter, and nothing here is compared against it.
+
+    Args:
+        value: The value :func:`_locate_span_value` returned, as plain JSON.
+
+    Returns:
+        The value as text, verbatim for a string and canonically encoded otherwise.
+    """
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _egress_values(
+    confirmation: Confirmation, egress: ConfirmationEgress
+) -> tuple[tuple[str, str], ...] | None:
+    """Every span's own value, in the binding's order, or ``None`` (ADR-0233 §8).
+
+    ``None`` is the whole-or-nothing answer §8's second clause requires: "A surface
+    that cannot render a value whole renders **no** confirmation and says so." One
+    unlocatable span therefore withdraws the *card*, not that span's line — a
+    confirmation showing every value but one looks like a complete one, which is
+    ADR-0178 §9's second clause read one member over.
+
+    **The order is the binding's own**, which is the artifact the ruling was taken
+    over and the order :func:`_render_confirmation_egress` already prints the
+    description in. §8 bars reordering "so as to bury one", and the way not to
+    reorder is not to sort.
+
+    Args:
+        confirmation: The parked action, for its arguments.
+        egress: Its egress facts, for the spans.
+
+    Returns:
+        One ``(key, value)`` pair per span, or ``None`` where any span's value
+        cannot be located.
+    """
+    dumped = confirmation.model_dump(mode="json", include={"parameters"})
+    parameters = cast("Mapping[str, object]", dumped["parameters"])
+    located: list[tuple[str, str]] = []
+    for span in egress.spans:
+        value = _locate_span_value(parameters, span)
+        if value is _UNLOCATABLE:
+            return None
+        located.append((_span_where(span), _span_value_text(value)))
+    return tuple(located)
+
+
+def _render_egress_value(value: str) -> None:
+    r"""Print one span's value whole, behind a gutter no adapter line carries.
+
+    **Whole, and that is the clause the rest of this function serves** (ADR-0233
+    §8): not truncated, not elided, not abbreviated, not summarised, not
+    paraphrased, and not collapsed behind a control the user must operate to see
+    it. So there is no pager, no "show more" and no head of a long body — a pager
+    *is* a control the user must operate, and the terminal's own scrollback is not
+    a control this surface offers.
+
+    **The line breaks are kept and the forgery they open is closed by the gutter**,
+    which is :func:`_render_content`'s answer to the same problem and is adopted
+    here for the same reason. :func:`_safe` replaces ``\n`` by default because a
+    value interpolated into a line this adapter authored can forge a second line
+    indistinguishable from one this adapter wrote — but an email body's breaks are
+    content, and rendering them as ``�`` would be an abbreviation §8 forbids.
+    So :func:`_safe_prose` keeps them, and every line of the value is printed behind
+    ``│`` — a marker no line this card writes ever carries, since its own lines lead
+    with a label or with a span's key. A forged ``  Why:`` therefore arrives as
+    ``│   Why:`` and reads as what it is: part of the value.
+
+    **The gutter is on every line, first line included**, so the block is legible
+    as one quoted thing rather than as a first line the eye can anchor on outside
+    it. It is on a single-line value too — unlike :func:`_render_content`, whose
+    rows are prose and where one line cannot forge a second. Here a single line
+    *can* mislead without forging: printed at this card's own indentation, a value
+    of ``Account: someone@example.org`` would sit among the card's fields looking
+    like one of them.
+
+    **The wrapping is taken here rather than left to the console**, because Rich
+    does not repeat a literal prefix on the continuations it wraps: handed one long
+    line it emits the gutter once and puts the remainder at the margin, so a long
+    body would run past the marker within a line or two. The value is therefore
+    wrapped to the room beside the gutter, by Rich's own measurement, and the
+    gutter is written onto each piece. Wrapping loses nothing — the pieces of a
+    line concatenate back to it — so the value stays whole on the screen as well as
+    in the buffer.
+
+    Rich markup is escaped over the **whole** value before it is split, never per
+    line, for the reason :func:`_safe_prose` records: Rich's tag pattern matches
+    across a newline, so ``[red\nbold]`` survives per-line escaping intact and is
+    then consumed as markup. What is printed is a :class:`~rich.text.Text`, so the
+    escaping is resolved once and cannot be re-parsed by the print.
+
+    Args:
+        value: The span's own value, as the confirmation carries it.
+    """
+    gutter = Text("    │ ", style="dim")
+    room = max(console.width - len(gutter), 1)
+    for line in _safe_prose(value).split("\n"):
+        for wrapped in Text.from_markup(line).wrap(console, room):
+            console.print(gutter + wrapped)
+
+
+def _render_egress_values(values: Sequence[tuple[str, str]]) -> None:
+    """Every span's own value, beside the description and before the answer (ADR-0233 §8).
+
+    **Beside, never instead.** ADR-0178 §7's floor is unreduced above this block —
+    the account identity, every occurrence with the argument it was selected by,
+    both destination forms, the canonical set as `core` derived it, and the payload
+    description — and §7's sixth clause binds harder here than before, because both
+    the description and the values are now on the screen: a surface that merged them
+    would be claiming the description states what the value says. They are two
+    headings, and each span's key appears under both so a reader can carry their eye
+    across (:func:`_span_where`).
+
+    **No summary, no excerpt, no derivation in place of a value** (§8's third
+    clause). A summary of covered content is itself the output of an operation
+    supplied covered content and is therefore covered content, and it is not what
+    would be sent — so a user answering against it has answered about something
+    else. What is printed under each key is the value.
+
+    Args:
+        values: One ``(key, value)`` pair per span, in the binding's own order.
+    """
+    console.print("  What it would send, whole:")
+    if not values:
+        console.print("    [dim](this call names no span, so it carries no value to show)[/]")
+    for key, value in values:
+        console.print(f"    {key}:")
+        _render_egress_value(value)
+
+
+def _render_confirmation_egress(
+    egress: ConfirmationEgress, values: Sequence[tuple[str, str]]
+) -> None:
     """What ADR-0148 §8's fourth clause requires, before the answer is collected.
 
     Three things, and a confirmation naming the tool and not the recipients is not
@@ -9186,9 +9493,11 @@ def _render_confirmation_egress(egress: ConfirmationEgress) -> None:
         console.print("    [dim](the payload description names no span)[/]")
     for span in egress.spans:
         console.print(f"    {_egress_span_line(span)}")
+    console.print(f"  [bold]What it draws on:[/] {_coverage_line(egress.coverage)}")
+    _render_egress_values(values)
 
 
-def _render_confirmation(confirmation: Confirmation) -> None:
+def _render_confirmation(confirmation: Confirmation) -> bool:
     """Render a parked action so a person can judge it (ADR-0042 §4, ADR-0178 §7).
 
     **An egress confirmation owes more than the four content members**, and until
@@ -9215,21 +9524,70 @@ def _render_confirmation(confirmation: Confirmation) -> None:
     Every value is neutralised for this terminal on the way out (:func:`_safe`),
     the new members included: ``argument`` is a caller-influenced key (ADR-0150
     §13) and a ``supplied`` form is a string a model produced.
+
+    **The ``With:`` block is not ADR-0233 §8's floor and is not withdrawn by it.**
+    It prints each argument on a line this adapter authored, so a value's newlines
+    are eaten there (:func:`_safe`) and a long value reads as one long line: that is
+    a *derivation*, and §8 permits one **beside** a value while forbidding one in
+    place of it. §8's floor is the block below — each span's own value, whole,
+    behind a gutter — and it is rendered in addition to this one rather than
+    instead of it, because reducing the card is not the way to satisfy a clause
+    about adding to it.
+
+    **A confirmation whose values cannot all be located renders as no
+    confirmation** (ADR-0233 §8's second clause). ``ConfirmationEgress``
+    deliberately re-checks none of the binding's structural invariants and a
+    ``Confirmation`` crosses the wire, so this is reachable even though the request
+    it was built from could not have been constructed. What is printed then names
+    the tool and says the card was withheld; it renders no part of the payload,
+    since a partial content-bearing confirmation is precisely what §8 refuses, and
+    the caller answers nothing.
+
+    Returns:
+        Whether the confirmation was rendered. ``False`` withdraws the card under
+        §8's second clause, and a caller that gets it collects no answer.
     """
+    egress = confirmation.egress
+    values: tuple[tuple[str, str], ...] = ()
+    if egress is not None:
+        located = _egress_values(confirmation, egress)
+        if located is None:
+            console.print("\n[bold yellow]Confirmation withheld[/]")
+            console.print(
+                f"  I cannot show you everything {_safe(confirmation.tool_id)} would send, "
+                "so I am not asking you to approve it. Nothing was sent and nothing was "
+                "declined; the step is still waiting."
+            )
+            return False
+        values = located
     console.print("\n[bold yellow]Confirmation required[/]")
     console.print(f"  Tool: {_safe(confirmation.tool_id)} — {_safe(confirmation.tool_description)}")
     if confirmation.parameters:
         console.print("  With:")
         for key, raw in confirmation.parameters.items():
             console.print(f"    {_safe(str(key))} = {_safe(str(raw))}")
-    if confirmation.egress is not None:
-        _render_confirmation_egress(confirmation.egress)
+    if egress is not None:
+        _render_confirmation_egress(egress, values)
     console.print(f"  Why: {_safe(confirmation.reason)}")
+    return True
 
 
-def _prompt_for_approval(confirmation: Confirmation) -> bool:
-    """Render the confirmation and read the human's yes/no (I/O; ADR-0042 §6)."""
-    _render_confirmation(confirmation)
+def _prompt_for_approval(confirmation: Confirmation) -> bool | None:
+    """Render the confirmation and read the human's yes/no (I/O; ADR-0042 §6).
+
+    **Rendered first, and the answer collected only if it was** (ADR-0233 §8): the
+    values precede the controls, and a card :func:`_render_confirmation` withheld is
+    one no prompt follows. ``None`` says the question was not put, which is neither
+    a yes nor a no — the step stays parked and its recorded decision is unchanged.
+
+    **The prompt does not default to approval and offers no lower-effort yes.** An
+    empty line is the default and the default is ``False``, so a bare Enter declines;
+    the approving token has to be typed. One prompt answers this one confirmation,
+    and answering is a separate act from the reveal above it — nothing here both
+    shows a value and approves it.
+    """
+    if not _render_confirmation(confirmation):
+        return None
     return typer.confirm("Proceed?", default=False)
 
 
@@ -9238,8 +9596,59 @@ def _confirm(_confirmation: Confirmation) -> bool:
 
     Used by the ``resume`` flow, where :func:`_drive_resume` renders each recovered
     action before prompting, so rendering here too would show it twice (I/O; §6).
+    That caller checks the render succeeded before it asks, so ADR-0233 §8's
+    withheld card never reaches this prompt.
+
+    One prompt per confirmation, no affirmative default, and the approving token
+    typed — :func:`_prompt_for_approval`'s clauses, on the same call.
     """
     return typer.confirm("Proceed?", default=False)
+
+
+def _assume_yes(confirmation: Confirmation) -> bool | None:
+    """``--yes``, which answers a confirmation that carries no egress and no other.
+
+    **What the flag is, and why it stops at this one card.** ``--yes`` supplies the
+    answer and never the rendering (ADR-0073 §5, ADR-0197 §5): the action is shown
+    whether the answer is interactive or not, so "a non-interactive approval must
+    not run a recovered action the user never saw" (ADR-0052 §4). That is unchanged
+    for every confirmation whose ``egress`` is ``None``, which is exactly the set
+    ADR-0233 §8's last clause owes none of its floor.
+
+    **For an egress confirmation the flag is not an answer, and two clauses say so
+    independently.** ADR-0233 §8 bars a surface offering a control that "answers
+    more than one confirmation" or "pre-selects an affirmative answer" — and a flag
+    typed before the request existed does both: on ``resume`` one ``--yes`` answers
+    every pending card, and on ``ask`` it settles the answer before there is a
+    question. And ADR-0233 §9's second condition admits a ``MODEL_ON_EVERY_PATH``
+    span only where the ``CONFIRM`` was "answered by the user … on **that**
+    request", which a standing flag is not; where that condition fails, ADR-0155
+    §3's third clause forbids the span exactly as written.
+
+    **It declines nothing, because the user refused nothing.** ``None`` leaves the
+    step parked with its recorded decision untouched, to be answered by
+    ``assistant resume`` on a screen. A ``False`` here would record a ``DENY`` the
+    user did not make, and a ``True`` would be the approval §8 refuses.
+
+    This is a narrowing of the flag and not of any other surface: ADR-0073 §5's
+    ``forget`` idiom and ADR-0197's routed cards take a different type and are not
+    reached from here.
+
+    Args:
+        confirmation: The parked action the flag was asked to answer.
+
+    Returns:
+        ``True`` where the confirmation carries no egress, and ``None`` where it
+        does — the question is left unanswered rather than answered by a flag.
+    """
+    if confirmation.egress is None:
+        return True
+    console.print(
+        "[yellow]--yes does not answer this one.[/] It would send content off this "
+        "device, so it is approved on a screen or not at all. Nothing was sent and "
+        "nothing was declined; run [bold]assistant resume[/] to read it and answer."
+    )
+    return None
 
 
 # --- rendering the audit trail (ADR-0186 §7, §8) ----------------------------
