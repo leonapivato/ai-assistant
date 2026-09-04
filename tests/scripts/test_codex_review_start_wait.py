@@ -394,6 +394,108 @@ def test_wait_reports_a_round_that_finished_while_the_poll_was_looking(tmp_path:
     assert repo / reported["artifact"] == require_artifact(repo, _git(repo, "rev-parse", "HEAD"))
 
 
+def test_wait_says_still_running_about_a_round_that_has_already_finished(
+    tmp_path: Path,
+) -> None:
+    """Issue #1635: the one direction the liveness-first order can still be wrong in.
+
+    `--wait` reads liveness before the artifact directory (#1629, #1630), and the
+    script's own comment states the residue that order leaves and calls it
+    harmless:
+
+        a round that finishes after the liveness read is reported as still
+        running, and the next poll -- one interval later -- reports its artifact.
+
+    That was prose in a comment and in PR #1633's body, asserted nowhere. It is
+    pinned here as behaviour, because "harmless" is a claim about what the caller
+    is told next: exit 3 means *call again*, so a caller that obeys it loses
+    nothing, whereas the same moment answered 4 -- "stop polling, nothing is
+    coming" -- would throw away a green, already-paid round, which is exactly
+    #1629's failure.
+
+    Two neighbours are close but neither states this. The `--timeout 1` test above
+    reports exit 3 about a round that is genuinely still parked; this one reports
+    it about a round that is provably *gone*, with its artifact already on disk.
+    And `..._finished_while_the_poll_was_looking` forces the same interleaving but
+    with a deadline generous enough to swallow it, so the caller only ever sees
+    the 0 -- the intermediate answer is never observed. Here the deadline falls
+    inside the window, so the 3 is the answer a real caller gets.
+
+    The interleaving is forced, not raced, by the same two devices that test uses:
+    the round is parked until this test opens its gate, and a named pipe in the
+    artifact directory blocks the poll *inside* its listing, after the liveness
+    observation it must outlive. `--timeout 0` is what turns that iteration into
+    the reported answer rather than one poll of many.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    gate = tmp_path / "let-the-round-publish"
+    env = _env(tmp_path, FAKE_CODEX_PRE_CMD=_hold_round_until(gate))
+    assert _run(repo, env, "--start", "adversarial", "main").returncode == 0
+
+    # After `--start`, for the reason the neighbouring test gives: the round's own
+    # round-count scan reads this directory before it publishes its marker.
+    blocker = repo / ".review" / "0-blocking-not-an-artifact.md"
+    os.mkfifo(blocker)
+    waiter = subprocess.Popen(  # noqa: S603  # resolved bash, in-repo script
+        [bash(), str(SCRIPT), "--wait", "adversarial", "main", "--timeout", "0"],
+        cwd=repo,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    held = -1
+    try:
+        # The poll is inside its listing, so liveness has been read and the round
+        # was alive when it was; the listing predates publication, since the round
+        # is still parked.
+        held = _attach_to_blocking_artifact(blocker)
+        blocker.unlink()
+        # The round now publishes and exits -- strictly after that liveness read.
+        gate.touch()
+        _reap(repo)
+        assert artifact_for(repo, _git(repo, "rev-parse", "HEAD")) is not None
+        pids = _round_pids(repo)
+        assert pids != []
+        assert not any(_alive(pid) for pid in pids)
+        # Release the stale listing; the deadline has long since passed.
+        os.write(held, b"not a review artifact\n")
+        os.close(held)
+        held = -1
+        stdout, stderr = waiter.communicate(timeout=120)
+    finally:
+        if held != -1:
+            os.close(held)
+        gate.touch()  # never leave a parked round behind, however this exited
+        if waiter.poll() is None:
+            waiter.kill()
+            waiter.communicate()
+        _reap(repo)
+        with contextlib.suppress(FileNotFoundError):
+            blocker.unlink()
+
+    assert waiter.returncode == STILL_RUNNING, stderr
+    assert waiter.returncode != NOT_IN_FLIGHT
+    assert "still running" in stderr
+    assert "call --wait again" in stderr, "exit 3 has to say 'ask again' to be harmless"
+    assert stdout == ""
+    # Not a 4 wearing a 3's exit status: none of exit 4's three sentences is here.
+    assert "recorded no artifact" not in stderr
+    assert "no 'adversarial' round is in flight" not in stderr
+    assert "is reviewing tree" not in stderr
+
+    # And the very next poll is the 0 the comment promises, needing no new round.
+    settled = _run(repo, env, "--wait", "adversarial", "main", "--timeout", "0")
+
+    assert settled.returncode == RECORDED, settled.stderr
+    assert settled.returncode != NOT_IN_FLIGHT
+    reported = _fields(settled.stdout)
+    assert reported["verdict"] == "APPROVE"
+    assert reported["tree"] == _tree(repo)
+    assert repo / reported["artifact"] == require_artifact(repo, _git(repo, "rev-parse", "HEAD"))
+
+
 def test_start_refuses_a_second_round_of_the_same_persona(tmp_path: Path) -> None:
     """ADR-0015 and #142's rule, refused at the start rather than in a log."""
     repo = tmp_path / "repo"
