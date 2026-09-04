@@ -59,9 +59,10 @@ import io
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import pypdf
+from pypdf._font import Font
 from pypdf.generic import (
     ArrayObject,
     ContentStream,
@@ -127,20 +128,6 @@ _RESOURCES: Final = "/Resources"
 #: which this module enforces. What this figure decides is only *which parses
 #: happen*, which is the same question the resource context decides.
 _MAX_XFORM_INVOCATIONS: Final = 5_000
-
-#: The three keys a ``/FontDescriptor`` may name a font program under. More than one
-#: of them in **one** descriptor makes ``pypdf``'s ``Font._parse_font_descriptor``
-#: raise, and that raise happens while a page's fonts are built — *before* its content
-#: stream is resolved — so the extraction reaches that parse not at all.
-_FONT_FILE_KEYS: Final = ("/FontFile", "/FontFile2", "/FontFile3")
-
-#: The subtypes for which the adopted extraction reaches ``_parse_font_descriptor``
-#: at all. Three of them reach it unconditionally; ``/Type3`` reaches it only where
-#: the font is *interpretable*, which :func:`_reaches_the_font_descriptor` decides the
-#: way the library decides it. Neither approximation of this set is safe to guess at:
-#: too wide refuses a document the extraction fetches, too narrow reports a malformed
-#: document as over-bound.
-_DESCRIPTOR_SUBTYPES: Final = ("/Type1", "/MMType1", "/TrueType", "/Type3")
 
 
 class ExtractionFailedError(Exception):
@@ -399,87 +386,57 @@ def _charged_font_program(font: PdfObject) -> StreamObject | None:
     return resolved if isinstance(resolved, StreamObject) else None
 
 
-def _reaches_the_font_descriptor(font: DictionaryObject) -> bool:
-    """Whether building this font reaches ``Font._parse_font_descriptor``.
-
-    ``Font.from_font_resource``'s own condition, key for key. Three subtypes reach it
-    whenever a ``/FontDescriptor`` is present. ``/Type3`` reaches it only when the font
-    is **interpretable**, which the library defines as carrying a ``/ToUnicode`` or
-    having every ``/CharProcs`` glyph name in Adobe's standard set — "Type3 fonts that
-    do not specify a ``/ToUnicode`` mapping cannot be reliably converted into character
-    codes unless all named chars in ``/CharProcs`` map to a standard adobe glyph".
-
-    The glyph table is read **lazily and only here**, on a path a document reaches only
-    once it already carries two font programs in one descriptor (below). A release that
-    moved or dropped it therefore raises ``ImportError`` on that path alone, which
-    :func:`_extract_pdf` turns into ``EXTRACTION_FAILED`` — the fail-closed answer
-    ADR-0232 §3 prescribes where the walk cannot establish what the extraction will do,
-    and the right answer for that document in any case.
-    """
-    subtype = font.get("/Subtype", "")
-    if subtype not in _DESCRIPTOR_SUBTYPES:
-        return False
-    if subtype != "/Type3" or "/ToUnicode" in font:
-        return True
-    from pypdf._codecs.adobe_glyphs import (  # noqa: PLC0415 — see the docstring
-        adobe_glyphs,
-    )
-
-    return all(name in adobe_glyphs for name in font.get("/CharProcs") or [])
-
-
-def _refuse_unbuildable_font(font: PdfObject) -> None:
-    """Refuse where the extraction's own font *initialisation* will raise.
+def _establish_font(font: PdfObject) -> None:
+    """Build this font the way the extraction does, so its failures are its own.
 
     ``PageObject._extract_text`` builds a stream's fonts **before** it resolves the
     content key, and it swallows only ``AttributeError`` and ``TypeError`` while doing
     so. Anything else leaves the page's extraction having parsed nothing at all — so a
-    walk that charged the content stream first would answer ``TOO_LARGE`` for a document
-    the extraction refuses as malformed, which is the class confusion ADR-0232 §4 exists
-    to prevent, pointing an operator at their bounds when the answer is a corrupt file.
+    walk that went on to charge the content stream would answer ``TOO_LARGE`` for a
+    document the extraction refuses as malformed, which is the class confusion ADR-0232
+    §4 exists to prevent: it sends an operator to their bounds when the answer is a
+    corrupt file, and §4's own reasoning about the opposite mistake applies unchanged.
 
-    Exactly one such failure is a property of the dictionary rather than of what
-    decoding it produces: ``Font._parse_font_descriptor`` raises ``PdfReadError`` where
-    one ``/FontDescriptor`` names a program under more than one of
-    :data:`_FONT_FILE_KEYS`. It is decided here from keys, before anything is decoded,
-    which is the same standard §3 sets for the font predicate itself — and both halves
-    of the condition are the library's own rather than a forecast of it, the second
-    being :func:`_reaches_the_font_descriptor`.
+    **This calls the library's own builder rather than predicting it**, which is the
+    same standard §3 sets for the content-stream half — "a walk that disagreed would
+    refuse documents this ADR requires it to fetch", and the instrument that makes the
+    walk agree is the extraction's own. Three successive attempts to state the
+    condition instead were each incomplete in one more place: the duplicate
+    ``/FontFile*`` raise in ``_parse_font_descriptor``, then ``/Type3``'s conditional
+    route into it, then ``/DescendantFonts`` — where a composite font reaches the same
+    raise through each descendant, and an unrecognised ``/Subtype`` with no
+    ``/DescendantFonts`` raises ``KeyError`` on the way. An enumeration of a
+    dependency's control flow has no test that can show it complete, because
+    completeness is a property of that dependency's source; asking it is exact by
+    construction and gets smaller with every version.
 
-    **The residual is stated rather than hidden.** Font initialisation can also raise
-    from a limit only *doing the work* discovers — a ``/ToUnicode`` past
-    ``MAPPING_DICTIONARY_SIZE_LIMIT``, a ``/Widths`` or a descendant ``/W`` past
-    ``MAX_WIDTH_ENTRY_COUNT`` or ``MAX_CID_WIDTH_ENTRY_COUNT``. Establishing those means
-    either decoding, in the walk, an input ADR-0232 §2 and §10 leave uncharged and
-    unbounded by name — paying the cost the bound exists to refuse, before it has
-    refused anything — or re-implementing the library's width grammar, which is the
-    second grammar §3 forbids for content streams and forbids here for the same reason.
-    So a document that is **both** malformed that way **and** over the bound is reported
-    ``TOO_LARGE`` rather than ``EXTRACTION_FAILED``. **It is refused either way**: §3's
-    harm clause is about refusing a document "the stated quantity says must fetch", and
-    no reading fetches this one. What is lost is which of two refusals an operator is
-    shown, and buying it back costs the property that makes the bound a bound.
+    **It costs a second font build per parse**, which is the doubling §3 already prices
+    for the content-stream parse and accepts for the same reason: the extraction builds
+    a stream's fonts on every ``_extract_text`` call, so this doubles a cost rather than
+    adding a new one, and it is bounded by the bound.
+
+    **One residual, and it is forced by §3's own ordering.** A font program is charged
+    *before* this runs, because §3 requires the comparison to precede the work it bounds
+    — "the total is compared before the operators it counts are parsed" — and building a
+    font decodes and scans that program. So a document whose charged font programs alone
+    cross the bound **and** whose fonts the extraction cannot build is reported
+    ``TOO_LARGE`` rather than ``EXTRACTION_FAILED``. It is refused either way: §3's harm
+    clause is about refusing a document "the stated quantity says must fetch", and no
+    reading fetches this one. Closing it means scanning a program before charging it,
+    which is the property that makes the bound a bound.
 
     Raises:
-        ExtractionFailedError: Where the extraction's font initialisation will raise.
+        ExtractionFailedError: Where the extraction's own font initialisation raises
+            anything it would not itself swallow.
     """
-    if not isinstance(font, DictionaryObject) or "/FontDescriptor" not in font:
-        return
-    descriptor = font["/FontDescriptor"]
-    if not isinstance(descriptor, DictionaryObject):
-        return
-    if sum(key in descriptor for key in _FONT_FILE_KEYS) <= 1:
-        # The cheap, decisive half first: one program or none is a font the extraction
-        # builds, whatever else is true of it, so nothing further need be asked.
-        return
     try:
-        reaches = _reaches_the_font_descriptor(font)
+        Font.from_font_resource(cast("DictionaryObject", font))
     except AttributeError, TypeError:
         # `_extract_text` swallows exactly these while building a font and carries on
         # to parse the content stream, so this is a parse that *does* happen.
         return
-    if reaches:
-        raise ExtractionFailedError(_UNBUILDABLE_FONT)
+    except Exception as exc:  # a parser's own class is not this seam's vocabulary
+        raise ExtractionFailedError(_UNBUILDABLE_FONT) from exc
 
 
 def _charge_font_programs(resources: DictionaryObject, budget: _Budget) -> None:
@@ -506,10 +463,10 @@ def _charge_font_programs(resources: DictionaryObject, budget: _Budget) -> None:
             # `_extract_text` swallows exactly this while building its fonts, so a
             # font it cannot resolve is a font it decodes no program for.
             continue
-        _refuse_unbuildable_font(font)
         program = _charged_font_program(font)
         if program is not None:
             budget.charge(len(program.get_data()))
+        _establish_font(font)
 
 
 def _invoked_form(resources: DictionaryObject, operands: list[PdfObject]) -> StreamObject | None:
@@ -553,11 +510,11 @@ def _charge_parse(obj: DictionaryObject, walk: _Walk, *, is_page: bool) -> None:
     stream **with the adopted library's own content-stream parser**, take the ``Do``
     operations it reports, resolve each against those same resources, and recurse.
 
-    **Fonts are established and charged before the content stream because that is the
-    order the extraction works in**, and the order decides a *class* rather than a
-    number: a page whose font initialisation raises is a page whose content stream the
-    extraction parses not at all, so charging it would answer ``TOO_LARGE`` where the
-    document is malformed (:func:`_refuse_unbuildable_font`).
+    **Fonts are charged and built before the content stream because that is the order
+    the extraction works in**, and the order decides a *class* rather than a number: a
+    page whose font initialisation raises is a page whose content stream the extraction
+    parses not at all, so charging that stream would answer ``TOO_LARGE`` where the
+    document is malformed (:func:`_establish_font`).
 
     **The library's own parser rather than a second grammar**, which costs an admitted
     document a second parse and is the price of agreement. A stream can carry the
@@ -778,4 +735,4 @@ def _extract_pdf(data: bytes, *, max_rendered_bytes: int, max_decoded_bytes: int
 _UNDECODABLE: Final = "the file could not be decoded as the format its suffix names"
 _OVER_BOUND: Final = "the extraction is over a configured bound"
 _UNREADABLE_CONTEXT: Final = "a resource context is present and cannot be read"
-_UNBUILDABLE_FONT: Final = "a font in the resource context cannot be initialised"
+_UNBUILDABLE_FONT: Final = "a font in the resource context could not be built"
