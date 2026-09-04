@@ -44,6 +44,55 @@
   that a later decision wanting it owes its own ratified ADR reopening ADR-0004
   §3, §6 and §7 through this ADR's §2 — which is the sequence §2's last clause
   requires.
+- **Note (2026-09-03): the Consequences bullet that attributes the prohibition on
+  widening the class by resemblance to §2 names the wrong section — the clause is
+  §1's fourth normative one.** The bullet beginning "**A Tier 0 value now exists in
+  this system's world that is not in the OS keyring**" closes: "§1's closed class
+  and §2's prohibition on widening by resemblance are what keep the answer short
+  for all of them — the class is three values, and anything else is still §3's."
+  **§2 carries no such prohibition, and the word appears nowhere in it.** §2 is
+  "ADR-0004 §3's keyring clause is superseded for that class": the narrow
+  supersession, the unsuperseded remainder of ADR-0004 §3's first bullet, the
+  reader clause left neither wider nor narrower, the four replacements (a)–(d), and
+  the three clauses bounding replacement (d). The prohibition is **§1's fourth
+  normative clause** — "No lane may cite this ADR to place any other Tier 0 value
+  outside the OS keyring, to exempt any other Tier 0 access from ADR-0004 §7, or to
+  widen this class by resemblance. A value that is not one of the three above is
+  outside it however much it looks like one, and admitting a fourth kind takes its
+  own ratified decision."
+  **The two numbers in that pairing are this ADR's own, so the pointer cannot be
+  rescued by reading it as an external citation.** ADR-0004 §1 is "Data
+  classification" and ADR-0004 §2 is "Residency and egress (local-first, minimal
+  egress)"; neither carries a class closed at three or a resemblance prohibition,
+  and "§1's closed class" is unambiguously this ADR's §1. ("still §3's", in the same
+  sentence, *is* ADR-0004 §3 — the clause the bullet's own previous sentence names.)
+  **That bullet is the only self-citation in this document that misplaces the
+  clause.** The word occurs three other times here and none of them is a wrong
+  pointer: the 2026-08-23 partially-superseded record above names it correctly
+  ("§1's prohibition on widening the class by resemblance is applied rather than
+  narrowed"); §1's own clause is the text quoted above; and §3's closing clause —
+  "No lane may cite this clause toward a fourth exemption. A further Tier 0 access
+  that cannot be gated by `permissions/` owes its own ratified decision, on its own
+  argument, however closely it resembles this one" — is a **different** prohibition
+  with a different subject, about a fourth exemption from ADR-0004 §7 rather than
+  about membership of the class, and sits correctly where it is. That is the
+  concrete cost of the wrong pointer: a reader who follows it to §2, finds nothing
+  about resemblance, and reads on to the next clause that uses the word takes a
+  rule about exemptions for the rule about the class.
+  **Nothing decided changes and no reader acts differently as to the decision**
+  (ADR-0070 §1, and its 2026-07-31 §1 note on what "differently" means). This ADR's
+  Decision carries ADR-0089 §2 marks throughout, so its marked clauses are the whole
+  of what it obligates and unmarked text supplies no obligation (ADR-0089 §3);
+  Consequences carries no mark, and the bullet summarises §1 rather than adding to
+  it. The prohibition binds exactly as before — same words, same class closed at
+  three, same requirement that admitting a fourth kind take its own ratified
+  decision — and a lane asking whether its value is in the class reaches the same
+  answer before and after. What is corrected is which section a reader is sent to.
+  This is an internal contradiction in this ADR's own words — ADR-0070 §1's first
+  term — with no other ADR as its cause, so it is recorded as this appended dated
+  note, the Consequences text below is **not** rewritten, and no `Status` edit is
+  owed (ADR-0082 §1). ADR-0175 §5 cites the clause and cites §1 to be accurate,
+  which is the disagreement that surfaced this. Refs #1351, PR #1349.
 
 
 - **This is the prerequisite ADR-0168 §6 names**, for `track:web-client`

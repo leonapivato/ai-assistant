@@ -2,6 +2,57 @@
 
 - Status: Accepted
 - Date: 2026-08-23
+- **Note (2026-09-03): the Alternatives entry "A boolean `opened` field beside the
+  outcome" calls opened-ness a *total* function of `outcome`; §1 makes it a function
+  of five of the six outcomes and undeterminable on the sixth.** That entry reads:
+  "Refused in §1: it is a total function of `outcome`, so it would be the second
+  spelling of a fact already recorded (ADR-0106 §2), and a stored derivation is one
+  that can disagree with what it derives from." **It describes an earlier §1, not
+  the one below it.** §1 as it stands says "Whether the source was opened is
+  determined by `outcome` for five of the six, and is not a field", and then, in a
+  clause of its own, "On `FAILED` the read was **attempted** and raised, and whether
+  the source was opened is **not determinable from the record**. No consumer infers
+  opened-ness from a `FAILED` row in either direction, and no surface renders one as
+  a read that happened or as one that did not." The Alternatives sentence predates
+  the narrowing that produced those two clauses and was not brought into line with
+  it.
+  **The refusal it records stands; what is wrong is that it gives one ground where
+  §1 leaves two.** On `REFUSED` and `UNANSWERED`, where the driver "never called
+  `read()`, so nothing was opened", and on `COMPLETED`, `DISCARDED` and
+  `UNCONFIRMED`, where "a reading exists, so it was", a stored `opened` would be
+  exactly the second spelling the entry names, and it is refused on that ground
+  unchanged. On `FAILED` the ground is a different and stronger one: there is no
+  true value to write at all. §1's own argument says why — a reader "can refuse
+  before it starts work at all" (`OneWorker.run`'s outstanding-read refusal, whose
+  contract says "**Nothing is started.**") or "can equally fail with the bytes
+  already in hand"; both cross the seam as `ReaderError` because ADR-0093 §8
+  requires it, and the discriminating classes live in `readers/_source.py`, which
+  `orchestration` and `context` may not import under golden rule 1 — so "a driver
+  genuinely cannot tell, and a record that claimed either way would assert something
+  nobody knew." A field refused as redundant and a field refused as unknowable are
+  not the same refusal, and the entry states only the first.
+  **The reader this costs is the one weighing the seam §14 defers.** §14's second
+  bullet defers "Closing `FAILED`'s opened-ness indeterminacy", which "needs a
+  `Reader` that can say whether it started — a return value, a distinct error class
+  in `core`, or a seam of its own — which is a `core/protocols.py` change owing its
+  own ADR under golden rule 5". Once such a seam exists a persisted `opened` would
+  no longer be redundant on `FAILED`, and this entry is not to be read as having
+  foreclosed it. What governs that question is §14's own condition, which this note
+  leaves exactly where it stands.
+  **Nothing decided changes and no reader acts differently as to the decision**
+  (ADR-0070 §1, and its 2026-07-31 §1 note on what "differently" means). This ADR
+  is marked under ADR-0089 §1 by its own declaration in §13, so its marked clauses
+  are the whole of what it obligates and unmarked text supplies no obligation
+  (ADR-0089 §3); the Alternatives section carries no mark, and §1's marked clauses
+  state the narrowed rule correctly. No implementation is redirected: `opened` is
+  not a field before this note and is not one after, §2's seven fields are
+  unchanged, and a consumer holding a `FAILED` row is forbidden to infer
+  opened-ness in either direction exactly as §1 already says. What is corrected is
+  the *reason* the Alternatives entry gives for a refusal that itself stands.
+  This is a stale phrase in this ADR's own words, reconciled against this ADR's own
+  §1 — ADR-0070 §1's first term — with no other ADR as its cause, so it is recorded
+  as this appended dated note, the Alternatives text below is **not** rewritten, and
+  no `Status` edit is owed (ADR-0082 §1). Refs #1506, PR #1504.
 - **Decides `core/protocols.py` and `core/types.py` surface — a breaking change
   (golden rule 5).** Two new Protocols with their two triads, one new frozen model,
   one new `StrEnum`, one new error class and one new `Settings` figure. It adds no
