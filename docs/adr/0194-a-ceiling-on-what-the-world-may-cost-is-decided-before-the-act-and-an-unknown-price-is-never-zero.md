@@ -2,6 +2,63 @@
 
 - Status: Accepted
 - Date: 2026-08-25
+- **Note (2026-09-03): §1's three named transition cases are consequences of the one
+  selection rule and not an enumeration an implementation may branch on — and the
+  missing-midnight case reaches a gap that merely *contains* midnight, not only one
+  that *begins* at it.** §1 states the rule generally: the boundary for a civil date
+  `D` is "the **earliest instant whose local civil date is greater than or equal to
+  `D`**". The clause below it says so in terms — "That one selection is the whole
+  rule and covers every transition a zone may carry, with no case distinguished by
+  an implementation" — then illustrates it three times, the second reading "where
+  midnight **does not exist** across a forward transition it selects the transition
+  instant itself", and closes "No implementation constructs a boundary by naming a
+  wall-clock midnight and accepting whatever `fold` a default supplies."
+  **The illustration is keyed on midnight's non-existence, not on where the gap
+  begins, and it holds in both shapes.** `America/Toronto` jumped from `23:29:59` on
+  1919-03-30 straight to `00:30` on the 31st, so civil midnight on the 31st sits
+  *inside* a gap that began the day before. The general rule selects `04:30Z` — the
+  transition instant, the earliest instant whose local civil date has reached the
+  31st — which is what the illustration names. It is a second shape of the case the
+  illustration already covers rather than a fourth case beside the three, and
+  nothing in §1 has to be read more widely to reach it.
+  **What is narrow is the shortcut a reader may substitute for the rule, and §1's
+  last sentence already forbids it.** Naming a wall-clock midnight and taking
+  whatever `fold` resolves it to coincides with the selection rule only where the
+  gap *begins* at midnight. On the Toronto date `datetime(1919, 3, 31,
+  tzinfo=ZoneInfo("America/Toronto"), fold=0)` resolves to `05:00Z`, half an hour
+  late, so spend recorded between `04:30Z` and `05:00Z` — already the 31st
+  locally — would fall into the 30th, undercounting the 31st and admitting a call
+  the day ceiling should refuse. An implementation that branches on the three named
+  cases, translating "midnight does not exist" into that construction, gets the
+  right answer on every gap that starts at midnight and the wrong one here. That is
+  the reading this note exists to close: the three are named because they are what a
+  naive implementation gets wrong, not because they bound what the rule reaches.
+  **Nothing decided changes and no reader acts differently as to the decision**
+  (ADR-0070 §1, and its 2026-07-31 §1 note on what "differently" means). The
+  operative text is the selection rule and the sentence that makes it the whole
+  rule, both unchanged and unrewritten, and an implementation of the rule — rather
+  than of its three consequences — computes the same instant on every date in every
+  zone before and after this note. In particular **this note lays no obligation on
+  §11's suite clause**, which enumerates the boundary fixtures the shared
+  conformance suite drives and is untouched: nothing here requires a fourth fixture,
+  and the observation below is a fact about the tree rather than a requirement this
+  note creates.
+  **It is already right in the code, which is why no test is owed with this note.**
+  Both holders compute the general rule directly — `_boundary` in
+  `src/ai_assistant/permissions/spend.py` splits the window at every offset change
+  it carries and takes the least satisfying instant across the pieces, "which is
+  what makes the three cases §1 enumerates fall out rather than be enumerated" — and
+  the Toronto date is pinned in the shared conformance suite both holders run, as
+  `test_a_gap_that_swallows_midnight_without_starting_at_it` in
+  `tests/permissions/spend_contract.py`, driven from
+  `tests/permissions/test_sqlite_spend.py` and
+  `tests/permissions/test_fake_spend.py`. It was caught in review on PR #1580 and
+  fixed there; nothing is broken today.
+  This is an internal contradiction in this ADR's own words — an illustration open
+  to a reading narrower than the rule it illustrates, ADR-0070 §1's first term —
+  with no other ADR as its cause, so it is recorded as this appended dated note,
+  §1's text below is **not** rewritten, and no `Status` edit is owed (ADR-0082 §1).
+  Refs #1585, PR #1580.
 - **Decides `core` contract surface and implements none of it (golden rule 5).**
   It adds **two** Protocols, three `core/types.py` models and three
   `core/errors.py` classes, and it lands none of them: the triad and its primary
