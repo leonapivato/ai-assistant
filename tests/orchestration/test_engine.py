@@ -517,7 +517,7 @@ class Harness:
         composing: ComposingStage | None = None,
         tools: tuple[ToolDefinition, ...] = (),
         policy: FakeActionPolicy | None = None,
-        recipient_grants: FakeRecipientGrantStore | None = None,
+        recipient_grants: RecipientGrantStore | None = None,
         memory: FakeMemoryStore | None = None,
         conversation_store: FakeConversationStore | None = None,
         closers: Sequence[object] = (),
@@ -776,7 +776,7 @@ class Harness:
         #: The recipient-grant store the five ADR-0235 §7 operations read and write,
         #: held here so a case can seed it, put it at its ceiling, or make its writes
         #: fail — the states the establishing act's carrier is about.
-        self.recipient_grants = (
+        self.recipient_grants: RecipientGrantStore = (
             FakeRecipientGrantStore() if recipient_grants is None else recipient_grants
         )
         self.engine = Engine(
