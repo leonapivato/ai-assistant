@@ -47,6 +47,7 @@ from ai_assistant.core.types import (
     MemoryUpdateProposal,
     Provenance,
     QuestionState,
+    ReportedExtent,
     SemanticMemory,
     SourceReading,
     Validity,
@@ -85,6 +86,17 @@ AT = datetime(2026, 7, 1, tzinfo=UTC)
 #: projection carrying the source's clock from one carrying ours (ADR-0189 §4).
 REPORTED_AT = datetime(2026, 6, 28, 9, 30, tzinfo=UTC)
 
+#: Where the reporting source says the entry it reported lies in its own world — the
+#: third fact an `Attestation` carries (ADR-0117 §2), and the one a projection that
+#: rebuilt the value object from ``reported_by`` and ``reported_at`` would silently
+#: drop. Deliberately after both other instants: an extent is a different fact about
+#: a different thing, so a fixture is only honest about it when it cannot be mistaken
+#: for either clock.
+REPORTED_EXTENT = ReportedExtent(
+    extends_from=datetime(2026, 7, 2, 10, tzinfo=UTC),
+    extends_until=datetime(2026, 7, 2, 11, tzinfo=UTC),
+)
+
 #: The `ASK_USER` ruling a scripted policy hands back, when a test needs a question
 #: without depending on any policy's rules for it.
 _ASK = MemoryDecision(kind=MemoryDecisionKind.ASK_USER, reason="fake: the user decides")
@@ -119,6 +131,11 @@ def _record(
     case here needs a different one. ``derived_from_external`` **is** a keyword,
     because it is the one input ADR-0106 §2's predicate has that the band does not
     decide.
+
+    **It carries an ``extent``**, so that ADR-0189 §2's "projected whole" is a claim
+    the projections here can be held to: a producer that rebuilt the value object
+    from the two fields every assertion below reads by name would pass a field-by-field
+    check while dropping the third (#1524).
     """
     confidence = 1.0 if source is MemorySource.USER_ASSERTED else 0.6
     return SemanticMemory(
@@ -132,7 +149,11 @@ def _record(
             last_updated=AT,
             derived_from_external=derived_from_external,
             attestation=(
-                Attestation(reported_by="calendar", reported_at=REPORTED_AT)
+                Attestation(
+                    reported_by="calendar",
+                    reported_at=REPORTED_AT,
+                    extent=REPORTED_EXTENT,
+                )
                 if band_of(source) is BeliefBand.ATTESTED
                 else None
             ),
@@ -328,9 +349,8 @@ async def test_a_retirement_carries_the_warrant_of_the_record_it_would_retire(
     the policy.
     """
     harness = Harness(policy=_DefersThenRules(MemoryDecisionKind.SUPERSEDE))
-    await harness.memory.add(
-        _record("live-1", _LISBON, source=source, derived_from_external=derived_from_external)
-    )
+    live = _record("live-1", _LISBON, source=source, derived_from_external=derived_from_external)
+    await harness.memory.add(live)
 
     outcome = await harness.writes.write(_proposal("new-1", _PORTO))
 
@@ -349,6 +369,18 @@ async def test_a_retirement_carries_the_warrant_of_the_record_it_would_retire(
         # clock rather than ours — `AT` is when this system last revised the record.
         assert retirement.warrant.attestation.reported_by == "calendar"
         assert retirement.warrant.attestation.reported_at == REPORTED_AT
+        # ADR-0189 §2 rules the stored `Attestation` is projected **whole**, and the
+        # two assertions above cannot tell that from a warrant rebuilt out of them:
+        # such a rebuild drops `extent`, the one field nothing here renders (#1524).
+        # Whole-value equality rather than the identity the belief pair is pinned
+        # against in `test_engine.py`: `_retirement` reads its record from
+        # `MemoryStore.get`, which the fake answers with a deep copy, so the object
+        # the producer saw is gone by the time this test could hold it.
+        assert retirement.warrant.attestation.extent is not None, (
+            "the pin is vacuous unless the fixture states an extent"
+        )
+        assert live.provenance.attestation is not None
+        assert retirement.warrant.attestation == live.provenance.attestation
     else:
         assert retirement.warrant.attestation is None
 
@@ -415,6 +447,17 @@ async def test_the_question_s_own_origin_is_the_proposal_s_and_never_a_conflict_
     assert question.attestation is not None
     assert question.attestation.reported_by == "calendar"
     assert question.attestation.reported_at == REPORTED_AT
+    # ADR-0189 §2's "projected whole", pinned as identity exactly as the belief pair
+    # is in `test_engine.py`: the queue answers with the row it holds, so the
+    # `Attestation` the producer read is still reachable from this test. A `_project`
+    # that rebuilt one from the two fields asserted above would pass them and drop
+    # `extent` (#1524); this refuses anything but the stored value itself.
+    queued = await harness.deferrals.get(question.id)
+    assert queued is not None
+    stored = queued.proposal.proposed.provenance.attestation
+    assert stored is not None
+    assert stored.extent is not None, "the pin is vacuous unless the fixture states an extent"
+    assert question.attestation is stored
     # The conflict answers for itself, and its answer is the other one.
     [retirement] = question.retires
     assert retirement.warrant is not None
