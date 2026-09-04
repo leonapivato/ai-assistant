@@ -1,0 +1,687 @@
+# 232. The extraction's cost is bounded on decoded bytes, and the file bound stays the file's own size
+
+- Status: Proposed
+- Date: 2026-09-03
+- **Partially supersedes**
+  [ADR-0230](0230-the-planner-names-a-file-it-was-shown-and-the-loop-fetches-it-into-the-supply.md)
+  — **§6's account of what bounds an extraction's cost, in one scope and no wider.**
+  Three sentences move, all in §6 and all about the same question. Its size-bound clause
+  reads *"`fetch_max_file_bytes`, the file's size on disk, default **4 MiB**, which
+  bounds the read **and the extraction's cost**"*, and the second limb is replaced: that
+  field bounds the read, and §2 below adds a third `Settings` field that bounds what an
+  extraction decodes. The same clause opens *"**Two** size bounds"*, and the count
+  becomes three. And the refuse-never-truncate clause reads *"A file over **either**
+  bound yields a refusal and no record"*, whose enumeration becomes any of the three —
+  its **ruling** is not replaced but extended, and it binds the new bound entire.
+  **Everything else in §6 stands**, and most of it is load-bearing here: the one
+  configured root and its unset default, the two-stage fail-closed eligibility, the
+  listing's ordering, cap and type allow-list, `NOT_FOUND` for a type the rung does not
+  read, `fetch_max_file_bytes` at 4 MiB as the file's size on disk bounding the read,
+  `fetch_max_content_bytes` at 32 KiB counted on the quoted rendering while extracting,
+  the stated-domain-and-load-time-refusal clause over the four fields ADR-0230 adds,
+  refusing rather than truncating, the **closed five-member `FetchRefusal`** and its
+  every-member-is-reachable clause, the resolved-outcome clause, the shape §6 fixes for
+  the PDF adoption — in-process, no network, **deterministic for a given file**,
+  `EXTRACTION_FAILED` rather than a raise — and off-until-configured. **§§1–5 and 7–16
+  are untouched**, and §4's *"Every bound is re-applied at `fetch` and none is carried
+  from the listing"* governs the new bound as it governs the other two. §11 below shows
+  the working under [ADR-0070](0070-adr-lifecycle-amend-supersede-status.md) §1 and
+  [ADR-0082](0082-recording-an-amendment-on-an-earlier-adrs-status-line.md) §1, clause by
+  clause, including the clauses a reader would most expect to have moved and which did
+  not. ADR-0230's `Status` line reads `Accepted` and takes the leading token in this
+  change (ADR-0082 §2).
+
+## Context
+
+### Where this comes from
+
+ADR-0230 §6 states two things about `fetch_max_file_bytes` in one sentence: that it is
+*"the file's size on disk"* and that it *"bounds the read **and** the extraction's
+cost"*. For an uncompressed format those are one number. For a compressed one they are
+not, and **no implementation can make both true** — which is
+[#2022](https://github.com/leonapivato/ai-assistant/issues/2022), filed out of
+ADR-0230's own Lane C1 (PR #2014) after both required review lenses had
+ruled on it from opposite sides on one round.
+
+A PDF page's content stream arrives Flate compressed, and a run of one repeated
+operator compresses about 340:1. Lane C1 measured what that buys an adversary, at §6's
+own defaults — `fetch_max_file_bytes` 4 MiB, `fetch_max_content_bytes` 32 KiB:
+
+| document on disk | decoded content stream | outcome | elapsed | `tracemalloc` peak |
+| --- | --- | --- | --- | --- |
+| 3.5 KB | 1 MB of operators | refused on the text bound | 6.0 s | 16 MB |
+| 12 KB | 4 MB of operators | refused on the text bound | 28 s | 65 MB |
+| 47 KB | 16 MB of operators | refused on the text bound | **313 s** | **261 MB** (737 MB RSS) |
+
+Every one of those refusals is **correct**; what is wrong is that it costs minutes of a
+worker thread to reach. The file bound is satisfied by the *compressed* bytes and never
+sees the stream; `fetch_max_content_bytes` is counted on extracted *text*, which exists
+only once the whole stream has been parsed into operators. So the one bound §6 says
+covers the extraction's cost cannot see the cost, and the one that can is checked after
+it has been paid. The shape is superlinear in the stream's size, so the exposure grows
+faster than the file does.
+
+**One figure is the whole design constraint and it is a measurement rather than an
+estimate**: the 47 KB document is a **single page**, so the 313 s is spent inside one
+uninterruptible `extract_text()` call. Nothing outside that call can refuse partway
+through it. §5 below is what that fact decides.
+
+**The measurements are Lane C1's, on one machine, and the orders of magnitude are the
+finding rather than the seconds.** They are recorded on #2022 and at the code, in
+`src/ai_assistant/readers/_extract.py`'s `_extract_pdf` docstring, which C1 merged
+carrying the whole disclosure.
+
+### Both lenses were right, and the text is what is wrong
+
+PR #2014 wrote two repairs and could keep neither, and the pair is why this is an ADR's
+question and not a lane's.
+
+1. **`extract_text(visitor_text=…)`, refusing as fragments are produced.** Measured and
+   **does not work.** `pypdf` calls the visitor once per *text-block flush* —
+   `BT`/`ET`/`cm`/`Tf` — not per operator, so one `BT … ET` block holding 90,909 `Tj`
+   operators calls it exactly twice, and both calls come after the parse the cost is in.
+   With the guard in place the 47 KB document's numbers did not move.
+2. **A running total of decoded content bytes, refused against `fetch_max_file_bytes`.**
+   Works — the same document then refuses in **0.01 s** — and was **removed at review
+   round 9** as an unratified refusal criterion. §6 defines that field as the file's
+   size on disk and its refuse-never-truncate clause names *"either bound"*, and a 4 MiB
+   PDF of vector artwork sits inside both while carrying far more than 4 MiB of
+   operators. Refusing it changes the `Fetcher` **outcome** contract, which ADR-0015
+   puts in an ADR and not in an implementation.
+
+Adversarial was right that the hole is real; architecture was right that closing it
+against a field defined as size on disk is a refusal no ADR ratifies. Neither lens was
+mistaken about the text. **The text is what is wrong**, and this ADR is the instrument
+ADR-0015 requires for changing it.
+
+### What the tree settles, verified against `origin/main` at `41d75b9f`
+
+- **ADR-0230 read `Status: Accepted`** on `origin/main` when this ADR was written — this
+  change is what puts the leading token on that line — and its §6 carries all three
+  sentences quoted in this ADR's header, verbatim.
+- **`readers/_extract.py` is on `main`**: ADR-0230 Lane C1 merged as PR #2014 while this
+  ADR was being written. `_extract_pdf` extracts a page at a time with a running total of
+  the *rendered text* checked after each page, and its docstring carries #2022's
+  disclosure entire. `SUPPORTED_SUFFIXES` is `{".txt", ".md", ".markdown", ".pdf"}`;
+  `_TEXT_SUFFIXES` is the first three, decoded strictly as UTF-8 in one call.
+- **`core/config.py` carries four `fetch_*` bounds** — `fetch_listing_ttl`,
+  `fetch_listing_max_entries`, `fetch_max_file_bytes` (4 MiB) and
+  `fetch_max_content_bytes` (32 KiB) — each with `ge=1` (or `gt=timedelta(0)`) and
+  `lt=2**63`, refused when `Settings` is constructed. `fetch_root_path` defaults unset.
+- **`core/types.py`'s `FetchRefusal` has exactly five members**, and `FetchOutcome`
+  carries a record or a refusal and never both or neither. **This ADR changes neither
+  file**, and adds no member, no field and no Protocol.
+- **`pypdf` is adopted ranged, `>=6.16`**, outside ADR-0024 §3's exact-pinned set, with
+  `uv.lock` fixing 6.16.2. §6 below turns on that.
+- **The repair is on `main`'s history and not at the sha #2022 names.** #2022 and the
+  ruling on it both point at `36501bb4`, which is a reachable object in no clone: PR
+  #2014 was rebased before it merged and rebase-merged when it did. The commit that
+  landed is **`edb2345f`**, *"fix(readers): a compressed content stream is bounded before
+  it is parsed"*, and the commit that removed the criterion again is **`41d75b9f`**.
+  `edb2345f` is what §9 below tells the implementing lane to lift, and both are on `main`
+  rather than on a branch that will be deleted.
+- **The fixture the lane needs was removed with the repair.** `41d75b9f` took
+  `amplified_content_stream_pdf` out of `tests/readers/pdf_fixtures.py` along with the
+  criterion; the file on `main` keeps `minimal_pdf`, `extracted_text_of` and
+  `amplified_page_tree_pdf` and not that one. It is in `edb2345f`'s diff and §9 names
+  it.
+
+### What this ADR is not allowed to settle
+
+It changes no Protocol and no `core/types.py` value, so golden rule 5 is not engaged by
+its implementation. It admits no format to §6's first rung and re-opens no library
+evaluation: ADR-0230 §13 charged Lane C1 with that, C1 discharged it, and §6 below cites
+the adopted library's own limits as **evidence** and never as a bound this system may
+rely on. It decides nothing about the web (ADR-0230 §15, #1996 Lane B), nothing about
+the egress seam (ADR-0154 §7), and nothing about retention (ADR-0230 §10, §15). It does
+not reopen ADR-0230 §6's refusal enumeration, which stays closed at five.
+
+## Decision
+
+We will keep `fetch_max_file_bytes` as **the file's size on disk**, bounding the read
+and nothing else, and add a **third `Settings` bound** on the bytes a format's own
+decoding produces for the extractor to parse — counted **while** extracting, compared
+before each decoded unit is parsed, and refused as **`TOO_LARGE`**. There is no sixth
+`FetchRefusal` member, no deadline, and no change to any Protocol, to `core/types.py`,
+to the conformance suite, to the canonical fake or to ADR-0230 §9's audit.
+
+### 1. The file bound stays the file's size on disk, and it bounds the read alone
+
+> **Normative.** `fetch_max_file_bytes` is the file's **size on disk** and bounds the
+> **read**: an implementation reads at most that many bytes plus one from the open
+> object and refuses `TOO_LARGE` where the object supplies more (ADR-0230 §4). It is
+> **not** a bound on what an extraction decodes or parses, and no implementation, lane
+> or later ADR derives a refusal criterion on decoded or extracted bytes from it.
+
+**Which of §6's two sentences stands is decided by what an operator can predict, and
+that is not a tie.** A size on disk is visible in a directory listing, in a file
+manager, in a mail client's attachment column and in ADR-0230 §3's own rendering of
+`ShownFile.size_bytes` — an operator setting 4 MiB knows exactly which of their
+documents that admits, and can check. A decoded size is visible **nowhere**: nothing in
+any listing shows it, no field of any type carries it, and for a PDF it is a property
+of whichever encoder produced the file. Redefining `fetch_max_file_bytes` onto consumed
+bytes would leave the mechanism's most visible number governing a quantity the operator
+cannot inspect — which is the defect §6 already names in its own domain clause, where a
+zero entry cap is refused because it is *"a mechanism that shows nothing while appearing
+configured"*.
+
+**And the read needs a bound of its own regardless, so the redefinition does not save a
+field.** ADR-0230 §4 rules that the acquiring read is itself bounded — *"An
+implementation reads at most `fetch_max_file_bytes` plus one byte from the open object
+and refuses as `TOO_LARGE` where the object supplies more; it does not decide the bound
+from a size it observed earlier and then read to end of file"* — and that clause is what
+refuses a file that **grows** between the listing and the fetch (§14 item 4's second
+arm). Point the field at consumed bytes and that clause has no figure left: the read
+becomes unbounded exactly where §4 spent a clause bounding it, and a second field has to
+be invented for the read. That is this section plus §2 with the names swapped, and with
+every deployment's configured value silently changed underneath it.
+
+**§6's own structure already answers this.** It carries two fields rather than one
+because *what is read* and *what reaches the prompt* are different quantities with
+different consumers, and one number cannot be honest about both. The bytes an extractor
+parses are a **third** such quantity with a third consumer — the parser — and the same
+argument that made §6 two fields makes it three. The alternative is a field whose name
+and whose stated domain are both false, which is the state §6 is in today.
+
+### 2. A third bound: `fetch_max_decoded_bytes`, with a named default of 1 MiB
+
+> **Normative.** `Settings` gains one field, **`fetch_max_decoded_bytes`**, a bound on
+> **the bytes a format's own decoding produces for the extractor to parse**, summed over
+> one fetch. Its named default is **1 MiB** (1,048,576). Its domain is **integers of at
+> least 1**, in ADR-0230 §6's own form for its four bounds, and a value outside that
+> domain is a **load-time configuration error** — `Settings`'s own refusal, at load
+> rather than at the first fetch, before any fetcher is built and before any filesystem
+> call (ADR-0093 §5, in the form ADR-0230 §6 borrows it). It stops the deployment
+> exactly as an out-of-domain `fetch_max_file_bytes` does.
+
+> **Normative.** The field's **name is fixed here** and is not the implementing lane's
+> to choose, as ADR-0230 §6 fixes the other three. It avoids the word *content* because
+> `fetch_max_content_bytes` already holds it for the extracted **text**, and a reader
+> meeting two `content` bounds measuring different things at different points would have
+> to guess which is which.
+
+> **Normative.** The bound is an **independent figure and never a derived one.** No
+> implementation computes it from `fetch_max_content_bytes` or from
+> `fetch_max_file_bytes`, and no deployment's change to either moves it.
+
+**Where 1 MiB comes from, stated as arithmetic rather than as a feel.** The number has
+to clear every legitimate document and refuse the amplified one, and the two sides are
+checkable.
+
+- **The legitimacy side is a ratio against a bound that is already ratified.** A
+  document that fetches at all must render its extracted text inside
+  `fetch_max_content_bytes`, 32 KiB. 1 MiB is exactly **thirty-two times** that. So this
+  bound refuses only a document spending **more than thirty-two bytes of content stream
+  per byte of text it yields** — a document that is overwhelmingly not text. An ordinary
+  text page's stream carries its text plus its positioning and font operators, a few
+  times over, not thirty-two.
+- **The cost side is the measurement.** At the adversarial density Lane C1 built — a
+  stream of nothing but repeated `Tj` — 1 MB of operators parsed in **6 s**, against
+  313 s at 16 MB. So the default admits a worst case of a few seconds of parse on a
+  stream chosen to be as expensive as a stream can be, where today it admits minutes and
+  is bounded by nothing.
+
+**An operator raising it buys superlinearly more, and that is worth writing down**
+rather than discovering: 1 MB → 6 s, 4 MB → 28 s, 16 MB → 313 s on Lane C1's machine.
+Doubling the figure does not double the worst case.
+
+**What this changes for a document that was going to refuse anyway is only the price.**
+A 300-page report carries far more than 32 KiB of text and refuses on
+`fetch_max_content_bytes` today; under this bound it refuses earlier and cheaply, and
+the class it refuses with is the same. The only documents whose **outcome** changes are
+those spending more than thirty-two stream bytes per text byte — the amplified ones and
+pages of vector artwork, which yield no useful text in either case.
+
+### 3. What is counted, per format, and where the comparison sits
+
+> **Normative.** The bound is counted **in the concrete extractor, per format**, on the
+> bytes that format's own decoding produces. It is not a `core` concern, adds no
+> argument to any Protocol, and reaches the extractor as a configured figure exactly as
+> the other two bounds do.
+
+> **Normative.** For **PDF** the counted quantity is the **decoded length of each page's
+> content stream**, taken before that page's text is extracted.
+
+> **Normative.** For **plain text and Markdown** the counted quantity is **zero**, and
+> no implementation checks this bound on those formats. Their extraction has no decoding
+> step: the extractor parses the file's own bytes, which `fetch_max_file_bytes` bounds at
+> the read, so there is no ratio between bytes read and bytes parsed for this bound to
+> refuse. A `.txt` file larger than `fetch_max_decoded_bytes` and inside
+> `fetch_max_file_bytes` is therefore **fetched**, not refused.
+
+> **Normative.** The total is **running across the whole fetch** and never per page. A
+> per-page bound would admit an unbounded document made of bounded pages, which is the
+> defect `fetch_max_content_bytes` is already summed to avoid.
+
+> **Normative.** The comparison is made **after each decoded unit and before the next is
+> decoded**, and the extraction is refused the moment the total passes the bound. No
+> implementation decodes a page's several content streams and compares their sum
+> afterwards.
+
+> **Normative.** Both refusals precede the work they bound: **the total is compared
+> before the operators it counts are parsed**, which is the property ADR-0230 §6 claimed
+> for `fetch_max_file_bytes` and did not have.
+
+> **Normative.** The bound is **re-applied at every `fetch` and carried from no
+> listing**, under ADR-0230 §4's clause of that name, and is decided against the object
+> the fetch has open. Nothing about it is read off a `SourceListingEntry`.
+
+> **Normative.** An ADR admitting a **later format** to ADR-0230 §6's rung states what
+> that format's decoding step produces for this bound, or that it has none. ADR-0230 §6
+> already requires such an ADR to state what its extraction is; this adds the one figure
+> a decoding format cannot be admitted without.
+
+**The stream-by-stream comparison is not a refinement of the lifted repair; it closes a
+hole the repair had.** A PDF page's `/Contents` may be an **array** of streams, and
+`edb2345f` summed a page's streams before comparing —
+`sum(len(part.get_object().get_data()) for part in parts)` — so every stream of that
+page is decoded and materialised before anything is refused. At the adopted library's
+own per-stream ceiling that is 75 MB **times the number of streams on the page**, and
+zlib's maximum ratio puts a 4 MiB file's total decoded size in the gigabytes. Comparing
+after each stream bounds what can be materialised before a refusal at **one** stream's
+decoded length.
+
+**The residual that leaves is stated rather than hidden**, because a bound whose own
+input is unbounded is not one. Obtaining a stream's decoded length requires decoding it,
+and the adopted library's interface decodes whole streams; so one stream's decoded bytes
+are materialised before the comparison that refuses them. What bounds *that* is the
+library's own ceiling and not this system — §6 below is why that is disclosed as
+evidence and §10 defers closing it, with what fires the deferral.
+
+**Measuring the length costs the extraction nothing**, which is why the comparison can
+sit before the parse rather than being a second decode. `pypdf` caches a stream's
+decoded bytes on the object, so the `extract_text()` that follows reads the same bytes
+rather than decompressing again. That is a property of the adopted version, and §6's
+rule about such properties applies to it too: it is why the check is cheap, never why it
+is correct.
+
+### 4. The refusal is `TOO_LARGE`, and there is no sixth member
+
+> **Normative.** An extraction refused on `fetch_max_decoded_bytes` yields the
+> `FetchRefusal` member **`TOO_LARGE`**. `FetchRefusal` stays **closed at five members**
+> and this ADR adds none.
+
+> **Normative.** The class does **not** disclose which bound refused, and no
+> implementation adds a field, a message or a second member that would. A refusal
+> *"names a **class** and carries no path, no name, no excerpt and no message from an
+> underlying library"* (ADR-0230 §6), and which of three bounds a document passed is a
+> fact about that document's contents.
+
+**`TOO_LARGE` and not `EXTRACTION_FAILED`, and the difference is what an operator does
+next.** `EXTRACTION_FAILED` means a file of a supported format whose text could not be
+decoded — a **malformed** document. An amplified one is perfectly well formed and is
+refused for its size. ADR-0230 §9 says in terms what the audit's refusal class is for:
+it is *"how a deployment learns that its size bound is set below its documents, or that
+its root holds formats the rung does not read"*. Report a size refusal as an extraction
+failure and that operator goes looking for corrupt files. `TOO_LARGE` sends them to the
+bounds, which is where the answer is.
+
+**No sixth member, on ADR-0230 §6's own two grounds.** The first is its
+every-member-is-reachable clause — a member is carried only where a real filesystem can
+produce it from an authentic entry, and §14 item 9 asserts the five arm for arm; a sixth
+would have to earn its arm and would then be a class distinguishable from outside. The
+second is the disclosure posture that clause exists to protect: §6 declines an
+`UNSUPPORTED_TYPE` member because a distinct class *"would answer* a file of that name
+is there, and it is a `.docx` *to a caller holding nothing but a guess"*. A member
+meaning *your file was small on disk and large once decompressed* is the same
+disclosure about the same file, one property over.
+
+**The cost of the coarse class is real and is named** rather than argued away: with
+three bounds all reporting `TOO_LARGE`, §9's per-kind refusal rate tells an operator
+that **a** bound is set below their documents and not **which**. §10 defers the finer
+statement and says what fires it.
+
+### 5. There is no deadline, and a byte bound is the only bound available here
+
+> **Normative.** No implementation bounds an extraction by **elapsed time**. This seam
+> takes no deadline, no timeout and no clock; no lane adds one, and ADR-0026's clock
+> seam is not wired into the extractor.
+
+**A deadline has no enforcement point this bound does not already have, which is a
+measured fact and not a prediction.** The 313 s is spent inside a single
+`extract_text()` call on a **single-page** document. Nothing checks a clock during it —
+CPython cannot interrupt it, and Lane C1 measured the one interface that looked like it
+could: `visitor_text` fires per text-block flush, so that document calls it twice, both
+times after the parse. A deadline could therefore only be read at the same points a
+decoded-byte total is read — between units — where it refuses nothing the byte bound
+does not, later and having already paid.
+
+**And it would cost a ratified property to buy that nothing.** ADR-0230 §6 fixes the
+shape the PDF adoption must satisfy: the extraction *"runs in-process, reaches no
+network, is **deterministic for a given file**, and converts a failure into
+`EXTRACTION_FAILED`"*. A deadline makes the outcome a function of machine load — the
+same document fetches on an idle hub and refuses on a busy one, and a turn's supply
+stops being reproducible from its inputs. A byte bound is a function of the file alone
+and keeps that property exactly.
+
+**What a deadline could genuinely reach, only a different mechanism reaches**: killing
+the work partway through means running the extraction out of process and killing the
+process. That is new machinery in `readers/`, an inter-process path carrying file
+content, and a lifecycle the composition root would own — none of which any ADR asks
+for, and all of it for a case this bound already refuses at its input. §10 defers it by
+name and says what would fire it.
+
+**Bounding the input of an uninterruptible unit is the bound that exists**, and stating
+it that way is what keeps this ADR honest where §6 was not. This decision does not claim
+to bound the *time* an extraction takes. It claims to bound the *quantity* whose parse
+that time is superlinear in, before the parse begins, and to choose the figure from the
+measurement of what that costs.
+
+### 6. What the adopted library bounds is evidence about a version, never this system's bound
+
+> **Normative.** A pinned dependency's own internal limit is **evidence about the
+> version this project resolves** and is never a bound this system relies on, states as
+> its own, or leaves a gap for. Where this system requires a bound, this system enforces
+> it.
+
+**`pypdf` 6.16.2 caps a Flate decode at `ZLIB_MAX_OUTPUT_LENGTH` (75,000,000 bytes) and
+raises past it**, with the same 75 MB ceiling on `LZW`, `RunLength`, `JBIG2` and the
+array-based path, and each raise lands in `_extract_pdf`'s own `except` as
+`EXTRACTION_FAILED`. That is worth knowing and is why §3's residual is 75 MB rather than
+unbounded. **It is not a bound on the parse**, which is where the 313 s went, and it is
+not aggregate — it is per stream, and a document has many.
+
+**And it is not carried by anything this project declares.** Lane C1 adopted `pypdf`
+**ranged**, `>=6.16`, deliberately outside ADR-0024 §3's exact-pinned set — §3 pins the
+behaviour-affecting stack exactly because *"a **published wheel** install resolves them
+fresh"*, and a ranged dependency is one this project has said it does not need pinned.
+A future 6.x may raise that ceiling, lower it, or spell it differently, and nothing in
+`pyproject.toml` would notice. So the ceiling is a fact about a resolution and not a
+term of this decision — the same distinction Lane C1 drew when it **pinned** the page-tree
+guards with a test rather than asserting them in prose.
+
+### 7. The audit is unchanged, and that is a decision rather than an omission
+
+> **Normative.** This ADR adds **no audit field, no event, no key and no emission
+> point**. ADR-0230 §9 binds entire and unchanged: one `INFO`-level structured event per
+> turn under the one fixed key, carrying the `FetchRefusal` class where a fetch resolved
+> to one and the ambient correlation identifier and no other.
+
+> **Normative.** §9's no-address rule binds this refusal without qualification. No path,
+> no name, no extension, no size, **no decoded byte count**, no excerpt and no message
+> from an extraction library appears in the event. The count is a measurement of the
+> file's contents and is Tier 1 by §9's own reasoning about a file name.
+
+**Nothing has to move, because the field §9 added is a class and the class already
+exists.** A refusal on this bound is a `TOO_LARGE`, which §9's one field already carries
+and which §6's enumeration already closes. That is the test §9 sets for itself — *"the
+fields milestone 2 raises rather than replaces"* is ADR-0226 §9's clause and §9 inherits
+it — and this addition renames nothing, drops nothing and starts no second audit.
+
+### 8. The representative-input tests this decision owes
+
+> **Normative.** The implementing lane owes a test for each of the following, each over
+> behaviour rather than over a call count, in ADR-0230 §14's form.
+
+1. **The amplified content stream is refused before it is parsed.** Lane C1's document —
+   about 47 KB on disk, one page, 16 MB of decoded operators — is refused `TOO_LARGE`,
+   adds no record, fails no turn, and puts no prefix of its text in the supply, the
+   record or the reply. **Asserted under a deadline the test fails on**, because the
+   defect this ADR closes is a cost and not a class: the returned class was already
+   correct before the fix, and only the deadline separates 313 s from 0.01 s. This is
+   ADR-0230 §14 item 4's fourth-arm reasoning — *"a hang is not a wrong answer this suite
+   could otherwise observe"* — applied to a parse rather than to an open.
+2. **The bound is a running total, and refuses at the unit that crosses it.** A document
+   whose pages are each well inside the bound and whose sum passes it is refused
+   `TOO_LARGE`, with the pages past the crossing never extracted. This is the arm that
+   fails on any implementation applying the bound per page.
+3. **The comparison sits between decoded units, not after a page's.** A single page whose
+   `/Contents` is an **array** of streams whose sum passes the bound is refused after the
+   stream that crosses it and **before the next is decoded**. This is the arm that fails
+   on `edb2345f` as written, which summed a page's streams before comparing.
+4. **The boundary value, both ways.** A document whose decoded content is exactly
+   `fetch_max_decoded_bytes` extracts; one byte over is refused `TOO_LARGE`. **Both arms
+   run with `fetch_max_content_bytes` set high enough that only this bound can decide
+   them** — an amplified stream yields far more text than 32 KiB, so an arm left at the
+   default asserts nothing about the bound it names.
+5. **A document inside every bound is unaffected.** Its text reaches the record whole and
+   the reply carries it, with no bound consulted having refused anything.
+6. **A plain-text file over this bound is fetched.** A `.txt` or `.md` file larger than
+   `fetch_max_decoded_bytes` and inside `fetch_max_file_bytes` fetches, with
+   `fetch_max_content_bytes` raised so the text bound does not decide the arm. This is
+   the arm that fails on any implementation applying the bound to a format with no
+   decoding step.
+7. **An out-of-domain bound does not load.** A zero and a negative
+   `fetch_max_decoded_bytes` are each refused when `Settings` is constructed, before any
+   fetcher is built and before any filesystem call, and each is a configuration error
+   that stops the deployment rather than an empty listing, a `FetchRefusal` or a degraded
+   turn. This is ADR-0230 §14 item 21's arm, extended by one field and asserted in its
+   form.
+8. **The enumeration did not grow.** `FetchRefusal` has five members, and the audit event
+   for arm 1's turn carries `TOO_LARGE` and no field naming a bound, a count or a size.
+
+> **Normative.** This ADR adds **no clause to the `Fetcher` conformance suite and no
+> parameter to the canonical fake.** The bound is enforced inside a concrete extraction,
+> and ADR-0230 §13's own rule is that a suite cannot make an arbitrary fetcher's source
+> behave — *"those are the concrete fetcher's tests"*. A fake that performs no extraction
+> has nothing to bound.
+
+### 9. What the implementing lane owes
+
+> **Normative.** **One lane**, briefed from this ADR's merged text, landing after
+> ADR-0230 Lane C1 — which merged as PR #2014 — and before milestone 29's exit probe
+> runs against a configured documents root. It is a **follow-on to Lane C1 and not a
+> reopening of it**: §13's C1 charge is discharged by C1's merge, and nothing here
+> re-decides the library, the triad, the fetcher or the composition.
+
+> **Normative.** Its footprint is `src/ai_assistant/core/config.py` (the field, its
+> named default, its stated domain and its load-time refusal),
+> `src/ai_assistant/readers/_extract.py` (the counting, the comparison, and the
+> `_extract_pdf` docstring, whose #2022 disclosure becomes a statement of the bound),
+> `src/ai_assistant/readers/files.py` (threading the configured figure to the
+> extraction), and tests under `tests/readers/` and `tests/core/`. It touches
+> `core/protocols.py` and `core/types.py` in **no** respect, and neither
+> `PROTOCOL_VERSION` nor `PlanExport.schema_version` moves.
+
+> **Normative.** The lane **lifts `edb2345f`** rather than rebuilding it — its
+> `_decoded_content_bytes` helper, its check point in `_extract_pdf`'s page loop, and
+> the `amplified_content_stream_pdf` fixture `41d75b9f` removed with it — and reshapes
+> it to this ADR: the comparison is against `fetch_max_decoded_bytes` and not against
+> `fetch_max_file_bytes`, and it is made **after each decoded stream** rather than after
+> a page's streams are summed (§3).
+
+**It is one lane under ADR-0137 §1** — the substantial new machinery is in `readers/`,
+and `core/config.py` gains one field with its validator, which is the *"a call site
+updated, an argument threaded through"* shape §1's carve-out covers rather than a second
+subsystem's worth of machinery.
+
+**Independent of Lanes C2 and C3**, which touch `planning/` and `orchestration/` and
+share no file with it. Its ordering constraint is C1 alone, and #2022's ruling — that
+milestone 29's disk clause is not probed until this is closed — is why it does not wait
+on either.
+
+### 10. Deferred, by name, each with what fires it
+
+- **Telling an operator which bound refused.** §4 keeps one class for three bounds, so
+  §9's refusal rate says *a* bound is set below this deployment's documents and not
+  which. Fired by §9's audit showing a `TOO_LARGE` rate an operator cannot act on — never
+  by a lane finding the coarse class unhelpful in the abstract, and never by adding a
+  sixth `FetchRefusal` member, which §4 refuses on grounds a deferral does not reach.
+- **Bounding the decompression this system performs, rather than inheriting the adopted
+  library's per-stream ceiling.** §3's residual is one stream's decoded bytes,
+  materialised before the comparison that refuses them, bounded at 75 MB by a ranged
+  dependency and by nothing this project declares (§6). Closing it means a bounded or
+  incremental decode this seam performs itself. Fired by a `pypdf` release dropping or
+  raising that ceiling, or by a measurement showing the **decompression** rather than the
+  parse is where the cost is.
+- **An extraction run out of process under a kill deadline.** §5 refuses a deadline
+  because it has no enforcement point and costs §6's determinism. A separate process has
+  one. Fired by a measured case where the parse of a stream **inside** the bound is
+  itself too slow for a turn — never by a preference for a wall-clock guard over a byte
+  one.
+- **A per-format decoded bound.** One figure covers every format this rung reads, which
+  is right while one format decodes and two do not. Fired by the ADR admitting a format
+  whose amplification profile the shared figure serves badly, which §3 already obliges to
+  state its decoding step.
+- **Any of ADR-0230 §15's deferrals.** None is fired here, and in particular this ADR
+  admits no format, no second root, no recursion and no outward kind.
+
+### 11. Scope, and what this records against ADR-0230
+
+**This ADR partially supersedes ADR-0230 in one scope and records nothing against any
+other ADR**, and that is a classification of this change and therefore prose rather than
+a marked clause (ADR-0089 §1). What follows is the working under ADR-0070 §1's test and
+ADR-0082 §1's, clause by clause.
+
+**Why supersession and not amendment.** ADR-0070 §1 admits an in-place amendment only
+where *"a reader acting on the ADR would act **identically** before and after"*, and
+reconciling an ADR *"with its own text — an internal contradiction"* is named as a case
+where they would. §6 **is** internally inconsistent, so the amendment reading is
+available on its face and is nonetheless wrong here, on two counts. First, a reader
+acting on §6 today is told the file bound covers the extraction's cost, and PR #2014's
+round 1 acted on exactly that sentence to justify a page ceiling; after this ADR they
+build a third bound instead. Second, the resolution is not a choice between two readings
+already in the text — **neither** limb, kept alone, is what this ADR decides: the file
+bound keeps only the first, and the second's job moves to a field ADR-0230 does not have.
+That is a change to what was decided, which ADR-0070 §1 sends to a superseding ADR. It is
+**partial** because §6's other rulings survive whole, and ADR-0070 §3 makes that form
+first-class rather than a discouraged one.
+
+**And the corpus's own precedent does not license the softer label.** ADR-0230 amended
+ADR-0226 §2's membership sentence when it added a third `ReadKind`, and could, because
+ADR-0226 §1 says in terms that *"A later kind is an **additive entry** to this
+enumeration"* — the earlier ADR provided for the addition, so its reader was never led to
+refuse it. §6 says no such thing about its bounds. It says *"**Two** size bounds"* and
+enumerates four `Settings` fields by name, and both review lenses of PR #2014 read that
+as closing the set — round 2 refused a fifth bound on it and round 9 refused a repair on
+it. A reader who acted on §6 as written refused what this ADR requires.
+
+**The three sentences that move, and what moves in each.**
+
+1. *"`fetch_max_file_bytes`, the file's size on disk, default **4 MiB**, which bounds the
+   read **and the extraction's cost**"* — the second limb is replaced by §2's third
+   field. The rest of the sentence is not merely intact but is §1's holding: the figure,
+   the default and *the file's size on disk* all stand.
+2. *"**Two** size bounds, both `Settings` fields with named defaults, both refused at
+   load rather than at the first fetch"* — the count becomes three. The **rulings** in
+   that sentence are not replaced and govern the new field: it is a `Settings` field, it
+   has a named default, and it is refused at load (§2).
+3. *"A file over **either** bound yields a refusal and no record"* — the enumeration
+   becomes any of three. Its ruling — **a bound is enforced by refusing, never by
+   truncating** — is not replaced but extended, and §2's bound is subject to it entire:
+   no prefix, no first page, no first *n* bytes, no abridgement, no truncation flag.
+
+**Clauses a reader would expect to have moved, and which did not.** Each is checked
+against ADR-0082 §1's test — *would a reader holding only ADR-0230 now act differently,
+or read the clause more widely than it now holds?* — and each comes out **no**, so no
+record is owed for it and stating that is the point of this paragraph.
+
+- **§6's stated-domain clause.** It reads *"**Every `Settings` field this ADR adds** has
+  a stated domain"* and names the four. That sentence is about the fields **ADR-0230
+  adds**; `fetch_max_decoded_bytes` is not one, and §2 above states its own domain in the
+  same form and refuses it at the same point. Nothing in the clause becomes false or
+  over-wide.
+- **§6's `FetchRefusal` closure.** *"The enumeration is closed and no lane adds a sixth
+  without the ADR that decides it"* — §4 adds none, and the every-member-is-reachable
+  clause is unaffected because `TOO_LARGE` was already reachable.
+- **§6's PDF paragraph.** The shape it fixes for the adoption is untouched and is
+  load-bearing: §5 rests on *deterministic for a given file* to refuse a deadline, and §6
+  rests on the adoption being this system's to bound.
+- **§4 entire.** Its bounded-read clause is what §1 keeps `fetch_max_file_bytes` for; its
+  *"Every bound is re-applied at `fetch` and none is carried from the listing"* governs
+  the new bound and is cited in §3; its `fetch_max_content_bytes` clause is unchanged.
+- **§9 entire** (§7 above), and §§1, 2, 3, 5, 7, 8, 10, 11, 12, 15 and 16, none of which
+  says anything about what bounds an extraction.
+- **§13 and §14 are stacked additions, not amendments.** §13 says *"Three lanes, in
+  order, each briefed from **this ADR's** merged text"* — a true statement about
+  ADR-0230's lanes, which §9 above does not join; the lane §9 charges is briefed from
+  **this** ADR's text and named here. §14 says *"The implementing lanes owe tests for each
+  of the following"* — every item stays owed, and §8 above adds items in the ADR that
+  makes them. Neither sentence becomes false or over-wide, which is ADR-0082 §1's
+  *stacked addition*: recorded in the ADR that makes it and nowhere else.
+
+**Where the record lives, and why no dated note is written on ADR-0230.** ADR-0230's
+`Status` line reads `Accepted`, so it takes the leading `Partially superseded by` token
+and the scope in the parenthesis, which is ADR-0001's mechanism and the template's. No
+appended dated note accompanies it: ADR-0070 §1's dated note is the append-only form of
+an **amendment** — *"A permitted amendment is append-only in mechanism, too. It is
+recorded as an appended, dated note"* — and ADR-0082 §1's *"and in its appended dated
+note"* is stated inside that frame, its own subject being a later ADR that *"amends a
+named clause"*. This is a supersession, and the corpus's own practice is the same: when
+ADR-0230 partially superseded ADR-0092 §3 it wrote the `Status` line and no note, while
+its **amendments** of ADR-0226 and ADR-0228 each wrote one. ADR-0082 §1 also says where
+the judgement belongs — *"The judgement is made in the later ADR's text, which is where
+it is reviewed"* — and that is this section.
+
+**Nothing is recorded against ADR-0093, ADR-0024, ADR-0026, ADR-0015, ADR-0137 or
+ADR-0089.** Each is cited for what it rules and none of their sentences becomes false:
+ADR-0093 §5 is applied in the borrowed form ADR-0230 §6 already borrowed it; ADR-0024 §3
+is cited for the distinction it draws and is not extended to `pypdf`; ADR-0026 is
+declined a seam rather than changed; ADR-0137 §1 classifies §9's lane and is unaffected
+by the classification.
+
+**Milestone numbering.** #1908's milestones were renumbered globally on 2026-09-03
+(*"1→27, 2→28, 3→29, 4→30"*), and this ADR uses **29** as ADR-0230 does.
+
+## Consequences
+
+**The mechanism's most visible number goes on meaning what it says.** An operator who
+sets `fetch_max_file_bytes` to 4 MiB admits files of 4 MiB, checkable in a directory
+listing, and the claim that this bounds the extraction's cost is gone from the corpus
+rather than left standing and false.
+
+**A fetch's worst case becomes a number chosen from a measurement.** It was minutes,
+bounded by nothing this system owns; it becomes a few seconds at the default, and the
+superlinearity is written down so an operator raising the figure knows what they buy.
+
+**The audit gets coarser in one respect and this is the price.** Three bounds report one
+class, so a deployment learns that a bound is set below its documents without learning
+which. §10 defers the finer statement and names what would fire it.
+
+**A `Settings` field is added to a mechanism that is off by default**, so no deployment's
+behaviour changes until a root is configured. A configured one sees no change unless a
+document spends more than thirty-two stream bytes per byte of text.
+
+**One more thing has to be stated by any ADR admitting a format** — what its decoding
+step produces for this bound. That is a small standing cost on a future decision, taken
+deliberately, because the alternative is a format admitted with no figure and a bound
+that silently does not apply to it.
+
+**The residual is smaller and is disclosed rather than closed.** One stream's decoded
+bytes are still materialised before the bound refuses them, at a ceiling a ranged
+dependency owns. That is one stream instead of a page's worth or a document's, it is
+memory rather than time, and §10 says what would fire closing it.
+
+## Alternatives considered
+
+**Redefine `fetch_max_file_bytes` as a bound on the bytes the extractor consumes.**
+Rejected on four grounds, in §1: an operator can see a size on disk and cannot see a
+decoded size; ADR-0230 §4's bounded-read clause would be left with no figure, so a second
+field has to be invented anyway; every configured deployment's value would silently
+change meaning; and the field's own name and stated domain would become false, which is
+the state this ADR exists to leave.
+
+**A deadline on the extraction, instead of or beside the byte bound.** Rejected in §5. It
+has no enforcement point the byte bound lacks — the 313 s is one uninterruptible call on
+a single-page document, and the one library interface that looked like a way in was
+measured not to be — and it would trade ADR-0230 §6's *deterministic for a given file*
+for that nothing.
+
+**A sixth `FetchRefusal` member for the decoded case.** Rejected in §4 on ADR-0230 §6's
+own two grounds: the enumeration is closed and each member owes a reachability arm, and a
+class meaning *small on disk, large decoded* discloses a property of the file's contents
+to a caller who is owed a class and nothing more.
+
+**Derive the bound from `fetch_max_content_bytes` — a multiplier rather than a field.**
+Rejected in §2. The relation is the *working* for the default and not the rule: an
+operator raising the text bound to fit longer documents would silently multiply what an
+extraction may decode, and an operator who wanted the second without the first could not
+have it. ADR-0230 §6's shape is a named default per field, and this follows it.
+
+**A ceiling on the page count.** Rejected before this ADR: it is PR #2014's round-1
+repair, which both required lenses refused at round 2 as an unratified fifth bound with a
+number of its own. It is also the wrong quantity — the measured document has **one**
+page — and #2015 recorded and closed the page-tree question separately, on the adopted
+library's own three traversal guards, which Lane C1 pinned with a test.
+
+**Rely on `pypdf`'s `ZLIB_MAX_OUTPUT_LENGTH` and call the seam bounded.** Rejected in §6.
+It bounds memory and not time, per stream and not in aggregate, and it is carried by a
+resolution rather than by anything this project declares — `pypdf` is adopted ranged,
+outside ADR-0024 §3's exact-pinned set.
+
+**Leave §6 alone and fix nothing, on the ground that the fetcher is off by default.**
+Rejected. It is true that `fetch_root_path` defaults unset and that a merged Lane C1 is
+*"a fetcher nothing calls"* (ADR-0230 §13), which is why C1 could merge with the defect
+disclosed. It stops being true the moment a deployment configures a documents root — and
+a documents root is exactly where a PDF that arrived by email lands, which is the case
+#1908's milestone 29 exists to serve.
