@@ -55,6 +55,41 @@
   ADR-0092's `Status` line takes the leading token in this change, and ADR-0121's
   existing qualifier moves off it into the note already carrying that record
   (ADR-0082 §2's last clause).
+- Amended: 2026-09-04 by ADR-0231 — **§7's servicing-order sentence, and that
+  alone.** §7 reads *"**The servicing order is: local file, then citation hop, then
+  sighted query.**"*
+  [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
+  §11 admits a fourth kind and places it between the first
+  two, so a reader holding only this ADR would read that sentence more widely than it
+  now holds and ADR-0082 §1's test is met. **§7's decision is not replaced but
+  applied**: it orders by cap — *"the capped read ahead of the uncapped one"*, which
+  is ADR-0226 §6's rule — and ADR-0231 §11 places a web search by the same rule, at a
+  cap of three records, and shows its working. Every other clause of §7 binds
+  unchanged and is load-bearing there: one servicing site, ADR-0226 §5 entire, the one
+  budget of ten counted after deduplication, the fourth group with no fifth, the
+  single evaluation over the turn's final supply, and a revision admitted on ADR-0228
+  §2's seven conditions with no eighth added.
+
+  **Three further parts of this ADR are load-bearing in ADR-0231 and none is moved.**
+  §5's externality argument — external content decided *"by **recorded origin**, never
+  by inspecting the text"* — is the reasoning ADR-0231 §10 follows for a remote
+  source. §5's own scoping sentence, that *"a kind whose fetch retrieves a remote
+  source's earlier answer, or replays one from a cache of its own, is outside this
+  scope entirely and ADR-0092 §3 binds it as written"*, is **obeyed rather than
+  extended**: ADR-0231 §10 takes the provider's own declared instant and mints nothing
+  where a response declares none, so ADR-0092 §3 is not superseded a second time. And
+  §15's first entry left that lane three questions open — kind or sibling, whether
+  `Fetcher` can be used at all, and the egress seam — which ADR-0231 §1, §2, §5 and §8
+  answer one by one; firing a deferral is the deferral working, so no record is owed
+  for it. §11's three grant-firing conditions are restated for the new seams in
+  ADR-0231 §14, which adds no `GrantScope` member either.
+
+  This ADR's `Status` line carries the leading `Partially superseded by` token —
+  ADR-0232's, merged between this ADR's ratification and this record — so under
+  ADR-0082 §2 no amendment qualifier is written on it and this note is the whole
+  record. ADR-0232 moves §6's account of what bounds an extraction's cost and touches
+  no clause this note reaches. Appended note per ADR-0070 §1; no text below is
+  rewritten. Refs #1996, #1908.
 
 ## Context
 

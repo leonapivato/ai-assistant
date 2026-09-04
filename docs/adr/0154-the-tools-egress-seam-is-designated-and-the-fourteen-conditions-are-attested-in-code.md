@@ -132,6 +132,47 @@
   it is *satisfied* here, not replaced — and the single edit this change makes to
   ADR-0017 is one appended dated note, its `Status` line being left alone under
   ADR-0082 §2 (§5). Refs #93, #1096.
+- Amended: 2026-09-04 by ADR-0231 — **§2's second clause, in the single scope of a
+  `WEB_SEARCH` servicing's send.** That clause reads *"Every send remains subject to
+  ADR-0148's per-call machinery whole: §1's single route through
+  `ToolInvoker.invoke`, …"*, and it is stated over **every send**, so ADR-0082 §1's
+  test is met the moment a send leaves this seam by another route.
+  [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
+  §6 is that
+  route and states why the invoker's is unavailable; the record on ADR-0148 carries
+  the working, and the rest of §2's clause — §3's recipient authorisation, §4's
+  whole-set rule, §7's credential gate, §8's approver and the two floors — binds
+  unchanged on a search request.
+
+  **Nothing else of this ADR moves, and ADR-0231 rests on it entire.** §1's
+  designation is the ground on which a search leaves at all, and ADR-0231 designates
+  **no second seam**, adds no second designated module, and states that a lane
+  converting the seam into a package or moving transport out of it has moved the
+  boundary. §2's remaining clauses bind and are cited: ADR-0231 registers no tool in
+  any registry the turn path selects from, approves no destination on the strength of
+  designation, lifts no ADR-0016 obligation, and takes **no first-use exemption and no
+  configuration-granted standing authorisation** — that last clause is the reason
+  ADR-0231 §9 declines rather than reaching for an operator's configuration as an
+  authorisation. §4's fourteen attestations are gone through one by one in ADR-0231
+  §7, which marks three as attested anew — condition 1's import-linter contract for
+  any transport dependency adopted, condition 5's transport pin and no-redirect
+  property, and condition 10's canonicalisation — and takes §4's own clause seriously
+  that a change falsifying a subsection's property must restore it in the same change.
+  §4's **actuator clause** is untouched and is the reason ADR-0231 §19 defers fetching
+  a result's URL: a search result's address is a recorded external span, and *"No
+  egress call through the designated seam is selected, parameterised or confirmed by
+  external content"*. §6's residues are carried unchanged, and §6's **residency
+  clause** — which binds a lane registering an integration at this seam to state
+  whether its ordinary operation places the owner's data into a third-party service,
+  and on what reading — is discharged for the search integration in ADR-0231 §14 and
+  for nothing else. §7's reservation of a `DestinationProtocol` member is **exercised**
+  by ADR-0231 §8, which is the ratified contract ADR ADR-0150 §3 requires, and not
+  moved.
+
+  This ADR's `Status` line carries the leading `Partially superseded by` token, so
+  under ADR-0082 §2 no amendment qualifier is written on it and this note is the whole
+  record. Appended note per ADR-0070 §1; no text below is rewritten. Refs #1996,
+  #1908.
 
 ## Context
 
