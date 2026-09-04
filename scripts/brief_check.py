@@ -82,9 +82,10 @@ _SECTION_RE = re.compile(
 )
 _LARGEST_RANGE = 20
 # CPython refuses to convert an integer literal beyond a few thousand digits, so
-# a label is length-bounded before any `int()` reaches it. Nothing in the corpus
-# is close; what the bound buys is that a brief cannot hand this script a
-# traceback in place of a report.
+# a range's endpoints are length-bounded before any `int()` reaches them. Nothing
+# in the corpus is close; what the bound buys is that a brief cannot hand this
+# script a traceback in place of a report. It binds the conversion and nothing
+# else: a standalone label is matched as a string and needs no bound.
 _LARGEST_LABEL = 9
 
 ABSENT = "absent"
@@ -213,11 +214,20 @@ def _references_for(adr: str | None, first: str, last: str | None) -> list[_Refe
     saying the rest was not expanded*. Returning the first section alone would
     let ``§§1-40`` report clean while thirty-nine cited sections went unread,
     which is the silent under-check this whole report exists to avoid.
+
+    A *standalone* label is checked whatever its length. :data:`_LARGEST_LABEL`
+    is a guard on the conversion and only on it, and nothing converts a
+    standalone label — :func:`find_section` matches it as a string — so testing
+    the length before the range branch reported ``ADR-0001 §1000000000``
+    unchecked where the ADR could simply be asked whether it carries that
+    section. On the range path the guard stays, and stays ahead of the
+    conversion: ``len(last)`` alone would let a first endpoint of a few thousand
+    digits reach ``int()``.
     """
-    if len(first) > _LARGEST_LABEL:
-        return [_Reference(adr, first, "a label too long to be a section number")]
     if last is None:
         return [_Reference(adr, first)]
+    if len(first) > _LARGEST_LABEL:
+        return [_Reference(adr, first, "a label too long to be a section number")]
     if first.isdigit() and last.isdigit() and len(last) <= _LARGEST_LABEL:
         low, high = int(first), int(last)
         if 0 < high - low <= _LARGEST_RANGE:
