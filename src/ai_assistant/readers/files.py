@@ -79,7 +79,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, final
+from typing import TYPE_CHECKING, Final, cast, final
 from uuid import uuid4
 
 from ai_assistant.core.clock import checked_clock
@@ -867,18 +867,30 @@ def _checked_root(value: object) -> Path:
     a ``Path`` annotation would make the refusal statically unreachable, which is the
     reasoning that let the value through.
 
-    **Accepted by ``isinstance``, then rebuilt.** Proving the type proves nothing
-    about a subclass's overrides, and both halves below are reachable through one: a
-    subclass answers ``is_absolute`` — the guard's own question — and raises from
-    ``__str__`` or ``__fspath__`` inside the message that would report the answer.
-    ``Path(value)`` copies the unparsed strings a ``PurePath`` already holds, so it
-    consults neither, and it is emphatically **not** ``resolve()``: §6 requires the
-    descent to *refuse* a symbolic link rather than follow one, so resolving here
-    would answer a question §6 reserves for :func:`_acquire_root`, and a plain
-    ``Path`` rebuilds to itself. It is the rebuilt root that is checked and handed on,
-    so every message below this guard renders a built-in. The rebuild reads
-    ``PurePath``'s own ``parser`` and ``_raw_paths``, so it closes the overrides this
-    guard is documented against rather than every conceivable one.
+    **The type test is put to the *real* class, never to the object.**
+    ``isinstance`` falls back to ``value.__class__`` when the concrete type does not
+    match, so an object of an unrelated class answering that attribute with ``Path``
+    passes it — and one whose ``__class__`` *raises* takes the guard down before any
+    refusal is built. ``issubclass(type(value), Path)`` asks ``Py_TYPE``, which no
+    object can override, and it admits exactly the same honest subclasses.
+
+    **Accepted, then rebuilt.** Proving the type proves nothing about a subclass's
+    overrides, and both halves below are reachable through one: a subclass answers
+    ``is_absolute`` — the guard's own question — and raises from ``__str__`` or
+    ``__fspath__`` inside the message that would report the answer. ``Path(value)``
+    copies the unparsed strings a ``PurePath`` already holds, so it consults
+    neither, and it is emphatically **not** ``resolve()``: §6 requires the descent
+    to *refuse* a symbolic link rather than follow one, so resolving here would
+    answer a question §6 reserves for :func:`_acquire_root`, and a plain ``Path``
+    rebuilds to itself. It is the rebuilt root that is checked and handed on, so
+    every message below this guard renders a built-in.
+
+    **The rebuild is itself guarded**: it reads ``PurePath``'s own ``parser`` and
+    ``_raw_paths``, which are ordinary Python attributes a genuine subclass can
+    override to raise. Catching that and refusing is what makes §6's promise — that
+    an ineligible configuration is a ``ConfigurationError`` — true rather than
+    nearly true. ``Exception`` is caught and ``BaseException`` deliberately is not,
+    for :func:`_type_name_of`'s reason (ADR-0060 §1).
 
     Args:
         value: The configured root, disbelieved until it has been checked.
@@ -887,12 +899,24 @@ def _checked_root(value: object) -> Path:
         The same location as a built-in ``Path``.
 
     Raises:
-        ConfigurationError: If ``value`` is not a ``Path``, or is not absolute.
+        ConfigurationError: If ``value`` is not a ``Path``, will not rebuild as one,
+            or is not absolute.
     """
-    if not isinstance(value, Path):
+    if not issubclass(type(value), Path):
         msg = f"the fetch root must be a Path, got {_type_name_of(value)} (ADR-0230 §6)"
         raise ConfigurationError(msg)
-    root = Path(value)
+    # `issubclass(type(...))` establishes the type without asking the object, but it
+    # narrows nothing for `mypy`; the cast records what the line above proved.
+    try:
+        root = Path(cast("Path", value))
+    # A blind `except Exception` on purpose — see the docstring; `BaseException`
+    # is deliberately not caught.
+    except Exception as exc:
+        msg = (
+            f"the fetch root must be a Path that rebuilds to a built-in one, got "
+            f"{_type_name_of(value)} (ADR-0230 §6)"
+        )
+        raise ConfigurationError(msg) from exc
     if not root.is_absolute():
         msg = f"the fetch root must be an absolute path, got {str(root)!r} (ADR-0230 §6)"
         raise ConfigurationError(msg)

@@ -214,7 +214,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, final
+from typing import TYPE_CHECKING, Final, cast, final
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -933,36 +933,58 @@ def _checked_path(value: object) -> Path:
     through :func:`_type_name_of`, because the read is itself a call into the
     refused object's class and owes it the same distrust (#2104).
 
-    **Accepted by ``isinstance``, then rebuilt**, which is
-    :func:`_checked_duration`'s two halves at this seam and for its reason (#1979).
-    Acceptance stays ``isinstance`` because honest ``Path`` subclasses exist and
-    none is *silently* accepted the way ``bool`` is by the integer guards. The
-    rebuild is what makes the check below hold and its message safe, because both
-    ask the refused value about itself: a subclass may override ``is_absolute`` to
-    answer ``True`` for a relative location, and ``__str__`` or ``__fspath__`` to
-    raise inside the message that reports one. ``Path(value)`` copies the unparsed
-    strings a ``PurePath`` already holds, so it consults none of those three, and
-    it is **not** ``resolve()`` — no symbolic link is followed and no component is
-    renamed, so a plain ``Path`` rebuilds to itself. It is the rebuilt path that is
-    checked, reported and returned.
+    **The type test is put to the *real* class, never to the object.**
+    ``isinstance`` falls back to ``value.__class__`` when the concrete type does not
+    match, so an object of an unrelated class answering that attribute with ``Path``
+    passes it — and one whose ``__class__`` *raises* takes the guard down before any
+    refusal is built. ``issubclass(type(value), Path)`` asks ``Py_TYPE``, which no
+    object can override, and it admits exactly the same honest subclasses.
 
-    The rebuild reads ``PurePath``'s own ``parser`` and ``_raw_paths``, so it
-    closes the overrides this guard is documented against rather than every
-    conceivable one — unlike :func:`_checked_duration`'s ``timedelta.__sub__``,
-    which reads C-level slots and is total.
+    **Accepted, then rebuilt**, which is :func:`_checked_duration`'s two halves at
+    this seam and for its reason (#1979). Acceptance stays a subclass test because
+    honest ``Path`` subclasses exist and none is *silently* accepted the way
+    ``bool`` is by the integer guards. The rebuild is what makes the check below
+    hold and its message safe, because both ask the refused value about itself: a
+    subclass may override ``is_absolute`` to answer ``True`` for a relative
+    location, and ``__str__`` or ``__fspath__`` to raise inside the message that
+    reports one. ``Path(value)`` copies the unparsed strings a ``PurePath`` already
+    holds, so it consults none of those three, and it is **not** ``resolve()`` — no
+    symbolic link is followed and no component is renamed, so a plain ``Path``
+    rebuilds to itself. It is the rebuilt path that is checked, reported and
+    returned.
+
+    **The rebuild is itself guarded**, unlike :func:`_checked_duration`'s C-level
+    ``timedelta.__sub__``: it reads ``PurePath``'s own ``parser`` and
+    ``_raw_paths``, which are ordinary Python attributes a genuine subclass can
+    override to raise. Catching that and refusing is what makes "nothing but a
+    ``ValueError`` leaves this constructor" true rather than nearly true.
+    ``Exception`` is caught and ``BaseException`` deliberately is not, for
+    :func:`_type_name_of`'s reason (ADR-0060 §1).
 
     Returns:
         The same location as a built-in ``Path``, whatever subclass carried it.
 
     Raises:
-        ValueError: If ``value`` is not a ``Path``, or is not absolute. Absoluteness
-            is the *shape* checked here; existence is a property of the world at an
-            instant and is checked at run time, where it degrades under ADR-0093 §8.
+        ValueError: If ``value`` is not a ``Path``, will not rebuild as one, or is
+            not absolute. Absoluteness is the *shape* checked here; existence is a
+            property of the world at an instant and is checked at run time, where it
+            degrades under ADR-0093 §8.
     """
-    if not isinstance(value, Path):
+    if not issubclass(type(value), Path):
         msg = f"the calendar source must be a Path, got {_type_name_of(value)}"
         raise ValueError(msg)
-    source = Path(value)
+    # `issubclass(type(...))` establishes the type without asking the object, but it
+    # narrows nothing for `mypy`; the cast records what the line above proved.
+    try:
+        source = Path(cast("Path", value))
+    # A blind `except Exception` on purpose — see the docstring; `BaseException`
+    # is deliberately not caught.
+    except Exception as exc:
+        msg = (
+            f"the calendar source must be a Path that rebuilds to a built-in one, "
+            f"got {_type_name_of(value)}"
+        )
+        raise ValueError(msg) from exc
     if not source.is_absolute():
         msg = (
             f"the calendar source must be an absolute path, got {str(source)!r}; a "
@@ -982,17 +1004,22 @@ def _checked_zone(value: object) -> ZoneInfo:
     object, not NoneType`` — a message naming neither this reader's field nor the
     rule the ``Raises:`` clause above promises for it.
 
-    **Accepted by ``isinstance``, then rebuilt**, for :func:`_checked_path`'s
-    reason at the other end of the same problem: a ``str`` subclass overriding
-    ``__repr__`` raises inside the refusal that reports an unknown zone. Here the
-    rebuild *is* total — ``str.__str__`` reads the C-level slot and answers with a
-    built-in ``str`` — and it changes nothing a caller sees, because ``ZoneInfo``
-    keys on the characters rather than on the object.
+    **The type test is put to the real class**, for :func:`_checked_path`'s
+    reason: ``isinstance`` falls back to ``value.__class__``, so an impostor
+    answering it with ``str`` reaches the rebuild below, where ``str.__str__``
+    refuses it with a ``TypeError`` rather than this guard's ``ValueError``.
+
+    **Accepted, then rebuilt**, for :func:`_checked_path`'s reason at the other end
+    of the same problem: a ``str`` subclass overriding ``__repr__`` raises inside
+    the refusal that reports an unknown zone. Here the rebuild needs no guard of
+    its own — ``str.__str__`` reads the C-level slot and answers with a built-in
+    ``str`` — and it changes nothing a caller sees, because ``ZoneInfo`` keys on
+    the characters rather than on the object.
 
     Raises:
         ValueError: If ``value`` is not a ``str``, or is not a known IANA zone.
     """
-    if not isinstance(value, str):
+    if not issubclass(type(value), str):
         msg = f"the calendar timezone must be a str, got {_type_name_of(value)}"
         raise ValueError(msg)
     name = str.__str__(value)
@@ -1024,9 +1051,16 @@ def _checked_duration(field: str, value: object) -> timedelta:
     through :func:`_type_name_of`, because the name read is itself a call into
     the refused object's class (#2104).
 
-    **Accepted by ``isinstance``, then canonicalised** — the two halves answer
-    different problems and neither substitutes for the other. Acceptance is
-    ``isinstance`` rather than an exact-type test, unlike the integer guards:
+    **The type test is put to the *real* class, never to the object.**
+    ``isinstance`` falls back to ``value.__class__`` when the concrete type does not
+    match, so an object of an unrelated class answering that attribute with ``timedelta``
+    passes it — and one whose ``__class__`` *raises* takes the guard down before any
+    refusal is built. ``issubclass(type(value), timedelta)`` asks ``Py_TYPE``, which no
+    object can override, and it admits exactly the same honest subclasses.
+
+    **Accepted, then canonicalised** — the two halves answer different problems and
+    neither substitutes for the other. Acceptance is a subclass test rather than an
+    exact-type test, unlike the integer guards:
     they are exact for a *reachable* reason (``bool`` is an ``int`` by
     inheritance, so ``max_entries=True`` passes ``mypy`` and loads as a cap of
     one — #471), while no ``timedelta`` subclass is silently accepted that way
@@ -1049,10 +1083,12 @@ def _checked_duration(field: str, value: object) -> timedelta:
     Raises:
         ValueError: If ``value`` is not a ``timedelta``.
     """
-    if not isinstance(value, timedelta):
+    if not issubclass(type(value), timedelta):
         msg = f"{field} must be a timedelta, got {_type_name_of(value)}"
         raise ValueError(msg)
-    return timedelta.__sub__(value, timedelta(0))
+    # `issubclass(type(...))` establishes the type without asking the object, but it
+    # narrows nothing for `mypy`; the cast records what the line above proved.
+    return timedelta.__sub__(cast("timedelta", value), timedelta(0))
 
 
 def _checked_timeout(field: str, value: object) -> timedelta:
