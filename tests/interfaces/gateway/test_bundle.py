@@ -2267,8 +2267,12 @@ def test_an_abandoned_ask_leaves_no_answer_shaped_nothing_on_screen() -> None:
     assert 'clearNode(el("answer-body"));' in abandon
     assert 'show("answer", false);' in abandon
     assert abandon.index("if (mine) {") < abandon.index('clearNode(el("answer-body"));')
-    # The two body reads that an abort can land in the middle of.
-    assert script.count("if (waiting.stopping.signal.aborted) {") == 2
+    # The reads an abort can land in the middle of. Three since #2008: the two body
+    # reads, and the streamed entry's misframed-line ending, which is reached from a
+    # line already buffered when the owner stopped waiting — an abort raises on the
+    # *next* read, so that ending and the abandonment can both be true at once, and the
+    # act is what the owner is told about.
+    assert script.count("if (waiting.stopping.signal.aborted) {") == 3
     whole = _functions(script)["askWhole"]
     assert whole.index("const body = await readBody(response);") < whole.index(
         "if (waiting.stopping.signal.aborted) {"
@@ -2371,7 +2375,13 @@ def test_the_announcement_is_read_off_what_this_browser_actually_observed() -> N
     # being explained. The declaration and its seven sites — the seventh being the spoken
     # entry's unreadable-answer ending (#2005), which points at the listing for the same
     # reason the other six do: the turn may have run and this browser cannot say.
-    assert script.count("WHERE_TO_LOOK") == 8
+    #
+    # **Eight rather than seven since #2008**, and the eighth is not an abandonment
+    # either: ``ANSWER_STREAM_MISFRAMED`` is the streamed entry's ending for a line it
+    # could not read as a value at all, one step earlier than the value it read and could
+    # not take an outcome from. It carries this clause for the same reason and neither of
+    # the two counted above it.
+    assert script.count("WHERE_TO_LOOK") == 9
     assert "though a turn whose record " in script
     assert "could not be written does not appear there" in script
 
