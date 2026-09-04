@@ -1222,13 +1222,23 @@ const CONFIRMATION_NOT_WHOLE =
   "this page does not put it to you: approving what is only partly on screen would " +
   "be answering about something else.";
 
-// One span whose own value did not reach this page.
+// One span whose own value did not reach this page, in every way it can fail to.
 //
-// `null` is unambiguous here and is not a value the owner could be looking at: every
-// located value crosses as **text**, so a JSON `null` argument arrives as the four
-// characters `null` and this arrives as nothing at all.
+// **Asked as "is this text", not as "is this null"**, which is adversarial review's
+// round-1 `major` and is the fail-closed direction ADR-0233 §8 requires rather than a
+// tidier spelling of one test. `null` is what the gateway sends for a span its
+// arguments do not locate — but nothing in this page validates the body it was
+// handed against a schema, so a `value` that is **absent**, a number, an object or a
+// boolean is equally a value that is not on the screen. Under a check for `null`
+// alone, `undefined` would slip past it and `valueBlock` would render the word
+// "undefined" as the bytes the owner is approving.
+//
+// Text is the whole of what a located value can be: every one is spelled by the
+// gateway with `_parameter_text`, so a JSON `null` argument arrives as the four
+// characters `null` and a number arrives as its digits. Anything else is this page
+// and the process that served it disagreeing, which is a card that gets refused.
 function unlocated(span) {
-  return span.value === null;
+  return typeof span.value !== "string";
 }
 
 function renderConfirmation(parent, confirmation) {
