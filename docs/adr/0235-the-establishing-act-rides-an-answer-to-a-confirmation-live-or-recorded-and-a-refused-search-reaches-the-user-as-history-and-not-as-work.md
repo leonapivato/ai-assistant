@@ -179,6 +179,23 @@ lane's own decision.**
 > contract: an act split across two calls is one a client can half-perform, and the
 > half that survives is an approval the user believed was standing.
 
+> **Normative.** Both operations **refuse an expiry that is not strictly after the
+> instant that will stamp the answer**, before anything is recorded, and the refusal
+> names the instant it was compared against. `RecipientGrant` refuses a granting
+> record whose `expires_at` is at or before its `decided_at` (ADR-0193 §9) and
+> `decided_at` is the answer's, so an operation that did not check would record the
+> answer and only then meet a construction refusal — leaving a decision in the trail,
+> no grant, and a user told nothing they could act on. It is the shape §3's seventh
+> condition closes one axis over, closed the same way and for the same reason: a
+> precondition on the act is checked where the act is offered, not where the record is
+> built.
+
+> **Normative.** The instant compared against is **the one the operation will stamp
+> on the answer**, read once and used for both. No operation reads the clock a second
+> time between the comparison and the record, because two reads admit an expiry that
+> passes the check and fails the constructor — which is the failure this clause
+> exists to remove rather than to narrow.
+
 > **Normative.** Every operation offering the act obtains its `RecipientGrant` from
 > `RecipientGrant.established_from` and **mints none of its own**, which is ADR-0193
 > §2's clause binding unchanged. Neither operation below builds a `RecipientGrant`
@@ -720,10 +737,17 @@ which is what "a product surface with a user action behind it" describes.
 > **Normative.** The **command-line surface** carries all of it, and is the surface
 > the implementing lane ships. `assistant resume` gains a way to state the instant
 > beside its answer under §2, offered only where the confirmation is one an act may
-> ride and never as a default or a pre-selection. Three commands are added for
-> population (b) and the standing store, named in a recipient vocabulary distinct
-> from the source-grant commands §7 keeps: the `grantable_decisions` listing with the
-> act beside it, the standing listing, and the revocation.
+> ride and never as a default or a pre-selection. **Four** commands are added,
+> named in a recipient vocabulary distinct from the source-grant commands §7 keeps:
+> the `grantable_decisions` listing with the act beside it; the standing listing;
+> the bounded history over `recent_recipient_grants`, taking a `--limit` with the
+> refusal §7 states; and the revocation, taking the id either listing renders.
+
+> **Normative.** The history command is what makes ADR-0193 §1's recourse performable
+> on the shipping surface, so it is named here rather than left to the lane: a user
+> whose act §6 refused on the ceiling reaches it, finds the expired grant the standing
+> listing correctly omits, and revokes. A lane that shipped the other three would ship
+> a refusal whose stated recourse has no command behind it.
 
 > **Normative.** The `--yes` flag, which today declines to answer any confirmation
 > carrying an egress, **never supplies the act**. No non-interactive flag,
@@ -786,8 +810,9 @@ in it, which is the disclosure ADR-0199 exists to refuse.
 > **Normative.** The lane implementing §4 moves `PROTOCOL_VERSION`, in the same
 > change, and records the ground in the constant's own commentary as every prior move
 > has. ADR-0124 §9's first limb is what obliges it: the promoted method set grows by
-> four and `resume`'s declared arguments grow by one, so a peer at the earlier version
-> and a peer at the later one do not agree about the surface.
+> **five** — the members §4's block declares — and `resume`'s declared arguments grow
+> by one, so a peer at the earlier version and a peer at the later one do not agree
+> about the surface.
 
 > **Normative.** This ADR **fixes no number**, and that is deliberate rather than an
 > omission. `PROTOCOL_VERSION` stands at 29 on `origin/main` and ADR-0231 §16 obliges
@@ -913,6 +938,12 @@ enumeration in its own text (§9).
 > `planned_with_external_content` as `True`. Each asserts that **no** answer and
 > **no** grant were recorded, and each asserts that `grantable_decisions` does not
 > return the decision either.
+
+> **Normative.** Lane 1 ships the expiry pair, on **both** operations: an
+> `expires_at` at or before the instant the answer would carry records neither the
+> answer nor the grant and raises, and one strictly after it establishes the grant.
+> The first fails against an implementation that let the record's own validator do
+> the refusing, which is the outcome §1's clause forbids.
 
 > **Normative.** The last of those is owed **by name and not by a roster**, because
 > it is the one an implementation reaches through a green path: `ActionPolicy.resolve`
