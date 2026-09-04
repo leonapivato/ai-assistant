@@ -57,6 +57,39 @@
   before `just ready` — supersedes nothing here, because this ADR never required
   that wait. Nothing in §1 is rewritten: the clause stays legible where it was
   written, beside this note.
+- **Note (2026-09-03): the Consequences "Easier" first bullet's run count is an
+  upper bound — a rebase made *before* the opening anchor adds no run.** That
+  bullet reads: "Two full runs on a branch that never rebases, plus one per
+  qualifying rebase under §1 — against one per commit before. On a 20-round lane
+  with two rebases that is ~17 minutes of pytest where there were ~110."
+  **Read as a prediction of the ordinary path it overcharges, by one run for each
+  rebase that precedes the opening anchor.** Issue #997 states the case: "the
+  author rebases onto current `main`, then runs the mandatory full gate
+  immediately before the first review invocation, and that single run discharges
+  both §1's opening anchor and §1's rebase-before-next-review clause. Only a
+  rebase made *after* the relevant anchor has already been discharged costs an
+  extra run", so "The ordinary path — rebase, then first review — costs two runs,
+  and the bullet predicts three." That is §1 read as written: its opening anchor
+  binds "immediately before the **first review invocation**" on the branch, its
+  first rebase clause binds "before the **next review invocation** on that
+  branch, if one follows", and where the rebase comes first, one run before that
+  first review discharges both. So the figures below are a ceiling on what a lane
+  pays rather than an estimate of what it will pay, and the arithmetic they are
+  reached by holds only for rebases taken after the anchor they would otherwise
+  fold into.
+  **Nothing decided changes and no reader acts differently as to the decision**
+  (ADR-0070 §1, and its 2026-07-31 §1 note on what "differently" means). §1's
+  clauses are correct as written and are untouched — the two anchors, both rebase
+  clauses, and the rule that each anchor is a run on the tree it names. This ADR
+  is a marked one, so its marked clauses are the whole of what it obligates and
+  unmarked text supplies no obligation (ADR-0089 §3); Consequences carries no
+  mark, and a lane counting its own owed runs from §1 arrives at the same number
+  before and after this note. What is corrected is how a cost estimate is read,
+  not a rule, and the ratified figures below are left as written.
+  This is a stale claim in this ADR's own words, reconciled against this ADR's
+  own §1 — ADR-0070 §1's first term — with no other ADR as its cause, so it is
+  recorded as this appended dated note, the Consequences text below is **not**
+  rewritten, and no `Status` edit is owed (ADR-0082 §1). Refs #997, PR #987.
 - **What this changes and what it does not.** It moves one sentence of ADR-0015's
   `Consequences` — the every-commit full gate — and nothing else. CI's gate is
   untouched (§6), the Definition of Done is untouched, and no Protocol, no
