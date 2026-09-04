@@ -408,7 +408,7 @@ have made the planner the namer again with an extra step.
 > condition is enforced by the model rather than by its callers; an outcome carrying
 > both or neither is not a value this corpus admits.
 
-> **Normative.** **`SEARCH_QUERY_MAX_CHARS` is a `Settings` field and is enforced by
+> **Normative.** **`search_query_max_chars` is a `Settings` field and is enforced by
 > the composer, never by the model.** `QueryOutcome` carries no bound, is
 > configuration-independent, and validates identically in every deployment; the
 > configured composer refuses over the bound and returns `QueryRefusal.TOO_LONG`. This
@@ -422,7 +422,7 @@ have made the planner the namer again with an extra step.
 > turn to be one no web search would answer; `UNAVAILABLE`, valued `unavailable`,
 > where the model call did not produce an answer; `MALFORMED`, valued `malformed`,
 > where the answer could not be read as a query; and `TOO_LONG`, valued `too_long`,
-> where the answer exceeded `SEARCH_QUERY_MAX_CHARS`. The vocabulary is **added to
+> where the answer exceeded `search_query_max_chars`. The vocabulary is **added to
 > and never renamed**, and no later lane adds a member without the ADR that decides
 > it. A composition over the bound is **refused rather than truncated**.
 
@@ -544,16 +544,27 @@ the other's input.
 > redirect** — a redirect response is a refusal and never a second request; it opens a
 > channel **per call** and closes it, retaining no pool, cache or keep-alive
 > (ADR-0191 §3); it carries the account's credential to that origin and to nothing
-> else; and it **stops reading at `SEARCH_MAX_RESPONSE_BYTES`**.
+> else; and it reads **no more than one byte past `search_max_response_bytes`**
+> before it stops.
 
 > **Normative.** **The response bound is enforced while the response is read and
 > before any part of it is parsed**, counted over the bytes taken off the channel. A
-> response that reaches the bound is **abandoned and refused** — the channel is
-> closed, no further byte is read, nothing is parsed, and no record is minted — and no
-> implementation buffers a whole response, parses incrementally past the bound, or
-> measures a response after assembling it. The bound is a `Settings` field with a
-> named default, a stated domain and a load-time refusal, exactly as ADR-0230 §6's
-> bounds are.
+> response **over** the bound is **abandoned and refused** — the read stops as soon as
+> one byte past the bound has been taken, the channel is closed, nothing is parsed and
+> no record is minted — while a response **exactly at** the bound is read whole and
+> parsed. No implementation buffers a whole response, parses incrementally past the
+> bound, or measures a response after assembling it.
+
+> **Normative.** **This decision adds exactly four `Settings` fields, each with the
+> named default, stated domain and load-time refusal ADR-0230 §6 requires of its
+> own.** `search_query_max_chars`, default **256**, an integer of at least 1, counted
+> in Unicode code points. `search_max_results`, default **3**, an integer from 1 to
+> **10** — ADR-0226 §6's whole budget, so no configuration lets one search take more
+> than the servicing has. `search_max_result_chars`, default **2048**, an integer of
+> at least 1, counted as §10 counts it. `search_max_response_bytes`, default
+> **1 MiB**, an integer of at least 1. A value outside a stated domain is refused at
+> `Settings` load, before any composer, searcher, transport or filesystem call, and no
+> lane reads a default here as a recommendation.
 
 > **Normative.** **Which path, which parameter names, which headers and which body
 > shape a provider request takes are the integration's own, are not a destination, are
@@ -719,16 +730,24 @@ establishes no tier.
 > `ReadAsk` through `StepExecutor` — ADR-0226 §4's other three prohibitions bind
 > verbatim.
 
-> **Normative.** **The seam performs ADR-0029 §2's three pre-execution checks
-> itself, in that order, before the credential is read and before any channel is
-> opened**: the `ToolCall` is **revalidated and detached**, so a mutation landed after
-> construction cannot survive into execution; `PermissionDecision.authorises` is
-> **re-checked against that revalidated, detached value**; and the call runs under
-> ADR-0029 §4's invocation deadline. `ToolCall`'s construction-time validator is the
-> first line and not the only one — `frozen=True` bounds the ordinary write path and
-> not `__dict__` (ADR-0018 §3) — so a route that relied on construction alone would
-> lose exactly the check ADR-0029 §2 exists for. Nothing about these three is relaxed
-> by the send leaving through a different member.
+> **Normative.** **The seam performs ADR-0029 §2's three pre-execution checks itself,
+> in that order, before the credential is read and before any channel is opened.**
+> (1) The `ToolCall` is **revalidated and detached**, so a mutation landed after
+> construction cannot survive into execution. (2) The definition on that detached copy
+> is compared for equality against **the searcher's own registered declaration** —
+> which is the authoritative original here, standing where ADR-0029 §2 puts the
+> registry's, because §5 gives this integration an egress registration and no registry
+> entry — and an unequal one is refused. (3) `PermissionDecision.authorises` is
+> **re-evaluated against that same detached copy** rather than trusted from
+> construction. Every subsequent step reads the revalidated copy and never the
+> argument, and the order is part of the rule for ADR-0029 §2's own stated reason.
+
+> **Normative.** **ADR-0029 §4's invocation deadline bounds the call, and it is not
+> one of the three.** It is an obligation on this route beside them, as it is on
+> `invoke`, and ADR-0194's spend admission runs **after** all three and **before** the
+> ledger claim, handed the `ToolCost` on the revalidated copy and never on the
+> argument. A refused admission reaches no channel, appends no claim and appends no
+> completion.
 
 > **Normative.** No lane reads this section as opening a second route for **any other
 > send**, and no lane synthesises a plan step, an execution or a `RUNNING` claim in
@@ -749,13 +768,19 @@ rather than the capability boundary, which is a property #1908, ADR-0170 §5a an
 ADR-0208 §1 all rest on.
 
 **What the amendment costs, and what it does not.** It moves `ToolInvoker`'s three
-pre-execution checks — revalidation and detachment, the authorisation re-check against
-the detached copy, and the deadline — onto the seam, which is why they are a marked
-clause above rather than a remark: `ToolCall`'s own validator runs
-`PermissionDecision.authorises` at construction and that is deliberately **not
-sufficient**, because `object.__setattr__` defeats `frozen=True` and the model's own
-docstring says so. A route that took construction for the whole of the guarantee would
-have quietly dropped the check ADR-0029 §2 puts first. It does **not** cost the payload binding (the request's `parameters_digest` is bound
+pre-execution checks onto the seam, which is why they are a marked clause above rather
+than a remark: `ToolCall`'s own validator runs `PermissionDecision.authorises` at
+construction and that is deliberately **not sufficient**, because `object.__setattr__`
+defeats `frozen=True` and the model's own docstring says so. A route that took
+construction for the whole of the guarantee would have dropped the check ADR-0029 §2
+puts first. **And the second check needs a different holder here, which is the one
+substantive difference.** `invoke` compares against the registry's original *"since the
+registry is the only holder of an untampered one"*; this integration has no registry
+entry, so the untampered original is the declaration the searcher registered at the
+seam and holds itself. Without that comparison a tampered-but-valid definition — ADR-0018
+§4's case — could reach the callable under a `discloses`, a `cost` or a
+`risk_level` other than the one the policy ruled on, which is precisely what the check
+prevents. It does **not** cost the payload binding (the request's `parameters_digest` is bound
 into the decision and compared by `authorises`), the immutability (`ToolCall` is
 frozen and the binding is derived, never accepted), the approver (§9), the credential
 gate (§5), or the audit (this section). Condition 12's property is not weakened but
@@ -998,7 +1023,7 @@ under it, makes a search fire without the user having authorised the recipient.
 
 > **Normative.** A `WebSearcher` mints the records; nothing outside it stamps a
 > `Provenance` for a search result. A successful search mints **at most
-> `SEARCH_MAX_RESULTS` `MemoryRecord`s**, one per result the provider returned, in the
+> `search_max_results` `MemoryRecord`s**, one per result the provider returned, in the
 > order it returned them, of kind `SEMANTIC`. No model is on that path: nothing
 > summarises, abridges, rewrites, re-ranks, annotates, deduplicates or classifies a
 > result between the provider's response and the record.
@@ -1013,7 +1038,7 @@ under it, makes a search fire without the user having authorised the recipient.
 > no word of this system's, and is a **transcription** rather than a rendering in
 > exactly the sense ADR-0230 §5 gives for a decoding.
 
-> **Normative.** A record whose `content` exceeds `SEARCH_MAX_RESULT_CHARS` — measured
+> **Normative.** A record whose `content` exceeds `search_max_result_chars` — measured
 > as ADR-0230 §6 measures a fetched document, on the JSON-quoted rendering the prompt
 > will carry — is **dropped rather than truncated**, the remaining results are minted,
 > and §13's audit counts the drop. Where every result is dropped the search yields
@@ -1115,7 +1140,7 @@ phrasing for why deferring the fetch is safe rather than merely smaller.
 **Three results, and the figure is bounded rather than measured.** ADR-0226 §6's ten
 is a measured figure; nothing has measured this one, and this ADR says so instead of
 implying otherwise. What bounds it is the budget it draws from and the prompt it
-enters: three results at `SEARCH_MAX_RESULT_CHARS` each is a prompt addition of the
+enters: three results at `search_max_result_chars` each is a prompt addition of the
 same order as the episodic supplement's ordinary contribution, it leaves seven of
 ADR-0226 §6's ten for the inward kinds, and it is small enough that §11's precedence
 costs the other kinds little. §19 defers the movement of the figure to §13's audit
@@ -1148,7 +1173,7 @@ disk, on the stronger case; this one needs no argument at all.
 > capped read ahead of the uncapped one — and this kind is capped by §10 at three
 > records where the hop's cap is ten and the query has none.
 
-> **Normative.** **One budget, and the search draws at most `SEARCH_MAX_RESULTS`
+> **Normative.** **One budget, and the search draws at most `search_max_results`
 > slots of it.** ADR-0226 §6's budget of ten binds per servicing (ADR-0228 §7),
 > counted after deduplication. It is not a share, not a second budget, and no lane
 > funds it by lowering `RETRIEVAL_LIMIT` or `EPISODIC_SUPPLEMENT_LIMIT`. **Where fewer
@@ -1445,9 +1470,10 @@ by ADR-0193's machinery, per §9.
 
 ### 15. Spend
 
-> **Normative.** **The search's transport call is admitted by a `SpendGate` before it
-> is made** (ADR-0194 §3), held by the searcher inside the seam and never by
-> `orchestration`, over the `ToolCost` the declaration carries. The searcher holds no
+> **Normative.** **The search's transport call is admitted by a `SpendGate` after
+> §6's three checks and before the ledger claim** (ADR-0194 §3), held by the searcher
+> inside the seam and never by `orchestration`, over the `ToolCost` on the
+> revalidated, detached copy §6 produced and never on the argument it was handed. The searcher holds no
 > `SpendLedger`, appends no row, and reads no totals projection. A refusal by the gate
 > is a disposition (§13) and never a retry.
 
@@ -1555,7 +1581,7 @@ said about the result through the capture path this decision leaves untouched.
 
 **Lane 1 — the query composer.** `core/protocols.py`'s `QueryComposer`;
 `core/types.py`'s `QueryOutcome` and `QueryRefusal`; the `Settings` field for
-`SEARCH_QUERY_MAX_CHARS` with its named default, its stated domain and its load-time
+`search_query_max_chars` with its named default, its stated domain and its load-time
 refusal; the **shared conformance suite**; the **canonical fake** in
 `ai_assistant.testing`; and the model-backed composer in `ai_assistant.planning`, with
 its prompt under ADR-0098 §2's marking and its parse. Nothing calls it yet.
@@ -1583,7 +1609,7 @@ its prompt under ADR-0098 §2's marking and its parse. Nothing calls it yet.
 `ai_assistant.tools.destinations` implementing §8's canonical form, its three
 equivalences and every refusal in its grammar; the HTTPS exchange inside
 `ai_assistant.tools.egress` over `OutboundTransport`, holding §5's five properties and
-its read bound; the `Settings` field for `SEARCH_MAX_RESPONSE_BYTES` with its named
+its read bound; the `Settings` field for `search_max_response_bytes` with its named
 default, its stated domain and its load-time refusal; the
 import-linter contract extension where a dependency is adopted, under ADR-0024's
 pinning rule; and the failure-path suite ADR-0154 §4's condition 14 requires — a
@@ -1598,7 +1624,7 @@ Nothing calls it yet.
 connected account with **no registry entry**, its credential read through `Secrets` at
 `SecretScope.INTEGRATION`, its `SpendGate` admission, its `InvocationLedger` claim and
 completion, its transcription and its minting under §10; the `Settings` fields for
-`SEARCH_MAX_RESULTS` and `SEARCH_MAX_RESULT_CHARS`; and `app/composition.py`'s wiring,
+`search_max_results` and `search_max_result_chars`; and `app/composition.py`'s wiring,
 which constructs a searcher only where an account is connected and registers its
 close among the resources it has opened (ADR-0042 §2).
 
@@ -1641,7 +1667,7 @@ close among the resources it has opened (ADR-0042 §2).
 > condition over the value's own fields, decidable in any process, and each is
 > enforced by the model rather than by its callers.
 
-> **Normative.** **`SEARCH_MAX_RESULTS` and `SEARCH_MAX_RESULT_CHARS` are `Settings`
+> **Normative.** **`search_max_results` and `search_max_result_chars` are `Settings`
 > fields and are enforced by the searcher, never by the model.** `SearchOutcome`
 > carries neither bound and validates identically in every deployment; the configured
 > searcher mints at most that many records, drops one over the content bound (§10),
@@ -1802,7 +1828,7 @@ for less.
 11. **A redirect is a refusal, and an oversized response is abandoned.** Lane 2's
     transport, driven against a fake exchange: on a redirect, no second channel is
     opened, no credential reaches a second origin, and the refusal class is the one §13
-    records. On a response longer than `SEARCH_MAX_RESPONSE_BYTES` — including one whose
+    records. On a response longer than `search_max_response_bytes` — including one whose
     declared length is absent and whose body never ends — the read stops at the bound,
     the channel is closed, **nothing is parsed**, and the refusal is
     `RESPONSE_TOO_LARGE`. Asserted over a byte channel that counts what was taken from
@@ -1814,6 +1840,21 @@ for less.
 13. **The credential is read inside the authorised call and nowhere else**, and a
     turn whose ruling was not `ALLOW` reads none — the `Secrets` fake fails the test if
     `get` is called on that path.
+13a. **A call mutated after construction reaches no credential and no channel.**
+    An authorised `ToolCall` whose `request.parameters` are rewritten through
+    `__dict__` after construction — the bypass ADR-0018 §3 puts inside the threat
+    model — is handed to `search`: the revalidation and the re-evaluated `authorises`
+    refuse it, the `Secrets` fake is never called and no channel is opened. The same
+    over a call whose `request.tool` was replaced with a **valid but different**
+    definition, which the second check refuses against the searcher's own registered
+    declaration. Both fail an implementation that trusted construction.
+13b. **The three bounds are tested at the boundary and not only over it.** A response
+    of exactly `search_max_response_bytes` is read whole and mints records, and one of
+    that plus one byte is refused `RESPONSE_TOO_LARGE` with nothing parsed; a result
+    whose quoted rendering is exactly `search_max_result_chars` is minted and one a
+    character longer is dropped; a query of exactly `search_query_max_chars` is
+    returned and one longer is `TOO_LONG`. Each pair fails an implementation whose
+    comparison is the wrong way round.
 14. **The invocation is claimed and completed, and an interrupted one stays open.**
     `orchestration` claims nothing: a serviced search leaves one claim completed with a
     `SUCCEEDED` outcome, and a transport failure leaves one completed with a failure
@@ -1854,7 +1895,7 @@ for less.
   outbound payloads is a decision about retention and data rights, not about this
   mechanism. Fired by an audit requirement nobody has stated, or by the approval-surface
   lane deciding what a user is shown before a send.
-- **Moving `SEARCH_MAX_RESULTS`, or a second search per servicing.** §10's three is
+- **Moving `search_max_results`, or a second search per servicing.** §10's three is
   bounded rather than measured and §1 admits one request per ask. Fired by §13's audit
   showing what turns actually needed. Not fired by a lane finding three results thin.
 - **Model-spend accounting for the composer's call** (§15). Nothing in this system
@@ -2041,9 +2082,10 @@ is that statement, and it answers #95 for nothing else.
 This ADR is in **ADR-0089's marked regime**: it carries well-formed clauses, so the
 marked clauses are the whole of what it obligates and the prose beside them supplies
 nothing. ADR-0089 §5 makes marking forward-only, so nothing this ADR cites is
-retro-marked. What binds is **one hundred clauses**: §1's four, §2's two, §3's eight,
-§4's two, §5's eight, §6's six, §8's seven, §9's five, §10's eight, §11's nine, §12's
-four, §13's seven, §14's five, §15's three, §16's eight, §17's thirteen and §18's one.
+retro-marked. What binds is **one hundred and two clauses**: §1's four, §2's two, §3's eight,
+§4's two, §5's nine, §6's seven, §8's seven, §9's five, §10's eight, §11's nine,
+§12's four, §13's seven, §14's five, §15's three, §16's eight, §17's thirteen and
+§18's one.
 §7's table, §19's
 list, §20's classification and every argument in this document are deliberately
 unmarked: they are attestation, deferral and argument, which ADR-0089 §1 classifies as
