@@ -1,4 +1,4 @@
-"""What this page does with an answer it cannot read (#1622, #2005, #2006, ADR-0216 §2).
+"""What this page does with an answer it cannot read (#1622, #2005, #2006, #2013, ADR-0216 §2).
 
 ``renderOutcome`` reads the outcome's members from its first lines, so a ``2xx``
 that carries no ``outcome`` throws at the call site — and every entry that renders a
@@ -40,11 +40,16 @@ import pytest
 from browser_drive import driving, rendering_of
 from playwright.async_api import expect
 
+from ai_assistant.core.types import SpokenAudio, SpokenAudioFormat
+from ai_assistant.interfaces.gateway.server import _TURN_BUDGET, _spoken_view
+
 if TYPE_CHECKING:
     from pathlib import Path
 
     from browser_drive import Drive
     from playwright.async_api import Browser, ConsoleMessage
+
+    from ai_assistant.core.types import SpokenTurn
 
 pytestmark = [
     pytest.mark.integration,
@@ -92,6 +97,11 @@ _HALF_RENDERABLE_BODY = {
 #: from the screen once the ending says the outcome is not known.
 _HALF_WRITTEN = "This turn was not recorded"
 
+#: The transcript the spoken bodies below carry. One string in two places: it is the
+#: ``heard`` member of a whole turn, and it is also the scalar one case puts *in place
+#: of* that turn — the same words arriving as the answer rather than inside it.
+_HEARD = "what is on today"
+
 
 def _spoken_without_an_outcome() -> str:
     """One ``/ask/spoken`` body whose turn carries every member but the outcome.
@@ -107,7 +117,7 @@ def _spoken_without_an_outcome() -> str:
     return json.dumps(
         {
             "turn": {
-                "heard": "what is on today",
+                "heard": _HEARD,
                 "spoken": {"content": rendering_of(2.0), "media_type": "audio/webm;codecs=opus"},
                 "spoken_degraded": False,
                 "episode_id": "ep-1",
@@ -271,6 +281,124 @@ async def test_a_spoken_reply_this_browser_cannot_read_at_all_reaches_the_same_e
         await expect(drive.page.locator("#answer")).to_be_hidden()
         await expect(drive.page.locator("#talk-button")).to_be_enabled()
         assert thrown == []
+
+
+async def _a_whole_spoken_turn(drive: Drive) -> SpokenTurn:
+    """The turn this drive's own engine answers a press with, taken directly.
+
+    Not fabricated and not enumerated: it is the canonical fake's own answer, run
+    through the view ``_ask_spoken`` answers with, so what it carries is what the page
+    would have rendered had it arrived unwrapped — a reply, a transcript, and a
+    rendering Chromium can really decode.
+
+    Args:
+        drive: The gateway, engine and page under test.
+
+    Returns:
+        One whole turn, the engine's rendering counter advanced by it.
+    """
+    return await drive.engine.converse_spoken(
+        SpokenAudio(content=rendering_of(0.2), media_type=SpokenAudioFormat.WEBM_OPUS),
+        plays=(SpokenAudioFormat.WEBM_OPUS,),
+        timeout=_TURN_BUDGET,
+    )
+
+
+async def _spoken_turn_of_shape(drive: Drive, shape: str) -> str:
+    """One ``/ask/spoken`` body whose ``turn`` is present and is not an object.
+
+    Each of the three is the arm one clause of ``asObject`` rejects, so the family is
+    driven at its edges rather than at one point inside it: ``null`` is what
+    ``parsed !== null`` is for, a scalar is what ``typeof parsed === "object"`` is for,
+    and an array is what ``!Array.isArray(parsed)`` is for — the one shape that
+    satisfies ``typeof`` and is still not a turn. ``null`` is also the only one of the
+    three a member read throws on, which is what makes it the case that fails against
+    the rewriting the caller's docstring names.
+
+    **The array's element is a whole turn rather than a turn-shaped nothing**, which is
+    adversarial review's round-1 ``major``: an element that itself carried no
+    ``outcome`` would reach the same ending through a page that had wrongly *unwrapped*
+    it, so the case would pass over the regression it is here to see. Because the
+    element is renderable, a page that read ``read[0]`` would put a reply on screen,
+    disclose the transcript and play the rendering — and each of those is an assertion
+    below.
+
+    Args:
+        drive: The gateway, engine and page under test — the engine because the array
+            shape's element is taken from it.
+        shape: ``"null"``, ``"scalar"`` or ``"array"``.
+
+    Returns:
+        The substituted body, as the page will read it.
+    """
+    if shape == "null":
+        return json.dumps({"turn": None})
+    if shape == "scalar":
+        # The transcript where the turn belongs, which is what a body flattened
+        # between the two ends arrives as.
+        return json.dumps({"turn": _HEARD})
+    return json.dumps({"turn": [_spoken_view(await _a_whole_spoken_turn(drive))]})
+
+
+@pytest.mark.parametrize("shape", ["null", "scalar", "array"])
+async def test_a_spoken_turn_present_but_not_an_object_reaches_the_same_ending(
+    gateway_browser: Browser, tmp_path: Path, shape: str
+) -> None:
+    """#2013: the shapes of an unreadable ``turn`` that are a *shape* and not a member.
+
+    The two cases above drive a ``turn`` that is absent entirely and a ``turn`` that is
+    an object carrying no ``outcome``. ``asObject`` normalises a third family to the
+    same ``{}`` and the suite reached none of it: a ``turn`` that is **present and not
+    an object**. It is the same line, the same guard and the same ending, so nothing
+    here is unhandled today — what the case pins is that it stays that way.
+
+    **Which makes this a regression case, and it is one that fails against a stated
+    rewriting.** A normalisation written as ``read === undefined ? {} : read`` handles
+    the absent shape the case above drives and reinstates the ``TypeError`` for
+    ``{"turn": null}`` alone — one ``catch`` further out, that is ``GATEWAY_GONE``,
+    "the gateway did not answer", about a gateway that had just answered a turn a
+    ``200`` says ran. Driven against that rewriting the ``null`` case fails on exactly
+    that sentence and the other two pass, which is the division to expect: ``null`` is
+    the shape that throws on a member read, and the other two are where the family
+    stops.
+
+    **The ending is the whole of ``SPOKEN_ANSWER_UNREADABLE``**, not merely "not
+    ``GATEWAY_GONE``". An unreadable answer that reached some *third* sentence would
+    satisfy the negative assertion and still be wrong, and the clause about the screen
+    and the air is this surface's own half (ADR-0200 §4) — which the ``array`` case
+    reads over an answer whose element is a whole renderable turn, transcript and
+    decodable audio and all. See :func:`_spoken_turn_of_shape` for why that element is
+    a whole one.
+    """
+    thrown: list[str] = []
+    complaints: list[str] = []
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.page.on("pageerror", lambda error: thrown.append(str(error)))
+        drive.page.on("console", lambda message: _note(message, complaints))
+        await _substitute(drive, path="/ask/spoken", body=await _spoken_turn_of_shape(drive, shape))
+        await drive.press()
+
+        said = await _fault(drive)
+        assert "could not read an outcome from the answer" in said
+        assert "what the turn did is not known" in said
+        assert "The turn itself ran" in said
+        assert "Nothing of it is shown or spoken here" in said
+        assert _GATEWAY_GONE not in said
+        # Nothing of the turn on screen, and no transcript beside it — including for the
+        # two shapes that carried one. Read as ``text_content`` as well as as a
+        # visibility, because a hidden node's ``inner_text`` is empty whether it was
+        # cleared or not: a page that wrote the transcript and then hid the slot would
+        # pass the visibility assertion alone.
+        await expect(drive.page.locator("#answer")).to_be_hidden()
+        await expect(drive.page.locator("#heard")).to_be_hidden()
+        beside = await drive.page.locator("#heard").text_content()
+        assert beside == "", beside
+        # And nothing in the air.
+        assert (await drive.probe())["starts"] == []
+        # #1500's invariant: a press that ends in a condition still hands the button back.
+        await expect(drive.page.locator("#talk-button")).to_be_enabled()
+        assert thrown == []
+        assert complaints == []
 
 
 async def test_a_spoken_turn_whose_answer_was_unreadable_still_spends_its_delivery_report(
