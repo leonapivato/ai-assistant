@@ -511,7 +511,11 @@ already refused before this one is consulted.
 
 **The last row is this ADR in one line.** A file of 568 KB that costs four and a half minutes charges
 **450,000 bytes** — under half the byte default — and nothing but the mapping figure
-catches it. Its escalation is linear and was measured across the range: 1.62 s at 10 pages, 14.73 s at 100, 72.56 s at 500 and 279.41 s at 2,000, or 0.14 to 0.16 s a page throughout.
+catches it. Its escalation was measured across the range rather than extrapolated: **1.62 s
+at 10 pages, 14.73 s at 100, 72.56 s at 500, 193.05 s at 1,000 and 279.41 s at 2,000** —
+0.14 to 0.19 s a page throughout, best of three at each point. It is the page count that
+carries it, and the page count is bounded by nothing but the file bound: two thousand pages
+of this shape is 568 KB on disk against a 4 MiB default.
 
 **The refused ordinary class is real, and it is chosen rather than overlooked.** A
 forty-page document carrying one 3,000-mapping subset font — 24 KB on disk, an entirely
