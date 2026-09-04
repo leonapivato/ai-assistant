@@ -2127,12 +2127,24 @@ _NO_CONTENT_STATUSES: Final = frozenset({204, 205})
 #: one channel, so it is refused as a shape rather than looped over.
 _MAX_INTERIM_STATUS: Final = 199
 
-#: The characters a request target may hold: printable ASCII excluding space
-#: (RFC 3986's whole character repertoire). A space, a control character or any
-#: non-ASCII octet is refused before a channel is opened, because each of them is
-#: a request-line injection and none of them is a target anything legitimate
-#: composes — a target is percent-encoded by the integration that built it.
-_TARGET_CHARACTERS: Final = frozenset(chr(code) for code in range(0x21, 0x7F))
+#: Printable ASCII: every octet RFC 9110 §5.5 calls ``VCHAR``. The two sets below
+#: are both drawn from it and are **not** each other, which is why it is named
+#: once here rather than one being written as the other plus something.
+_VISIBLE_ASCII: Final = frozenset(chr(code) for code in range(0x21, 0x7F))
+
+#: The characters a request target may hold: printable ASCII excluding space, and
+#: excluding ``#``. A space, a control character or any non-ASCII octet is refused
+#: before a channel is opened, because each of them is a request-line injection and
+#: none of them is a target anything legitimate composes — a target is
+#: percent-encoded by the integration that built it.
+#:
+#: ``#`` is excluded on a second ground: RFC 9112 §3.2.1's origin-form is
+#: ``absolute-path [ "?" query ]`` and carries **no fragment**. A fragment is a
+#: client-side selector that never leaves the client, so writing one into a request
+#: line sends the far end a query nobody composed — the same reason ADR-0231 §8
+#: refuses a fragment in a destination, one field over. Adversarial review found it
+#: on round 5.
+_TARGET_CHARACTERS: Final = _VISIBLE_ASCII - {"#"}
 
 #: RFC 9110 §5.6.2's ``token``, which a header field name is. Checked so that a
 #: name carrying a separator — a colon above all — cannot write a second field.
@@ -2142,7 +2154,7 @@ _FIELD_NAME_CHARACTERS: Final = frozenset(string.ascii_letters + string.digits +
 #: tab, which RFC 9110 §5.5 admits inside a value. ``CR`` and ``LF`` are excluded,
 #: which is the whole point — a value carrying either writes a field this seam did
 #: not, and the credential travels in one of these values.
-_FIELD_VALUE_CHARACTERS: Final = _TARGET_CHARACTERS | {" ", "\t"}
+_FIELD_VALUE_CHARACTERS: Final = _VISIBLE_ASCII | {" ", "\t"}
 
 #: The header fields this exchange writes itself, and which a caller therefore may
 #: not supply. Two of them frame the response and one names the recipient: a
@@ -2503,7 +2515,8 @@ class HttpsExchange:
                 the value a ruling and a grant range over.
             target: The origin-form request target — a path, with a query where
                 there is one, already percent-encoded by whoever composed it. It
-                begins with ``/`` and holds only printable ASCII other than space.
+                begins with ``/``, carries no fragment, and holds only printable
+                ASCII other than space.
             headers: The fields to send, in order, as name-value pairs. Names are
                 compared case-insensitively against the four this exchange writes
                 itself and are refused where they collide. The credential rides
@@ -2587,9 +2600,10 @@ class HttpsExchange:
             character not in _TARGET_CHARACTERS for character in target
         ):
             msg = (
-                "the request target is an origin-form path beginning with '/' and "
-                "holding only printable ASCII other than space; it is refused "
-                "rather than encoded, and the value is not named"
+                "the request target is an origin-form path beginning with '/', with "
+                "an optional query and no fragment, holding only printable ASCII "
+                "other than space; it is refused rather than encoded, and the value "
+                "is not named"
             )
             raise TransportPinError(msg)
         lines = [f"GET {target} HTTP/1.1"]
