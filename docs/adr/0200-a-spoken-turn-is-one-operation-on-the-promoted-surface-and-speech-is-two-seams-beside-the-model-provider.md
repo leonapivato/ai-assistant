@@ -162,6 +162,61 @@
   text below is rewritten, and the note above is left exactly as ADR-0205 wrote it —
   its "two pairs" was true when written and this note is where the third is
   recorded. Refs #1699.
+- **Note (2026-09-04): §13's third clause puts "the `core/types.py` names of §4
+  and §9" in the engine wave, but §1's Protocol signatures already take §9's
+  types, so §9's names land with the triad wave — as they in fact did.** That
+  clause reads: "The `AssistantEngine` member of §3, the `core/types.py` names of
+  §4 and §9, the `core/errors.py` name of §4, the `orchestration` implementation
+  and the `wire` client's member land in **one** lane, because a member added to a
+  *provided* contract with two implementations cannot land in one of them and
+  leave the gate green." **The ground it gives is about §3's engine member and
+  does not reach §9's value types.** §1's clauses spend those types in the two
+  Protocols' own signatures — `SpeechTranscriber` has "`async transcribe(audio:
+  SpokenAudio) -> EncodableText`" and a "`formats` property answering the
+  `SpokenAudioFormat` members this implementation can decode", and
+  `SpeechSynthesizer` has "`async synthesize(text: NonBlankEncodableText, *,
+  format: SpokenAudioFormat) -> SpokenAudio`" — and §13's **first** clause rules
+  that each speech Protocol's triad "**never lands alone**. It rides in one lane
+  and one PR with its primary production implementation in `models/`, in ADR-0137
+  §2's sense." A lane holding the triad wave without `SpokenAudio`,
+  `SpokenAudioFormat` and `Base64Audio` cannot state either Protocol at all, so
+  the two clauses cannot both be satisfied on the third's reading.
+  **Read together, §9's value types belong to the triad wave and §4's names to the
+  engine wave**, which is the only assignment that leaves §1, §13's first clause
+  and §13's third clause all satisfied. §4's `SpokenTurn` and `SpeechFailure`,
+  §4's `core/errors.py` name, §3's `AssistantEngine` member, the `orchestration`
+  implementation, the `wire` client's member and the `PROTOCOL_VERSION` bump are
+  untouched by this reading and stay exactly where the third clause puts them —
+  they are what its stated ground is about.
+  **This is a record of what happened, not a redirection of anything.** The
+  dispatcher ruled the split at briefing on 2026-08-27 and recorded it in the
+  triad lane's PR description; the tree took that sequence. PR #1677 (`659c3537`)
+  added `SpokenAudioFormat`, `Base64Audio` and `SpokenAudio` to `core/types.py`
+  together with `SpeechTranscriber` and `SpeechSynthesizer` in `core/protocols.py`
+  and §1's `SpeechError`/`SpeechTimeoutError` in `core/errors.py`, beside the two
+  `models/` implementations the first clause pairs them with. PR #1685
+  (`8f01c526`) then added §4's `SpokenTurn` and `SpeechFailure`, §4's
+  `TranscriptionFailedError`, `converse_spoken` on `AssistantEngine`, the
+  `orchestration` composition, the `wire` client's member and the
+  `PROTOCOL_VERSION` bump. Both waves are merged, so the clause misdescribes a
+  sequence that is finished rather than directing an unwritten one.
+  **§13's table is unaffected, and so is its closing clause.** The rows name a
+  deliverable and a test item per clause of the Decision, not a wave; §9's row —
+  "`SpokenAudio`, `SpokenAudioFormat`, the base64 refinement, `decoded()`" with
+  its round-trip, `wire/codec.py` and per-defect rejection tests — was satisfied
+  inside the triad lane's fence, which is exactly what "A lane satisfies the rows
+  of this table that fall inside its fence and adds none" asks of it.
+  **Nothing decided changes and no reader acts differently as to the decision**
+  (ADR-0070 §1, and its 2026-07-31 §1 note on what "differently" means). What is
+  corrected is which of this ADR's own sentences a reader acts on where two of
+  them cannot both be obeyed, and §1's signatures are what settle it: no
+  obligation is added, removed or moved between waves that §1 and §13's first
+  clause did not already fix. This is an internal contradiction in this ADR's own
+  words — ADR-0070 §1's first term — with no other ADR as its cause, so it is
+  recorded as this appended dated note, §13's text below is **not** rewritten, and
+  no `Status` edit is owed (ADR-0082 §1); the `Status` line leads with `Partially
+  superseded by` in any event, which ADR-0082 §2 excludes an amendment qualifier
+  from. Refs #1676, #1657, PR #1677, PR #1685, ADR-0200 §1, §9, §13, ADR-0137 §2.
 
 ## Context
 
