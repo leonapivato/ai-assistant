@@ -25,7 +25,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
-from hostile_values import Hostile
+from hostile_values import Hostile, NumericName, Unnameable
 from pydantic import ValidationError
 
 from ai_assistant.core.config import _MAX_CALENDAR_WINDOW, Settings, load_settings
@@ -240,6 +240,35 @@ def test_a_hostile_repr_does_not_raise_past_an_integer_guard(field: str, domain:
     """
     kwargs: dict[str, Any] = {field: Hostile()}
     expected = re.escape(f"calendar_{field} must be {domain}, got Hostile")
+    with pytest.raises(ValueError, match=expected):
+        CalendarReader(_ABSOLUTE, **kwargs)
+
+
+@pytest.mark.parametrize(("field", "domain"), _INTEGER_GUARDS)
+def test_a_hostile_type_name_does_not_raise_past_an_integer_guard(field: str, domain: str) -> None:
+    """The half of #1978 that survives substituting ``repr``.
+
+    A refusal that names the type still calls into the refused object's *class*,
+    so a metaclass whose ``__name__`` raises moves the wrong-exception-class
+    escape rather than closing it. The read is guarded for the same reason
+    :func:`~ai_assistant.core.types.fault_class_of` guards its own.
+    """
+    kwargs: dict[str, Any] = {field: Unnameable("Evil", (), {})()}
+    expected = re.escape(f"calendar_{field} must be {domain}, got an unnameable type")
+    with pytest.raises(ValueError, match=expected):
+        CalendarReader(_ABSOLUTE, **kwargs)
+
+
+@pytest.mark.parametrize(("field", "domain"), _INTEGER_GUARDS)
+def test_a_type_name_that_is_not_a_str_does_not_reach_the_message(field: str, domain: str) -> None:
+    """``__name__`` can answer with something that is not a ``str`` at all.
+
+    Rendering *that* into the message is a second object with a second chance to
+    raise, so the guard requires a built-in ``str`` rather than accepting whatever
+    answered.
+    """
+    kwargs: dict[str, Any] = {field: NumericName("Numeric", (), {})()}
+    expected = re.escape(f"calendar_{field} must be {domain}, got an unnameable type")
     with pytest.raises(ValueError, match=expected):
         CalendarReader(_ABSOLUTE, **kwargs)
 
