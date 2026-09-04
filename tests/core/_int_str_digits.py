@@ -1,11 +1,17 @@
 """A context manager pinning ``sys``'s integer-string conversion limit.
 
 Imported into each ``core.types`` test module that asserts an oversized integer
-has no JSON encoding. It is a plain helper module rather than a ``conftest.py``
-so it carries a unique module name: the suite has one ``conftest`` (``tests/``)
-and mypy resolves test modules by basename, so a second ``conftest`` would
-collide. A context manager rather than a fixture keeps the pin explicit at the
-one assertion that needs it, with no fixture-name plumbing.
+has no JSON encoding, and — since #1358 — into
+``tests/interfaces/gateway/test_http.py``, whose door-parser case needs a digit
+string the interpreter declines to convert. ``tests/conftest.py`` pins
+``tests/core`` on ``sys.path``, so that second caller resolves the same helper in
+a narrowed run as in the whole suite.
+
+It is a plain helper module rather than a ``conftest.py`` so it carries a unique
+module name: the suite has one ``conftest`` (``tests/``) and mypy resolves test
+modules by basename, so a second ``conftest`` would collide. A context manager
+rather than a fixture keeps the pin explicit at the one assertion that needs it,
+with no fixture-name plumbing.
 """
 
 from __future__ import annotations
@@ -28,7 +34,9 @@ def pinned_int_str_digits() -> Iterator[None]:
     """Pin ``sys``'s integer-string conversion limit to the default in this block.
 
     The oversized-integer refusal tests assert that a 5001-digit literal has no
-    JSON encoding, which only holds while the limit is below 5001. The default
+    JSON encoding, which only holds while the limit is below 5001; the gateway
+    door test builds a ``Content-Length`` one digit past the limit, which is a
+    string with no ``int()`` only while the limit is *enabled*. The default
     is 4300, but ``PYTHONINTMAXSTRDIGITS=0`` (unlimited) — or any raise past
     5000 — makes the literal renderable, so the refusal never fires and the test
     fails though the validator is correct (#406). Pin the limit here so the

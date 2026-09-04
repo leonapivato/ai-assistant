@@ -6,6 +6,7 @@ import asyncio
 import sys
 
 import pytest
+from _int_str_digits import pinned_int_str_digits
 
 from ai_assistant.interfaces.gateway.http import (
     _METHOD_FIRST_BYTES,
@@ -302,12 +303,28 @@ async def test_a_length_too_long_to_convert_is_refused_and_not_raised() -> None:
     The cap is raised past the default here because the header has to *fit* for the
     conversion to be attempted at all; under ``_CAP`` this same request is refused
     one condition earlier, as too large.
-    """
-    absurd = "9" * (sys.get_int_max_str_digits() + 1)
-    payload = _request(f"POST /ask HTTP/1.1\nHost: h\nContent-Length: {absurd}\n")
 
-    with pytest.raises(MalformedRequestError):
-        await read_request(_reader(payload), max_bytes=len(payload) + 1)
+    The digit limit is *pinned* rather than read off the ambient interpreter, because
+    it can be disabled outright — ``PYTHONINTMAXSTRDIGITS=0`` or ``-X
+    int_max_str_digits=0`` makes ``sys.get_int_max_str_digits()`` return ``0``. A
+    length derived from that is the single character ``9``, which converts, and the
+    ``except ValueError`` branch this test exists to pin goes unexercised while the
+    case fails on the *next* condition instead (#1358). Pinning holds the branch
+    reachable whatever the ambient setting is.
+    """
+    with pinned_int_str_digits():
+        absurd = "9" * (sys.get_int_max_str_digits() + 1)
+        payload = _request(f"POST /ask HTTP/1.1\nHost: h\nContent-Length: {absurd}\n")
+
+        with pytest.raises(MalformedRequestError) as refusal:
+            await read_request(_reader(payload), max_bytes=len(payload) + 1)
+
+    # *Which* condition refused it is the whole of the case. With the limit
+    # disabled the ambient-limit form of this test declared a nine-byte body and
+    # was refused one condition later, as too large — a refusal this case is not
+    # about. The cause pins the conversion's own `ValueError`, chained by
+    # `_content_length`'s `raise ... from exc`.
+    assert isinstance(refusal.value.__cause__, ValueError)
 
 
 async def test_bytes_past_the_declared_body_are_refused_rather_than_reframed() -> None:
