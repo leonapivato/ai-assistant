@@ -480,12 +480,22 @@ already requires, and that is a decision constructor rather than a grant one.
 > act on it.
 
 > **Normative.** On population (b) the surface is rendering a recorded
-> `PermissionDecision`, so ADR-0186 §7's row floor binds it and ADR-0186 §8's bars
-> bind with it. The recorded decision carries a `parameters_digest` and not the
-> argument values, so **ADR-0233 §8's span-value floor is not met and no surface
-> claims it is**: no surface renders a digest as a value, renders a reconstruction,
-> summary, excerpt or paraphrase of the arguments, or states or implies that the user
-> has been shown what the call would have sent.
+> `PermissionDecision` and not a `Confirmation`, so ADR-0186 §7's row floor binds it
+> and ADR-0186 §8's bars bind with it. **ADR-0193 §2's floor above is met whole** —
+> the account, both destination forms, the canonical destination set as `core`
+> derived it, the payload description, the declaration and the origin are all on the
+> binding the row carries (ADR-0148 §6, ADR-0150 §1) — which is what the act needs,
+> because a grant reaches the recipient and never the payload (ADR-0193 §3, §5).
+
+> **Normative.** **ADR-0233 §8's span-value floor is not met on population (b), and
+> no surface claims it is.** That floor is stated over a surface rendering a
+> `Confirmation` whose `egress` is present, which this is not, and the recorded
+> decision carries a `parameters_digest` rather than the argument values, so the
+> bytes are not in the store to render. No surface renders a digest as a value,
+> renders a reconstruction, summary, excerpt or paraphrase of the arguments, or
+> states or implies that the user has been shown what the call would have sent. A
+> surface that cannot say what a call would send says so, which is the direction
+> ADR-0233 §8's own no-summary clause fixes for the case where it can.
 
 > **Normative.** A surface offering the act on population (b) states, before it
 > collects it, **three facts about the call the user is deciding on**: that the call
@@ -908,7 +918,7 @@ obligation (ADR-0089 §1).
   `docs/adr/0235-*.md` alone. The record owed is a second pair on ADR-0231's `Status`
   line — already a leading-token line under ADR-0070 §4's accumulation rule — together
   with the appended dated note ADR-0070 §1 requires, and it is a header-only change
-  carrying no decision of its own. It is filed with this PR and named here so that a
+  carrying no decision of its own. **#2090** holds it, filed with this PR, so that a
   reader of either document can find the other.
 
 - **ADR-0177 — neither amended nor superseded, and §9 is what makes that true.** §1's
