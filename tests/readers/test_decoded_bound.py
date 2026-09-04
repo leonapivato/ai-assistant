@@ -127,6 +127,14 @@ async def fetch(  # noqa: PLR0913 — a root, a document, its name and the three
     End to end rather than against ``_extract`` directly, because what ADR-0232 changes
     is the ``Fetcher`` **outcome**: a document that resolved to a record resolves to a
     ``TOO_LARGE`` refusal, and that is a fact about the seam rather than about a helper.
+
+    **The entry is taken by ``name`` and not by position.** A listing is ordered most
+    recently modified first with the *name* as the tie-break (``files.py``), so on a
+    filesystem whose timestamps cannot separate two writes in the same test the first
+    entry is whichever name sorts lower — not the document this call just wrote. Three
+    arms here write a second document into the same root to state a property from both
+    sides, and one of them, ``repeated.pdf`` after ``document.pdf``, would then assert
+    the refusal against the admitted document and fail.
     """
     (root / name).write_bytes(data)
     subject = build(
@@ -137,7 +145,8 @@ async def fetch(  # noqa: PLR0913 — a root, a document, its name and the three
     )
     try:
         listing = await subject.listing()
-        return await subject.fetch(listing, listing.entries[0])
+        entry = next(candidate for candidate in listing.entries if candidate.name == name)
+        return await subject.fetch(listing, entry)
     finally:
         subject.close()
 
