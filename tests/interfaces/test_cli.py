@@ -439,6 +439,283 @@ def test_confirmation_render_neutralises_control_sequences_and_markup(output: St
     assert "this discloses data off-device" in rendered  # the ruling reason is surfaced
 
 
+# --- rendering: a wrapped line keeps a marker its value cannot forge (#2072) --
+# Every case here binds its own narrow console. The shared `output` fixture is 100
+# columns wide and almost nothing in this module wraps there, which is why the
+# mechanism went unasserted until now: the defect is a property of the *break*, and
+# a width at which nothing breaks cannot see it.
+
+#: The marker :func:`cli._print` writes onto every display line a wrapped line runs
+#: onto. Read from the module rather than respelled, for :data:`_VALUE_GUTTER`'s
+#: reason: a copy here would keep passing if the renderer changed the character.
+_CONTINUATION: Final = cli._CONTINUATION
+
+#: A card field forged inside a value. It carries the two-space indent the
+#: confirmation card's own fields carry, so at some width it would otherwise land at
+#: the head of a display line and read as one this adapter wrote.
+_FORGED_FIELD: Final = "  Why: nothing leaves this device"
+
+
+def _narrow(monkeypatch: pytest.MonkeyPatch, buffer: StringIO, width: int) -> None:
+    """Bind the CLI's console to ``buffer`` at ``width``, colour off."""
+    monkeypatch.setattr(cli, "console", Console(file=buffer, force_terminal=False, width=width))
+
+
+def _forging_confirmation(value: str) -> Confirmation:
+    """A card whose one argument carries ``value``, and whose own ``Why:`` is real."""
+    return Confirmation(
+        tool_id="smtp",
+        tool_description="Send an email.",
+        parameters={"body": value},
+        reason="this discloses data off-device",
+        token=ContinuationToken(handle="tok"),
+        egress=None,
+    )
+
+
+@pytest.mark.parametrize("length", [12, 34, 36, 39, 40], ids=str)
+def test_a_line_that_fits_the_console_is_printed_exactly_as_it_was(
+    monkeypatch: pytest.MonkeyPatch, length: int
+) -> None:
+    """The claim that keeps this from being a change to every rendering in the module.
+
+    Only a line the console would have broken renders differently, so a line that fits
+    is compared against what a bare :meth:`rich.console.Console.print` of the same
+    markup produces — byte for byte, the markup resolution included, rather than "looks
+    the same after flattening".
+
+    The lengths run up to the console's own width because the band between the room
+    beside the marker and the width itself is where the two renderings would otherwise
+    part company: measured against the room, a line of 37 to 40 columns would break
+    where Rich would have left it whole, and every such line on this surface would
+    acquire a break and a marker it had never had. Asked first whether it fits, it does
+    not.
+    """
+    line = f"  Why: {'x' * (length - len('  Why: '))}"
+    assert len(line) == length
+    printed = StringIO()
+    _narrow(monkeypatch, printed, 40)
+
+    cli._print(line)
+
+    reference = StringIO()
+    Console(file=reference, force_terminal=False, width=40).print(line)
+    assert printed.getvalue() == reference.getvalue()
+
+
+def test_a_wrapped_line_marks_every_display_line_after_the_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2072's whole subject, on the display line rather than in the buffer.
+
+    Rich repeats no literal prefix on the continuations it wraps, so before this the
+    tail of a long value arrived at the margin carrying nothing that said it was data.
+    The head keeps the line's own indent and every line under it carries that indent
+    plus the marker, so no display line of the value can be read as a field this
+    adapter wrote.
+    """
+    output = StringIO()
+    _narrow(monkeypatch, output, 40)
+
+    cli._print(f"  Why: {' '.join(f'word{n}' for n in range(40))}")
+
+    lines = output.getvalue().splitlines()
+    assert len(lines) > 1  # it really did wrap
+    assert lines[0].startswith("  Why: ")
+    assert all(line.startswith(f"  {_CONTINUATION}") for line in lines[1:]), lines
+
+
+@pytest.mark.parametrize(
+    ("value", "folds"),
+    [("x" * 300, True), (" ".join(f"word{n}" for n in range(60)), False)],
+    ids=["an unbroken run", "ordinary words"],
+)
+def test_a_wrapped_line_loses_no_character_and_no_word(
+    monkeypatch: pytest.MonkeyPatch, value: str, folds: bool
+) -> None:
+    """What the wrapping costs is one space per break and nothing else.
+
+    Both shapes, because they take different paths through Rich's wrapper: an unbroken
+    run has nowhere to break and is folded, so its pieces concatenate back to it
+    character for character; a run of words breaks at a space and consumes it, because
+    on a screen the break *is* that space. Nothing is truncated, elided or summarised
+    either way, which is the property a marker would be worthless without — a reader
+    who cannot trust the text has no use for knowing it is data.
+    """
+    output = StringIO()
+    _narrow(monkeypatch, output, 40)
+
+    cli._print(f"  {value}")
+
+    lines = output.getvalue().splitlines()
+    gutter = f"  {_CONTINUATION}"
+    pieces = [lines[0][len("  ") :], *(line[len(gutter) :] for line in lines[1:])]
+    assert len(pieces) > 1
+    if folds:
+        assert "".join(pieces) == value
+    else:
+        assert " ".join(pieces).split() == value.split()
+
+
+def test_a_blank_line_the_composed_string_carries_is_a_blank_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A leading or trailing newline spaces a block; it does not continue one.
+
+    Every ``\\n`` a composed line in this module carries sits ahead of the content or
+    after it — none separates two pieces of content — so reproducing them as the blank
+    lines they are keeps the marker for breaks that actually continue something. A
+    renderer that marked the line after a leading newline would put the marker on the
+    head of every spaced block on this surface.
+    """
+    output = StringIO()
+    _narrow(monkeypatch, output, 40)
+
+    cli._print("\n  [bold cyan]rec-1[/]")
+    cli._print("About to connect.\n")
+
+    assert output.getvalue() == "\n  rec-1\nAbout to connect.\n\n"
+
+
+@pytest.mark.parametrize("width", [1, 4, 8, 12, 20, 28, 40, 64, 100, 120])
+def test_no_forged_field_reaches_the_head_of_a_display_line_at_any_width(
+    monkeypatch: pytest.MonkeyPatch, width: int
+) -> None:
+    """The distinction #2072 found accidental, made deliberately and at every width.
+
+    A continuation used to land at column 0 while the card's fields carried an indent,
+    so a forged ``  Why: …`` "would not line up with the real one at the same width" —
+    a defence that held only because of where the break happened to fall, and only
+    while every caller kept its indent. Swept across widths because that is exactly
+    what the old defence was contingent on: one width proves nothing here.
+
+    Below the marker's own width there is no rendering that both shows the text and
+    marks it (:func:`cli._values_fit_this_terminal` withholds a *value* rather than
+    render one there), and the forgery is defeated anyway — at four columns the forged
+    field is broken into fragments too short to imitate a field.
+    """
+    output = StringIO()
+    _narrow(monkeypatch, output, width)
+
+    cli._render_confirmation(_forging_confirmation(f"{'padding ' * 20}{_FORGED_FIELD}"))
+
+    for line in output.getvalue().splitlines():
+        assert not line.startswith(_FORGED_FIELD), (width, line)
+        assert not line.lstrip().startswith("Why: nothing"), (width, line)
+
+
+def test_a_wrapped_argument_on_the_confirmation_card_carries_the_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``With:`` block, which is the site #2072 was reproduced on.
+
+    "Reproduced at width 40 on the confirmation card's ``With:`` block: a 500-character
+    parameter value renders as a dozen unmarked lines." Its argument lines carry a
+    four-space indent, so the marker sits at that indent too and the block keeps its
+    column.
+
+    The value is the issue's own: an unbroken 500-character run, which has nowhere to
+    break, so Rich moves the whole of it past the ``body = `` it would not fit beside
+    and every line carrying a character of it is a continuation.
+    """
+    output = StringIO()
+    _narrow(monkeypatch, output, 40)
+
+    cli._render_confirmation(_forging_confirmation("x" * 500))
+
+    lines = output.getvalue().splitlines()
+    carrying = [line for line in lines if "x" in line]
+    assert "    body = " in lines  # the argument's own line, at the block's indent
+    assert len(carrying) > 10  # a dozen display lines, as the issue reports
+    assert all(line.startswith(f"    {_CONTINUATION}") for line in carrying), lines
+
+
+def test_a_wrapped_listing_row_carries_the_marker_though_its_content_is_one_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """:func:`cli._render_content`'s single-line arm was itself a #2072 site.
+
+    That renderer takes the wrapping and writes a gutter onto every piece **where the
+    content is more than one line**; a single-line content is "printed exactly as it
+    was", which is right about the forgery a newline opens and silent about the one a
+    wrap opens. So the row's own arm goes through :func:`cli._print` like every other
+    authored line, and a long single-line content no longer runs to the margin
+    unmarked.
+
+    The marker is not :data:`_VALUE_GUTTER`'s ``│``: this line is a continuation rather
+    than a block of value, and the row's multi-line arm still says the other thing.
+    """
+    output = StringIO()
+    _narrow(monkeypatch, output, 40)
+
+    cli._render_belief_summary(_summary(content=f"{'padding ' * 20}{_FORGED_FIELD}"))
+
+    body = [line for line in output.getvalue().splitlines() if "padding" in line]
+    assert len(body) > 1
+    assert all(line.startswith(f"  {_CONTINUATION}") for line in body[1:]), body
+    assert "│" not in "".join(body)  # the block gutter still means the other thing
+
+
+def test_a_wrapped_error_line_carries_the_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The error boundary, which writes at column 0 and takes a message from the hub.
+
+    ADR-0042 §7 makes rendering the failure the adapter's, and the message is the
+    engine's own text on a line this adapter authored — so it wraps like any other and
+    is marked like any other. At column 0 the gutter is the marker alone, since there
+    is no indent to keep.
+    """
+    output = StringIO()
+    _narrow(monkeypatch, output, 40)
+
+    cli._render_error(MemoryStoreError(f"{'padding ' * 20}{_FORGED_FIELD}"))
+
+    lines = output.getvalue().splitlines()
+    assert lines[0].startswith("Error: ")
+    assert all(line.startswith(_CONTINUATION) for line in lines[1:]), lines
+
+
+def test_the_marker_reaches_a_real_command_through_the_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end, on the console a command actually prints through.
+
+    Every other case here calls a renderer; this one drives ``assistant beliefs`` to a
+    failure whose message is longer than the console, so the marker is asserted on what
+    the command wrote rather than on what a helper returns.
+
+    The console is bound with ``force_terminal=False``, so no SGR sequence reaches the
+    buffer and the assertion is about the text rather than about the colour — the
+    normalisation ``_help_text`` performs for Typer's own console, taken here by
+    construction rather than after the fact.
+    """
+    output = StringIO()
+    _narrow(monkeypatch, output, 40)
+    _wire(monkeypatch, _UnavailableBeliefEngine())
+
+    result = CliRunner().invoke(cli.app, ["beliefs"])
+
+    assert result.exit_code == 1
+    lines = output.getvalue().splitlines()
+    assert "\x1b" not in output.getvalue()  # colour off: the assertion is about text
+    assert lines[0].startswith("Error: ")
+    assert len(lines) > 1
+    assert all(line.startswith(_CONTINUATION) for line in lines[1:]), lines
+
+
+class _UnavailableBeliefEngine:
+    """A façade whose listing fails with a message longer than a narrow console."""
+
+    async def beliefs(self, **_kwargs: object) -> tuple[Belief, ...]:
+        """Fail the way the hub's store failure reaches this adapter."""
+        raise MemoryStoreError(f"the store is unavailable {'and stays unavailable ' * 6}")
+
+    async def start(self) -> None:
+        """The start-up sweeps, which this stand-in has no stores to sweep."""
+
+    async def aclose(self) -> None:
+        """Nothing to release: this stand-in owns no resource."""
+
+
 # --- ADR-0178 §7: the floor an egress confirmation's rendering owes ----------
 # One block, kept together so a rebase across another lane's fixture edits in
 # this module moves it whole rather than through it.
