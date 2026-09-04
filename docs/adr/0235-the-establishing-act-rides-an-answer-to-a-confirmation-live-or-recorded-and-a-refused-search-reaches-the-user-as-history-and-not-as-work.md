@@ -1439,11 +1439,19 @@ enumeration in its own text (§9).
 > any client is built. Without them §9 is prose an implementation satisfies under any
 > name, which is the gap round 8 of this review found in an earlier draft of it.
 
-> **Normative.** Lane 1 ships the terminal arm for §9's three carrier renderings: on
-> `CEILING_REACHED` the output names the ceiling and `assistant
-> revoke-recipient-grant`, on `ALREADY_STANDING` it names the standing listing, and on
-> `REFUSED` it names no cause. It is asserted over the rendered output, because
-> ADR-0193 §1's obligation is discharged in what the user reads and nowhere else.
+> **Normative.** Lane 1 ships the terminal arm for §9's **four** carrier renderings:
+> on `CEILING_REACHED` the output names the ceiling and `assistant
+> revoke-recipient-grant`, on `ALREADY_STANDING` it names the standing listing, on
+> `REFUSED` it names no cause, and on `STORE_UNAVAILABLE` it says the grant store
+> could not be written **and that the confirmed call was unaffected** — the arm that
+> fails against a terminal rendering a storage fault as a declined request. It is
+> asserted over the rendered output, because ADR-0193 §1's obligation is discharged in
+> what the user reads and nowhere else.
+
+> **Normative.** Lane 1 ships the terminal arm for `UngrantableActError` on both
+> populations, asserting the population-dependent sentence §9 states: the population
+> (a) rendering says the call is still answerable, and the population (b) rendering
+> does not say it.
 
 ### 13. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
