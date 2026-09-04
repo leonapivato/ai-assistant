@@ -23,49 +23,29 @@
   ADR, and this ADR is not it and is not read as it. §4's marked clause (nothing
   states that §3 is enforced mechanically) is discharged in part and *only* in part
   by §6 below, which says exactly how far.
-- **Amends** [ADR-0148](0148-an-egress-call-is-authorised-as-one-whole-and-nothing-in-it-moves-after-the-ruling.md)
-  — **§6's determinism clause, by a count and by nothing else.** That clause reads
-  *"The payload description is **deterministic**: it is a function of exactly three
-  things — the request's own arguments … the provenance the request carries for
-  their spans, and the registry's definition for the bound tool — and of nothing
-  else"*. §4 below adds a fourth carried input, so the word "three" stops being
-  true of the tree and a reader holding only ADR-0148 would read the enumeration as
-  closed. **This record was commissioned in terms**: ADR-0150 §6's last clause
-  rules that the lane closing the recorded-per-span-classification residue "amends
-  that clause and records it under ADR-0082 §1". Everything else §6 rules is
-  untouched and is relied on here — the determinism itself (the fourth input is a
-  *carried* fact, so two derivations still agree), the "no clock, no configuration,
-  no store read, no network" exclusion, the coverage clause, and the whole binding
-  account. §8's approver clause and §9's four outcomes bind as ratified.
-- **Amends** [ADR-0150](0150-the-egress-binding-is-one-validating-value-and-nothing-in-it-is-stated-twice.md)
-  — **§10's second clause, by a count and by nothing else.** That clause enumerates
-  what a description states per span — *"the argument and position it came from,
-  its discloser provenance, its extent, its tier where its field establishes one,
-  and its destination forms where it is one"* — and §4 below adds a sixth item, so
-  a reader holding only ADR-0150 would read the list as exhaustive. **The rest of
-  that clause is not merely intact but is the reason this ADR mints no second
-  artifact**: *"A description states **no record identifier** — no memory record
-  id, no episode id, no store-side key of any kind — and no field name of any
-  store's schema"* binds entire and §4 is written to satisfy it, and *"It holds no
-  content"* is **kept, not superseded** — §2 and §5 below are the whole argument
-  that the content the approver reads is not in the description and never becomes
-  part of it. §10's first, third, fourth and fifth clauses bind as ratified;
-  §10's fourth clause ("no lane binds one artifact and shows another") is the
-  clause §5 is designed around. §4's decomposition, §5's carried-not-derived
-  marker rule and §6's tier residue all bind, and §12 below states that this ADR
-  discharges none of §6's tier residue.
-- **Discharges** [ADR-0184](0184-a-decision-recorded-before-the-origin-field-is-legible-history-and-the-absence-is-its-own-value.md)
-  **§9's obligation, and no record is owed on that ADR.** §9's second clause obliges
-  "An ADR that adds a further member to `EgressBinding` — or to any other `core` model
-  the audit trail stores — **required with no default**" to decide "that field's own
-  history representation in its own text, before its implementation lands", and its
-  deferred payload version "fires with the second such epoch". §4 below is that member,
-  §14 is that decision, and discharging an obligation an earlier ADR imposes is not
-  amending it (ADR-0082 §1). Every clause of ADR-0184 stays true: §9's first clause is
-  obeyed — no second sibling is minted and `OriginUnrecordedBinding` keeps its one
-  field, one epoch — and §2's clauses are statements about what *that* ADR mints, which
-  this one does not falsify. §7's floor is a floor this ADR extends by cause in its own
-  text rather than replaces. §14 shows the test coming out this way for each.
+- **Amends** [ADR-0184](0184-a-decision-recorded-before-the-origin-field-is-legible-history-and-the-absence-is-its-own-value.md)
+  — **§2's member roster and §9's first clause, and those alone.** §9 deferred a stored
+  payload version and named its firing condition — "the next member added
+  required-with-no-default to a model the trail stores" — obliging "the ADR adding that
+  member" to choose "between a second sibling and a version, in its own text". §4 below
+  is that member and §14 makes that choice: **a second sibling**, because a version key
+  names a schema and supplies no representable value for a row lacking a required
+  field. So §2's description of `OriginUnrecordedBinding` as carrying "every member
+  `EgressBinding` carries **but** `planned_with_external_content`" stops being true, and
+  §9's first clause ("No lane adds a second sibling to this union") is the clause §9's
+  second clause licenses this ADR to spend. **Everything else stands and is relied
+  on**: §2's declare-each-member-once rule is obeyed by a private base chain, §3's
+  structural, total and mutually exclusive discrimination is extended by one rung and
+  not replaced, §4's nothing-is-written rule and §5's five readers bind unchanged, and
+  §7's floor is extended **by cause** for §7's own reason. §11 is untouched.
+- **No record is owed on ADR-0148, ADR-0150, ADR-0181, ADR-0193, ADR-0178, ADR-0199,
+  ADR-0203, ADR-0207, ADR-0146, ADR-0106 or ADR-0152**, and §14 applies ADR-0082 §1's
+  test to each rather than asserting it. In particular: ADR-0148 §6's determinism
+  clause is **not** amended, because §4 below puts the new fact on the **binding** and
+  not in the description, exactly as ADR-0181 §3 did and for the same reason; and
+  ADR-0150 §10's per-span enumeration is **not** amended, because the description gains
+  nothing. "It holds no content" is kept rather than superseded, and §2 below is the
+  whole argument for how a content-bearing surface is compatible with it.
 
 ## Context
 
@@ -195,10 +175,10 @@ so a surface that showed the body would still not have made the send lawful. Wha
 changes is that the mechanism arm (b) commissions does not need a new artifact, a new
 carriage or a supersession of "it holds no content". It needs three things the tree
 does not have: an **obligation** that the content be shown span by span before the
-answer is collected; a **recorded fact** about each span saying which of §3's two
-clauses governs it, without which nothing can tell an approvable span from an
-absolutely forbidden one; and a **statement of the conditions** under which the
-third clause's prohibition lifts.
+answer is collected; a **recorded fact** about the call saying which of §3's two
+clauses governs what it would carry, without which nothing can tell an approvable
+call from an absolutely forbidden one; and a **statement of the conditions** under
+which the third clause's prohibition lifts.
 
 ### What this ADR is not allowed to settle
 
@@ -326,54 +306,61 @@ remembered one:
 > knows their paths' character, which is three-valued at every supply: covered with a
 > model call on the path, covered with none, or not covered …
 
-### 4. The `core` surface: one three-valued fact per span, carried on the span it is about
+### 4. The `core` surface: one three-valued fact about the call, on the binding
 
 > **Normative.** `core/types.py` gains `SpanCoverage`, a `StrEnum` with **exactly
 > three** members, one per state ADR-0155 §3's first clause names: `NOT_COVERED` — no
-> covered path, so the span's value is not covered content at all;
-> `MODEL_ON_EVERY_PATH` — covered, and every covered path contains a model call, which
-> is ADR-0155 §3's third clause's subject; and `PATH_WITHOUT_MODEL` — covered, and at
-> least one covered path contains no model call, which is §3's second clause's subject.
-> The three are mutually exclusive and jointly exhaustive because §3's first clause
-> makes them so, and no lane adds a fourth member, an "unknown" member or a
-> `None`-valued absence.
+> covered path, so nothing the call would carry is covered content at all;
+> `MODEL_ON_EVERY_PATH` — covered, and every covered path of everything the call would
+> carry contains a model call, which is ADR-0155 §3's third clause's subject; and
+> `PATH_WITHOUT_MODEL` — covered, and at least one covered path of something the call
+> would carry contains no model call, which is §3's second clause's subject. No lane
+> adds a fourth member, an "unknown" member or a `None`-valued absence.
 
-> **Normative.** `EgressSpan` gains `coverage: SpanCoverage`, **required with no
-> default**. It is the fact about *that span's own value*, at the supply that put the
-> value in the argument, and it is what makes the description able to distinguish a
-> memory record recited into a body from a paragraph composed for the send — the
-> distinction ADR-0155 §4 and #1154 both record the corpus as unable to draw.
+> **Normative.** `EgressBinding` gains `coverage: SpanCoverage`, **required with no
+> default**: the state ADR-0155 §3's first clause gives, over **every** span the call
+> would transmit, to the material the components composing this request's arguments
+> supplied to the operations that produced them.
 
-> **Normative.** It rides on the span and nowhere else, for ADR-0150 §5's own reason
-> quoted rather than re-derived: the description "**is** the thing bound and **is**
-> transcribed verbatim into the recorded decision", so "a marker riding anywhere else
-> would have to be joined to the description by something, and the join is a second
-> shape that must agree". No second carriage of this fact is added to `EgressBinding`,
-> `ConfirmationEgress`, `ActionRequest`, `PermissionDecision` or any other model.
+> **Normative.** Where the spans differ, the binding carries the **strongest** of their
+> states under the total order `NOT_COVERED` < `MODEL_ON_EVERY_PATH` <
+> `PATH_WITHOUT_MODEL`. That order is not this ADR's invention: it is ADR-0155 §3's own
+> ruling that "The overlap falls to the absolute clause", because "one non-model path
+> suffices to keep content under the absolute clause **forever**". A call is therefore
+> governed by the most restrictive clause any part of it reaches, which is strictly
+> conservative and is the direction §3 already chose.
 
-> **Normative.** `CarriedProvenance.spans` becomes a mapping from `EgressSpanLocator`
-> to **one** value carrying both a span's `DiscloserProvenance` and its
-> `SpanCoverage`, each required with no default. It does **not** become two mappings:
-> two mappings over one key set is one invariant stated twice, and the key sets could
-> come to disagree. The value's name and declaration are the implementing lane's
-> (§13); what is fixed here is that there is one of it and that neither member
-> defaults.
+> **Normative.** `CarriedProvenance` gains `coverage: SpanCoverage`, **required with no
+> default**, and `CarriedProvenance.spans` is **untouched** — its key type, its value
+> type `DiscloserProvenance`, its detachment validator and its serializer all stand.
+> The seam writes the binding's value from the carrier's, unchanged, exactly as
+> ADR-0181 §3 makes it write `planned_with_external_content`.
 
 > **Normative.** `coverage` is **not** discloser provenance, is not a tier, and is not
-> `planned_with_external_content`. ADR-0150 §5's ruling that "the marker **is** the
-> `provenance` field of `EgressSpan`" is about ADR-0146's discloser axis and binds
-> entire; `DiscloserProvenance` gains no member and loses none; and no lane reads one
-> of the two fields off the other, in either direction, at any site.
+> `planned_with_external_content`. `EgressSpan` gains **no** field, so ADR-0150 §5's
+> "the marker **is** the `provenance` field of `EgressSpan`" and its no-second-carriage
+> rule are untouched at the field they govern, ADR-0150 §10's per-span enumeration is
+> unchanged, and ADR-0148 §6's three determinism inputs stay three — the description is
+> not a function of this fact, because this fact is not in the description. No lane
+> reads one of the three axes off another, at any site.
 
-> **Normative.** The payload description therefore becomes a function of **four**
-> carried inputs rather than ADR-0148 §6's three. Determinism is unchanged in
-> substance: the fourth is a fact the request carries, exactly as the second is, so
-> two derivations of one request's description still agree and no clock, configuration,
-> store read or network reaches it. The amendment record on ADR-0148 is in this ADR's
-> header.
+> **Normative.** `PermissionDecision.authorises` compares `coverage` with the rest of
+> the binding as one whole. No lane compares it separately, exempts it from the
+> comparison, or re-derives it after the ruling. `EgressBinder.rebind` takes it from
+> `approved`, matched to the binding it re-derived, exactly as ADR-0152 §7 and ADR-0181
+> §3 make it take a span's `provenance` and the binding's origin, and for the identical
+> reason: the fact is about a composition made before the confirmation was parked,
+> plausibly before a restart, and `rebind` receives nothing to recompute it from. This
+> narrows ADR-0152 §7's count from two to three and narrows nothing else there.
 
-> **Normative.** No field is added to `Provenance`, `MemoryBase`, `ContextFacet`,
-> `ToolDefinition`, `ToolCall`, `Confirmation`, `ConfirmationEgress`,
+> **Normative.** `ConfirmationEgress` gains `coverage: SpanCoverage`, **required with
+> no default**, populated from the recorded decision's `egress_binding` at both
+> assembly sites and by no other route (ADR-0178 §5). It is a transcription and not a
+> second carriage (ADR-0150 §1), it mints no type, and it is not a
+> `ConfirmationDestination`.
+
+> **Normative.** No field is added to `EgressSpan`, `Provenance`, `MemoryBase`,
+> `ContextFacet`, `ToolDefinition`, `ToolCall`, `Confirmation`,
 > `ConfirmationDestination`, `PermissionDecision`, `PermissionRuling`,
 > `EgressDestination`, `BoundAccount` or `CanonicalDestination` by this ADR, and no
 > `DataTier`, `DiscloserProvenance`, `DestinationProtocol` or `PermissionOutcome`
@@ -383,79 +370,91 @@ remembered one:
 prohibitions.** A boolean "is this covered" cannot tell the absolutely forbidden case
 from the approvable one, and a boolean "is this approvable" would put the partition's
 own reasoning inside a field name where no reviewer can check it against ADR-0155 §3.
-The enum's members are named for the quantifier each clause carries — *every* path
-versus *some* path — because the quantifiers are what ADR-0155 §3 says make the
-partition exhaustive, and a name that dropped them would be the first thing to drift.
+The members are named for the quantifier each clause carries — *every* path versus
+*some* path — because the quantifiers are what ADR-0155 §3 says make the partition
+exhaustive, and a name that dropped them would be the first thing to drift.
 
-**No default, and the argument is ADR-0150 §5's and ADR-0181 §3's, at a field where
-it bites harder.** Both ruled that "a defaulted field is what a lane forgets". Here
-the safe-looking default is `NOT_COVERED`, which asserts that the value came from
-nowhere near this system's stores — a claim about a supply the defaulting lane never
-made, and the exact claim §3's whole partition exists to stop anyone making by
-accident. Requiring the field forces every builder to answer in code a reviewer can
-see.
+**On the binding rather than on the span, and an earlier draft of this ADR had it the
+other way.** Per-span is the more informative shape and it is not the one the corpus
+can carry. Three things decide it. ADR-0181 §2's third clause **refuses to mint** a
+per-span externality marker and ADR-0181 §6's fifth clause forbids a surface
+presenting a call-level fact as a span-level claim, so a per-span origin axis arriving
+beside it would invite exactly the conflation those clauses exist to prevent. ADR-0150
+§10's second clause enumerates what a description states per span and ADR-0148 §6
+fixes the description's inputs at three, so a per-span field costs two amendments to
+ratified contract clauses — and buys, on top of §8's floor, only a label beside bytes
+the user is already reading whole. And ADR-0150 §6's residue reserves the per-span
+*classification* mechanism to the ADR that closes the **tier** axis; taking that shape
+here for a different axis would half-build it. The binding is where ADR-0181 §3 put
+the neighbouring fact, for the reason it gave — "a call-level fact on a span would look
+like a span-level claim" — and this fact is a call-level fact in exactly the same
+sense: the two prohibitions ADR-0155 §3 states are about what an egress call may carry,
+and a call carrying one forbidden span is a forbidden call.
 
-**And a builder with no recorded origin answers `PATH_WITHOUT_MODEL`.** ADR-0146 §2's
-fail-closed rule is the precedent — a span for which no origin was recorded is
+**What the coarser fact costs, stated rather than glossed.** A user reading a
+confirmation learns that *something* in this call was composed by a model that had been
+shown things they told this system, and not *which* argument. That is a real loss
+against the per-span shape, and it is bounded by the thing this ADR is actually for:
+the user is reading the bytes, all of them, before they answer. The label is context
+for a reading, not a substitute for one.
+
+**No default, and the argument is ADR-0181 §3's, quoted rather than re-derived.**
+"A defaulted field is what a lane forgets: an implementation that never wires
+provenance through would get `SYSTEM_SELECTED` for free, its payloads would look
+correct." Here the safe-looking default is `NOT_COVERED`, which asserts that nothing
+in the call came from anywhere near this system's stores — a claim about a supply the
+defaulting lane never made, and the exact claim §3's whole partition exists to stop
+anyone making by accident.
+
+**And a component with no recorded origin answers `PATH_WITHOUT_MODEL`.** ADR-0146
+§2's fail-closed rule is the precedent — a span for which no origin was recorded is
 `SYSTEM_SELECTED` — and the direction is chosen the same way, by asking which mistake
-is survivable. A builder that wrongly says `PATH_WITHOUT_MODEL` gets its call refused
-at construction (§6) and someone notices immediately. A builder that wrongly says
+is survivable. A component that wrongly says `PATH_WITHOUT_MODEL` gets its call
+refused at construction (§6) and someone notices immediately. One that wrongly says
 `NOT_COVERED` sends the user's accumulated model to a third party and nobody notices
 at all. The asymmetry is total, so the fail-closed value is the one that refuses.
 
-### 5. Computed by whoever composed the argument, never inferred, and never cleared
+### 5. Computed by whoever composed the arguments, never inferred, and never cleared
 
-> **Normative.** A span's `coverage` is computed by the component that **composed the
-> argument's value**, from the membership and path character of what it supplied to
-> the operations that produced it, and is written onto the carrier before the request
-> reaches `EgressBinder.bind`. Any value a model, a tool, a tool declaration or a plan
-> emitted for it is **discarded, not merged**.
+> **Normative.** `coverage` is computed by the component that **composed the call's
+> arguments**, from the membership and path character of what it supplied to the
+> operations that produced them, and is written onto `CarriedProvenance` before the
+> request reaches `EgressBinder.bind`. Any value a model, a tool, a tool declaration or
+> a plan emitted for it is **discarded, not merged**.
 
-> **Normative.** No component derives it by inspecting the span's value, its argument
-> name, its field, its shape or its resemblance to anything, and no seam invents one
-> where a caller did not supply it. This is ADR-0146 §2's forbidden inference and
-> ADR-0098 §5's unrecoverable relation, read on this axis.
+> **Normative.** No component derives it by inspecting an argument's value, its name,
+> its field, its shape or its resemblance to anything, and no seam invents one where a
+> caller did not supply it. This is ADR-0146 §2's forbidden inference and ADR-0098 §5's
+> unrecoverable relation, read on this axis.
 
-> **Normative.** Where a value passed through several operations or several
-> compositions, the recorded state is the one ADR-0155 §3's first clause gives it over
-> **all** its covered paths, and it is never weakened by a later operation. A component
-> merging a `PATH_WITHOUT_MODEL` value with anything records `PATH_WITHOUT_MODEL` for
-> the result, because a covered path without a model call is still a covered path of
-> the merged value. No re-composition, re-planning, re-rendering, translation,
-> summarisation, excerpting or round trip through a model clears a state, and there is
-> no operation that improves one.
-
-> **Normative.** `EgressBinder.rebind` takes each span's `coverage` from `approved`,
-> matched to the binding it re-derived, exactly as ADR-0152 §7 and ADR-0181 §3 make it
-> take that span's `provenance` and the binding's `planned_with_external_content`, and
-> for the identical reason: the fact is about a composition made before the
-> confirmation was parked, plausibly before a restart, and `rebind` receives nothing to
-> recompute it from. This narrows ADR-0152 §7's count from two to three and narrows
-> nothing else in that section.
+> **Normative.** Where a request's arguments were composed by more than one component,
+> over more than one supply, the value is the strongest of their states under §4's
+> order. No component and no later step of a plan weakens a value an earlier one
+> recorded, and no re-composition, re-planning, re-rendering, translation,
+> summarisation, excerpting or round trip through a model improves one.
 
 **Monotonicity is stated because the laundering path would otherwise simply move**,
 and the corpus has watched it move twice. ADR-0106 §4 found it on the memory marker —
-"No fold, merge, reinforcement, or supersession clears `derived_from_external`" —
-and ADR-0181 §4 found it again one seam over: *"plan a step over tainted material, then
+"No fold, merge, reinforcement, or supersession clears `derived_from_external`" — and
+ADR-0181 §4 found it again one seam over: *"plan a step over tainted material, then
 have a second step re-plan over clean material and watch the fact clear. A warrant is
 never un-received, and neither is a selection."* Here the move would be shorter and
 more tempting: hand a `PATH_WITHOUT_MODEL` value to a model, take its output, and call
 the result `MODEL_ON_EVERY_PATH` because a model call is now on the path. ADR-0155 §3
-already forecloses that in terms — the overlap "falls to the absolute clause", because
-one non-model path suffices "**forever**" — and this clause is that sentence stated
-where a component could otherwise get it wrong.
+already forecloses it — the overlap "falls to the absolute clause", because one
+non-model path suffices "**forever**" — and this clause is that sentence stated where
+a component could otherwise get it wrong.
 
 ### 6. The absolute clause gets its first mechanism: the binding refuses at construction
 
-> **Normative.** `EgressBinding` **refuses at construction** any span whose `coverage`
-> is `PATH_WITHOUT_MODEL`. The refusal is unconditional: no argument, no tool, no
-> account, no configuration, no policy and no user act admits one, and no lane adds a
-> parameter, a flag or a subclass through which one could be admitted.
+> **Normative.** `EgressBinding` **refuses at construction** a `coverage` of
+> `PATH_WITHOUT_MODEL`. The refusal is unconditional: no argument, no tool, no account,
+> no configuration, no policy and no user act admits one, and no lane adds a parameter,
+> a flag or a subclass through which one could be admitted.
 
 > **Normative.** No `ActionPolicy` floor is added for this case and no lane adds one.
-> A request carrying such a span is **unconstructable**, so a policy clause would be a
-> second statement of one invariant with nothing to rule on — the shape ADR-0184 §7's
-> own reasoning distinguishes from a floor worth writing, and the shape ADR-0150 is
+> A request carrying that value is **unconstructable**, so a policy clause would be a
+> second statement of one invariant with nothing to rule on — the shape ADR-0150 is
 > named against. A policy may of course be stricter about anything (ADR-0021 §5).
 
 > **Normative.** This is stated at construction rather than at the ruling because
@@ -463,17 +462,24 @@ where a component could otherwise get it wrong.
 > makes a transmission either prohibition above forbids lawful." A refusal a policy
 > could be replaced out of is not the refusal that clause asks for.
 
-> **Normative.** This discharges ADR-0155 §4's marked clause **only for spans whose
-> `coverage` was honestly recorded**, and no lane, ADR or surface states or implies
-> more. Nothing here detects a component that records `NOT_COVERED` for a value it
-> took from a store, nothing inspects content to check a recorded state against it,
-> and no bound in this corpus is obtained from a claim that something does. What
-> changes is that the fact is now **recordable and recorded**, which is what #1154
-> asked for; what does not change is that the rule still binds an author who could
-> lie to it.
+> **Normative.** This discharges ADR-0155 §4's marked clause **only to the extent the
+> value was honestly recorded**, and no lane, ADR or surface states or implies more.
+> Nothing here detects a component that records `NOT_COVERED` for a call that carries a
+> store value, nothing inspects content to check a recorded state against it, and no
+> bound in this corpus is obtained from a claim that something does. What changes is
+> that the fact is now **recordable and recorded**, which is what #1154 asked for; what
+> does not change is that the rule still binds an author who could lie to it.
+
+**The whole call is refused rather than the span, and that is the conservative
+direction rather than a compromise.** ADR-0155 §3's clauses are stated over a span, so
+a per-span refusal would let the rest of a call through. Refusing the call refuses a
+superset, and it never admits a span either clause forbids. It also matches what the
+seam can actually do: ADR-0150 §4 makes the spans the arguments, and a send missing an
+argument is not a narrower send but a different one (ADR-0148 §4's own rule about a
+recipient set, one member over).
 
 **"Refused before the surface" is the answer to the sharpest question this ADR
-faces**, and it is worth putting plainly: a verbatim store value carried into an
+faces**, and it is worth putting plainly: a call carrying a verbatim store value in an
 email body never reaches a confirmation at all. The user is not asked, because the
 question is not the user's to answer. §7 argues why.
 
@@ -570,28 +576,35 @@ not the thing that decision needs.
 > both are now on the screen and a surface that merged them would be claiming the
 > description states what the value says.
 
-> **Normative.** A surface renders each span's `coverage` beside that span's value, in
-> **all three** states, as a statement about **where the value came from** and at the
-> strength the recorded fact carries: that it is not drawn from anything this system
-> stores; or that it was composed by a model that was shown something this system
-> stores; or — a state no confirmation can reach, since §6 refuses it at construction
-> — that it carries something taken from this system's stores directly. It names **no
+> **Normative.** A surface renders the call's `coverage` before it collects the answer,
+> beside the values rather than in place of any of them, in **all three** states, as a
+> statement about **the call** and at the strength the recorded fact carries: that
+> nothing this call would send is drawn from what this system stores; or that some of
+> what it would send was composed by a model that had been shown something this system
+> stores; or — a state no confirmation can reach, since §6 refuses it at construction —
+> that it carries something taken from this system's stores directly. It names **no
 > record**, no record identifier, no episode, no store-side key, no field name of any
 > store's schema and no memory (ADR-0150 §10's second clause, kept), and it names no
 > kind of source.
 
+> **Normative.** No surface renders it as a statement about a **span**. It is not
+> attributed to an argument, a position or a destination, and no surface says or
+> implies that any particular value is the covered one. This is ADR-0181 §6's fifth
+> clause read one axis over, and it is stated for the same reason: the recorded fact is
+> a disjunction over the call, so a per-span rendering would assert a marker §4
+> deliberately does not mint.
+
 > **Normative.** No surface renders `NOT_COVERED` as an assurance. It states that no
-> covered path was recorded for that span, never that the span is unrelated to
-> anything the user has told this system, and never that the send is safe. This is
-> ADR-0181 §6's third clause read one axis over and it is stated for the same reason.
+> covered path was recorded for this call, never that nothing in it relates to anything
+> the user has told this system, and never that the send is safe. This is ADR-0181 §6's
+> third clause read one axis over.
 
 > **Normative.** No surface presents `coverage` as a detection, a score, a risk level,
 > a recommendation or a warning that the call is malicious, and no surface conflates it
-> with `planned_with_external_content`. The two answer different questions — where the
-> value came from, and whether the material selected into the planning call carried the
-> external mark — and ADR-0181 §6's fifth clause forbids the second being rendered as a
-> per-span claim. A surface that used one to render the other would be asserting a
-> marker neither ADR mints.
+> with `planned_with_external_content`. The two answer different questions — where what
+> this call would send came from, and whether the material selected into the planning
+> call carried the external mark — and a surface that rendered one as the other would
+> be asserting a marker neither ADR mints.
 
 > **Normative.** No surface offers a control that answers more than one confirmation,
 > pre-selects an affirmative answer, defaults to one, or presents approval as the
@@ -633,13 +646,14 @@ comes closest — LangChain's `HumanInTheLoopMiddleware` `edit` decision — is 
 there under **Avoid** for a different reason §9 below adopts. There is no prior art to
 copy here, and the kindness is the failure mode.
 
-### 9. When a model-composed span is approvable, stated over the call
+### 9. When a model-composed span may be carried, stated as a condition on the call
 
-> **Normative.** A span whose `coverage` is `MODEL_ON_EVERY_PATH` may be carried by an
-> egress call **only** where all four hold: the request's binding carries that span's
-> `coverage` under §4; the ruling on that request is a `CONFIRM` answered by the user
+> **Normative.** An egress call whose binding carries `coverage` of
+> `MODEL_ON_EVERY_PATH` may carry covered content **only** where all four hold: the
+> binding carries that value under §4, written by the component that composed the
+> arguments under §5; the ruling on that request is a `CONFIRM` answered by the user
 > under ADR-0148 §3's route (a), on **that** request; the `Confirmation` put to the
-> user carried the span's own value in `parameters`, and the surface that rendered it
+> user carried every span's own value in `parameters`, and the surface that rendered it
 > owed and met §8's floor; and the recorded decision binds those exact bytes by
 > `parameters_digest`, which `PermissionDecision.authorises` compares before the seam
 > transmits. Where any of the four fails, ADR-0155 §3's third clause forbids the span
@@ -696,13 +710,14 @@ route, and §9 is where it is finally spent on content.
 > resumes a parked step with parameters other than the ones its recorded decision
 > binds.
 
-> **Normative.** An edit **never** weakens a span's `coverage`. A span edited from a
-> `MODEL_ON_EVERY_PATH` value stays `MODEL_ON_EVERY_PATH`, and a span edited from a
-> `PATH_WITHOUT_MODEL` value stays `PATH_WITHOUT_MODEL` and is therefore refused at
-> construction exactly as its predecessor was. No component decides otherwise by
-> comparing the edited text to the original, by measuring how much changed, or by any
-> other inspection: that is §5's forbidden inference, and it is where the laundering
-> route would reappear if it were admitted.
+> **Normative.** An edit **never** weakens the new request's `coverage`. A request
+> whose values were edited from a `MODEL_ON_EVERY_PATH` call carries
+> `MODEL_ON_EVERY_PATH`, and one edited from a `PATH_WITHOUT_MODEL` call carries
+> `PATH_WITHOUT_MODEL` and is therefore refused at construction exactly as its
+> predecessor was. No component decides otherwise by comparing the edited text to the
+> original, by measuring how much changed, or by any other inspection: that is §5's
+> forbidden inference, and it is where the laundering route would reappear if it were
+> admitted.
 
 > **Normative.** This ADR decides that an edit has that shape **if** a surface offers
 > one; it does not oblige any surface to offer one, and §13 leaves that to the
@@ -836,9 +851,10 @@ second clause keeps every direct store value out permanently, and §6 now refuse
 at construction rather than trusting an author. Every send is a fresh per-call decision
 with no standing route (ADR-0148 §8, ADR-0154 §4, ADR-0181 §5, ADR-0193 §5). The bytes
 are fixed between the question and the send by `parameters_digest`, so what was read
-is what leaves. And the description names no record, so the trail records that a span
-of some extent and some coverage went to some recipient, and never *which* memory —
-which is why ADR-0150 §10's deletion answer survives this decision unchanged.
+is what leaves. And the description names no record and holds no content, so the trail
+records that a span of some extent went to some recipient under a call of some
+coverage, and never *which* memory and never what was said — which is why ADR-0150
+§10's deletion answer survives this decision unchanged.
 
 **What is not bounded, and is named so that nobody claims otherwise.** Reading. The
 surface can put the bytes above the controls, whole and unabridged, with no affirmative
@@ -858,9 +874,9 @@ of them. Both are real; the owner ruled; this section records what was bought.
 
 ### 13. What is not decided here, each with its reason
 
-> **Normative.** Beyond §1's three clauses, §2's three, §3's two, §4's seven, §5's
-> four, §6's four, §7's two, §8's ten, §9's four, §10's four, §11's six, §12's three,
-> §13's two, §14's two and §15's five, this ADR decides nothing. It registers no tool, designates no seam,
+> **Normative.** Beyond §1's three clauses, §2's three, §3's two, §4's eight, §5's
+> three, §6's four, §7's two, §8's eleven, §9's four, §10's four, §11's six, §12's
+> three, §13's two, §14's five and §15's nine, this ADR decides nothing. It registers no tool, designates no seam,
 > adds no `DestinationProtocol` member, changes no Protocol signature, authorises no
 > dependency or destination, and attests, relaxes or adds no condition of ADR-0017 §3
 > or ADR-0154 §4.
@@ -871,7 +887,9 @@ of them. Both are real; the owner ruled; this section records what was bought.
 > about one, and no lane cites it, or this ADR, as discharging ADR-0146 §5's third
 > clause. ADR-0150 §6's own clause — that the closing mechanism is a recorded per-span
 > classification whose ADR amends ADR-0148 §6 — remains owed for the tier axis, and is
-> now owed by an ADR that will find the fourth determinism input already there.
+> now owed by an ADR whose own choice between a per-span carriage and a call-level
+> one is untouched by §4's, since §4 puts its fact on the binding and adds nothing to
+> the description.
 
 Named individually:
 
@@ -887,9 +905,9 @@ Named individually:
   the arithmetic is stated rather than denied. This ADR adds one short enum value per
   span to the description and **no content to the frame**, because
   `Confirmation.parameters` already travels (ADR-0042 §4) and the payload the wire
-  measures already includes it. So #1379's product term — `EgressSpan.argument`
-  repeated once per span — is unchanged in kind and grows by a bounded constant per
-  span. ADR-0178 §9's figures do not move, its no-truncation clause is reinforced by
+  measures already includes it. §4 adds one short enum value to the **binding**, once
+  per call, and nothing to `EgressSpan`, so #1379's product term — `EgressSpan.argument`
+  repeated once per span — is untouched and the payload grows by a constant. ADR-0178 §9's figures do not move, its no-truncation clause is reinforced by
   §8's whole-rendering clause, and the compact-locator decision #1379 asks for stays
   where its firing condition leaves it. What this ADR does add is a reason to expect a
   *larger* `parameters` in practice, since a model-composed body is longer than the
@@ -949,27 +967,19 @@ judgement being made in this ADR's text, which is where it is reviewed.
   axis, which ADR-0150's own dated note of 2026-08-23 states in terms when ADR-0181
   added the externality axis: "**§5's first clause is not narrowed and must not be
   read as breached.**" `SpanCoverage` is a third axis on the same footing. That note's
-  closing observation — "`EgressSpan` gains nothing" — is a statement about what
-  ADR-0181 did, not a bar on what a later ADR may do, and §4 above puts the new axis
-  on the span for §5's **own** stated reason rather than in spite of it: the
-  description is the thing bound and transcribed, so a marker riding elsewhere would
-  need a join.
+  closing observation — "`EgressSpan` gains nothing" — is true of §4 above too: the
+  new axis rides the **binding**, exactly where ADR-0181 put the externality axis and
+  for the reason it gave, so §5's field is untouched at every site and the question
+  that note answered does not arise a second time.
 - **ADR-0146 and ADR-0106.** No record. `SpanCoverage` is a third axis beside the
   discloser axis and the externality axis; ADR-0146 §1's two members and §2's
   carried-not-inferred rule are unchanged and are the model §5 copies, and ADR-0106
   §4's monotonicity is read across rather than restated over its own field.
-- **ADR-0184.** No record, and the test is worth showing because this ADR fires one
-  of its deferrals. §9's first clause ("exactly one such sibling, for exactly one
-  epoch … No lane adds a second sibling") stays true: §14's second clause below mints
-  none. §9's second clause **obliges** the ADR adding a further such member to decide
-  its history representation in its own text, and §14 decides it — discharging an
-  obligation is not amending the ADR that imposed it. §2's clauses are stated about
-  what ADR-0184 itself mints ("no field is added to `EgressSpan` … **by this ADR**")
-  and stay literally true; §2's roster of `OriginUnrecordedBinding`'s members is over
-  the member set, not over a member's own fields, and `spans` is still `spans`. §7's
-  floor stays true and is extended by cause here rather than replaced. The deferral
-  §14 spends is unmarked prose in a marked ADR, which ADR-0089 §3 makes argument
-  rather than obligation.
+- **ADR-0184.** A record **is** owed and is in this ADR's header: §2's roster
+  sentence and §9's one-sibling clause. What is *not* owed there is a record about
+  §9's *deferral*, which is unmarked prose in a marked ADR (ADR-0089 §3) and is
+  discharged rather than amended, and none about §3, §5, §6 or §7, each of which stays
+  true and is relied on by §14 below.
 - **ADR-0152.** No record on §7's substance; its "exactly one" count was already
   narrowed to two by ADR-0181 §3's fifth clause, and §5 above narrows the same count
   to three by the identical route. ADR-0181 §3 recorded that narrowing in its own text
@@ -980,63 +990,110 @@ judgement being made in this ADR's text, which is where it is reviewed.
 > **Normative.** ADR-0184 §9's deferral **fires with this ADR and is answered here**:
 > §4 adds a member required with no default to a `core` model the audit trail stores,
 > and the choice §9 puts to it — a second sibling, or the deferred stored payload
-> version for the trail's `data` column — is decided in favour of the **version**. A
-> decision recorded at a payload version predating `EgressSpan.coverage` is legible
-> history, is never rewritten, is never backfilled, and is never re-interpreted as
-> though a coverage had been recorded for it.
+> version for the trail's `data` column — is decided in favour of a **second sibling**.
+> `core/types.py` gains `CoverageUnrecordedBinding`: the value a decision recorded
+> between `planned_with_external_content`'s arrival and `coverage`'s reads back as,
+> carrying every member `EgressBinding` carries **but** `coverage`, each required with
+> no default, satisfying every invariant `EgressBinding` enforces over those members.
 
-> **Normative.** No second sibling is minted. `OriginUnrecordedBinding` keeps exactly
-> the scope ADR-0184 §2 and §9 give it — one field's absence, one epoch — and no lane
-> adds a third member to `PermissionDecision.egress_binding`'s union, or a sibling to
-> any other model, on the strength of this ADR. ADR-0184 §7's floor is extended by
-> cause and not replaced: `ActionPolicy.resolve` returns no `ALLOW` on a `confirmed`
-> whose recorded binding predates the coverage field, for the same reason it returns
-> none on an `OriginUnrecordedBinding` — the fact the ruling would have to rest on was
-> never recorded, and fabricating one is the failure ADR-0184 exists to refuse.
+> **Normative.** Each member is still declared **exactly once**, on a private base
+> chain the three models inherit — the three shared members on the base ADR-0184 §2
+> already puts them on, `planned_with_external_content` on a second private base
+> beneath it that `EgressBinding` and `CoverageUnrecordedBinding` share, and `coverage`
+> on `EgressBinding` alone. No model restates a member, a validator or the derived
+> `canonical_destination_set`, which is ADR-0184 §2's rule obeyed rather than narrowed.
 
-**The version rather than a sibling, on ADR-0184 §9's own reasoning and one fact it
-did not have.** §9 declined the version at one data point because "adding it now would
-itself be a write to every future row for a benefit nothing has yet needed", and named
-its firing condition as the second epoch. This is the second epoch, so the condition is
-met on its own terms. Two further things settle it. First, siblings do not compose
-here: this field lands on `EgressSpan`, which sits on the shared base **both**
-`EgressBinding` and `OriginUnrecordedBinding` inherit, so a sibling would have to be a
-sibling of the *span* and then a variant of each binding over it — the six pairwise
-discriminations §9 warned about, arriving at three types rather than at three siblings.
-Second, a third epoch is already visible: ADR-0150 §6's tier residue wants the same
-shape on the same model, and buying the version now is what makes that one cheap, which
-is the benefit §9 said a version would deliver.
+> **Normative.** `PermissionDecision.egress_binding` becomes
+> `EgressBinding | CoverageUnrecordedBinding | OriginUnrecordedBinding | None`, still
+> one field, still named `egress_binding`, still defaulting to `None`, and `None` keeps
+> exactly the meaning ADR-0150 §1's second clause gives it. `ActionRequest.egress_binding`
+> stays `EgressBinding | None` and no lane widens it (ADR-0184 §2's fourth clause).
+
+> **Normative.** The discrimination stays **structural, total and mutually exclusive**
+> (ADR-0184 §3) and is a **ladder rather than a matrix**, because the epochs are totally
+> ordered in time: a row lacking `planned_with_external_content` necessarily lacks
+> `coverage` too, so the three shapes form a chain and no fourth combination exists to
+> represent. No lane mints one, and no lane adds a further member to this union on the
+> strength of this ADR — an ADR adding another member required with no default to a
+> model the trail stores makes ADR-0184 §9's choice again, in its own text, with three
+> data points.
+
+> **Normative.** Nothing is written, in either direction. A recorded row is never
+> rewritten, never backfilled, and never re-interpreted as though a coverage had been
+> recorded for it (ADR-0184 §4). ADR-0184 §7's floor is extended **by cause**:
+> `ActionPolicy.resolve` returns no `ALLOW` on a `confirmed` whose `egress_binding` is
+> a `CoverageUnrecordedBinding`, whatever `approved` says, for §7's own reason — the
+> fact the ruling would rest on was never recorded. The clause is stated on the
+> `ActionPolicy` Protocol and asserted in `ActionPolicyContract`, beside ADR-0184 §7's,
+> and no signature moves.
+
+**The sibling rather than the version, and the reason is a fact ADR-0184 §9 did not
+have.** §9 offered the version as the answer that "would make the next epoch cheap",
+and adversarial review of this ADR's first round found why it cannot be the answer at
+all: **a version key names the schema a row stands under and supplies no representable
+value for it.** A stored binding missing a required field still decodes into no type,
+so a row at an older version would be neither typed nor legible — the failure ADR-0184
+is titled against. A version is a good answer to *which* schema and no answer to
+*what value*, and this question is the second one.
+
+**§9's objection to accumulating siblings does not bite here, and the reason is
+structural rather than a plea.** §9 warned that "three siblings is six pairwise
+discriminations to reason about and a union every consumer must exhaust". Six pairwise
+discriminations is the cost of *unordered* variants. These are ordered: every epoch
+strictly precedes the next, so each shape is the next one minus a field, and the
+discrimination is two field-presence tests taken in one direction. A consumer
+exhausting the union writes three arms, and each arm names exactly which fact it does
+not have — which is §9's own stated reason for preferring a named absence to a general
+one ("a reader meeting it learns something specific").
+
+**And an earlier draft of this section chose the version, which is worth recording
+rather than quietly repairing.** It reached for the version on §9's own words and did
+not check that the version could produce a value; ADR-0089's neighbours are full of the
+same shape, and ADR-0155 §3 records its own document making a related mistake twice.
+The finding is kept here as evidence rather than summarised away.
 
 ### 15. What the implementing lanes owe
 
 This section is direction for the lanes that build it, and it binds them as marked.
 
 > **Normative.** The `core` change lands **before** anything implements against it and
-> in its own PR: `SpanCoverage`, the field on `EgressSpan`, the widened
-> `CarriedProvenance.spans` value, `EgressBinding`'s construction refusal, and the
-> payload version §14 decides. `PROTOCOL_VERSION` moves, because
-> `ConfirmationEgress.spans` carries `EgressSpan` across the wire (ADR-0178 §6's rule).
-> Golden rule 5 and ADR-0015 §5 govern the sequencing.
+> in its own PR: `SpanCoverage`; `coverage` on `EgressBinding`, `CarriedProvenance` and
+> `ConfirmationEgress`; `EgressBinding`'s construction refusal; and
+> `CoverageUnrecordedBinding` with the widened union and the private base chain §14
+> decides. Golden rule 5 and ADR-0015 §5 govern the sequencing.
+
+> **Normative.** `PROTOCOL_VERSION` moves, because `ConfirmationEgress` gains a member
+> and that value crosses the wire (ADR-0178 §6's rule).
 
 > **Normative.** The `ActionPolicy` clause §14's last clause states is stated on the
 > Protocol and asserted in the shared `ActionPolicyContract` suite, beside ADR-0184
 > §7's, in the same change as the type. No method is added, no argument widened and no
 > return annotation changed.
 
-> **Normative.** Every span's `coverage` is written by the component that composed the
-> argument, and the empty carrier `AttemptRunner._bound` passes today
-> (`CarriedProvenance(spans={}, …)`) is filled in the same lane. A lane that adds the
-> field and leaves the carrier empty has built a description that answers
-> `PATH_WITHOUT_MODEL` for every span and refuses every send — which is the
-> fail-closed direction working, and is still an incomplete lane.
+> **Normative.** `coverage` is written by the component that composes a call's
+> arguments, in the same lane that adds the field. A lane that adds the field and
+> leaves nothing writing it has built a seam that answers `PATH_WITHOUT_MODEL` and
+> refuses every send — which is the fail-closed direction working, and is still an
+> incomplete lane. `AttemptRunner._bound`'s empty `CarriedProvenance(spans={}, …)` is
+> the site.
 
-> **Normative.** Each surface's lane pins §8's floor with tests over that surface's own
-> rendering: that every span's value appears, whole and untruncated, before the control;
-> that a value carrying the surface's own framing characters is neutralised; that all
-> three `coverage` states render and that none renders as an assurance or a warning;
-> and that no control approves more than one confirmation or defaults to approval. The
-> browser lane drives the page at a desktop width and at a phone-class viewport and
-> records what it saw, because a value "above the fold" is a claim about a rendering.
+> **Normative.** Each surface's lane pins §8's rendering floor with tests over that
+> surface's own output: every span's value appears, whole and untruncated, before the
+> control, and a value carrying that surface's own framing characters is neutralised.
+
+> **Normative.** Each surface's lane pins §8's coverage floor with tests over that
+> surface's own output: all three states render, none renders as an assurance, a
+> warning or a per-span claim, and none is conflated with the origin line ADR-0181 §6
+> already requires.
+
+> **Normative.** Each surface's lane pins §8's control floor with tests over that
+> surface's own output: no control answers more than one confirmation, none defaults
+> to approval, and none both reveals a value and approves it.
+
+> **Normative.** The **browser** lane additionally drives the page at a desktop width
+> and at a phone-class viewport and records what it saw, because "before the control"
+> is a claim about a rendering that no assertion over the bytes can check. No other
+> surface's lane owes that observation.
 
 Representative inputs the implementation is measured against, each named so a lane
 builds the case rather than inventing one:
@@ -1044,21 +1101,22 @@ builds the case rather than inventing one:
 - A memory-drawn email body is rendered **verbatim** in the confirmation, and the send
   transmits exactly those bytes; a body altered between the confirmation and the resume
   is refused by `authorises` before the seam is reached.
-- A confirmation whose span carries `MODEL_ON_EVERY_PATH` renders the coverage line in
+- A confirmation on a call carrying `MODEL_ON_EVERY_PATH` renders the coverage line in
   its own right; one carrying `NOT_COVERED` renders it too, and the rendered text is
   not an assurance.
-- A request carrying a `PATH_WITHOUT_MODEL` span is refused at `EgressBinding`
-  construction — **no confirmation is ever built for it**, and the test asserts the
-  absence of a confirmation rather than a denial.
+- A request whose composed arguments carry a covered path with no model call is refused
+  at `EgressBinding` construction — **no confirmation is ever built for it**, and the
+  test asserts the absence of a confirmation rather than a denial.
 - A declined confirmation sends nothing and records the `DENY`, with the same
   four-outcome discipline ADR-0148 §9 already fixes.
 - An edit produces a second `CONFIRM` carrying the edited bytes, whose recorded digest
-  differs from the first, whose spans carry the same `coverage`, and which the first
-  decision does not authorise.
+  differs from the first, whose binding carries the same `coverage`, and which the
+  first decision does not authorise.
 - A confirmation on `converse_spoken` speaks `SPOKEN_PARK_SENTENCE` and no part of the
   content, exactly as ADR-0207 §2 already requires.
-- A recorded decision at a pre-coverage payload version reads back as legible history
-  and `resolve` returns no `ALLOW` on it.
+- A decision recorded before `coverage` reads back as a `CoverageUnrecordedBinding`,
+  renders its account, destinations and description as legible history, and `resolve`
+  returns no `ALLOW` on it.
 
 > **Normative.** No lane widens the relaxation while implementing it. §9's four
 > conditions are conjunctive, and a lane that finds one of them awkward files an issue
@@ -1069,9 +1127,9 @@ builds the case rather than inventing one:
 This ADR is in **ADR-0089's marked regime**: the marked clauses are the whole of what
 it obligates, and the prose beside them determines what they mean and supplies no
 obligation of its own (ADR-0089 §3). Marking is forward-only, so nothing this ADR
-cites is retro-marked (§5). What binds is **sixty-one clauses**: §1's three, §2's
-three, §3's two, §4's seven, §5's four, §6's four, §7's two, §8's ten, §9's four,
-§10's four, §11's six, §12's three, §13's two, §14's two and §15's five. Each is a
+cites is retro-marked (§5). What binds is **sixty-nine clauses**: §1's three, §2's
+three, §3's two, §4's eight, §5's three, §6's four, §7's two, §8's eleven, §9's four,
+§10's four, §11's six, §12's three, §13's two, §14's five and §15's nine. Each is a
 block quote at column 0 preceded by a blank line, stating one obligation with its own
 scope (§2); passages stating two separable obligations were split in drafting for that
 reason.
@@ -1118,10 +1176,12 @@ surface.
   cheap.** ADR-0184 §9's deferral is spent by the route §9 offered, at the epoch §9
   named, and the third epoch — ADR-0150 §6's tier residue — will find the machinery
   already there.
-- **`EgressSpan` now carries three axes and the corpus knows what each is for.** Who
-  disclosed it (ADR-0146), what tier its field establishes (ADR-0150 §6), and where its
-  value came from (this ADR). The second is still under-answered for a moved value, and
-  §13 says so rather than letting the third look like an answer to it.
+- **The egress binding now carries two call-level facts and the corpus knows what each
+  is for.** Whether the material selected into the planning call was marked as external
+  (ADR-0181), and where what this call would send came from (this ADR). The per-span
+  axes are unchanged — ADR-0146's discloser marker, and ADR-0150 §6's tier residue,
+  which is still under-answered for a moved value and which §13 says this ADR does not
+  answer.
 - **Revisit trigger.** The first measurement of how often an approver's confirmation
   carries a body large enough that a surface would want to abbreviate it. §8 forbids
   abbreviating; the moment a real deployment finds that unusable is the moment this
