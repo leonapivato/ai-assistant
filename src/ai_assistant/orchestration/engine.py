@@ -82,7 +82,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -152,12 +152,14 @@ from ai_assistant.core.types import (
     StepStatus,
     TraceOutcome,
     TurnOutcome,
+    TurnResult,
     band_of,
     describe_untrusted,
     is_live_confirmation_park,
     rests_on_recorded_external_content,
     secret_value,
 )
+from ai_assistant.orchestration.composing import ComposedReply
 from ai_assistant.orchestration.disclosure import (
     BoundedAudienceSupply,
     TurnSupply,
@@ -203,7 +205,7 @@ from ai_assistant.orchestration.speech import (
 from ai_assistant.orchestration.traces import Observation, OperationTraces
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping, Sequence
+    from collections.abc import AsyncIterator
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
@@ -256,9 +258,8 @@ if TYPE_CHECKING:
         TranscriptArchiveSize,
         TranscriptEntry,
         TranscriptHit,
-        TurnResult,
     )
-    from ai_assistant.orchestration.composing import ComposedReply, ComposingStage
+    from ai_assistant.orchestration.composing import ComposingStage
     from ai_assistant.orchestration.connections import ConnectionOperations
     from ai_assistant.orchestration.consolidation import (
         ConsolidationReport,
@@ -1437,7 +1438,7 @@ def _routed_exchange_of(utterance: str | None, *, resumed: bool) -> str:
 #: :meth:`Engine._compose_routed_streaming` — and it is a parameter rather than a flag
 #: for :meth:`Engine._run_turn`'s own reason: a second copy of the routing driver would
 #: be two places for the reservation's release and the capture point to drift apart.
-type _RoutedComposer = Callable[[RoutedOperation, str], Awaitable["ComposedReply | None"]]
+type _RoutedComposer = Callable[[RoutedOperation, str], Awaitable[ComposedReply | None]]
 
 
 #: How an ordinary pass composes its answer: what the turn produced, what became of the
@@ -1472,14 +1473,14 @@ type _RoutedComposer = Callable[[RoutedOperation, str], Awaitable["ComposedReply
 #: byte-identical to what it is today.
 type _Composer = Callable[
     [
-        "TurnResult | None",
+        TurnResult | None,
         StepOutcome | None,
         str,
-        "Mapping[str, SpokenDelivery]",
-        "Sequence[str]",
+        Mapping[str, SpokenDelivery],
+        Sequence[str],
         bool,
     ],
-    Awaitable["ComposedReply | None"],
+    Awaitable[ComposedReply | None],
 ]
 
 
