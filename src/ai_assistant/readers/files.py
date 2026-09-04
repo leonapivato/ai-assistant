@@ -121,13 +121,15 @@ if TYPE_CHECKING:
 #: of its type and may hold the type's bare name.
 FILE_FETCHER_NAME: Final = "files"
 
-#: ADR-0230 §4's and §6's named defaults, restated here because the constructor is
-#: a second seam a test or a second composition root reaches directly, and §6 puts
-#: every refusal at construction rather than at the first fetch (ADR-0093 §5).
+#: ADR-0230 §4's and §6's named defaults, and ADR-0232 §2's, restated here because
+#: the constructor is a second seam a test or a second composition root reaches
+#: directly, and §6 puts every refusal at construction rather than at the first
+#: fetch (ADR-0093 §5).
 DEFAULT_FETCH_LISTING_TTL: Final = timedelta(minutes=5)
 DEFAULT_FETCH_LISTING_MAX_ENTRIES: Final = 40
 DEFAULT_FETCH_MAX_FILE_BYTES: Final = 4 * 1024 * 1024
 DEFAULT_FETCH_MAX_CONTENT_BYTES: Final = 32 * 1024
+DEFAULT_FETCH_MAX_DECODED_BYTES: Final = 1024 * 1024
 
 #: What a fetched record's report is worth (ADR-0230 §5). Below 1.0 — nothing
 #: forces that in the ``ATTESTED`` band, since a connected source may legitimately
@@ -287,7 +289,7 @@ class LocalFileFetcher:
     listing, never a ``FetchRefusal`` and never a degraded turn (ADR-0230 §6).
     """
 
-    def __init__(  # noqa: PLR0913 — one root, two clocks, §6's four figures and the platform view; each is one knob
+    def __init__(  # noqa: PLR0913 — one root, two clocks, five configured figures and the platform view; each is one knob
         self,
         root: Path,
         *,
@@ -297,6 +299,7 @@ class LocalFileFetcher:
         listing_max_entries: int = DEFAULT_FETCH_LISTING_MAX_ENTRIES,
         max_file_bytes: int = DEFAULT_FETCH_MAX_FILE_BYTES,
         max_content_bytes: int = DEFAULT_FETCH_MAX_CONTENT_BYTES,
+        max_decoded_bytes: int = DEFAULT_FETCH_MAX_DECODED_BYTES,
         tables: PlatformTables | None = None,
         id_factory: Callable[[], str] | None = None,
     ) -> None:
@@ -322,6 +325,10 @@ class LocalFileFetcher:
             listing_max_entries: ``fetch_listing_max_entries``. At least 1.
             max_file_bytes: ``fetch_max_file_bytes``. At least 1.
             max_content_bytes: ``fetch_max_content_bytes``. At least 1.
+            max_decoded_bytes: ``fetch_max_decoded_bytes``. At least 1. The decoded
+                bytes one extraction may **parse**, summed once per parse
+                (ADR-0232 §2) — a third quantity with a third consumer, the parser
+                rather than the disk or the prompt.
             tables: The platform's mount and device view for §6's stage 1. Defaults
                 to this machine's own ``/proc`` and ``/sys``.
             id_factory: Mints each record's id. Defaulted to a fresh UUID; a caller
@@ -341,6 +348,7 @@ class LocalFileFetcher:
             listing_max_entries=listing_max_entries,
             max_file_bytes=max_file_bytes,
             max_content_bytes=max_content_bytes,
+            max_decoded_bytes=max_decoded_bytes,
         )
         if not root.is_absolute():
             msg = f"the fetch root must be an absolute path, got {str(root)!r} (ADR-0230 §6)"
@@ -351,6 +359,7 @@ class LocalFileFetcher:
         self._listing_max_entries = listing_max_entries
         self._max_file_bytes = max_file_bytes
         self._max_content_bytes = max_content_bytes
+        self._max_decoded_bytes = max_decoded_bytes
         self._id_factory = id_factory
         # Generated here and never leaving: it is what makes a token and a handle
         # unforgeable, and ADR-0230 §4 requires the state be private to the fetcher.
@@ -496,7 +505,11 @@ class LocalFileFetcher:
         data, read_at = await asyncio.to_thread(self._acquire, name)
         try:
             text = await asyncio.to_thread(
-                extract, data, suffix, max_rendered_bytes=self._max_content_bytes
+                extract,
+                data,
+                suffix,
+                max_rendered_bytes=self._max_content_bytes,
+                max_decoded_bytes=self._max_decoded_bytes,
             )
         except ContentTooLargeError as exc:
             raise _FileTooLargeError from exc
@@ -709,8 +722,9 @@ def _refuse_out_of_domain(
     listing_max_entries: int,
     max_file_bytes: int,
     max_content_bytes: int,
+    max_decoded_bytes: int,
 ) -> None:
-    """Refuse a figure outside ADR-0230 §6's stated domain, at construction.
+    """Refuse a figure outside ADR-0230 §6's or ADR-0232 §2's domain, at construction.
 
     ``Settings`` states the same rules again, and this is not duplication for its own
     sake: §6 puts the refusal at load *and* this constructor is a second seam a test
@@ -737,13 +751,14 @@ def _refuse_out_of_domain(
             f"{listing_ttl!r} (ADR-0230 §6)"
         )
         raise ConfigurationError(msg)
-    for label, figure in (
-        ("fetch_listing_max_entries", listing_max_entries),
-        ("fetch_max_file_bytes", max_file_bytes),
-        ("fetch_max_content_bytes", max_content_bytes),
+    for label, figure, citation in (
+        ("fetch_listing_max_entries", listing_max_entries, "ADR-0230 §6"),
+        ("fetch_max_file_bytes", max_file_bytes, "ADR-0230 §6"),
+        ("fetch_max_content_bytes", max_content_bytes, "ADR-0230 §6"),
+        ("fetch_max_decoded_bytes", max_decoded_bytes, "ADR-0232 §2"),
     ):
         if type(figure) is not int or figure < 1:
-            msg = f"{label} must be an integer of at least 1, got {figure!r} (ADR-0230 §6)"
+            msg = f"{label} must be an integer of at least 1, got {figure!r} ({citation})"
             raise ConfigurationError(msg)
 
 

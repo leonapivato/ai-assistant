@@ -3437,8 +3437,8 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return expanded
 
-    # **Every one of the four below has a stated domain, and a value outside it is
-    # a load-time configuration error** (ADR-0230 §6). Zero and negative values are
+    # **Every one of the five below has a stated domain, and a value outside it is
+    # a load-time configuration error** (ADR-0230 §6, ADR-0232 §2). Zero and negative values are
     # refused rather than given a meaning, and the refusal is `Settings`'s own — at
     # load, before any fetcher is built and before any filesystem call — for
     # ADR-0093 §5's reason. A zero entry cap is a mechanism that shows nothing
@@ -3485,6 +3485,33 @@ class Settings(BaseSettings):
             "**quoted rendering** the prompt will carry — `json.dumps` at its "
             "default `ensure_ascii=True`, both delimiters included (ADR-0230 §6). A "
             "file beyond it is refused, never truncated."
+        ),
+    )
+    # **The third quantity, and the third consumer** (ADR-0232 §1, §2). The two
+    # fields above are *what is read* and *what reaches the prompt*; this one is
+    # what the **parser** is handed, and one number cannot be honest about all
+    # three. It is an independent figure and never a derived one: no deployment's
+    # change to either field above moves it, and nothing computes it from them.
+    #
+    # **Bytes parsed, never bytes decoded**, and the two differ by the number of
+    # times the extraction reads the same stream. A stream parsed on forty pages is
+    # charged forty times — which is the whole content of the bound, because the
+    # decoded size of a document's streams is not the quantity its extraction's
+    # cost is a function of.
+    fetch_max_decoded_bytes: _IntegerSetting = Field(
+        default=1024 * 1024,
+        ge=1,
+        lt=2**63,
+        description=(
+            "The most decoded bytes one fetch's extraction may **parse**, summed "
+            "once per parse and compared before each decoded stream is parsed "
+            "(ADR-0232 §2, §3). For PDF that is every content stream the extraction "
+            "parses — a page's own and every Form XObject reached from it, once for "
+            "each `Do` that invokes it — plus, per parse, the embedded font program "
+            "of each font the extraction re-parses per page: no `/ToUnicode`, "
+            "`/Subtype` `/Type1`, and a `/FontDescriptor` carrying `/FontFile`. "
+            "Plain text and Markdown have no decoding step and count zero. A "
+            "document beyond it is refused `TOO_LARGE`, never truncated."
         ),
     )
 
