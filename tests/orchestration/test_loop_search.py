@@ -57,7 +57,12 @@ from test_engine import (
 )
 from test_engine_capture import _captured, _replying
 
-from ai_assistant.core.errors import MemoryStoreError, PermissionDeniedError
+from ai_assistant.core.errors import (
+    AuditError,
+    ConnectionStoreError,
+    MemoryStoreError,
+    PermissionDeniedError,
+)
 from ai_assistant.core.types import (
     ActionPlan,
     ActionRequest,
@@ -1534,3 +1539,163 @@ async def test_a_conversation_whose_deployment_searched_nothing_keeps_its_allow(
 
     assert second.step is not None
     assert second.step.disposition is Disposition.EXECUTED
+
+
+# --------------------------------------------------------------------------- #
+# ADR-0226 §5: a fault the searcher raised degrades the turn and never fails it #
+# --------------------------------------------------------------------------- #
+
+
+class _RaisingTrail:
+    """A trail whose ``record`` or ``get`` raises the error the seam contracts.
+
+    ``FakeAuditTrail`` has no failure knob, and §9's second decline cause is stated
+    over a trail that "could not record the decision" — which a store outage at either
+    await is. Every other member delegates, so what this models is one store fault
+    rather than a different contract.
+    """
+
+    def __init__(self, *, at: str) -> None:
+        self.inner = FakeAuditTrail()
+        self._at = at
+
+    async def record(self, decision: PermissionDecision) -> str:
+        """Append, or raise where this fake was armed to.
+
+        Args:
+            decision: What was decided.
+
+        Returns:
+            The id, where the append is allowed to happen.
+
+        Raises:
+            AuditError: If this fake was armed at ``record``.
+        """
+        if self._at == "record":
+            msg = "the trail is unavailable"
+            raise AuditError(msg)
+        return await self.inner.record(decision)
+
+    async def get(self, decision_id: str) -> PermissionDecision | None:
+        """Read back, or raise where this fake was armed to.
+
+        Args:
+            decision_id: What to read.
+
+        Returns:
+            The stored decision.
+
+        Raises:
+            AuditError: If this fake was armed at ``get``.
+        """
+        if self._at == "get":
+            msg = "the trail's row could not be read"
+            raise AuditError(msg)
+        return await self.inner.get(decision_id)
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate every other member to the fake this wraps."""
+        return getattr(self.inner, name)
+
+
+@pytest.mark.parametrize("at", ["record", "get"], ids=["the append", "the read-back"])
+async def test_a_trail_that_raises_at_either_await_names_the_ruling_stage(at: str) -> None:
+    """§13's ``RULING_UNAVAILABLE``, over the fault a store actually has.
+
+    ``_LosingTrail`` above models the trail that accepts and loses; this models the
+    one that is simply down, at each of the two awaits ``_ruled`` makes. Both are "an
+    ``AuditTrail`` that could not record the decision" (§9), both degrade the turn
+    rather than failing it, and neither opens a channel — asserted over a searcher
+    that would record the call if one were made.
+    """
+    searcher = FakeWebSearcher(results=(_RESULT,))
+
+    entry = await _disposition_of(trail=_RaisingTrail(at=at), searcher=_CostedSearcher(searcher))
+
+    assert entry["disposition"] == SearchDisposition.RULING_UNAVAILABLE.value
+    assert entry["failed"] is False, "a decline is not a servicing failure"
+    assert searcher.searched == [], "and no channel was opened on a decision nothing holds"
+
+
+class _FaultingSearcher:
+    """A searcher whose authorised ``search`` raises the fault its concrete kin do.
+
+    ADR-0231 §17 gives this seam ``Fetcher``'s raise-for-no-source-reason posture, and
+    the concrete searcher keeps it — but it also performs ``ToolInvoker.invoke``'s own
+    machinery at §6's second route, and *that* raises: ``web_search.py``'s ``search``
+    documents ``ConnectionStoreError`` for a connection record it could not read,
+    ``AuditError`` for a claim append that failed, ``AuthorisationSpentError`` for a
+    spent authorisation, and three more. None of them is a ``SearchRefusal`` and §13
+    has no member for any of them.
+    """
+
+    def __init__(self, error: Exception) -> None:
+        self.inner = _CostedSearcher(FakeWebSearcher(results=(_RESULT,)))
+        self._error = error
+
+    @property
+    def name(self) -> str:
+        """The configured source this searcher serves."""
+        return self.inner.name
+
+    async def request(self, query: str, /) -> ActionRequest | None:
+        """Propose the search, exactly as the fake it wraps does."""
+        return await self.inner.request(query)
+
+    async def search(self, call: ToolCall, /) -> SearchOutcome:
+        """Raise the fault this searcher was built with.
+
+        Args:
+            call: The authorised call, unused.
+
+        Raises:
+            Exception: Whatever this fake was built with.
+        """
+        raise self._error
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ConnectionStoreError("the connection record could not be read"),
+        AuditError("the ledger refused the claim"),
+    ],
+    ids=["a connection store outage", "a ledger that refused the claim"],
+)
+async def test_a_fault_the_searcher_raised_degrades_the_servicing(error: Exception) -> None:
+    """ADR-0226 §5 binds this kind entire, and the searcher's own faults reach it.
+
+    "A mechanism whose whole purpose is a marginal improvement in reach must never be
+    able to take the reply down with it." ADR-0231 §11 restates it — "a servicing
+    failure degrades the turn and never fails it" — and §9's decline list covers the
+    three stages *before* the send, each of which resolves to its own disposition. A
+    fault the searcher raises after the ruling is none of those and has no
+    ``SearchRefusal`` member either, so what it reaches is §5's **all-or-nothing**
+    degradation: the supply is left as planning saw it, every count is zero, and the
+    record says the servicing failed.
+
+    The other kinds' net is deliberately unwidened by this — ADR-0230 §4's fetch seam
+    raises nothing, and the hop and the query raise ``MemoryStoreError`` — so a fault
+    reaches the degradation only from the kind whose seam can produce one.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_belief("belief-1", "Porto has a river"))
+
+    with structlog.testing.capture_logs() as captured:
+        responded = await _loop(
+            planner=FakePlanner(now=_clock, read_request=_search()),
+            memory=memory,
+            search=_servicer(searcher=_FaultingSearcher(error), granted=True),
+        ).respond(_ASK, narrow=_bounded())
+
+    assert responded.turn is not None, "the turn completed"
+    assert responded.turn.plan is not None, "and it carries the plan it was answered from"
+    assert [one.id for one in responded.turn.memories] == ["belief-1"], (
+        "the supply is exactly what planning saw (ADR-0226 §5)"
+    )
+    assert _DISTINCTIVE not in _contents(responded.turn.memories)
+    entry = _serviced(captured)
+    assert entry["failed"] is True, "ADR-0226 §5: the servicing failed"
+    assert entry["new"] == 0
+    assert entry["returned"] == 0
+    assert entry["kinds"] == (ReadKind.WEB_SEARCH.value,), "and the record says which kind"

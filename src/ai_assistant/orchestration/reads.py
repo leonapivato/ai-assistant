@@ -460,7 +460,14 @@ class ServicedRead:
             snippet, a provider message or an exception type to sit. It **rides on
             a failing record too**, exactly as :attr:`refusal` does: §13 enumerates
             the two cases in which the field is empty, and a search that declined
-            before a later kind's read raised is neither.
+            before a later kind's read raised is neither. **One residue is named
+            rather than papered over**: where the *searcher itself* raised a fault
+            after the ruling, this field is empty and :attr:`failed` is what says
+            what happened, because §13's vocabulary is closed at fifteen with no
+            member for a fault at that stage (issue #2112). ADR-0226 §5's
+            all-or-nothing degradation is the ratified answer to such a fault, and
+            it is a record an operator can read; what it is not is a *ninth cause*
+            beside the eight §13 enumerates.
         truncated_kinds: Which kinds the budget cut short, in servicing order.
             Empty where it cut neither.
         failed: Whether the servicing failed. Where it did, every count above is
@@ -586,6 +593,33 @@ class _Union:
             else:
                 truncated = True
         return truncated
+
+
+class _ServicingFailedError(Exception):
+    """A seam's own fault, carried to ADR-0226 §5's one degradation site.
+
+    **Not an error class and not on any contract**: it is module-private, it is
+    never raised across a call this package does not make, and it adds nothing to
+    ``core/errors.py`` — which ADR-0231 forbids in terms. What it does is let one
+    kind's fault reach :func:`service_read_request`'s degradation without widening
+    the net for the other three, whose seams raise nothing this handler does not
+    already state (ADR-0230 §4 for the fetch; ``MemoryStoreError`` for the hop and
+    the query).
+
+    **Why a search needs it and the other kinds do not.** ADR-0231 §17 gives the
+    ``WebSearcher`` seam the same raise-for-no-source-reason posture ``Fetcher``
+    has, so a refused admission, a failed transport, an over-large response and an
+    unattested one are all :class:`~ai_assistant.core.types.SearchRefusal` members.
+    But the concrete searcher performs ``ToolInvoker.invoke``'s own machinery
+    (ADR-0231 §6) and raises for the **faults** that machinery raises for — a
+    connection record that could not be read (ADR-0148 §6's fail-closed limb), a
+    ledger claim the trail refused, an authorisation already spent. Those are not
+    source reasons and have no ``SearchRefusal`` member, and §13's vocabulary is
+    closed at fifteen with no member for them either. ADR-0226 §5 settles what
+    happens to them: "a servicing failure degrades the turn and never fails it",
+    all-or-nothing, "the records that did come back are discarded with the rest" —
+    which is exactly the record the ``finally`` below writes.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -1246,7 +1280,7 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
             for identifier in dict.fromkeys(record.id for record in resolved_by_hop)
             if identifier in union.held
         )
-    except MemoryStoreError:
+    except MemoryStoreError, _ServicingFailedError:
         # §5's whole posture, and the archive's for the same reason ADR-0225 §2
         # gives: "a turn that answered from the supply it had is a worse turn, not
         # a broken one, and a mechanism whose whole purpose is a marginal
@@ -1358,17 +1392,37 @@ async def _serviced_search(  # noqa: PLR0913 — the seam, the composer's one in
     Returns:
         §13's disposition, or ``None`` where the search yielded records and where it
         reached the provider and returned none.
+
+    Raises:
+        _ServicingFailedError: If the searcher raised a fault of its own. Carried to
+            ADR-0226 §5's degradation rather than reported as a disposition, for the
+            reason that class records.
     """
     if search is None:
         return SearchDisposition.NOT_CONFIGURED
-    found = await search.service(
-        utterance,
-        remaining=union.remaining,
-        external=any(
-            rests_on_recorded_external_content(record.provenance)
-            for record in (*supply, *union.admitted)
-        ),
-    )
+    try:
+        found = await search.service(
+            utterance,
+            remaining=union.remaining,
+            external=any(
+                rests_on_recorded_external_content(record.provenance)
+                for record in (*supply, *union.admitted)
+            ),
+        )
+    except AssistantError as exc:
+        # ADR-0226 §5, and the reason :class:`_ServicingFailedError` exists.
+        # ADR-0231 §9's decline list names the three stages *before* the send — a
+        # binder, a policy, a trail — and each of those resolves to its own
+        # disposition without raising. What reaches here is a fault the searcher
+        # itself raised **after** the ruling, performing ``ToolInvoker.invoke``'s
+        # machinery at §6's second route: a connection record it could not read
+        # (ADR-0148 §6's fail-closed limb), a ledger claim the trail refused, an
+        # authorisation already spent. §13's vocabulary is closed at fifteen with no
+        # member for any of them and §17 gives the seam no ``SearchRefusal`` for them
+        # either, so the ratified answer is ADR-0226 §5's all-or-nothing degradation
+        # — which is what this reaches, and which leaves the supply as planning saw
+        # it with every count zero.
+        raise _ServicingFailedError from exc
     reads.note(len(found.records))
     if union.admit(found.records):
         truncated.append(ReadKind.WEB_SEARCH)
