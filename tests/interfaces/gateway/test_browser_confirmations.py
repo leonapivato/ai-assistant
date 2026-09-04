@@ -601,6 +601,34 @@ async def test_a_confirmation_whose_value_cannot_be_located_is_not_put_at_all(
 #: state (round 2), and last the shapes that used to **throw** rather than refuse
 #: (round 6): an ``egress`` that is absent, a ``spans`` that is not a list, and a
 #: ``parameters`` that is not one either.
+def _negative_position(view: dict[str, Any]) -> None:
+    """A locator naming a position no decomposition has, on both halves at once.
+
+    Both, because the join is what a one-sided change would be caught by: the page asks
+    that a span's locator names exactly one argument entry, so moving only the span
+    would be refused for naming none and would say nothing about the bound.
+    ``EgressSpan.index`` carries ``ge=0``, so this is a body ``core`` refuses to build.
+
+    Args:
+        view: The confirmation view to spoil.
+    """
+    view["parameters"][1]["index"] = -1
+    view["egress"]["spans"][1]["index"] = -1
+
+
+def _negative_extent(view: dict[str, Any]) -> None:
+    """A span describing its value as fewer than no code points.
+
+    ``EgressSpan.extent`` carries ``ge=0`` and ``_span_defect`` checks it against the
+    value, so this too is a body ``core`` refuses to build — and rendered, it would put
+    "-1 code points" beside the bytes as a fact about them.
+
+    Args:
+        view: The confirmation view to spoil.
+    """
+    view["egress"]["spans"][0]["extent"] = -1
+
+
 _FAULTS: dict[str, Callable[[dict[str, Any]], None]] = {
     "an omitted value": lambda view: view["parameters"][1].pop("value"),
     "a numeric value": lambda view: view["parameters"][1].update({"value": 12}),
@@ -615,6 +643,8 @@ _FAULTS: dict[str, Callable[[dict[str, Any]], None]] = {
     "an omitted egress": lambda view: view.pop("egress"),
     "spans that are not a list": lambda view: view["egress"].update({"spans": {}}),
     "arguments that are not a list": lambda view: view.update({"parameters": {}}),
+    "a negative position": _negative_position,
+    "a negative extent": _negative_extent,
 }
 
 
