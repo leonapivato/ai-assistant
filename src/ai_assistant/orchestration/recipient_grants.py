@@ -40,11 +40,13 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
     DuplicateRecipientGrantError,
     InvalidRecipientGrantError,
     InvalidResolutionError,
     PermissionDeniedError,
+    PlanningError,
     RecipientGrantCeilingError,
     RecipientGrantError,
     UngrantableActError,
@@ -98,13 +100,17 @@ class RecipientGrantOperations:
                 one would be minting into a write-once store.
             clock: Reads the instant of the call, and the instant an answer this
                 object records carries. Injected for the same reason, and one
-                sharper: a client's clock would backdate a user act.
+                sharper: a client's clock would backdate a user act. **Guarded at
+                the moment it is stored** (ADR-0026 §2), which is where
+                :func:`~ai_assistant.core.clock.checked_clock` says to put it — "a
+                call site cannot forget" — so every reading below is aware, UTC and
+                localizable rather than checked three times or not at all.
         """
         self._store = store
         self._trail = trail
         self._policy = policy
         self._id_factory = id_factory
-        self._clock = clock
+        self._clock = checked_clock(clock, owner="RecipientGrantOperations")
 
     # --- the offerable rows (ADR-0235 §3) ------------------------------------
 
@@ -137,7 +143,7 @@ class RecipientGrantOperations:
             PlanningError: If the injected clock's reading is not conforming.
         """
         rows = await self._trail.recent(limit=limit)
-        now = self._clock()
+        now = self._now()
         # A resolution is at or after the confirmation it answers (`AuditTrail.record`
         # refuses one "decided *after* the resolution answering it"), so every
         # resolution of a candidate strictly newer than the oldest returned row is
@@ -352,7 +358,7 @@ class RecipientGrantOperations:
             tool=outstanding.tool,
             account=outstanding.account,
             destinations=outstanding.destinations,
-            decided_at=self._clock(),
+            decided_at=self._now(),
             expires_at=outstanding.expires_at,
             revokes=outstanding.id,
         )
@@ -417,7 +423,7 @@ class RecipientGrantOperations:
                 f"the one that may be made standing (ADR-0044 §2b, ADR-0235 §3)"
             )
             raise UngrantableActError(msg)
-        now = self._clock()
+        now = self._now()
         if confirmed.expires_at is not None and confirmed.expires_at <= now:
             msg = (
                 f"decision {decision_id!r} stopped being answerable at "
@@ -479,7 +485,7 @@ class RecipientGrantOperations:
             AuditError: If the trail refused the answer on any other ground.
             PlanningError: If the injected clock's reading is not conforming.
         """
-        decided_at = self._clock()
+        decided_at = self._now()
         if ruling.outcome is PermissionOutcome.ALLOW and expires_at <= decided_at:
             msg = (
                 f"a standing recipient grant expires strictly after the answer that "
@@ -520,6 +526,30 @@ class RecipientGrantOperations:
             )
             raise UngrantableActError(msg) from exc
         return answer
+
+    def _now(self) -> datetime:
+        """The guarded clock's reading, as the reading stage's own error.
+
+        ``core/errors.py`` defines no error for `orchestration`, so ADR-0026 §4 gives
+        the failure to the **stage**: this is :meth:`StepRunner._now`'s translation,
+        one seam over, and it is what makes the ``PlanningError`` each operation's
+        docstring declares true rather than aspirational.
+
+        **The guard covers the reading and not the invocation** (ADR-0026 §2). An
+        exception the injected callable raises *itself* propagates unwrapped —
+        that is the clock's own failure, already carrying its own type and cause —
+        and only a :class:`~ai_assistant.core.clock.ClockReadingError` is
+        translated, which is why that class is distinct from a bare ``ValueError``.
+
+        Raises:
+            PlanningError: If the injected clock's reading is not a conforming one —
+                naive, indeterminate, or outside the localizable range.
+        """
+        try:
+            return self._clock()
+        except ClockReadingError as exc:
+            msg = f"the recipient-grant operations' clock returned a non-conforming reading: {exc}"
+            raise PlanningError(msg) from exc
 
     async def _resolution_of(self, decision_id: str) -> PermissionDecision | None:
         """The decision resolving ``decision_id``, or ``None`` — conclusively.
