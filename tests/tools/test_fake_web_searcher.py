@@ -105,7 +105,7 @@ class TestFakeWebSearcherContract(WebSearcherContract):
     def content_bound(self) -> int:
         return _CONTENT_BOUND
 
-    def searching(self, results: int) -> ScriptedSearch:
+    async def searching(self, results: int) -> ScriptedSearch:
         # Distinct contents, so an implementation that minted one record per result
         # and one that minted the same record `results` times are told apart by the
         # cases that read them back.
@@ -115,22 +115,22 @@ class TestFakeWebSearcherContract(WebSearcherContract):
         )
         return ScriptedSearch(searcher=subject, call=_authorised(subject))
 
-    def refusing(self, refusal: SearchRefusal) -> ScriptedRefusal:
+    async def refusing(self, refusal: SearchRefusal) -> ScriptedRefusal:
         subject = FakeWebSearcher(refusals={QUERY: refusal}, max_result_chars=_CONTENT_BOUND)
         return ScriptedRefusal(searcher=subject, call=_authorised(subject))
 
-    def gated(self) -> GatedSearch:
+    async def gated(self) -> GatedSearch:
         subject = FakeWebSearcher(max_result_chars=_CONTENT_BOUND)
         return GatedSearch(searcher=subject, call=_authorised(subject), arm=subject.suspend_next)
 
-    def connected(self) -> ConnectedAccount:
+    async def connected(self) -> ConnectedAccount:
         return ConnectedAccount(
             searcher=FakeWebSearcher(max_result_chars=_CONTENT_BOUND),
             origin=DEFAULT_SEARCH_ORIGIN,
             declaration=FAKE_WEB_SEARCH,
         )
 
-    def unconnected(self) -> FakeWebSearcher:
+    async def unconnected(self) -> FakeWebSearcher:
         return FakeWebSearcher(origin=None)
 
 
