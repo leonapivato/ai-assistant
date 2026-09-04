@@ -14,7 +14,7 @@ is discharged in what the user reads and nowhere else.
 from __future__ import annotations
 
 import ast
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
 from typing import Any, Final
@@ -22,7 +22,8 @@ from typing import Any, Final
 import pytest
 import typer.main
 from rich.console import Console
-from test_cli_decisions import _binding, _decision, _flat
+from test_cli import _egress_confirmation
+from test_cli_decisions import _binding, _decision, _flat, _span
 from test_cli_invocations import _help_text
 from typer.testing import CliRunner
 
@@ -35,11 +36,14 @@ from ai_assistant.core.errors import (
     UngrantableActError,
 )
 from ai_assistant.core.types import (
+    Confirmation,
+    ContinuationToken,
     PermissionOutcome,
     RecipientGrantNotEstablished,
     RecipientGrantOutcome,
 )
 from ai_assistant.interfaces import cli
+from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.testing.recipient_grants import recipient_grant
 
 #: The instant a case types, and the shape §9 fixes: ISO 8601 with an offset.
@@ -381,6 +385,78 @@ async def test_a_refusal_before_the_answer_says_the_call_is_not_made_by_this_act
     assert code == cli._EXIT_ERROR
     assert "already answered" in rendered
     assert "still waiting for an answer" not in rendered
+
+
+# --- §9: no non-interactive flag establishes a grant -------------------------
+
+
+def _plain_confirmation() -> Confirmation:
+    """A parked card about a call that discloses nothing off-device."""
+    return Confirmation(
+        tool_id="t-1",
+        tool_description="a local tool",
+        parameters={},
+        reason="the policy wants a human answer",
+        token=ContinuationToken(handle="plain-1"),
+        egress=None,
+    )
+
+
+@pytest.mark.parametrize(
+    "confirmation",
+    [
+        _plain_confirmation(),
+        _egress_confirmation(_span("to", canonical="a@example.com")),
+        _egress_confirmation(
+            _span("to", canonical="a@example.com"), planned_with_external_content=True
+        ),
+    ],
+    ids=["no-egress", "egress", "egress-planned-over-external"],
+)
+def test_yes_answers_no_card_the_standing_control_may_ride(confirmation: Confirmation) -> None:
+    """ADR-0235 §9: ``--yes`` "never supplies the act", and the two halves make it so.
+
+    §9 rules that no non-interactive flag, environment variable, configuration value
+    or scripted default establishes a grant. On this surface that is not a check but
+    a **disjointness**, and it takes both halves to see it, which is why the case
+    asserts the conjunction rather than either side: :func:`cli._assume_yes` answers
+    only a card whose ``egress`` is ``None``, and
+    :func:`cli._may_ride_an_establishing_act` offers the argument only for a card
+    whose ``egress`` is not — and ``_drive_resume`` sends the expiry only where the
+    answer is affirmative *and* the act may ride. So no card is both, the expiry
+    reaches ``resume`` on none of them, and the combination establishes nothing.
+
+    It fails against a ``--yes`` widened to answer an egress card, which is the shape
+    that would make the flag supply the act.
+    """
+    approved = cli._assume_yes(confirmation)
+
+    assert not (approved is True and cli._may_ride_an_establishing_act(confirmation))
+
+
+async def test_yes_beside_the_flag_carries_no_expiry_and_records_no_grant(
+    output: StringIO,
+) -> None:
+    """The other half of §9's rule, driven rather than reasoned about.
+
+    The card ``--yes`` *does* answer is the one the act may not ride, so the run
+    answers it, tells the user the standing request was not offered here, and leaves
+    the store empty. A ``--yes`` that supplied the act would have to establish a
+    grant on this card, since it is the only kind of card the flag answers at all.
+    """
+    engine = FakeAssistantEngine()
+    engine.park("plain-1")
+
+    code = await cli._drive_resume(
+        engine,
+        timeout=timedelta(seconds=30),
+        approver=cli._assume_yes,
+        remember_recipients_until=datetime(2026, 10, 1, 9, 0, tzinfo=UTC),
+    )
+
+    assert code == cli._EXIT_OK
+    assert await engine.recipient_grants.export() == []
+    assert "not a call whose recipients can be made standing" in _flat(output.getvalue())
 
 
 def test_the_held_populations_refusal_says_the_call_is_still_answerable(
