@@ -206,17 +206,39 @@
   its round-trip, `wire/codec.py` and per-defect rejection tests — was satisfied
   inside the triad lane's fence, which is exactly what "A lane satisfies the rows
   of this table that fall inside its fence and adds none" asks of it.
+  **§13's own preamble is the third thing that points this way**, and it is
+  unmarked text doing exactly what ADR-0089 §3 keeps it for: "The waves below are
+  what §11's deferrals are cut around; **which of them ride in one lane is
+  ADR-0137's question and not this ADR's** … What is decided here is what each
+  wave must contain if it exists." So the third clause's "in **one** lane" is a
+  co-landing constraint compelled by the gate — its own sentence says so, and its
+  subject is §3's member on a *provided* contract — rather than a free-standing
+  allocation this ADR sets out to decide.
   **Nothing decided changes and no reader acts differently as to the decision**
-  (ADR-0070 §1, and its 2026-07-31 §1 note on what "differently" means). What is
-  corrected is which of this ADR's own sentences a reader acts on where two of
-  them cannot both be obeyed, and §1's signatures are what settle it: no
-  obligation is added, removed or moved between waves that §1 and §13's first
-  clause did not already fix. This is an internal contradiction in this ADR's own
-  words — ADR-0070 §1's first term — with no other ADR as its cause, so it is
-  recorded as this appended dated note, §13's text below is **not** rewritten, and
-  no `Status` edit is owed (ADR-0082 §1); the `Status` line leads with `Partially
-  superseded by` in any event, which ADR-0082 §2 excludes an amendment qualifier
-  from. Refs #1676, #1657, PR #1677, PR #1685, ADR-0200 §1, §9, §13, ADR-0137 §2.
+  (ADR-0070 §1). What is corrected is which of this ADR's own sentences a reader
+  acts on where two of them cannot both be obeyed, and §1's signatures are what
+  settle it: no obligation is added, removed or moved between waves that §1 and
+  §13's first clause did not already fix. **The objection that a reader
+  nonetheless *acts* differently is the one ADR-0070 §1's own 2026-07-31 note
+  answers**, and it answers it by name: "the operative test is the one §1 leads
+  with and repeats — 'changes no decision' — and 'anything a reader would act on
+  differently' is a gloss on *what was decided*, not an independent, wider test",
+  because "Correcting a broken cross-reference, a stale phrase or **an internal
+  contradiction** changes which text a reader is pointed at or **which of two
+  sentences they act on**; it does not change what the ADR decided, which is why
+  §1 lists all three." That note records the same objection raised as a `blocker`
+  against PR #538, waived on the merits, and it states the limit that keeps the
+  reading safe — the enumeration is not a bypass, and a correction that *reverses*
+  a decision is a supersession however labelled. This one reverses nothing: the
+  member sets, the types, the engine member, the wire member and the version bump
+  are all exactly where the ADR put them, both waves are merged, and no lane is
+  left for either reading to direct. This is an internal contradiction in this
+  ADR's own words — ADR-0070 §1's first term — with no other ADR as its cause, so
+  it is recorded as this appended dated note, §13's text below is **not**
+  rewritten, and no `Status` edit is owed (ADR-0082 §1); the `Status` line leads
+  with `Partially superseded by` in any event, which ADR-0082 §2 excludes an
+  amendment qualifier from. Refs #1676, #1657, PR #1677, PR #1685, ADR-0200 §1,
+  §9, §13, ADR-0137 §2, ADR-0089 §3.
 
 ## Context
 
