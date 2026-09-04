@@ -291,7 +291,7 @@ async def test_every_plan_is_persisted_and_the_chain_is_legible() -> None:
     ``ActionPlan``" and under iteration the ask that was actually serviced is on the
     plan the turn replaced.
 
-    And the export carries both, at ``schema_version`` 4.
+    And the export carries both, at the ``schema_version`` the type pins.
     """
     planner = _DependentPlanner()
     harness = Harness(memory=await _store_holding_the_address(), planner=planner)
@@ -306,7 +306,7 @@ async def test_every_plan_is_persisted_and_the_chain_is_legible() -> None:
     assert revision.id != first.id
 
     export = await harness.plans.export()
-    assert export.schema_version == 5
+    assert export.schema_version == 6
     assert {plan.id for plan in export.plans} == {first.id, revision.id}
 
 

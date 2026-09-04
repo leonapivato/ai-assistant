@@ -1013,7 +1013,62 @@ from ai_assistant.wire.errors import (
 #: **This move covers the shape going forward and repairs nothing already
 #: released**, on the chain the two entries above are on: #1956's window stays open
 #: and this entry neither repairs it nor inherits it.
-PROTOCOL_VERSION: Final[int] = 29
+#: **30 since ADR-0231 §16**, which admits ``WEB_SEARCH`` to
+#: :class:`~ai_assistant.core.types.ReadKind` (§1) — ADR-0124 §9's **second** limb
+#: once more, with each limb of the conjunction the two entries above state checked
+#: against the tree rather than inherited:
+#:
+#: * ``ActionPlan`` is carried to a client and a ``ReadAsk`` rides inside it, by the
+#:   route the entry above traces: ``wire/client.py``'s ``converse`` and ``resume``
+#:   return :class:`~ai_assistant.core.types.TurnOutcome`, whose ``turn`` is a
+#:   :class:`~ai_assistant.core.types.TurnResult`, whose ``plan`` is an
+#:   ``ActionPlan``, whose ``read_request`` carries the asks.
+#: * ``wire/codec.py``'s ``project`` renders a model with a bare ``model_dump()``,
+#:   so an ask's ``kind`` is on the wire on every request-carrying turn, and an
+#:   ``Enum`` crosses as its ``value`` — the string ``"web_search"``.
+#: * ``ReadAsk`` sets ``ConfigDict(extra="forbid", frozen=True)`` and its ``kind`` is
+#:   a **closed** enumeration, so a peer whose ``ReadKind`` predates ``WEB_SEARCH``
+#:   fails to decode a ``TurnOutcome`` whose plan names that kind.
+#:
+#: **Which limb actually bites, said precisely, because this move is not the
+#: previous one.** ADR-0231 §1 gives this kind **no field**: "``ReadAsk`` gains no
+#: field for this kind, and no later lane adds one without the ADR that decides it."
+#: So the wider half of ADR-0230 §12's pair — a defaulted member the projection
+#: emits on every request-carrying turn, refused by ``extra="forbid"`` — is **not
+#: reached here**, and this entry does not borrow it. What obliges the move is the
+#: narrower half alone: the enumeration is closed, so a version 29 peer handed
+#: ``"web_search"`` refuses the value outright. That population is every turn on
+#: which a planner asks for a search, which ADR-0231 §17's Lane 4 is precisely the
+#: change that makes possible.
+#:
+#: **It bites in one direction and the asymmetry is stated rather than assumed.** A
+#: version 30 hub sends a plan naming the kind and a version 29 client refuses it; a
+#: version 29 hub never emits the value at all, so a version 30 client decoding one
+#: sees nothing new. That is one direction fewer than the entry above it, and it is
+#: still the state the handshake exists to make legible rather than to discover
+#: inside a ``converse``.
+#:
+#: **The method set does not move and stands at forty-nine**, and ADR-0177 §1's
+#: browser enumeration does not move either and stands at thirty-one: ADR-0231 §17's
+#: Lane 4 adds no Protocol, no method to the promoted ``AssistantEngine`` surface and
+#: no gateway route. ``tests/core/test_engine_surface_closure.py`` pins the figure
+#: beside this constant. The two Protocols ADR-0231 does decide —
+#: ``QueryComposer`` and ``WebSearcher`` — landed in Lanes 1 and 3 and are on neither
+#: surface, so they are not a second ground for this bump either.
+#:
+#: **No row is minted in ADR-0087 §2c's scalar table**: ``project`` already renders
+#: every ``Enum`` as its ``value``, which is a string, exactly as it renders the
+#: three ``ReadKind`` members that crossed before this one. Nothing else under
+#: ``wire/`` changes — not the framing, the connect exchange, the frame kinds, the
+#: codec's dispatch, ``surface.METHODS`` or either adapter — and the error registry is
+#: untouched, because ADR-0231 §1 adds no error class and a refused search is a
+#: ``SearchRefusal`` rather than a raise.
+#:
+#: **This move covers the shape going forward and repairs nothing already
+#: released**, on the chain every entry above it is on: #1956's window stays open,
+#: and ADR-0231 §16 states in terms that this decision "neither repairs nor inherits"
+#: it.
+PROTOCOL_VERSION: Final[int] = 30
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

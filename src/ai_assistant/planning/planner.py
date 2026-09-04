@@ -610,6 +610,74 @@ names no capability, sends nothing anywhere and reaches no network: it is this \
 device's own disk, read for this turn only."""
 
 
+#: ADR-0231 §1's fourth member of ``read_request``, asked for with no argument at
+#: all.
+#:
+#: **Unconditional, where :data:`_LOCAL_FILE_GUIDANCE` is conditional, and the
+#: asymmetry is ADR-0226 §5's scoping posture rather than inconsistency.** §5 rules
+#: that "a planner on such a turn is not told that its request will not be serviced",
+#: and ADR-0231 §17 applies that to this kind in terms: "a planner is not told whether
+#: a search will be serviced". A listing was different because §2 makes a turn with no
+#: listing "a turn on which no file is nameable" — every ``F`` label would resolve to
+#: nothing — whereas this member takes no label and no address, so there is nothing
+#: for a deployment's state to make unnameable. What varies between deployments is the
+#: **servicing**, which this seam does not see and ADR-0226 §8 keeps measuring on every
+#: channel.
+#:
+#: **It asks for a flag and forecloses every other spelling** (§1). The ask "carries no
+#: ``query``, no ``labels`` and no ``entry``" and ``ReadAsk`` gains no field for it, so
+#: the block states there is nothing to write rather than leaving a model to infer it
+#: from the absence of an example. That is §1's safety claim reaching the prompt: a
+#: planner-composed query would be covered content — ``Planner.plan`` is handed
+#: ``memories`` read from a store under ``Settings.data_dir`` — and ADR-0155 §3's third
+#: clause forbids that reaching an egress span. The type already makes such a field
+#: unconstructable; what the prompt adds is that a model writing one has not been
+#: quietly overruled, it has reached nothing.
+#:
+#: **And it corrects :data:`_READ_REQUEST_GUIDANCE` rather than restating it**, on the
+#: same footing :data:`_LOCAL_FILE_GUIDANCE` does. That block says "nothing is sent
+#: anywhere, and nothing is looked up outside this system", and this is the one member
+#: of which neither half is true. A reader who met that sentence and then this one
+#: without the correction would have to reconcile two paragraphs, and the honest
+#: reading of the corrected pair is the one ADR-0231 §12 states plainly of the
+#: mechanism: on a turn that searches, the user's question leaves.
+#:
+#: **No address, in either direction** (§2). "No ``ReadKind`` accepts a URL, a host, a
+#: domain or any other address from a model", so the block refuses a site, a domain and
+#: a phrasing in the same breath as it refuses a query — not because one would be
+#: honoured (there is no field to carry it) but because a model that writes one has
+#: understood the member as an address space, which it is not.
+#:
+#: A separate constant for :data:`_STATED_FACT_GUIDANCE`'s reason: the prompt test can
+#: assert it **reaches the model** without string-matching its wording.
+_WEB_SEARCH_GUIDANCE = """\
+There is one more member you may add to the same `read_request` object, and it \
+asks for ONE search of the web:
+
+ "web_search": true
+
+That is the whole of the request. `true` is the only value it takes, and you do \
+not write what to search for: the words that are searched are composed separately \
+from the user's own words for this turn, and from nothing else. There is no query, \
+no site, no domain, no address and no phrasing here for you to send — no member \
+carries one, and writing one reaches nothing at all.
+
+This is the one member of `read_request` for which the paragraph above does not \
+hold. The other members are read inside this system; a search is not. The user's \
+question, in words composed from their own, goes to a search provider outside this \
+device, and what comes back are that provider's own results. Ask for one where the \
+goal turns on something outside this assistant and outside this user's own record \
+of themselves — something public, something in the world, something newer than \
+anything you can see — and neither the memories below nor the conversation carries \
+it. Where the answer is already in front of you, or the question is about the user \
+themselves, their own past or their own files, ask for nothing.
+
+Send at most one search, and do not send the key at all unless you are asking for \
+one. A search runs no tool from the list above, names no capability, and is not a \
+step: it does not belong in `steps`, and asking for it does not change which of the \
+two shapes you are sending. You are still answering now from what you have."""
+
+
 def _system_prompt(capabilities: Sequence[str], *, files_shown: bool) -> str:
     """Build the planning system prompt over the vocabulary advertised this turn.
 
@@ -639,16 +707,24 @@ def _system_prompt(capabilities: Sequence[str], *, files_shown: bool) -> str:
     label actually printed — already says what that leaves askable, without this
     function taking a second input to say it twice.
 
+    :data:`_WEB_SEARCH_GUIDANCE` sits below :data:`_ACT_RECORD_GUIDANCE` for the same
+    reason again — it adds a member to the request those blocks have described — and
+    **unconditionally**, which is ADR-0226 §5's scoping posture as ADR-0231 §17 applies
+    it: "a planner is not told whether a search will be serviced". It also carries the
+    one correction the block above needs, since that block's "nothing is sent anywhere"
+    stops being the whole truth once this member exists (ADR-0231 §12).
+
     **:data:`_LOCAL_FILE_GUIDANCE` is the one block that is conditional, and it sits
-    last** (ADR-0230 §2, §3). It adds a third member to the request the block above
-    has just described, so a reader meeting it before that block would be told about
-    an addition to a shape they have not been shown; and it is stated only where the
-    loop passed a listing, because §2 makes a turn with no listing "a turn on which no
-    file is nameable" and a block describing an unaskable member would fill ADR-0226
-    §9's unresolved-label population with emissions the prompt asked for. That is why
-    this function takes a second input where the empty-supply case needed none: an
-    empty listing genuinely does change which shape is available, in the way an empty
-    vocabulary does.
+    last** (ADR-0230 §2, §3). It adds a member to the request the blocks above have
+    just described, so a reader meeting it before them would be told about an addition
+    to a shape they have not been shown; and it is stated only where the loop passed a
+    listing, because §2 makes a turn with no listing "a turn on which no file is
+    nameable" and a block describing an unaskable member would fill ADR-0226 §9's
+    unresolved-label population with emissions the prompt asked for. That is why this
+    function takes a second input where the empty-supply case needed none: an empty
+    listing genuinely does change which shape is available, in the way an empty
+    vocabulary does. A ``WEB_SEARCH`` ask takes no label at all, so no deployment's
+    state can make it unnameable and the same conditionality would buy nothing.
 
     Args:
         capabilities: The vocabulary the registry advertised for this turn, taken
@@ -675,6 +751,8 @@ def _system_prompt(capabilities: Sequence[str], *, files_shown: bool) -> str:
         _READ_REQUEST_GUIDANCE,
         "",
         _ACT_RECORD_GUIDANCE,
+        "",
+        _WEB_SEARCH_GUIDANCE,
     ]
     if files_shown:
         blocks += ["", _LOCAL_FILE_GUIDANCE]
@@ -990,10 +1068,11 @@ class ModelBackedPlanner:
 def _optional_read_request(envelope: dict[str, object]) -> ReadRequest | None:
     """Read ADR-0226 §4's ``read_request`` out of one envelope, or return ``None``.
 
-    Builds at most one ask of each kind from the three optional members the prompt
+    Builds at most one ask of each kind from the four optional members the prompt
     asks for — a non-blank ``query`` becomes a ``SIGHTED_QUERY`` ask, a list of one
-    or two label strings becomes a ``CITATION_HOP`` ask, and a non-blank ``file``
-    becomes a ``LOCAL_FILE`` ask (ADR-0230 §1) — and hands them to
+    or two label strings becomes a ``CITATION_HOP`` ask, a non-blank ``file``
+    becomes a ``LOCAL_FILE`` ask (ADR-0230 §1), and a ``web_search`` of exactly
+    ``true`` becomes a ``WEB_SEARCH`` ask (ADR-0231 §1) — and hands them to
     :class:`~ai_assistant.core.types.ReadRequest`, whose validators are the
     authority on every condition §4 states. An envelope carrying no ``read_request``,
     or one from which no ask could be built, yields ``None``, which ADR-0226 §4
@@ -1052,6 +1131,10 @@ def _optional_read_request(envelope: dict[str, object]) -> ReadRequest | None:
     file_label = raw.get("file")
     if file_label is not None:
         asks += _file_ask(file_label)
+
+    searched = raw.get("web_search")
+    if searched is not None:
+        asks += _search_ask(searched)
 
     if not asks:
         _log.info(_READ_REQUEST_DROPPED, reason="no_usable_ask")
@@ -1136,6 +1219,54 @@ def _file_ask(entry: object) -> list[ReadAsk]:
         _log.info(_READ_REQUEST_DROPPED, reason="unusable_file")
         return []
     return [ReadAsk(kind=ReadKind.LOCAL_FILE, entry=entry)]
+
+
+def _search_ask(searched: object) -> list[ReadAsk]:
+    """Build the ``WEB_SEARCH`` ask from an envelope's ``web_search``, or nothing.
+
+    **The ask carries no argument, so there is nothing here to read off the value**
+    (ADR-0231 §1). What the member says is *whether* the planner asked, and the only
+    spelling of "yes" this accepts is the boolean ``true`` the prompt shows. A
+    request naming the kind is one ask of it; ``ReadRequest``'s validator holds the
+    at-most-one-of-each-kind rule as it does for every other kind.
+
+    **``false`` is a "no" and never a drop.** A model that answers the member
+    explicitly has asked for nothing, which is exactly the state the absent member
+    describes, so it adds no ask and increments no counter: recording it as malformed
+    would put a well-formed refusal into the population :data:`_READ_REQUEST_DROPPED`
+    exists to distinguish from an emission that never happened, and ADR-0226 §8's
+    fire rate is read against that.
+
+    **Everything else is a drop, and the identity check is what makes that true of
+    ``1`` too.** ``bool`` is a subclass of ``int`` in Python, so ``searched == True``
+    would read a JSON ``1`` as an ask; ``is True`` does not. A string is the case
+    worth refusing on purpose rather than by omission: a model writing
+    ``"web_search": "flights to Lisbon"`` has composed a query, and §1 rules that no
+    field carries one. Honouring it as a bare ask would search the utterance while
+    leaving the model believing its words were used — a different question asked
+    silently — so the emission is dropped and counted, which is the honest cost
+    ADR-0226 §8 asks be visible rather than absorbed.
+
+    **Nothing here decides whether a search will happen** (ADR-0226 §5, ADR-0231
+    §17). Whether an account is connected, whether the policy rules ``ALLOW`` and
+    whether the budget has a slot are all the loop's, on the far side of a seam this
+    function cannot see; a planner is not told, so this parse reads the emission and
+    nothing else.
+
+    Args:
+        searched: The envelope's ``web_search`` member, whatever the model wrote
+            there.
+
+    Returns:
+        A one-element list holding the ask where the member is exactly ``true``, and
+        an empty list otherwise.
+    """
+    if searched is True:
+        return [ReadAsk(kind=ReadKind.WEB_SEARCH)]
+    if searched is False:
+        return []
+    _log.info(_READ_REQUEST_DROPPED, reason="unusable_web_search")
+    return []
 
 
 def _render_request(
