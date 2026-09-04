@@ -38,7 +38,10 @@ over a ``LearningLoop`` under ``tests/orchestration/``.
 or a CI runner's device chain may legitimately refuse — and a test of the *wiring* has
 no business being decided by the machine it runs on.
 
-**And every configured bound reaches the fetcher, which is its own arm** (ADR-0232 §9).
+**And every configured bound reaches the fetcher, which is its own arm** (ADR-0232 §9,
+ADR-0234 §8, which repeats the clause for its own field in as many words: "without it an
+operator's configured value reaches ``readers`` never, and the bound is a field nothing
+enforces").
 The bounds are passed explicitly here and the fetcher defaults each one, so a figure
 left off this call site is not a build failure: it is an operator's configured value
 silently ignored, while the field goes on validating at load and the fetcher goes on
@@ -61,7 +64,7 @@ import pytest
 sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "readers"))
 
 from fetch_fixtures import vouching
-from pdf_fixtures import drawing, pages_sharing_a_font
+from pdf_fixtures import bfrange_cmap, drawing, mapped_font_pages_pdf, pages_sharing_a_font
 
 from ai_assistant.app import composition
 from ai_assistant.app.composition import build_engine
@@ -104,6 +107,7 @@ def vouched(monkeypatch: pytest.MonkeyPatch) -> list[LocalFileFetcher]:
             max_file_bytes=settings.fetch_max_file_bytes,
             max_content_bytes=settings.fetch_max_content_bytes,
             max_decoded_bytes=settings.fetch_max_decoded_bytes,
+            max_character_mappings=settings.fetch_max_character_mappings,
         )
         built.append(fetcher)
         return fetcher
@@ -295,6 +299,57 @@ async def test_a_configured_decoded_bound_reaches_the_fetcher(
     try:
         listing = await fetcher.listing()
         entry = next(one for one in listing.entries if one.name == "drawn.pdf")
+        outcome = await fetcher.fetch(listing, entry)
+    finally:
+        fetcher.close()
+
+    if configured_below_the_documents_charge:
+        assert outcome.refusal is FetchRefusal.TOO_LARGE
+        assert outcome.record is None
+    else:
+        assert outcome.refusal is None
+        assert outcome.record is not None
+
+
+@pytest.mark.parametrize("configured_below_the_documents_charge", [True, False])
+async def test_a_configured_mapping_bound_reaches_the_fetcher(
+    tmp_path: Path,
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configured_below_the_documents_charge: bool,
+) -> None:
+    """ADR-0234 §8's wiring clause, over the **real** builder and over behaviour.
+
+    The sibling of the arm above, one field over, and it needs its own document rather
+    than sharing that one: a page of drawing operators builds no ``/ToUnicode`` mapping
+    at all, so it could not tell a wired mapping bound from an unwired one. This document
+    carries a font whose ``/ToUnicode`` is 178 bytes of ``bfrange`` declaring a thousand
+    mappings — a quantity the *byte* bound cannot see, which is the whole reason
+    ADR-0234 §2 makes it a second field and the reason a second wiring arm is owed.
+
+    Both configured values are non-default, so a wiring that dropped the figure would
+    take the 400,000 default and admit the document in both directions; and only the pair
+    is evidence, since the refusal alone would pass on a fetcher refusing everything.
+    """
+    cmap = bfrange_cmap(1_000)
+    document = mapped_font_pages_pdf(pages=1, cmap=cmap)
+    (root / "mapped.pdf").write_bytes(document)
+    charge = 1_000
+    assert charge < 400_000, "the shipped default must admit this document"
+    configured = charge - 1 if configured_below_the_documents_charge else charge
+
+    monkeypatch.setattr(files_module, "ProcPlatformTables", lambda: vouching(root))
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        fetch_root_path=root,
+        fetch_max_character_mappings=configured,
+    )
+    fetcher = composition._build_local_file_fetcher(settings)
+
+    assert fetcher is not None
+    try:
+        listing = await fetcher.listing()
+        entry = next(one for one in listing.entries if one.name == "mapped.pdf")
         outcome = await fetcher.fetch(listing, entry)
     finally:
         fetcher.close()

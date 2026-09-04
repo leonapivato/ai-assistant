@@ -757,7 +757,7 @@ def hollow_invocations_pdf(*, hollow: int, form_bytes: int) -> bytes:
     )
 
 
-def object_stream_and_cmap_pdf(*, objstm_bytes: int, cmap_bytes: int) -> bytes:
+def object_stream_and_cmap_pdf(*, objstm_bytes: int, cmap_bytes: int, pages: int = 1) -> bytes:
     """A document whose large ``/ObjStm`` and large ``/ToUnicode`` are both decoded.
 
     The two decoded inputs ADR-0232 deliberately does **not** charge, in one document,
@@ -773,24 +773,43 @@ def object_stream_and_cmap_pdf(*, objstm_bytes: int, cmap_bytes: int) -> bytes:
     It needs a **cross-reference stream** rather than the classic table every other
     fixture here uses, because an object inside an ``/ObjStm`` is reachable only through
     a type-2 entry, which a classic table has no way to spell.
+
+    ``pages`` repeats that page, which is what ADR-0234 §6's measurement needs: the
+    object stream's decode is entered **once** whatever the page count, because
+    ``_get_object_from_stream`` parses every object in one pass and caches each and
+    ``get_object`` consults that cache first — flat where the CMap's per-page cost is
+    linear, and the whole of why one half of ADR-0232 §10's class fired and the other
+    did not.
     """
+    assert pages >= 1, "a document of no pages is not one"
     cmap = SMALLEST_TO_UNICODE + b"\n%" + b"C" * max(cmap_bytes - len(SMALLEST_TO_UNICODE) - 2, 1)
     font_body = b"<< /Type /Font /Subtype /TrueType /BaseFont /Uncharged /ToUnicode 6 0 R >>"
     header = b"4 0 "
     objstm_data = header + font_body
     objstm_data += b"\n%" + b"S" * max(objstm_bytes - len(objstm_data) - 2, 1)
+    # 1 catalogue, 2 page tree, 3 the first page, 4 the font (inside the stream),
+    # 5 the shared content stream, 6 the CMap, 7 the object stream, 8… further pages.
+    extra = [8 + index for index in range(pages - 1)]
+    page_body = (
+        b"<< /Type /Page /Parent 2 0 R /MediaBox "
+        + _MEDIA_BOX
+        + b" /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>"
+    )
     bodies = {
         1: b"<< /Type /Catalog /Pages 2 0 R >>",
-        2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        3: b"<< /Type /Page /Parent 2 0 R /MediaBox "
-        + _MEDIA_BOX
-        + b" /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        2: b"<< /Type /Pages /Kids ["
+        + b" ".join(reference(number) for number in [3, *extra])
+        + b"] /Count "
+        + str(pages).encode()
+        + b" >>",
+        3: page_body,
         5: stream_object(b"BT /F1 24 Tf 72 700 Td (A) Tj ET"),
         6: stream_object(cmap),
         7: stream_object(
             objstm_data,
             entries=b" /Type /ObjStm /N 1 /First " + str(len(header)).encode(),
         ),
+        **dict.fromkeys(extra, page_body),
     }
     return _assembled_with_xref_stream(bodies, compressed={4: (7, 0)}, root=1)
 
@@ -842,7 +861,9 @@ def _assembled_with_xref_stream(
     return bytes(document)
 
 
-def unbuildable_font_pdf(*, decoded_bytes: int, subtype: bytes = b"/Type1") -> bytes:
+def unbuildable_font_pdf(
+    *, decoded_bytes: int, subtype: bytes = b"/Type1", to_unicode: bool = False
+) -> bytes:
     """A page whose font names a program under **two** ``/FontFile*`` keys.
 
     ``Font._parse_font_descriptor`` raises ``PdfReadError`` on that, and
@@ -860,6 +881,12 @@ def unbuildable_font_pdf(*, decoded_bytes: int, subtype: bytes = b"/Type1") -> b
     ``all(...)`` over nothing is true; and every **other** subtype reaches it through
     each entry of ``/DescendantFonts``, so a composite ``/Type0`` carries the malformed
     descriptor a level down where a top-level ``/FontDescriptor`` test does not look.
+
+    ``to_unicode`` puts a small, perfectly readable ``/ToUnicode`` CMap on the font,
+    which is ADR-0234 §7 arm 9's document: #2043's first residual, closed by §4's
+    unconditional establishment. Before it, a font carrying a ``/ToUnicode`` was not
+    established at all, so this document's content stream was charged and it was refused
+    ``TOO_LARGE`` where the extraction alone answers ``EXTRACTION_FAILED``.
     """
     objects = _Objects()
     program = objects.add(stream_object(type1_program(2_000)))
@@ -869,6 +896,9 @@ def unbuildable_font_pdf(*, decoded_bytes: int, subtype: bytes = b"/Type1") -> b
         + b" /FontFile2 "
         + program
         + b" >>"
+    )
+    mapped = (
+        b" /ToUnicode " + objects.add(stream_object(SMALLEST_TO_UNICODE)) if to_unicode else b""
     )
     if subtype == b"/Type0":
         # A composite font carries no descriptor of its own: `from_font_resource`
@@ -880,7 +910,7 @@ def unbuildable_font_pdf(*, decoded_bytes: int, subtype: bytes = b"/Type1") -> b
         )
         font = objects.add(
             b"<< /Type /Font /Subtype /Type0 /BaseFont /Twice /Encoding /Identity-H"
-            b" /DescendantFonts [" + descendant + b"] >>"
+            b" /DescendantFonts [" + descendant + b"]" + mapped + b" >>"
         )
     else:
         font = objects.add(
@@ -888,6 +918,7 @@ def unbuildable_font_pdf(*, decoded_bytes: int, subtype: bytes = b"/Type1") -> b
             + subtype
             + b" /BaseFont /Twice /FontDescriptor "
             + descriptor
+            + mapped
             + b" >>"
         )
     return document(
@@ -911,5 +942,160 @@ def cmap_pages_pdf(*, pages: int, cmap_bytes: int) -> bytes:
     )
     return document(
         [Page(contents=[b"BT /F1 24 Tf (A) Tj ET"], fonts={"/F1": font}) for _ in range(pages)],
+        objects=objects,
+    )
+
+
+#: The largest range a single ``bfrange`` line can span with two-byte source codes.
+#: ``parse_bfrange`` reads ``nbi = max(len(lst[0]), len(lst[1]))`` and stores
+#: ``(nbi + 1) // 2`` as the code width, then decodes each key as ``utf-16-be`` — so a
+#: five-hex-digit endpoint asks for a three-byte key and every mapping on that line is
+#: skipped with a warning. A CMap declaring more than this many mappings therefore
+#: needs more than one line, which is also what makes its source codes overlap.
+_MAX_RANGE_SPAN: Final = 0x10000
+
+
+def bfrange_cmap(mappings: int) -> bytes:
+    """A ``/ToUnicode`` CMap declaring ``mappings`` mappings in a few hundred bytes.
+
+    ADR-0234's second measurement, and the one that decides the whole decision's shape:
+    ``pypdf``'s ``parse_bfrange`` admits a range line — ``<a> <b> <c>`` with no bracketed
+    list — and builds ``b - a + 1`` mappings from it, checking
+    ``_check_mapping_size(entry_count + range_size)`` before the loop. So a range
+    declares mappings at a rate **no byte count tracks**: 65,000 mappings arrive in
+    927,031 bytes of ``bfchar`` or in **178** of ``bfrange``, a factor of about 5,200.
+
+    Past :data:`_MAX_RANGE_SPAN` the declaration takes a second line, and every line
+    starts at ``<0000>`` — so a CMap over that span **wraps the two-byte code space**
+    and declares more mappings than it leaves keys, which is ADR-0234 §7 arm 4's
+    document as well as arm 2's: 90,000 built against 65,536 kept, exactly the pair §5
+    measured.
+    """
+    assert mappings >= 1, "a CMap declaring nothing is not one"
+    lines: list[bytes] = []
+    remaining = mappings
+    while remaining:
+        span = min(remaining, _MAX_RANGE_SPAN)
+        lines.append(b"<0000> <%04X> <0000>\n" % (span - 1))
+        remaining -= span
+    return _cmap_of(b"%d beginbfrange\n" % len(lines) + b"".join(lines) + b"endbfrange\n")
+
+
+def bfchar_cmap(mappings: int) -> bytes:
+    """A ``/ToUnicode`` CMap declaring ``mappings`` mappings, one line each.
+
+    The form a real subset font is written in, and the one ADR-0234 §5 measures the byte
+    bound against: about **14.4** bytes a mapping, so a byte total inside 1 MiB implies a
+    mapping total under about 73,000 — a fifth of ``fetch_max_character_mappings``'s
+    figure. This is why the mapping bound "refuses nothing the other admits" for this
+    form, and why :func:`bfrange_cmap` is the form it exists for.
+
+    Every source code is distinct, so the mappings built and the dictionary kept are the
+    same number here — which is what makes it the control for
+    :func:`bfrange_cmap`'s overlapping one.
+    """
+    assert 1 <= mappings <= _MAX_RANGE_SPAN, "two-byte source codes run out past 65,536"
+    lines = b"".join(b"<%04X> <%04X>\n" % (code, code) for code in range(mappings))
+    return _cmap_of(b"%d beginbfchar\n" % mappings + lines + b"endbfchar\n")
+
+
+def _cmap_of(body: bytes) -> bytes:
+    """``body`` wrapped in the CMap preamble ``pypdf`` will read past.
+
+    The ``begincodespacerange`` block is inert to the parse ``_check_mapping_size``
+    counts — ``process_cm_line`` is in neither ``process_rg`` nor ``process_char`` while
+    it runs, so those lines fall through every branch — and it is here because a CMap
+    without one is not one a real document carries.
+    """
+    return (
+        b"/CIDInit /ProcSet findresource begin\n"
+        b"12 dict begin begincmap\n"
+        b"1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n" + body + b"endcmap end end\n"
+    )
+
+
+def mapped_font_pages_pdf(
+    *,
+    pages: int,
+    cmap: bytes,
+    fonts: int = 1,
+    contents: bytes | None = None,
+) -> bytes:
+    """``pages`` pages whose resource context carries ``fonts`` fonts sharing one CMap.
+
+    The shape ADR-0234 §1 charges: every entry of a parse's ``/Font`` dictionary is
+    built by ``PageObject._extract_text`` **before** it resolves the content key, so the
+    charge is ``pages * fonts`` CMap parses however many distinct CMap *streams* there
+    are — here exactly one, named by ``fonts`` distinct font dictionaries. That is §7
+    arm 7's document at ``fonts=2``: "an implementation charging a CMap once per parse
+    rather than once per font-build … under-charges by the number of fonts sharing it".
+
+    ``contents`` defaults to ``None``, giving content-free pages: the resource context is
+    non-empty so every font is still built, and nothing but the fonts is charged, which
+    is what lets an arm's arithmetic be exactly the CMap's.
+    """
+    objects = _Objects()
+    stream = objects.add(stream_object(cmap))
+    resources = {
+        f"/F{index}": objects.add(
+            b"<< /Type /Font /Subtype /TrueType /BaseFont /Mapped /ToUnicode " + stream + b" >>"
+        )
+        for index in range(1, fonts + 1)
+    }
+    return document(
+        [
+            Page(contents=None if contents is None else [contents], fonts=resources)
+            for _ in range(pages)
+        ],
+        objects=objects,
+    )
+
+
+def named_to_unicode_pages_pdf(*, pages: int, names: int) -> bytes:
+    """``pages`` pages carrying **one** font object under ``names`` resource names.
+
+    ADR-0234 §7 arm 5's document. ``prepare_cm`` reads no stream for a ``/ToUnicode``
+    that is not one: it synthesises a fixed 44-byte literal — a single ``beginbfrange``
+    line spanning ``<0000>`` to ``<0001>`` — so **nothing is decoded** and there is no
+    decoded length to charge, and it parses that literal and builds its **two** mappings
+    on every font-build. The size of the literal is the library's; the number of times it
+    is parsed is the file's, and ``_extract_text`` builds every *entry*, so the count is
+    ``pages * names * 2``.
+
+    One font **object** under many names rather than many objects, because that is what
+    makes the multiplier the document's own rather than its font count's — and it is the
+    shape ADR-0234 §9 measures the deferred font-build quantity on: fifty thousand builds
+    from a 608 KB file cost 3.08 s.
+    """
+    objects = _Objects()
+    font = objects.add(
+        b"<< /Type /Font /Subtype /TrueType /BaseFont /Named /ToUnicode /Identity-H >>"
+    )
+    resources = {f"/F{index}": font for index in range(1, names + 1)}
+    return document([Page(fonts=resources) for _ in range(pages)], objects=objects)
+
+
+def unselected_cmap_font_pdf(*, cmap: bytes) -> bytes:
+    """A page whose content selects ``/F1`` while ``/F2`` carries the large CMap.
+
+    ADR-0234 §7 arm 8. ``PageObject._extract_text`` iterates the whole ``/Font`` resource
+    dictionary and builds each entry **before** it resolves the content key, so a font no
+    ``Tf`` names is parsed exactly as often as one that is. An implementation charging
+    only the fonts the content stream selects would under-charge every parse, and the
+    predicate ADR-0234 §1 fixes needs no forecast of which fonts the operators pick.
+    """
+    objects = _Objects()
+    plain = objects.add(PLAIN_FONT)
+    stream = objects.add(stream_object(cmap))
+    unselected = objects.add(
+        b"<< /Type /Font /Subtype /TrueType /BaseFont /Unselected /ToUnicode " + stream + b" >>"
+    )
+    return document(
+        [
+            Page(
+                contents=[b"BT /F1 24 Tf 72 700 Td (A) Tj ET"],
+                fonts={"/F1": plain, "/F2": unselected},
+            )
+        ],
         objects=objects,
     )
