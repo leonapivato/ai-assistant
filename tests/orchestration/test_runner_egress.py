@@ -991,7 +991,10 @@ async def test_a_resumed_call_carries_the_coverage_that_was_approved() -> None:
 # --- ADR-0233 §6: the fail-closed value, handed over rather than softened -----
 
 
-async def test_a_fail_closed_coverage_is_forwarded_unchanged_and_refused_at_the_seam() -> None:
+@pytest.mark.parametrize("selected_external", [True, False])
+async def test_a_fail_closed_coverage_is_forwarded_unchanged_and_refused_at_the_seam(
+    *, selected_external: bool
+) -> None:
     """ADR-0233 §6 through this stage: ``_bound`` hands the value over, it is refused.
 
     ADR-0155 §3's **second** clause is the absolute one — a span may not carry
@@ -1029,6 +1032,15 @@ async def test_a_fail_closed_coverage_is_forwarded_unchanged_and_refused_at_the_
     inside it, which is the refusal §6 states, reached because the stage handed the
     value over.
 
+    **Both states of ``planned_with_external_content``, because ADR-0233 §4's fifth
+    clause makes the two facts independent**: they are "not functions of each other
+    and neither is read off the other". A stage that laundered the coverage on one
+    arm of the boolean — forwarded ``NOT_COVERED`` whenever external material had
+    been selected, say — would pass a case fixed at the other arm while putting a
+    call ADR-0155 §3 forbids in front of a user for approval. The boolean is carried
+    through to the assertion too, so the arm is not merely run but seen to have
+    reached the seam.
+
     Committing nothing is asserted the way the ``EGRESS_UNBINDABLE`` cases above
     assert it, plus the standing question: no ``pending_confirmation`` is left
     against the binding, so nothing is awaiting an answer to a call that may not be
@@ -1045,7 +1057,8 @@ async def test_a_fail_closed_coverage_is_forwarded_unchanged_and_refused_at_the_
         STEP,
         timeout=PATIENT,
         origin=SelectionOrigin(
-            planned_with_external_content=False, coverage=SpanCoverage.PATH_WITHOUT_MODEL
+            planned_with_external_content=selected_external,
+            coverage=SpanCoverage.PATH_WITHOUT_MODEL,
         ),
     )
 
@@ -1053,10 +1066,10 @@ async def test_a_fail_closed_coverage_is_forwarded_unchanged_and_refused_at_the_
     assert binder.carried == [
         CarriedProvenance(
             spans={},
-            planned_with_external_content=False,
+            planned_with_external_content=selected_external,
             coverage=SpanCoverage.PATH_WITHOUT_MODEL,
         )
-    ], "the seam was handed the caller's value, unchanged"
+    ], "the seam was handed both of the caller's values, unchanged"
     assert binder.returned == [], (
         "the seam answered nothing: the construction ADR-0233 §6 refuses raised inside it"
     )
