@@ -546,6 +546,46 @@ async def test_a_certificate_that_does_not_verify_reaches_no_write() -> None:
             "terminate a chunk",
             id="a-chunk-longer-than-its-size",
         ),
+        pytest.param(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;\x00\r\na\r\n0\r\n\r\n",
+            "chunk extension",
+            id="a-chunk-extension-holding-a-control-octet",
+        ),
+        pytest.param(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;\r\na\r\n0\r\n\r\n",
+            "chunk extension",
+            id="a-chunk-extension-that-is-a-lone-separator",
+        ),
+        pytest.param(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;=v\r\na\r\n0\r\n\r\n",
+            "chunk extension",
+            id="a-chunk-extension-with-no-name",
+        ),
+        pytest.param(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;a=\r\na\r\n0\r\n\r\n",
+            "chunk extension",
+            id="a-chunk-extension-with-an-empty-value",
+        ),
+        pytest.param(
+            b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;a="v\r\na\r\n0\r\n\r\n',
+            "chunk extension",
+            id="a-chunk-extension-whose-quoted-value-is-never-closed",
+        ),
+        pytest.param(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;a b\r\na\r\n0\r\n\r\n",
+            "chunk extension",
+            id="a-chunk-extension-a-second-name-follows-with-no-separator",
+        ),
+        pytest.param(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;caf\xc3\xa9\r\na\r\n0\r\n\r\n",
+            "chunk extension",
+            id="a-non-ascii-chunk-extension",
+        ),
+        pytest.param(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1 \r\na\r\n0\r\n\r\n",
+            "hexadecimal",
+            id="a-chunk-size-with-trailing-space-and-no-extension",
+        ),
     ],
 )
 async def test_a_response_this_seam_will_not_read_is_refused(octets: bytes, why: str) -> None:
@@ -842,6 +882,28 @@ async def test_a_well_formed_trailer_is_read_and_discarded() -> None:
     answer = await subject.get(origin=ORIGIN, target=TARGET)
 
     assert answer.body == b"abc"
+    assert answer.headers == (("transfer-encoding", "chunked"),)
+
+
+async def test_a_well_formed_chunk_extension_is_read_and_discarded() -> None:
+    """The other side of the chunk-extension arms above, so §7.1.1 is not read as a ban.
+
+    RFC 9112 §7.1.1 says a recipient "MUST ignore unrecognized chunk extensions",
+    so what the arms above assert is that an **ill-formed** extension is refused —
+    not that a conforming one is. Every form the grammar admits is here in one
+    body: a bare name, a token value, a quoted value carrying both a ``;`` and an
+    escaped quote (neither of which ends it), two extensions on one line, the
+    ``BWS`` RFC 9110 §5.6.3 directs a recipient to remove rather than refuse, and
+    an extension on the last chunk. None of it reaches the caller, and the body is
+    the chunks' octets and nothing else.
+    """
+    body = b'3;plain\r\nabc\r\n3 ; name=value ; quoted="a;b\\"c"\r\ndef\r\n0;last\r\n\r\n'
+    channel = far_end(response(headers=["Transfer-Encoding: chunked"], body=body))
+    subject, _ = exchange(channel)
+
+    answer = await subject.get(origin=ORIGIN, target=TARGET)
+
+    assert answer.body == b"abcdef"
     assert answer.headers == (("transfer-encoding", "chunked"),)
 
 
