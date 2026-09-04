@@ -684,12 +684,56 @@ holds.
 > slot, so a check over the live set passes acts the store will refuse and would
 > report the wrong reason for the refusal when it came.
 
-> **Normative.** Where `record` refuses on the ceiling, the operation **raises with
-> the store's own `InvalidRecipientGrantError`**, and it returns no value a caller
-> could mistake for an established grant. The answer stays recorded — the trail is
-> append-only and nothing retracts it — and nothing already recorded in the grant
-> store is removed, narrowed, expired, evicted or truncated to make room, and no
-> looser grant is minted in its place (ADR-0193 §1, §2).
+> **Normative.** Where `record` refuses on the ceiling, the answer **stays recorded**
+> — the trail is append-only and nothing retracts it — and nothing already recorded in
+> the grant store is removed, narrowed, expired, evicted or truncated to make room,
+> and no looser grant is minted in its place (ADR-0193 §1, §2). What the operation
+> then does is **not the same on the two populations**, because their returns differ
+> and neither may report an outcome that did not happen.
+
+> **Normative.** On population (b), `establish_recipient_grant` **raises the store's
+> own `InvalidRecipientGrantError`** and returns no value a caller could mistake for
+> an established grant. Its return *is* the grant, there is no grant, and nothing was
+> sent on account of the answer (§3) — so the raise states the whole outcome and
+> states nothing false.
+
+> **Normative.** On population (a), `resume` **does not raise on a ceiling refusal**.
+> It returns the `TurnOutcome` for the call it approved and executed, exactly as a
+> `resume` supplying no `remember_recipients_until` would, and the establishment's
+> failure is carried by the absence of the grant rather than by an exception. The
+> reason is the order: by the time `record` is asked the call has been sent, and
+> `resume`'s return is fixed as `TurnOutcome` (§4), so a raise would report a failure
+> for an egress nobody can un-send, breaching this section's own bar below on
+> *"presenting it as a fault of the call that was confirmed"* — while discarding
+> the outcome the surface needs in order to tell the user what that call did. The two
+> shapes this ADR rejected for it are in `Alternatives considered`, and the carrier it
+> declines to mint is named in §11.
+
+> **Normative.** What governs `resume` across this ADR is therefore **one rule and not
+> two: it raises where nothing has been sent, and returns where something has.** §1's
+> expiry refusal and §2's binding refusal both fire before any ruling is sought, so
+> they raise and the step stays durably parked and answerable; the ceiling fires after
+> the call has gone out, so it returns. No lane reads the three as inconsistent, and
+> none repairs any of them into another.
+
+> **Normative.** A surface that collected the act on population (a) **confirms the
+> establishment by reading `standing_recipient_grants` once `resume` has returned**,
+> and states the standing outcome from what that read holds and from nothing else. It
+> asserts no grant it has not read — a surface reporting the standing request as
+> recorded because `resume` returned normally would be asserting the one thing this
+> clause exists to prevent — and it does not stay silent either, because a user who is
+> told nothing concludes that what they asked for happened.
+
+> **Normative.** That read-back is **how** the refusal reaches the user on this
+> population, and it is stated because the operation no longer carries it. The
+> `Confirmation` a park hands a surface carries no decision id — `tool_id`,
+> `tool_description`, `parameters`, `reason`, `token` and `egress` are its whole
+> membership on `origin/main` — so no surface can match
+> `RecipientGrant.established_by` against the confirmation it answered. Where a
+> surface cannot itself tell which grant is which, and on this population it cannot,
+> it **renders the listing it read and states that this is what now stands**, which is
+> the whole of what it has read and no more (ADR-0193 §11's discipline, read one store
+> over).
 
 > **Normative.** A surface offering the act **states that refusal to the user at the
 > moment it happens**, naming that the ceiling was reached and that the recourse is
@@ -704,8 +748,27 @@ holds.
 > route-(a) answer, which is the outcome the user asked for minus the standing part.
 > On population (b) it leaves an `ALLOW` that authorises nothing and established
 > nothing. Neither is repaired by retrying with a different expiry, by narrowing the
-> destination set, or by any of the moves the clause above forbids; the recourse is
-> the revocation §7 makes reachable, after which the act may be performed again.
+> destination set, or by any of the moves the clause above forbids.
+
+> **Normative.** **A ceiling refusal settles that confirmation, and costs that call
+> its chance at standing.** The answer is recorded, a confirmation has one answer
+> (ADR-0044 §2b), and §3's fourth availability condition then keeps the decision out
+> of `grantable_decisions` for good; on population (a) the park is resolved with it,
+> and the token yields ADR-0198 §1's restatement rather than a second answerable park.
+> So revoking a grant frees a slot but does **not** reopen this act, and no clause,
+> surface or message states, renders or implies that it does. This is §3's already
+> stated outcome for a non-`ALLOW` ruling reached by a second road, and it is stated
+> here rather than discovered because it is the one thing a user would expect the
+> recourse to buy them.
+
+> **Normative.** The recourse is therefore to **revoke** — which §7 makes reachable
+> and §9 gives a command — and to make the **next** such call standing. It is real on
+> both populations and no surface overstates it: population (b) refills, because the
+> next turn whose search is refused records a fresh `CONFIRM` meeting §3's seven
+> conditions (ADR-0231 §9's first clause records every non-`ALLOW` outcome), and
+> population (a) refills on the next call parked for confirmation. What the user
+> cannot recover is *this* confirmation, and a surface says so in those terms rather
+> than inviting a retry it knows will not be offered.
 
 > **Normative.** No lane makes the two writes one transaction, coordinates the two
 > stores, or claims an ordering stronger than the one stated here. ADR-0193 §9
@@ -826,13 +889,57 @@ which is what "a product surface with a user action behind it" describes.
 ### 9. Per channel: the terminal now, the browser by its own decision, voice withheld
 
 > **Normative.** The **command-line surface** carries all of it, and is the surface
-> the implementing lane ships. `assistant resume` gains a way to state the instant
-> beside its answer under §2, offered only where the confirmation is one an act may
-> ride and never as a default or a pre-selection. **Four** commands are added,
-> named in a recipient vocabulary distinct from the source-grant commands §7 keeps:
-> the `grantable_decisions` listing with the act beside it; the standing listing;
-> the bounded history over `recent_recipient_grants`, taking a `--limit` with the
-> refusal §7 states; and the revocation, taking the id either listing renders.
+> the implementing lane ships. **Four** commands are added, **by these names and not
+> by names a lane chooses**, in a recipient vocabulary distinct from the source-grant
+> commands §7 keeps:
+>
+> - **`assistant remember-recipients`** — the `grantable_decisions` listing, with the
+>   act offered beside each row it renders. Bare it lists, taking a `--limit` that
+>   carries §3's window and the refusal §3 states; given a decision id from **its
+>   own** listing it performs the act, as
+>   `assistant remember-recipients <decision-id> --until <instant>`.
+> - **`assistant recipient-grants`** — the standing listing over
+>   `standing_recipient_grants`. It takes **no** `--limit`, for `assistant
+>   connections`' stated reason: a truncated answer to "what do I authorise" is a
+>   false answer rather than a partial one.
+> - **`assistant recipient-grant-log`** — the bounded history over
+>   `recent_recipient_grants`, taking a `--limit` with the refusal §7 states.
+> - **`assistant revoke-recipient-grant <grant-id>`** — the revocation, taking the id
+>   either listing renders.
+
+> **Normative.** `assistant resume` gains **`--remember-recipients-until <instant>`**,
+> which supplies `remember_recipients_until` under §2 and nothing else. It is offered
+> only where the confirmation is one an act may ride, and never as a default, a
+> pre-selection, or a value the surface fills in (§1). Each flag carries the name of
+> the argument it supplies — `--until` for `establish_recipient_grant`'s `expires_at`,
+> the qualified form for `resume`'s — and on `resume` the qualified form is also what
+> keeps it from being read as a retention control over what the assistant remembers,
+> which is what "remember" means everywhere else on this surface (`learn`, `observe`,
+> `forget`).
+
+> **Normative.** An instant either flag takes is an **ISO 8601 timestamp carrying an
+> explicit offset** — `2026-10-01T09:00:00Z` or `2026-10-01T11:00:00+02:00` — and one
+> carrying none is **refused during parameter parsing**, before any client is built,
+> naming that an offset is required. The surface attributes no offset and reads no
+> timezone of its own. ADR-0023 §3 names *"a datetime a user typed meaning their own
+> wall clock"* as exactly the value for which attribution *fabricates* a fact rather
+> than restoring one, and puts attribution in the adapter that **knows** the offset,
+> which this one does not: the user is stating when a standing authorisation ends, and
+> a surface that guessed a zone would date it by an hour the user never gave. Refusing
+> rather than accepting-and-changing is `_quiet_window`'s rule one type over, and
+> refusing inside Typer's parameter parsing is `_page_argument`'s shape, so it is a
+> usage error rather than a traceback out of a command's error boundary.
+
+> **Normative.** These names are fixed here rather than left to the lane, for the
+> reason ADR-0186 §9 fixed `assistant decisions` and `assistant export-decisions` in
+> terms: a normative decision an operator cannot derive a working command from is one
+> no test can pin, and four commands named by four readings are four incompatible
+> surfaces. They qualify with **`recipient`** for §7's naming reason exactly — on this
+> surface `grant`, `amend`, `revoke`, `grants` and `granted` already have a referent
+> and it is `SourceGrant` — and the live listing and the bounded log take
+> `assistant connections` and `assistant connection-log`'s shape, which is this pair
+> one store over: a listing stating what stands now, and a log off which
+> `connection-log` already says liveness may not be read.
 
 > **Normative.** The history command is what makes ADR-0193 §1's recourse performable
 > on the shipping surface, so it is named here rather than left to the lane: a user
@@ -963,6 +1070,17 @@ Named individually:
   changes a return is changing this decision rather than implementing it"* — so it is
   an ADR partially superseding that clause, not a lane's repair. **Fires** on a
   measurement that a real user reaches the ceiling and cannot find the record.
+- **A carrier by which `resume` reports a failed establishment to its caller.** §6
+  rules that it does not raise on a ceiling refusal and returns its `TurnOutcome`, so
+  what became of the standing request is learned by reading
+  `standing_recipient_grants` and never from the return. A carrier would be a widened
+  return or a minted error class on a promoted operation, and §4 forbids both in
+  terms — *"a contract that adds a member, widens an argument or changes a return is
+  changing this decision rather than implementing it"* — while the shapes that avoid
+  the widening cost either a misreport or an approved send (`Alternatives
+  considered`). **Fires** on an ADR that decides how a promoted operation reports a
+  second act it performed beside its own, which is a question this ADR is the first to
+  raise and the wrong one to settle inside it.
 - **Renewing a grant.** Nothing here extends, re-dates or re-scopes a grant, because
   ADR-0193 §1's store is append-only and its §9 makes changing an authorisation a
   revocation followed by a new grant. A new grant needs a fresh confirmation about a
@@ -1080,20 +1198,36 @@ enumeration in its own text (§9).
 > `approved=True` on which the policy answers `DENY` records that `DENY` and
 > establishes no grant.
 
-> **Normative.** Lane 1 ships the test pinning §6's ceiling behaviour: an act whose
-> `RecipientGrantStore.record` refuses on the ceiling leaves the answer recorded,
-> raises `InvalidRecipientGrantError`, returns no grant, and evicts, narrows,
-> expires and truncates nothing. It is arranged over a store already holding the
+> **Normative.** Lane 1 ships the test pinning §6's ceiling behaviour on **both**
+> populations, in two arms that differ because §6's two outcomes do. On population (b)
+> an `establish_recipient_grant` whose `RecipientGrantStore.record` refuses on the
+> ceiling leaves the answer recorded, raises `InvalidRecipientGrantError`, and returns
+> no grant. On population (a) a `resume` carrying `remember_recipients_until` in the
+> same condition leaves the answer recorded, **executes the call**, **returns its
+> `TurnOutcome` and raises nothing**, and leaves the grant store unchanged — the arm
+> that fails against the shape §6 rejects, which would have raised over an egress that
+> had already gone out. Both assert that nothing was evicted, narrowed, expired or
+> truncated to make room, and both are arranged over a store already holding the
 > configured maximum of **outstanding** records at least one of which is **expired**,
-> so it fails against an implementation that counted the live set instead — which is
+> so both fail against an implementation that counted the live set instead — which is
 > the substitution §6 forbids.
+
+> **Normative.** Lane 1 ships the test pinning §6's **settlement**, on both
+> populations and by name rather than by a roster: after a ceiling refusal the same
+> decision is **not** returned by `grantable_decisions` at any `limit`, and on
+> population (a) the same token yields ADR-0198 §1's restatement rather than a second
+> answerable park. It fails against an implementation that left the confirmation
+> offerable, which is the implementation whose surface would invite the retry §6
+> forbids it to promise.
 
 > **Normative.** Lane 1 ships the test that pins §7's recourse end to end: a store at
 > the ceiling whose slots are held partly by expired grants yields those records from
 > `recent_recipient_grants` and none of them from `standing_recipient_grants`,
-> `revoke_recipient_grant` on one of them appends a revoking record, and the act
-> then succeeds. It is the assertion that ADR-0193 §1's stated recourse is an act the
-> user can actually perform.
+> `revoke_recipient_grant` on one of them appends a revoking record, and the act then
+> succeeds **on a different, still-unanswered confirmation** — never on the one the
+> ceiling refused, which §6 settles. It is the assertion that ADR-0193 §1's stated
+> recourse is an act the user can actually perform, and naming a second confirmation
+> is what makes it that assertion rather than the retry §6 forbids.
 
 > **Normative.** Lane 1 ships a test asserting that `from_confirmation` **accepts no
 > parameter naming a subject** — by introspecting its signature, as
@@ -1123,6 +1257,14 @@ enumeration in its own text (§9).
 > an answer and a grant, and a subsequent request over the same tool, account and
 > canonical destination set is ruled `ALLOW` on route (b) with `authorised_by` naming
 > that grant. It is the test that would have failed on every tree before this one.
+
+> **Normative.** Lane 1 ships a test pinning §9's **four command names and two flag
+> names literally** — `assistant remember-recipients`, `assistant recipient-grants`,
+> `assistant recipient-grant-log`, `assistant revoke-recipient-grant`,
+> `--remember-recipients-until` on `assistant resume`, and `--until` on the act — and
+> one asserting that an instant carrying no offset is refused as a usage error before
+> any client is built. Without them §9 is prose an implementation satisfies under any
+> name, which is the gap round 8 of this review found in an earlier draft of it.
 
 ### 13. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
@@ -1273,7 +1415,10 @@ against §4 until this has merged (ADR-0015 §5, golden rule 5).
   exactly where ADR-0193 §1 put it — inside `record`, atomic, over the outstanding
   set — and adds the obligation that its refusal reach the user with the ceiling
   named and a recourse beside it. What §7 adds is the listing that makes the recourse
-  performable, which is a read the corpus had built and never promoted.
+  performable, which is a read the corpus had built and never promoted. **Its cost is
+  stated with it rather than smoothed over:** a refusal settles the confirmation it
+  refused, so the recourse buys the *next* such call and not this one, and a user who
+  wanted these recipients standing revokes, then answers about them once more.
 - **A voice-only deployment cannot establish a grant at all.** Every send stays a
   confirmation on a screen, and a user with no screen is where ADR-0207 already left
   them. That is disclosed here rather than discovered.
@@ -1324,6 +1469,18 @@ against §4 until this has merged (ADR-0015 §5, golden rule 5).
   choices were to widen ADR-0193 §1's exact surface or to make every act read a Tier 1
   store whole, for a check `record` would have to repeat anyway — so §6 puts the
   ceiling where ADR-0193 §1 already put it and rules what the surface must say.
+- **`resume` raising after the call has been executed**, which an earlier draft of
+  §6 required. Rejected on review: `resume` returns a `TurnOutcome` and the egress has
+  already gone out by the time the ceiling refuses, so the terminal would report a
+  failure for a call that was made and would lose the outcome that says what it did —
+  §6's own bar on presenting the refusal "as a fault of the call that was confirmed",
+  breached by the mechanism rather than by the words.
+- **Recording the grant before executing the step**, so that a raise would honestly
+  mean nothing was sent. Rejected: the answer is recorded first (ADR-0193 §2), so a
+  raise there leaves the step parked with its `ALLOW` durable, and the next `resume`
+  on that token is ADR-0198 §1's restatement, which states the settled answer and
+  drives nothing. The approved send would then never happen at all — a user's
+  approval silently discarded, which is worse than either report.
 - **A `Settings` default lifetime for a grant, so a surface could offer one.**
   Rejected in §1: ADR-0193 §9 puts the instant in the user's act, and a configured
   default is the grant-minted-from-configuration shape ADR-0097 §8 refuses.
