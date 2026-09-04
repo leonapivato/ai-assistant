@@ -107,7 +107,12 @@ DEFAULT_SEARCH_CONTENT: Final = (
 )
 
 #: ADR-0231 §5's named default for ``search_max_results``, so a fake constructed with
-#: no bound is bounded the way a default deployment is.
+#: no bound is bounded the way a default deployment is. It is also §5's **ceiling** —
+#: "§10's figure is the ceiling and the setting narrows it, never widens it" — and
+#: this fake refuses a larger one for that reason: a canonical fake configurable into
+#: a state no deployment can be in would let a consumer's test pass over a supply this
+#: system can never actually assemble, which is what would make §11's precedence look
+#: satisfied while a search took a third of ADR-0226 §6's budget of ten.
 DEFAULT_MAX_RESULTS: Final = 3
 
 #: ADR-0231 §5's named default for ``search_max_result_chars``, likewise.
@@ -204,7 +209,9 @@ class FakeWebSearcher:
                 attested to it, which ``SearchOutcome`` enforces anyway.
             max_results: The bound this searcher was configured with —
                 ``Settings.search_max_results``. At most this many records are
-                minted, whatever a script named.
+                minted, whatever a script named. From 1 to
+                :data:`DEFAULT_MAX_RESULTS`, which is ADR-0231 §5's whole stated
+                domain and not merely its default.
             max_result_chars: ``Settings.search_max_result_chars``, counted on the
                 quoted rendering as ADR-0230 §6 counts it. A scripted content beyond
                 it is **dropped** at :meth:`search`, never truncated.
@@ -219,17 +226,24 @@ class FakeWebSearcher:
                 fake that took it would raise out of :meth:`search` at the call it
                 was scripted for.
             ValueError: If ``max_results`` or ``max_result_chars`` is below 1, if
+                ``max_results`` is above ADR-0231 §5's ceiling of three, if
                 ``name`` is blank or is a value ``Identifier`` would strip, or if
                 ``origin`` is present and blank. Each is a state this fake could not
                 answer from, refused here rather than at an arbitrary later call —
                 which is the one thing ADR-0231 §17 says never leaves either member.
         """
-        for label, bound in (("max_results", max_results), ("max_result_chars", max_result_chars)):
+        for label, bound, ceiling in (
+            ("max_results", max_results, DEFAULT_MAX_RESULTS),
+            ("max_result_chars", max_result_chars, None),
+        ):
             if isinstance(bound, bool) or type(bound) is not int:
                 msg = f"{label} must be an integer, got {bound!r}"
                 raise TypeError(msg)
             if bound < 1:
                 msg = f"{label} must be at least 1, got {bound}"
+                raise ValueError(msg)
+            if ceiling is not None and bound > ceiling:
+                msg = f"{label} must be at most {ceiling} (ADR-0231 §5), got {bound}"
                 raise ValueError(msg)
         if not name.strip():
             msg = f"name must be non-blank, got {name!r}"

@@ -248,6 +248,32 @@ _BOUNDS: Final = (
 )
 
 
+def test_a_result_count_above_the_ceiling_is_refused_at_build() -> None:
+    """ADR-0231 §5's ceiling, which is the domain and not merely the default.
+
+    "§10's figure is the ceiling and the setting narrows it, never widens it, so §11's
+    precedence holds in every configuration and no deployment can make one search take
+    a third of ADR-0226 §6's budget of ten." A canonical fake that admitted four would
+    let a consumer's test pass over a supply this system can never assemble.
+    """
+    with pytest.raises(ValueError, match="max_results must be at most 3"):
+        FakeWebSearcher(max_results=DEFAULT_MAX_RESULTS + 1)
+
+
+async def test_a_fake_at_the_ceiling_mints_exactly_that_many() -> None:
+    """The boundary beside the refusal, so the pair fails a comparison the wrong way round."""
+    searcher = FakeWebSearcher(
+        results=tuple(f"result {index}" for index in range(DEFAULT_MAX_RESULTS + 2)),
+        max_results=DEFAULT_MAX_RESULTS,
+    )
+
+    outcome = await searcher.search(_authorised(searcher))
+
+    assert [record.content for record in outcome.records] == [
+        f"result {index}" for index in range(DEFAULT_MAX_RESULTS)
+    ]
+
+
 @pytest.mark.parametrize(("bound", "build"), _BOUNDS)
 def test_a_bound_below_one_is_refused_at_build(
     bound: str, build: Callable[[int], FakeWebSearcher]

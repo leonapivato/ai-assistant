@@ -23,12 +23,22 @@ that could disagree about what ADR-0148 §6 is over.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, final
 
-from egress_transport_harness import CREDENTIAL, IDENTITY, REFERENCE, Records, entry, keyring
+from egress_transport_harness import (
+    CREDENTIAL,
+    IDENTITY,
+    REFERENCE,
+    SLOT,
+    Records,
+    entry,
+    keyring,
+)
+from pydantic import SecretStr
 
 from ai_assistant.core.errors import SpendCeilingError, TransportError
 from ai_assistant.core.types import (
@@ -39,6 +49,7 @@ from ai_assistant.core.types import (
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
+    SecretScope,
     SpanCoverage,
     SpendTotal,
     ToolCall,
@@ -46,6 +57,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.testing import FakeAuditTrail, FakeByteChannel, FakeOutboundTransport, authorised
 from ai_assistant.testing.cancellation import SuspendableResource
+from ai_assistant.testing.secrets import FakeSecretStore
 from ai_assistant.tools import build_web_search_integration, egress_registrations
 from ai_assistant.tools.egress_binder import EgressBindingSeam
 from ai_assistant.tools.web_search import WEB_SEARCH
@@ -59,11 +71,13 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         BoundEgressCall,
         FrozenJson,
+        SecretName,
         SpendAdmissionHandle,
         TransportEndpoint,
     )
     from ai_assistant.testing.cancellation import LoopSuspension
     from ai_assistant.tools.builtin import WebSearchIntegration
+    from ai_assistant.tools.connection_store import StoredEntry
     from ai_assistant.tools.egress import WebSearchTransport
 
 #: The connected account's origin. ``.invalid`` (RFC 6761 §6.4), so a case that
@@ -339,6 +353,146 @@ class InterruptingTransport:
         raise KeyboardInterrupt
 
 
+@final
+class SuspendableKeyring:
+    """A recording ``Secrets`` face whose next :meth:`get` can be held open.
+
+    ADR-0231 §18's arm 13aa asks for "a ``Secrets`` fake the harness suspends inside
+    ``get``", and it asks for it because the property under test is about a *window*:
+    ADR-0148 §6 makes reading the record and reading the credential one step "with no
+    ``await`` between them", and a fake that answers immediately cannot tell an
+    implementation that honours that from one that suspends in the middle. Held open,
+    the harness can land a reprovisioning inside the read and see what comes back.
+
+    **It records what the world looked like at entry, not only what it was asked
+    for.** Arm 13aa's fourth case asserts "that the task has **not** run when the
+    ``Secrets`` fake is called" — a fact about the instant :meth:`get` was entered,
+    which nothing observable after the call can recover.
+
+    Attributes:
+        reads: Every name passed to :meth:`get`, in order.
+        moved_at_entry: For each read, whether the store had already been
+            reprovisioned when :meth:`get` was entered. A conforming implementation
+            offers no suspension before this point, so every entry is ``False``.
+    """
+
+    __slots__ = ("_records", "_resource", "_store", "moved_at_entry", "reads")
+
+    def __init__(self, store: FakeSecretStore, records: ReprovisioningRecords | None) -> None:
+        """Read from ``store``, watching ``records`` for a reprovisioning.
+
+        Args:
+            store: The canonical keyring fake this reads through, so the behaviour
+                every case rests on is ADR-0125 §11's contract rather than a second
+                implementation of it.
+            records: The store whose reprovisioning this watches, or ``None`` where
+                the case queues none.
+        """
+        self._store = store
+        self._records = records
+        self._resource = SuspendableResource()
+        self.reads: list[SecretName] = []
+        self.moved_at_entry: list[bool] = []
+
+    def suspend_next(self) -> LoopSuspension:
+        """Arm the next :meth:`get` to suspend inside the modelled resource.
+
+        Returns:
+            The handle a case waits on and releases.
+        """
+        return self._resource.suspend_next()
+
+    async def get(self, name: SecretName) -> SecretStr | None:
+        """Read ``name``, recording the read and the world it happened in.
+
+        Args:
+            name: The entry to read.
+
+        Returns:
+            The value, or ``None`` where the keyring holds nothing under it.
+        """
+        self.reads.append(name)
+        self.moved_at_entry.append(self._records is not None and self._records.reprovisioned)
+        async with self._resource.held():
+            return await self._store.get(name)
+
+
+@final
+class ReprovisioningRecords:
+    """A ``ConnectionRecords`` that queues a reprovisioning at its **first** read.
+
+    ADR-0231 §18's arm 13aa's fourth case: "a reprovisioning task is queued to run at
+    the first suspension the searcher offers after it has read the identity, revision,
+    provisioning state and slot". Queued from inside that read, so the task is
+    *runnable* from the instant the pre-read returns and runs at whichever await the
+    searcher reaches first. "A conforming implementation offers none before
+    ``Secrets.get``", so a searcher with an ``await`` in that gap reads a credential
+    the pre-read did not name — which is what :attr:`SuspendableKeyring.moved_at_entry`
+    and the slot record between them detect.
+
+    Attributes:
+        reads: Every reference read, in order.
+        reprovisioned: Whether the queued task has run.
+    """
+
+    __slots__ = ("_after", "_current", "_task", "reads", "reprovisioned")
+
+    def __init__(self, before: StoredEntry, after: StoredEntry | None) -> None:
+        """Answer ``before`` until the queued task lands, and ``after`` afterwards.
+
+        Args:
+            before: The record the pre-read sees.
+            after: What a reprovisioning or a disconnection leaves, or ``None`` for a
+                reference the store no longer holds a record for.
+        """
+        self._current: StoredEntry | None = before
+        self._after = after
+        self._task: asyncio.Task[None] | None = None
+        self.reads: list[str] = []
+        self.reprovisioned = False
+
+    async def latest(self, reference: str, /) -> StoredEntry | None:
+        """The reference's latest entry, queueing the reprovisioning on the first read.
+
+        Args:
+            reference: The connection to read.
+
+        Returns:
+            The entry as it stands at this read.
+        """
+        self.reads.append(reference)
+        if len(self.reads) == 1:
+            self._task = asyncio.ensure_future(self._reprovision())
+        return self._current
+
+    async def _reprovision(self) -> None:
+        """Land the reprovisioning, as a provisioning act committing under the read."""
+        self.reprovisioned = True
+        self._current = self._after
+
+
+async def suspendable(
+    *,
+    records: ReprovisioningRecords | None = None,
+    holds: str | None = CREDENTIAL,
+    slot: SecretName = SLOT,
+) -> SuspendableKeyring:
+    """A keyring holding ``holds`` under ``slot``, whose reads can be held open.
+
+    Args:
+        records: The store whose reprovisioning it watches.
+        holds: The credential to store.
+        slot: Where to store it.
+
+    Returns:
+        The keyring.
+    """
+    store = FakeSecretStore(scope=SecretScope.INTEGRATION)
+    if holds is not None:
+        await store.set(slot, SecretStr(holds))
+    return SuspendableKeyring(store, records)
+
+
 @dataclass(frozen=True, slots=True)
 class Built:
     """One configured search integration and every double behind it.
@@ -355,8 +509,8 @@ class Built:
 
     integration: WebSearchIntegration
     transport: FakeOutboundTransport | GatedTransport | InterruptingTransport
-    keyring: Keyring
-    records: Records
+    keyring: Keyring | SuspendableKeyring
+    records: Records | ReprovisioningRecords
     trail: FakeAuditTrail
 
     @property
@@ -382,7 +536,8 @@ async def built(  # noqa: PLR0913 — one knob per double a case arranges, and e
     *,
     channels: Sequence[FakeByteChannel] = (),
     transport: GatedTransport | InterruptingTransport | None = None,
-    records: Records | None = None,
+    records: Records | ReprovisioningRecords | None = None,
+    secrets: SuspendableKeyring | None = None,
     holds: str | None = CREDENTIAL,
     gate: SpendGate | None = None,
     origin: str = ORIGIN,
@@ -400,6 +555,8 @@ async def built(  # noqa: PLR0913 — one knob per double a case arranges, and e
             fake has no arrangement for — a held open and an interrupted one.
         records: The connection store's scripted answers; defaults to one active
             record that never moves.
+        secrets: A keyring of the case's own, for the arms that hold a credential read
+            open. Defaults to the recording one the mail harness builds.
         holds: What the keyring holds under the record's slot, or ``None`` for a
             keyring with no entry — which is what an interrupted provisioning act
             leaves behind.
@@ -414,7 +571,7 @@ async def built(  # noqa: PLR0913 — one knob per double a case arranges, and e
     Returns:
         The integration and every double behind it.
     """
-    ring = await keyring(holds=holds)
+    ring = await keyring(holds=holds) if secrets is None else secrets
     trail = FakeAuditTrail()
     capability = transport
     if capability is None:
