@@ -477,7 +477,16 @@ class FakeNotificationStore:
         return self._cap
 
     def _now(self) -> datetime:
-        """Read the clock, reporting an unusable reading as this store's error.
+        """The guarded clock's reading, as this store's own error (ADR-0026 §4).
+
+        The guard's own text is carried through rather than replaced, as
+        :meth:`~ai_assistant.memory.notification_store.SqliteNotificationStore._now`
+        carries it: the ``owner`` label
+        :func:`~ai_assistant.core.clock.checked_clock` was given is not inferable
+        from anything `core` holds, so a constant message here would spend it and
+        discard it — and this being a canonical double (ADR-0026 §7), a consumer
+        asserting on the diagnostic would be certified against a message the real
+        store never produces.
 
         Returns:
             The reading, aware and UTC.
@@ -488,8 +497,7 @@ class FakeNotificationStore:
         try:
             return self._clock()
         except ClockReadingError as exc:
-            msg = "the notification store's clock returned an unusable reading"
-            raise NotificationStoreError(msg) from exc
+            raise NotificationStoreError(str(exc)) from exc
 
     async def admit(
         self, candidate: NotificationCandidate, *, policy: NotificationPolicy
