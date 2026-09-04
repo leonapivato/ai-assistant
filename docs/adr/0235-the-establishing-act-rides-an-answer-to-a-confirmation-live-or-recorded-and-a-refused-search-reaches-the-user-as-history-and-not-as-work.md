@@ -699,9 +699,11 @@ class PermissionDecision(BaseModel):                   # core/types.py
 > **Normative.** This ADR adds **no Protocol**, no member to `ActionPolicy`,
 > `AuditTrail`, `EgressBinder`, `RecipientGrants`, `RecipientGrantResolution` or
 > `RecipientGrantStore`, no `Settings` field, and no member to
-> `RoutableOperation`. It mints **one** error class and no second —
-> `UngrantableActError` (§3), whose reason is stated there — and adds no member to any
-> existing one. What it **does** add to `core/types.py` is the carrier above —
+> `RoutableOperation`. It adds **three** error classes and no fourth:
+> `UngrantableActError` (§3), whose reason is stated there, and the two
+> `InvalidRecipientGrantError` subclasses above, which narrow an existing refusal
+> rather than opening a new failure mode. It adds no member to any existing error
+> class and mints no error anywhere else. What it **does** add to `core/types.py` is the carrier above —
 > one field on `TurnOutcome` and the two values it is typed over — and nothing else:
 > no field on `RecipientGrant`, `PermissionDecision`, `Confirmation` or
 > `ConfirmationEgress`, and no second construction path for any of them.
@@ -1135,6 +1137,24 @@ which is what "a product surface with a user action behind it" describes.
 > terminal as `UngrantableActError` and is rendered at the command's own error
 > boundary, with the call left answerable.
 
+> **Normative.** `assistant remember-recipients` states the same outcomes from the
+> **refusal `establish_recipient_grant` raises**, because ADR-0193 §1's ceiling clause
+> binds *every* surface offering the act and this is the other one. It catches
+> `RecipientGrantCeilingError` and names the ceiling and `assistant
+> revoke-recipient-grant`; catches `DuplicateRecipientGrantError` and says the
+> recipients were already authorised, naming `assistant recipient-grants`; catches the
+> base `InvalidRecipientGrantError` and says no standing authorisation was created,
+> naming no cause; and catches a bare `RecipientGrantError` and says the grant store
+> could not be written. None of the four propagates as a traceback, and none is
+> rendered as a fault of the call the decision records — which was refused before this
+> act and is not made by it (§3).
+
+> **Normative.** The two surfaces state the **same four outcomes** by construction,
+> from the carrier on one population and from the refusal's own type on the other, and
+> no lane gives one of them a rendering the other lacks. That is the whole of what
+> ADR-0193 §1 asks of a surface offering the act, discharged twice because the act is
+> offered twice.
+
 > **Normative.** The history command is what makes ADR-0193 §1's recourse performable
 > on the shipping surface, so it is named here rather than left to the lane: a user
 > whose act §6 refused on the ceiling reaches it, finds the expired grant the standing
@@ -1231,8 +1251,8 @@ in it, which is the disclosure ADR-0199 exists to refuse.
 
 > **Normative.** Beyond the marked clauses §14 enumerates, this ADR decides nothing.
 > It registers no tool, designates no seam, adds no `DestinationProtocol` member, adds
-> no `Settings` field, mints no error class but the one §3 names, and attests, relaxes
-> or adds no condition of ADR-0017 §3 or ADR-0154 §4.
+> no `Settings` field, mints no error class but the three §3 and §4 name, and attests,
+> relaxes or adds no condition of ADR-0017 §3 or ADR-0154 §4.
 
 > **Normative.** It decides nothing about `SourceGrant`, `SourceGrants` or
 > `SourceGrantStore`. ADR-0097 §7 stands verbatim: a source grant may never be cited
@@ -1543,6 +1563,16 @@ enumeration in its own text (§9).
 > fails against a terminal rendering a storage fault as a declined request. It is
 > asserted over the rendered output, because ADR-0193 §1's obligation is discharged in
 > what the user reads and nowhere else.
+
+> **Normative.** Lane 1 ships the matching terminal arm for `assistant
+> remember-recipients`, over an `establish_recipient_grant` raising each of
+> `RecipientGrantCeilingError`, `DuplicateRecipientGrantError`, the base
+> `InvalidRecipientGrantError` and a bare `RecipientGrantError`. It asserts the same
+> four sentences §9 requires of `assistant resume`, and that none of the four escapes
+> as a traceback. It fails against a lane that rendered the carrier on one population
+> and let the refusal propagate on the other — which is the gap round 12 of this review
+> found, and which ADR-0193 §1 does not permit, because its ceiling clause binds every
+> surface offering the act.
 
 > **Normative.** Lane 1 ships the terminal arm for `UngrantableActError` on both
 > populations, asserting the population-dependent sentence §9 states: the population
