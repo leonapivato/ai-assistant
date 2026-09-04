@@ -268,11 +268,17 @@ from ai_assistant.core.errors import (
     AssistantError,
     ConfigurationError,
     DisplacedProvisioningError,
+    DuplicateRecipientGrantError,
     IncompleteProvisioningError,
+    InvalidRecipientGrantError,
     InvalidResolutionError,
     OversizedValueError,
+    PermissionDeniedError,
     ProvisioningOutcomeUnknownError,
+    RecipientGrantCeilingError,
+    RecipientGrantError,
     ResidualCredentialError,
+    UngrantableActError,
     UnknownConnectionError,
     UnusableIdentityError,
 )
@@ -308,6 +314,9 @@ from ai_assistant.core.types import (
     QueueOutcome,
     QuietWindow,
     ReadOutcome,
+    RecipientGrant,
+    RecipientGrantNotEstablished,
+    RecipientGrantOutcome,
     RecordedInvocation,
     ReplyChunk,
     RoutableOperation,
@@ -1047,6 +1056,71 @@ def _positive_page_argument(value: int) -> int:
     return value
 
 
+def _parsed_instant(value: str) -> datetime:
+    """Parse an ISO 8601 instant, refusing one that carries no offset (ADR-0235 §9).
+
+    **The surface attributes no offset and reads no timezone of its own.** ADR-0023
+    §3 names *"a datetime a user typed meaning their own wall clock"* as exactly the
+    value for which attribution **fabricates** a fact rather than restoring one, and
+    puts attribution in the adapter that *knows* the offset — which this one does
+    not. The user is stating when a standing authorisation ends, and a surface that
+    guessed a zone would date it by an hour the user never gave.
+
+    Refusing rather than accepting-and-changing is :func:`_quiet_window`'s rule one
+    type over, and refusing during Typer's parameter parsing is
+    :func:`_page_argument`'s shape: it makes this a usage error with a controlled
+    exit code rather than a traceback out of a command's error boundary (ADR-0042
+    §7).
+
+    Args:
+        value: The instant as the user typed it.
+
+    Returns:
+        The instant, timezone-aware.
+
+    Raises:
+        BadParameter: If it is not an ISO 8601 timestamp, or carries no offset.
+    """
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        msg = (
+            "must be an ISO 8601 timestamp with an explicit offset, "
+            "like 2026-10-01T09:00:00Z or 2026-10-01T11:00:00+02:00"
+        )
+        raise typer.BadParameter(msg) from exc
+    if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) is None:
+        msg = (
+            "must carry an explicit UTC offset — I will not guess your timezone, "
+            "because guessing would date the authorisation by an hour you never gave. "
+            "Write 2026-10-01T09:00:00Z or 2026-10-01T11:00:00+02:00"
+        )
+        raise typer.BadParameter(msg)
+    return parsed
+
+
+def _offset_instant(value: str) -> str:
+    """Refuse an offsetless instant during parameter parsing, returning it unchanged.
+
+    The value reaches the engine as the ``datetime``
+    :func:`_parsed_instant` produces; what this does is make the refusal a **usage**
+    error before any client is built (ADR-0235 §9). The parse is run once here and
+    once where the argument is used, through the one function, so the surface has a
+    single statement of what an admissible instant is.
+    """
+    _parsed_instant(value)
+    return value
+
+
+def _optional_offset_instant(value: str | None) -> str | None:
+    """:func:`_offset_instant` for the two instant options that may be absent.
+
+    ``None`` is "the user asked for nothing standing", which is the ordinary
+    outcome and the one thing this must not turn into a value (ADR-0235 §1).
+    """
+    return None if value is None else _offset_instant(value)
+
+
 def _present_notification_class(value: str | None) -> str | None:
     """:func:`_present_source` for ``tune --class``: **byte-exact**, and that is the point.
 
@@ -1545,6 +1619,16 @@ def resume(
         callback=_positive_finite_seconds,
         help="Per-attempt deadline for the engine's work, in seconds (positive).",
     ),
+    remember_recipients_until: str | None = typer.Option(
+        None,
+        "--remember-recipients-until",
+        callback=_optional_offset_instant,
+        metavar="INSTANT",
+        help=(
+            "Also remember this call's recipients until this instant, so calls to them "
+            "are not put to you again (ISO 8601 with an offset)."
+        ),
+    ),
     *,
     yes: bool = typer.Option(
         False, "--yes", "-y", help="Approve every pending confirmation without prompting."
@@ -1556,8 +1640,30 @@ def resume(
     was parked durably (ADR-0052) and survives a process exit. This reconstructs
     each such confirmation from stored state, shows the action and the policy's
     reason, and relays the opaque token back to the engine to resolve it.
+
+    **``--remember-recipients-until`` makes the recipients standing, in the same
+    act** (ADR-0193 §2, ADR-0235 §2). Approving a call and asking for nothing
+    standing is the ordinary outcome and stays the default: this is a separate thing
+    you supply, never a state a control arrives in, and nothing here fills it in,
+    rounds it or extends it. It is honoured only where you approve, and only on a
+    confirmation about an outbound call the grant may ride; where a card is not one,
+    the answer is collected without it and this says so.
+
+    **``--yes`` never supplies it.** No non-interactive flag, environment variable or
+    configuration value establishes a grant: the act is a decision made while looking
+    at the call (ADR-0235 §9).
     """
-    code = asyncio.run(_resume_pending(timeout_seconds=timeout_seconds, assume_yes=yes))
+    code = asyncio.run(
+        _resume_pending(
+            timeout_seconds=timeout_seconds,
+            assume_yes=yes,
+            remember_recipients_until=(
+                None
+                if remember_recipients_until is None
+                else _parsed_instant(remember_recipients_until)
+            ),
+        )
+    )
     raise typer.Exit(code)
 
 
@@ -1975,6 +2081,135 @@ def granted() -> None:
     anything was actually read is a question nothing here answers yet.
     """
     code = asyncio.run(_list_standing())
+    raise typer.Exit(code)
+
+
+@app.command("remember-recipients")
+def remember_recipients(
+    decision_id: str | None = typer.Argument(
+        None,
+        callback=_present_optional_id,
+        help="A decision from this listing, to make its recipients standing.",
+    ),
+    limit: int = typer.Option(
+        DEFAULT_PAGE_SIZE,
+        "--limit",
+        callback=_positive_page_argument,
+        help="How many rulings to read when listing (at least 1).",
+    ),
+    until: str | None = typer.Option(
+        None,
+        "--until",
+        callback=_optional_offset_instant,
+        metavar="INSTANT",
+        help="When the standing authorisation ends (ISO 8601 with an offset).",
+    ),
+) -> None:
+    """Show calls that were refused, and remember their recipients if you want to.
+
+    Bare, this lists the recorded questions you can still answer this way: calls
+    this assistant was **not** permitted to make and did not make. A search it
+    wanted to run and was refused shows up here, and this is the only place it does
+    — nothing was appended to a reply, and no notification was sent.
+
+    **Answering here does not make the call.** The call was refused and is gone;
+    nothing is sent on account of your answer. What the answer establishes is a
+    standing authorisation for the **recipients** of calls like it — never for their
+    payloads, and never for what they would say.
+
+    Give a decision id from this listing, with ``--until``, and I record your answer
+    and remember those recipients until that instant:
+
+        assistant remember-recipients <decision-id> --until 2026-10-01T09:00:00Z
+
+    ``--until`` is yours to choose and I will not choose it for you. See what stands
+    with ``assistant recipient-grants`` and withdraw one with ``assistant
+    revoke-recipient-grant``.
+    """
+    if decision_id is None and until is not None:
+        msg = "is only meaningful with a decision id: bare, this command lists"
+        raise typer.BadParameter(msg, param_hint="--until")
+    if decision_id is not None and until is None:
+        msg = (
+            "is required when a decision is named: a standing authorisation ends at an "
+            "instant you choose, and I will not choose one for you"
+        )
+        raise typer.BadParameter(msg, param_hint="--until")
+    code = asyncio.run(
+        _list_grantable(limit=limit)
+        if decision_id is None or until is None
+        else _establish_recipients(decision_id, expires_at=_parsed_instant(until))
+    )
+    raise typer.Exit(code)
+
+
+@app.command("recipient-grants")
+def recipient_grants() -> None:
+    """Show the recipients I am currently allowed to send to without asking.
+
+    The honest answer to "what sends have I made standing": every grant that is
+    live right now, read from the record of what you decided.
+
+    **This is a different question from ``assistant granted``**, which is about
+    *reading* your sources. The two are never one list and neither answers the
+    other: withdrawing one withdraws nothing of the other.
+
+    There is no ``--limit`` here on purpose. A truncated answer to "what do I
+    authorise" is a false answer rather than a partial one.
+
+    A grant that has expired is not live and is not here — ``assistant
+    recipient-grant-log`` is where you find it, and it still occupies a slot until
+    you withdraw it.
+    """
+    code = asyncio.run(_list_recipient_grants())
+    raise typer.Exit(code)
+
+
+@app.command("recipient-grant-log")
+def recipient_grant_log(
+    limit: int = typer.Option(
+        DEFAULT_PAGE_SIZE,
+        "--limit",
+        callback=_positive_page_argument,
+        help="How many records to show at most (at least 1).",
+    ),
+) -> None:
+    """Show every recipient act I recorded — granted and withdrawn — newest first.
+
+    Both kinds of act are here and nothing is ever edited or removed: withdrawing a
+    grant adds a record, it does not delete one.
+
+    **Do not read liveness off this list.** A record here says an act happened, not
+    that it still stands — use ``assistant recipient-grants``, which asks me
+    directly. What this list is *for* is the grant that has expired: it is no longer
+    live, so it is in no standing listing, and it still occupies a slot until you
+    withdraw it. This is where you find its id.
+    """
+    code = asyncio.run(_list_recipient_grant_log(limit=limit))
+    raise typer.Exit(code)
+
+
+@app.command("revoke-recipient-grant")
+def revoke_recipient_grant(
+    grant_id: str = typer.Argument(
+        ..., callback=_present_id, help="The grant to withdraw, from either listing."
+    ),
+) -> None:
+    """Withdraw one standing recipient authorisation.
+
+    **No question is asked and nothing stands in the way**, deliberately: this is
+    your remedy, and a prompt between you and it is a prompt too many. It is never
+    refused for being "too many" — a ceiling that could block a withdrawal would
+    trap you above it with no way down.
+
+    Withdrawal is whole: there is no partial withdrawal and no narrowing. Changing
+    what you authorise is a withdrawal followed by a new grant, and a new grant needs
+    a fresh call you are asked about.
+
+    It says nothing about a send already going out, and it does not retire anything I
+    already did. It stops the next such call from being made without asking you.
+    """
+    code = asyncio.run(_revoke_recipient_grant(grant_id))
     raise typer.Exit(code)
 
 
@@ -3246,7 +3481,9 @@ async def _forget_transcript_conversation(conversation_id: str, *, assume_yes: b
     return await _drive_forget_transcript_conversation(engine, conversation_id, confirm=confirm)
 
 
-async def _resume_pending(*, timeout_seconds: float, assume_yes: bool) -> int:
+async def _resume_pending(
+    *, timeout_seconds: float, assume_yes: bool, remember_recipients_until: datetime | None = None
+) -> int:
     """Recover durably-parked confirmations, answer them, and close the engine (ADR-0052).
 
     The restart-recovery counterpart to :func:`_ask`: it builds the engine over the
@@ -3267,7 +3504,12 @@ async def _resume_pending(*, timeout_seconds: float, assume_yes: bool) -> int:
         _render_error(exc)
         return _EXIT_ERROR
 
-    return await _drive_resume(engine, timeout=timeout, approver=approver)
+    return await _drive_resume(
+        engine,
+        timeout=timeout,
+        approver=approver,
+        remember_recipients_until=remember_recipients_until,
+    )
 
 
 async def _learn_feedback(  # noqa: PLR0913 — one parameter per field of the event this builds, each a separate thing the user said
@@ -3508,6 +3750,61 @@ async def _list_standing() -> int:
         return _EXIT_ERROR
 
     return await _drive_standing(engine)
+
+
+async def _list_grantable(*, limit: int) -> int:
+    """Obtain a client, read the offerable rulings, and render them (ADR-0235 §3)."""
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_grantable(engine, limit=limit)
+
+
+async def _establish_recipients(decision_id: str, *, expires_at: datetime) -> int:
+    """Obtain a client and perform the establishing act (ADR-0235 §3)."""
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_establish(engine, decision_id, expires_at=expires_at)
+
+
+async def _list_recipient_grants() -> int:
+    """Obtain a client, read what recipients are authorised now, and render it (§7)."""
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_recipient_grants(engine)
+
+
+async def _list_recipient_grant_log(*, limit: int) -> int:
+    """Obtain a client, read the recipient-grant history, and render it (§7)."""
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_recipient_grant_log(engine, limit=limit)
+
+
+async def _revoke_recipient_grant(grant_id: str) -> int:
+    """Obtain a client and withdraw one standing recipient grant (§7)."""
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_revoke_recipient_grant(engine, grant_id)
 
 
 async def _amend_source(source: str, *, scope: list[GrantScope], assume_yes: bool) -> int:
@@ -4071,6 +4368,7 @@ async def _drive_resume(
     *,
     timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, relayed to the façade (ADR-0029 §4)
     approver: Callable[[Confirmation], bool | None],
+    remember_recipients_until: datetime | None = None,
 ) -> int:
     """Recover the pending confirmations and resolve each one.
 
@@ -4105,13 +4403,69 @@ async def _drive_resume(
             if approved is None:
                 failed = True
                 continue
-            resumed = await engine.resume(confirmation.token, approved=approved, timeout=timeout)
+            # **The standing control is offered only where the act may ride the
+            # card, and never beside a declining answer** (ADR-0235 §2). A card
+            # carrying no egress, or one planned over external content, is one the
+            # act is refused on — §5's rendering floor is what tells this surface
+            # which — so the answer is collected without the argument and the user
+            # is told, rather than the whole call being refused and their answer
+            # lost with it.
+            until = (
+                remember_recipients_until
+                if approved and _may_ride_an_establishing_act(confirmation)
+                else None
+            )
+            if remember_recipients_until is not None and until is None and approved:
+                _render_act_not_offered()
+            try:
+                resumed = await engine.resume(
+                    confirmation.token,
+                    approved=approved,
+                    timeout=timeout,
+                    remember_recipients_until=until,
+                )
+            except UngrantableActError as exc:
+                # Nothing was recorded, nothing was executed and the step stays
+                # durably parked, so this card is unanswered and the loop moves on
+                # (ADR-0235 §2, §6). The exit code is non-zero for the reason a
+                # withheld render is: a caller must not read "everything was
+                # resolved" off a run that left one pending.
+                _render_ungrantable(exc, still_answerable=True)
+                failed = True
+                continue
             failed = _render_turn(resumed) or failed
+            _render_recipient_grant_outcome(resumed.recipient_grant)
             _render_conversation_footer(resumed)
     except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
     return _EXIT_ERROR if failed else _EXIT_OK
+
+
+def _may_ride_an_establishing_act(confirmation: Confirmation) -> bool:
+    """Whether the standing control may be offered beside this card (ADR-0235 §2, §5).
+
+    The two conditions ADR-0235 §3 places on the recorded population, read off the
+    card §5's floor renders: it is about an outbound call at all, and that call was
+    not planned over external content. A user answering such a confirmation may
+    approve the call; they may not, in that act, make its recipients standing
+    (ADR-0193 §2, §4).
+
+    **Read off the card and never guessed.** Where the answer is ``False`` the
+    argument is not sent, which is what keeps the shape ADR-0235 §2 defines for a
+    non-conforming client unreachable from this one.
+    """
+    egress = confirmation.egress
+    return egress is not None and not egress.planned_with_external_content
+
+
+def _render_act_not_offered() -> None:
+    """Say why one card took the answer without the standing request (ADR-0235 §2)."""
+    console.print(
+        "[dim]Recipients not remembered for this one: it is not a call whose "
+        "recipients can be made standing. Your answer was recorded as you gave "
+        "it.[/]"
+    )
 
 
 async def _drive_turn(  # noqa: PLR0913 — one parameter per seam a turn is driven through, and the two approvers are two card types
@@ -4724,6 +5078,110 @@ def _outcome_of(exc: Exception) -> _ActOutcome:
     if isinstance(exc, TransportError | OversizedValueError):
         return _ActOutcome.UNKNOWN
     return _ActOutcome.NOT_LANDED
+
+
+async def _drive_grantable(engine: AssistantEngine, *, limit: int) -> int:
+    """Read the offerable rulings and render them (ADR-0235 §3, §5, §8)."""
+    try:
+        offerable = await engine.grantable_decisions(limit=limit)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_grantable_decisions(offerable, limit=limit)
+    return _EXIT_OK
+
+
+async def _drive_establish(  # noqa: PLR0911 — ADR-0235 §9's five renderings plus the pre-answer refusal and the success, each read from its own type
+    engine: AssistantEngine, decision_id: str, *, expires_at: datetime
+) -> int:
+    """Perform the act, and state the outcome from the refusal's own type (ADR-0235 §9).
+
+    **Five outcomes, and each is read from the type of what was raised** — never
+    from its message, never from a count this adapter took, and never from a
+    listing read afterwards (ADR-0235 §11). They are the same five ``assistant
+    resume`` states from its carrier, which is ADR-0193 §1's ceiling obligation
+    discharged twice because the act is offered twice.
+
+    **None of the five escapes as a traceback, and none is rendered as a fault of
+    the call the decision records** — that call was refused before this act and is
+    not made by it (ADR-0235 §3).
+    """
+    try:
+        grant = await engine.establish_recipient_grant(decision_id, expires_at=expires_at)
+    except RecipientGrantCeilingError:
+        _render_ceiling_reached()
+        return _EXIT_ERROR
+    except DuplicateRecipientGrantError:
+        _render_already_standing()
+        return _EXIT_ERROR
+    except InvalidRecipientGrantError:
+        _render_grant_refused()
+        return _EXIT_ERROR
+    except RecipientGrantError:
+        _render_grant_store_unavailable()
+        return _EXIT_ERROR
+    except PermissionDeniedError:
+        _render_grant_declined()
+        return _EXIT_ERROR
+    except UngrantableActError as exc:
+        _render_ungrantable(exc, still_answerable=False)
+        return _EXIT_ERROR
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_recipient_grant_established(grant)
+    return _EXIT_OK
+
+
+async def _drive_recipient_grants(engine: AssistantEngine) -> int:
+    """Ask what recipients are authorised now and render it (ADR-0235 §7).
+
+    **One call and no second one.** This does not read the history to annotate the
+    set, does not compute liveness of its own, and does not merge in what
+    ``assistant granted`` answers: recipient grants and source grants are two
+    vocabularies, and a page that answered one with the other is how someone comes
+    to believe that revoking one revoked the other.
+    """
+    try:
+        standing = await engine.standing_recipient_grants()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_standing_recipient_grants(standing)
+    return _EXIT_OK
+
+
+async def _drive_recipient_grant_log(engine: AssistantEngine, *, limit: int) -> int:
+    """Read the recipient-grant history and render it, newest first (ADR-0235 §7)."""
+    try:
+        recorded = await engine.recent_recipient_grants(limit=limit)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_recipient_grant_log(recorded, limit=limit)
+    return _EXIT_OK
+
+
+async def _drive_revoke_recipient_grant(engine: AssistantEngine, grant_id: str) -> int:
+    """Withdraw one grant, or report that the store held none (ADR-0235 §7)."""
+    try:
+        revoked = await engine.revoke_recipient_grant(grant_id)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    if revoked is None:
+        console.print(
+            f"[yellow]Nothing to withdraw.[/] No standing recipient authorisation "
+            f"{_safe(grant_id)} is outstanding — it may already have been withdrawn."
+        )
+        console.print("[dim]'assistant recipient-grants' shows what stands now.[/]")
+        return _EXIT_OK
+    console.print(f"[green]Withdrawn.[/] Recorded as {_safe(revoked.id)}.")
+    console.print(
+        "[dim]Sends to those recipients will be put to you again. Nothing already "
+        "sent is retired, and a send already going out is not stopped.[/]"
+    )
+    return _EXIT_OK
 
 
 async def _state_after(engine: AssistantEngine, source: str) -> SourceGrant | None | _Unread:
@@ -8381,6 +8839,240 @@ def _confirm_grant(_source: GrantableSource) -> bool:
     nothing mints a grant from what is merely configured).
     """
     return typer.confirm("Connect it?", default=False)
+
+
+def _render_grantable_decisions(offerable: tuple[PermissionDecision, ...], *, limit: int) -> None:
+    """The listing that tells the user a call was refused (ADR-0235 §8).
+
+    **This listing is the message, and there is nowhere else** (§8). No reply says
+    it, nothing is appended to one, no reply is degraded for it, and no notification
+    is minted: a refused read interrupting the user is the posture ADR-0226 §5
+    designed the mechanism against. What is left is a place to look, next to the one
+    act that changes the answer.
+
+    **It states what the recorded decisions say and no more.** It does not say the
+    turn would have answered differently, that a reply was incomplete, that a search
+    would have succeeded, or that anything is owed — which is ADR-0235 §3's
+    outstanding-work clause read on the words as well as on the shape. Nothing here
+    is a task, a queue, a to-do, a badge or an unread count.
+
+    **The three facts §5 requires are stated before any act is collected**, once for
+    the page rather than once per row: that the call was refused and was not made,
+    that answering now does not make it, and that what an answer establishes is a
+    standing authorisation for the **recipients** of calls like it and never for
+    their payloads.
+
+    **ADR-0233 §8's span-value floor is not met here and this does not claim it is.**
+    A recorded ruling carries a ``parameters_digest`` rather than the argument
+    values, so the bytes are not in the store to render — and nothing here renders a
+    digest as a value, reconstructs, summarises, excerpts or paraphrases the
+    arguments, or implies the user has been shown what the call would have sent.
+    :func:`_render_decision` is what renders the row, floor and all.
+    """
+    if not offerable:
+        console.print(
+            "[dim]Nothing to answer.[/] No refused call is waiting for a decision "
+            "about its recipients."
+        )
+        return
+    console.print(
+        f"[bold]{len(offerable)}[/] refused call(s) you can still decide about, newest first:\n"
+    )
+    console.print(
+        "[yellow]Each of these was refused and was not made.[/] Answering now does "
+        "not make it — nothing is sent on account of your answer. What an answer "
+        "establishes is a standing authorisation for the [bold]recipients[/] of "
+        "calls like it, never for what such a call would say.\n"
+    )
+    for decision in offerable:
+        _render_decision(decision)
+    if len(offerable) == limit:
+        console.print(
+            f"[dim]Read from the most recent {limit} rulings. Ask for more with "
+            "--limit; a call older than that window is not offered here.[/]"
+        )
+    console.print(
+        "[dim]To remember one call's recipients: assistant remember-recipients "
+        "<decision-id> --until <instant>[/]"
+    )
+
+
+def _render_recipient_grant_established(grant: RecipientGrant) -> None:
+    """Say a grant was recorded, and say exactly what it covers (ADR-0235 §5)."""
+    console.print(f"[green]Remembered.[/] Recorded as {_safe(grant.id)}.")
+    console.print(f"  [bold]Account:[/] {_safe(grant.account.identity)}")
+    console.print("  [bold]Recipients:[/]")
+    for member in grant.destinations:
+        console.print(f"    {_recorded_destination_line(member)}")
+    console.print(f"  [bold]Until:[/] {_decided_at(grant.expires_at)}")
+    console.print(
+        "[dim]Calls this covers will not be put to you again, so their payload "
+        "description is not shown again. It authorises the recipients and never "
+        "what is sent to them. 'assistant recipient-grants' shows what stands; "
+        "'assistant revoke-recipient-grant' withdraws one.[/]"
+    )
+
+
+def _render_ceiling_reached() -> None:
+    """Name the ceiling and the recourse, and never the call (ADR-0193 §1, ADR-0235 §6)."""
+    console.print(
+        "[yellow]Not remembered.[/] You are holding as many standing recipient "
+        "authorisations as this deployment admits, so this one was refused. Nothing "
+        "you already hold was evicted, narrowed or expired to make room."
+    )
+    console.print(
+        "[dim]Withdraw one you hold with 'assistant revoke-recipient-grant' — "
+        "'assistant recipient-grant-log' lists them, expired ones included, which "
+        "'assistant recipient-grants' correctly omits. Withdrawing frees a slot for "
+        "the next such call; it does not reopen this one.[/]"
+    )
+
+
+def _render_already_standing() -> None:
+    """Say the recipients were already authorised (ADR-0235 §4, §9)."""
+    console.print(
+        "[yellow]Nothing to do.[/] Those recipients are already authorised for this "
+        "account and this tool, so no second authorisation was recorded."
+    )
+    console.print("[dim]'assistant recipient-grants' shows what stands.[/]")
+
+
+def _render_grant_refused() -> None:
+    """Say no authorisation was created, naming no cause it was not given (§4, §9)."""
+    console.print(
+        "[yellow]Not remembered.[/] No standing authorisation was created. I was not "
+        "told why, and I will not guess."
+    )
+
+
+def _render_grant_store_unavailable() -> None:
+    """Say the store could not be written, and that the call was unaffected (§4, §9)."""
+    console.print(
+        "[yellow]Not remembered.[/] The record of standing recipient authorisations "
+        "could not be written, so nothing stands from this. That is a storage fault "
+        "and not a refusal of what you asked for."
+    )
+
+
+def _render_grant_declined() -> None:
+    """Say the call was declined when it was ruled on, and settled (§2, §9)."""
+    console.print(
+        "[yellow]Declined.[/] The call was declined when it was ruled on. That "
+        "decision is recorded and settled, and nothing was made standing."
+    )
+
+
+def _render_ungrantable(exc: Exception, *, still_answerable: bool) -> None:
+    """The refusal that recorded nothing, in the population's own words (§9, §12).
+
+    **The sentence differs by population and that is the decision rather than a
+    slip.** On a held confirmation the step stays durably parked, so the call is
+    still answerable and this says so; on a recorded one there is no park to answer
+    and this does not say it — a surface that offered a retry it knows will not be
+    there would be inviting the one thing ADR-0235 §6 forbids it to promise.
+    """
+    console.print(f"[yellow]Not remembered.[/] {_safe(str(exc))}")
+    if still_answerable:
+        console.print(
+            "[dim]Nothing was recorded and nothing was sent. The call is still "
+            "waiting for an answer: run 'assistant resume' again without "
+            "--remember-recipients-until.[/]"
+        )
+    else:
+        console.print("[dim]Nothing was recorded and nothing was sent.[/]")
+
+
+def _render_recipient_grant_outcome(outcome: RecipientGrantOutcome | None) -> None:
+    """State what became of a standing request, from the carrier and nothing else.
+
+    **From the carrier and never from a listing read afterwards** (ADR-0235 §6). A
+    ceiling refusal, a grant recorded with an expiry an instant after the answer, and
+    a duplicate refusal all show as the same ``standing_recipient_grants`` listing,
+    and a :class:`~ai_assistant.core.types.Confirmation` carries no decision id to
+    correlate on — so a read-back cannot tell them apart and this does not try.
+
+    **Silence where the carrier is absent** is a call that collected no act, and the
+    surface then says nothing about standing grants at all. Where the carrier *is*
+    present it always says something: a user told nothing about a request they made
+    concludes it was granted.
+
+    It is printed beside the call's own result and never in place of it.
+    """
+    if outcome is None:
+        return
+    if outcome.established is not None:
+        _render_recipient_grant_established(outcome.established)
+        return
+    match outcome.not_established:
+        case RecipientGrantNotEstablished.CEILING_REACHED:
+            _render_ceiling_reached()
+        case RecipientGrantNotEstablished.ALREADY_STANDING:
+            _render_already_standing()
+        case RecipientGrantNotEstablished.REFUSED:
+            _render_grant_refused()
+        case RecipientGrantNotEstablished.STORE_UNAVAILABLE:
+            _render_grant_store_unavailable()
+        case RecipientGrantNotEstablished.DECLINED:
+            _render_grant_declined()
+        case None:  # pragma: no cover - the model's own validator refuses it
+            return
+
+
+def _render_standing_recipient_grants(standing: tuple[RecipientGrant, ...]) -> None:
+    """What the user currently authorises sending to (ADR-0235 §7)."""
+    if not standing:
+        console.print(
+            "[yellow]Nothing standing.[/] No recipients are authorised in advance, "
+            "so every outbound call is put to you."
+        )
+        console.print(
+            "[dim]This is not the same question as 'assistant granted', which is "
+            "about reading your sources.[/]"
+        )
+        return
+    console.print(f"[bold]{len(standing)}[/] standing recipient authorisation(s):\n")
+    for grant in standing:
+        console.print(f"  [bold]{_safe(grant.id)}[/] [dim]until {_decided_at(grant.expires_at)}[/]")
+        console.print(
+            f"    [bold]Tool:[/] {_safe(grant.tool.id)} "
+            f"[dim](capability {_safe(grant.tool.capability)})[/]"
+        )
+        console.print(f"    [bold]Account:[/] {_safe(grant.account.identity)}")
+        for member in grant.destinations:
+            console.print(f"    {_recorded_destination_line(member)}")
+        console.print()
+    console.print(
+        "[dim]Each authorises the recipients and never what is sent to them. "
+        "'assistant revoke-recipient-grant <id>' withdraws one. This is not "
+        "'assistant granted', which is about reading your sources.[/]"
+    )
+
+
+def _render_recipient_grant_log(recorded: tuple[RecipientGrant, ...], *, limit: int) -> None:
+    """Every recipient act, granted and withdrawn, newest first (ADR-0235 §7)."""
+    if not recorded:
+        console.print("[yellow]Nothing recorded.[/] No recipient act has been made yet.")
+        return
+    console.print(f"[bold]{len(recorded)}[/] recipient act(s), newest first:\n")
+    for record in recorded:
+        kind = "Withdrew" if record.revokes is not None else "Granted"
+        console.print(
+            f"  [bold]{kind}[/] {_safe(record.id)} [dim]{_decided_at(record.decided_at)}[/]"
+        )
+        if record.revokes is not None:
+            console.print(f"    [bold]Withdraws:[/] {_safe(record.revokes)}")
+        console.print(f"    [bold]Account:[/] {_safe(record.account.identity)}")
+        for member in record.destinations:
+            console.print(f"    {_recorded_destination_line(member)}")
+        console.print(f"    [bold]Ends:[/] {_decided_at(record.expires_at)}")
+        console.print()
+    if len(recorded) == limit:
+        console.print(f"[dim]Showing {limit}. Ask for more with --limit.[/]")
+    console.print(
+        "[dim]A record here says an act happened, never that it still stands — "
+        "'assistant recipient-grants' is the honest answer to that. An expired grant "
+        "is not live and still occupies a slot until you withdraw it.[/]"
+    )
 
 
 def _render_grants(recorded: tuple[SourceGrant, ...], *, limit: int) -> None:

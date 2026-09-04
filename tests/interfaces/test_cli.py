@@ -1482,6 +1482,13 @@ def test_a_recorded_ruling_reaches_the_audit_surface_and_nothing_else() -> None:
     before a byte of it is printed, and both therefore take the decision and belong
     on this surface. The set is **extended** rather than relaxed to a superset test,
     because a membership check would stop catching the entry this case exists for.
+
+    ``_render_grantable_decisions`` is the eighth, added by ADR-0235 §8: the listing
+    that tells the user a search was refused renders **recorded rulings** and not
+    confirmations — §5's population-(b) floor is ADR-0186 §7's row floor, and this
+    function delegates each row to ``_render_decision`` rather than growing a second
+    renderer. It is on the audit surface for exactly the reason the seven above are,
+    and its presence here is what keeps the confirmation path holding no ruling.
     """
     holders = {
         name
@@ -1500,6 +1507,7 @@ def test_a_recorded_ruling_reaches_the_audit_surface_and_nothing_else() -> None:
         "_render_decision",
         "_refuse_a_page_this_surface_cannot_state",
         "_render_decisions",
+        "_render_grantable_decisions",
         "_render_recorded_egress",
     }
 
@@ -7844,6 +7852,8 @@ def test_every_id_parameter_on_the_surface_carries_an_id_callback() -> None:
         "forget-notification:notification_id": True,
         "forget-question:question_id": True,
         "observe:conversation_id": True,
+        "remember-recipients:decision_id": True,
+        "revoke-recipient-grant:grant_id": True,
     }
 
 

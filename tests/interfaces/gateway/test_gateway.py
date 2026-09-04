@@ -836,6 +836,22 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
     ``test_gateway_reads.py`` pin that — because that bar is on the route and not on
     the rendering, and a routed pass makes no browser request for any of them.
     ``tests/interfaces/gateway/test_gateway_routed.py`` is where the arms are pinned.
+
+    **``recipient_grant`` is ADR-0235 §4's member, and the decision taken here is
+    "not rendered".** That is a decision rather than an omission, and ADR-0235 §9
+    is where it is made: "The **browser** is not reached by this decision … whether
+    the page offers a control for it is the browser lane's, and until that lane the
+    page renders the card exactly as it does today." The member crosses the wire —
+    it is on ``TurnOutcome`` and this page decodes the whole outcome — and no panel
+    reads it, because a page that reported what became of a standing request would
+    have to offer the control that makes one, which ADR-0177 §1's enumeration does
+    not yet admit and which §9 assigns to a later consumer lane with its own
+    ratified decision.
+
+    The cost is stated rather than hidden: until that lane, a user of the page sees
+    no change from ADR-0235 at all, which is the sequencing §9 chose. Nothing on
+    this page can *set* ``remember_recipients_until`` either, so the member is
+    ``None`` on every outcome this adapter will ever see.
     """
     assert set(TurnOutcome.model_fields) == {
         "turn",
@@ -845,6 +861,7 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
         "reply",
         "reply_degraded",
         "routed",
+        "recipient_grant",
     }
 
 
