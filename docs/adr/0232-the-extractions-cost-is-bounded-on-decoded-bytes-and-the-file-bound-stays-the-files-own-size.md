@@ -9,12 +9,12 @@
   reads *"`fetch_max_file_bytes`, the file's size on disk, default **4 MiB**, which
   bounds the read **and the extraction's cost**"*, and the second limb is replaced: that
   field bounds the read, and §2 below adds **one** `Settings` field bounding the decoded
-  bytes an extraction parses **as content-stream instructions** — the superlinear
-  quantity #2022 is filed about, measured at about 5 s per decoded MB. What replaces the
-  limb is that narrower claim and no wider one: this ADR does **not** bound the decoded
-  classes an extraction reads *linearly* — a compressed object stream, a `/ToUnicode`
-  CMap, an embedded font program, each about 0.04 s per decoded MB — and §10 defers those
-  **by name** with what fires them. The same clause
+  bytes an extraction **parses, counted once per parse**: content-stream instructions,
+  which is the superlinear quantity #2022 is filed about, **and** the embedded font
+  program the extraction re-parses on every page. What replaces the limb is that claim and
+  no wider one: this ADR does **not** bound the decoded inputs read *once* and cached — a
+  compressed object stream, a `/ToUnicode` CMap — and §10 defers those **by name** with
+  what fires them. The same clause
   opens *"**Two** size bounds"*, and the count becomes three. And the refuse-never-truncate
   clause reads *"A file over **either** bound yields a refusal and no record"*, whose
   enumeration becomes any of the three — its **ruling** is not replaced but extended, and
@@ -101,63 +101,81 @@ bytes sees 105 KB and admits two minutes of parsing.
 page's own stream, and why §8 owes an arm for each of these three documents rather than
 for #2022's alone.
 
-### The extraction reads other decoded streams too, and this ADR does not bound them
+### The font program is re-parsed on every page, and that multiplier is the second half
 
 `extract_text` decodes more than content streams. It reads each font's `/ToUnicode` CMap
 and its **embedded font program**, and a compressed **object stream** (`/ObjStm`) is
-decoded whole during ordinary indirect-object resolution. All three are decoded streams of
-a size the file bound does not see. Built and timed the same way:
+decoded whole during ordinary indirect-object resolution. None of the three is seen by the
+file bound. **Two of them are read once and cached; one is re-parsed on every page, and
+that difference is what decides §2 and §3.**
 
-| document on disk | decoded resource stream | `extract_text()` | peak |
-| --- | --- | --- | --- |
-| 16,411 B | an 8 MB `/FontFile` | **3.19 s** | 51.7 MB |
-| 40 pages, 13,008 B | one 1 MB `/FontFile`, **re-read per page** | 1.66 s | — |
+**The re-parse is the whole vector, and it was measured against the production
+extractor** — `readers/_extract.py`'s `_extract_pdf`, `pypdf` 6.16.2, at ADR-0230 §6's own
+defaults of 4 MiB and 32 KiB. Each document is N content-free pages sharing one `/Type1`
+font that carries a `/FontFile` and no `/ToUnicode`:
 
-**They cost two orders of magnitude less per byte than operators do, and that is the
-finding rather than an aside**: about **0.04 s per decoded MB** for a font program against
-about **5 s per decoded MB** for content-stream operators, a factor of roughly **120**.
-The second row is why: the adopted extraction rebuilds a stream's fonts on **every**
-`_extract_text` call, so a font is read once per page and once per form invocation — one
-page 0.04 s, ten 0.43 s, forty 1.66 s, exactly **linear**. Linear in decoded bytes is what
-the file bound was already a proxy for; superlinear is what it never was, and #2022 is
-filed about the superlinear one.
+| document on disk | pages | decoded font program | `_extract_pdf` | outcome |
+| --- | --- | --- | --- | --- |
+| 1.833 MiB | 20,000 | 4 MB | **150.2 s** | refused — but on `fetch_max_content_bytes`, at ~16,384 pages |
+| **0.217 MiB** | 2,000 | 40 MB | **257.1 s** | **fetched**, 1,999 B of text, no bound refused |
+| 1.8 MiB | 20,000 | 40 MB | **> 600 s** | killed at ten minutes |
 
-**An earlier draft of this ADR bounded both, with a second `Settings` field, and both
-review lenses refused it from opposite sides on one round.** The pair is worth recording
-because it is the reason §2 has one field and not two, and because the two findings are
-the same clause failing in two directions:
+The middle row is the one that decides this ADR's shape. **A 0.217 MiB document fetches
+successfully after 257 s** — against the 313 s of #2022's own document, which is the defect
+this ADR exists to close. Every one of these carries an empty content stream, so a bound on
+instructions alone stands at **zero** throughout and sees none of them.
 
-- **Too narrow.** `PdfReader._get_object_from_stream` calls `obj_stm.get_data()` — decoding
-  the **whole** `/ObjStm` — and parses every object in it in one pass, *during ordinary
-  indirect-object resolution*. That happens while the catalog, the page tree and the
-  resource dictionaries are resolved, which is **before** any per-page loop and therefore
-  before any total exists to compare. A Flate-compressed `/ObjStm` inside
-  `fetch_max_file_bytes` is decoded and parsed with every new total still at zero, so a
-  clause claiming every decoded byte falls under one of the bounds was simply false.
-- **Too wide.** `Font.from_font_resource` resolves `/FontFile*` with `get_object()`, which
-  does **not** decode. The decode is `get_data()`, reached in `_font.py` only under
-  `HAS_FONTTOOLS and font_file and isinstance(self.encoding, str)`, and in
-  `_cmap._type1_alternative` only when `/ToUnicode` is **absent** and `/Subtype` is
-  `/Type1`. So a document with a normal `/ToUnicode` and a large `/FontFile2` is extracted
-  without that program ever being decoded — and a bound counting it would refuse on bytes
-  the extraction never reads.
+**Why the page count is the multiplier.** The adopted extraction rebuilds a stream's fonts
+on **every** `_extract_text` call, so `pypdf._cmap._type1_alternative` re-reads and
+re-scans the font program once per page. `get_data()` caches the *decompression*, so what
+repeats is the parse — `split(b"eexec\n")`, `split(b"/Encoding")`, and a line scan over the
+whole clear part — and it repeats as many times as there are pages. The number of pages is
+bounded only by `fetch_max_content_bytes`: `_extract_pdf` charges a two-byte delimiter per
+page against a 32 KiB rendered total, which caps a text-free document at about **16,384**
+pages and no lower.
 
-**Three successive enumerations were falsified in three successive rounds** — `/Contents`
-only, then plus forms, then plus CMaps and font programs — which is the shape of a
-formulation that is wrong rather than one that is incomplete. **Predicting which streams a
-library will decode is not a stable contract**: part of the set is conditional at several
-points, and part of it happens before the extraction the bound sits in begins. So this ADR
-narrows what it claims instead of lengthening the list. It bounds the class it can
-establish soundly, because §3's walk decides membership with **the extraction's own
-parser** rather than by predicting the library's behaviour — and it says in terms that the
-linear classes are unbounded here, deferring them by name in §10 with what fires them.
+**So a class that is cheap per byte is not cheap, and this is where an earlier draft of
+this ADR went wrong in both directions.** That draft charged the font program to a second
+`Settings` field sized at 32 MiB on the ground that it costs about **0.04 s per decoded
+MB** against about **5 s** for operators — a factor of roughly 120 — and both required
+review lenses refused it on one round, from opposite sides. Both were right about that
+draft, and the measurements above show why a per-byte ratio was the wrong test: **cheap per
+byte multiplied by an unbounded page count is not cheap.**
+
+- **It was too narrow.** `PdfReader._get_object_from_stream` calls `obj_stm.get_data()` —
+  decoding the **whole** `/ObjStm` — and parses every object in it in one pass, *during
+  ordinary indirect-object resolution*. That happens while the catalog, the page tree and
+  the resource dictionaries are resolved, which is **before** any per-page loop and
+  therefore before any total exists to compare. So a clause claiming every decoded byte
+  fell under one of the two bounds was false as written.
+- **It was too wide.** It counted `/FontFile*` unconditionally. `Font.from_font_resource`
+  resolves those with `get_object()`, which does **not** decode; the decode in `_font.py`
+  sits behind `HAS_FONTTOOLS and font_file and isinstance(self.encoding, str)`. A document
+  with a normal `/ToUnicode` and a large `/FontFile2` is extracted without that program
+  ever being read, and a bound counting it would refuse on bytes nothing decoded.
+
+**What makes the charge statable is a fact neither of those rounds established: in this
+project the conditional decode has exactly one reachable form.** `fontTools` is not a
+dependency — it is absent from `pyproject.toml`, from `uv.lock` and from the resolved
+environment — so `HAS_FONTTOOLS` is `False` and `_font.py`'s branch cannot execute at all
+here (its only call site is `pypdf/generic/_appearance_stream.py`, the appearance path,
+which `extract_text` does not enter). The **only** font-program decode extraction reaches
+is `_cmap._type1_alternative`, and `_parse_to_unicode` guards it with three tests that are
+**properties of the font dictionary**, readable before anything is decoded: `/ToUnicode`
+absent, `/Subtype` equal to `/Type1`, and a `/FontDescriptor` carrying `/FontFile`.
+
+That is why §3 can charge the font program **without predicting library internals**: the
+predicate is three keys in a dictionary the walk already resolves, and it is neither too
+narrow nor too wide because it is the extraction's own condition rather than a forecast of
+it. `/ObjStm` and the `/ToUnicode` CMap stay uncharged and are deferred by name in §10 —
+correctly, because each is read **once** and cached, so neither carries the per-page
+multiplier that makes the font program dangerous.
 
 **Two figures of the adopted library appear in this ADR and neither is leant on** (§6): a
 `/ToUnicode` CMap raises at `MAPPING_DICTIONARY_SIZE_LIMIT` (100,000 mappings), and form
 invocations are capped in aggregate at `MAX_XFORM_INVOCATIONS_PER_EXTRACTION` (5,000).
 Both are recorded as evidence about a resolved version; §6 is why neither is a bound this
-system states as its own, and §10's deferral of the linear class is not discharged by
-either.
+system states as its own, and §10's deferrals are not discharged by either.
 
 ### Both lenses were right, and the text is what is wrong
 
@@ -235,12 +253,13 @@ which stays closed at five.
 ## Decision
 
 We will keep `fetch_max_file_bytes` as **the file's size on disk**, bounding the read and
-nothing else, and add **one `Settings` bound** on the decoded bytes an extraction parses
-**as content-stream instructions** — the superlinear quantity, about 5 s per decoded MB.
-It is counted **while** extracting, compared before each decoded stream is parsed, and
-refused as **`TOO_LARGE`**. It does **not** bound the decoded classes the extraction reads
-linearly at about 0.04 s per decoded MB — object streams, `/ToUnicode` CMaps, embedded
-font programs — and §10 defers that class by name, with what fires it. There is no sixth
+nothing else, and add **one `Settings` bound** on the decoded bytes an extraction
+**parses, charged once per parse**: content-stream operators, and the embedded font
+program the extraction re-parses on every page, scoped to exactly the condition under
+which it does so. It is counted **while** extracting, compared before each decoded stream
+is parsed, and refused as **`TOO_LARGE`**. It does **not** bound the decoded inputs read
+once and cached — object streams and `/ToUnicode` CMaps — and §10 defers those by name,
+with what fires each. There is no sixth
 `FetchRefusal` member, no deadline, and no change to
 any Protocol, to any `core` value's shape, to the conformance suite, to the canonical fake
 or to ADR-0230 §9's audit — the one thing this reaches in `core/types.py` being
@@ -284,7 +303,7 @@ parses are a **third** such quantity with a third consumer — the parser — an
 argument that made §6 two fields makes it three. The alternative is a field whose name
 and whose stated domain are both false, which is the state §6 is in today.
 
-### 2. One bound, on the decoded bytes parsed as instructions
+### 2. One bound, on the decoded bytes parsed — charged once per parse
 
 > **Normative.** `Settings` gains **one** field, a bound on decoded bytes summed over one
 > fetch, with a named default, with a domain of **integers of at least
@@ -294,25 +313,31 @@ and whose stated domain are both false, which is the state §6 is in today.
 > `fetch_max_file_bytes` does:
 >
 > - **`fetch_max_decoded_bytes`**, default **1 MiB** (1,048,576) — the decoded bytes the
->   extraction parses **as instructions**. For PDF, content-stream operators.
+>   extraction **parses, summed once per parse**. For PDF, content-stream operators (§3)
+>   and the embedded font program of a font the extraction re-parses per page (§3).
 
-> **Normative.** **This bound is on the instruction class alone, and this ADR states in
-> terms that it bounds nothing else.** The decoded classes an extraction reads *linearly*
-> — for PDF, a compressed object stream, a font's `/ToUnicode` CMap and its embedded font
-> program — are **not bounded by this ADR**, and no implementation, lane or later ADR
-> derives a refusal criterion on them from this field. §10 defers that class by name, with
-> what fires the deferral.
+> **Normative.** **The counted quantity is bytes *parsed*, never bytes *decoded*, and the
+> two differ by the number of times the extraction reads the same stream.** A stream
+> parsed on forty pages is charged forty times. This is the whole content of the bound:
+> the decoded size of a document's streams is not the quantity its extraction's cost is a
+> function of, and a bound on the former is the mistake ADR-0230 §6 made one field over.
 
-> **Normative.** **The narrowing is the decision and not an omission**, and its ground is
-> a measured ratio rather than a preference. Content-stream operators parse at about
-> **5 s per decoded MB** (8.5 s/MB for the form-carried document, 2.5 s/MB for the
-> repeated-form one) and the parse is **superlinear** in the stream's size — 1 MB → 6 s,
-> 4 MB → 28 s, 16 MB → 313 s. An embedded font program reads at about **0.04 s per decoded
-> MB**, linear, a factor of roughly **120** cheaper. #2022 is filed about the superlinear
-> quantity; a linear one at that price is bounded well enough by the file bound and the
-> read it governs, and charging it into this figure would refuse an ordinary forty-page
-> document with an embedded font while charging it into a second figure requires
-> predicting a set of streams §6 and Context show cannot be predicted stably.
+> **Normative.** **This bound is not on every decoded byte, and this ADR states in terms
+> that it is not.** The decoded inputs an extraction reads **once and caches** — for PDF, a
+> compressed object stream and a font's `/ToUnicode` CMap — are **not bounded by this
+> ADR**, and no implementation, lane or later ADR derives a refusal criterion on them from
+> this field. §10 defers each by name, with what fires it. What separates them from the
+> font program is not their cost per byte but the absence of a per-parse multiplier.
+
+> **Normative.** **A per-byte cost is not the test for whether a class is charged, and
+> this ADR does not use one.** An earlier draft excluded the font program from this figure
+> on the ground that it costs about **0.04 s per decoded MB** against about **5 s** for
+> operators, a factor of roughly 120. That reasoning is refused here on measurement: with
+> the page count as a multiplier, a 0.217 MiB document of 2,000 content-free pages sharing
+> a 40 MB font program **fetches** after **257 s** — against 313 s for the document #2022
+> is filed about. **Cheap per byte times an unbounded page count is not cheap.** The test
+> is whether the extraction's cost is a function of the quantity, and for a stream
+> re-parsed per page it is.
 
 > **Normative.** The **name is fixed here** and is not the implementing lane's to
 > choose, as ADR-0230 §6 fixes the four it adds. It does not carry the word *content*, which
@@ -346,22 +371,41 @@ checkable.
 rather than discovering: 1 MB → 6 s, 4 MB → 28 s, 16 MB → 313 s on Lane C1's machine.
 Doubling the figure does not double the worst case.
 
-**And an ordinary document's fonts do not enter the figure at all**, which is what the
-narrowing buys the legitimacy side. The adopted extraction rebuilds a page's fonts on each
-`_extract_text` call, so a forty-page document embedding a 200 KB font reads **8 MB** of
-font bytes across its parses — eight times this bound, and an entirely ordinary document.
-None of it is counted here. What is counted is the operators, and an ordinary page's are a
-few times its text rather than thirty-two. A single figure asked to cover both would have
-had to clear that 8 MB, and would then have admitted #2022's 16 MB of operators.
+**The figure stays at 1 MiB, and the font charge means it refuses a class of ordinary
+document. That is chosen rather than overlooked, and here is the class.** Documents of N
+pages carrying F `/Type1` fonts with `/FontFile` and no `/ToUnicode` — dvips-era TeX
+output, the class the charge is scoped to — were built and run through `_extract_pdf`:
+
+| ordinary document | on disk | charge (pages × fonts × program) | at 1 MiB | `_extract_pdf` |
+| --- | --- | --- | --- | --- |
+| 20 pages, one 34 KiB font | 5.7 KiB | **0.67 MiB** | admitted | 0.023 s |
+| 30 pages, three 34 KiB fonts | 9.2 KiB | **3.00 MiB** | **refused** | 0.037 s |
+| 40 pages, five 34 KiB fonts | 12.7 KiB | **6.68 MiB** | **refused** | 0.058 s |
+| 30 pages, three 147 KiB fonts | 9.5 KiB | **12.87 MiB** | **refused** | 0.050 s |
+
+So a thirty-page paper with a roman, an italic and a maths font is refused while costing
+**37 ms**. That is a real over-refusal and it is not argued away.
+
+**Raising the figure to admit it was measured and is worse.** The instruction side was
+timed on the same machine as the table above: **1 MB of operators → 1.2 s, 8 MB →
+45.3 s**, superlinear. Admitting the forty-page five-font document needs at least 8 MiB,
+which multiplies the instruction worst case by about **thirty-eight**; and admitting the
+last row needs **16 MiB**, which is exactly the 16 MB of operators #2022 is filed about and
+would readmit that defect whole. **The two quantities are 120× apart per byte, so one
+figure sized for the font charge is not a bound on operators at all** — which is ADR-0230
+§6's own error, and the reason a second field was tried and refused (Context). The figure
+therefore holds at the value the instruction side justifies.
+
+**What that leaves is a legitimate document refused, in the direction ADR-0230 §6 chooses
+for its own bounds** — *"a legitimate local configuration refused until the lane can
+establish it — a configuration error a deployment can see and fix"* — and visible in §9's
+audit rather than silent. An operator whose corpus is dvips-era TeX raises the figure and
+accepts the weaker instruction bound; §10 defers the fix that removes the choice, which is
+to stop the extraction re-parsing one font once per page.
 
 **For a document that was going to refuse anyway, only the price changes.** A 300-page
 report carries far more than 32 KiB of text and refuses on `fetch_max_content_bytes`
-today; under this bound it refuses earlier and cheaply, with the same class. What
-changes **outcome** is a document parsing more than thirty-two bytes of operators per byte
-of text it yields — the amplified ones, pages of vector artwork, and a document whose
-per-page graphics are parsed on every page. The last of those is a legitimate document
-refused, which is the direction ADR-0230 §6 chooses for its own bounds and which §10
-defers raising the figure for, on evidence rather than on an estimate.
+today; under this bound it refuses earlier and cheaply, with the same class.
 
 ### 3. What is counted, per format, and where the comparison sits
 
@@ -376,19 +420,46 @@ defers raising the figure for, on evidence rather than on an estimate.
 > `/Contents` alone does not satisfy it, and neither does one charging a repeatedly
 > invoked form a single time.
 
-> **Normative.** **Nothing else is counted, and that is a boundary rather than a gap.**
-> Decoded streams the extraction reads but does not parse as instructions — for the
-> adopted version, a compressed object stream, a font's `/ToUnicode` CMap and its embedded
-> font program — are **not** charged to this total, and no implementation charges them to
-> it. They are also not bounded elsewhere by this ADR: §10 defers the class by name.
+> **Normative.** For **PDF**, `fetch_max_decoded_bytes` **also** counts, for each parse,
+> the decoded length of the **embedded font program** of every font in that parse's
+> resource context that satisfies all three of: it carries **no `/ToUnicode`**, its
+> `/Subtype` is **`/Type1`**, and its `/FontDescriptor` carries a **`/FontFile`**. It is
+> charged **once per parse**, so a font meeting the predicate on forty pages is charged
+> forty times. That predicate is `pypdf._cmap._parse_to_unicode`'s own condition for
+> entering `_type1_alternative`, and it is decided from the font dictionary the walk has
+> already resolved — **before anything is decoded**.
 
-> **Normative.** **The counted set is decided by the extraction's own parse and not by a
-> prediction of what the library decodes**, which is what makes it establishable at all. A
-> stream is counted exactly where the walk below reaches it through the extraction's own
-> content-stream parser. An implementation may not extend the total to a stream it
-> *expects* the library to decode, and may not omit one the walk reaches on the ground that
-> some other mechanism bounds it — §6 is why the second half of that holds: what a
-> dependency's own limit does is evidence about a version.
+> **Normative.** **The charge is per parse because the extraction re-parses the font per
+> parse**, and the multiplier is therefore the page count. The adopted extraction rebuilds
+> a stream's fonts on **every** `_extract_text` call, and `get_data()` caches only the
+> decompression, so the scan of the program's clear part repeats once per page. Charging
+> the program once admits a 0.217 MiB document of 2,000 content-free pages sharing a 40 MB
+> font program, which **fetched** after **257 s** when it was measured (Context). **A
+> quantity charged once when the extraction pays it many times is not a bound**, and this
+> is true of the font program even though it is cheap per byte.
+
+> **Normative.** **Nothing else is counted, and that is a boundary rather than a gap.**
+> Decoded inputs the extraction reads **once and caches** — for the adopted version, a
+> compressed object stream and a font's `/ToUnicode` CMap — are **not** charged to this
+> total, and no implementation charges them to it. They are also not bounded elsewhere by
+> this ADR: §10 defers each by name. **The separating property is the per-parse
+> multiplier, not the cost per byte**, and an implementation may not read this clause as
+> licence to charge or omit a class on how expensive its bytes are.
+
+> **Normative.** **Neither half of the counted set is a prediction of what the library
+> decodes**, which is what makes both establishable at all. A content stream is counted
+> exactly where the walk below reaches it through the extraction's own content-stream
+> parser; a font program is counted exactly where the extraction's own three-key condition
+> holds. An implementation may not extend the total to a stream it *expects* the library
+> to decode, and may not omit one on the ground that some other mechanism bounds it — §6
+> is why the second half of that holds: what a dependency's own limit does is evidence
+> about a version.
+
+> **Normative.** **A later version of the adopted library that decodes a font program
+> under a different condition changes what this clause charges**, and the implementing
+> lane re-establishes the predicate against the version `uv.lock` fixes rather than
+> carrying this ADR's three keys forward unchecked (§6). Where the predicate cannot be
+> established, the fail-closed branch below governs.
 
 > **Normative.** **What the walk treats as an invocation, and what it resolves that
 > invocation against, are the adopted extraction's own answers and never a second
@@ -418,8 +489,9 @@ defers raising the figure for, on evidence rather than on an estimate.
 > own form — and it is named **achievable** rather than aspirational, because a
 > requirement no implementation is known to satisfy would be a deferral wearing a
 > decision's clothes. A walk of the **invocation graph** satisfies it: begin at the page's
-> decoded content stream; add each stream's decoded length to the total and
-> compare it **before** that stream is parsed;
+> decoded content stream; add each stream's decoded length to the total, and add the
+> decoded length of every font in that parse's resource context meeting the three-key
+> predicate above; compare the total **before** that stream is parsed;
 > then parse the stream **with the adopted library's own content-stream parser**, take the
 > `Do` operations it reports, resolve each against the inherited resources above, and
 > recurse — refusing the moment the total passes the bound.
@@ -437,8 +509,9 @@ defers raising the figure for, on evidence rather than on an estimate.
 
 > **Normative.** The comparison is made **after each decoded stream and before the next
 > is decoded**, and the extraction is refused the moment the total passes the bound. No
-> implementation decodes several streams — a page's content array, a page's forms, or both
-> together — and compares their sum afterwards.
+> implementation decodes several streams — a page's content array, a page's forms, a
+> page's charged font programs, or any of those together — and compares their sum
+> afterwards.
 
 > **Normative.** The refusal precedes the work it bounds: **the total is compared
 > before the operators it counts are parsed**, which is the property ADR-0230 §6 claimed
@@ -601,28 +674,38 @@ wrong is why they are listed rather than leant on.** Measured against the same v
 raises past it; form invocations are capped in aggregate at
 `MAX_XFORM_INVOCATIONS_PER_EXTRACTION` (5,000); and the page tree carries the three guards
 Lane C1 pinned. An earlier draft of §3 used the first of those as the reason the walk need
-not count a `/ToUnicode` stream, which is the reliance the clause above forbids. **The
-narrowed claim does not restore that reliance and must not be read as doing so.** §2 does
-not bound the CMap or the font program *because they are cheap and measured linear*, and
-§10 defers them on that ground, with what fires the deferral; the library's cap is
-recorded here as evidence and is not the reason. Nor is the invocation cap leant on: the
-walk charges every invocation and refuses long before 5,000 is reached.
+not count a `/ToUnicode` stream, which is the reliance the clause above forbids. **§2 does
+not restore that reliance and must not be read as doing so.** The CMap is left uncharged
+because it is read **once and cached**, so no per-parse multiplier acts on it — not because
+`MAPPING_DICTIONARY_SIZE_LIMIT` exists, which is recorded here as evidence and is not the
+reason; §10 defers it on that stated ground. Nor is the invocation cap leant on: the walk
+charges every invocation and refuses long before 5,000 is reached.
 
 > **Normative.** The implementing lane **establishes, against the version `uv.lock`
-> fixes, which streams the extraction parses as content-stream instructions**, so that
-> §3's walk reaches exactly those. It records what it found at the code, in
-> `_extract_pdf`'s docstring, as Lane C1 recorded #2022's disclosure there — **including
-> the decoded classes it found that this bound does not count**, so a reader at the code
-> meets the boundary §2 draws and not only the total.
+> fixes, two things**: which streams the extraction parses as content-stream instructions,
+> so that §3's walk reaches exactly those; and the condition under which it decodes an
+> embedded font program, so that §3's three-key predicate is that version's own condition
+> and not this ADR's recollection of it. It records both at the code, in `_extract_pdf`'s
+> docstring, as Lane C1 recorded #2022's disclosure there — **including the decoded inputs
+> it found that this bound does not charge**, so a reader at the code meets the boundary
+> §2 draws and not only the total.
+
+> **Normative.** **`HAS_FONTTOOLS` is not assumed.** This ADR's predicate is stated for a
+> resolved environment in which `fontTools` is absent, so `pypdf._font.py`'s decode branch
+> cannot execute and `_cmap._type1_alternative` is the only reachable one. `fontTools` is
+> not a declared dependency of this project, and the lane **asserts that** rather than
+> commenting it: a test that fails if `fontTools` becomes resolvable is what turns this
+> from an assumption into a pinned fact, in the form Lane C1 used for the page-tree guards.
+> Should it ever be resolved, `_font.py`'s branch becomes reachable and §3's predicate is
+> incomplete — which is a case §10 names.
 
 **What that record is for, and what it is not.** It is not an enumeration this ADR relies
-on for soundness: §3's counted set is decided by the extraction's own parse rather than by
-a prediction, so a release that decoded a further stream kind *outside* the instruction
-class changes nothing this bound claims. The record exists so a later reader can see which
-classes were measured linear when the claim was narrowed, and can tell whether §10's
-deferral has been fired. That difference — a claim whose soundness does not rest on a
-list — is the difference between this ADR and the clause of ADR-0230 §6 it replaces, and
-it is the correction three falsified enumerations bought (Context).
+on for soundness: §3's counted set is decided by the extraction's own parse and the
+extraction's own font condition rather than by a forecast of either. The record exists so
+a later reader can see what was established when, and can tell whether §10's deferrals have
+been fired. That difference — a claim whose soundness does not rest on a list — is the
+difference between this ADR and the clause of ADR-0230 §6 it replaces, and it is the
+correction four review rounds bought (Context).
 
 **And it is not carried by anything this project declares.** Lane C1 adopted `pypdf`
 **ranged**, `>=6.16`, deliberately outside ADR-0024 §3's exact-pinned set — §3 pins the
@@ -715,22 +798,39 @@ it — and this addition renames nothing, drops nothing and starts no second aud
    `fetch_max_content_bytes` raised so the text bound does not decide the arm. This is
    the arm that fails on any implementation applying a decoded bound to a format with no
    decoding step.
-10. **The bound counts instructions and nothing else, which is pinned rather than only
-    stated.** A forty-page document embedding a font of ordinary size, whose font bytes
-    across its parses far exceed `fetch_max_decoded_bytes` while its content streams sit
-    well inside it, **fetches**, with its text reaching the record. **This is the arm that
-    fails on any implementation charging decoded resource streams into this total** — the
-    boundary §2 and §3 draw, and the one clause of this ADR that a later reader is most
-    likely to widen back. It is a *fetch* arm rather than a refusal arm because what is
-    being asserted is the absence of a bound, so no refusal exists to observe.
-11. **An out-of-domain bound does not load.** A zero and a negative value of
+10. **A font-carried amplification is refused, and the charge is per page.** A document of
+    many content-free pages sharing **one** `/Type1` font with a `/FontFile` and no
+    `/ToUnicode` — the 0.217 MiB, 2,000-page, 40 MB-program document measured at **257.1 s
+    and *fetched*** without this charge — is refused `TOO_LARGE` with `extract_text` not
+    called for the crossing page. **This is the arm that fails on any implementation
+    charging a distinct font program a single time**, which passes arms 1 to 3 whole, and
+    it is the arm that fails on any implementation charging no font program at all.
+11. **The predicate is the extraction's, in both directions.** Two arms. A document whose
+    large `/FontFile2` belongs to a font carrying a normal `/ToUnicode` **fetches**, its
+    program charged nothing — the arm that fails on any implementation charging
+    `/FontFile*` unconditionally, which would refuse on bytes the extraction never decodes.
+    And a document whose large `/ObjStm` and whose large `/ToUnicode` CMap sit inside
+    `fetch_max_file_bytes` **fetches**, neither charged — the boundary §2 and §3 draw, and
+    the clause a later reader is most likely to widen back. Both are *fetch* arms because
+    what they assert is the absence of a charge, so no refusal exists to observe.
+12. **The refused ordinary class is pinned, so that raising the default is a decision and
+    not a discovery.** A thirty-page document carrying three `/Type1` fonts of ordinary
+    size that meet the predicate is **refused** `TOO_LARGE` at the default, and **fetches**
+    with `fetch_max_decoded_bytes` raised to a figure §2's table names. This is the arm
+    that records the cost §2 accepts; an implementation that quietly admitted it would be
+    charging the font program per document rather than per parse, which arm 10 forbids.
+13. **An out-of-domain bound does not load.** A zero and a negative value of
     `fetch_max_decoded_bytes` is refused when
     `Settings` is constructed, before any fetcher is built and before any filesystem call,
     and each is a configuration error that stops the deployment rather than an empty
     listing, a `FetchRefusal` or a degraded turn. This is ADR-0230 §14 item 21's arm,
     extended by one field and asserted in its form.
-12. **The enumeration did not grow.** `FetchRefusal` has five members, and the audit event
+14. **The enumeration did not grow.** `FetchRefusal` has five members, and the audit event
     for arm 1's turn carries `TOO_LARGE` and no field naming a bound, a count or a size.
+15. **`fontTools` is not resolvable.** The suite fails if `fontTools` can be imported,
+    because §3's predicate is stated for an environment in which `pypdf._font.py`'s decode
+    branch is unreachable (§6). This is the page-tree-guard pattern Lane C1 used: a
+    property of the resolved environment pinned by a test rather than asserted in prose.
 
 > **Normative.** This ADR adds **no clause to the `Fetcher` conformance suite and no
 > parameter to the canonical fake.** The bound is enforced inside a concrete extraction,
@@ -753,7 +853,7 @@ it — and this addition renames nothing, drops nothing and starts no second aud
 > `readers` never, and the bound is a field nothing enforces),
 > `src/ai_assistant/readers/_extract.py` (the walk, the comparison, and the
 > `_extract_pdf` docstring, whose #2022 disclosure becomes a statement of the bound **and
-> of the classes it does not bound**, §6), `src/ai_assistant/readers/files.py` (threading
+> of the inputs it does not charge**, §6), `src/ai_assistant/readers/files.py` (threading
 > that figure from the fetcher to the
 > extraction), `src/ai_assistant/core/types.py` (**one docstring**, below), and tests
 > under `tests/readers/`, `tests/core/` and `tests/app/`. `core/protocols.py` is untouched
@@ -784,11 +884,13 @@ updated, an argument threaded through"* shape §1's carve-out covers rather than
 subsystem's worth of machinery.
 
 **The walk is the largest thing in it, and it is smaller than it sounds.** It decodes a
-stream, adds its length, scans it for `Do` occurrences, resolves each against the stream's
-own resources, recurses, and stops the moment the total passes the bound — so its cost is
-bounded by the bound and its state is a running total and a path set. §3 fixes what it
-must count and §8's arms 2, 3, 4 and 10 fix where it must not be wrong — 10 being the one
-that fails an implementation counting *more* than §3 does; the spelling is the lane's.
+stream, adds its length, adds the program of each font in that parse's resource context
+meeting §3's three-key predicate, scans the stream for `Do` occurrences, resolves each
+against the stream's own resources, recurses, and stops the moment the total passes the
+bound — so its cost is bounded by the bound and its state is a running total and a path
+set. §3 fixes what it must count and §8's arms 2, 3, 4, 10, 11 and 12 fix where it must not
+be wrong — 11 being the pair that fails an implementation counting *more* than §3 does; the
+spelling is the lane's.
 
 **Independent of Lanes C2 and C3**, which touch `planning/` and `orchestration/` and
 share no file with it. Its ordering constraint is C1 alone, and #2022's ruling — that
@@ -820,32 +922,45 @@ on either.
   raises that figure — the fail-closed direction ADR-0230 §6 takes for its own bounds, and
   visible in §9's audit rather than silent. Fired by that audit showing `TOO_LARGE` on a
   deployment's ordinary documents; not by a lane's estimate of what a real PDF costs.
-- **The linear decoded classes, which this ADR does not bound at all.** Named, for the
-  adopted version: a compressed **object stream** (`/ObjStm`), decoded whole by
+- **The decoded inputs read once and cached, which this ADR does not charge.** Named, for
+  the adopted version: a compressed **object stream** (`/ObjStm`), decoded whole by
   `PdfReader._get_object_from_stream` during ordinary indirect-object resolution — before
-  any per-page loop, so before any total this ADR keeps exists; a font's **`/ToUnicode`
-  CMap**; and an **embedded font program** (`/FontFile`, `/FontFile2`, `/FontFile3`),
-  whose decode is reached conditionally, in `_font.py` under
-  `HAS_FONTTOOLS and font_file and isinstance(self.encoding, str)` and in
-  `_cmap._type1_alternative` only when `/ToUnicode` is absent and `/Subtype` is `/Type1`.
-  Each is **linear** in its decoded bytes at about **0.04 s per decoded MB**, a factor of
-  roughly 120 below the instruction class, which is why the fail-closed direction is not
-  taken here and the class is left to the file bound and the read it governs.
-  **Fired by either of two things and by nothing else**: a measurement showing one of
-  these classes costing what the instruction class costs — per decoded byte, on a document
-  inside `fetch_max_file_bytes` — or an adopted release whose **parse order** changes such
-  that one of them is parsed as instructions or is reached from inside the walk. Not fired
-  by an enumeration argument that the classes exist, which is the ground on which this
-  ADR's own earlier draft added a second field and both review lenses refused it, from
-  opposite sides, on one round.
-- **A decoded stream a later library version reads that §3's walk does not count** (§6).
-  This is a narrower residual than it was before the claim was narrowed, because §3's
-  counted set is decided by the extraction's own parse rather than by a prediction: a new
-  stream kind read *outside* the instruction class is already covered by the deferral
-  above, and one parsed as instructions is reached by the walk. What remains is a release
+  any per-page loop, so before any total this ADR keeps exists — and a font's **`/ToUnicode`
+  CMap**. Each is read **once** and cached, so the page count is not a multiplier on
+  either, and each is therefore linear in the file that `fetch_max_file_bytes` already
+  bounds at the read. **Fired by either of two things and by nothing else**: a measurement
+  showing one of them re-read or re-parsed per page, or per any other quantity a document
+  controls — which is exactly what makes the font program chargeable and would make these
+  so; or an adopted release whose **parse order** changes such that one of them is parsed
+  as instructions or is reached from inside the walk. Not fired by the observation that
+  the inputs exist and are decoded, which is the ground on which this ADR's own earlier
+  draft added a second `Settings` field and both review lenses refused it, from opposite
+  sides, on one round.
+- **The ordinary Type1 documents this bound refuses, and the extractor change that would
+  re-admit them.** §2's table records the cost precisely: a thirty-page paper with three
+  ordinary `/Type1` fonts charges 3.00 MiB, is refused, and would have cost 37 ms. The
+  charge is honest — the extraction really does re-parse that program thirty times — but
+  the *re-parsing* is the defect, not the document. Closing it means the extraction parsing
+  each font **once per fetch** rather than once per page: a cache the extractor holds
+  across a document's pages, or an adopted version that does not rebuild a stream's fonts
+  on every `_extract_text` call. Either removes the multiplier, at which point the charge
+  falls to one program per distinct font and the class fetches at the present default.
+  **Fired by** §9's audit showing `TOO_LARGE` on a deployment's ordinary documents, or by
+  a `pypdf` release that stops rebuilding fonts per page. Not fired by raising the default,
+  which §2 measured and rejected: 8 MiB multiplies the instruction worst case by
+  thirty-eight and 16 MiB readmits #2022's document whole.
+- **A `fontTools` that becomes resolvable.** §3's predicate is the only reachable font
+  decode *in an environment without `fontTools`* (§6). Were it ever installed,
+  `pypdf._font.py`'s branch would open a second decode under a different condition, and
+  §3's three keys would be incomplete. §8 arm 15 pins the absence rather than assuming it.
+  **Fired by** that test failing.
+- **A decoded stream a later library version reads that §3 does not charge** (§6). §3's
+  counted set is decided by the extraction's own parse and its own font condition rather
+  than by a forecast of either, so a new input read *once* is covered by the first deferral
+  above and one parsed as instructions is reached by the walk. What remains is a release
   that parses instructions by a path the walk cannot follow, and §3's fail-closed
   `EXTRACTION_FAILED` is what that meets. Fired by a release doing it — which is why the
-  lane records at the code the set it established rather than only here.
+  lane re-establishes both sets at the code rather than carrying this ADR's forward.
 - **A per-format decoded bound.** One figure covers every format this rung reads, which
   is right while one format decodes and two do not. Fired by the ADR admitting a format
   whose amplification profile the shared figure serves badly, which §3 already obliges to
@@ -892,11 +1007,12 @@ it. A reader who acted on §6 as written refused what this ADR requires.
    default and *the file's size on disk* all stand.
    **What replaces the limb is narrower than the limb, and that is the substance of this
    supersession rather than a shortfall in it.** ADR-0230 §6 claimed a bound on *the
-   extraction's cost* entire and had none; this ADR claims one on the superlinear part of
-   that cost, holds it, and says in terms (§2, §10) that the linear part is unbounded here
-   and why. A reader is left with a smaller claim that is true in place of a larger one
-   that was not, which is what ADR-0070 §1's *change to what was decided* looks like when
-   the change is a retreat to what can be established.
+   extraction's cost* entire and had none; this ADR claims one on the bytes the extraction
+   **parses**, charged once per parse, holds it, and says in terms (§2, §10) that the
+   inputs read once and cached are unbounded here and why. A reader is left with a smaller
+   claim that is true in place of a larger one that was not, which is what ADR-0070 §1's
+   *change to what was decided* looks like when the change is a retreat to what can be
+   established.
 2. *"**Two** size bounds, both `Settings` fields with named defaults, both refused at
    load rather than at the first fetch"* — the count becomes three. The **rulings** in
    that sentence are not replaced and govern the new field: it is a `Settings` field,
@@ -978,16 +1094,22 @@ which. §10 defers the finer statement and names what would fire it.
 deployment's behaviour changes until a root is configured. A configured one sees no change
 unless a document parses more than thirty-two bytes of operators per byte of text.
 
-**The linear decoded classes are left unbounded, and that is the honest half of this
-ADR.** An object stream, a `/ToUnicode` CMap and an embedded font program are still
-decoded without a figure of this system's own governing them; what governs them is
-`fetch_max_file_bytes` and the read it bounds, and their measured cost of about 0.04 s per
-decoded MB is why that is tolerable rather than why it is complete. An earlier draft
-bounded them with a second field and could not state the set soundly — one class is
-decoded before any extraction loop exists, another only under conditions the extraction
-often does not meet — so what this ADR carries instead is a claim it can hold plus a
-deferral naming exactly what would fire it (§10). **That trade is the point of the ADR,
-not a residue of it**: a smaller true claim beats the larger false one ADR-0230 §6 made.
+**A class of ordinary document is refused, and that is the price this ADR pays rather
+than hides.** Because the extraction re-parses a font program once per page, a thirty-page
+paper with three ordinary `/Type1` fonts charges 3.00 MiB against a 1 MiB bound and is
+refused, having cost 37 ms. The charge is honest and the refusal is not: what is wrong is
+the re-parsing, and §10 defers the extractor-side fix — parse each font once per fetch —
+that removes the multiplier and re-admits the class at the present default. Raising the
+figure instead was measured and rejected in §2: 8 MiB multiplies the instruction worst case
+by thirty-eight, and 16 MiB readmits #2022's own document.
+
+**The inputs read once and cached are left unbounded, and that is the other price.** An
+object stream and a `/ToUnicode` CMap are still decoded without a figure of this system's
+own governing them; what governs them is `fetch_max_file_bytes` and the read it bounds, and
+the absence of a per-parse multiplier is why that is tolerable rather than why it is
+complete. §10 names each with what fires it. **The shape of the trade is the point of the
+ADR, not a residue of it**: a smaller claim that holds beats the larger one ADR-0230 §6
+made and could not.
 
 **Two files outside `readers/` move, and both are load-bearing.**
 `app/composition.py` passes the figure to the fetcher — without which the field exists
@@ -1000,15 +1122,19 @@ what an extraction *will* parse means following the invocation graph rather than
 one field, and §3 requires it because two measured documents defeat everything simpler:
 the count cannot be `/Contents`, and it cannot charge a repeatedly invoked form once. The
 walk is bounded by the bound, so it does not become a second unbounded traversal, and
-§8's arms 2, 3, 4 and 10 are what fail an implementation that skips it, that
-over-approximates it, or that charges a resource stream into it.
+§8's arms 2, 3, 4, 10, 11 and 12 are what fail an implementation that skips it, that
+over-approximates it, that charges a once-and-cached input into it, or that charges a font
+program once per document instead of once per parse.
 
-**A legitimate document can now be refused, and that direction is chosen.** A report
-whose per-page graphics push its instruction total over 1 MiB is refused with 20 KB of
-text, and the operator raises that figure. ADR-0230 §6 takes that direction for its own
-bounds — *"a legitimate local configuration refused until the lane can establish it — a
-configuration error a deployment can see and fix"* — and §9's audit is where a deployment
-sees it. §10 defers raising the default until there is evidence rather than an estimate.
+**A legitimate document can now be refused, and that direction is chosen.** Two kinds: a
+report whose per-page graphics push its counted total over 1 MiB, and — measured, and named
+in §2 — a thirty-page paper carrying three ordinary `/Type1` fonts that meet §3's
+predicate. Each is refused with a few tens of KB of text, and the operator raises the
+figure knowing from §2 what that costs on the instruction side. ADR-0230 §6 takes that
+direction for its own bounds — *"a legitimate local configuration refused until the lane
+can establish it — a configuration error a deployment can see and fix"* — and §9's audit is
+where a deployment sees it. §10 defers the extractor-side change that re-admits the second
+kind without moving the figure at all.
 
 **One more thing has to be stated by any ADR admitting a format** — what its decoding
 step produces for this bound. That is a small standing cost on a future
@@ -1020,8 +1146,8 @@ materialised before the bound refuses them, at a ceiling a ranged dependency own
 stream instead of a page's worth or a document's, and memory rather than time. And a
 release that parsed instructions by a path §3's walk cannot follow would be a hole the
 walk does not see, which §3's fail-closed branch meets and §10 carries. The general answer
-to both, and to the deferred linear class, is the out-of-process extraction §10 defers,
-which bounds the work rather than its inputs.
+to both, and to the deferred once-and-cached inputs, is the out-of-process extraction §10
+defers, which bounds the work rather than its inputs.
 
 ## Alternatives considered
 
@@ -1048,9 +1174,30 @@ total exists to compare it against** — while an embedded font program is decod
 under conditions (`HAS_FONTTOOLS`, a string encoding, or an absent `/ToUnicode` on a
 `/Type1` font) that an ordinary document often does not meet, so the bound would refuse on
 bytes never read. Three successive rounds falsified three successive enumerations. And the
-prize is small: the class is linear at about 0.04 s per decoded MB, a factor of roughly
-120 below the operators. So the class is **deferred by name** in §10 with what fires it,
-rather than bounded by a clause that cannot be stated truly.
+draft's own ground for a *separate* figure — that the class costs about 0.04 s per decoded
+MB, a factor of roughly 120 below the operators — is refuted outright by measurement: with
+the page count as a multiplier, the class reaches 257 s inside 0.217 MiB. §2 therefore
+charges the font program into the **one** field, scoped to the extraction's own three-key
+condition, and §10 defers only the inputs that carry no multiplier.
+
+**Raise `fetch_max_decoded_bytes` so the refused ordinary Type1 class fetches.**
+Rejected in §2, on measurement rather than on preference. Admitting the forty-page,
+five-font document (6.68 MiB charged) needs at least 8 MiB, and 8 MB of operators was timed
+at **45.3 s** against 1 MB's **1.2 s** on the same machine — about thirty-eight times the
+worst case the default buys. Admitting the thirty-page document with three 147 KiB fonts
+(12.87 MiB) needs 16 MiB, which is precisely the 16 MB of operators #2022 is filed about,
+so that figure readmits the defect this ADR exists to close. The two quantities are 120×
+apart per byte, so one figure sized for the font charge is not a bound on operators at
+all — which is ADR-0230 §6's error, and a second field is refused above. The default
+therefore holds where the instruction side justifies it, the refused class is named in §2
+and pinned by §8 arm 12, and §10 defers the extractor-side change that re-admits it without
+weakening anything.
+
+**Charge the font program once per distinct font rather than once per parse.** Rejected on
+measurement, in §3: the 0.217 MiB document of 2,000 content-free pages sharing one 40 MB
+program has **one** distinct font, so charged once it sits inside any figure this ADR could
+pick, and it **fetched** after 257 s. The extraction pays per page; a bound that charges
+per document is not a bound on what the extraction pays.
 
 **Count at the decode itself rather than predicting it** — a counting seam at
 `EncodedStreamObject.get_data()`, through which `pypdf` funnels every stream decode.
