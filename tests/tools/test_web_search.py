@@ -29,6 +29,7 @@ declares, which is ADR-0092 §3's rule made testable rather than merely stated.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Final
@@ -46,6 +47,7 @@ from web_search_harness import (
     GatedTransport,
     InterruptingTransport,
     RefusingGate,
+    ReprovisioningRecords,
     answering,
     authorised_search,
     body,
@@ -55,6 +57,7 @@ from web_search_harness import (
     request,
     response,
     result,
+    suspendable,
 )
 from web_searcher_contract import (
     ConnectedAccount,
@@ -64,13 +67,20 @@ from web_searcher_contract import (
     WebSearcherContract,
 )
 
-from ai_assistant.core.errors import ConnectionStoreError, ToolBindingError, TransportError
+from ai_assistant.core.errors import (
+    AuthorisationSpentError,
+    ConnectionStoreError,
+    ToolBindingError,
+    TransportError,
+)
 from ai_assistant.core.types import (
     MemorySource,
     PermissionOutcome,
     SearchRefusal,
     ToolOutcome,
 )
+from ai_assistant.orchestration.recovery import RecoveryScan
+from ai_assistant.testing import FakePlanStore
 from ai_assistant.tools.egress import TransportPinError
 from ai_assistant.tools.web_search import WEB_SEARCH, WEB_SEARCH_SOURCE_NAME, WebSearchEgress
 
@@ -943,6 +953,83 @@ async def test_the_slot_asked_for_is_the_one_the_first_read_named() -> None:
     assert outcome.refusal is SearchRefusal.PROVIDER_REFUSED
 
 
+@pytest.mark.parametrize(
+    "after",
+    [
+        pytest.param(entry(revision=2), id="a-reprovisioning"),
+        pytest.param(entry(state=None), id="a-disconnection"),
+        pytest.param(None, id="a-record-the-store-no-longer-holds"),
+    ],
+)
+async def test_an_account_that_moves_while_the_credential_read_is_suspended_sends_nothing(
+    after: object,
+) -> None:
+    """§18 arm 13aa's first three arms, over a ``Secrets`` fake **held inside ``get``**.
+
+    This is the interleaving the clause is actually about, and the one a fake that
+    answers immediately cannot reach: the bound connection record is reprovisioned —
+    and, in the other arms, disconnected or removed — *while the credential read is
+    suspended*, so ADR-0148 §6's post-read check runs against a record that moved under
+    it. On release **no byte is written to the channel**, the credential is discarded,
+    and the outcome is ``PROVIDER_REFUSED``, which is the refusal ADR-0231 §5 names.
+
+    An implementation that read the credential and transmitted passes every other case
+    in this file and fails these.
+    """
+    records = ReprovisioningRecords(entry(), after)  # type: ignore[arg-type]  # None is an arm
+    ring = await suspendable(records=records)
+    subject = await built(channels=[answering(result())], records=records, secrets=ring)
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    gate = ring.suspend_next()
+    search = asyncio.ensure_future(subject.searcher.search(call))
+    await gate.reached()
+    await records._reprovision()
+    gate.release()
+    outcome = await search
+
+    assert outcome.refusal is SearchRefusal.PROVIDER_REFUSED
+    assert subject.transport.attempts == (), "no channel was opened"
+
+
+async def test_no_suspension_is_offered_between_the_record_read_and_the_credential_read() -> None:
+    """§18 arm 13aa's **fourth** arm: ADR-0148 §6's one-step clause, at the interleaving.
+
+    A reprovisioning task is queued from inside the pre-read, so it is runnable from
+    the instant that read returns and runs at whichever await the searcher reaches
+    first. "A conforming implementation offers none before ``Secrets.get``", so the arm
+    asserts that **the task has not run when the ``Secrets`` fake is called**, that the
+    slot asked for is the one the pre-read named and **never the successor's**, and
+    that the send is then discarded ``PROVIDER_REFUSED`` by the post-read check.
+
+    An implementation with an ``await`` in that gap reads a credential the pre-read did
+    not name — the window ADR-0097 §5a closes — and fails here while passing every
+    other case in this file.
+    """
+    successor = entry(revision=2, slot=SLOT.model_copy(update={"key": "conn-0001-r2"}))
+    records = ReprovisioningRecords(entry(), successor)
+    ring = await suspendable(records=records)
+    subject = await built(channels=[answering(result())], records=records, secrets=ring)
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    # The suspension is armed inside `Secrets.get` and nowhere else, so it is the
+    # *first* await this searcher offers after the pre-read — which is exactly where
+    # the queued task runs. `moved_at_entry` is recorded before that await, so it
+    # answers the question the clause asks: had the successor landed by the time the
+    # credential was asked for?
+    gate = ring.suspend_next()
+    search = asyncio.ensure_future(subject.searcher.search(call))
+    await gate.reached()
+    gate.release()
+    outcome = await search
+
+    assert ring.moved_at_entry == [False], "no suspension was offered before the credential read"
+    assert ring.reads == [SLOT], "the slot asked for is the pre-read's, never the successor's"
+    assert records.reprovisioned, "the queued act did land, at the first await that was offered"
+    assert outcome.refusal is SearchRefusal.PROVIDER_REFUSED
+    assert subject.transport.attempts == ()
+
+
 async def test_a_record_that_is_not_connectable_reaches_no_keyring_and_no_channel() -> None:
     """ADR-0148 §6's pre-read limb: nothing is asked under an account that is not one.
 
@@ -1088,6 +1175,31 @@ async def test_an_interruption_on_the_way_to_the_completion_leaves_the_claim_ope
     rows = [row.invocation for row in await subject.trail.export_invocations()]
     assert len(rows) == 1, "the claim, and no completion for it"
     assert rows[0].completes is None
+
+    # **And it *stays* open**, which is the half that would fail an implementation
+    # adding the recovery arm §6 forbids. The scan is driven exactly as the
+    # composition root wires it — one store behind the trail and the completer faces —
+    # over a plan store holding no execution at all, which is the state a search
+    # decision leaves: it has no `step_id` and no `execution_id` (§6), so
+    # `_recover_execution` never reaches this claim's approval.
+    await RecoveryScan(
+        plans=FakePlanStore(), trail=subject.trail, completer=subject.trail
+    ).recover()
+
+    after = [row.invocation for row in await subject.trail.export_invocations()]
+    assert [row.id for row in after] == [rows[0].id], "the scan completed nothing"
+    assert after[0].completes is None
+    assert await subject.trail.open_invocations(decision_id=call.decision.id) == [rows[0]]
+
+    # **And no further claim is admitted under that decision** (ADR-0192 §1): "the
+    # decision authorised one call", and the claim already spent it. A searcher that
+    # retried — or a later lane that resolved the open claim by guessing — would make
+    # a second search under an authorisation the user gave once.
+    opened = len(subject.transport.attempts)
+    with pytest.raises(AuthorisationSpentError):
+        await subject.searcher.search(call)
+
+    assert len(subject.transport.attempts) == opened, "and the refused claim opened nothing"
 
 
 # --------------------------------------------------------------------------- #
