@@ -317,7 +317,10 @@ lane's own decision.**
 > **Normative.** Where the policy answers a `DENY` to an `approved=True` resume —
 > which `ActionPolicy.resolve`'s second obligation expressly permits — the `DENY` is
 > recorded as it is today and **no grant is established**. The establishment fails
-> with the ruling's own reason; nothing looser is minted in its place.
+> with the ruling's own reason; nothing looser is minted in its place. `resume`
+> **returns** as it always does and carries `DECLINED` (§4), which is also what it
+> carries where the argument was supplied beside `approved=False`: on any resolving
+> ruling that is not an `ALLOW`, the store is never reached and the carrier says so.
 
 > **Normative.** `resume`'s existing behaviour is otherwise unchanged in every
 > respect. A call supplying no `remember_recipients_until` behaves byte for byte as
@@ -403,13 +406,24 @@ declared argument is admitted by that clause rather than by a change to it (§13
 > **Normative.** Where `ActionPolicy.resolve` answers other than an `ALLOW` on
 > `establish_recipient_grant` — which its second obligation expressly permits for a
 > confirmation answered long after it was asked — **that answer is recorded** and the
-> operation raises, establishing nothing. Suppressing it would be the failure
+> operation raises `PermissionDeniedError`, establishing nothing. Suppressing it would
+> be the failure
 > ADR-0042 §4's guarantee exists to prevent, read one operation over: the policy
 > ruled on a question the user answered, and a ruling the trail never sees is a
 > decision nobody can audit. Because a confirmation has one answer (ADR-0044 §2b) the
 > decision is thereby settled, and §3's fourth condition then keeps the act from being
 > offered on it again — which is stated here rather than discovered, since it is the
 > one outcome on this population that costs the user the act.
+
+> **Normative.** `PermissionDeniedError` is the existing class — *"an action was
+> blocked by the permission/policy layer"* — and raising it here does **not** breach
+> `AssistantEngineContract::test_a_refusal_is_a_result_and_not_an_exception`. That
+> contract is stated over `resume`, whose `TurnOutcome` carries a disposition a
+> refusal can be reported *in*; `establish_recipient_grant`'s return is the grant,
+> there is no disposition to carry, and the ruling **is** recorded in the trail, so
+> nothing about the refusal is hidden — what the raise reports is that no grant
+> exists, which is true. No lane reads this as licence to make a `resume` refusal an
+> exception (ADR-0197's amendment note, ADR-0042 §4).
 
 > **Normative.** The operation **resumes nothing and services nothing**. The
 > `ALLOW` it records authorises a call that has already been abandoned: no lane
@@ -547,6 +561,7 @@ class RecipientGrantNotEstablished(StrEnum):           # core/types.py
     ALREADY_STANDING = "already_standing"                      # §6
     REFUSED = "refused"                                        # §6
     STORE_UNAVAILABLE = "store_unavailable"                    # §6
+    DECLINED = "declined"                                      # §2, §6
 
 
 class UngrantableActError(AssistantError): ...         # core/errors.py, §1/§2/§3
@@ -578,8 +593,14 @@ class PermissionDecision(BaseModel):                   # core/types.py
 > `RecipientGrant` it carries on the establishing arm is the record the store
 > accepted, detached as every other promoted read's is (ADR-0018 §3).
 
-> **Normative.** `RecipientGrantNotEstablished` names, in four members, every way an
-> attempted act ends with no grant. `CEILING_REACHED` is here because ADR-0193 §1
+> **Normative.** `RecipientGrantNotEstablished` names, in **five** members, every way
+> an attempted act ends with no grant. `DECLINED` is the one that never reaches the
+> store: the resolving ruling was not an `ALLOW` — a declining answer, or a policy
+> `DENY` on an approving one (§2) — so the answer is recorded, no grant could be
+> established from it (ADR-0193 §2), and `RecipientGrantStore.record` was not called
+> at all. It is distinct from `REFUSED` because the store refused nothing, and it is a
+> member rather than an absent carrier so that a surface can tell "the act was
+> collected and the answer went against it" from "no act was collected". `CEILING_REACHED` is here because ADR-0193 §1
 > obliges a surface to name **that** reason in terms. `ALREADY_STANDING` is the
 > duplicate-**subject** refusal ADR-0193 §1 makes `record` perform. `REFUSED` is every
 > other `InvalidRecipientGrantError` that operation can raise — the duplicate-id check
@@ -1145,13 +1166,16 @@ which is what "a product surface with a user action behind it" describes.
 > recipients were already authorised, naming `assistant recipient-grants`; catches the
 > base `InvalidRecipientGrantError` and says no standing authorisation was created,
 > naming no cause; and catches a bare `RecipientGrantError` and says the grant store
-> could not be written. None of the four propagates as a traceback, and none is
+> could not be written; and catches `PermissionDeniedError` and says the call was
+> declined when it was ruled on, that the decision is recorded and settled, and that
+> nothing was made standing. None of the five propagates as a traceback, and none is
 > rendered as a fault of the call the decision records — which was refused before this
 > act and is not made by it (§3).
 
-> **Normative.** The two surfaces state the **same four outcomes** by construction,
-> from the carrier on one population and from the refusal's own type on the other, and
-> no lane gives one of them a rendering the other lacks. That is the whole of what
+> **Normative.** The two surfaces state the **same five outcomes** by construction —
+> the ceiling, the duplicate, the bare refusal, the store fault and the declined
+> ruling — from the carrier on one population and from the refusal's own type on the
+> other, and no lane gives one of them a rendering the other lacks. That is the whole of what
 > ADR-0193 §1 asks of a surface offering the act, discharged twice because the act is
 > offered twice.
 
@@ -1455,7 +1479,10 @@ enumeration in its own text (§9).
 > this review showed a listing cannot stand in for. Over one `resume` carrying
 > `remember_recipients_until` in each case: a successful act carries `established`
 > holding the recorded grant and no `not_established`; a ceiling refusal carries
-> `CEILING_REACHED`; a duplicate-subject refusal carries `ALREADY_STANDING`; and every
+> `CEILING_REACHED`; a duplicate-subject refusal carries `ALREADY_STANDING`; a
+> `resume` whose policy answers `DENY` to an approving answer, and one carrying the
+> argument beside `approved=False`, each carry `DECLINED` beside the recorded answer
+> and reach `RecipientGrantStore.record` not at all; and every
 > call that collected no act — an `ask`, a `resume` without the argument, and
 > ADR-0198 §1's restatement — carries `recipient_grant` as `None`. Each asserts the
 > `TurnOutcome` was **returned** rather than raised.
@@ -1567,9 +1594,10 @@ enumeration in its own text (§9).
 > **Normative.** Lane 1 ships the matching terminal arm for `assistant
 > remember-recipients`, over an `establish_recipient_grant` raising each of
 > `RecipientGrantCeilingError`, `DuplicateRecipientGrantError`, the base
-> `InvalidRecipientGrantError` and a bare `RecipientGrantError`. It asserts the same
-> four sentences §9 requires of `assistant resume`, and that none of the four escapes
-> as a traceback. It fails against a lane that rendered the carrier on one population
+> `InvalidRecipientGrantError`, a bare `RecipientGrantError` and — over a policy
+> answering other than `ALLOW` — `PermissionDeniedError`. It asserts the same five
+> sentences §9 requires of `assistant resume`, that the non-`ALLOW` answer is in the
+> trail, and that none of the five escapes as a traceback. It fails against a lane that rendered the carrier on one population
 > and let the refusal propagate on the other — which is the gap round 12 of this review
 > found, and which ADR-0193 §1 does not permit, because its ceiling clause binds every
 > surface offering the act.
