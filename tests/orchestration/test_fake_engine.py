@@ -1271,3 +1271,47 @@ async def test_a_trail_that_refuses_the_answer_leaves_the_park_answerable() -> N
     assert resumed.step is not None
     assert resumed.step.disposition is Disposition.EXECUTED
     assert resumed.recipient_grant is None
+
+
+async def test_a_successful_act_leaves_a_reference_that_resolves() -> None:
+    """The step names the decision that cleared it (ADR-0004 §7, ADR-0014 §4).
+
+    Before ADR-0235 this fake's resume recorded no decision at all, so its
+    ``approval_ref`` resolved to nothing on every path and could mislead nobody. Now
+    that the establishing act records one, a reference naming a different id would be
+    the dangling pointer ADR-0014 §4 exists to prevent — and it would be dangling in
+    the *one* state a consumer's own recovery test can resolve, which is the state
+    that would be believed.
+    """
+    engine = FakeAssistantEngine()
+    binding = _binding()
+    confirmed = PermissionDecision.from_request(
+        ActionRequest(
+            tool=_TRANSMITTING_TOOL,
+            parameters={"to": "Alice@Example.ORG", "body": "hello"},
+            egress_binding=binding,
+        ),
+        PermissionRuling(outcome=PermissionOutcome.CONFIRM, reason="it discloses off-device"),
+        id="d-confirm",
+        decided_at=_RECIPIENT_AT,
+    )
+    await engine.trail.record(confirmed)
+    engine.hold_confirmation_decision("park-1", confirmed)
+    parked = engine.park("park-1", egress=binding)
+
+    resumed = await engine.resume(
+        parked.token,
+        approved=True,
+        timeout=timedelta(seconds=30),
+        remember_recipients_until=_RECIPIENT_AT + timedelta(days=1),
+    )
+
+    assert resumed.step is not None
+    cleared = resumed.step.state.step("step-1")
+    assert cleared is not None
+    assert cleared.approval_ref is not None
+    answering = await engine.trail.get(cleared.approval_ref)
+    assert answering is not None
+    assert answering.resolves == confirmed.id
+    assert resumed.recipient_grant is not None
+    assert resumed.recipient_grant.established is not None
