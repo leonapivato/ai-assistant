@@ -86,7 +86,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
-from ai_assistant.core.clock import ClockReadingError, checked_clock
+from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.correlation import current_correlation
 from ai_assistant.core.errors import AssistantError, MemoryStoreError
 from ai_assistant.core.types import (
@@ -883,8 +883,13 @@ class SearchServicer:
 
         Returns:
             The trail's own copy of the recorded decision, or ``None`` where the
-            policy raised, the clock could not be read, the append was refused, or
-            what came back is not what was written.
+            policy raised, the append was refused, or what came back is not what was
+            written.
+
+        Raises:
+            ClockReadingError: If the injected clock's reading is not a conforming
+                one — naive, indeterminate, or outside the localizable range. Not
+                translated and not swallowed, for the reason stated in the body.
         """
         try:
             ruling = await self._policy.decide(request)
@@ -892,23 +897,29 @@ class SearchServicer:
             # §13's `RULING_UNAVAILABLE`, first limb: "`ActionPolicy` raised". The
             # net is `_bound`'s, for its reason.
             return None
+        # One clock reading, stamping the record. `expires_at` is `None` on every
+        # outcome: ADR-0059 §1's lifetime is a property of a question somebody will
+        # answer, and §9 rules that a `CONFIRM` here "resolves in no turn" — so a
+        # deadline would describe an answerability this decision does not have.
+        #
+        # **A non-conforming reading propagates untranslated** (ADR-0026 §4), which is
+        # `Fetcher`'s posture at the neighbouring seam and ADR-0230 §4's reason
+        # transposed: ADR-0231 adds **no** error class to `core/errors.py`, and a clock
+        # this process cannot read is not one of §9's three decline causes — those are
+        # a binder, a policy and a trail. Reporting it as `RULING_UNAVAILABLE` would
+        # report one stage's fault under another stage's member, which §13 forbids in
+        # terms. No production turn reaches here on such a clock anyway:
+        # `LearningLoop._goal_from` reads the same guarded seam before the planner is
+        # called and raises `PlanningError` there.
+        decision = PermissionDecision.from_request(
+            request, ruling, id=self._id_factory(), decided_at=self._now()
+        )
         try:
-            # One clock reading, stamping the record. `expires_at` is `None` on
-            # every outcome: ADR-0059 §1's lifetime is a property of a question
-            # somebody will answer, and §9 rules that a `CONFIRM` here "resolves in
-            # no turn" — so a deadline would describe an answerability this
-            # decision does not have.
-            decision = PermissionDecision.from_request(
-                request, ruling, id=self._id_factory(), decided_at=self._now()
-            )
             await self._trail.record(decision)
             recorded = await self._trail.get(decision.id)
-        except AssistantError, ClockReadingError:
-            # §13's second limb: "the decision could not be recorded". A
-            # `ClockReadingError` is a `ValueError` rather than an
-            # `AssistantError` (ADR-0026 §4), and a reading `UtcInstant` would
-            # refuse leaves the decision unconstructable, which is the same fact
-            # one step earlier.
+        except AssistantError:
+            # §13's second limb: "the decision could not be recorded" — a refused
+            # append, or a read that raised. The net is `_bound`'s, for its reason.
             return None
         # Equality over the whole record and not its subject, for
         # `StepRunner._record`'s reason: comparing the tool and the digest leaves

@@ -122,6 +122,7 @@ from ai_assistant.orchestration import (
     MemoryWriteStage,
     ObservationStage,
     QuestionStage,
+    SearchServicer,
     StepExecutor,
     StepRunner,
     UpcomingEventStage,
@@ -147,6 +148,7 @@ from ai_assistant.testing import (
     FakeContextProvider,
     FakeConversationStore,
     FakeDeferralStore,
+    FakeEgressBinder,
     FakeEmbedder,
     FakeFeedbackProcessor,
     FakeFetcher,
@@ -161,6 +163,7 @@ from ai_assistant.testing import (
     FakeObserver,
     FakePlanner,
     FakePlanStore,
+    FakeQueryComposer,
     FakeReader,
     FakeRecipientGrants,
     FakeRecipientGrantStore,
@@ -175,10 +178,12 @@ from ai_assistant.testing import (
     FakeTraceSink,
     FakeTranscriptArchive,
     FakeTranscriptArchiveWriter,
+    FakeWebSearcher,
     invoker_over,
     source_grant,
     succeeds,
 )
+from ai_assistant.testing.searching import FAKE_WEB_SEARCH
 from ai_assistant.tools.builtin import CurrentTime
 
 if TYPE_CHECKING:
@@ -343,6 +348,31 @@ async def _learning_loop(now: Clock) -> None:
         now=now,
         registry=FakeToolRegistry(),
     ).respond("book the flight")
+
+
+async def _search_servicer(now: Clock) -> None:
+    """ADR-0231 §6's recorder clock, read where the ``PermissionDecision`` is stamped.
+
+    Driven through the seam's real entry point rather than a private method: the
+    composition, the proposal, the binding and the ruling all run first, and the
+    reading is the last thing before the trail is written. A ``FakeActionPolicy``
+    reaches a ``CONFIRM`` on the search declaration's own ``discloses`` floor, which
+    is a **recorded** ruling like any other — §9 records every outcome — so the stamp
+    is reached without a grant, a costed declaration or an open channel.
+    """
+    binder = FakeEgressBinder()
+    binder.register_egress(
+        FAKE_WEB_SEARCH, reference="search-account", identity="search@example.com"
+    )
+    await SearchServicer(
+        composer=FakeQueryComposer(),
+        searcher=FakeWebSearcher(),
+        binder=binder,
+        policy=FakeActionPolicy(),
+        trail=FakeAuditTrail(),
+        now=now,
+        id_factory=lambda: "d-1",
+    ).service("what is that bell tower in Porto", remaining=10, external=False)
 
 
 async def _clock_source(now: Clock) -> None:
@@ -938,6 +968,9 @@ SEAMS = [
     Seam("SqliteMemoryStore", _sqlite_store, MemoryStoreError),
     Seam("MemoryIngestor", _ingestor, MemoryStoreError),
     Seam("LearningLoop", _learning_loop, PlanningError),
+    # ADR-0231 §6's recorder clock, propagating rather than translating for the
+    # reason `PROPAGATED` records — `Fetcher`'s clause above, one seam over.
+    Seam("SearchServicer", _search_servicer, ClockReadingError),
     Seam("FakeMemoryStore", _fake_store, MemoryStoreError),
     Seam("FakeMemoryWriter", _fake_writer, MemoryStoreError),
     Seam("FakePlanner", _fake_planner, PlanningError),
@@ -1247,6 +1280,12 @@ PROPAGATED: Final[dict[str, str]] = {
         "ADR-0230 §4 adds **no** error class to `core.errors` — a source failure is a "
         "`FetchRefusal` rather than a raise — and a clock fault is not a source reason, "
         "so `core`'s own rejection is what a caller sees"
+    ),
+    "SearchServicer": (
+        "ADR-0231 adds **no** error class to `core.errors` either, and a clock this "
+        "process cannot read is none of ADR-0231 §9's three decline causes — a binder, "
+        "a policy, a trail — so reporting it as one of them would report one stage's "
+        "fault under another stage's member, which §13 forbids in terms"
     ),
     "ConsolidationStage": _UNDECLARED,
     "CurrentTime": ("documented at ``tools/builtin.py:148``, and `tools` is not in §4's list"),
