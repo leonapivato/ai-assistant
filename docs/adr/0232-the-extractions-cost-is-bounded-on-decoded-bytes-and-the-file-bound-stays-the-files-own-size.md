@@ -1,6 +1,6 @@
 # 232. The extraction's cost is bounded on decoded bytes, and the file bound stays the file's own size
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-03
 - **Partially supersedes**
   [ADR-0230](0230-the-planner-names-a-file-it-was-shown-and-the-loop-fetches-it-into-the-supply.md)
