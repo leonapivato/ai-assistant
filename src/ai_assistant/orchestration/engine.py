@@ -184,6 +184,7 @@ from ai_assistant.orchestration.payloads import (
     non_blank_text,
     page_argument,
     positive_page_argument,
+    utc_instant,
 )
 from ai_assistant.orchestration.questions import question_state
 from ai_assistant.orchestration.routing import (
@@ -4199,20 +4200,27 @@ class Engine:
             AuditError, ToolBindingError: As the stages raise.
         """
         self._reject_if_closing()
+        # **Validated locally and before any I/O** (ADR-0085 §9). ``UtcInstant`` is a
+        # pydantic annotation, which a wire request is checked against before dispatch
+        # and an in-process call is not — so without this the two implementations
+        # refuse different values, and a naive instant reaches an ordering comparison
+        # as a bare ``TypeError`` rather than as a controlled refusal.
+        until = (
+            None
+            if remember_recipients_until is None
+            else utc_instant(remember_recipients_until, name="remember_recipients_until")
+        )
         check_arguments(
             "resume",
             max_bytes=self._max_payload_bytes,
             token=token,
             approved=approved,
             timeout=timeout,
-            remember_recipients_until=remember_recipients_until,
+            remember_recipients_until=until,
         )
         return await self._tracked(
             self._resume(
-                token,
-                approved=approved,
-                timeout=timeout,
-                remember_recipients_until=remember_recipients_until,
+                token, approved=approved, timeout=timeout, remember_recipients_until=until
             ),
             "resume",
             checked=True,
@@ -6525,14 +6533,19 @@ class Engine:
         """
         self._reject_if_closing()
         named = identifier(decision_id, name="decision_id")
+        # The instant is refused here for ``decision_id``'s reason and one sharper:
+        # a naive one reaches ADR-0235 §1's comparison **after** the policy has been
+        # consulted, so a caller would meet a bare ``TypeError`` where the contract
+        # declares a controlled refusal before any I/O (ADR-0085 §9, ADR-0023 §3).
+        until = utc_instant(expires_at, name="expires_at")
         check_arguments(
             "establish_recipient_grant",
             max_bytes=self._max_payload_bytes,
             decision_id=named,
-            expires_at=expires_at,
+            expires_at=until,
         )
         return await self._tracked(
-            self._recipient_grants.establish_recipient_grant(named, expires_at=expires_at),
+            self._recipient_grants.establish_recipient_grant(named, expires_at=until),
             "establish_recipient_grant",
             checked=True,
         )
