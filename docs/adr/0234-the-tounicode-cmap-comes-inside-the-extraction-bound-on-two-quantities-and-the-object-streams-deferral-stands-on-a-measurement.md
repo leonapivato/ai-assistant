@@ -327,38 +327,64 @@ and each to the field whose quantity it is.
 > statements of one font condition, each incomplete in one more place — and the correction
 > that ended them was to ask the library instead.
 
-> **Normative.** The walk performs that establishing parse **at most once per distinct
-> `/ToUnicode` stream per fetch**, and charges the count it yields at **every** parse whose
-> resource context carries a font naming that stream. The count is a property of the
-> stream; the charge is per parse. An implementation that re-parsed per page would pay the
-> multiplier this bound exists to refuse.
+> **Normative.** **The count is charged once for every font-build the extraction will
+> perform — per font entry, per parse — and never once per parse.**
+> `PageObject._extract_text` builds **every entry** of the `/Font` resource dictionary, so
+> two font dictionaries in one resource context naming the **same** `/ToUnicode` stream
+> make the extraction parse that CMap **twice** on that page, and both are charged. The
+> count is a property of the stream and the charge is a property of the build; an
+> implementation charging one CMap once per page would disagree with the extraction about
+> which parses happen, which ADR-0232 §3 forbids. The byte charge of §1 is per font entry
+> per parse for the same reason and by the same reading of the same loop.
 
-> **Normative.** **The walk likewise establishes each distinct font at most once per
-> fetch**, remembering the outcome — built, swallowed, or raised — and applying it at every
-> later parse whose resource context carries that font. ADR-0232's implementation
-> establishes per parse, which cost nothing while the CMap was excluded and would cost the
-> whole of this bound's multiplier once it is not: a font established on forty pages would
-> have its CMap parsed forty times by the walk on top of the forty the extraction pays.
-> **The memo is sound because the outcome is a function of the font dictionary alone** —
-> the extraction builds the same font from the same bytes on every page and fails or
-> succeeds identically — so a walk that asks once and remembers agrees with it exactly
-> where a walk that asks every time does, at one fortieth of the cost.
+> **Normative.** **The walk parses a distinct `/ToUnicode` stream at most once for the
+> count and at most once for each distinct font naming it, per fetch — and never once per
+> parse.** Two memos, because two questions are being asked of the same bytes and neither
+> answer serves the other: the **count** is `_parse_to_unicode`'s pre-deduplication tally,
+> which `Font.from_font_resource` does not expose — it keeps only the surviving
+> `character_map`, 65,536 keys where 90,000 mappings were built — and the
+> **font-establishment outcome** is the whole of `from_font_resource`, of which the CMap
+> parse is one step. So the walk asks `_parse_to_unicode` once per stream and
+> `from_font_resource` once per font, both memoised for the fetch, and a CMap named by F
+> distinct fonts is parsed by the walk at most **F + 1** times against the extraction's F
+> times **per page**.
 
-> **Normative.** **The order is fixed, and it is what makes the establishing parse
-> affordable.** For each font in a parse's resource context whose `/ToUnicode` resolves to
-> a stream, the walk (a) decodes that stream and charges its length to
+> **Normative.** **What is fixed here is the ceiling, not the instrument.** A lane that can
+> obtain the font-establishment outcome and the pre-deduplication count from **one** parse
+> — a later version exposing the tally, or an interface this ADR does not know of — may do
+> so, and satisfies this section better. What no implementation may do is ask either
+> question once per **parse** rather than once per fetch, which is the multiplier this
+> bound exists to refuse.
+
+> **Normative.** **The font-establishment memo is sound because its outcome is a function
+> of the font dictionary alone** — the extraction builds the same font from the same bytes
+> on every page and fails or succeeds identically — so a walk that asks once and remembers
+> agrees with it exactly where a walk that asks every time does. ADR-0232's implementation
+> asks per parse, which cost nothing while the CMap was excluded and would cost the whole
+> of this bound's multiplier once it is not: a font established on forty pages would have
+> its CMap parsed forty times by the walk on top of the forty the extraction pays.
+
+> **Normative.** **The order is fixed, and it is what makes the walk's own parses
+> affordable.** For each font **entry** in a parse's resource context whose `/ToUnicode`
+> resolves to a stream, the walk (a) decodes that stream and charges its length to
 > `fetch_max_decoded_bytes`, (b) compares that total and refuses the moment it is passed,
-> (c) establishes the mapping count if this stream has not been established in this fetch,
-> (d) charges that count to `fetch_max_character_mappings`, and (e) compares that total and
-> refuses the moment it is passed. No implementation establishes several CMaps and compares
-> their sum afterwards, and none establishes one before its bytes have been compared.
+> (c) takes the mapping count, parsing the stream for it only if this fetch has not already
+> counted this stream, (d) charges that count to `fetch_max_character_mappings`, (e)
+> compares that total and refuses the moment it is passed, and (f) establishes the font
+> itself (§4), parsing it only if this fetch has not already established this font entry.
+> No implementation compares a sum over several fonts' charges afterwards, none counts a
+> stream before its bytes have been compared, and none establishes a font before its
+> CMap's mappings have been.
 
 > **Normative.** **The residual this leaves is one establishing parse past the bound, and
 > it is stated rather than argued away.** Obtaining a CMap's mapping count requires parsing
 > it, so the parse that crosses `fetch_max_character_mappings` has completed before the
 > comparison that refuses it. What bounds the parses *before* it is the bound itself: every
-> established CMap's count is charged to the same running total, so the mappings built
-> across a whole fetch's establishing parses are at most the bound plus one CMap's. What
+> font-build the walk establishes has already had its CMap's bytes and mappings charged to
+> the two running totals, so across a whole fetch the walk's own establishing parses build
+> at most **twice** what `fetch_max_character_mappings` admits, plus one font's worth — F
+> font-establishments and one count parse over a CMap whose F charges are already inside
+> the bound. The same arithmetic bounds their byte term against `fetch_max_decoded_bytes`. What
 > bounds that one CMap is the adopted version's own `MAPPING_DICTIONARY_SIZE_LIMIT` and
 > nothing this project declares — evidence about a version (ADR-0232 §6), disclosed here
 > in the same posture and for the same reason ADR-0232 §3 discloses the 75 MB per-stream
@@ -448,7 +474,7 @@ than the minutes the same document costs today.
 > as a consequence of this decision and not as a separate repair**: a font carrying a
 > `/ToUnicode` that the extraction cannot build no longer lets the content stream be
 > charged, so that document stops being refused `TOO_LARGE` where the extraction alone
-> answers `EXTRACTION_FAILED`, and §7 arm 8 pins the class. **#2043's second residual is
+> answers `EXTRACTION_FAILED`, and §7 arm 9 pins the class. **#2043's second residual is
 > untouched and stays open** — a font program is still charged before the font is built,
 > because ADR-0232 §3 requires the comparison to precede the work it bounds, and closing
 > it would mean scanning a program before charging it, which is the property that makes
@@ -597,7 +623,7 @@ ever true.
 > asserts a wall-clock duration. Every arm runs with the bounds it is not about set high
 > enough that only the one under test can decide it.
 
-1. **A CMap-carried amplification is refused, and the charge is per parse.** A document of
+1. **A CMap-carried amplification is refused, and the charge is per font-build.** A document of
    many content-free pages sharing **one** font with a large `/ToUnicode` CMap is refused
    `TOO_LARGE`, with `extract_text` not called for the crossing page. **This is the arm
    that fails on any implementation charging a distinct CMap a single time**, and it fails
@@ -635,40 +661,47 @@ ever true.
    fails any implementation carrying ADR-0232 §3's three-key font-program predicate over to
    this input. And a font carrying **no** `/ToUnicode` is charged no CMap, its font-program
    charge unchanged, which is ADR-0232 §8 arm 10 still passing.
-7. **A font the operators never select is charged.** A page whose resource context carries
+7. **Two fonts sharing one CMap are charged twice.** A page whose resource context carries
+   two font dictionaries naming the **same** `/ToUnicode` stream is refused at a
+   `fetch_max_character_mappings` set between one and two times that CMap's count, and
+   **fetches** just above twice it. `PageObject._extract_text` builds every entry of the
+   `/Font` dictionary, so it parses that CMap once per entry; **this is the arm that fails
+   an implementation charging a CMap once per parse rather than once per font-build**,
+   which under-charges by the number of fonts sharing it and is the reading §3 forbids.
+8. **A font the operators never select is charged.** A page whose resource context carries
    a second font with a large CMap that no `Tf` names is refused `TOO_LARGE`. This is the
    arm that fails an implementation charging only the fonts the content stream selects,
    which would under-charge every parse: `_extract_text` builds the whole `/Font`
    dictionary before it resolves the content key.
-8. **An unbuildable `/ToUnicode` font is `EXTRACTION_FAILED`, not `TOO_LARGE`.** A document
+9. **An unbuildable `/ToUnicode` font is `EXTRACTION_FAILED`, not `TOO_LARGE`.** A document
    whose font carries a `/ToUnicode` and a structure that makes the extraction's own font
    initialisation raise something it would not swallow is refused **`EXTRACTION_FAILED`**,
    with no record added and no turn failed. This is #2043's class, closed by §4's
    unconditional establishment, and the arm that fails an implementation keeping the
    `/ToUnicode` exclusion.
-9. **The boundary value, both ways, for the new field.** A document whose mapping charge is
+10. **The boundary value, both ways, for the new field.** A document whose mapping charge is
    exactly `fetch_max_character_mappings` extracts, and one mapping over is refused
    `TOO_LARGE`.
-10. **A document inside every bound is unaffected.** A document of a few pages carrying an
+11. **A document inside every bound is unaffected.** A document of a few pages carrying an
     ordinary `/ToUnicode` CMap fetches, its text reaching the record whole and the reply
     carrying it, with no bound having refused anything.
-11. **ADR-0232 §8 arm 11's `/ObjStm` half stands and its CMap half is replaced.** The
+12. **ADR-0232 §8 arm 11's `/ObjStm` half stands and its CMap half is replaced.** The
     `/ObjStm` arm is unchanged and stays a **fetch** arm: a document whose large `/ObjStm`
     sits inside `fetch_max_file_bytes` fetches, uncharged, which is §6 above. The CMap half
     becomes two arms: the same document's large `/ToUnicode` makes it **refuse** at the
     defaults, and it **fetches** with both of this ADR's figures raised — which is the
     boundary this ADR draws where ADR-0232 drew the other one, and the clause a later
     reader is most likely to widen back.
-12. **The refused ordinary class is pinned, so that raising a default stays a decision and
+13. **The refused ordinary class is pinned, so that raising a default stays a decision and
     not a discovery.** The document §5 names as refused at the defaults is **refused**
     `TOO_LARGE`, and **fetches** at a figure §5 names. This is the arm that records the
     cost §5 accepts.
-13. **An out-of-domain bound does not load.** A zero and a negative value of
+14. **An out-of-domain bound does not load.** A zero and a negative value of
     `fetch_max_character_mappings` is refused when `Settings` is constructed, before any
     fetcher is built and before any filesystem call — a configuration error that stops the
     deployment rather than an empty listing, a `FetchRefusal` or a degraded turn. This is
     ADR-0230 §14 item 21's arm, extended by one further field and asserted in its form.
-14. **The enumeration did not grow.** `FetchRefusal` has five members, and the audit event
+15. **The enumeration did not grow.** `FetchRefusal` has five members, and the audit event
     for arm 1's turn carries `TOO_LARGE` and no field naming a bound, a count or a size.
 
 > **Normative.** This ADR adds **no clause to the `Fetcher` conformance suite and no
@@ -689,8 +722,9 @@ ever true.
 > `src/ai_assistant/app/composition.py` (`_build_local_file_fetcher` passing that figure to
 > the fetcher beside the others — without it an operator's configured value reaches
 > `readers` never, and the bound is a field nothing enforces),
-> `src/ai_assistant/readers/_extract.py` (the CMap charge, the establishing parse and its
-> per-fetch memo, the removal of `_establish_font`'s `/ToUnicode` exclusion, and
+> `src/ai_assistant/readers/_extract.py` (the CMap charges, the count-establishing parse
+> and the two per-fetch memos §3 requires, the removal of `_establish_font`'s
+> `/ToUnicode` exclusion, and
 > `_extract_pdf`'s docstring, whose statement of what is charged and what is not is
 > restated for this decision — ADR-0232 §6), `src/ai_assistant/readers/files.py` (threading
 > the figure from the fetcher to the extraction), `src/ai_assistant/core/types.py` (**one
@@ -830,7 +864,7 @@ it"*.
    are.
 4. §8 arm 11's second arm — *"a document whose large `/ObjStm` and whose large
    `/ToUnicode` CMap sit inside `fetch_max_file_bytes` **fetches**, neither charged"*. §7
-   arm 11 above keeps the `/ObjStm` half verbatim and replaces the CMap half with a
+   arm 12 above keeps the `/ObjStm` half verbatim and replaces the CMap half with a
    refusal arm and a fetch arm at raised figures. Arm 11's **first** arm — the `/FontFile2`
    behind a normal `/ToUnicode` charged nothing — stands entire, and is worth saying
    because a careless reading of §1 above would take it: that arm is about the **font
@@ -940,7 +974,7 @@ figure that does not bound what it claims to, and the deferral that would tell t
 bound refused is unchanged and named.
 
 **Some documents that fetch today will be refused**, which is the whole point and is also
-the harm. §5 names the class and measures it; §7 arm 12 pins it, so raising a default stays
+the harm. §5 names the class and measures it; §7 arm 13 pins it, so raising a default stays
 a decision an operator makes rather than a discovery a lane makes.
 
 **The walk gets cheaper for the documents it already handled, not more expensive.**
