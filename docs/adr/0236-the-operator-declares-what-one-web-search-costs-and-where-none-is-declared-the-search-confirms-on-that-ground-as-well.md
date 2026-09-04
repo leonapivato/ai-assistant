@@ -258,13 +258,24 @@ consequence is what tells them why.
 ### 4. Absence: `UNKNOWN`, `CONFIRM` on the cost ground, and that is the shipped default
 
 > **Normative.** Where neither field is set the declaration's `cost` is
-> `ToolCost(basis=CostBasis.UNKNOWN)`, `_UNKNOWN_COST_FLOOR` fires beside
-> `_DISCLOSURE_FLOOR`, `_only_the_disclosure_floor` is `False`, the
-> `RecipientGrants` seam is consulted **zero** times, and the ruling is `CONFIRM`
-> whatever grants exist. That is the shipped default and it is the state this ADR
-> makes **legible rather than accidental**: it is what the corpus already produces,
-> stated as a decision so that a deployment reads it as a configuration fact rather
-> than as an unexplained refusal.
+> `ToolCost(basis=CostBasis.UNKNOWN)` and `_UNKNOWN_COST_FLOOR` fires beside
+> `_DISCLOSURE_FLOOR`. **Two consequences follow, and only the first is
+> unconditional.** `_only_the_disclosure_floor` is `False` on every such request, so
+> the `RecipientGrants` seam is consulted **zero** times whatever grants exist — that
+> holds in every configuration, because the predicate requires the singleton `fired`
+> and the outcome to be `CONFIRM`, and an unset figure defeats the first while a
+> configured `DENY` threshold defeats the second. The **ruling** is `CONFIRM` where no
+> threshold rule fires; where the user has configured `deny_at_risk` at or below `LOW`
+> or `deny_at_reversibility` at or below `REVERSIBLE`, the table's maximum is `DENY`
+> and the ruling is `DENY`. No lane states the ruling unconditionally.
+
+> **Normative.** That is the shipped default — both deny thresholds default unset —
+> and it is the state this ADR makes **legible rather than accidental**: it is what
+> the corpus already produces, stated as a decision so that a deployment reads it as a
+> configuration fact rather than as an unexplained refusal. A deployment that has
+> configured a `DENY` threshold reaching this declaration has refused the search on
+> its own stated policy, which is ADR-0036 §1's thresholds working and is neither this
+> ADR's to move nor a state the cost figure changes.
 
 > **Normative.** No lane makes the search reachable by suppressing
 > `_UNKNOWN_COST_FLOOR`, by exempting this declaration from it, by adding a setting
@@ -287,8 +298,10 @@ recomputed `subject_digest`. The shipped defaults are such a deployment —
 `confirm_at_risk` is `MEDIUM` and `confirm_at_reversibility` is `IRREVERSIBLE` — but a
 deployment that set `confirm_at_risk=LOW`, or `confirm_at_reversibility=REVERSIBLE`, has
 `_risk_rule` or `_reversibility_rule` in `fired` beside the disclosure floor, so the
-seam is consulted zero times and the search confirms whatever the figure says. **That
-is not a defect this ADR fixes and not one it may fix**: those are the user's own
+seam is consulted zero times and the search confirms whatever the figure says — and a
+deployment that set either *deny* threshold that low denies it outright, since the
+table's combination is a maximum and `DENY` is the scale's top. **Neither is a defect
+this ADR fixes and neither is one it may fix**: those are the user's own
 thresholds, ADR-0036 §1 makes them the user's, and ADR-0231 §5 already states the
 neighbouring case in terms — a deployment judging `MEDIUM` honest *"gets a mechanism
 that is never serviced under the shipped thresholds; that outcome is legible,
@@ -526,7 +539,13 @@ bullet list would bind nothing.**
     leaves `FAKE_WEB_SEARCH` alone, and then hands out the `UNKNOWN` constant whatever
     it was constructed with — the one implementation the rest of this list cannot
     fail.
-13. **A zero figure in a mismatched currency is refused at the gate, not at load.**
+13. **A configured deny threshold denies the search, and still consults no grant.**
+    With `deny_at_risk=LOW` and a covering grant seeded, in both cost configurations:
+    the ruling is `DENY`, its reason names the risk ground, and the `RecipientGrants`
+    fake fails the test if `covering` is called. This is §4's second clause asserted —
+    the ruling is conditional on the thresholds while the zero-lookup guarantee is
+    not — and it fails a lane that read "the ruling is `CONFIRM`" as unconditional.
+14. **A zero figure in a mismatched currency is refused at the gate, not at load.**
     `web_search_cost_per_call = 0` with `EUR`, `world_spend_currency = "USD"`, a
     ceiling set and no allowance: `Settings` loads, the policy rules `ALLOW` on a
     covering grant, and the `SpendGate` refuses. This is §3's stated residual and §6's
