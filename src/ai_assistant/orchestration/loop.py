@@ -1315,8 +1315,19 @@ class LearningLoop:
             # carries "no identifier but the correlation id" — threading a
             # render decision through it would put record identifiers on a
             # surface whose whole discipline is that they are not there.
+            # ADR-0230 §7: **one servicing site**, and this is it — the fetch is a
+            # third kind of the same emission rather than a second seam, so the
+            # fetcher and the listing are handed to the same call the hop and the
+            # query are serviced by. `listing` is the very object `files` was
+            # projected from, which is what makes `F`*n* name, at the fetch, the
+            # entry the planner was shown at position *n* (§2, §4).
             reached = await service_read_request(
-                self._memory, request, supply=memories, audit=audit
+                self._memory,
+                request,
+                supply=memories,
+                fetcher=self._fetcher,
+                listing=listing,
+                audit=audit,
             )
             serviced = audit.servicings[-1]
             # ADR-0226 §7: appended whole after the episodic supplement, never

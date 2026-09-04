@@ -1233,6 +1233,11 @@ async def test_the_audit_copies_no_text_and_carries_only_the_correlation_id() ->
         "new",
         "deduplicated",
         "labels_unresolved",
+        # ADR-0230 §9's **one** added field, and the pin stays closed over it: "the
+        # record gains one field per servicing … a member of a closed enumeration and
+        # never free text". `None` here, on a servicing that carried no `LOCAL_FILE`
+        # ask at all — which is one of the two absences §9 enumerates.
+        "refusal",
         "truncated_kinds",
         "failed",
         "failed_after_read_returned",
@@ -1859,6 +1864,8 @@ async def test_no_caller_can_raise_the_budget() -> None:
             memory,
             _query("billing schedule notes"),
             supply=(),
+            fetcher=None,
+            listing=None,
             audit=TurnReadAudit(),
             budget=100,  # type: ignore[call-arg]  # the point of the case
         )

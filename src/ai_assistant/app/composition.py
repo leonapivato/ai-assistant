@@ -965,12 +965,11 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # outside that registration would pin its root's mount for the life of the
         # process and leak a descriptor per build."
         #
-        # **Nothing consumes it yet, and that is the intended state of this lane**
-        # (ADR-0230 §13): "A merged C1 is a fetcher nothing calls, in a deployment with
-        # no root configured." The loop that reads a listing and the servicer that
-        # fetches from one are ADR-0230's later lanes; what lands here is the wiring
-        # that owns the resource, so the lane that adds the consumer adds a consumer and
-        # not a lifecycle.
+        # **Built here and consumed by the loop below** (ADR-0230 §3, §13). The
+        # lifecycle is this line's; the reading is `LearningLoop`'s, which takes the
+        # same object as `fetcher` and calls `listing()` once per turn. The two were
+        # separated across ADR-0230's lanes — C1 landed "a fetcher nothing calls" and
+        # C2 the loop that could read one — and #2027 is the join.
         fetcher = _build_local_file_fetcher(settings)
         if fetcher is not None:
             opened.append(fetcher.close)
@@ -1169,6 +1168,23 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # planning stage rather than inventing a second one for it.
             registry=tools,
             feedback=RuleBasedFeedbackProcessor(),
+            # **The fetcher this root built above, where a root is configured**
+            # (ADR-0230 §3, §13; #2027). The loop reads its `listing()` once per
+            # turn, before the first planner call, and shows the projection to both
+            # of a turn's calls; without this line the process would hold an open
+            # root handle and show no listing to any planner, so `files` would be
+            # `()` on every production turn and no `LOCAL_FILE` ask could resolve.
+            #
+            # **`None` is the ordinary case and never an error.** A deployment with
+            # no `fetch_root_path` builds no fetcher, so no file is nameable on any
+            # of its turns — §3's default, read from the caller's side, and the
+            # configuration ADR-0230 §6 ships.
+            #
+            # The **same object** whose `close` is registered among the opened
+            # resources above, not a second fetcher over the same root: two would
+            # each pin the root's mount, and the one the loop read from would be the
+            # one the ordered shutdown did not close (ADR-0042 §2).
+            fetcher=fetcher,
             # Passed rather than defaulted, for the reason the ingestor's
             # ``conflict_limit`` is (ADR-0119 §9): this is the second cardinality
             # control, and its effective ``search`` limit is its own value —
