@@ -2,16 +2,32 @@
 
 - Status: Proposed
 - Date: 2026-09-04
-- **Amends** [ADR-0155](0155-residency-governs-the-assistants-own-store-and-that-store-is-never-externalised.md)
-  — **§3's third clause, in one respect: its closing sentence.** That sentence reads
-  *"An owner ruling alone does not relax this clause; relaxation requires the
-  commissioned ADR and its approval surface, ratified, and **until then every lane
-  implements the prohibition as written**."* The owner ruled arm **(b)** on
-  2026-09-04 and this is the ADR that arm commissions, so a reader holding only
-  ADR-0155 would read "until then" as still running and would read the prohibition
-  more widely than it now holds. ADR-0082 §1's test is met on that sentence and on
-  nothing else in ADR-0155. **Every other ruling of §3 is untouched and is
-  load-bearing here.** §3's first clause — the definition of covered content, its
+- **Partially supersedes** [ADR-0155](0155-residency-governs-the-assistants-own-store-and-that-store-is-never-externalised.md)
+  — **§3's third clause, to the extent §9 below states, and nothing else in ADR-0155.**
+  That clause forbids an egress span carrying covered content all of whose covered
+  paths contain a model call; reserves to an owner ruling the choice between **(a)**
+  ratifying it as permanent and **(b)** commissioning a later ADR designing a
+  content-bearing approval surface; and closes *"An owner ruling alone does not relax
+  this clause; relaxation requires the commissioned ADR and its approval surface,
+  ratified, and **until then every lane implements the prohibition as written**."* The
+  owner ruled arm **(b)** on 2026-09-04 and this is the ADR that arm commissions.
+  **Two of the clause's sentences move, and the instrument is supersession rather than
+  amendment because a reader acts differently on both** (ADR-0070 §1, whose line is the
+  decision and not the size of the edit). The closing sentence's "until then" stops
+  running. And the **prohibition sentence itself** acquires the exception §9 below
+  states: a call meeting all four of §9's conditions may carry content of that class, so
+  a reader holding only ADR-0155 would read "may not carry" more widely than it now
+  holds. ADR-0082 §1's test is met on those two sentences and on nothing else in
+  ADR-0155.
+  **The clause's own reservation is not a licence to record this as a discharge.** §3
+  reserves the *route* — under arm (b) "a relaxation **could then be considered**" —
+  and says relaxation "requires the commissioned ADR and its approval surface,
+  ratified". Stating a posture an earlier ADR obliges leaves that ADR's sentences true
+  (§14 classifies ADR-0199 §3 that way); **effecting** a relaxation does not, and this
+  ADR effects one. The distinction is drawn here rather than left for a reader to make.
+  **What the supersession does not reach is nearly all of §3, and every other ruling of
+  §3 is untouched and load-bearing here.** §3's first clause — the definition of
+  covered content, its
   propagation through every operation without exception, and its three-valued
   per-supply character — is the class this whole decision is stated over and is
   quoted in §3 below. §3's **second** clause, the absolute prohibition on a span
@@ -23,23 +39,62 @@
   ADR, and this ADR is not it and is not read as it. §4's marked clause (nothing
   states that §3 is enforced mechanically) is discharged in part and *only* in part
   by §6 below, which says exactly how far.
-- **Amends** [ADR-0184](0184-a-decision-recorded-before-the-origin-field-is-legible-history-and-the-absence-is-its-own-value.md)
-  — **§2's member roster and §9's first clause, and those alone.** §9 deferred a stored
-  payload version and named its firing condition — "the next member added
-  required-with-no-default to a model the trail stores" — obliging "the ADR adding that
-  member" to choose "between a second sibling and a version, in its own text". §4 below
-  is that member and §14 makes that choice: **a second sibling**, because a version key
-  names a schema and supplies no representable value for a row lacking a required
-  field. So §2's description of `OriginUnrecordedBinding` as carrying "every member
-  `EgressBinding` carries **but** `planned_with_external_content`" stops being true, and
-  §9's first clause ("No lane adds a second sibling to this union") is the clause §9's
-  second clause licenses this ADR to spend. **Everything else stands and is relied
-  on**: §2's declare-each-member-once rule is obeyed by a private base chain, §3's
-  structural, total and mutually exclusive discrimination is extended by one rung and
-  not replaced, §4's nothing-is-written rule and §5's five readers bind unchanged, and
-  §7's floor is extended **by cause** for §7's own reason. §11 is untouched.
-- **No record is owed on ADR-0148, ADR-0150, ADR-0181, ADR-0193, ADR-0178, ADR-0199,
-  ADR-0203, ADR-0207, ADR-0146, ADR-0106 or ADR-0152**, and §14 applies ADR-0082 §1's
+- **Partially supersedes** [ADR-0184](0184-a-decision-recorded-before-the-origin-field-is-legible-history-and-the-absence-is-its-own-value.md)
+  — **§1's exception roster, three sentences of §2, §3's discrimination sentence and
+  §9's first clause; those, and no others.** The instrument is supersession for the
+  reason it is on ADR-0155: each of these sentences is one a lane **acts on
+  differently** once this ADR stands, which is ADR-0070 §1's line. That is also how the
+  corpus has recorded every widening of a roster clause — ADR-0181 partially superseded
+  ADR-0178 §2's exactly-two-fields clause and ADR-0152 §7's exactly-one-thing clause,
+  and ADR-0184 itself partially superseded ADR-0150 §1's clause typing
+  `PermissionDecision.egress_binding` — so the label follows the test rather than the
+  size of the edit (ADR-0082 §1: "the test controls, not the label").
+  §9 deferred a stored payload version and named its firing condition — "the next member added required-with-no-default to a
+  model the trail stores" — obliging "the ADR adding that member" to choose "between a
+  second sibling and a version, in its own text". §4 below is that member and §14 makes
+  that choice: **a second sibling**, because a version key names a schema and supplies
+  no representable value for a row lacking a required field. Adding a member to
+  `EgressBinding` and a third shape to the union moves five sentences, each named here
+  because ADR-0082 §1 puts the naming in this ADR's text, and each stated in its
+  repaired form in §14:
+  **§1** recognises a row by its carrying "every member `EgressBinding` requires
+  **except** `planned_with_external_content`" — an exception list that must now carry
+  two names, since a genuine pre-origin row lacks `coverage` as well, and which read
+  unrepaired would make the first epoch's own rows unrecognisable.
+  **§2's first clause** describes `OriginUnrecordedBinding` as carrying "every member
+  `EgressBinding` carries **but** `planned_with_external_content`", for the same reason.
+  **§2's third clause** states that "`EgressBinding` is unchanged … no member is added
+  to it"; §4 below adds `coverage`, which is that sentence and not a reading of it.
+  **§2's fifth clause** types `PermissionDecision.egress_binding` as
+  `EgressBinding | OriginUnrecordedBinding | None`; §14 makes it a three-shape union.
+  **§3's** clause that "a stored object carrying `planned_with_external_content`
+  validates as `EgressBinding` **and as nothing else**" stops being true: such an object
+  lacking `coverage` validates as `CoverageUnrecordedBinding`. §3's *property* —
+  structural, total and mutually exclusive, with no discriminator field — is preserved
+  exactly and is why the ladder works; it is the two-shape **sentence** that is replaced
+  by a three-rung one, and §14 states it.
+  **§9's first clause** ("No lane adds a second sibling to this union") is the clause
+  §9's second clause licenses this ADR to spend.
+  **Everything else stands and is relied on**: §2's declare-each-member-once rule is
+  obeyed by a private base chain, §2's fourth clause keeps
+  `ActionRequest.egress_binding` narrow and §14 does not widen it, §2's sixth clause is
+  scoped "**by this ADR**" and so is a statement about ADR-0184's own reach rather than
+  a standing prohibition on later ones — §4's `SpanCoverage` and its
+  `ConfirmationEgress` member breach nothing there — §4's
+  nothing-is-written rule and §5's five readers bind unchanged, and §7's floor is
+  extended **by cause** for §7's own reason. §11 is untouched, and its own partial
+  supersession of ADR-0150 §1 is why no second pair is owed there (§14).
+- **Also partially supersedes [ADR-0152](0152-the-binding-is-derived-at-one-seam-never-supplied-to-it-and-a-call-it-cannot-describe-is-refused.md)
+  and [ADR-0178](0178-a-confirmation-carries-the-egress-it-is-about-and-its-absence-is-the-discriminator.md),
+  each on a clause ADR-0181 already partially superseded and this ADR narrows again by
+  one**, by the same test and the same precedent. ADR-0152 §7's clause on what `rebind` takes from `approved` went from one thing
+  to two; §4 below makes it three. ADR-0178 §2's clause fixing `ConfirmationEgress`'s
+  fields went from two to three; §4 below makes it four, and §10's `model_fields` roster
+  test moves by one further entry with it. Both pairs accumulate on a `Status` line that
+  already carries the leading token, which is ADR-0070 §4's accumulation rule and
+  ADR-0082 §2's placement rule; §14 states the extent of each.
+- **No record is owed on ADR-0148, ADR-0150, ADR-0181, ADR-0193, ADR-0199,
+  ADR-0203, ADR-0207, ADR-0146 or ADR-0106**, and §14 applies ADR-0082 §1's
   test to each rather than asserting it. In particular: ADR-0148 §6's determinism
   clause is **not** amended, because §4 below puts the new fact on the **binding** and
   not in the description, exactly as ADR-0181 §3 did and for the same reason; and
@@ -939,16 +994,32 @@ Named individually:
 
 ### 14. Every other ADR classified under ADR-0082 §1, and the history epoch decided
 
-The header records the four amendments. This section applies ADR-0082 §1's test to
-every other ADR a reader might expect a record on, and states why none is owed — the
-judgement being made in this ADR's text, which is where it is reviewed.
+The header records the partial supersessions this ADR makes and names every clause each
+one reaches. This section applies ADR-0082 §1's test to every *other* ADR a reader
+might expect a record on, states the extent of the two records the header does not
+argue in full, and states why nothing is owed on the rest — the judgement being made in
+this ADR's text, which is where it is reviewed. It carries no count of its own: §16
+enumerates the marked clauses, and an ordinal restated here is the drift this ADR has
+already corrected twice.
 
-- **ADR-0178.** No record. §7's floor is a floor, and §8 above adds an obligation on
-  top of it without making any sentence of §7 false: every clause of §7 still holds of
-  every surface, and §7's sixth clause ("No surface renders the payload description as
-  though it were the payload") is not merely intact but is quoted and relied on. That
-  is ADR-0082 §1's **stacked addition**, recorded in the ADR that makes it and nowhere
-  else. §9's size clauses likewise stay true (§13).
+- **ADR-0178. A record is owed, and on one clause only: §2's field count.** §2 fixes
+  `ConfirmationEgress`'s fields — "exactly two fields, both required with no default" —
+  which ADR-0181 §3 already narrowed to three and recorded there as a partial
+  supersession. §4 above adds `coverage` as a fourth, by the identical route and for the
+  identical reason, so the same clause is narrowed again by one and this ADR's pair
+  accumulates beside ADR-0181's on the leading-token line (ADR-0070 §4). §10's
+  `model_fields` roster test moves by one further entry with it, exactly as ADR-0181's
+  own record says it moved by one — the test keeps its subject, which is that no field
+  of `ConfirmationEgress` is named or typed for a connection reference, a transport
+  endpoint, a `BoundAccount` or a `SecretName`, and `coverage` is none of those.
+  **No record is owed on §7**, and the distinction is the point of ADR-0082 §1: §7's
+  floor is a floor, and §8 above adds an obligation on top of it without making any
+  sentence of §7 false. Every clause of §7 still holds of every surface, and §7's sixth
+  clause ("No surface renders the payload description as though it were the payload") is
+  not merely intact but is quoted and relied on. That is a **stacked addition**,
+  recorded in the ADR that makes it and nowhere else. §9's size clauses likewise stay
+  true (§13), and `Confirmation` gains no member, so §10's seven-field roster test on it
+  keeps its count.
 - **ADR-0181.** No record. §6 rules what a surface shows about
   `planned_with_external_content`; §8 above adds a different fact on a different axis
   and forbids conflating them. No sentence of §6 becomes false or over-wide: it says
@@ -981,19 +1052,48 @@ judgement being made in this ADR's text, which is where it is reviewed.
   discloser axis and the externality axis; ADR-0146 §1's two members and §2's
   carried-not-inferred rule are unchanged and are the model §5 copies, and ADR-0106
   §4's monotonicity is read across rather than restated over its own field.
-- **ADR-0184.** A record **is** owed and is in this ADR's header: §2's roster
-  sentence and §9's one-sibling clause. What is *not* owed there is a record about
+- **ADR-0184.** A record **is** owed and the header states its extent clause by clause:
+  §1's exception roster, §2's first, third and fifth clauses, §3's discrimination
+  sentence and §9's first clause. Two things are *not* owed there. One is a record about
   §9's *deferral*, which is unmarked prose in a marked ADR (ADR-0089 §3) and is
-  discharged rather than amended, and none about §3, §4, §5, §6, §7 or §8, each of
-  which stays true and is relied on by §14 below. §4's write-path refusal, §5's readers
-  and §8's refusals speak of the *origin*-unrecorded shape and keep speaking of it
-  exactly; §14 states the parallel
-  rules for the new sibling in this ADR's own text rather than widening theirs, which
-  is the same instrument §7's floor is extended by.
-- **ADR-0152.** No record on §7's substance; its "exactly one" count was already
-  narrowed to two by ADR-0181 §3's fifth clause, and §5 above narrows the same count
-  to three by the identical route. ADR-0181 §3 recorded that narrowing in its own text
-  rather than on ADR-0152, and this ADR follows the precedent it set.
+  discharged rather than superseded. The other is any record on §4, §5, §6, §7 or §8:
+  each stays true and each is relied on below. §4's write-path refusal, §5's readers and
+  §8's refusals speak of the *origin*-unrecorded shape and keep speaking of it exactly;
+  the clauses below state the parallel rules for the new sibling in this ADR's own text
+  rather than widening theirs, which is the same instrument §7's floor is extended by.
+  **§3 is the one to read carefully, because half of it is superseded and half is
+  load-bearing.** Its *property* — that `extra="forbid"` makes the union total and
+  mutually exclusive with no discriminator field, no tag, no version key and no
+  `Literal` member — is not touched by one word and is precisely what makes a third rung
+  representable. Its *sentence* naming which shape a `planned_with_external_content`-
+  bearing object validates as is the half that stops being true, and the header records
+  that half alone.
+- **ADR-0150 §1's union clause, specifically, and why no second pair is owed there.**
+  §1 types `PermissionDecision.egress_binding` as `EgressBinding | None`, and that clause
+  is **already** partially superseded by ADR-0184 — it is the scope named on ADR-0150's
+  own `Status` line. The clause a reader of ADR-0150 is sent to for the current type is
+  therefore ADR-0184 §2's fifth, which is exactly the sentence this ADR supersedes and
+  records. Adding a second pair to ADR-0150 would record the same move twice and point a
+  reader at a clause ADR-0150 no longer states; the chain ADR-0150 → ADR-0184 → this ADR
+  is complete without it, and ADR-0070 §4's precedence rule already gives the later ADR
+  the overlap. This is classified here rather than left silent, because "no record" and
+  "nobody looked" read identically on a `Status` line.
+- **ADR-0152. A record is owed on §7's count, and an earlier draft of this section said
+  the opposite on a precedent that does not exist.** §7 rules that `rebind` "takes from
+  `approved` **exactly one** thing"; ADR-0181 §3 made it two. That draft asserted
+  ADR-0181 had recorded the narrowing "in its own text rather than on ADR-0152" — it did
+  not. ADR-0152's `Status` line has read "Partially superseded by … ADR-0181 (§7's
+  clause that `rebind` takes exactly one thing from `approved`)" since 2026-08-23, with
+  the dated note beneath it. §4 above narrows the same count from two to three by the
+  identical route and for the identical reason — the fact is about a composition made
+  before the confirmation was parked and `rebind` receives nothing to recompute it
+  from — so the record is owed on the same clause and this ADR's pair accumulates beside
+  ADR-0181's. **Nothing else in §7 moves**: the afresh derivation, the whole-value
+  equality refusal, both unmatched-locator refusals, the no-`SYSTEM_SELECTED`-fill rule
+  and the two `None` limbs all stand.
+  The correction is recorded rather than quietly made, because the false claim was the
+  *ground* the no-record classification stood on, and a reader who checked the ground
+  would have found the classification unsupported before finding it wrong.
 - **ADR-0042 and ADR-0085.** No record. `Confirmation.parameters` is used as ADR-0042
   §4 already provides it, and no figure of ADR-0085 §8 moves (§13).
 
@@ -1023,7 +1123,18 @@ judgement being made in this ADR's text, which is where it is reviewed.
 > (ADR-0184 §3) and is a **ladder rather than a matrix**, because the epochs are totally
 > ordered in time: a row lacking `planned_with_external_content` necessarily lacks
 > `coverage` too, so the three shapes form a chain and no fourth combination exists to
-> represent. No lane mints one, and no lane adds a further member to this union on the
+> represent. Stated as the rule ADR-0184 §3's two-shape sentence is replaced by, and
+> ADR-0184 §1's exception roster with it: a stored object carrying **both**
+> `planned_with_external_content` and `coverage` validates as `EgressBinding` and as
+> nothing else; one carrying `planned_with_external_content` but **not** `coverage`
+> validates as `CoverageUnrecordedBinding` and as nothing else; one carrying **neither**
+> validates as `OriginUnrecordedBinding` and as nothing else — that shape being the one
+> carrying every member `EgressBinding` requires except those two, which is ADR-0184
+> §1's roster with the second name added and its narrowness untouched. Still no tag, no
+> version key, no `Field(discriminator=...)` and no `Literal` member: `extra="forbid"`
+> does the whole job on three models as it did on two. A row missing a member in any
+> other way, or faulty at any other position, satisfies none of the three and still
+> raises, so the tolerance stays exactly as many shapes wide as there are epochs. No lane mints one, and no lane adds a further member to this union on the
 > strength of this ADR — an ADR adding another member required with no default to a
 > model the trail stores makes ADR-0184 §9's choice again, in its own text, with three
 > data points.
