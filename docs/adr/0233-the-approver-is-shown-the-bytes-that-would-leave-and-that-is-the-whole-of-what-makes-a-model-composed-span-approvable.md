@@ -1,6 +1,6 @@
 # 233. The approver is shown the bytes that would leave, and that is the whole of what makes a model-composed span approvable
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-04
 - **Partially supersedes** [ADR-0155](0155-residency-governs-the-assistants-own-store-and-that-store-is-never-externalised.md)
   — **§3's third clause, to the extent §9 below states; and §4's marked clause, to the
