@@ -66,7 +66,12 @@ from recipient_builders import (
     request,
 )
 
-from ai_assistant.core.errors import InvalidRecipientGrantError, RecipientGrantError
+from ai_assistant.core.errors import (
+    DuplicateRecipientGrantError,
+    InvalidRecipientGrantError,
+    RecipientGrantCeilingError,
+    RecipientGrantError,
+)
 from ai_assistant.core.protocols import (
     RecipientGrantResolution,
     RecipientGrants,
@@ -949,6 +954,108 @@ class RecipientGrantStoreContract(RecipientGrantsContract, RecipientGrantResolut
         assert len(refused) == 1, outcomes
         assert isinstance(refused[0], InvalidRecipientGrantError)
         assert len(await store.standing()) == CEILING
+
+    # --- ADR-0235 §4: the two discriminators, and the base that still catches all
+
+    async def test_a_breach_of_the_ceiling_raises_the_ceiling_subclass(
+        self, store: RecipientGrantStore
+    ) -> None:
+        """ADR-0235 §4's first discriminator, on the store rather than at a surface.
+
+        ADR-0193 §1's ceiling clause obliges a surface offering the establishing act
+        to refuse it *"with a reason visible to the user, naming that the ceiling was
+        reached"*, and a surface names a reason it was **told**. What tells it is the
+        type of this refusal and nothing else: ADR-0235 §11 bars parsing a message,
+        taking a count, or reading a listing afterwards to work out which ground it
+        was, so the discriminator has to be here or the obligation is undischargeable.
+
+        In the shared suite, so **every** implementation owes it — the ADR requires
+        the subclass of the store contract itself rather than of one store.
+        """
+        await self._fill(store, CEILING)
+
+        await _refuses(
+            store, recipient_grant(member(ALICE), grant_id="g-over"), RecipientGrantCeilingError
+        )
+
+    async def test_a_duplicate_subject_raises_the_duplicate_subclass(
+        self, store: RecipientGrantStore
+    ) -> None:
+        """ADR-0235 §4's second discriminator: the duplicate-**subject** refusal.
+
+        Named apart because the user's recourse is *no act at all* — what they asked
+        for is already true — where every ground keeping the base class leaves them a
+        record to rebuild. That is exactly where ADR-0193 §1's "the caller's recourse
+        is identical in every refusing case" is false, and exactly how far ADR-0235
+        §4 supersedes it.
+        """
+        await store.record(recipient_grant(member(ALICE), grant_id="g-first"))
+
+        await _refuses(
+            store,
+            recipient_grant(member(ALICE), grant_id="g-second"),
+            DuplicateRecipientGrantError,
+        )
+
+    async def test_a_duplicate_id_raises_the_base_class_and_neither_subclass(
+        self, store: RecipientGrantStore
+    ) -> None:
+        """The write-once refusal keeps the base class, and that is the scope holding.
+
+        A duplicate **id** is a caller reusing an identifier, not a user asking for
+        something that already stands, so it is not the duplicate-*subject* ground and
+        gets no name of its own: ADR-0235 §4 moves the limb "exactly where that ground
+        is false and nowhere else".
+        """
+        await store.record(recipient_grant(member(ALICE), grant_id="g-1"))
+
+        with pytest.raises(InvalidRecipientGrantError) as raised:
+            await store.record(recipient_grant(member(BOB), grant_id="g-1"))
+
+        assert not isinstance(raised.value, RecipientGrantCeilingError)
+        assert not isinstance(raised.value, DuplicateRecipientGrantError)
+
+    async def test_a_failed_revocation_raises_the_base_class_and_neither_subclass(
+        self, store: RecipientGrantStore
+    ) -> None:
+        """The revocation invariants keep the base class too, for the same reason."""
+        granted = recipient_grant(member(ALICE), grant_id="g-1")
+        await store.record(granted)
+        await store.record(recipient_revocation_of(granted, grant_id="r-1"))
+
+        with pytest.raises(InvalidRecipientGrantError) as raised:
+            await store.record(recipient_revocation_of(granted, grant_id="r-2"))
+
+        assert not isinstance(raised.value, RecipientGrantCeilingError)
+        assert not isinstance(raised.value, DuplicateRecipientGrantError)
+
+    async def test_one_handler_still_catches_every_refusal(
+        self, store: RecipientGrantStore
+    ) -> None:
+        """The clause ADR-0235 §4 **preserves** rather than trades (ADR-0193 §1).
+
+        The change is subclasses rather than a reason member precisely so that a
+        caller wanting *"the recipient-grant store refused the record"* still writes
+        one ``except InvalidRecipientGrantError`` and catches all of them. Asserted
+        over all four grounds at once, because a suite that checked the two new types
+        and not the base would pass an implementation that had made them siblings.
+        """
+        spent = recipient_grant(member(ALICE), grant_id="x-spent")
+        await store.record(spent)
+        await store.record(recipient_revocation_of(spent, grant_id="x-revoked"))
+        await self._fill(store, CEILING - 1)
+        held = recipient_grant(member(BOB), grant_id="x-held")
+        await store.record(held)
+
+        rejected = [
+            recipient_grant(member(BOB), grant_id="x-duplicate-subject"),
+            recipient_grant(member("someone@example.com"), grant_id="x-held"),
+            recipient_revocation_of(spent, grant_id="x-second-revocation"),
+            recipient_grant(member("over@example.com"), grant_id="x-over-the-ceiling"),
+        ]
+        for record in rejected:
+            with pytest.raises(InvalidRecipientGrantError):
+                await store.record(record)
 
     async def test_a_zero_ceiling_over_a_populated_store_retracts_nothing(
         self, store: RecipientGrantStore, clock: MovableClock

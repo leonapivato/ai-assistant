@@ -83,6 +83,7 @@ from ai_assistant.core.errors import (
     OversizedValueError,
     PlanningError,
     ReadTrailError,
+    UngrantableActError,
     UngrantableSourceError,
     UnknownConnectionError,
     UnknownContinuationError,
@@ -180,6 +181,10 @@ _OVERSIZED_CREDENTIAL_BYTES = 712
 
 #: A generous per-turn budget: nothing in this suite is about a deadline.
 _PATIENT = timedelta(seconds=30)
+
+#: An expiry far enough ahead that no implementation's clock reaches it, so a case
+#: about an *availability* refusal never trips ADR-0235 §1's expiry check instead.
+_FAR_FUTURE = datetime(2099, 1, 1, tzinfo=UTC)
 
 #: A limit large enough that an ordinary ``learn`` call — argument *and* result —
 #: fits inside it, and small enough that a handful of stored beliefs does not.
@@ -5853,6 +5858,140 @@ class AssistantEngineContract(ABC):
         taken = set(inspect.signature(AssistantEngine.transcript_entry).parameters)
 
         assert taken == {"self", "address"}
+
+    # --- ADR-0235 §3, §7: the recipient-grant surface's five ----------------
+    #
+    # The clauses that bind **every** implementation over a subject holding nothing,
+    # which is the state every deployment starts in and the one a client meets first.
+    # What a *populated* store does to each — the act, the carrier, the ceiling, the
+    # race — is the concrete engine's, in `test_recipient_grant_operations.py` and
+    # `test_engine_recipient_grants.py`, because those clauses are about orderings a
+    # fake engine's resume does not have.
+
+    async def test_the_recipient_grant_reads_answer_empty_rather_than_refusing(
+        self, engine: AssistantEngine
+    ) -> None:
+        """A store holding nothing is the ordinary state and never an error.
+
+        And every enumeration is a **tuple**, on ADR-0085 §3b's rule: a caller that
+        mutated a returned page has changed nothing about the engine's state and may
+        believe otherwise.
+        """
+        assert await engine.grantable_decisions() == ()
+        assert await engine.standing_recipient_grants() == ()
+        assert await engine.recent_recipient_grants() == ()
+
+    async def test_revoking_a_grant_no_store_holds_answers_none(
+        self, engine: AssistantEngine
+    ) -> None:
+        """``None`` means the store holds no outstanding record with that id (§7).
+
+        It is the honest answer to a caller arriving after somebody else's
+        revocation as well as to one naming an id nothing ever held, and ADR-0235 §7
+        makes the two one outcome deliberately: what the user asked for is true
+        either way.
+        """
+        assert await engine.revoke_recipient_grant("g-nothing-holds") is None
+
+    async def test_an_act_on_a_decision_the_trail_does_not_hold_is_refused(
+        self, engine: AssistantEngine
+    ) -> None:
+        """§3's first availability condition, and the type §3 names for every refusal.
+
+        ``UngrantableActError`` and not a bare ``ValueError``: a ``ValueError`` is not
+        an ``AssistantError``, so it would escape a command's ``except
+        (AssistantError, TransportError)`` boundary as an uncaught traceback with no
+        controlled exit code, which ADR-0042 §7 forbids.
+        """
+        with pytest.raises(UngrantableActError, match=r"\w"):
+            await engine.establish_recipient_grant("d-nothing-holds", expires_at=_FAR_FUTURE)
+
+    @pytest.mark.parametrize("call", ["establish_recipient_grant", "revoke_recipient_grant"])
+    async def test_a_blank_recipient_grant_identifier_is_refused_locally(
+        self, engine: AssistantEngine, call: str
+    ) -> None:
+        """ADR-0235 §4: both identifier arguments undergo ``Identifier`` validation.
+
+        "Before any I/O", so a wire client refuses the same values without a round
+        trip — the obligation is inherited from ``AssistantEngine``'s own second
+        clause rather than restated by ADR-0235, and this is where it is checked on
+        the two arguments that decision adds.
+        """
+        arguments = {"expires_at": _FAR_FUTURE} if call.startswith("establish") else {}
+        with pytest.raises(ValueError, match=r"\w"):
+            await getattr(engine, call)("  ", **arguments)
+
+    @pytest.mark.parametrize("bad", [0, -1, 2**63])
+    @pytest.mark.parametrize("method", ["grantable_decisions", "recent_recipient_grants"])
+    async def test_a_non_positive_recipient_grant_limit_is_refused_locally(
+        self, engine: AssistantEngine, method: str, bad: int
+    ) -> None:
+        """Strictly positive, on ``recent_grants``' reason and in every implementation.
+
+        ADR-0085 §9 admits a page argument in ``[0, 2**63)`` while the stores behind
+        both reads require a strictly positive limit, so ``limit=0`` is well-formed
+        under the surface rule and refused by the store — and §9 forbids either
+        implementation from being silently more permissive than the other.
+        """
+        with pytest.raises(ValueError, match=r"\w"):
+            await getattr(engine, method)(limit=bad)
+
+    @pytest.mark.parametrize("bad", [1.5, True, "1", None])
+    @pytest.mark.parametrize("method", ["grantable_decisions", "recent_recipient_grants"])
+    async def test_a_recipient_grant_limit_that_is_not_an_integer_is_refused_locally(
+        self, engine: AssistantEngine, method: str, bad: object
+    ) -> None:
+        """The type, checked before the range and before any I/O."""
+        with pytest.raises(TypeError, match=r"\w"):
+            await getattr(engine, method)(limit=bad)
+
+    async def test_the_standing_listing_takes_no_page_argument(self) -> None:
+        """ADR-0235 §7: no ``limit``, for ``connected_accounts``' stated reason.
+
+        "A truncated answer to *what do I authorise* is a false answer rather than a
+        partial one." A signature assertion rather than a behavioural one, because
+        the clause is about what the surface *offers*: an implementation that
+        accepted one and ignored it would pass every behavioural case here.
+        """
+        taken = set(inspect.signature(AssistantEngine.standing_recipient_grants).parameters)
+
+        assert taken == {"self"}
+
+    async def test_a_turn_that_collected_no_act_carries_no_recipient_grant(
+        self, engine: AssistantEngine
+    ) -> None:
+        """ADR-0235 §4: ``recipient_grant`` is ``None`` on every call that made no act.
+
+        Every ``converse`` and every ``resume`` supplying no
+        ``remember_recipients_until``. Where the carrier is absent a surface says
+        nothing about standing grants at all, so the absence is the contract rather
+        than an implementation's convenience.
+        """
+        outcome = await engine.converse("hello", timeout=_PATIENT)
+
+        assert outcome.recipient_grant is None
+
+    async def test_resume_declares_the_argument_as_keyword_only_and_defaulted(self) -> None:
+        """§2: ``resume`` gains **one** keyword-only argument and gains nothing else.
+
+        "No second argument, no widened return, and no change to ``token``,
+        ``approved`` or ``timeout``." Asserted over the signature, because that is
+        what ``wire/surface.py`` derives the wire mapping from and what a spoke
+        author reads — and because the default is what makes every existing call
+        behave byte for byte as it did.
+        """
+        parameters = inspect.signature(AssistantEngine.resume).parameters
+
+        assert set(parameters) == {
+            "self",
+            "token",
+            "approved",
+            "timeout",
+            "remember_recipients_until",
+        }
+        argument = parameters["remember_recipients_until"]
+        assert argument.kind is inspect.Parameter.KEYWORD_ONLY
+        assert argument.default is None
 
 
 def backwards_clock() -> Callable[[], datetime]:
