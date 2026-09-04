@@ -936,6 +936,16 @@ class FakeAssistantEngine:
             # and the one a consumer's own retry logic would be written against.
             answered = await self._record_the_answer(token.handle, at=establishing_at)
         confirmation = self.parked.pop(token.handle)
+        # **The reference names the decision that actually cleared the step**, where
+        # this path recorded one (ADR-0004 §7, ADR-0014 §4). Before ADR-0235 nothing
+        # on this fake's resume recorded a decision at all, so the reference resolved
+        # to nothing on every path and could mislead nobody; now that the
+        # establishing act records one, a reference naming a *different* id would be
+        # the dangling ``approval_ref`` ADR-0014 §4 exists to prevent, in the one
+        # state a consumer can actually resolve.
+        cleared_by = (
+            (f"decision-{token.handle}" if answered is None else answered.id) if approved else None
+        )
         # **A denial is a result, not an exception** (ADR-0042 §4): the adapter
         # conveys consent, the policy rules on it, and the engine records and
         # executes. Only ``approved=False -> DENY`` is guaranteed; ``approved=True``
@@ -954,7 +964,7 @@ class FakeAssistantEngine:
                         # step that claims either without saying so (ADR-0004 §7).
                         status=StepStatus.SUCCEEDED if approved else StepStatus.SKIPPED,
                         attempts=1 if approved else 0,
-                        approval_ref=f"decision-{token.handle}" if approved else None,
+                        approval_ref=cleared_by,
                         bound_tool=confirmation.tool_id if approved else None,
                         skip_reason=None if approved else SkipReason.APPROVAL_DENIED,
                         started_at=_AT if approved else None,
@@ -1113,10 +1123,7 @@ class FakeAssistantEngine:
         confirmed = self._parked_decisions[handle]
         answer = PermissionDecision.from_confirmation(
             confirmed,
-            PermissionRuling(
-                outcome=PermissionOutcome.ALLOW,
-                reason="the fake engine records the answer the user gave",
-            ),
+            _approving(confirmed),
             id=f"decision-{handle}-answer",
             decided_at=at,
         )
@@ -2142,13 +2149,7 @@ class FakeAssistantEngine:
             )
             raise UngrantableActError(msg)
         answer = PermissionDecision.from_confirmation(
-            confirmed,
-            PermissionRuling(
-                outcome=PermissionOutcome.ALLOW,
-                reason="the fake engine records the answer the user gave",
-            ),
-            id=f"decision-{named}-answer",
-            decided_at=decided_at,
+            confirmed, _approving(confirmed), id=f"decision-{named}-answer", decided_at=decided_at
         )
         await self.trail.record(answer)
         grant = RecipientGrant.established_from(
@@ -2953,6 +2954,30 @@ class FakeAssistantEngine:
         page_argument(offset, name="offset")
         check_arguments(method, max_bytes=self._max_payload_bytes, limit=limit, offset=offset)
         self.calls.append((method, {"limit": limit, "offset": offset}))
+
+
+def _approving(confirmed: PermissionDecision) -> PermissionRuling:
+    """The resolving ``ALLOW`` an approving answer to ``confirmed`` produces.
+
+    **``authorised_by`` names the confirmation and is not optional here**:
+    ``AuditTrail.record`` refuses a resolving ``ALLOW`` that does not rest on the
+    question it answers, so a ruling without it is one no conforming trail accepts
+    (ADR-0193 §6's route-(a) discriminator). Shipping policies author it —
+    ``ActionPolicy.resolve``'s own obligation — and this fake authors no ruling
+    anywhere else, so the one place it stands in for a policy is stated once rather
+    than twice.
+
+    Args:
+        confirmed: The recorded ``CONFIRM`` being answered.
+
+    Returns:
+        The ruling, resting on that confirmation.
+    """
+    return PermissionRuling(
+        outcome=PermissionOutcome.ALLOW,
+        reason="the fake engine records the answer the user gave",
+        authorised_by=confirmed.id,
+    )
 
 
 def _is_grantable(identity: str, location: str | None) -> bool:
