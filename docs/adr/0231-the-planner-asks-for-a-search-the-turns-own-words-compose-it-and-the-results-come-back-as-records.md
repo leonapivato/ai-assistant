@@ -404,10 +404,18 @@ have made the planner the namer again with an extra step.
 > **Normative.** `core/types.py` gains **`QueryOutcome`**, a frozen model refusing
 > unknown fields, with exactly two fields — `query: NonBlankEncodableText | None`,
 > defaulting to `None`, and `refusal: QueryRefusal | None`, defaulting to `None` — and
-> a model validator requiring **exactly one of them to be set**, and requiring a set
-> `query` to be at most `SEARCH_QUERY_MAX_CHARS` Unicode code points. The condition is
-> enforced by the model rather than by its callers; an outcome carrying both or
-> neither is not a value this corpus admits.
+> a model validator requiring **exactly one of them to be set**. That structural
+> condition is enforced by the model rather than by its callers; an outcome carrying
+> both or neither is not a value this corpus admits.
+
+> **Normative.** **`SEARCH_QUERY_MAX_CHARS` is a `Settings` field and is enforced by
+> the composer, never by the model.** `QueryOutcome` carries no bound, is
+> configuration-independent, and validates identically in every deployment; the
+> configured composer refuses over the bound and returns `QueryRefusal.TOO_LONG`. This
+> is ADR-0230 §6's own division — the bounds are `Settings` fields with named
+> defaults, stated domains and a load-time refusal, and the concrete fetcher enforces
+> them — and it is why no `core` model here reads a setting, holds one, or means
+> different things in two processes.
 
 > **Normative.** `core/types.py` gains **`QueryRefusal`**, a `StrEnum` closed at
 > exactly four members: `DECLINED`, valued `declined`, where the composer judged the
@@ -547,12 +555,15 @@ the other's input.
 > named default, a stated domain and a load-time refusal, exactly as ADR-0230 §6's
 > bounds are.
 
-> **Normative.** **The request's path, query string, headers and body are the
-> integration's own and are not a destination, not an argument and not model-reachable.**
-> They are composed inside the seam from the connected account's configuration and the
-> one query string the request carries; no component outside `ai_assistant.tools`
-> supplies, sees or influences them, and §8's canonical destination is the origin
-> alone.
+> **Normative.** **Which path, which parameter names, which headers and which body
+> shape a provider request takes are the integration's own, are not a destination, are
+> not an argument, and are chosen inside `ai_assistant.tools` from the connected
+> account's configuration alone.** No component outside that package selects, supplies
+> or influences any of them, and §8's canonical destination is the origin alone. **The
+> one value that crosses into the request from outside is the authorised query
+> string**, which the seam encodes into whichever of those the integration uses — that
+> is what a search *is*, and the clause above bounds the shape of the request and never
+> its one payload.
 
 > **Normative.** Adopting a transport-bearing dependency for this exchange is
 > ADR-0003's ordinary route under ADR-0024's pinning rule, is confined to the
@@ -1306,16 +1317,26 @@ it says so.
 > **Normative.** The record gains **one field per servicing**: the **disposition** a
 > `WEB_SEARCH` ask resolved to, where it resolved to one, and nothing where the search
 > yielded records or where no `WEB_SEARCH` ask was made. It is a member of
-> **`SearchDisposition`**, a `StrEnum` closed at exactly eleven members and never free
-> text — `NOT_CONFIGURED`, `NO_BUDGET`, `COMPOSER_DECLINED`, `COMPOSER_UNAVAILABLE`,
-> `COMPOSER_MALFORMED`, `RULING_CONFIRM`, `RULING_DENY`, and the five of
-> `SearchRefusal` that can reach the servicer carried across one for one:
-> `SPEND_REFUSED`, `TRANSPORT_FAILED`, `PROVIDER_REFUSED`, `RESPONSE_TOO_LARGE` and
-> `UNATTESTED`. `SearchRefusal.NO_RESULT` is **not** a disposition: a search that
-> reached the provider and yielded nothing is a completed servicing whose returned
-> count is zero, which §9 of ADR-0226 already records, and calling it a disposition
-> would double-count it. A `QueryRefusal.TOO_LONG` is recorded as
-> `COMPOSER_MALFORMED`.
+> **`SearchDisposition`**, a `StrEnum` closed at exactly **twelve** members and never
+> free text: `NOT_CONFIGURED`, `NO_BUDGET`, `COMPOSER_DECLINED`,
+> `COMPOSER_UNAVAILABLE`, `COMPOSER_MALFORMED`, `RULING_CONFIRM`, `RULING_DENY`, and
+> the five members of `SearchRefusal` that can reach the servicer, carried across one
+> for one: `SPEND_REFUSED`, `TRANSPORT_FAILED`, `PROVIDER_REFUSED`,
+> `RESPONSE_TOO_LARGE` and `UNATTESTED`. `SearchRefusal.NO_RESULT` is **not** a
+> disposition: a search that reached the provider and yielded nothing is a completed
+> servicing whose returned count is zero, which ADR-0226 §9 already records, and
+> calling it a disposition would double-count it. A `QueryRefusal.TOO_LONG` is
+> recorded as `COMPOSER_MALFORMED`.
+
+> **Normative.** **`SearchDisposition` lives in `ai_assistant.orchestration`, beside
+> `TurnReadAudit` in `orchestration/reads.py`, and not in `core`.** It crosses no
+> subsystem boundary: it is the servicer's own account of why a servicing did not
+> yield, assembled from a composer refusal, a policy ruling, a budget fact and a
+> `SearchRefusal`, and read by nothing but the event `emit_read_audit` writes. It is
+> the shape `TriggerOutcome`, `Servicing` and `StopReason` already have in that module,
+> and the reason `SelectionOrigin` is not in `core` either. **`SearchRefusal` and
+> `SearchOutcome` are `core`'s**, because they cross the `WebSearcher` seam; the
+> mapping from one to the other is `orchestration`'s and is stated above.
 
 > **Normative.** **The query, the address and the results are Tier 1 and this record
 > carries none of them.** No query text, no fragment of one, no length of one, no
@@ -1546,8 +1567,9 @@ its prompt under ADR-0098 §2's marking and its parse. Nothing calls it yet.
 
 > **Normative.** The conformance suite holds the clauses expressible **without a
 > model**: an outcome carries a query **or** a refusal and never both or neither; a
-> returned query is non-blank and within the bound; a composition over the bound is a
-> refusal and never a truncation; `compose` raises for no composition reason and
+> returned query is non-blank and within **the bound the implementation under test was
+> configured with**, which the harness supplies because no `core` value carries it; a
+> composition over that bound is a refusal and never a truncation; `compose` raises for no composition reason and
 > re-raises `CancelledError` unchanged when cancelled while suspended; and — the clause
 > that fails an implementation that grew a second input — **the member takes exactly
 > one positional parameter and no keyword parameters**, checked against the runtime
@@ -1608,14 +1630,23 @@ close among the resources it has opened (ADR-0042 §2).
 
 > **Normative.** `core/types.py` gains **`SearchOutcome`**, a frozen model refusing
 > unknown fields, with exactly three fields — `reported_at: UtcInstant | None`,
-> `records: tuple[MemoryRecord, ...]` defaulting to empty, and
-> `refusal: SearchRefusal | None` — and a model validator enforcing **all** of:
-> either a `refusal` is set with no `records` and no `reported_at`, or a `refusal` is
-> unset with a `reported_at` set and at least one record; at most
-> `SEARCH_MAX_RESULTS` records; every record of kind `SEMANTIC` with
-> `provenance.source` equal to `MemorySource.EXTERNAL`, an empty
-> `provenance.evidence`, and an `Attestation` whose `reported_at` **equals the
-> outcome's own**. Each condition is enforced by the model rather than by its callers.
+> defaulting to `None`; `records: tuple[MemoryRecord, ...]`, defaulting to empty; and
+> `refusal: SearchRefusal | None`, defaulting to `None` — and a model validator
+> enforcing **all** of: either a `refusal` is set with no `records` and no
+> `reported_at`, or a `refusal` is unset with a `reported_at` set and at least one
+> record; and every record of kind `SEMANTIC`, with `provenance.source` equal to
+> `MemorySource.EXTERNAL`, an empty `provenance.evidence`, and an `Attestation` whose
+> `reported_at` **equals the outcome's own**. Every one of those is a **structural**
+> condition over the value's own fields, decidable in any process, and each is
+> enforced by the model rather than by its callers.
+
+> **Normative.** **`SEARCH_MAX_RESULTS` and `SEARCH_MAX_RESULT_CHARS` are `Settings`
+> fields and are enforced by the searcher, never by the model.** `SearchOutcome`
+> carries neither bound and validates identically in every deployment; the configured
+> searcher mints at most that many records, drops one over the content bound (§10),
+> and refuses `RESPONSE_TOO_LARGE` over the response bound. Two searchers configured
+> differently in one process therefore produce values one model validates the same
+> way, which is what makes this type shareable at all.
 
 > **Normative.** `core/types.py` gains **`SearchRefusal`**, a `StrEnum` closed at
 > exactly six members: `SPEND_REFUSED`, `TRANSPORT_FAILED`, `PROVIDER_REFUSED`,
@@ -1627,7 +1658,9 @@ close among the resources it has opened (ADR-0042 §2).
 
 > **Normative.** The conformance suite holds the clauses expressible **without a
 > provider**: a `SearchOutcome` carries records **or** a refusal and never both or
-> neither; at most `SEARCH_MAX_RESULTS` records; every minted record is `SEMANTIC`,
+> neither; at most **the result count the implementation under test was configured
+> with**, supplied by the harness for the same reason; every minted record is
+> `SEMANTIC`,
 > `EXTERNAL`-sourced, carries an `Attestation` whose `reported_by` equals `name`,
 > carries an empty `evidence`, and carries a `content` within the bound; **a
 > `SearchOutcome` carrying a record whose `reported_at` the outcome's own response did
@@ -1656,8 +1689,9 @@ for this kind, so nothing crosses the seam, and a planner is not told whether a 
 will be serviced — ADR-0226 §5's scoping posture applied, and the reason this lane
 needs no contract change at all.
 
-**Lane 5 — the servicing, the precedence and the audit.** `core/types.py`'s
-`SearchDisposition`; and in `ai_assistant.orchestration`:
+**Lane 5 — the servicing, the precedence and the audit.** In
+`ai_assistant.orchestration`: `SearchDisposition` beside `TurnReadAudit` in
+`orchestration/reads.py`;
 §11's servicing order and budget clause; the compose–bind–rule–record–send sequence and
 its origin-fact computation; §9's decline on any non-`ALLOW`; the minted records'
 entry into the fourth group under ADR-0226 §7's deduplication; §13's one added audit
@@ -1745,7 +1779,15 @@ for less.
    outcome is a refusal, and the suite's unconstructability clause covers the type-level
    half.
 9. **A result over the content bound is dropped and its siblings are minted**, and a
-   response every one of whose results is over the bound yields nothing.
+   response every one of whose results is over the bound yields nothing. A response
+   carrying more results than the configured count mints exactly that many, in the
+   order the provider returned them.
+9a. **The three vocabularies are complete and the mapping is total.** `QueryRefusal`
+    holds exactly its four members, `SearchRefusal` exactly its six, and
+    `SearchDisposition` exactly its twelve; every `QueryRefusal` member and every
+    `SearchRefusal` member except `NO_RESULT` maps to a distinct `SearchDisposition`
+    member, and `NO_RESULT` maps to none. Asserted over the enums themselves, so a
+    member added without an arm fails.
 10. **`HTTPS` canonicalisation.** `HTTPS://Example.COM` and `https://example.com:443`
     canonicalise identically; and each of §8's refusals is refused, one assertion per
     form — a non-`https` scheme, userinfo, a query, a fragment, an empty host, a
@@ -1998,9 +2040,9 @@ is that statement, and it answers #95 for nothing else.
 This ADR is in **ADR-0089's marked regime**: it carries well-formed clauses, so the
 marked clauses are the whole of what it obligates and the prose beside them supplies
 nothing. ADR-0089 §5 makes marking forward-only, so nothing this ADR cites is
-retro-marked. What binds is **ninety-seven clauses**: §1's four, §2's two, §3's seven, §4's two,
+retro-marked. What binds is **one hundred clauses**: §1's four, §2's two, §3's eight, §4's two,
 §5's eight, §6's six, §8's seven, §9's five, §10's eight, §11's nine, §12's four,
-§13's six, §14's five, §15's three, §16's eight, §17's twelve and §18's one. §7's table, §19's
+§13's seven, §14's five, §15's three, §16's eight, §17's thirteen and §18's one. §7's table, §19's
 list, §20's classification and every argument in this document are deliberately
 unmarked: they are attestation, deferral and argument, which ADR-0089 §1 classifies as
 non-normative however load-bearing.
