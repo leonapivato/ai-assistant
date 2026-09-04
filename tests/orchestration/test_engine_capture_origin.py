@@ -54,6 +54,7 @@ from test_engine_routing import (
 )
 
 from ai_assistant.core.types import (
+    ActionPlan,
     CurrentContext,
     Disposition,
     EgressBinding,
@@ -61,6 +62,9 @@ from ai_assistant.core.types import (
     Goal,
     MemorySource,
     Provenance,
+    ReadAsk,
+    ReadKind,
+    ReadRequest,
     RoutableOperation,
     SemanticMemory,
     TimeOfDay,
@@ -68,16 +72,22 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.learning import ModelBackedObserver
 from ai_assistant.planning import ModelBackedPlanner
-from ai_assistant.testing import FakeModelProvider
+from ai_assistant.testing import FakeFetcher, FakeModelProvider
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import MemoryRecord
+    from collections.abc import Sequence
+
+    from ai_assistant.core.types import MemoryRecord, ShownFile
 
 #: The ask. It carries the seeded records' own terms so the store's lexical search
 #: selects them — the supply has to *contain* the record for the disjunction to have
 #: anything to find, and a case that silently retrieved nothing would pass an
 #: implementation that hard-codes ``False``.
 _ASK: Final = "send it to the address in the invite"
+
+#: A span that appears only in the document under ADR-0230's fetch root, so a supply
+#: carrying it can only have got it from a fetch.
+_FETCHED: Final = "the address in the invite:"
 
 
 # --- scaffolding --------------------------------------------------------------
@@ -564,3 +574,185 @@ async def test_the_observers_rendering_of_a_stamped_episode_is_byte_identical() 
         await ModelBackedObserver(provider).observe([_episode(marked=marked)])
 
     assert _assembled(stamped) == _assembled(unstamped)
+
+
+# --- ADR-0230 §14 test 10: a fetched record taints the conversation ------------
+
+
+#: A root holding one document whose text carries the ask's own terms, so the store's
+#: lexical search is not what puts it in the supply — the **fetch** is.
+_FETCH_ROOT: Final = {"invite.md": f"the address in the invite: {_ASK}"}
+
+
+class _FetchingOneStepPlanner(OneStepPlanner):
+    """Plans the same step every turn, and names a file on its **first call only**.
+
+    The first turn fetches; every call after it asks for nothing. That is what makes
+    the second turn's ruling evidence about the *captured episode* rather than about a
+    second fetch — with a planner that named the file every turn, the consequence
+    ADR-0230 §14 item 10 asserts would be indistinguishable from the first turn's own.
+    """
+
+    async def plan(
+        self,
+        goal: Goal,
+        *,
+        context: CurrentContext,
+        memories: Sequence[MemoryRecord] = (),
+        capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
+    ) -> ActionPlan:
+        """Answer the base plan, carrying a ``LOCAL_FILE`` ask the first time only."""
+        first = self._calls == 0
+        plan = await super().plan(
+            goal,
+            context=context,
+            memories=memories,
+            capabilities=capabilities,
+            files=files,
+        )
+        if not first:
+            return plan
+        return plan.model_copy(
+            update={
+                "read_request": ReadRequest(asks=(ReadAsk(kind=ReadKind.LOCAL_FILE, entry="F1"),))
+            }
+        )
+
+
+def _fetching_egress_harness() -> Harness:
+    """``_allowable_egress_harness``, plus a fetcher and a planner that names a file.
+
+    The store is seeded with **nothing** external, so the only thing that can taint
+    the first turn is the document — which is ADR-0230 §5's mark doing the work
+    ADR-0223 §6 then acts on.
+    """
+    definition = tool("smtp", parameters_schema=EGRESS_SCHEMA)
+    return Harness(
+        tools=(definition,),
+        binder=bound_binder(definition),
+        planner=_FetchingOneStepPlanner(capability=CAPABILITY),
+        composing=_replying("Sent."),
+        fetcher=FakeFetcher(_FETCH_ROOT, read_at=AT),
+    )
+
+
+async def test_a_turn_that_fetched_stamps_its_capture_and_the_next_turn_asks() -> None:
+    """ADR-0230 §14 item 10, end to end and not at the predicate.
+
+    "A bounded-audience turn that fetches captures an episode whose
+    ``derived_from_external`` is ``True``; the same turn's ``SelectionOrigin`` carries
+    ``planned_with_external_content``; and a **subsequent** turn of that conversation
+    reaching the egress seam is a confirmation rather than an allow."
+
+    **This is the assertion standing between this rung and #1844's exfiltration
+    channel.** ADR-0230 §8's containment is that a steered loop has nowhere to steer
+    to, and the one outward path a steered plan can reach is the egress seam — where
+    ADR-0223 §6's allow applies "exactly as it applies for any other reason", so "every
+    subsequent turn of that conversation that reaches the egress seam is a
+    confirmation rather than an allow". §5 calls that "the milestone's control rather
+    than its cost", and this is where the control is observable.
+
+    The store holds nothing external at any point, and the planner names the file on
+    the first turn alone — so the second turn's ruling can only be reading the first
+    turn's own captured episode, which is asserted rather than assumed.
+    """
+    harness = _fetching_egress_harness()
+
+    first = await harness.engine.converse(_ASK, timeout=PATIENT)
+
+    assert first.conversation_id is not None
+    assert first.turn is not None
+    assert [record.id for record in first.turn.memories if _FETCHED in record.content] != [], (
+        "the fetch really did put the document in this turn's supply"
+    )
+    (stamped,) = await _captured(harness)
+    assert stamped.provenance.derived_from_external is True, "ADR-0223 §1 over ADR-0230 §5"
+
+    second = await harness.engine.converse(
+        _ASK, timeout=PATIENT, conversation_id=first.conversation_id
+    )
+
+    assert second.turn is not None
+    assert _stamps(tuple(second.turn.memories)) == [stamped.id], (
+        "the first turn's own episode is the only thing carrying the fact"
+    )
+    assert _FETCHED not in "\n".join(record.content for record in second.turn.memories), (
+        "and the second turn fetched nothing of its own (ADR-0230 §10: turn-scoped)"
+    )
+    assert second.step is not None
+    assert second.step.disposition is Disposition.AWAITING_CONFIRMATION, (
+        "ADR-0181 §5's third clause: no ruling on this request is ALLOW"
+    )
+    request = harness.policy.requests[-1]
+    assert request.egress_binding is not None
+    assert request.egress_binding.planned_with_external_content is True
+    assert all(
+        resolution.ruling.outcome.value != "allow" for resolution, _ in harness.policy.resolutions
+    )
+
+
+async def test_a_conversation_whose_root_showed_a_file_nobody_named_keeps_its_allow() -> None:
+    """The control: a wired fetcher is not itself a taint.
+
+    Without it the case above would pass on an implementation that stamped every turn
+    a fetcher was wired into — which is precisely what a mark taken from the listing
+    rather than from the fetch would do, and what ADR-0230 §3 forbids by making an
+    unnamed listing carry no meaning at all.
+    """
+    definition = tool("smtp", parameters_schema=EGRESS_SCHEMA)
+    harness = Harness(
+        tools=(definition,),
+        binder=bound_binder(definition),
+        planner=OneStepPlanner(capability=CAPABILITY),
+        composing=_replying("Sent."),
+        fetcher=FakeFetcher(_FETCH_ROOT, read_at=AT),
+    )
+
+    first = await harness.engine.converse(_ASK, timeout=PATIENT)
+    assert first.conversation_id is not None
+    (episode,) = await _captured(harness)
+    assert episode.provenance.derived_from_external is False
+
+    second = await harness.engine.converse(
+        _ASK, timeout=PATIENT, conversation_id=first.conversation_id
+    )
+
+    assert second.step is not None
+    assert second.step.disposition is Disposition.EXECUTED
+
+
+async def test_servicing_a_local_file_ask_is_not_itself_an_egress() -> None:
+    """ADR-0230 §14 item 10's second clause, and §8's property (b) asserted.
+
+    "Servicing the ask engages no ``DestinationProtocol`` member, requires no
+    confirmation of its own and routes through no egress seam." §8 argues it from the
+    shape of the act — "a fetch is an open, a read and a close on a filesystem: this
+    system composes no outward request and names no destination on the fetch path" —
+    and this is that stated as behaviour.
+
+    The harness holds a **bound, confirmable egress tool**, so there is a
+    ``DestinationProtocol`` member to engage and a seam to route through; the plan
+    drives no step, so the only thing this turn did was fetch. Nothing reaches the
+    policy at all.
+    """
+    definition = egress_confirmable()
+    harness = Harness(
+        tools=(definition,),
+        binder=bound_binder(definition),
+        planner=_FetchingOneStepPlanner(capability="answer_only"),
+        composing=_replying("Noted."),
+        fetcher=FakeFetcher(_FETCH_ROOT, read_at=AT),
+    )
+
+    outcome = await harness.engine.converse(_ASK, timeout=PATIENT)
+
+    assert outcome.turn is not None
+    assert [record.id for record in outcome.turn.memories if _FETCHED in record.content] != [], (
+        "the turn really did fetch"
+    )
+    assert harness.policy.requests == [], "no permission request, so no confirmation"
+    assert harness.policy.resolutions == [], "and no ruling of any kind"
+    assert outcome.step is None or outcome.step.disposition is not (
+        Disposition.AWAITING_CONFIRMATION
+    ), "the fetch required no confirmation of its own"

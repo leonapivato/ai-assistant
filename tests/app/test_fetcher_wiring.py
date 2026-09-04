@@ -1,4 +1,6 @@
-"""The fetch root's handle is released on both paths (ADR-0230 §14 item 23).
+"""The fetch root's wiring: handed to the loop, and released on both paths.
+
+ADR-0230 §14 item 23, and the join #2027 records.
 
 Item 23 asks for three arms over ``app/composition.py``: "a built engine's ``aclose``
 closes the fetcher, and a construction step that fails **after** the fetcher was built
@@ -14,6 +16,22 @@ without registering its ``close``."
 number: "a fetcher wired outside that registration would pin its root's mount for the
 life of the process and leak a descriptor per build". A call count would pass on a
 wiring that called ``close`` on a second object.
+
+**And the fetcher the root builds is the fetcher the loop reads from** (#2027,
+ADR-0230 §3, §13). §13 assigns composition to Lane C1 and the loop's ``fetcher``
+parameter to Lane C2, and named the joining line in neither — so a deployment could
+(and for one merge did) construct a fetcher, hold its root handle open, and show no
+listing to any planner. The arm below is the one that fails on that: it asserts the
+**identity** of the two objects, because a second fetcher over the same root would
+satisfy every other case in this file while pinning the mount twice and leaving the
+one the loop read from outside the ordered shutdown.
+
+**It is a structural arm and says so.** Driving a turn through a built engine would
+need a ``ModelProvider``, and ``build_engine`` takes no seam for one; what is
+checkable without it is which object the loop holds, which is exactly the fact #2027
+is about. Every *behavioural* consequence of that object — the listing read once per
+turn, the ordinal resolved into it, the record entering the fourth group — is asserted
+over a ``LearningLoop`` under ``tests/orchestration/``.
 
 **The platform view is supplied**, for ``tests/readers/fetch_fixtures.py``'s reason:
 ``ProcPlatformTables`` is fail-closed by decision, so a container's ``overlay`` root
@@ -186,3 +204,37 @@ async def test_repeated_builds_accumulate_no_descriptor(
     # One descriptor of slack: the census reads `/proc/self/fd` through a descriptor of
     # its own, and the arm is about accumulation rather than about an exact number.
     assert _open_descriptors() <= before + 1
+
+
+async def test_the_loop_reads_from_the_fetcher_this_root_built(
+    tmp_path: Path, root: Path, vouched: list[LocalFileFetcher]
+) -> None:
+    """#2027: the constructed fetcher reaches ``LearningLoop``, and it is the same one.
+
+    Without this line ``files`` is ``()`` on every production turn — the planner is
+    never shown a listing, so no ``LOCAL_FILE`` ask it could emit resolves to anything,
+    and ADR-0230's mechanism is inert in the one deployment that has a root.
+    """
+    engine = build_engine(_settings(root), data_dir=tmp_path / "data")
+    try:
+        assert len(vouched) == 1
+        assert engine._loop._fetcher is vouched[0], (  # no public reader on either
+            "the loop reads from the very object whose close this root registered"
+        )
+    finally:
+        await engine.aclose()
+
+
+async def test_a_deployment_with_no_root_leaves_the_loop_no_fetcher(tmp_path: Path) -> None:
+    """ADR-0230 §3: ``None`` is the ordinary case and never an error.
+
+    "A deployment with no ``Fetcher`` wired passes ``()``, renders no listing into any
+    prompt, and can service no ``LOCAL_FILE`` ask." The negative half of the arm above,
+    and what says the wiring is conditional on the configuration rather than on a
+    default that happens to be unset.
+    """
+    engine = build_engine(_settings(None), data_dir=tmp_path / "data")
+    try:
+        assert engine._loop._fetcher is None  # no public reader on either
+    finally:
+        await engine.aclose()
