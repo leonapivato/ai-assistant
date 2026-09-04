@@ -40,6 +40,10 @@ Body.
 
 Body.
 
+### 1000000000. A section whose label is longer than the numeric bound
+
+Body.
+
 ## Consequences
 """
 
@@ -368,6 +372,65 @@ def test_a_long_section_label_is_not_truncated(tmp_path: Path) -> None:
     assert "§100 " not in result.stdout
     assert "longer than three digits" in _row(result.stdout, "ADR-0001 §1000")
     assert result.returncode == 0
+
+
+def test_a_standalone_label_longer_than_the_numeric_bound_is_checked(tmp_path: Path) -> None:
+    # The bound guards `int()`, and nothing converts a standalone label —
+    # find_section matches it as a string. Reporting it unchecked said "this
+    # cannot be judged" about a question the ADR answers.
+    _make_repo(tmp_path)
+
+    result = _run(tmp_path, "ADR-0001 §1000000000 governs.")
+
+    row = _row(result.stdout, "ADR-0001 §1000000000")
+    assert _section_of(result.stdout, row).startswith("present")
+    assert "longer than the numeric bound" in row
+    assert result.returncode == 0
+
+
+def test_a_standalone_label_longer_than_the_numeric_bound_can_be_absent(tmp_path: Path) -> None:
+    # The other half of "checked": the long label is now answerable both ways,
+    # so an ADR that does not carry it reports absent rather than unchecked.
+    _make_repo(tmp_path)
+
+    result = _run(tmp_path, "ADR-0001 §1000000001 governs.")
+
+    assert _section_of(result.stdout, _row(result.stdout, "ADR-0001 §1000000001")).startswith(
+        "absent"
+    )
+    assert result.returncode == 1
+
+
+def test_a_range_endpoint_longer_than_the_numeric_bound_is_still_refused(tmp_path: Path) -> None:
+    # A range is expanded by converting its endpoints, so the bound still binds
+    # there: §§1-1000000000 yields its first section plus the note that the rest
+    # went unread, never a thousand million rows.
+    _make_repo(tmp_path)
+
+    result = _run(tmp_path, "ADR-0001 §§1-1000000000 governs.")
+
+    assert _section_of(result.stdout, _row(result.stdout, "A numbered heading")).startswith(
+        "present"
+    )
+    assert _section_of(result.stdout, _row(result.stdout, "§1 to 1000000000")).startswith(
+        "not checked"
+    )
+
+
+def test_a_range_whose_first_endpoint_is_absurdly_long_reports_rather_than_crashing(
+    tmp_path: Path,
+) -> None:
+    # The guard has to sit ahead of the conversion and cover `first` as well as
+    # `last`: a short last endpoint satisfies `len(last) <= _LARGEST_LABEL` and
+    # would hand `int()` a first endpoint CPython refuses to convert.
+    _make_repo(tmp_path)
+    huge = "1" * 4301
+
+    result = _run(tmp_path, f"ADR-0001 §§{huge}-9 governs.")
+
+    assert "Traceback" not in result.stderr
+    assert result.returncode in (0, 1)
+    assert _section_of(result.stdout, _row(result.stdout, "too long")).startswith("not checked")
 
 
 def test_an_absurd_section_range_reports_rather_than_crashing(tmp_path: Path) -> None:
