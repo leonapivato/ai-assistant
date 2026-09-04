@@ -35,9 +35,13 @@ shape the eight offenders had, runs the same resolver over it, and asserts it is
 reported unresolved. Without it, a resolver that silently swallowed every error
 would pass forever and assert nothing.
 
-:data:`_KNOWN_UNRESOLVED` is the one deliberate exemption, and it is written so
-that it can only shrink: the ledger test asserts each entry **still fails**, so
-fixing the alias turns this module red and names the row to delete.
+:data:`_KNOWN_UNRESOLVED` is **empty**, and every alias in the tree resolves. It
+is kept rather than deleted because the alternative to a ledger is not "no
+exemptions" but an exemption argued in a review comment: the next alias that
+cannot be fixed in the lane that finds it needs somewhere to be *recorded*, and
+this is that place. It is written so that it can only shrink — the ledger test
+asserts each entry still fails, so an entry whose defect gets fixed turns this
+module red and names the row to delete.
 """
 
 from __future__ import annotations
@@ -58,20 +62,21 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from types import ModuleType
 
-#: Aliases known to be unresolvable, each with the issue that owns the fix.
+#: Aliases known to be unresolvable, each mapped to the issue that owns the fix.
 #:
-#: Not an opt-out and not a suppression list: the ledger test below asserts every
-#: entry is *still* broken, so an entry that gets fixed fails the suite until the
-#: row is deleted. An entry added here without an issue number is a defect hidden
-#: rather than deferred.
+#: **Empty, and meant to stay that way.** Every alias in the tree resolves; the
+#: last entry (``memory.sqlite_store._PreparedWrite``, #2040) was fixed in the
+#: same PR that added this module rather than deferred.
 #:
-#: ``memory.sqlite_store._PreparedWrite`` is here rather than fixed because the
-#: lane that wrote this module was fenced to the six modules #1706 named and
-#: ``memory/sqlite_store.py`` is not one of them (#2040 carries the one-line fix
-#: and the deletion of this row).
-_KNOWN_UNRESOLVED: Final[dict[tuple[str, str], str]] = {
-    ("ai_assistant.memory.sqlite_store", "_PreparedWrite"): "#2040",
-}
+#: It is not an opt-out and not a suppression list. An entry exempts its alias
+#: from :func:`test_every_type_alias_resolves_at_runtime` and immediately becomes
+#: the subject of
+#: :func:`test_the_known_unresolved_ledger_holds_only_aliases_that_still_fail`,
+#: which asserts the entry still *exists* and still *fails* — so a row outlives
+#: its defect by exactly zero runs. Add one only with an issue number: a row
+#: without one is a defect hidden rather than deferred, and nothing else in the
+#: suite would ever say so.
+_KNOWN_UNRESOLVED: Final[dict[tuple[str, str], str]] = {}
 
 #: The tree the source scan parses — the installed package's own directory, so a
 #: run against a wheel and a run against the checkout read the same files.
@@ -213,6 +218,12 @@ def test_the_known_unresolved_ledger_holds_only_aliases_that_still_fail() -> Non
     An entry that has been fixed fails here, naming the row to delete — so the
     exemption cannot outlive the defect it was written for, which is the failure
     mode a plain skip-list has and this one does not.
+
+    Vacuous while :data:`_KNOWN_UNRESOLVED` is empty, which is the state the tree
+    is in and should stay in. It is kept armed rather than deleted because the
+    cost of an empty loop is nothing and the cost of re-deriving this rule the
+    next time an alias cannot be fixed in the lane that finds it is an exemption
+    nothing checks.
     """
     for qualified, owner in _KNOWN_UNRESOLVED.items():
         assert qualified in _ALIASES, f"{qualified} no longer exists; delete its ledger row"
