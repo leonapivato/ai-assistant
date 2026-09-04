@@ -763,6 +763,8 @@ def test_an_accepted_origin_pins_the_host_and_the_port_it_named() -> None:
         pytest.param("/v1/search\r\nX-Injected: 1", id="a-request-line-injection"),
         pytest.param("/v1/séarch", id="a-non-ascii-octet"),
         pytest.param("/v1/search\x00", id="a-control-character"),
+        pytest.param("/v1/search?q=weather#fragment", id="a-fragment"),
+        pytest.param("/#", id="a-bare-fragment-marker"),
     ],
 )
 async def test_a_target_this_seam_will_not_write_opens_no_channel(target: str) -> None:
@@ -970,3 +972,20 @@ async def test_a_status_that_admits_no_content_is_framed_by_the_header_section(
     answer = await subject.get(origin=ORIGIN, target=TARGET)
 
     assert (answer.status, answer.body) == (status, b"")
+
+
+async def test_a_header_value_may_carry_the_octet_a_target_may_not() -> None:
+    """The two character sets are drawn from one repertoire and are not each other.
+
+    ``#`` is excluded from a request target because RFC 9112 §3.2.1's origin-form
+    carries no fragment; it is ordinary inside a field value, and an ``ETag`` or a
+    ``Content-Disposition`` filename can hold one. Asserted in both directions, so
+    that narrowing the target set cannot silently narrow the header set with it.
+    """
+    channel = far_end(response(headers=['ETag: "v1#2"'], body=b"{}"))
+    subject, _ = exchange(channel)
+
+    answer = await subject.get(origin=ORIGIN, target=TARGET, headers=[("If-Match", '"v1#2"')])
+
+    assert ("etag", '"v1#2"') in answer.headers
+    assert 'If-Match: "v1#2"' in request_of(channel)
