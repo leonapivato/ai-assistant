@@ -906,7 +906,7 @@ async def test_the_audit_carries_no_address_and_the_capability_reaches_nothing()
     fetcher hand entries to `orchestration` and take them back on ``fetch``.
     """
     named = "salary-negotiation-with-priya.md"
-    fetcher = _RecordingFetcher({named: f"a document holding a {_DISTINCTIVE}"})
+    fetcher = _CapturingFetcher({named: f"a document holding a {_DISTINCTIVE}"})
     planner = FakePlanner(now=_clock, read_request=_file("F1"))
 
     with structlog.testing.capture_logs() as captured:
@@ -914,7 +914,13 @@ async def test_the_audit_carries_no_address_and_the_capability_reaches_nothing()
             "how did the quarter go", narrow=_bounded()
         )
 
-    listing = await fetcher.listing()  # a fresh one; its shape is what a case reads
+    # **The listing this turn actually used**, and not a fresh one. Every listing a
+    # conforming ``Fetcher`` mints carries its own unguessable token and handles
+    # (ADR-0230 §4), so a case searching for a *later* listing's values would find
+    # nothing however loudly the turn had leaked its own.
+    [listing] = fetcher.produced
+    assert listing.token, "there is a token here to leak"
+    assert listing.entries, "and a handle on the entry the turn fetched"
     lines = repr(captured)
     for address in (named, "salary-negotiation", ".md", _DISTINCTIVE, str(len(named))):
         assert address not in lines, f"{address!r} reached the log"
@@ -1180,37 +1186,42 @@ class _CapturingFetcher(_RecordingFetcher):
 
 
 async def test_a_stale_listing_is_never_carried_into_a_later_turn(tmp_path: Path) -> None:
-    """§3's discipline, over a **real** fetcher and inside its own TTL.
+    """§3's discipline, over **one** loop, a real fetcher, and inside its own TTL.
 
-    §14 item 7's last arm asks for two consecutive turns "whose roots have changed
-    between them, with the second turn beginning **inside** ``fetch_listing_ttl`` of
-    the first — the interval in which a retained listing would still verify, so the arm
-    turns on §3's discipline and not on the expiry". Turn 2 renders its own listing and
-    ``F1`` on turn 2 fetches turn 2's first entry.
+    §14 item 7's last arm asks for "**two consecutive turns** of one conversation whose
+    roots have changed between them, with the second turn beginning **inside**
+    ``fetch_listing_ttl`` of the first — the interval in which a retained listing would
+    still verify, so the arm turns on §3's discipline and not on the expiry". Turn 2
+    renders its own listing, ``F1`` on turn 2 fetches turn 2's first entry, and turn 1's
+    entries and handles reach no ask resolution and no fetch of turn 2.
 
-    Run against a real ``LocalFileFetcher`` because the property is about a listing
-    that would still *verify*: a fake could satisfy it by minting nothing reusable.
+    **Both turns run through the same ``LearningLoop``**, which is what makes this the
+    arm §14 names: a loop caching its first listing on ``self`` would be invisible to a
+    case that built a second loop for the second turn, since the new object starts
+    without the state the case is looking for.
+
+    Run against a real ``LocalFileFetcher`` because the property is about a listing that
+    would still *verify*: a fake could satisfy it by minting nothing reusable.
     """
     root = tmp_path / "documents"
     root.mkdir()
     (root / "first.md").write_text(f"turn one holds a {_DISTINCTIVE}", encoding="utf-8")
     fetcher = real_fetcher(root, listing_ttl=timedelta(hours=1))
-    memory = FakeMemoryStore(now=_clock)
+    planner = FakePlanner(now=_clock, read_request=_file("F1"))
+    loop = _loop(planner=planner, fetcher=fetcher, memory=FakeMemoryStore(now=_clock))
 
-    first = await _loop(
-        planner=FakePlanner(now=_clock, read_request=_file("F1")), fetcher=fetcher, memory=memory
-    ).respond("what did I save", narrow=_bounded())
-    assert _DISTINCTIVE in _contents(first.turn.memories)
+    first = await loop.respond("what did I save", narrow=_bounded())
+    assert _DISTINCTIVE in _contents(first.turn.memories), "turn one fetched its own entry"
 
     (root / "first.md").unlink()
     (root / "second.md").write_text("turn two holds something else", encoding="utf-8")
-    second_planner = FakePlanner(now=_clock, read_request=_file("F1"))
-    second = await _loop(planner=second_planner, fetcher=fetcher, memory=memory).respond(
-        "and now", narrow=_bounded()
-    )
 
-    assert [one.name for one in second_planner.calls[0][4]] == ["second.md"]
+    second = await loop.respond("and now", narrow=_bounded())
+
+    shown_first, shown_second = (call[4] for call in planner.calls)
+    assert [one.name for one in shown_first] == ["first.md"]
+    assert [one.name for one in shown_second] == ["second.md"], "turn two rendered its own"
     assert "turn two holds something else" in _contents(second.turn.memories)
     assert _DISTINCTIVE not in _contents(second.turn.memories), (
-        "turn one's entries reached no fetch of turn two"
+        "turn one's entries reached no ask resolution and no fetch of turn two"
     )
