@@ -13,7 +13,8 @@
   `planned_with_external_content`'s arrival and `coverage`'s.
   **The instrument is supersession because each sentence below is one a lane acts on
   differently** (ADR-0070 §1), which is how this corpus has recorded every widening of a
-  roster clause — including this ADR's own of ADR-0150 §1. Five sentences move.
+  roster clause — including this ADR's own of ADR-0150 §1. The sentences that move are
+  these, and they are enumerated rather than counted.
   **§1** recognises a row by its carrying "every member `EgressBinding` requires
   **except** `planned_with_external_content`". Once `EgressBinding` requires `coverage`
   too, that exception list needs both names: a genuine pre-origin row lacks `coverage`
