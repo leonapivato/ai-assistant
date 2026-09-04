@@ -1043,18 +1043,65 @@ def _checked_window(field: str, value: object, *, allow_zero: bool) -> timedelta
     return duration
 
 
-def _check_count(field: str, value: int) -> None:
-    # `bool` is an `int` by inheritance and a flag is not a count — the rule the
-    # four layers under `Settings` already state, at the seam a direct caller
-    # reaches (issue #471).
-    if isinstance(value, bool) or type(value) is not int or not 1 <= value < MAX_CALENDAR_COUNT:
-        msg = f"{field} must be an int in [1, 2**63), got {value!r}"
+def _checked_int(field: str, value: object, domain: str) -> int:
+    """A configured figure as a built-in ``int``, or a refusal naming its type.
+
+    Typed ``object`` because the guard **disbelieves the annotation**, for
+    :func:`_checked_duration`'s reason: an ``int`` annotation would make the
+    refusal statically unreachable, which is the reasoning that lets a value
+    through.
+
+    **The type test is separated from the range test below it, and the two
+    refusals render the offending value differently on purpose** (#1978). This
+    guard is reached by a value of *arbitrary* type, so a message built with
+    ``repr`` lets the refused object's own ``__repr__`` run inside the message
+    that refuses it — a hostile one then raises straight past the guard, turning
+    the wrong-exception-class defect the guard exists to fix into a different
+    one. That is :func:`_checked_path`'s discipline, and it is why the type
+    refusal names ``type(value).__name__``. Below this guard ``repr`` is not
+    merely safe but *right*: what a caller needs from a range violation is
+    ``got 0``, and ``got int`` tells them nothing.
+
+    **Exact rather than ``isinstance``**, which is what draws both lines at
+    once: ``bool`` is an ``int`` by inheritance, so ``max_entries=True`` passes
+    ``mypy`` and would load as a cap of one — a value silently accepted, which
+    is #471's defect. Exactness is also what makes the range message safe
+    without the canonicalisation :func:`_checked_duration` needs. That guard
+    accepts a ``timedelta`` subclass and so must build its own built-in value
+    before reporting one; here no subclass is accepted at all, so the figure the
+    range message renders is a built-in ``int`` whose ``__repr__`` is
+    ``int.__repr__``.
+
+    Args:
+        field: The setting's name, spelled as an operator configures it.
+        value: The configured figure, disbelieved until it has been checked.
+        domain: The rule, phrased once for both of this figure's refusals.
+
+    Returns:
+        The same figure, as the built-in ``int`` it has been proved to be.
+
+    Raises:
+        ValueError: If ``value`` is not exactly an ``int``.
+    """
+    if type(value) is not int:
+        msg = f"{field} must be {domain}, got {type(value).__name__}"
+        raise ValueError(msg)
+    return value
+
+
+def _check_count(field: str, value: object) -> None:
+    domain = "an int in [1, 2**63)"
+    figure = _checked_int(field, value, domain)
+    if not 1 <= figure < MAX_CALENDAR_COUNT:
+        msg = f"{field} must be {domain}, got {figure!r}"
         raise ValueError(msg)
 
 
-def _check_positive_int(field: str, value: int) -> None:
-    if isinstance(value, bool) or type(value) is not int or value <= 0:
-        msg = f"{field} must be a positive int, got {value!r}"
+def _check_positive_int(field: str, value: object) -> None:
+    domain = "a positive int"
+    figure = _checked_int(field, value, domain)
+    if figure <= 0:
+        msg = f"{field} must be {domain}, got {figure!r}"
         raise ValueError(msg)
 
 

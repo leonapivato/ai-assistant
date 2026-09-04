@@ -25,11 +25,13 @@ same suite so the asymmetry is visible rather than surprising.
 
 from __future__ import annotations
 
+import re
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+from hostile_values import Hostile
 from pydantic import ValidationError
 
 from ai_assistant.core.config import _MAX_EMAIL_WINDOW, Settings, load_settings
@@ -294,13 +296,72 @@ def test_an_accepted_duration_is_stored_as_a_builtin_timedelta() -> None:
 @pytest.mark.parametrize("field", ["window_past", "read_timeout"])
 def test_a_hostile_repr_does_not_raise_past_a_duration_guard(field: str) -> None:
     """Nothing but a ``ValueError`` leaves this constructor, whatever it was handed."""
-
-    class Hostile:
-        def __repr__(self) -> str:
-            raise RuntimeError("a hostile __repr__ must not raise past a guard")
-
     kwargs: dict[str, Any] = {field: Hostile()}
     with pytest.raises(ValueError, match=f"email_{field} must be a timedelta, got Hostile"):
+        EmailReader(_ABSOLUTE, **kwargs)
+
+
+#: Each integer-guarded constructor argument, with the rule both of its refusals cite.
+_INTEGER_GUARDS = [
+    ("max_messages", "an int in [1, 2**63)"),
+    ("max_bytes", "a positive int"),
+    ("max_content_bytes", "a positive int"),
+]
+
+
+@pytest.mark.parametrize(("field", "domain"), _INTEGER_GUARDS)
+def test_a_hostile_repr_does_not_raise_past_an_integer_guard(field: str, domain: str) -> None:
+    """The duration guard's rule, at the seam that had not got it (#1978).
+
+    These two guards conflated the type test with the range test in one condition,
+    so one message served both and it was built with ``repr`` — which is right for
+    a range violation and wrong for a type refusal, because only the type refusal
+    is reached by a value of *arbitrary* type. Split, the type refusal names the
+    type, and nothing but a ``ValueError`` leaves this constructor whatever it was
+    handed.
+    """
+    kwargs: dict[str, Any] = {field: Hostile()}
+    expected = re.escape(f"email_{field} must be {domain}, got Hostile")
+    with pytest.raises(ValueError, match=expected):
+        EmailReader(_ABSOLUTE, **kwargs)
+
+
+@pytest.mark.parametrize(("field", "domain"), _INTEGER_GUARDS)
+def test_a_flag_is_refused_by_the_type_test_and_named_as_a_bool(field: str, domain: str) -> None:
+    """Where #471's rule is now written, and that it still draws the same line.
+
+    ``bool`` is an ``int`` by inheritance, so ``max_messages=True`` passes ``mypy``
+    and would load as a cap of one. The exact-type test refuses it, which is what
+    lets this assertion be made at all: the refusal names ``bool`` rather than
+    asking the flag to render itself as ``True``.
+    """
+    kwargs: dict[str, Any] = {field: True}
+    expected = re.escape(f"email_{field} must be {domain}, got bool")
+    with pytest.raises(ValueError, match=expected):
+        EmailReader(_ABSOLUTE, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "domain"),
+    [
+        ("max_messages", 0, "an int in [1, 2**63)"),
+        ("max_messages", 2**63, "an int in [1, 2**63)"),
+        ("max_bytes", 0, "a positive int"),
+        ("max_content_bytes", -1, "a positive int"),
+    ],
+)
+def test_a_figure_out_of_range_is_still_reported_by_value(
+    field: str, value: int, domain: str
+) -> None:
+    """The half of the split ``repr`` is *right* for, and the split does not lose it.
+
+    ``got 0`` is what a caller needs from a range violation and ``got int`` is not,
+    so the value's rendering survives below the type test — where it is safe,
+    because the exact-type test has by then proved the figure a built-in ``int``.
+    """
+    kwargs: dict[str, Any] = {field: value}
+    expected = re.escape(f"email_{field} must be {domain}, got {value!r}")
+    with pytest.raises(ValueError, match=expected):
         EmailReader(_ABSOLUTE, **kwargs)
 
 
