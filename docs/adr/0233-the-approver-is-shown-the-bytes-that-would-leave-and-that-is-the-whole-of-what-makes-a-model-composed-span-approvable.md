@@ -1072,8 +1072,12 @@ This section is direction for the lanes that build it, and it binds them as mark
 > required with no default, that PR also passes the fail-closed `PATH_WITHOUT_MODEL`
 > at every existing construction site, so that the tree it lands on is green. Passing
 > a constant is not implementing §5 — nothing is computed, read or inferred — which is
-> why that adaptation does not breach this clause's first sentence, and it is the only
-> thing outside `core` the PR may touch.
+> why that adaptation does not breach this clause's first sentence. Three things
+> outside `core` ride in that PR and nothing else does: this constant at each existing
+> construction site, the `PROTOCOL_VERSION` move the next clause requires, and the
+> `ActionPolicyContract` assertion the clause after it requires. What may **not** ride
+> in it is any computation of the value and any change to a rendering surface; those
+> are the lanes below, and they are what the first sentence is about.
 
 > **Normative.** `PROTOCOL_VERSION` moves, because `ConfirmationEgress` gains a member
 > and that value crosses the wire (ADR-0178 §6's rule).
@@ -1117,6 +1121,12 @@ builds the case rather than inventing one:
 - A memory-drawn email body is rendered **verbatim** in the confirmation, and the send
   transmits exactly those bytes; a body altered between the confirmation and the resume
   is refused by `authorises` before the seam is reached.
+- Two decisions differing in `coverage` **alone** — same tool, same parameters, same
+  step, same execution, same spans, same destinations, one `MODEL_ON_EVERY_PATH` and
+  one `NOT_COVERED` — do not authorise each other's requests, and `authorises` refuses
+  before the seam is reached. The altered-body and edit cases above both move
+  `parameters_digest`, so an implementation that left `coverage` out of §4's whole-
+  binding comparison would pass them both; this is the case that fails it.
 - A confirmation on a call carrying `MODEL_ON_EVERY_PATH` renders the coverage line in
   its own right; one carrying `NOT_COVERED` renders it too, and the rendered text is
   not an assurance.
