@@ -34,14 +34,48 @@ pytestmark = pytest.mark.integration
 #: fails it rather than hanging the run.
 _PATIENCE = 10.0
 
-#: How long to wait for a thing that must *not* happen. Short, because it is only
-#: ever spent: what makes the case deterministic is that the first caller holds the
-#: gate throughout, not the length of this.
-_A_MOMENT = 0.2
-
 #: What the child interpreter below prints: the block it claimed for itself and one
 #: port out of it. Two integers on one line, so the parent parses no format.
 _REPORT = "import gateway_ports;print(gateway_ports.claimed_block(), gateway_ports.free_port())"
+
+
+class _WatchedGate:
+    """A ``_Block``'s own lock, with a caller *finding it held* made observable.
+
+    The case at the bottom of this module has to know that its second caller
+    reached the allocator's mutual exclusion, and no clock can tell it that: a
+    thread the scheduler has not run yet is indistinguishable from one queued on a
+    lock, which is what let the previous version of that case pass vacuously
+    (#1915). A lock offers no way to ask who is waiting on it, so the arrival is
+    announced from *inside* the wait. The announcement is made only after a
+    non-blocking attempt has failed, which it can do for one reason — another
+    caller holds the gate — so it means "the gate is held and I am now blocking on
+    it" rather than the weaker "I got this far".
+
+    Substituted onto a ``_Block`` the case builds for itself, so no other caller in
+    this process allocates through it. It is a bare stand-in for the ``Lock`` that
+    class constructs, not a subclass: ``threading.Lock`` is a factory for a type
+    that cannot be subclassed.
+    """
+
+    def __init__(self, queued: threading.Event) -> None:
+        """Wrap a fresh lock.
+
+        Args:
+            queued: Set by the first caller that finds this gate already held.
+        """
+        self._lock = threading.Lock()
+        self._queued = queued
+
+    def __enter__(self) -> None:
+        """Take the gate, announcing the wait where another caller holds it."""
+        if not self._lock.acquire(blocking=False):
+            self._queued.set()
+            self._lock.acquire()
+
+    def __exit__(self, *_: object) -> None:
+        """Release the gate."""
+        self._lock.release()
 
 
 @contextlib.contextmanager
@@ -178,40 +212,68 @@ def test_a_second_caller_waits_for_a_claim_in_progress_rather_than_falling_back(
     """A claim in progress is not the same as no claim (adversarial review, round 2).
 
     Without the gate, a caller arriving while the first is still inside
-    ``_claim_a_block`` reads a base of ``None`` and takes the ephemeral fallback —
-    the probe-and-release this module exists to replace, on a run that had a block
-    all along. Deterministic in both directions: the first caller is held inside the
-    claim, so the second either blocks (and cannot possibly finish while it is held)
-    or returns, and returning is the defect.
+    ``_claim_a_block`` takes the ephemeral fallback — the probe-and-release this
+    module exists to replace, on a run that had a block all along. The claim is
+    recorded against this process *before* it is made, so the second caller does not
+    reach ``_claim_a_block`` at all on either allocator: it reads a base of ``None``
+    and falls back. Which is to say the defect is not a second claim, it is a second
+    caller that gets an answer while there is no answer yet.
+
+    **Driven rather than timed** (#1915). The previous version of this case started
+    the second caller and asserted it was still alive a fifth of a second later,
+    which a thread the scheduler had not yet run satisfied without ever reaching the
+    allocator — vacuously, and on the broken allocator just as well. Nothing here
+    waits out a clock for a thing that must not happen. Both of the two things that
+    *can* happen are instrumented instead: the gate announces a caller that finds it
+    held (:class:`_WatchedGate`), and the fallback records a caller that takes it. One
+    of the two arrives on either allocator, and which one it is decides the case.
     """
     claimed = gateway_ports._claim_a_block()
     if claimed is None:
         pytest.skip("no block could be claimed here, so the fallback is an ephemeral probe")
     claim, base = claimed
-    inside, may_finish = threading.Event(), threading.Event()
+    probe = gateway_ports._an_ephemeral_port
+    inside, may_finish, arrived = threading.Event(), threading.Event(), threading.Event()
+    # Appended to from whichever caller gets there, and read once it is over:
+    # ``list.append`` is atomic, and every read below happens after the event that
+    # guards it has been set.
+    claims: list[int] = []
+    fallbacks: list[int] = []
 
     def held() -> tuple[socket.socket, int] | None:
+        claims.append(base)
         inside.set()
         may_finish.wait(_PATIENCE)
         return claimed
 
+    def fallen_back() -> int:
+        port = probe()
+        fallbacks.append(port)
+        arrived.set()
+        return port
+
     monkeypatch.setattr(gateway_ports, "_claim_a_block", held)
+    monkeypatch.setattr(gateway_ports, "_an_ephemeral_port", fallen_back)
     block = gateway_ports._Block()
+    monkeypatch.setattr(block, "_gate", _WatchedGate(arrived))
     drawn: queue.Queue[int] = queue.Queue()
     callers = [threading.Thread(target=lambda: drawn.put(block.next_port())) for _ in range(2)]
     try:
         callers[0].start()
         assert inside.wait(_PATIENCE), "the first caller never reached the claim"
         callers[1].start()
-        callers[1].join(_A_MOMENT)
-        assert callers[1].is_alive(), "the second caller took the fallback instead of waiting"
+        assert arrived.wait(_PATIENCE), "the second caller never reached the allocator at all"
+        assert not fallbacks, "the second caller took the ephemeral fallback mid-claim"
+        assert drawn.empty(), "a caller was answered while the claim was still in progress"
         may_finish.set()
         for caller in callers:
             caller.join(_PATIENCE)
+            assert not caller.is_alive(), "a caller never finished"
     finally:
         may_finish.set()
         claim.close()
 
+    assert claims == [base], "the block was claimed other than exactly once"
     ports = [drawn.get_nowait(), drawn.get_nowait()]
     assert len(set(ports)) == 2
     assert all(base < port < base + gateway_ports.BLOCK_SIZE for port in ports)
