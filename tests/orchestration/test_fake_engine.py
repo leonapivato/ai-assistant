@@ -61,7 +61,11 @@ from assistant_engine_contract import (
     spoken_step_park_outcome,
 )
 
-from ai_assistant.core.errors import DuplicateDecisionError, OversizedValueError
+from ai_assistant.core.errors import (
+    DuplicateDecisionError,
+    OversizedValueError,
+    UngrantableActError,
+)
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     ActionRequest,
@@ -171,6 +175,25 @@ def _transmitting_tool() -> ToolDefinition:
 
 
 _TRANSMITTING_TOOL = _transmitting_tool()
+
+
+def _recorded_confirm(binding: EgressBinding | None) -> PermissionDecision:
+    """A recorded egress ``CONFIRM``, as the trail holds it and a park binds it.
+
+    ``binding`` is ``None`` for the first of ADR-0235 §2's four refused shapes — a
+    confirmation about a call that discloses nothing off-device, which a user may
+    still answer and may not make recipients standing from.
+    """
+    return PermissionDecision.from_request(
+        ActionRequest(
+            tool=_TRANSMITTING_TOOL,
+            parameters={"to": "Alice@Example.ORG", "body": "hello"},
+            egress_binding=binding,
+        ),
+        PermissionRuling(outcome=PermissionOutcome.CONFIRM, reason="it discloses off-device"),
+        id="d-confirm",
+        decided_at=_RECIPIENT_AT,
+    )
 
 
 class TestFakeAssistantEngineContract(AssistantEngineContract):
@@ -1361,3 +1384,124 @@ async def test_a_declined_act_records_the_deny_the_carrier_claims() -> None:
     answers = [row for row in await engine.trail.export() if row.resolves == confirmed.id]
     assert [row.ruling.outcome for row in answers] == [PermissionOutcome.DENY]
     assert await engine.recipient_grants.export() == []
+
+
+async def test_a_park_bound_to_no_confirmation_refuses_the_act_whatever_the_answer() -> None:
+    """The one state this fake refuses where a hub does not, and why (ADR-0235 §2, §4).
+
+    ADR-0235 §2 governs "the answer to a **held confirmation**", and every durable
+    park a hub holds has a recorded ``CONFIRM``. A park with none is this fake's own
+    state — :meth:`FakeAssistantEngine.park` mints one and
+    ``hold_confirmation_decision`` was never called — so no clause covers it, and
+    **neither carrier §4 offers is true of it**: ``DECLINED`` asserts that the answer
+    was recorded and nothing was recorded, while an absent carrier says "no act was
+    collected" and one was. So the act is refused rather than reported in terms that
+    are false, on **both** answers, and the park survives it: nothing is answered,
+    nothing is executed, and the same token then answers it without the argument.
+
+    The declining arm is the one that would otherwise pass, because ``approved=True``
+    is already refused by §2's binding conditions.
+    """
+    for approved in (True, False):
+        engine = FakeAssistantEngine()
+        parked = engine.park("park-1")
+
+        with pytest.raises(UngrantableActError, match="no recorded CONFIRM"):
+            await engine.resume(
+                parked.token,
+                approved=approved,
+                timeout=timedelta(seconds=30),
+                remember_recipients_until=_RECIPIENT_AT + timedelta(days=1),
+            )
+
+        assert await engine.trail.export() == []
+        assert await engine.recipient_grants.export() == []
+        assert [held.token.handle for held in await engine.pending_confirmations()] == ["park-1"]
+
+        resumed = await engine.resume(
+            parked.token, approved=approved, timeout=timedelta(seconds=30)
+        )
+
+        assert resumed.step is not None
+        assert resumed.step.disposition is (
+            Disposition.EXECUTED if approved else Disposition.DENIED
+        )
+        assert resumed.recipient_grant is None
+
+
+async def test_a_declining_answer_on_a_confirmation_with_no_binding_is_recorded_not_refused() -> (
+    None
+):
+    """The scope of the refusal above, pinned from the other side (ADR-0235 §2).
+
+    §2's binding refusal is stated over an **approving** answer alone, and the clause
+    beside it rules that the argument supplied with ``approved=False`` "establishes
+    nothing and changes nothing else: the answer is recorded as a ``DENY`` exactly as
+    it is today" — ADR-0042 §4's guarantee, which §2 declines to except. So where a
+    ``CONFIRM`` *is* bound and its ``egress_binding`` is ``None`` — the first of §2's
+    four refused shapes, and the state the fake's unbound park is nearest to — the
+    decline is recorded and carried as ``DECLINED``, exactly as the concrete runner
+    does it, whose own refusal reads ``remember_recipients_until is not None and
+    approved``.
+
+    Without this case the refusal above could grow to cover a decline the ADR
+    requires recorded, and every other test here would still pass.
+    """
+    engine = FakeAssistantEngine()
+    confirmed = _recorded_confirm(None)
+    await engine.trail.record(confirmed)
+    engine.hold_confirmation_decision("park-1", confirmed)
+    parked = engine.park("park-1")
+
+    resumed = await engine.resume(
+        parked.token,
+        approved=False,
+        timeout=timedelta(seconds=30),
+        remember_recipients_until=_RECIPIENT_AT + timedelta(days=1),
+    )
+
+    assert resumed.step is not None
+    assert resumed.step.disposition is Disposition.DENIED
+    assert resumed.recipient_grant is not None
+    assert resumed.recipient_grant.not_established is RecipientGrantNotEstablished.DECLINED
+    answers = [row for row in await engine.trail.export() if row.resolves == confirmed.id]
+    assert [row.ruling.outcome for row in answers] == [PermissionOutcome.DENY]
+    assert await engine.recipient_grants.export() == []
+
+
+async def test_a_nonconforming_recipient_grant_clock_does_not_prevent_a_decline() -> None:
+    """A decline reads no recipient-grant clock at all (ADR-0235 §1, §2; ADR-0042 §4).
+
+    §1's single reading exists for the **approving** path, where one instant is
+    compared against the chosen expiry and then stamped on the answer. A decline
+    compares nothing, so reading that clock to stamp the ``DENY`` would let a clock a
+    test moved for the *establishing* case stand between a user and the record of a
+    decision they made — a ``PlanningError`` where ADR-0042 §4 guarantees a recorded
+    denial. The concrete runner consults its establishing instant on the approving
+    path alone.
+
+    The clock is set naive, which is what :func:`checked_clock` refuses, and the
+    assertion is that the answer is recorded anyway and carries this fake's fixed
+    instant.
+    """
+    engine = FakeAssistantEngine()
+    confirmed = _recorded_confirm(_binding())
+    await engine.trail.record(confirmed)
+    engine.hold_confirmation_decision("park-1", confirmed)
+    parked = engine.park("park-1", egress=_binding())
+    engine.recipient_grant_clock = lambda: datetime(2026, 1, 1, 12, 0)  # noqa: DTZ001
+
+    resumed = await engine.resume(
+        parked.token,
+        approved=False,
+        timeout=timedelta(seconds=30),
+        remember_recipients_until=_RECIPIENT_AT + timedelta(days=1),
+    )
+
+    assert resumed.step is not None
+    assert resumed.step.disposition is Disposition.DENIED
+    assert resumed.recipient_grant is not None
+    assert resumed.recipient_grant.not_established is RecipientGrantNotEstablished.DECLINED
+    answers = [row for row in await engine.trail.export() if row.resolves == confirmed.id]
+    assert [row.ruling.outcome for row in answers] == [PermissionOutcome.DENY]
+    assert [row.decided_at for row in answers] == [_RECIPIENT_AT]
