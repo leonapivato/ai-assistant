@@ -919,10 +919,51 @@ function conversationLost(body, sent) {
   }
 }
 
+// The one thing `streamValues` throws of its own motion, and it has its own type so
+// that a reader can tell it from everything else a read can reject with — an abort the
+// owner asked for, a connection that failed, a body the browser gave up on. Each of
+// those is a different ending and is announced as one, and a bare `SyntaxError` from
+// `JSON.parse` is indistinguishable from all of them at the catch that has to choose
+// (#2008).
+class MisframedValue extends Error {}
+
+// One line of a stream, read as the value that line is supposed to be (ADR-0175 §2).
+//
+// **A line that is not one JSON object is not a value on this stream at all**, and it
+// is refused here rather than at each reader, because "one JSON object per line" is
+// this reader's own contract and not something a consumer of it should be re-checking.
+// Two shapes breach it: a line `JSON.parse` will not read at all, and a line that reads
+// as `null`, as a scalar or as an array — none of which can carry the discriminator
+// §2's first clause requires a value to carry, so there is nothing on them a kind could
+// be resolved from and reading one off their shape is the guess that same clause
+// refuses.
+//
+// **`{}` is a different case and stays a value.** An object whose `kind` this page does
+// not know is the two halves of one distribution disagreeing (ADR-0168 §10), which
+// every reader below already ignores rather than guesses at. What is refused here is a
+// line that could not carry a kind, never one that carried an unfamiliar one.
+function frameOf(framed) {
+  let value;
+  try {
+    value = JSON.parse(framed);
+  } catch (_) {
+    throw new MisframedValue();
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new MisframedValue();
+  }
+  return value;
+}
+
 // Read one `application/x-ndjson` body: one JSON object per line, each carrying the
 // `kind` that says what it is (ADR-0175 §2). A reader resolves a value's kind from
 // that member and never by inspecting what the value contains, so nothing below
 // guesses from a payload's shape.
+//
+// **A line this reader cannot read ends the stream here**, as `MisframedValue` rather
+// than as whatever `JSON.parse` happened to raise: left unguarded that throw escaped
+// every consumer's own ending and reached `ask`'s outer catch, which called it
+// `GATEWAY_GONE` — about a gateway that had just written a head and a body (#2008).
 async function* streamValues(response) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -941,7 +982,7 @@ async function* streamValues(response) {
       const framed = buffer.slice(0, newline);
       buffer = buffer.slice(newline + 1);
       if (framed) {
-        yield JSON.parse(framed);
+        yield frameOf(framed);
       }
     }
   }
@@ -3733,6 +3774,41 @@ const STREAMED_ANSWER_UNREADABLE =
   "cancelled. " +
   WHERE_TO_LOOK;
 
+// **And the ending one line earlier than that one** (#2008): a stream that carried a
+// line this page could not read *as a value at all*, rather than a value it read and
+// could not take an outcome from. Both inputs — a line that is not JSON, and one that
+// reads as `null` — used to throw inside the read and land in `ask`'s outer catch,
+// which announced `GATEWAY_GONE`: "The gateway did not answer, so it may have stopped",
+// with a restart and a fresh bootstrap value as the remedy, about a gateway that had
+// answered and a turn that may have run. That is ADR-0139 §4's direction breached — an
+// act reported as an outcome it is known not to have, never as one of the other two —
+// and the remedy it offered threw the session away.
+//
+// **The ending is ADR-0175 §2's transport failure, and that clause is exhaustive.**
+// "Every stream ends in exactly one of two ways, and a reader tells them apart from the
+// stream alone: the gateway wrote a **terminal** value, or the body ended without one.
+// A reader that reached a terminal value has the whole of what the gateway sent; a
+// reader that did not has a transport failure and the front end reports it as one."
+// A reader stopped by a line it cannot read reached no terminal value, so it is in the
+// second limb and nothing new is decided by putting it there.
+//
+// **What §2 leaves open is the wording, and it says so.** Its third clause hands "the
+// exact framing of a value on a stream" to the implementing lane, and this page already
+// carries four sentences inside that one limb — cut, silent, stalled, and the delivery
+// half of the first — because "the condition is the same; what was cut is not". This is
+// the fifth, for the same reason and not for a new one.
+//
+// **It is specifically not `ANSWER_STREAM_CUT`.** That sentence opens "ended before the
+// gateway finished it", and a gateway that wrote a whole line of something unreadable
+// did not stop part way through writing — saying it did would be a wrong explanation
+// rather than a missing one, which is the distinction this page keeps everywhere else.
+const ANSWER_STREAM_MISFRAMED =
+  "That answer's stream carried a line this browser could not read as a value on it, so " +
+  "nothing further was read from it and what became of the turn is not known. The " +
+  "gateway did answer: what broke is the shape of what was written and not the " +
+  "connection carrying it. Nothing was re-sent and nothing was cancelled. " +
+  WHERE_TO_LOOK;
+
 // **And the ending where the outcome is not unknown at all**, which adversarial review
 // found on round 3. A head this page already read can name the outcome: an expired
 // session or a mismatched cookie half is answered by `_session_bound` — `401` and `409`
@@ -4139,19 +4215,53 @@ async function askStreaming(half, asked, chosenAt, waiting) {
   // `_pump_answer` is awaited — so it takes the panel and nothing more.
   waiting.composing = composing;
   let terminal = null;
-  for await (const value of streamValues(response)) {
-    if (value.kind === "chunk") {
-      // The first chunk is what proves the question reached the assistant on this
-      // entry, and it is the fact a wait abandoned from here is announced with.
-      waiting.heard = true;
-      composing.textContent += value.text;
-    } else if (TERMINAL_KINDS.has(value.kind)) {
-      terminal = value;
-      break;
+  try {
+    for await (const value of streamValues(response)) {
+      if (value.kind === "chunk") {
+        // The first chunk is what proves the question reached the assistant on this
+        // entry, and it is the fact a wait abandoned from here is announced with.
+        waiting.heard = true;
+        composing.textContent += value.text;
+      } else if (TERMINAL_KINDS.has(value.kind)) {
+        terminal = value;
+        break;
+      }
+      // A kind this page does not know is ignored rather than guessed at. The
+      // enumeration is closed and the gateway ships with this file, so meeting one
+      // means the two halves of one distribution disagree (ADR-0168 §10).
     }
-    // A kind this page does not know is ignored rather than guessed at. The
-    // enumeration is closed and the gateway ships with this file, so meeting one
-    // means the two halves of one distribution disagree (ADR-0168 §10).
+  } catch (error) {
+    // **One condition is caught here and every other one is not** (#2008). A line this
+    // reader could not read is an ending this entry has words for, and it is announced
+    // where it happened rather than left to `ask`'s catch, which has only
+    // `GATEWAY_GONE` to say. Everything else a read can reject with — the owner's own
+    // abort, a connection that failed, a body the browser gave up on — is re-thrown
+    // untouched, because each of those is a different ending and `ask` is where the
+    // first of them is told from the rest.
+    if (!(error instanceof MisframedValue)) {
+      throw error;
+    }
+    // `askWhole`'s guard, on the read this entry can be abandoned in the middle of. An
+    // abort raises on the *next* read, so a line already buffered can be found
+    // unreadable after the owner has stopped waiting — and `abandonAsk` has by then
+    // cleared this panel and said what the owner did. Writing over that would replace
+    // an act with a fault, which is the one thing this page never does.
+    if (waiting.stopping.signal.aborted) {
+      return;
+    }
+    // The partial text goes where `ANSWER_STREAM_CUT` sends it and for its reason:
+    // ADR-0173 §3 makes the terminal outcome's `reply` the answer, so chunks left under
+    // a fault render a non-answer as one. The clause about the screen is added only
+    // where there was something on it — `STREAMED_ANSWER_UNREADABLE`'s own division,
+    // because a stream misframed before its first chunk cleared an empty panel and
+    // saying so would be a sentence about nothing.
+    clearNode(panel);
+    show("answer", false);
+    fault(
+      waiting.heard ? `${ANSWER_STREAM_MISFRAMED} ${PARTIAL_CLEARED}` : ANSWER_STREAM_MISFRAMED,
+      "console"
+    );
+    return;
   }
   if (terminal === null) {
     // **The partial text is cleared rather than left under the fault.** A body that
