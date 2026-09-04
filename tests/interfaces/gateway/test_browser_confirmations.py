@@ -688,6 +688,12 @@ _FAULTS: dict[str, Callable[[dict[str, Any]], None]] = {
     "a negative extent": _negative_extent,
     "a locator no double holds": _unsafe_position,
     "an extent no double holds": _unsafe_extent,
+    # A lone surrogate: a JSON escape carries it, ``JSON.parse`` produces it, and a
+    # text node renders the replacement character in its place — a character the value
+    # does not contain, shown instead of one it does. ``core`` refuses it at
+    # construction for the reason it cannot be rendered: it has no UTF-8 encoding at
+    # all (adversarial review, round 11).
+    "a value with no UTF-8 form": lambda view: view["parameters"][0].update({"value": "\ud800"}),
 }
 
 
