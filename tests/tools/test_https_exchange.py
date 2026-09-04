@@ -484,7 +484,9 @@ async def test_a_certificate_that_does_not_verify_reaches_no_write() -> None:
             b"HTTP/1.1 200 OK\r\n\tfolded: x\r\n\r\n", "not a header", id="an-obsolete-line-fold"
         ),
         pytest.param(
-            b"HTTP/1.1 200 OK\r\nX-Caf\xc3\xa9: x\r\n\r\n", "non-ASCII", id="a-non-ascii-field"
+            b"HTTP/1.1 200 OK\r\nX-Caf\xc3\xa9: x\r\n\r\n",
+            "not a header",
+            id="a-field-named-outside-the-token-grammar",
         ),
         pytest.param(
             b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\nx",
@@ -528,8 +530,8 @@ async def test_a_certificate_that_does_not_verify_reaches_no_write() -> None:
         ),
         pytest.param(
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX-Caf\xc3\xa9: x\r\n\r\n",
-            "non-ASCII",
-            id="a-non-ascii-trailer",
+            "not a header",
+            id="a-trailer-named-outside-the-token-grammar",
         ),
         pytest.param(
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nab\r\n0\r\n\r\n",
@@ -579,7 +581,7 @@ async def test_a_certificate_that_does_not_verify_reaches_no_write() -> None:
         pytest.param(
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;caf\xc3\xa9\r\na\r\n0\r\n\r\n",
             "chunk extension",
-            id="a-non-ascii-chunk-extension",
+            id="a-chunk-extension-named-outside-the-token-grammar",
         ),
         pytest.param(
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1 \r\na\r\n0\r\n\r\n",
@@ -897,7 +899,11 @@ async def test_a_well_formed_chunk_extension_is_read_and_discarded() -> None:
     an extension on the last chunk. None of it reaches the caller, and the body is
     the chunks' octets and nothing else.
     """
-    body = b'3;plain\r\nabc\r\n3 ; name=value ; quoted="a;b\\"c"\r\ndef\r\n0;last\r\n\r\n'
+    body = (
+        b"3;plain\r\nabc\r\n"
+        b'3 ; name=value ; quoted="a;b\\"c" ; opaque="\xe9"\r\ndef\r\n'
+        b"0;last\r\n\r\n"
+    )
     channel = far_end(response(headers=["Transfer-Encoding: chunked"], body=body))
     subject, _ = exchange(channel)
 
@@ -905,6 +911,48 @@ async def test_a_well_formed_chunk_extension_is_read_and_discarded() -> None:
 
     assert answer.body == b"abcdef"
     assert answer.headers == (("transfer-encoding", "chunked"),)
+
+
+async def test_a_response_carrying_obs_text_is_read_and_its_octets_are_kept() -> None:
+    """RFC 9110 §5.5's opaque data, which a recipient carries rather than refuses.
+
+    §5.5 tells a **sender** to keep a field value to visible US-ASCII and tells a
+    **recipient** to treat what arrives outside it as opaque data; RFC 9112 §4
+    admits ``obs-text`` in a reason phrase outright. Refusing either would turn a
+    response no reader would call malformed into a failed search, which is what
+    adversarial round 8 found. The value is decoded octet for octet, so what a
+    caller gets back is recoverable rather than guessed at — and the **name** is
+    still a ``token``, so nothing non-ASCII can case-fold onto a field that frames
+    the body.
+    """
+    channel = far_end(
+        b"HTTP/1.1 200 Caf\xc3\xa9\r\nX-Provider-Label: caf\xc3\xa9\r\nContent-Length: 2\r\n\r\nok"
+    )
+    subject, _ = exchange(channel)
+
+    answer = await subject.get(origin=ORIGIN, target=TARGET)
+
+    assert answer.status == 200
+    assert answer.body == b"ok"
+    assert dict(answer.headers)["x-provider-label"].encode("latin-1") == b"caf\xc3\xa9"
+
+
+async def test_a_field_named_outside_the_token_grammar_is_still_refused() -> None:
+    """The bound on the arm above, so "opaque" is not read as "anything goes".
+
+    ``obs-text`` is admitted in a field **value** and in a reason phrase because
+    RFC 9110 §5.5 and RFC 9112 §4 admit it there. A field **name** is §5.6.2's
+    ``token`` and admits none of it, which is what keeps a far end from spelling
+    ``Content-Length`` in octets that some reader downstream would case-fold back
+    onto it.
+    """
+    channel = far_end(b"HTTP/1.1 200 OK\r\nX-Caf\xc3\xa9: x\r\nContent-Length: 0\r\n\r\n")
+    subject, _ = exchange(channel)
+
+    with pytest.raises(MalformedHttpResponseError, match="not a header"):
+        await subject.get(origin=ORIGIN, target=TARGET)
+
+    assert channel.closed
 
 
 async def test_an_oversized_body_behind_a_well_formed_head_yields_no_response() -> None:
