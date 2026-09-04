@@ -8917,9 +8917,24 @@ class DestinationProtocol(StrEnum):
     nor permits any transmission. The canonicaliser itself lives at the seam
     (ADR-0148 §2's sixth clause), never here; a copy of the rule in `core` would
     be the second canonicaliser that clause exists to forbid.
+
+    ``HTTPS`` is ADR-0231 §8's member, and the same two sentences hold of it. Its
+    ratified contract ADR is that section: the canonical form is the **origin** —
+    ``https://host:port``, the scheme, the host and the port and nothing below
+    them — and the equivalences it establishes are **exactly three**: the scheme
+    differs only by ASCII case, the host differs only by ASCII case, and one form
+    omits the port where the other states ``443``. Six are stated as *not*
+    established and are written down there so no lane infers one: a name against
+    an address it resolves to, a trailing dot against none, a percent-encoded
+    octet against its decoded form, an internationalised host against any
+    ASCII-compatible encoding, ``http`` against ``https``, and anything at all
+    involving a path, a query or a fragment. It **authorises nothing** either: it
+    registers no tool, permits no transmission, and implies no canonicaliser
+    beyond the one §8 fixes at the seam.
     """
 
     SMTP = "smtp"
+    HTTPS = "https"
 
 
 class DiscloserProvenance(StrEnum):

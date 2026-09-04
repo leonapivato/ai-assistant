@@ -113,6 +113,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import ssl
+import string
 import unicodedata
 from contextlib import suppress
 from dataclasses import dataclass
@@ -1972,16 +1973,870 @@ class _SmtpSession:
         raise TransportPinError(msg)
 
 
+# --- The HTTPS exchange (ADR-0231 §5) --------------------------------------- #
+# **Built here, over the injected byte channel, and deliberately not an HTTP
+# client library.** ADR-0191 §2 fixes :class:`~ai_assistant.core.protocols.
+# ByteChannel` as "deliberately **not** an HTTP client: it carries no URL, no
+# request or response model, no redirect handling and no notion of a method or a
+# header, and a protocol — SMTP, HTTP, JSON-RPC or anything else — is built on top
+# of it by the module that holds it and never inside the capability". This is that
+# protocol for HTTP/1.1, in the one module ADR-0154 §1 designates, and ADR-0231 §5
+# is what commissions it: "The transport is an **HTTPS exchange built inside that
+# module**, over the injected ``OutboundTransport`` ADR-0191 §1 contracts".
+#
+# **No dependency is adopted, because the ADR adopts none.** §5 says in terms that
+# "This ADR authorises no dependency and chooses none", so ADR-0147 §3's
+# import-linter contract is unchanged and its forbidden set gains nothing. A later
+# lane that does adopt one extends that set in the same change, which is what §5's
+# own clause already requires of "any lane adding a transport-bearing dependency".
+
+
+class HttpsExchangeError(ToolError):
+    """This seam's HTTPS exchange will not hand back a response it read.
+
+    **Not an** :class:`EgressTransportError`, and the split is the same one
+    :class:`IndeterminateTransmissionError` is on the other side of. Every member
+    of that hierarchy "is raised **before any byte of the payload reached the
+    wire**", and for a search the payload *is* the query: the request carrying it
+    is written before any of these can be raised, so calling one of them a refusal
+    that transmitted nothing would be false.
+
+    **It is not** :class:`IndeterminateTransmissionError` **either, and for a
+    reason about the far end rather than about this class.** That type exists
+    because an SMTP message may or may not have been accepted, and ADR-0014 §4's
+    recovery scan is the reconciliation path for the difference. A search changes
+    nothing at the far end — ADR-0231 §5 decides ``reversibility=REVERSIBLE`` on
+    exactly that ground, "a search is a **read** of a remote index: nothing at the
+    far end changes" — so there is no effect to reconcile. What did happen, in
+    every case below, is that the query was disclosed; that is carried by the
+    declaration's ``discloses`` and by the ruling, not by an exception class.
+
+    **No message any of these raises renders a credential, a header value, a
+    request target or a byte of a response body.** It may name a status code, a
+    count, a bound and a rule. That is :class:`EgressTransportError`'s discipline
+    applied to the neighbouring surface, and it matters more here: a response body
+    is a third party's text, and a refusal message reaches a log.
+    """
+
+
+class HttpsRedirectRefusedError(HttpsExchangeError):
+    """The far end answered with a redirect, which is a refusal (ADR-0231 §5).
+
+    "It **follows no redirect** — a redirect response is a refusal and never a
+    second request." This is #83's own failure written for the protocol that has
+    it: a client that followed one would carry the account's credential to a host
+    no ruling named and no grant covered. SMTP's analogue is RFC 5321 §3.4's
+    forward-path replies, which :class:`SmtpEgressTransport` refuses the same way.
+
+    Raised **after** the status line has been read and **before** anything else is
+    done with the response: no ``Location`` is parsed, no second endpoint is
+    derived, no second channel is opened, and the one channel is closed on the way
+    out.
+    """
+
+
+class HttpsResponseTooLargeError(HttpsExchangeError):
+    """The response passed ``search_max_response_bytes`` and was abandoned (§5).
+
+    ADR-0231 §5: "The response bound is enforced **while the response is read and
+    before any part of it is parsed**, counted over the bytes taken off the
+    channel. A response **over** the bound is **abandoned and refused** — the read
+    stops as soon as one byte past the bound has been taken, the channel is closed,
+    nothing is parsed and no record is minted — while a response **exactly at** the
+    bound is read whole and parsed."
+
+    That is a property of :class:`_BoundedReader`, which never asks the channel for
+    more than the allowance plus one octet, rather than of a check somewhere: an
+    implementation that read to end of stream and then compared a length would
+    satisfy the sentence and not the rule, and is the thing §5's last clause names.
+    """
+
+
+class MalformedHttpResponseError(HttpsExchangeError):
+    """The far end did not answer in the shape HTTP/1.1 documents (ADR-0231 §5).
+
+    A status line that is not one, a header line with no field name, a framing this
+    exchange will not read — two ways of declaring a body's length at once, a
+    transfer coding other than ``chunked``, a chunk size that is not hexadecimal —
+    or a stream that ended in the middle of any of them.
+
+    **This is the transport half of ADR-0231 §10's "a response whose top-level
+    shape is not the one the provider documents".** The other half is the
+    provider's own payload format, which this exchange does not parse at all: it
+    hands back the body's octets and decodes none of them, so which JSON shape a
+    provider documents — and what a response failing it costs — is the searcher's
+    (ADR-0231 §17's Lane 3).
+    """
+
+
+#: The scheme an HTTPS origin names, in the one case ADR-0231 §8 renders it in.
+HTTPS_SCHEME: Final = "https"
+
+#: The port the ``Host`` header omits, RFC 9110 §4.2.2's default for the scheme.
+#: It is written into the header only where the endpoint is on some other port,
+#: which is what every ordinary client does and what a virtual host expects.
+_HTTPS_DEFAULT_PORT: Final = 443
+
+#: HTTP/1.1's line terminator (RFC 9112 §2.2), and the terminator this exchange
+#: both writes and requires. A bare ``\n`` is not one: reading it as a line ending
+#: is the leniency request smuggling is built out of, and this seam refuses the
+#: response rather than guessing at where a far end meant a line to end.
+_CRLF: Final = b"\r\n"
+
+#: The versions this exchange will read a reply in. HTTP/2 and HTTP/3 are not
+#: line-framed at all and could not arrive here; a far end answering ``HTTP/0.9``
+#: sends no status line, which the status-line parse refuses on its own terms.
+_HTTP_VERSIONS: Final = frozenset({b"HTTP/1.0", b"HTTP/1.1"})
+
+#: The lowest and highest status codes RFC 9110 §15 defines a class for. A
+#: three-digit number outside them is not a status this seam will act on.
+_MIN_STATUS: Final = 100
+_MAX_STATUS: Final = 599
+
+#: RFC 9110 §15.4's redirection class, which ADR-0231 §5 makes a refusal.
+_MIN_REDIRECT: Final = 300
+_MAX_REDIRECT: Final = 399
+
+#: The first class RFC 9110 §15.2 defines, which is *interim*: a client is meant
+#: to keep reading for the real response. This exchange sends no ``Expect``, so a
+#: conforming far end sends none — and reading one would mean a second response on
+#: one channel, so it is refused as a shape rather than looped over.
+_MAX_INTERIM_STATUS: Final = 199
+
+#: The characters a request target may hold: printable ASCII excluding space
+#: (RFC 3986's whole character repertoire). A space, a control character or any
+#: non-ASCII octet is refused before a channel is opened, because each of them is
+#: a request-line injection and none of them is a target anything legitimate
+#: composes — a target is percent-encoded by the integration that built it.
+_TARGET_CHARACTERS: Final = frozenset(chr(code) for code in range(0x21, 0x7F))
+
+#: RFC 9110 §5.6.2's ``token``, which a header field name is. Checked so that a
+#: name carrying a separator — a colon above all — cannot write a second field.
+_FIELD_NAME_CHARACTERS: Final = frozenset(string.ascii_letters + string.digits + "!#$%&'*+-.^_`|~")
+
+#: What a header field value may hold: printable ASCII, plus space and horizontal
+#: tab, which RFC 9110 §5.5 admits inside a value. ``CR`` and ``LF`` are excluded,
+#: which is the whole point — a value carrying either writes a field this seam did
+#: not, and the credential travels in one of these values.
+_FIELD_VALUE_CHARACTERS: Final = _TARGET_CHARACTERS | {" ", "\t"}
+
+#: The header fields this exchange writes itself, and which a caller therefore may
+#: not supply. Two of them frame the response and one names the recipient: a
+#: caller able to write a second ``Host`` would be selecting a virtual host the
+#: ruling never saw, and one able to write a ``Content-Length`` or a
+#: ``Transfer-Encoding`` would be framing a request body this exchange does not
+#: send. ``Connection`` is here because ADR-0191 §3's per-call channel is not a
+#: thing a caller may ask to keep alive.
+_RESERVED_FIELD_NAMES: Final = frozenset(
+    {"host", "connection", "content-length", "transfer-encoding"}
+)
+
+#: The most hexadecimal digits a chunk size may be written in. ``int(text, 16)``
+#: on a very long string is the same denial-of-service ``_MAX_PORT_DIGITS`` closes
+#: for a port (#1147), and no chunk this exchange could accept needs more: the
+#: response bound is a 64-bit quantity at most.
+_MAX_CHUNK_SIZE_DIGITS: Final = 16
+
+#: ASCII hexadecimal digits, for the chunk-size grammar. ``int(text, 16)`` is
+#: itself far more permissive than the grammar — it accepts a sign, surrounding
+#: whitespace and ``_`` separators, so ``int(b"1_0", 16)`` is 16 — which is why
+#: the text is checked before it is converted rather than after.
+_HEX_DIGITS: Final = frozenset(string.hexdigits)
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class HttpsResponse:
+    """One HTTPS response, as this seam read it off a channel it opened.
+
+    Frozen and slotted for the reason every value at this seam is: what a caller
+    acts on must not be something a later holder can rewrite.
+
+    **The body is octets and is decoded by nothing here.** ADR-0231 §10 makes the
+    provider's payload format the searcher's business, and a transport that
+    decoded it would be the second place a response's shape is decided.
+
+    Attributes:
+        status: The three-digit status the far end sent, in ``100..599``. Never a
+            redirect: :class:`HttpsRedirectRefusedError` is raised instead of one
+            being returned (ADR-0231 §5).
+        headers: Every field the far end sent, in the order it sent them, with the
+            name ASCII-lowercased and the value's surrounding whitespace stripped
+            as RFC 9110 §5.5 directs. Carried rather than interpreted: this
+            exchange reads only the two that frame the body, and what a
+            ``reported_at`` is read from is ADR-0231 §10's question.
+        body: The payload's octets, exactly as they arrived, with any chunked
+            framing removed. Its length is bounded by construction: the whole
+            response, this field included, took at most
+            ``search_max_response_bytes`` off the channel.
+    """
+
+    status: int
+    headers: tuple[tuple[str, str], ...]
+    body: bytes
+
+
+class _BoundedReader:
+    """Reads a response off a channel, taking at most one octet past the bound.
+
+    ADR-0231 §5's read bound as a property of the reader rather than as a check
+    after the fact: every fill asks the channel for **the allowance plus one**, so
+    the count of octets taken can reach ``bound + 1`` and can never exceed it. The
+    moment it does, the read stops and :class:`HttpsResponseTooLargeError` is
+    raised — before the octets that carried it past the bound are looked at.
+
+    The plus-one is what makes the boundary decidable rather than approximate: a
+    response of exactly ``bound`` octets is read whole and then answers end of
+    stream, while one of ``bound + 1`` is stopped on the octet that made it so.
+
+    **The count is over every octet taken off the channel**, the status line and
+    the headers included, which is §5's "counted over the bytes taken off the
+    channel" read as it is written. It is not a body bound with a header allowance
+    beside it, and nothing here subtracts one from the other.
+    """
+
+    __slots__ = ("_bound", "_buffer", "_channel", "_ended", "_taken")
+
+    def __init__(self, channel: ByteChannel, *, bound: int) -> None:
+        """Read ``channel`` under ``bound``.
+
+        Args:
+            channel: The channel the response arrives on.
+            bound: ``search_max_response_bytes``, in octets.
+        """
+        self._channel = channel
+        self._bound = bound
+        self._buffer = bytearray()
+        self._taken = 0
+        self._ended = False
+
+    @property
+    def taken(self) -> int:
+        """How many octets have been taken off the channel so far.
+
+        Returns:
+            The count, which never exceeds the bound by more than one.
+        """
+        return self._taken
+
+    async def _fill(self) -> bool:
+        """Take one more chunk off the channel.
+
+        Returns:
+            Whether anything arrived. ``False`` means end of stream, and the
+            channel is not read again.
+
+        Raises:
+            HttpsResponseTooLargeError: If the chunk took the count past the bound.
+            TransportError: If the connection could not be continued (ADR-0191 §1).
+        """
+        if self._ended:
+            return False
+        allowance = self._bound - self._taken + 1
+        chunk = await self._channel.read(min(allowance, TRANSPORT_OCTET_CEILING))
+        if not chunk:
+            self._ended = True
+            return False
+        self._taken += len(chunk)
+        if self._taken > self._bound:
+            # Stopped **on** the octet that passed the bound, before this chunk is
+            # put in the buffer and so before any part of it could be read. The
+            # buffer is abandoned with it; the caller closes the channel.
+            msg = (
+                f"the response passed the {self._bound}-byte bound this seam reads "
+                f"under; it was abandoned unparsed (ADR-0231 §5)"
+            )
+            raise HttpsResponseTooLargeError(msg)
+        self._buffer += chunk
+        return True
+
+    async def line(self) -> bytes:
+        """The next CRLF-terminated line, without its terminator.
+
+        Returns:
+            The line's octets. An empty result is the empty line that ends a
+            header section, not end of stream — a stream that ends where a line
+            was expected is a malformed response and is raised over.
+
+        Raises:
+            MalformedHttpResponseError: If the stream ended before a terminator.
+            HttpsResponseTooLargeError: If reading it passed the bound.
+            TransportError: If the connection could not be continued.
+        """
+        while True:
+            found = self._buffer.find(_CRLF)
+            if found >= 0:
+                line = bytes(self._buffer[:found])
+                del self._buffer[: found + len(_CRLF)]
+                return line
+            if not await self._fill():
+                msg = "the far end ended the stream in the middle of a response line"
+                raise MalformedHttpResponseError(msg)
+
+    async def take(self, count: int) -> bytes:
+        """Exactly ``count`` octets.
+
+        Args:
+            count: How many to take, which a far end's own declared length or
+                chunk size supplies. A count larger than the bound is not
+                special-cased: the fill that would pass the bound refuses first,
+                so nothing is allocated for it.
+
+        Returns:
+            The octets.
+
+        Raises:
+            MalformedHttpResponseError: If the stream ended first.
+            HttpsResponseTooLargeError: If reading them passed the bound.
+            TransportError: If the connection could not be continued.
+        """
+        while len(self._buffer) < count:
+            if not await self._fill():
+                msg = "the far end ended the stream before the length it declared"
+                raise MalformedHttpResponseError(msg)
+        taken = bytes(self._buffer[:count])
+        del self._buffer[:count]
+        return taken
+
+    async def rest(self) -> bytes:
+        """Everything up to end of stream.
+
+        Returns:
+            The remaining octets.
+
+        Raises:
+            HttpsResponseTooLargeError: If reading them passed the bound.
+            TransportError: If the connection could not be continued.
+        """
+        while await self._fill():
+            pass
+        remaining = bytes(self._buffer)
+        self._buffer.clear()
+        return remaining
+
+
+def parse_https_origin(origin: str) -> TransportEndpoint:
+    """The endpoint a channel to ``origin`` is opened to (ADR-0231 §5, §8).
+
+    **One grammar, and it is the canonicaliser's.** The origin is put through
+    :func:`~ai_assistant.tools.destinations.canonicalise` and the endpoint is split
+    out of the **canonical** form, which is ``https://host:port`` by construction —
+    so this function parses a string this seam itself produced and never a supplied
+    one. A second grammar here is exactly ADR-0148 §2's sixth clause forbids, and
+    it is how a destination the ruling compared one way comes to be connected to
+    another (#83, #1158).
+
+    **No control-character check of its own**, deliberately: ADR-0231 §8's host
+    grammar admits only ASCII letters, digits, ``-`` and ``.``, so the truncating
+    character :func:`_truncating_character` exists for cannot survive
+    canonicalisation, and :meth:`StreamOutboundTransport.open_channel` applies that
+    rule again on the one path to a resolver. A third copy would be a rule with
+    three homes and no single one to read.
+
+    Args:
+        origin: A supplied HTTPS origin, in any form ADR-0231 §8 canonicalises.
+
+    Returns:
+        The endpoint, always with ``implicit_tls`` — HTTPS is TLS from the first
+        octet and this seam has no cleartext form, exactly as ``smtps`` has none.
+
+    Raises:
+        TransportPinError: If ``origin`` is not a form this seam will canonicalise,
+            and so not one it will pin. The message states the rule that was broken
+            and never the origin: the canonicaliser's refusals name no value (see
+            :mod:`ai_assistant.tools.destinations`), which is what makes
+            interpolating one safe here as it is in ``tools/egress_binder.py``.
+    """
+    try:
+        canonical = canonicalise(SeamProtocol.HTTPS, origin).canonical
+    except DestinationCanonicalisationError as exc:
+        msg = f"the origin has no canonical form, so this seam will not pin it — {exc}"
+        raise TransportPinError(msg) from exc
+    host, _, port = canonical.removeprefix(f"{HTTPS_SCHEME}://").rpartition(":")
+    return TransportEndpoint(host=host, port=int(port), implicit_tls=True)
+
+
+@final
+class HttpsExchange:
+    """One HTTPS request per call, to one origin, over the injected transport.
+
+    ADR-0231 §5's five properties, each of which is a property of this class's
+    shape rather than of a check inside it:
+
+    1. **One origin.** :meth:`get` derives its endpoint from the origin it is
+       given through :func:`parse_https_origin`, hands it to
+       :meth:`~ai_assistant.core.protocols.OutboundTransport.open_channel`, and
+       has no other way to reach a host — ADR-0191 §1's "its shape is what pins the
+       destination". No caller-supplied header may name a ``Host``.
+    2. **No redirect.** A ``3xx`` is :class:`HttpsRedirectRefusedError` and the
+       method returns; there is no loop, no ``Location`` read and no second
+       :meth:`open_channel` call anywhere in this class.
+    3. **A channel per call.** :meth:`get` opens one and closes it in a ``finally``,
+       and this object's ``__slots__`` hold no channel, no pool and no cache
+       (ADR-0191 §3). A second call opens a second channel.
+    4. **The credential to that origin and nothing else.** The credential rides in
+       a caller-supplied header, which is written to the channel this call opened
+       and to nothing else — and only after :attr:`ByteChannel.is_secure` reads
+       ``True``, which is read from the channel's own state rather than inferred
+       from the endpoint having asked for TLS. Since nothing is written before that
+       check, a channel that somehow arrived in the clear carries no credential.
+    5. **The read bound.** :class:`_BoundedReader`, above.
+
+    **It reads a credential from nowhere and holds none.** ADR-0231 §5 puts the
+    ``Secrets`` read inside ``WebSearcher.search``, after its three checks; this
+    object is handed the header that carries the result and never the face that
+    would produce one.
+
+    **A GET, and no other method.** ADR-0231 §5 leaves "which path, which parameter
+    names, which headers and which body shape a provider request takes" to the
+    integration, and this exchange narrows the last of those to *none*: a search is
+    a read of a remote index, which is the ground §5 gives for
+    ``reversibility=REVERSIBLE``, and a seam able to send a body is a seam able to
+    write. A later lane needing a body-bearing search endpoint widens this
+    deliberately rather than by default (issue filed alongside this change).
+
+    **Nothing constructs one yet.** ADR-0231 §17's Lane 2 is a transport nothing
+    drives, "reviewable against a real exchange before anything is minted"; the
+    searcher that drives it, its declaration and its registration are Lane 3's.
+    """
+
+    __slots__ = ("_bound", "_transport")
+
+    def __init__(self, *, transport: OutboundTransport, max_response_bytes: int) -> None:
+        """Bind an exchange to the capability it reaches the world through.
+
+        Args:
+            transport: The injected capability (ADR-0191 §1). **Required, with no
+                default and no ``None``-means-the-real-one fallback** — ADR-0191
+                §3's load-bearing clause, for :class:`SmtpEgressTransport`'s
+                reason: an object handed no transport cannot be constructed rather
+                than being constructed with the real one.
+            max_response_bytes: ``Settings.search_max_response_bytes``. Passed in
+                rather than read here, because a seam reading configuration is a
+                second place a bound is decided.
+
+        Raises:
+            ValueError: If ``max_response_bytes`` is below 1. ``Settings`` refuses
+                that at load (ADR-0231 §5), and this states the same rule at the
+                one place a bound of zero would silently mean "refuse everything".
+        """
+        if max_response_bytes < 1:
+            msg = f"max_response_bytes is an integer of at least 1; got {max_response_bytes}"
+            raise ValueError(msg)
+        self._transport = transport
+        self._bound = max_response_bytes
+
+    async def get(
+        self, *, origin: str, target: str, headers: Sequence[tuple[str, str]] = ()
+    ) -> HttpsResponse:
+        """Fetch ``target`` from ``origin``, or refuse.
+
+        The order is the decision rather than an implementation detail:
+
+        1. The origin is canonicalised and pinned, and the target and every header
+           are checked, **before a channel is opened** — so a request that could
+           not be made spends no connection and discloses nothing (ADR-0148 §1's
+           third clause, ADR-0145's precedent).
+        2. The channel is opened to that endpoint and to nothing else.
+        3. :attr:`ByteChannel.is_secure` is read, and nothing is written unless it
+           is ``True``.
+        4. The request is written, whole, in one write.
+        5. The response is read under the bound, and a redirect is refused.
+        6. The channel is closed, on every path out including a cancellation.
+
+        Args:
+            origin: The recipient, in any form ADR-0231 §8 canonicalises. This is
+                the value a ruling and a grant range over.
+            target: The origin-form request target — a path, with a query where
+                there is one, already percent-encoded by whoever composed it. It
+                begins with ``/`` and holds only printable ASCII other than space.
+            headers: The fields to send, in order, as name-value pairs. Names are
+                compared case-insensitively against the four this exchange writes
+                itself and are refused where they collide. The credential rides
+                here where the integration's provider takes one.
+
+        Returns:
+            The response, whose ``status`` is never a redirect.
+
+        Raises:
+            TransportPinError: If ``origin`` is not a form this seam will pin, if
+                ``target`` is not an origin-form target, or if a header is not one
+                this exchange will write. Every one of these is raised **before**
+                a channel is opened, so nothing was disclosed.
+            HttpsRedirectRefusedError: If the far end answered ``3xx``.
+            HttpsResponseTooLargeError: If the response passed the bound.
+            MalformedHttpResponseError: If it was not an HTTP/1.1 response this
+                exchange will read.
+            TransportError: If the channel could not be opened, could not be
+                verified, or could not be continued (ADR-0191 §1). It is declared
+                rather than converted: what it says is what happened to the
+                *connection*, which is the capability's subject and not this
+                seam's to restate (#1604 names the omission this avoids).
+            CancelledError: Re-raised after the channel is released (ADR-0060 §1).
+        """
+        endpoint = parse_https_origin(origin)
+        request = self._request(endpoint, target=target, headers=headers)
+        channel = await self._transport.open_channel(endpoint)
+        try:
+            if not channel.is_secure:  # pragma: no cover — no conforming transport
+                # Read from the channel's own state rather than inferred from the
+                # endpoint having asked for implicit TLS, which is the distinction
+                # ADR-0191 §1 states `is_secure` exists for. Nothing has been
+                # written, so the credential in `headers` has not travelled.
+                #
+                # **Unreachable through a conforming transport, and stated rather
+                # than asserted for `_occurrence`'s reason** (``egress_binder.py``):
+                # ADR-0191 §1 requires ``open_channel`` to return a channel
+                # "already under TLS where ``endpoint.implicit_tls`` is ``True``",
+                # and :class:`~ai_assistant.testing.FakeOutboundTransport` refuses
+                # to hand out one that is not — so no case here can drive it. But
+                # the transport is an **injected** Protocol, a type checker cannot
+                # see the clause, and a guard whose failure mode is a credential on
+                # a cleartext channel is not one to leave to a contract somebody
+                # else implements.
+                msg = (
+                    "the channel to the origin is not under TLS, so nothing was "
+                    "written to it; this seam has no cleartext form"
+                )
+                raise TransportPinError(msg)
+            await channel.write(request)
+            return await self._response(channel)
+        finally:
+            await channel.close()
+
+    def _request(
+        self, endpoint: TransportEndpoint, *, target: str, headers: Sequence[tuple[str, str]]
+    ) -> bytes:
+        """Render the request line, the fields this exchange owns, and ``headers``.
+
+        **Every refusal here happens before a channel exists**, which is what makes
+        them refusals rather than outcomes. The character sets are the whole of the
+        injection defence: a target or a value carrying ``CR`` or ``LF`` would
+        write a request line or a field this seam did not compose, and the
+        credential travels in one of these values.
+
+        Args:
+            endpoint: The endpoint the channel will be opened to, which supplies
+                the ``Host`` field.
+            target: The origin-form request target.
+            headers: The caller's fields, in order.
+
+        Returns:
+            The request's octets, terminated by the empty line that ends the field
+            section. There is no body: this exchange sends none.
+
+        Raises:
+            TransportPinError: If the target or a field is not one this exchange
+                will write.
+        """
+        if not target.startswith("/") or any(
+            character not in _TARGET_CHARACTERS for character in target
+        ):
+            msg = (
+                "the request target is an origin-form path beginning with '/' and "
+                "holding only printable ASCII other than space; it is refused "
+                "rather than encoded, and the value is not named"
+            )
+            raise TransportPinError(msg)
+        lines = [f"GET {target} HTTP/1.1"]
+        authority = (
+            endpoint.host
+            if endpoint.port == _HTTPS_DEFAULT_PORT
+            else f"{endpoint.host}:{endpoint.port}"
+        )
+        lines.append(f"Host: {authority}")
+        # ADR-0191 §3's per-call channel, said to the far end as well as held to
+        # here: nothing is pooled, so a far end keeping the connection alive would
+        # be holding a route this seam has no intention of using again — and where
+        # the response declares no length, the close is what frames it.
+        lines.append("Connection: close")
+        for name, value in headers:
+            self._check_field(name, value)
+            lines.append(f"{name}: {value}")
+        return _CRLF.join(line.encode("ascii") for line in [*lines, "", ""])
+
+    def _check_field(self, name: str, value: str) -> None:
+        """Refuse a field this exchange will not write.
+
+        Args:
+            name: The field name, in any case.
+            value: The field value.
+
+        Raises:
+            TransportPinError: If the name is not an RFC 9110 §5.6.2 token, names
+                one of the four fields this exchange writes itself, or the value
+                holds a character outside :data:`_FIELD_VALUE_CHARACTERS`. **The
+                message names neither**: a value here may be the credential.
+        """
+        if not name or any(character not in _FIELD_NAME_CHARACTERS for character in name):
+            msg = "a request header's name is an RFC 9110 §5.6.2 token; the value is not named"
+            raise TransportPinError(msg)
+        if name.lower() in _RESERVED_FIELD_NAMES:
+            msg = (
+                f"a request header may not name one of the {len(_RESERVED_FIELD_NAMES)} "
+                f"fields this seam writes itself; the recipient and the framing are "
+                f"not a caller's to choose"
+            )
+            raise TransportPinError(msg)
+        if any(character not in _FIELD_VALUE_CHARACTERS for character in value):
+            msg = (
+                "a request header's value holds only printable ASCII, space and "
+                "tab; a line break would write a field this seam did not compose, "
+                "and the value is not named"
+            )
+            raise TransportPinError(msg)
+
+    async def _response(self, channel: ByteChannel) -> HttpsResponse:
+        """Read one response off ``channel``, under the bound.
+
+        Args:
+            channel: The channel the request was written to.
+
+        Returns:
+            The response.
+
+        Raises:
+            HttpsRedirectRefusedError: On a ``3xx``, raised before anything else is
+                read from the response and before any second request could exist.
+            HttpsResponseTooLargeError: If the response passed the bound.
+            MalformedHttpResponseError: If it is not a shape this exchange reads.
+            TransportError: If the connection could not be continued.
+        """
+        reader = _BoundedReader(channel, bound=self._bound)
+        status = _status_of(await reader.line())
+        if _MIN_REDIRECT <= status <= _MAX_REDIRECT:
+            msg = (
+                f"the far end answered {status}, a redirect; this seam follows none "
+                f"and opened no second channel (ADR-0231 §5)"
+            )
+            raise HttpsRedirectRefusedError(msg)
+        if status <= _MAX_INTERIM_STATUS:
+            msg = f"the far end answered the interim status {status}, which this seam does not read"
+            raise MalformedHttpResponseError(msg)
+        headers = await _headers_of(reader)
+        return HttpsResponse(status=status, headers=headers, body=await _body_of(reader, headers))
+
+
+def _status_of(line: bytes) -> int:
+    """The status code a status line carries (RFC 9112 §4).
+
+    Args:
+        line: The first line of the response, without its terminator.
+
+    Returns:
+        The code, in ``100..599``.
+
+    Raises:
+        MalformedHttpResponseError: If the line is not a status line this exchange
+            reads. The message names the defect and never the line: a far end's
+            octets are a third party's text, and a refusal reaches a log.
+    """
+    version, separator, rest = line.partition(b" ")
+    code = rest.partition(b" ")[0]
+    if not separator or version not in _HTTP_VERSIONS:
+        msg = "the far end's first line names no HTTP version this seam reads"
+        raise MalformedHttpResponseError(msg)
+    if len(code) != len(b"000") or not code.isascii() or not code.isdigit():
+        msg = "the far end's status line carries no three-digit status code"
+        raise MalformedHttpResponseError(msg)
+    status = int(code)
+    if not _MIN_STATUS <= status <= _MAX_STATUS:
+        msg = f"the far end answered {status}, which names no status class (RFC 9110 §15)"
+        raise MalformedHttpResponseError(msg)
+    return status
+
+
+async def _headers_of(reader: _BoundedReader) -> tuple[tuple[str, str], ...]:
+    """Every field of the header section, in order, names lowercased.
+
+    Args:
+        reader: The bounded reader, positioned after the status line.
+
+    Returns:
+        The fields. The empty line ending the section is consumed and not
+        returned.
+
+    Raises:
+        MalformedHttpResponseError: If a line is not a field, or carries an octet
+            outside ASCII. Obsolete line folding (a field continued on a line
+            beginning with space or tab) is refused with them: RFC 9112 §5
+            deprecates it, and reading it is the leniency response splitting is
+            built out of.
+        HttpsResponseTooLargeError: If reading the section passed the bound.
+        TransportError: If the connection could not be continued.
+    """
+    fields: list[tuple[str, str]] = []
+    while True:
+        line = await reader.line()
+        if not line:
+            return tuple(fields)
+        if not line.isascii():
+            msg = "the far end sent a header line carrying a non-ASCII octet"
+            raise MalformedHttpResponseError(msg)
+        name, separator, value = line.decode("ascii").partition(":")
+        if (
+            not separator
+            or not name
+            or any(character not in _FIELD_NAME_CHARACTERS for character in name)
+        ):
+            msg = "the far end sent a line that is not a header field"
+            raise MalformedHttpResponseError(msg)
+        fields.append((name.lower(), value.strip(" \t")))
+
+
+async def _body_of(reader: _BoundedReader, headers: tuple[tuple[str, str], ...]) -> bytes:
+    """The payload's octets, with any chunked framing removed.
+
+    Three framings, in RFC 9112 §6.3's own precedence and no other: a
+    ``Transfer-Encoding``, a ``Content-Length``, or the connection's close — which
+    is why the request says ``Connection: close``.
+
+    **A response declaring its length two ways is refused rather than resolved.**
+    Choosing between them is what request smuggling is, and a seam that picked one
+    would be picking the same one an intermediary might not.
+
+    Args:
+        reader: The bounded reader, positioned after the header section.
+        headers: The fields, as :func:`_headers_of` returned them.
+
+    Returns:
+        The octets.
+
+    Raises:
+        MalformedHttpResponseError: On two framings at once, a transfer coding
+            other than ``chunked``, a ``Content-Length`` that is not one decimal
+            number, or a stream ending inside any of them.
+        HttpsResponseTooLargeError: If reading it passed the bound.
+        TransportError: If the connection could not be continued.
+    """
+    coding = _one_of(headers, "transfer-encoding")
+    length = _one_of(headers, "content-length")
+    if coding is not None and length is not None:
+        msg = (
+            "the far end framed the response two ways at once, with both a "
+            "transfer coding and a content length; it is refused rather than "
+            "resolved in favour of either"
+        )
+        raise MalformedHttpResponseError(msg)
+    if coding is not None:
+        if coding.lower().strip() != "chunked":
+            msg = "the far end named a transfer coding this seam does not read"
+            raise MalformedHttpResponseError(msg)
+        return await _chunked(reader)
+    if length is not None:
+        if not length.isascii() or not length.isdigit():
+            msg = "the far end's content length is not a decimal number of octets"
+            raise MalformedHttpResponseError(msg)
+        return await reader.take(int(length))
+    return await reader.rest()
+
+
+def _one_of(headers: tuple[tuple[str, str], ...], name: str) -> str | None:
+    """The one value ``name`` carries, or ``None`` where it is absent.
+
+    Args:
+        headers: The fields, names already lowercased.
+        name: The field to read, lowercased.
+
+    Returns:
+        The value, or ``None``.
+
+    Raises:
+        MalformedHttpResponseError: If the field appears more than once. Both
+            fields this is used for frame the body, and a far end sending two of
+            either is the smuggling shape a client that took the first would let
+            through.
+    """
+    values = [value for field, value in headers if field == name]
+    if len(values) > 1:
+        msg = f"the far end sent more than one {name!r} field, which frames the response twice"
+        raise MalformedHttpResponseError(msg)
+    return values[0] if values else None
+
+
+async def _chunked(reader: _BoundedReader) -> bytes:
+    """Decode a chunked body, trailers and all (RFC 9112 §7.1).
+
+    Args:
+        reader: The bounded reader, positioned at the first chunk size.
+
+    Returns:
+        The chunks' octets, joined, with every size line, terminator and trailer
+        removed.
+
+    Raises:
+        MalformedHttpResponseError: On a chunk size that is not hexadecimal, a
+            chunk not followed by its terminator, or a stream ending inside
+            either.
+        HttpsResponseTooLargeError: If reading it passed the bound.
+        TransportError: If the connection could not be continued.
+    """
+    body = bytearray()
+    while True:
+        size = _chunk_size(await reader.line())
+        if size == 0:
+            break
+        body += await reader.take(size)
+        if await reader.line():
+            msg = "the far end did not terminate a chunk where its size said it ends"
+            raise MalformedHttpResponseError(msg)
+    # The trailer section, which RFC 9112 §7.1.2 allows and this seam discards:
+    # a trailer is a header field arriving after the body, and nothing here reads
+    # one. It is still *read*, because the octets are on the channel either way and
+    # the bound counts them.
+    while await reader.line():
+        pass
+    return bytes(body)
+
+
+def _chunk_size(line: bytes) -> int:
+    """The size a chunk-size line declares, in octets (RFC 9112 §7.1).
+
+    ``int(text, 16)`` is checked against rather than trusted: it accepts a sign,
+    surrounding whitespace and ``_`` separators, so ``int(b"1_0", 16)`` is 16 and a
+    far end could declare a size in a spelling no other reader agrees on. The
+    length is checked before the conversion, for :func:`_port`'s reason (#1147).
+
+    Args:
+        line: The chunk-size line, without its terminator. A chunk extension —
+            everything from the first ``;`` — is dropped, which RFC 9112 §7.1.1
+            allows a recipient to do.
+
+    Returns:
+        The size, in octets.
+
+    Raises:
+        MalformedHttpResponseError: If the line declares no hexadecimal size.
+    """
+    size = line.partition(b";")[0]
+    if (
+        not size
+        or len(size) > _MAX_CHUNK_SIZE_DIGITS
+        or any(chr(octet) not in _HEX_DIGITS for octet in size)
+    ):
+        msg = "the far end declared a chunk size that is not a hexadecimal number"
+        raise MalformedHttpResponseError(msg)
+    return int(size, 16)
+
+
 __all__ = [
+    "HTTPS_SCHEME",
     "IMPLICIT_TLS_SCHEME",
     "STARTTLS_SCHEME",
     "BoundCallChangedError",
     "EgressTransportError",
+    "HttpsExchange",
+    "HttpsExchangeError",
+    "HttpsRedirectRefusedError",
+    "HttpsResponse",
+    "HttpsResponseTooLargeError",
     "IndeterminateTransmissionError",
+    "MalformedHttpResponseError",
     "OutboundEmail",
     "SmtpEgressTransport",
     "StreamOutboundTransport",
     "TransportPinError",
+    "parse_https_origin",
     "parse_smtp_endpoint",
     "smtp_message",
 ]

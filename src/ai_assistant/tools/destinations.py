@@ -1,7 +1,8 @@
 """One canonicaliser per protocol, at the seam, refusing what it cannot prove.
 
-ADR-0148 §2 in code, for the one protocol email speaks. Every clause of that
-section reads on this module:
+ADR-0148 §2 in code, for each protocol this seam speaks: RFC 5321's mailbox, and
+— since ADR-0231 §8 — the HTTPS origin. Every clause of that section reads on
+this module:
 
 - **Per protocol, in one place.** :func:`canonicalise` dispatches on
   :class:`DestinationProtocol` through :data:`_CANONICALISERS`, which is the
@@ -20,7 +21,10 @@ section reads on this module:
   guessed at, which is §1's third clause and the fail-closed direction §2 argues
   for at length: "lowercasing an address whose local part the protocol treats as
   case-sensitive lets a grant for one address authorise another; provider
-  aliasing gives the inverse failure."
+  aliasing gives the inverse failure." ADR-0231 §8 states the same default for
+  HTTPS in its own terms — three equivalences, six named non-equivalences, and a
+  refusal for every form whose equivalence class this seam cannot state
+  truthfully.
 - **Both forms survive.** :class:`Destination` carries the supplied form beside
   the canonical one and neither is derivable from the other, which is §2's fourth
   clause and the **alias** case ADR-0148 §14 requires a test for.
@@ -70,6 +74,9 @@ class DestinationProtocol(StrEnum):
 
     SMTP = "smtp"
     """An RFC 5321 mailbox: ``local-part@domain``, the address email speaks."""
+
+    HTTPS = "https"
+    """An HTTPS **origin**: ``https://host:port``, and nothing below it (ADR-0231 §8)."""
 
 
 class DestinationCanonicalisationError(ToolError):
@@ -302,6 +309,254 @@ def _canonical_smtp_address(supplied: str) -> str:
     return f"{local_part}@{domain.lower()}"
 
 
+#: ADR-0231 §8's scheme, in the one case the canonical form renders it in. A
+#: supplied form naming any other scheme after ASCII case-folding is refused; no
+#: equivalence between ``http`` and ``https`` is established, and none is inferred.
+_HTTPS_SCHEME: Final = "https"
+
+#: The port a supplied form omitting one denotes (RFC 9110 §4.2.2). ADR-0231 §8's
+#: third and last equivalence: "one form omits the port where the other states
+#: ``443``". It is rendered explicitly in every canonical form, so the two spellings
+#: of the default compare equal as text and no comparison has to know about it.
+_HTTPS_DEFAULT_PORT: Final = 443
+
+#: The characters ADR-0231 §8 admits in a host: "ASCII letters, digits, ``-`` and
+#: ``.``". Everything else is refused rather than mapped — an internationalised host
+#: has an IDNA answer that ADR has not evaluated, a percent-encoded octet has a
+#: decoded form whose equivalence is unstated, and an IPv6 literal is outside this
+#: set entirely, which §8 says in terms is this clause reaching it.
+_HOST_CHARACTERS: Final = frozenset(string.ascii_letters + string.digits + "-.")
+
+#: ADR-0231 §8's total host bound, in characters. The set above is ASCII, so a
+#: character and an octet are the same unit by the time this is compared.
+_MAX_HOST_CHARACTERS: Final = 253
+
+#: The highest TCP port, and the digits it takes. Checked as a length **before** the
+#: conversion for ``tools/egress.py``'s ``_port`` reason: CPython refuses ``int()``
+#: on a string of more than 4300 digits, so a port of five thousand digits would
+#: otherwise pass every character test and raise out of the conversion (#1147).
+_MAX_HTTPS_PORT: Final = 65535
+_MAX_HTTPS_PORT_DIGITS: Final = len(str(_MAX_HTTPS_PORT))
+
+#: ASCII hexadecimal digits, for the ``0x``-prefixed half of §8's number rule.
+_HEX_DIGITS: Final = frozenset(string.hexdigits)
+
+
+def _split_https_origin(supplied: str) -> tuple[str, str | None]:
+    """Split an origin into its host and the port it stated, or refuse the form.
+
+    Everything refused here is refused *before* the two halves exist, so no later
+    check has to reason about a form that is not an origin at all.
+
+    **A path is refused rather than dropped, including the empty-selecting ``/``.**
+    ADR-0231 §8 fixes the equivalences this protocol establishes at exactly three
+    — scheme case, host case, and an omitted port against ``443`` — and says
+    "every other difference makes two destinations". Reading ``https://example.com/``
+    as the same recipient as ``https://example.com`` would be a fourth, so the
+    trailing separator is refused with every other path rather than stripped. §18's
+    test 10 anticipates exactly that ordering when it asks for
+    ``https://example.com:`` "and its trailing-slash form **where the parse reaches
+    one**": a conforming canonicaliser may refuse that form on its path or on its
+    empty port, and it is refused here on its path.
+
+    Args:
+        supplied: The argument value, exactly as it was given.
+
+    Returns:
+        The host, and the port as it was written, or ``None`` where the form wrote
+        no port at all. ``""`` is never returned: a stated separator with nothing
+        after it is refused here rather than defaulted, which is ADR-0231 §8's
+        "states a port separator with no port after it, which is **not** an omitted
+        port" and #1147's shape one protocol over.
+
+    Raises:
+        DestinationCanonicalisationError: If ``supplied`` is not ``https://`` plus
+            an authority carrying a host and at most one written port.
+    """
+    scheme, separator, authority = supplied.partition("://")
+    if not separator or not scheme.isascii() or scheme.lower() != _HTTPS_SCHEME:
+        # ``isascii`` before ``lower``: a non-ASCII scheme has no ASCII case-folding,
+        # and ``str.lower`` maps some code points into ASCII, which would admit a
+        # spelling that compares unequal to `https` as text everywhere else.
+        raise _refuse(
+            "an HTTPS destination is written 'https://host' or 'https://host:port'; "
+            "no other scheme is canonicalised here, and no equivalence between "
+            "'http' and 'https' is established (ADR-0231 §8)"
+        )
+    if any(character in authority for character in "@/?#"):
+        raise _refuse(
+            "an HTTPS destination is an origin: it carries no userinfo, no path, "
+            "no query and no fragment, and a path-bearing form is refused rather "
+            "than stripped (ADR-0231 §8)"
+        )
+    host, colon, port_text = authority.rpartition(":")
+    if not colon:
+        # ``rpartition`` puts the whole authority in its tail when there is no
+        # separator, so the separator is the only thing telling "no port was
+        # written" apart from "a port was written and left empty" (#1147).
+        host = authority
+    if not host:
+        raise _refuse("an HTTPS destination has a non-empty host (ADR-0231 §8)")
+    return host, port_text if colon else None
+
+
+def _check_https_host(host: str) -> None:
+    """Require ADR-0231 §8's host grammar, refusing every IP literal notation.
+
+    The label grammar and the number rule are two checks rather than one because
+    the label grammar admits the whole abbreviated IP-literal family while catching
+    none of it: ``127.1``, ``2130706433`` and ``0x7f000001`` each satisfy every
+    label clause, and each is resolved to ``127.0.0.1`` by the same stack
+    ``asyncio.open_connection`` sits on. §8 adopts the URL standard's own "ends in a
+    number" rule for that reason, and states it as a decidable test rather than a
+    judgement — so it is written out here in exactly its own terms.
+
+    Args:
+        host: The authority's host half, unaltered.
+
+    Raises:
+        DestinationCanonicalisationError: If it is not a sequence of conforming
+            labels within §8's bounds, or its rightmost label is a number.
+    """
+    if len(host) > _MAX_HOST_CHARACTERS:
+        raise _refuse(f"an HTTPS host is at most {_MAX_HOST_CHARACTERS} characters (ADR-0231 §8)")
+    if any(character not in _HOST_CHARACTERS for character in host):
+        # Non-ASCII, percent-encoding, ``_``, a control character and every bracketed
+        # IPv6 form land here together. §8 refuses each because the equivalence class
+        # it would need to assert is one this seam cannot state truthfully.
+        raise _refuse(
+            "an HTTPS host holds only ASCII letters, digits, '-' and '.'; an "
+            "internationalised, percent-encoded or bracketed form is refused "
+            "rather than mapped (ADR-0231 §8)"
+        )
+    labels = host.split(".")
+    for label in labels:
+        # A leading, trailing or doubled dot lands here as an empty label, and is
+        # refused rather than trimmed: the root-relative form's equivalence to the
+        # bare one is a resolver question, not this seam's (ADR-0231 §8).
+        if not label:
+            raise _refuse(
+                "an HTTPS host is non-empty labels separated by single dots, with "
+                "no leading or trailing dot; it is refused rather than trimmed "
+                "(ADR-0231 §8)"
+            )
+        if len(label) > _MAX_LABEL_OCTETS:
+            raise _refuse(f"an HTTPS host label is at most {_MAX_LABEL_OCTETS} characters")
+        if label.startswith("-") or label.endswith("-"):
+            raise _refuse("an HTTPS host label neither begins nor ends with '-' (ADR-0231 §8)")
+    if _is_number(labels[-1]):
+        raise _refuse(
+            "an HTTPS host whose rightmost label is a number is an IP literal and "
+            "is refused: its equivalence class belongs to the IP stack, and a "
+            "registrable name never ends in one (ADR-0231 §8)"
+        )
+
+
+def _is_number(label: str) -> bool:
+    """Whether ``label`` is ADR-0231 §8's *number*, which makes a host an IP literal.
+
+    §8 fixes the test: "one or more ASCII decimal digits, or ``0x``/``0X`` followed
+    by one or more ASCII hexadecimal digits". A bare ``0x`` is therefore **not** one
+    — the clause says "one or more" — and that is the ADR's own line rather than a
+    reading of it.
+
+    Args:
+        label: The host's rightmost label, already known to be non-empty and to
+            hold only characters :data:`_HOST_CHARACTERS` admits.
+
+    Returns:
+        Whether it is a number in either notation.
+    """
+    if all(character in string.digits for character in label):
+        return True
+    return (
+        len(label) > len("0x")
+        and label[:2] in {"0x", "0X"}
+        and all(character in _HEX_DIGITS for character in label[2:])
+    )
+
+
+def _https_port(port_text: str | None) -> int:
+    """Read the port the origin wrote, or ADR-0231 §8's default.
+
+    The grammar is ``tools/egress.py``'s ``_port``, one protocol over and for its
+    reasons (#1147): ``isdigit()`` is ``True`` for characters ``int()`` cannot read
+    and for digits in another script that it reads perfectly well, so a port written
+    as two ARABIC-INDIC DIGIT FIVE would otherwise be *accepted* as 55 — a spelling
+    comparing unequal to ``:55`` as text while opening the same port. A leading zero
+    is that same fold inside ASCII, so ``:0443`` is refused rather than read as 443:
+    this grammar normalises a port exactly as much as §8 normalises a host, which is
+    not at all.
+
+    Args:
+        port_text: The text after the authority's last colon, or ``None`` where the
+            authority carried no colon at all.
+
+    Returns:
+        A port in ``1..65535``.
+
+    Raises:
+        DestinationCanonicalisationError: If a port was written and is not one to
+            five ASCII decimal digits without a leading zero denoting a value in
+            ``1..65535``.
+    """
+    if port_text is None:
+        return _HTTPS_DEFAULT_PORT
+    written_as_a_port_number = (
+        port_text.isascii()
+        and port_text.isdigit()
+        and len(port_text) <= _MAX_HTTPS_PORT_DIGITS
+        and not port_text.startswith("0")
+    )
+    if not written_as_a_port_number or not 1 <= int(port_text) <= _MAX_HTTPS_PORT:
+        raise _refuse(
+            "an HTTPS destination's port is one to five decimal digits with no "
+            "leading zero, naming a value in 1..65535; an empty, unreadable or "
+            "out-of-range one is refused rather than defaulted (ADR-0231 §8)"
+        )
+    return int(port_text)
+
+
+def _canonical_https_origin(supplied: str) -> str:
+    """Return the canonical form of an HTTPS origin: ``https://<host>:<port>``.
+
+    ADR-0231 §8's canonical form, "always all three, with the port rendered
+    explicitly even where the supplied form omitted it", carrying no path, no
+    query, no fragment, no userinfo and no trailing separator. Two supplied forms
+    denote one recipient when and only when this function returns one string for
+    both.
+
+    **Two transformations and no others**: the scheme is rendered in the one case
+    §8 states, and the host is lowered. Both are the ASCII case-folding §8's first
+    two equivalences establish, and ``str.lower`` rather than ``str.casefold`` for
+    :func:`_canonical_smtp_address`'s reason — the host is ASCII by the time this
+    runs, where the two agree, and ``casefold`` folds on grounds the protocol does
+    not supply. The port is *rendered* rather than transformed: an omitted one is
+    written out as §8's third equivalence, and a written one is refused unless it
+    is already in the one spelling :func:`_https_port` admits.
+
+    **The origin, and nothing below it.** ADR-0148 §2 makes a destination the
+    semantic recipient the arguments select, and for HTTPS the recipient **is** the
+    origin: the party that receives the bytes and holds the credential's audience.
+    A destination carrying a path would make a grant range over a value the request
+    composes per call, so two calls to one provider would be two recipients — which
+    is a false statement about who received the query (ADR-0231 §8).
+
+    Args:
+        supplied: The argument value, exactly as it was given.
+
+    Returns:
+        ``https://lowered-host:port``.
+
+    Raises:
+        DestinationCanonicalisationError: If ``supplied`` is not a form this seam
+            will canonicalise; see the checks above for each ground.
+    """
+    host, port_text = _split_https_origin(supplied)
+    _check_https_host(host)
+    return f"{_HTTPS_SCHEME}://{host.lower()}:{_https_port(port_text)}"
+
+
 #: The whole of the seam's canonicalisation surface: one entry per protocol, and
 #: no registration function beside it. ADR-0148 §2's sixth clause is a property of
 #: this mapping being the only one — "#83's reason applied on the destination
@@ -309,6 +564,7 @@ def _canonical_smtp_address(supplied: str) -> str:
 #: mean different things in different tools with no test detecting it.
 _CANONICALISERS: Final[Mapping[DestinationProtocol, Callable[[str], str]]] = {
     DestinationProtocol.SMTP: _canonical_smtp_address,
+    DestinationProtocol.HTTPS: _canonical_https_origin,
 }
 
 

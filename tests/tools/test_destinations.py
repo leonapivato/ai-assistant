@@ -1,4 +1,4 @@
-"""The SMTP canonicaliser: one rule applied, everything else refused.
+"""The seam's canonicalisers: one rule applied per protocol, everything else refused.
 
 ADR-0148 §2's exactness default is the security content of the whole section, and
 these tests are stated over the two directions it names (#93 item 3): "lowercasing
@@ -7,6 +7,13 @@ one address authorise another; provider aliasing gives the inverse failure." So
 the file asserts *both* that the domain folds and that the local part does not,
 and treats every form whose equivalence RFC 5321 does not establish as a refusal
 rather than as a case somebody may later make work.
+
+**The HTTPS half is the same discipline under ADR-0231 §8**, which states the
+three equivalences that protocol establishes, six it does not, and a refusal for
+every form whose equivalence class it cannot state truthfully. §18's test 10 is
+what the second half of this file is written against, form by form; what belongs
+to the *exchange* rather than to the canonicaliser — that a refused origin opens
+no channel — is asserted in ``test_https_exchange.py`` instead.
 """
 
 from __future__ import annotations
@@ -46,6 +53,10 @@ _PERMITTED_IMPORTS = frozenset(
 
 def _smtp(supplied: str) -> Destination:
     return canonicalise(DestinationProtocol.SMTP, supplied)
+
+
+def _https(supplied: str) -> Destination:
+    return canonicalise(DestinationProtocol.HTTPS, supplied)
 
 
 def test_the_domain_folds_and_the_local_part_does_not() -> None:
@@ -276,3 +287,204 @@ def test_the_canonicaliser_imports_nothing_that_could_perform_io() -> None:
             imported.add(node.module)
 
     assert imported <= _PERMITTED_IMPORTS, sorted(imported - _PERMITTED_IMPORTS)
+
+
+# --------------------------------------------------------------------------- #
+# ADR-0231 §8 — the HTTPS origin                                                #
+# --------------------------------------------------------------------------- #
+
+
+def test_the_scheme_and_the_host_fold_and_the_default_port_is_written_out() -> None:
+    """ADR-0231 §18's test 10, first half: all three equivalences in one assertion.
+
+    "``HTTPS://Example.COM`` and ``https://example.com:443`` canonicalise
+    identically" — which is the scheme's ASCII case, the host's ASCII case, and an
+    omitted port against a stated ``443``, the whole of what this protocol
+    establishes.
+    """
+    folded = _https("HTTPS://Example.COM")
+
+    assert folded.canonical == "https://example.com:443"
+    assert folded.canonical == _https("https://example.com:443").canonical
+    assert folded.canonical == _https("https://example.com").canonical
+
+
+def test_the_supplied_form_survives_beside_the_canonical_one() -> None:
+    """ADR-0148 §2's fourth clause, which ADR-0231 §8 does not move.
+
+    An origin written with its default port and one written without are one
+    recipient and two *forms*, and the occurrence carries both — reconstructing
+    either from the other is what ADR-0148 §14 names as a failure.
+    """
+    stated = _https("https://Example.com:443")
+
+    assert (stated.supplied, stated.canonical) == (
+        "https://Example.com:443",
+        "https://example.com:443",
+    )
+
+
+def test_a_stated_non_default_port_survives_into_the_canonical_form() -> None:
+    """The port is rendered, never normalised: only ``443``'s omission is an equivalence."""
+    assert _https("https://example.com:8443").canonical == "https://example.com:8443"
+    assert _https("https://example.com:8443").canonical != _https("https://example.com").canonical
+
+
+@pytest.mark.parametrize(
+    "supplied",
+    [
+        pytest.param("http://example.com", id="a-scheme-other-than-https"),
+        pytest.param("HTTP://example.com", id="the-same-scheme-in-another-case"),
+        pytest.param("ftp://example.com", id="a-scheme-with-no-canonicaliser"),
+        pytest.param("example.com", id="no-scheme-at-all"),
+        pytest.param("https:/example.com", id="a-scheme-with-one-slash"),
+        pytest.param("https://user@example.com", id="userinfo"),
+        pytest.param("https://user:pass@example.com", id="userinfo-with-a-password"),
+        pytest.param("https://example.com?q=1", id="a-query"),
+        pytest.param("https://example.com#fragment", id="a-fragment"),
+        pytest.param("https://", id="an-empty-host"),
+        pytest.param("https://:443", id="an-empty-host-with-a-port"),
+        pytest.param("https://exämple.com", id="an-internationalised-host"),
+        pytest.param("https://xn--exmple-cua.com/", id="an-a-label-with-a-path"),
+        pytest.param("https://ex%61mple.com", id="a-percent-encoded-octet"),
+        pytest.param("https://example.com.", id="a-trailing-dot"),
+        pytest.param("https://.example.com", id="a-leading-dot"),
+        pytest.param("https://example..com", id="a-doubled-dot"),
+        pytest.param("https://exa_mple.com", id="an-underscore"),
+        pytest.param("https://example.com\x00.evil.com", id="a-control-character"),
+        pytest.param("https:// example.com", id="a-space"),
+        pytest.param("https://-example.com", id="a-label-beginning-with-a-hyphen"),
+        pytest.param("https://example-.com", id="a-label-ending-with-a-hyphen"),
+        pytest.param("https://[::1]", id="an-ipv6-literal"),
+        pytest.param("https://[::1]:443", id="an-ipv6-literal-with-a-port"),
+        pytest.param("https://example.com:", id="a-port-separator-with-no-port"),
+        pytest.param("https://example.com:/", id="the-same-with-a-trailing-slash"),
+        pytest.param("https://example.com:0443", id="a-port-with-a-leading-zero"),
+        pytest.param("https://example.com:https", id="a-port-that-is-not-a-number"),
+        pytest.param("https://example.com:٤٤٣", id="a-port-in-another-script"),
+        pytest.param("https://example.com:0", id="a-port-below-the-range"),
+        pytest.param("https://example.com:65536", id="a-port-above-the-range"),
+        pytest.param("https://example.com:443:8443", id="two-ports"),
+    ],
+)
+def test_an_https_form_whose_equivalence_is_unproven_has_no_canonical_form(supplied: str) -> None:
+    """ADR-0231 §18's test 10, one assertion per form the ADR names.
+
+    Every one of these is a form whose equivalence class §8 declines to state: an
+    internationalised host has an IDNA answer that ADR has not evaluated, a
+    trailing dot is a resolver question, a percent-encoded octet has a decoded form
+    nothing here establishes an equivalence with, and ``http`` is a different
+    protocol. Refusing is the direction ADR-0148 §2 argues for at length, and the
+    failure that matters is two forms denoting different recipients being read as
+    one.
+    """
+    with pytest.raises(DestinationCanonicalisationError):
+        _https(supplied)
+
+
+@pytest.mark.parametrize(
+    "supplied",
+    [
+        pytest.param("https://127.0.0.1", id="the-dotted-quad-nobody-writes"),
+        pytest.param("https://127.1", id="the-abbreviated-form"),
+        pytest.param("https://2130706433", id="the-whole-address-as-one-decimal"),
+        pytest.param("https://0x7f000001", id="the-whole-address-as-one-hexadecimal"),
+        pytest.param("https://0X7F000001", id="the-same-in-upper-case"),
+        pytest.param("https://192.168.0.1", id="a-private-address"),
+        pytest.param("https://example.com.1", id="a-name-ending-in-a-number"),
+    ],
+)
+def test_a_host_ending_in_a_number_is_an_ip_literal_and_is_refused(supplied: str) -> None:
+    """ADR-0231 §8's decidable test, over the four spellings it names by hand.
+
+    The label grammar admits the whole abbreviated family while catching none of
+    it, and "each is resolved to ``127.0.0.1`` by the same stack
+    ``asyncio.open_connection`` sits on, so a canonicaliser tested only against
+    ``127.0.0.1`` refuses the one spelling nobody writes and admits the three an
+    attacker would". An implementation testing for four dotted decimal octets
+    passes the first arm and fails the next three.
+    """
+    with pytest.raises(DestinationCanonicalisationError):
+        _https(supplied)
+
+
+@pytest.mark.parametrize(
+    ("supplied", "why"),
+    [
+        pytest.param(f"https://{'a' * 63}.example.com", "a label of exactly 63", id="label-63"),
+        pytest.param(
+            f"https://{'a' * 61}.{'b' * 61}.{'c' * 61}.{'d' * 61}.com",
+            "a host of exactly 251",
+            id="host-under-253",
+        ),
+        pytest.param("https://example.com:1", "the lowest port", id="port-1"),
+        pytest.param("https://example.com:65535", "the highest port", id="port-65535"),
+        pytest.param("https://0x", "0x with no hexadecimal digit after it", id="a-bare-0x"),
+    ],
+)
+def test_the_boundary_forms_adr_0231_admits_are_admitted(supplied: str, why: str) -> None:
+    """The other side of every bound, so no refusal is one form too wide.
+
+    ``https://0x`` is here because it is the boundary §8 states in its own words —
+    "``0x``/``0X`` followed by **one or more** ASCII hexadecimal digits" — and a
+    canonicaliser refusing it would be refusing a form the ratified test admits,
+    which is a rule this seam did not write (issue filed alongside this change).
+    """
+    assert _https(supplied).canonical.startswith("https://"), why
+
+
+@pytest.mark.parametrize(
+    "supplied",
+    [
+        pytest.param(f"https://{'a' * 64}.example.com", id="a-label-of-64"),
+        pytest.param(
+            f"https://{'a' * 61}.{'b' * 61}.{'c' * 61}.{'d' * 61}.{'e' * 61}.com",
+            id="a-host-over-253",
+        ),
+        pytest.param("https://example.com:655360", id="a-port-of-six-digits"),
+    ],
+)
+def test_the_boundary_forms_adr_0231_refuses_are_refused(supplied: str) -> None:
+    """The pairs above, one over each bound, which fail a comparison the wrong way round."""
+    with pytest.raises(DestinationCanonicalisationError):
+        _https(supplied)
+
+
+@pytest.mark.parametrize("supplied", ["https://example.com/", "https://example.com/a"])
+def test_a_path_bearing_form_is_refused_and_yields_no_destination(supplied: str) -> None:
+    """ADR-0231 §18's test 10, last paragraph, and the reason it is stated that way.
+
+    "``https://example.com/a`` and ``https://example.com/b`` are each refused
+    independently, and no test asserts that they canonicalise to anything — an
+    assertion that they were 'one destination' would drive an implementation to
+    strip the path, which §8 forbids in terms."
+
+    The bare trailing slash is refused with them, and that is §8's own arithmetic
+    rather than an extra rule: the equivalences this protocol establishes are
+    **exactly three**, and reading ``https://example.com/`` as the same recipient
+    as ``https://example.com`` would be a fourth.
+    """
+    with pytest.raises(DestinationCanonicalisationError):
+        _https(supplied)
+
+
+def test_two_paths_under_one_origin_are_not_one_destination() -> None:
+    """The pair, asserted as two refusals rather than as one canonical form."""
+    for supplied in ("https://example.com/a", "https://example.com/b"):
+        with pytest.raises(DestinationCanonicalisationError):
+            _https(supplied)
+
+
+def test_no_https_refusal_renders_the_form_it_refused() -> None:
+    """This module's own discipline, which an origin does not escape.
+
+    An origin is operator configuration rather than a mailbox, but a refusal
+    message still reaches a log and the value still arrived from somewhere: the
+    rule this module states for an address is stated over every value it refuses.
+    """
+    marker = "distinctive-host-name"
+
+    with pytest.raises(DestinationCanonicalisationError) as raised:
+        _https(f"https://{marker}_x.example.com")
+
+    assert marker not in str(raised.value)
