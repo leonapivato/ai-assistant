@@ -2630,11 +2630,23 @@ async def _store_device_enrolment(hub_identity: str, read_credential: Callable[[
     for where standard input is not a terminal — and a refusal raised outside the
     ``try`` would leave as a traceback instead of a rendered line.
 
-    **A refusal, not a failed stream.** An ``OSError`` from the descriptor itself is
-    not caught here, and is not caught by :func:`_drive_connect` or
-    :func:`_drive_reconnect` either — nothing was read, so it is not a statement
-    about the value and the refusals above have nothing to say about it. Deciding
-    what all three surfaces render for it is #1940.
+    **A refusal, not a failed stream** (#1940). An ``OSError`` from the descriptor
+    itself — a stream that errors mid-read, a pipe whose peer died as ``EIO``, a
+    controlling terminal ``getpass`` cannot open — is a statement about the *read*
+    and about nothing else: nothing arrived, so nothing about a value is known.
+    Every surface that takes a credential now catches it — here, and in
+    :func:`_drive_connect` and :func:`_drive_reconnect` — and all three render it
+    the one way this boundary already renders every failure it catches,
+    :func:`_render_error`'s "Error:", carrying the errno the platform gave.
+
+    **The other rendering is refused, and by the same reasoning that chose this
+    one.** :func:`_render_unusable_credential` says a credential cannot be used,
+    which asserts something about a value that was never read, and its safety rests
+    on ADR-0125 §6 governing what a *refusal of a value* may say — a guarantee that
+    has nothing to reach when the refusal is the stream's. A third sentence of its
+    own was available and is not taken: #1146 spent a change removing exactly this
+    surface's per-command divergence, and one failed read means one thing at all
+    three commands.
     """
     try:
         credential = read_credential()
@@ -2643,7 +2655,7 @@ async def _store_device_enrolment(hub_identity: str, read_credential: Callable[[
         await store_enrolment(
             _enrolment_secrets(settings), hub_identity=hub_identity, credential=credential
         )
-    except (AssistantError, TransportError, ValueError) as exc:
+    except (AssistantError, TransportError, ValueError, OSError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
     console.print(f"[green]Enrolled.[/] This device is now bound to hub {_safe(hub_identity)}.")
@@ -3637,6 +3649,10 @@ def _prompt_for_credential() -> str:
     Raises:
         ValueError: If standard input is not a terminal. The message names the flag
             to use instead, and nothing about any value.
+        OSError: If the terminal itself fails — ``getpass`` opens ``/dev/tty`` and
+            reads from it, and neither is guaranteed to succeed. Nothing was read,
+            so it is not a refusal; every caller renders it as the failed read it
+            is (:func:`_store_device_enrolment`, #1940).
     """
     if not sys.stdin.isatty():
         msg = (
@@ -3704,6 +3720,10 @@ def _credential_from_stdin() -> str:
             admissible credential can occupy. The message names the bound, which
             ADR-0125 §6 permits, and neither the value nor its length, which it
             does not.
+        OSError: If the descriptor itself fails — a stream that errors mid-read, a
+            pipe whose peer died in a way the platform reports as ``EIO``, a closed
+            stream. Nothing was read, so it is not a refusal; every caller renders
+            it as the failed read it is (:func:`_store_device_enrolment`, #1940).
     """
     chunk = sys.stdin.buffer.readline(_CREDENTIAL_READ_LIMIT)
     if len(chunk) >= _CREDENTIAL_READ_LIMIT and not chunk.endswith(b"\n"):
@@ -4945,6 +4965,12 @@ async def _drive_connect(
     except ValueError as exc:
         _render_unusable_credential(exc)
         return _EXIT_ERROR
+    except OSError as exc:
+        # A failed read is not a refused value, and the two do not share a sentence:
+        # :func:`_store_device_enrolment` holds the reasoning for all three surfaces
+        # and this is the rendering it settles on (#1940).
+        _render_error(exc)
+        return _EXIT_ERROR
 
     try:
         connected = await engine.connect_account(identity=identity, credential=credential)
@@ -4984,6 +5010,11 @@ async def _drive_reconnect(
         credential = _credential(read_credential())
     except ValueError as exc:
         _render_unusable_credential(exc)
+        return _EXIT_ERROR
+    except OSError as exc:
+        # :func:`_drive_connect`'s arm, for :func:`_store_device_enrolment`'s reason
+        # (#1940).
+        _render_error(exc)
         return _EXIT_ERROR
 
     try:

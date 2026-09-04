@@ -14,6 +14,7 @@ import errno
 import re
 import shlex
 import socket
+import sys
 from datetime import UTC, datetime, timedelta
 from inspect import getsource, isfunction, unwrap
 from io import StringIO
@@ -1791,6 +1792,169 @@ def test_ask_rejects_an_unusable_timeout(bad: str, monkeypatch: pytest.MonkeyPat
 
     assert result.exit_code == 2  # Typer's usage-error code, before the engine is built
     assert opened == []
+
+
+# --- a failed credential read is not a refused credential (#1940) ------------
+
+
+class _FailingStdin:
+    """A standard input whose descriptor fails at the read (#1940).
+
+    The failure ``_credential_from_stdin``'s bounded ``readline`` is exposed to and
+    that no refusal describes: a stream that errors mid-read, a pipe whose peer died
+    in a way the platform reports as ``EIO``, a closed stream. It answers with a
+    real ``OSError`` rather than a stand-in exception, because the whole question
+    the three cases below settle is which ``except`` arm that class lands in.
+
+    ``isatty`` is answered rather than inherited so the same stub serves the hidden
+    prompt, whose guard is a question about the terminal and not about the read.
+    """
+
+    def __init__(self, *, tty: bool = False) -> None:
+        """Create the stub, optionally claiming to be a terminal."""
+        self._tty = tty
+        self.buffer = self
+
+    def isatty(self) -> bool:
+        """Whether ``_prompt_for_credential`` sees a terminal here."""
+        return self._tty
+
+    def readline(self, limit: int | None = None) -> bytes:
+        """Fail the way a descriptor does, having read nothing."""
+        raise OSError(errno.EIO, "Input/output error")
+
+
+def test_a_credential_read_that_fails_is_not_translated_into_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reader lets an ``OSError`` through as itself, and that is the design.
+
+    Translating it into the ``ValueError`` the three surfaces already catch would
+    make this one change instead of three — and would route ``connect`` and
+    ``reconnect`` through ``_render_unusable_credential``, whose sentence asserts
+    that a credential cannot be used. Nothing was read, so there is no credential to
+    say that about, and the renderer's own safety argument is ADR-0125 §6's
+    guarantee about the refusal *of a value*, which has nothing to reach here.
+
+    So the class the boundaries branch on is the class the platform raised, and this
+    pins the reader against a well-meant later translation.
+    """
+    monkeypatch.setattr(sys, "stdin", _FailingStdin())
+
+    with pytest.raises(OSError, match="Input/output error"):
+        cli._credential_from_stdin()
+
+
+async def test_connect_renders_a_failed_credential_read_rather_than_a_traceback(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``connect``'s read failure is a rendered line and a non-zero exit (#1940).
+
+    ADR-0042 §7 makes surfacing errors and setting a meaningful exit code the
+    adapter's own responsibility, and before this the ``OSError`` walked out of
+    ``_drive_connect`` past a boundary that caught only ``ValueError``.
+
+    The two negative assertions are the finding's actual content. Nothing may be
+    sent, because the credential never arrived; and the rendering may not be
+    ``_render_unusable_credential``'s, because "that credential cannot be used"
+    would attribute a descriptor fault to a value nobody read.
+    """
+    engine = FakeAssistantEngine()
+    _wire_recording_opens(monkeypatch, engine)
+    monkeypatch.setattr(sys, "stdin", _FailingStdin())
+
+    code = await cli._connect_account("me@example.com", credential_stdin=True)
+
+    assert code == 1
+    rendered = _flat(output.getvalue())
+    assert "Error:" in rendered
+    assert "Input/output error" in rendered
+    assert "cannot be used" not in rendered
+    assert engine.calls == []
+
+
+async def test_reconnect_renders_a_failed_credential_read_rather_than_a_traceback(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``reconnect``'s read failure lands the same way, on the same reasoning.
+
+    It is the third surface of #1940's finding and it is asserted separately rather
+    than parametrised with ``connect``, because the two boundaries are separate
+    code: ADR-0151 §1 refused to fold the operations into one method, and the
+    duplication of the arm is the thing a test has to see.
+    """
+    engine = FakeAssistantEngine()
+    _wire_recording_opens(monkeypatch, engine)
+    monkeypatch.setattr(sys, "stdin", _FailingStdin())
+
+    code = await cli._reprovision_account(
+        "conn-1", identity="me@example.com", credential_stdin=True
+    )
+
+    assert code == 1
+    rendered = _flat(output.getvalue())
+    assert "Error:" in rendered
+    assert "Input/output error" in rendered
+    assert "cannot be used" not in rendered
+    assert engine.calls == []
+
+
+async def test_device_enrol_renders_a_failed_credential_read_rather_than_a_traceback(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The enrolment boundary catches it too, and it already had the vocabulary.
+
+    ``device enrol`` renders every failure it catches through ``_render_error``, so
+    the one message the three surfaces settle on is the one this command was already
+    giving for a refused value — no fourth sentence was invented for the case.
+
+    Nothing is wired: the read is the first statement inside the boundary, so a
+    failing one is answered before any setting is loaded or any keyring is opened,
+    and asserting that requires providing neither.
+    """
+    monkeypatch.setattr(sys, "stdin", _FailingStdin())
+
+    code = await cli._store_device_enrolment("hub-abcdefgh", cli._credential_from_stdin)
+
+    assert code == 1
+    rendered = _flat(output.getvalue())
+    assert "Error:" in rendered
+    assert "Input/output error" in rendered
+    assert "Enrolled" not in rendered
+
+
+async def test_a_terminal_that_fails_at_the_hidden_prompt_takes_the_same_arm(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other reader's ``OSError`` is the same event and takes the same arm.
+
+    ``_prompt_for_credential`` reaches ``getpass``, which opens the controlling
+    terminal and reads from it; neither is guaranteed to succeed, and a container or
+    a revoked ``/dev/tty`` produces an ``OSError`` from a reader that never touches
+    ``sys.stdin.buffer``. The arm is on the exception's class rather than on which
+    reader was chosen, which is what makes one test of that claim enough.
+
+    The terminal is stubbed at ``typer.prompt`` — the read itself — rather than at
+    ``_prompt_for_credential``, so the reader's own non-terminal guard still runs and
+    the case remains the one where a terminal exists and fails.
+    """
+    engine = FakeAssistantEngine()
+    _wire_recording_opens(monkeypatch, engine)
+    monkeypatch.setattr(sys, "stdin", _FailingStdin(tty=True))
+
+    def _no_terminal(*_args: object, **_kwargs: object) -> str:
+        raise OSError(errno.ENXIO, "No such device or address")
+
+    monkeypatch.setattr(typer, "prompt", _no_terminal)
+
+    code = await cli._connect_account("me@example.com", credential_stdin=False)
+
+    assert code == 1
+    rendered = _flat(output.getvalue())
+    assert "Error:" in rendered
+    assert "No such device or address" in rendered
+    assert "cannot be used" not in rendered
+    assert engine.calls == []
 
 
 # --- learn: the correction leg (ADR-0042 §3, §6) ------------------------
