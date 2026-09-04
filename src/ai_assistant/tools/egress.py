@@ -2097,6 +2097,14 @@ _MAX_STATUS: Final = 599
 _MIN_REDIRECT: Final = 300
 _MAX_REDIRECT: Final = 399
 
+#: RFC 9112 §6.3: a response with one of these statuses "is always terminated by
+#: the first empty line after the header fields, **regardless of the header fields
+#: present** in the message". A ``1xx`` is in that list too and never reaches the
+#: body reader, since :meth:`HttpsExchange._response` refuses an interim status
+#: outright, so these two are the whole of it here. Adversarial review found a
+#: ``204`` carrying a ``Content-Length`` being read as provider payload on round 3.
+_NO_CONTENT_STATUSES: Final = frozenset({204, 304})
+
 #: The first class RFC 9110 §15.2 defines, which is *interim*: a client is meant
 #: to keep reading for the real response. This exchange sends no ``Expect``, so a
 #: conforming far end sends none — and reading one would mean a second response on
@@ -2644,7 +2652,8 @@ class HttpsExchange:
             msg = f"the far end answered the interim status {status}, which this seam does not read"
             raise MalformedHttpResponseError(msg)
         headers = await _headers_of(reader)
-        return HttpsResponse(status=status, headers=headers, body=await _body_of(reader, headers))
+        body = await _body_of(reader, headers, status=status)
+        return HttpsResponse(status=status, headers=headers, body=body)
 
 
 def _status_of(line: bytes) -> int:
@@ -2776,10 +2785,21 @@ def _field_of(line: bytes) -> tuple[str, str]:
     return name.lower(), content
 
 
-async def _body_of(reader: _BoundedReader, headers: tuple[tuple[str, str], ...]) -> bytes:
+async def _body_of(
+    reader: _BoundedReader, headers: tuple[tuple[str, str], ...], *, status: int
+) -> bytes:
     """The payload's octets, with any chunked framing removed.
 
-    Three framings, in RFC 9112 §6.3's own precedence and no other: a
+    **A status with no content is framed by the header section and by nothing
+    else**, which is RFC 9112 §6.3's first rule and the reason this takes a status
+    at all. §6.3 decides it "regardless of the header fields present in the
+    message", so a ``Content-Length`` or a ``Transfer-Encoding`` on a ``204`` or a
+    ``304`` is neither read nor resolved: the standard states the framing, and
+    reading a body such a response does not have would hand a caller octets it
+    would take for provider payload. Nothing is desynchronised by leaving them,
+    because ``Connection: close`` means there is no next response on this channel.
+
+    Otherwise three framings, in §6.3's own precedence and no other: a
     ``Transfer-Encoding``, a ``Content-Length``, or the connection's close — which
     is why the request says ``Connection: close``.
 
@@ -2790,9 +2810,10 @@ async def _body_of(reader: _BoundedReader, headers: tuple[tuple[str, str], ...])
     Args:
         reader: The bounded reader, positioned after the header section.
         headers: The fields, as :func:`_headers_of` returned them.
+        status: The status the response carried, which §6.3's first rule turns on.
 
     Returns:
-        The octets.
+        The octets, which are empty for a status that admits no content.
 
     Raises:
         MalformedHttpResponseError: On two framings at once, a transfer coding
@@ -2801,6 +2822,8 @@ async def _body_of(reader: _BoundedReader, headers: tuple[tuple[str, str], ...])
         HttpsResponseTooLargeError: If reading it passed the bound.
         TransportError: If the connection could not be continued.
     """
+    if status in _NO_CONTENT_STATUSES:
+        return b""
     coding = _one_of(headers, "transfer-encoding")
     length = _one_of(headers, "content-length")
     if coding is not None and length is not None:
