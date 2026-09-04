@@ -588,6 +588,45 @@ def content_array_pdf(*, part_bytes: int, undecodable_bytes: int) -> bytes:
     return document([Page(contents=parts, fonts={"/F1": font})], objects=objects)
 
 
+def charged_font_programs_pdf(*, program_bytes: int, undecodable_bytes: int) -> bytes:
+    """One page carrying two charged ``/Type1`` fonts, whose **second** cannot decode.
+
+    Each font meets ``_charged_font_program``'s three keys — ``/Subtype`` ``/Type1``,
+    no ``/ToUnicode``, and a ``/FontDescriptor`` carrying a ``/FontFile`` — and each
+    carries a program of its own rather than sharing one, which is what
+    :func:`type1_font_pages_pdf` does. The first decodes to ``program_bytes``; the
+    second declares more decoded bytes than ``pypdf``'s own per-stream ceiling admits,
+    so decoding it raises ``LimitReachedError`` and the fetch would be
+    ``EXTRACTION_FAILED``.
+
+    :func:`content_array_pdf`'s shape one counted input over. An implementation
+    decoding a resource dictionary's font programs and comparing their sum afterwards
+    reaches the second program and answers that class; one comparing after each decoded
+    program refuses ``TOO_LARGE`` on the first and never touches the second — which is
+    ADR-0232 §3's comparison clause, whose own list of what may not be summed names "a
+    page's charged font programs".
+
+    The page carries **no** ``/Contents``, so the two programs are the whole of its
+    counted quantity, and the fonts are written into the resource dictionary in the
+    order ``_charge_font_programs`` iterates it.
+    """
+    objects = _Objects()
+    fonts: dict[str, bytes] = {}
+    programs = [type1_program(program_bytes), bytes(undecodable_bytes)]
+    for index, program in enumerate(programs, start=1):
+        descriptor = objects.add(
+            b"<< /Type /FontDescriptor /FontName /Charged /Flags 4 /FontFile "
+            + objects.add(stream_object(program))
+            + b" >>"
+        )
+        fonts[f"/F{index}"] = objects.add(
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Charged /FontDescriptor "
+            + descriptor
+            + b" >>"
+        )
+    return document([Page(fonts=fonts)], objects=objects)
+
+
 def oversized_content_array_pdf(*, members: int, decoded_bytes: int) -> bytes:
     """One page whose ``/Contents`` array carries ``members`` references.
 
