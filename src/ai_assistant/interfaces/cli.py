@@ -9630,6 +9630,14 @@ def _assume_yes(confirmation: Confirmation) -> bool | None:
     ``assistant resume`` on a screen. A ``False`` here would record a ``DENY`` the
     user did not make, and a ``True`` would be the approval §8 refuses.
 
+    **The sentence names the flag it is asking to be dropped**, because
+    ``assistant resume`` alone is the command that just did this: on the resume path
+    the card was rendered a moment ago and re-running it the same way would render
+    it and refuse again, and on the ``ask`` path it was not rendered at all. So it
+    claims neither that the content was read nor that it was not, and says the one
+    thing that is true of both — the step is waiting, and the way to answer it is a
+    ``resume`` without the flag. Adversarial review, round 1, ``minor``.
+
     This is a narrowing of the flag and not of any other surface: ADR-0073 §5's
     ``forget`` idiom and ADR-0197's routed cards take a different type and are not
     reached from here.
@@ -9646,7 +9654,8 @@ def _assume_yes(confirmation: Confirmation) -> bool | None:
     console.print(
         "[yellow]--yes does not answer this one.[/] It would send content off this "
         "device, so it is approved on a screen or not at all. Nothing was sent and "
-        "nothing was declined; run [bold]assistant resume[/] to read it and answer."
+        "nothing was declined: the step is still waiting. Answer it with "
+        "[bold]assistant resume[/], run without [bold]--yes[/]."
     )
     return None
 
