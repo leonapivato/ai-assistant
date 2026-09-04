@@ -269,6 +269,22 @@ class _Settled:
     disposition: Disposition
 
 
+@dataclass(frozen=True, slots=True)
+class _CollectedAct:
+    """The establishing act one ``resume`` collected, once its refusals have passed.
+
+    Present exactly where ``remember_recipients_until`` was supplied and the call was
+    not refused, which is why it carries the recorded answer as a value rather than as
+    an optional one: ADR-0235 §2's refusals fire **before** anything is answered, so a
+    collected act with no recorded answer is not a state this fake can be in, and
+    :class:`~ai_assistant.core.types.RecipientGrantOutcome` never has to describe one.
+    """
+
+    confirmed: PermissionDecision
+    answer: PermissionDecision
+    expires_at: datetime
+
+
 #: The answer a routed pass this fake resolved carries. Fixed rather than composed,
 #: because a fake originates no model call — and present rather than ``None`` because
 #: ADR-0197 §8 makes a routed pass that is not a park owe one.
@@ -919,40 +935,17 @@ class FakeAssistantEngine:
             # than it consults ``approved``** (ADR-0198 §§1-3, ADR-0235 §4): it drives
             # nothing, so its outcome carries ``recipient_grant`` ``None``.
             return self._restate(token.handle)
-        # **The act's two refusals fire before anything is answered** (ADR-0235 §1,
-        # §2), so the park survives them and the same token answers it again without
-        # the argument.
-        establishing_at: datetime | None = None
-        answered: PermissionDecision | None = None
+        # **The act is refused or recorded before the park is evicted** (ADR-0235
+        # §1, §2), so a refusal leaves the park exactly where it was and the same
+        # token answers it again without the argument — and the order is the
+        # concrete engine's, where the runner records the resolving decision inside
+        # the critical section that then replaces the park with its settled record.
+        # A fake that settled first would, on a trail that refused the write, leave
+        # a token restating an execution no answer authorised: a state no conforming
+        # hub can be in, and the one a consumer's own retry logic is written against.
+        collected: _CollectedAct | None = None
         if until is not None:
-            if approved:
-                self._check_establishable(token.handle)
-                establishing_at = self._establishing_instant(until)
-            # **The answer is recorded on both answers, and before the park is
-            # evicted.** ADR-0235 §2 supplies the argument beside ``approved=False``
-            # and rules that "the answer is recorded as a ``DENY`` exactly as it is
-            # today" — ADR-0042 §4's guarantee, which
-            # :attr:`RecipientGrantNotEstablished.DECLINED` then *asserts* on the
-            # carrier. A fake that carried ``DECLINED`` over an empty trail would be
-            # claiming an auditable settled decision it never made.
-            #
-            # And before the eviction, which is the order the concrete engine has
-            # and the one ADR-0193 §2 fixes: the runner records the resolving
-            # decision and only then does the engine replace the park with its
-            # settled record. A fake that settled first would, on a trail that
-            # refused the write, leave a token restating an execution no answer
-            # authorised — a state no conforming hub can be in, and the one a
-            # consumer's own retry logic would be written against.
-            #
-            # A park no confirmation is bound to (:meth:`hold_confirmation_decision`)
-            # has no recorded ``CONFIRM`` for an answer to resolve, so there is
-            # nothing to author rather than a write this drops.
-            if token.handle in self._parked_decisions:
-                answered = await self._record_the_answer(
-                    token.handle,
-                    at=establishing_at if establishing_at is not None else self._recipient_now(),
-                    approved=approved,
-                )
+            collected = await self._collect_the_act(token.handle, until, approved=approved)
         confirmation = self.parked.pop(token.handle)
         # **The reference names the decision that actually cleared the step**, where
         # this path recorded one (ADR-0004 §7, ADR-0014 §4). Before ADR-0235 nothing
@@ -962,7 +955,9 @@ class FakeAssistantEngine:
         # the dangling ``approval_ref`` ADR-0014 §4 exists to prevent, in the one
         # state a consumer can actually resolve.
         cleared_by = (
-            (f"decision-{token.handle}" if answered is None else answered.id) if approved else None
+            (f"decision-{token.handle}" if collected is None else collected.answer.id)
+            if approved
+            else None
         )
         # **A denial is a result, not an exception** (ADR-0042 §4): the adapter
         # conveys consent, the policy rules on it, and the engine records and
@@ -1010,10 +1005,8 @@ class FakeAssistantEngine:
                 disposition=resolved.disposition,
             ),
         )
-        recipient_grant = await self._establish_recipients(
-            token.handle,
-            remember_recipients_until=until,
-            answer=answered,
+        recipient_grant = (
+            None if collected is None else await self._establish_recipients(token.handle, collected)
         )
         # ``turn`` is ``None`` here because this engine parks nothing from a live
         # turn — the shape a **recovered** park produces after a restart, which
@@ -1073,21 +1066,96 @@ class FakeAssistantEngine:
             msg = f"the recipient-grant clock returned a non-conforming reading: {exc}"
             raise PlanningError(msg) from exc
 
-    def _check_establishable(self, handle: str) -> None:
-        """Refuse an establishing act on a park it may not ride (ADR-0235 §2).
+    async def _collect_the_act(
+        self, handle: str, remember_recipients_until: datetime, *, approved: bool
+    ) -> _CollectedAct:
+        """Refuse the establishing act, or record the answer it rides (ADR-0235 §1, §2).
+
+        **Every refusal here fires before anything is answered**, so the park survives
+        it and the same token answers the confirmation again without the argument —
+        the shape §2 states in terms and the one
+        :meth:`~ai_assistant.orchestration.runner.StepRunner.resume` already has.
+
+        **A park no recorded ``CONFIRM`` is bound to is refused whatever ``approved``
+        carries**, and it is the one place this fake refuses where the concrete engine
+        does not. The state is this fake's own and no hub is ever in it: ADR-0235 §2
+        is stated over "the answer to a **held confirmation**", and every durable park
+        a hub holds *has* a recorded ``CONFIRM`` — a park with none exists only because
+        :meth:`park` mints one and :meth:`hold_confirmation_decision` was never called.
+        So no clause governs it, and **neither carrier §4 offers is true of it**:
+        ``DECLINED`` *asserts* that the answer was recorded and nothing was recorded,
+        while an absent carrier says "no act was collected" and one was. Refusing the
+        act, rather than reporting it in terms that are false, leaves a consumer no
+        state to certify against that a hub can never reach — and it costs them
+        nothing, because the way to model a real confirmation carrying no egress
+        binding is to bind one (§2's first refused shape), which this engine then
+        answers exactly as a hub does, ``DENY``, ``DECLINED`` and all.
+
+        **The declining answer reads no clock.** ADR-0235 §1's single reading exists
+        for the approving path, where one instant is compared against the chosen expiry
+        and then stamped on the answer; a decline compares nothing, so it is stamped
+        with this fake's fixed instant and a non-conforming ``recipient_grant_clock``
+        never stands between a user and the record of a decision they made
+        (ADR-0042 §4). The concrete runner consults its establishing instant on the
+        approving path alone for the same reason.
+
+        Args:
+            handle: The park being answered.
+            remember_recipients_until: The instant the user chose.
+            approved: What the user said.
+
+        Returns:
+            The collected act: the bound ``CONFIRM``, the answer just recorded, and
+            the instant the grant would expire at.
+
+        Raises:
+            UngrantableActError: If no recorded ``CONFIRM`` is bound to this park, or
+                — on an approving answer — if §2's binding conditions or §1's expiry
+                refuse it.
+            AuditError: If the trail refuses the answer (:meth:`_record_the_answer`).
+        """
+        confirmed = self._parked_decisions.get(handle)
+        if confirmed is None:
+            msg = (
+                "this token names a park this engine holds no recorded CONFIRM for, so "
+                "there is no answer for a standing recipient grant to ride; nothing was "
+                "answered and the same token still answers the park without the argument "
+                "(ADR-0235 §2)"
+            )
+            raise UngrantableActError(msg)
+        establishing_at: datetime | None = None
+        if approved:
+            self._check_establishable(confirmed)
+            establishing_at = self._establishing_instant(remember_recipients_until)
+        answer = await self._record_the_answer(
+            handle,
+            confirmed,
+            at=establishing_at if establishing_at is not None else _AT,
+            approved=approved,
+        )
+        return _CollectedAct(
+            confirmed=confirmed, answer=answer, expires_at=remember_recipients_until
+        )
+
+    def _check_establishable(self, confirmed: PermissionDecision) -> None:
+        """Refuse an establishing act on a confirmation it may not ride (ADR-0235 §2).
 
         The same two conditions §3 places on the recorded population, on the held
         one, and refused before anything is answered — so the park survives and the
-        same token answers it again without the argument.
+        same token answers it again without the argument. It takes the bound
+        ``CONFIRM`` rather than the handle, which is the concrete runner's own
+        signature: a park this engine holds no decision for is refused one step
+        earlier (:meth:`_collect_the_act`) and never reaches here.
+
+        Args:
+            confirmed: The recorded ``CONFIRM`` the park is bound to.
 
         Raises:
-            UngrantableActError: If no recorded ``CONFIRM`` is bound to this park, if
-                its ``egress_binding`` is not an
+            UngrantableActError: If its ``egress_binding`` is not an
                 :class:`~ai_assistant.core.types.EgressBinding`, or if that binding
                 carries ``planned_with_external_content``.
         """
-        confirmed = self._parked_decisions.get(handle)
-        binding = None if confirmed is None else confirmed.egress_binding
+        binding = confirmed.egress_binding
         if not isinstance(binding, EgressBinding):
             msg = (
                 "this confirmation records no egress call whose recipients could be made "
@@ -1126,7 +1194,7 @@ class FakeAssistantEngine:
         return decided_at
 
     async def _record_the_answer(
-        self, handle: str, *, at: datetime, approved: bool
+        self, handle: str, confirmed: PermissionDecision, *, at: datetime, approved: bool
     ) -> PermissionDecision:
         """Author and record the resolving decision this act rides (ADR-0193 §2).
 
@@ -1143,8 +1211,10 @@ class FakeAssistantEngine:
 
         Args:
             handle: The park being answered.
+            confirmed: The recorded ``CONFIRM`` the park is bound to.
             at: The instant to stamp, which on an approving answer is the one
-                ADR-0235 §1's expiry was already compared against.
+                ADR-0235 §1's expiry was already compared against, and on a declining
+                one is this fake's fixed instant — a decline reads no clock at all.
             approved: What the user said.
 
         Returns:
@@ -1155,7 +1225,6 @@ class FakeAssistantEngine:
                 trail that will not hold the record of a decision is not a state
                 this engine may report an outcome over.
         """
-        confirmed = self._parked_decisions[handle]
         answer = PermissionDecision.from_confirmation(
             confirmed,
             _approving(confirmed) if approved else _declining(),
@@ -1166,12 +1235,8 @@ class FakeAssistantEngine:
         return answer
 
     async def _establish_recipients(
-        self,
-        handle: str,
-        *,
-        remember_recipients_until: datetime | None,
-        answer: PermissionDecision | None,
-    ) -> RecipientGrantOutcome | None:
+        self, handle: str, collected: _CollectedAct
+    ) -> RecipientGrantOutcome:
         """Say what became of the act this ``resume`` collected.
 
         Reached **after** the step has executed and settled, so nothing here raises
@@ -1180,22 +1245,21 @@ class FakeAssistantEngine:
         and from nothing else — no message is parsed, no count taken, and no listing
         read afterwards (ADR-0235 §11).
 
-        ``answer`` is ``None`` on the one path that collected the act and reached no
-        approving answer: ``approved=False``, where the ``DENY`` is recorded and the
-        store is never reached (ADR-0235 §2, §4).
+        Reached only where an act was collected, and a collected act always carries a
+        recorded answer (:meth:`_collect_the_act`): the refusals fire before anything
+        is answered, so there is no state here in which the carrier would have to
+        describe an answer that was never made.
         """
-        if remember_recipients_until is None:
-            return None
-        if answer is None or answer.ruling.outcome is not PermissionOutcome.ALLOW:
+        if collected.answer.ruling.outcome is not PermissionOutcome.ALLOW:
             # The one member that never reaches the store (ADR-0235 §4): the
             # resolving ruling was not an ``ALLOW``, so no grant could be established
             # from it and ``RecipientGrantStore.record`` was not called at all.
             return RecipientGrantOutcome(not_established=RecipientGrantNotEstablished.DECLINED)
         grant = RecipientGrant.established_from(
-            self._parked_decisions[handle],
-            answer,
+            collected.confirmed,
+            collected.answer,
             id=f"recipient-grant-{handle}",
-            expires_at=remember_recipients_until,
+            expires_at=collected.expires_at,
         )
         # **The mapping is reached for rather than restated** (ADR-0235 §4, §11): a
         # second copy of "which member does this refusal mean" would let a
