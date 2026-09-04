@@ -2,6 +2,36 @@
 
 - Status: Partially superseded by ADR-0178 (§3's clause that a member of a canonical destination set is a `CanonicalDestination`; §3's clause that an account member carries the account whole; and §3's clause that the canonical destination set is a single derived property of `EgressBinding` — each only as it reaches the canonical destination set a `Confirmation` names) and ADR-0184 (§1's clause typing `PermissionDecision.egress_binding` as `EgressBinding | None`)
 - Date: 2026-08-14
+- **Amended: 2026-09-04 by ADR-0233 — §10's second clause, by a count and by nothing
+  else.** That clause enumerates what a description states per span — "the argument
+  and position it came from, its discloser provenance, its extent, its tier where its
+  field establishes one, and its destination forms where it is one" — and ADR-0233 §4
+  adds a sixth item, `coverage`: a recorded three-valued fact saying which of ADR-0155
+  §3's two prohibitions governs that span's value. A reader holding only this ADR
+  would read the list as exhaustive, which is ADR-0070 §1's second limb. The record
+  lives in this note alone, because the `Status` line is led by
+  `Partially superseded by` (ADR-0082 §2).
+  **The rest of §10 is kept, and two of its clauses are what that ADR is built
+  around.** "A description states **no record identifier** … and no field name of any
+  store's schema" binds entire — `coverage` names a path character and never a record
+  — so §10's answer to ADR-0004 §6's deletion question survives untouched. **"It holds
+  no content" is kept and is not superseded**: the bytes ADR-0233's approver reads are
+  `Confirmation.parameters`, the request's own arguments, which ADR-0042 §4 has carried
+  to a surface since before this ADR and which §4 here makes the spans a decomposition
+  *of*. That is not "a value derived beside the binding" in §10's fourth clause's
+  sense — the derivation runs the other way, and `ActionRequest` already recomputes
+  every span's extent from those same arguments, which is the join. No content member
+  is added to `EgressBinding`, `ConfirmationEgress` or `PermissionDecision`, and no
+  second renderable artifact is minted.
+  **§5, §4 and §6 are not amended.** §5's first clause governs **discloser**
+  provenance, as the 2026-08-23 note below already ruled when ADR-0181 added the
+  externality axis; `coverage` is a third axis and `EgressSpan.provenance` keeps
+  ADR-0146 §1's two members and no default. §4's decomposition is unchanged and
+  `extent` is still a count. §4's own "They are not the whole of what the value
+  refuses" is what admits ADR-0233 §6's construction refusal. **§6's tier residue is
+  not discharged by one word** — ADR-0233 §13 says so in a marked clause — and §6's
+  last clause is the clause that commissioned the ADR-0148 §6 amendment ADR-0233's
+  header carries.
 - **Note (2026-08-23): §5's third clause is decided by ADR-0181, and §5's first
   clause is unchanged.** The third clause left open "how a recorded origin reaches
   the component that builds a span"; ADR-0181 §2 decides it for the one fact it rules
