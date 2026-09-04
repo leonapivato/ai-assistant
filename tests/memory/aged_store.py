@@ -287,6 +287,32 @@ def _check_share(name: str, value: float) -> None:
         raise ValueError(msg)
 
 
+def _check_count(name: str, value: object) -> None:
+    """Refuse a count that is not an integer of at least one, from one owner not four.
+
+    The parameter is ``object`` on purpose. Every field this vets is annotated
+    ``int``, and the whole reason the check exists is that an annotation is a
+    promise the runtime does not keep: the test used to be ``value < 1``, and
+    every ordered comparison against ``nan`` is false, so ``live=nan`` passed it.
+    That spec was built, reported a ``nan`` :attr:`AgedStoreSpec.cluster_density`
+    — a measurement label that is not a number — and then crashed in
+    ``_live_drafts`` at ``range(nan)`` with a ``TypeError`` about a float, rather
+    than with the ``ValueError`` the constructor documents.
+
+    The test is on the *type* and not on :meth:`float.is_integer`, because
+    ``range()`` refuses ``2.0`` exactly as it refuses ``2.5``: admitting an
+    integral float would only move the same crash further from its cause. A
+    ``bool`` is an ``int`` in Python and is taken as the count it equals, which
+    is already what ``range(True)`` means.
+
+    Raises:
+        ValueError: If ``value`` is not an ``int``, or is below one.
+    """
+    if not isinstance(value, int) or value < 1:
+        msg = f"{name} must be an integer >= 1, got {value!r}"
+        raise ValueError(msg)
+
+
 class ClosedBy(StrEnum):
     """Which producer closed a planted record's validity window."""
 
@@ -334,10 +360,19 @@ class AgedStoreSpec:
         0-9 hold a live record and a query against any of the other ninety meets
         an empty cluster, under a density the spec states uniformly. An empty
         topical cluster is not a density this fixture has any use for.
+
+        The two counts are vetted by :func:`_check_count` before that comparison,
+        so ``nan`` is refused here rather than passing every ordered test and
+        surfacing later as a ``nan`` density or a ``TypeError`` inside
+        ``range()``.
+
+        Raises:
+            ValueError: If ``live`` or ``topics`` is not an integer of at least
+                one, if ``topics`` exceeds ``live``, or if any share is outside
+                the range that field allows.
         """
-        if self.live < 1 or self.topics < 1:
-            msg = f"live and topics must both be >= 1, got {self.live} and {self.topics}"
-            raise ValueError(msg)
+        _check_count("live", self.live)
+        _check_count("topics", self.topics)
         if self.topics > self.live:
             msg = (
                 f"topics must not exceed live ({self.topics} > {self.live}); the live "
@@ -380,13 +415,15 @@ class AgedStoreSpec:
             seed: Passed through.
 
         Raises:
-            ValueError: If ``total`` or ``crowding`` is below one — ``crowding=0``
-                otherwise reached an unwrapped ``ZeroDivisionError`` and a negative
-                one silently collapsed the store to a single topic, which is a
-                *different* density from the one asked for and would be reported
-                under the requested label. Also if the requested combination
-                leaves no live record, or if
-                the population it yields is not the one asked for. ``closed`` is
+            ValueError: If ``total`` or ``crowding`` is not an integer of at
+                least one — ``crowding=0`` otherwise reached an unwrapped
+                ``ZeroDivisionError``, a negative one silently collapsed the
+                store to a single topic, which is a *different* density from the
+                one asked for and would be reported under the requested label,
+                and a non-finite ``total`` reached ``round()`` and surfaced as an
+                ``OverflowError`` about converting a float. Also if the requested
+                combination leaves no live record, or if the population it yields
+                is not the one asked for. ``closed`` is
                 derived from ``live`` and the fraction, so a ``live`` clamped up to
                 1 would silently re-inflate ``total`` — a
                 ``total=2000, closed_fraction=0.9999`` request became a
@@ -400,9 +437,8 @@ class AgedStoreSpec:
                 enough that ``total // crowding`` exceeds the live count it
                 leaves: those surplus clusters would hold no live record.
         """
-        if total < 1 or crowding < 1:
-            msg = f"total and crowding must both be >= 1, got {total} and {crowding}"
-            raise ValueError(msg)
+        _check_count("total", total)
+        _check_count("crowding", crowding)
         # Before the arithmetic, not after it: `round()` on a non-finite product
         # raises first, and an `OverflowError` about converting a float is not the
         # refusal this constructor documents.
