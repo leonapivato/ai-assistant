@@ -1,10 +1,10 @@
 # 184. A decision recorded before the origin field is legible history, and the absence is its own value
 
-- Status: Partially superseded by ADR-0233 (§1's exception roster, §2's first, third and fifth clauses, §3's two-shape discrimination sentence, and §9's one-sibling clause; §2's shared-base rule, §3's structural property, §4's write rule, §5's readers and §7's floor all stand)
+- Status: Partially superseded by ADR-0233 (§1's exception roster, §2's first, third and fifth clauses, §3's two-shape discrimination sentence, §10's discrimination-test clause, and §9's one-sibling clause; §2's shared-base rule, §3's structural property, §4's write rule, §5's readers, §7's floor and §10's other tests all stand)
 - Date: 2026-08-23
 - **Partially superseded: 2026-09-04 by ADR-0233 — §1's exception roster, §2's first,
-  third and fifth clauses, §3's two-shape discrimination sentence, and §9's first
-  clause; those, and no others.** §9 deferred a stored payload version for the trail's
+  third and fifth clauses, §3's two-shape discrimination sentence, §10's
+  discrimination-test clause, and §9's first clause; those, and no others.** §9 deferred a stored payload version for the trail's
   `data` column and named its firing condition: "the next member added
   required-with-no-default to a model the trail stores", with "the ADR adding that
   member" choosing "between a second sibling and a version, in its own text". ADR-0233
@@ -32,6 +32,17 @@
   validates as `EgressBinding` **and as nothing else**" stops being true: such an object
   lacking `coverage` validates as `CoverageUnrecordedBinding`. ADR-0233 §14 states the
   three-way rule that replaces it.
+  **§10's** discrimination-test clause requires the implementing lane to assert that
+  "the same JSON with exactly that key removed decodes carrying an
+  `OriginUnrecordedBinding`". That case becomes unsatisfiable: a row with only
+  `planned_with_external_content` removed still carries `coverage`, which
+  `OriginUnrecordedBinding` does not declare, so `extra="forbid"` makes it raise. ADR-0233
+  §15 states the three-epoch cases that replace it, including that this shape now raises
+  — which is this clause's own purpose, since it exists to fail an implementation that
+  widened the tolerance rather than shaping it. **§10's other clauses stand**: the
+  construction, correspondence, shared-base, reader, round-trip, `pending_confirmation`
+  and `authorises` tests all still hold of the two models they name, and ADR-0233 §15
+  adds the third model's parallels rather than rewriting them.
   **§9's first clause** — "No lane adds a second sibling to this union" — is the clause
   §9's *second* clause licenses ADR-0233 to spend, and it is spent.
   **Why the version was refused rather than taken, which is a fact §9 did not
