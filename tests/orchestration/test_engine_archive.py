@@ -36,7 +36,7 @@ from ai_assistant.testing.routing import FakeRoutingRecorder
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import ActionPlan, CurrentContext, Goal, MemoryRecord
+    from ai_assistant.core.types import ActionPlan, CurrentContext, Goal, MemoryRecord, ShownFile
 
 #: A span nothing else in this tree says, so a match anywhere is this entry's.
 ARCHIVED_SPAN = "the lender was Ravensworth and the account was nine-nine-four"
@@ -81,6 +81,7 @@ class RecordingPlanner:
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         from ai_assistant.core.types import ActionPlan  # noqa: PLC0415 — a fake's own import
 

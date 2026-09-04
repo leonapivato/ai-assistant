@@ -154,7 +154,7 @@ from ai_assistant.wire.address import sun_path_limit
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
-    from ai_assistant.core.types import MemoryRecord, SourceGrant
+    from ai_assistant.core.types import MemoryRecord, ShownFile, SourceGrant
 
 
 AT = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
@@ -270,6 +270,7 @@ class _OneStepPlanner:
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         step = PlanStep(
             id="step-1", intent="send the note", capability=CAPABILITY, parameters=PARAMETERS
@@ -3267,6 +3268,7 @@ class _NoStepPlanner:
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(), created_at=AT)
 

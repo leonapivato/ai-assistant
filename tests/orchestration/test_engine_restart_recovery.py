@@ -82,7 +82,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
     from pathlib import Path
 
-    from ai_assistant.core.types import CurrentContext, FrozenJson, Goal, MemoryRecord
+    from ai_assistant.core.types import CurrentContext, FrozenJson, Goal, MemoryRecord, ShownFile
 
 AT = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
 
@@ -200,6 +200,7 @@ class _OneStepPlanner:
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         step = PlanStep(
             id="step-1", intent="send the note", capability=CAPABILITY, parameters=PARAMETERS

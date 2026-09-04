@@ -95,6 +95,7 @@ if TYPE_CHECKING:
         Goal,
         MemoryRecord,
         MemorySearchResult,
+        ShownFile,
     )
     from ai_assistant.orchestration.loop import RespondedTurn
     from ai_assistant.testing.cancellation import LoopSuspension
@@ -285,6 +286,7 @@ class _DeletingPlanner:
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         del context, capabilities
         self.calls.append(tuple(memories))
@@ -320,6 +322,7 @@ class _SuspendingPlanner:
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         del context, memories, capabilities
         self.held = self._store.suspend_next_operation()
@@ -414,6 +417,7 @@ class _RaisingPlanner:
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         del goal, context, memories, capabilities
         msg = "no plan for that"

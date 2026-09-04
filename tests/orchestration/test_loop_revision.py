@@ -76,6 +76,7 @@ if TYPE_CHECKING:
         MemoryKind,
         MemoryRecord,
         MemorySearchResult,
+        ShownFile,
     )
     from ai_assistant.orchestration.loop import RespondedTurn
 
@@ -159,6 +160,7 @@ class _Script:
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         """Answer this call from the script, recording what it was handed."""
         ordinal = len(self.calls)

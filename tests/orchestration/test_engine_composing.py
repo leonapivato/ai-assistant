@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.protocols import ModelProvider
-    from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord
+    from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord, ShownFile
 
 _ANSWER = "You prefer hiking, and I have not sent anything."
 
@@ -88,6 +88,7 @@ class _TwoStepPlanner(OneStepPlanner):
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         first = await super().plan(
             goal, context=context, memories=memories, capabilities=capabilities
@@ -144,6 +145,7 @@ class _NoStep(OneStepPlanner):
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         built = await super().plan(
             goal, context=context, memories=memories, capabilities=capabilities

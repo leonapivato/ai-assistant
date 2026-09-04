@@ -43,7 +43,7 @@ from ai_assistant.testing import FakeMemoryStore
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord
+    from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord, ShownFile
 
 #: What the user asks on every case here: a question whose act needs a value only
 #: memory holds. One distinctive term, so the turn's own blind belief read reaches
@@ -80,6 +80,7 @@ class _DependentPlanner:
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         """Plan the step where the supply carries the address, and ask for it where not."""
         ordinal = len(self.calls) + 1
@@ -129,6 +130,7 @@ class _AlwaysAsking:
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
     ) -> ActionPlan:
         """Plan one step and ask for one more read, on every call."""
         ordinal = len(self.calls) + 1
