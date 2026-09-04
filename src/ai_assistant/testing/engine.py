@@ -924,17 +924,35 @@ class FakeAssistantEngine:
         # the argument.
         establishing_at: datetime | None = None
         answered: PermissionDecision | None = None
-        if until is not None and approved:
-            self._check_establishable(token.handle)
-            establishing_at = self._establishing_instant(until)
-            # **The answer is recorded before the park is evicted**, which is the
-            # order the concrete engine has and the one ADR-0193 §2 fixes: the
-            # runner records the resolving decision and only then does the engine
-            # replace the park with its settled record. A fake that settled first
-            # would, on a trail that refused the write, leave a token restating an
-            # execution no answer authorised — a state no conforming hub can be in,
-            # and the one a consumer's own retry logic would be written against.
-            answered = await self._record_the_answer(token.handle, at=establishing_at)
+        if until is not None:
+            if approved:
+                self._check_establishable(token.handle)
+                establishing_at = self._establishing_instant(until)
+            # **The answer is recorded on both answers, and before the park is
+            # evicted.** ADR-0235 §2 supplies the argument beside ``approved=False``
+            # and rules that "the answer is recorded as a ``DENY`` exactly as it is
+            # today" — ADR-0042 §4's guarantee, which
+            # :attr:`RecipientGrantNotEstablished.DECLINED` then *asserts* on the
+            # carrier. A fake that carried ``DECLINED`` over an empty trail would be
+            # claiming an auditable settled decision it never made.
+            #
+            # And before the eviction, which is the order the concrete engine has
+            # and the one ADR-0193 §2 fixes: the runner records the resolving
+            # decision and only then does the engine replace the park with its
+            # settled record. A fake that settled first would, on a trail that
+            # refused the write, leave a token restating an execution no answer
+            # authorised — a state no conforming hub can be in, and the one a
+            # consumer's own retry logic would be written against.
+            #
+            # A park no confirmation is bound to (:meth:`hold_confirmation_decision`)
+            # has no recorded ``CONFIRM`` for an answer to resolve, so there is
+            # nothing to author rather than a write this drops.
+            if token.handle in self._parked_decisions:
+                answered = await self._record_the_answer(
+                    token.handle,
+                    at=establishing_at if establishing_at is not None else self._recipient_now(),
+                    approved=approved,
+                )
         confirmation = self.parked.pop(token.handle)
         # **The reference names the decision that actually cleared the step**, where
         # this path recorded one (ADR-0004 §7, ADR-0014 §4). Before ADR-0235 nothing
@@ -1107,13 +1125,30 @@ class FakeAssistantEngine:
             raise UngrantableActError(msg)
         return decided_at
 
-    async def _record_the_answer(self, handle: str, *, at: datetime) -> PermissionDecision:
-        """Author and record the resolving ``ALLOW`` this act rides (ADR-0193 §2).
+    async def _record_the_answer(
+        self, handle: str, *, at: datetime, approved: bool
+    ) -> PermissionDecision:
+        """Author and record the resolving decision this act rides (ADR-0193 §2).
 
         Called **before** the park is evicted, so a trail that refuses the write
         leaves the park exactly where it was and the token still answerable — the
         order the concrete engine has, where the runner records inside the critical
         section that later replaces the park with its settled record.
+
+        **On both answers**, because ADR-0042 §4 guarantees the ``DENY``'s record and
+        ADR-0235 §4's ``DECLINED`` asserts it on the carrier. This engine holds no
+        ``ActionPolicy``, so the ruling is the one an approving or declining answer
+        produces; a consumer wanting a policy that declines an *approving* answer is
+        exercising a hub's own thresholds rather than this double.
+
+        Args:
+            handle: The park being answered.
+            at: The instant to stamp, which on an approving answer is the one
+                ADR-0235 §1's expiry was already compared against.
+            approved: What the user said.
+
+        Returns:
+            The recorded resolving decision.
 
         Raises:
             AuditError: If the trail refuses the answer. It propagates, because a
@@ -1123,7 +1158,7 @@ class FakeAssistantEngine:
         confirmed = self._parked_decisions[handle]
         answer = PermissionDecision.from_confirmation(
             confirmed,
-            _approving(confirmed),
+            _approving(confirmed) if approved else _declining(),
             id=f"decision-{handle}-answer",
             decided_at=at,
         )
@@ -1151,9 +1186,10 @@ class FakeAssistantEngine:
         """
         if remember_recipients_until is None:
             return None
-        if answer is None:
-            # The one member that never reaches the store (ADR-0235 §4): the answer
-            # was recorded as a ``DENY`` and no grant could be established from it.
+        if answer is None or answer.ruling.outcome is not PermissionOutcome.ALLOW:
+            # The one member that never reaches the store (ADR-0235 §4): the
+            # resolving ruling was not an ``ALLOW``, so no grant could be established
+            # from it and ``RecipientGrantStore.record`` was not called at all.
             return RecipientGrantOutcome(not_established=RecipientGrantNotEstablished.DECLINED)
         grant = RecipientGrant.established_from(
             self._parked_decisions[handle],
@@ -2977,6 +3013,22 @@ def _approving(confirmed: PermissionDecision) -> PermissionRuling:
         outcome=PermissionOutcome.ALLOW,
         reason="the fake engine records the answer the user gave",
         authorised_by=confirmed.id,
+    )
+
+
+def _declining() -> PermissionRuling:
+    """The resolving ``DENY`` a declining answer produces.
+
+    ``authorised_by`` is unset and refused if set: ``PermissionRuling`` admits an
+    authorisation pointer on an ``ALLOW`` alone, which is the same "only the coherent
+    outcome may carry this" rule the record's own lifetime validator uses.
+
+    Returns:
+        The ruling.
+    """
+    return PermissionRuling(
+        outcome=PermissionOutcome.DENY,
+        reason="the fake engine records the answer the user gave",
     )
 
 
