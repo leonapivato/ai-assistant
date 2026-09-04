@@ -22,13 +22,16 @@ quotes, because a quoted name is a promise deferred to a resolver that may never
 run — and because ``ruff``'s own ``TC001`` reads a quoted reference as
 typing-only and would otherwise ask for the import back.
 
-**A generic alias hides a name in a third place.** ``type Bucket[T: Hidden] =
+**A type parameter hides a name in a third place.** ``type Bucket[T: Hidden] =
 list[T]`` resolves its value to ``list[T]`` without ever touching ``Hidden``:
-the bound, the constraints and the default of a PEP 695 type parameter are each
-evaluated as lazily as the value is, and each raises on first read. Nothing in
-``src/`` is generic today, so this arm guards no live defect — it is here so the
-first alias that is generic does not arrive unchecked, which is the same reason
-the walk exists at all.
+the bound, the constraints and the default of a type parameter are each
+evaluated as lazily as the value is, and each raises on first read. An inline
+``[T: Hidden]`` and a legacy ``T = TypeVar("T", bound="Hidden")`` the value
+picks up are the same kind of object, so both reach the walk by the same branch
+and each resolves against the module that *declared* it. Nothing in ``src/``
+reaches a type parameter today, so this arm guards no live defect — it is here
+so the first alias that does is not the one that finds out, which is the same
+reason the walk exists at all.
 
 **The exposure is real rather than theoretical**, because the reader is never
 this repository's own code. ``typing.get_type_hints`` resolves aliases it meets;
@@ -83,7 +86,10 @@ from typing import (
     ForwardRef,
     Literal,
     NoDefault,
+    ParamSpec,
     TypeAliasType,
+    TypeVar,
+    TypeVarTuple,
     get_args,
     get_origin,
 )
@@ -171,16 +177,17 @@ def module_aliases(module: ModuleType) -> dict[str, TypeAliasType]:
     }
 
 
-def _namespace_of(alias: TypeAliasType) -> dict[str, object]:
-    """The globals a name inside ``alias``'s value is resolved against.
+def _namespace_of(value: object) -> dict[str, object]:
+    """The globals a lazily-evaluated part of ``value`` is resolved against.
 
-    Its *defining* module's, followed across a nested alias rather than kept
-    from the outer one: an alias in ``A`` whose value reaches an alias in ``B``
-    carries ``B``'s forward references, and resolving those in ``A``'s namespace
-    would report a failure ``B`` does not have or miss one it does.
+    Its *defining* module's, followed across a nested alias or an imported type
+    parameter rather than kept from the outer one: an alias in ``A`` whose value
+    reaches something declared in ``B`` carries ``B``'s forward references, and
+    resolving those in ``A``'s namespace would report a failure ``B`` does not
+    have or miss one it does.
     """
-    origin = alias.__module__
-    module = None if origin is None else sys.modules.get(origin)
+    origin = getattr(value, "__module__", None)
+    module = sys.modules.get(origin) if isinstance(origin, str) else None
     return {} if module is None else vars(module)
 
 
@@ -225,38 +232,51 @@ def _resolve_reference(
 #: and a fourth thing that raises long after the module imported cleanly.
 _LAZY_TYPE_PARAMETER_ATTRIBUTES: Final = ("__bound__", "__constraints__", "__default__")
 
+#: What a type parameter can be. An inline ``[T: Hidden]`` and a legacy
+#: ``TypeVar("T", bound="Hidden")`` are the same object, so one branch covers
+#: both; ``ParamSpec`` and ``TypeVarTuple`` carry a subset of the attributes and
+#: are handled by the same loop.
+_TYPE_PARAMETER_KINDS: Final = (TypeVar, ParamSpec, TypeVarTuple)
 
-def _resolve_type_parameters(
-    alias: TypeAliasType, namespace: dict[str, object], seen: list[object], errors: list[str]
-) -> None:
-    """Follow the bound, constraints and default of each of ``alias``'s parameters.
+
+def _resolve_type_parameter(parameter: object, seen: list[object], errors: list[str]) -> None:
+    """Follow the bound, constraints and default one type parameter carries.
 
     ``type Bucket[T: Hidden] = list[T]`` resolves its *value* to ``list[T]``
     without touching ``Hidden`` at all, so an alias can pass the value check and
     still raise on the first read of ``__type_params__[0].__bound__``. Same
-    defect, one attribute further in. Nothing in ``src/`` is generic today; this
-    is here so that the first alias that is does not arrive unguarded.
+    defect, one attribute further in.
+
+    Reached from two directions, which is why it is a walk step rather than a
+    pass over ``__type_params__``: an inline ``[T: Hidden]`` *is* a ``TypeVar``,
+    and so is a legacy ``T = TypeVar("T", bound="Hidden")`` that an alias picks
+    up from its value. Both arrive here, and each resolves in the module that
+    declared it rather than the one that used it. Nothing in ``src/`` reaches a
+    type parameter at all today; this is here so the first alias that does is
+    not the one that finds out.
 
     ``getattr``'s default swallows ``AttributeError`` and nothing else, which is
-    what is wanted: a parameter kind that carries no such attribute is not a
-    finding, and a ``NameError`` raised *by* the attribute is.
+    what is wanted: a parameter kind that carries no such attribute — a
+    ``TypeVarTuple`` has no bound — is not a finding, and a ``NameError`` raised
+    *by* the attribute is.
     """
-    for parameter in alias.__type_params__:
-        for attribute in _LAZY_TYPE_PARAMETER_ATTRIBUTES:
-            try:
-                carried: object = getattr(parameter, attribute, None)
-            except Exception as exc:  # the failure *is* the finding
-                errors.append(f"{parameter!r}.{attribute} — {type(exc).__name__}: {exc}")
-                continue
-            if carried is None or carried == () or carried is NoDefault:
-                continue
-            _resolve(carried, namespace, seen, errors)
+    namespace = _namespace_of(parameter)
+    for attribute in _LAZY_TYPE_PARAMETER_ATTRIBUTES:
+        try:
+            carried: object = getattr(parameter, attribute, None)
+        except Exception as exc:  # the failure *is* the finding
+            errors.append(f"{parameter!r}.{attribute} — {type(exc).__name__}: {exc}")
+            continue
+        if carried is None or carried is NoDefault or (isinstance(carried, tuple) and not carried):
+            continue
+        _resolve(carried, namespace, seen, errors)
 
 
 def _resolve_alias(alias: TypeAliasType, seen: list[object], errors: list[str]) -> None:
     """Read one alias's value and its parameters, in *its own* module's namespace."""
     namespace = _namespace_of(alias)
-    _resolve_type_parameters(alias, namespace, seen, errors)
+    for parameter in alias.__type_params__:
+        _resolve(parameter, namespace, seen, errors)
     try:
         value: object = alias.__value__
     except Exception as exc:  # the failure *is* the finding
@@ -290,6 +310,9 @@ def _resolve(
         return
     if isinstance(value, TypeAliasType):
         _resolve_alias(value, seen, errors)
+        return
+    if isinstance(value, _TYPE_PARAMETER_KINDS):
+        _resolve_type_parameter(value, seen, errors)
         return
     for argument in _type_arguments(value):
         _resolve(argument, namespace, seen, errors)
@@ -441,12 +464,16 @@ def test_the_check_catches_a_type_checking_only_name(tmp_path: Path) -> None:
       ``__type_params__[0]``. ``Generic`` is their control — the same shape with
       a bound the module can see — so that a walk which reported every generic
       alias would fail here.
+    * ``LegacyBound`` is round 5's: the same defect carried by a ``TypeVar``
+      *object* the alias picks up from its value rather than by an inline
+      parameter. The two are the same kind of object, which is why one branch
+      answers both, and ``LegacyFine`` is its control.
     * ``Fine`` names nothing at all.
     """
     source = tmp_path / "hidden_name_alias.py"
     source.write_text(
         "from __future__ import annotations\n"
-        "from typing import TYPE_CHECKING, Annotated, Literal\n"
+        "from typing import TYPE_CHECKING, Annotated, Literal, TypeVar\n"
         "if TYPE_CHECKING:\n"
         "    from collections.abc import Callable, Sequence\n"
         "type Hidden = Callable[[], int]\n"
@@ -458,6 +485,10 @@ def test_the_check_catches_a_type_checking_only_name(tmp_path: Path) -> None:
         "type Constrained[T: (Sequence[int], int)] = list[T]\n"
         "type Defaulted[T = Sequence[int]] = list[T]\n"
         "type Generic[T: int] = list[T]\n"
+        "_Legacy = TypeVar('_Legacy', bound='Sequence[int]')\n"
+        "type LegacyBound = list[_Legacy]\n"
+        "_Plain = TypeVar('_Plain', bound=int)\n"
+        "type LegacyFine = list[_Plain]\n"
         "type Fine = tuple[int, ...]\n"
         "class DefinedLater: ...\n",
         encoding="utf-8",
@@ -479,12 +510,21 @@ def test_the_check_catches_a_type_checking_only_name(tmp_path: Path) -> None:
             "Constrained",
             "Defaulted",
             "Generic",
+            "LegacyBound",
+            "LegacyFine",
             "Fine",
         }
         failures = unresolved(module)
     finally:
         del sys.modules[spec.name]
-    assert set(failures) == {"Hidden", "Nested", "Bounded", "Constrained", "Defaulted"}
+    assert set(failures) == {
+        "Hidden",
+        "Nested",
+        "Bounded",
+        "Constrained",
+        "Defaulted",
+        "LegacyBound",
+    }
     assert "Callable" in failures["Hidden"][0]
-    for name in ("Nested", "Bounded", "Constrained", "Defaulted"):
+    for name in ("Nested", "Bounded", "Constrained", "Defaulted", "LegacyBound"):
         assert "Sequence" in failures[name][0], name
