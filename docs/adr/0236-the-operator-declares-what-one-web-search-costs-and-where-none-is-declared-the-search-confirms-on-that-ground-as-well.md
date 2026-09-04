@@ -576,6 +576,20 @@ bullet list would bind nothing.**
     covering grant, and the `SpendGate` refuses. This is §3's stated residual and §6's
     consequence asserted, and it fails an implementation that coupled the two
     currencies at load or silently converted between them.
+15. **A completed search reports `UNKNOWN`, and what that does to the period is
+    asserted rather than left to be found.** With the pair set in
+    `world_spend_currency`, a covering grant, a ceiling configured for the period and
+    `world_spend_unknown_allowance` **unset**: the first search is admitted on its
+    declared estimate and runs to completion; the completion row's `incurred_cost` is
+    asserted to carry an `UNKNOWN` basis and **not** the declared figure; and a second
+    search in that period is refused at the gate with `SpendUndeterminedError`,
+    recorded `SearchDisposition.SPEND_REFUSED`. A companion arm sets the allowance and
+    asserts the second search is admitted, which is what makes the pair a statement
+    about the allowance rather than about the search. This is the Consequences bullet
+    asserted, and it fails an implementation that reached for
+    `ToolResult.incurred_cost` and put the declared figure there — which ADR-0192 §5
+    forbids in terms: *"No lane copies `ToolDefinition.cost` into it, or derives it
+    from the declaration by any other route."*
 
 ### 9. Deferred, by name, each with what fires it
 
@@ -797,6 +811,25 @@ implements against §§1–8 until this has merged (ADR-0015 §5, golden rule 5)
   nothing is summed and nothing refused; with a currency but no ceiling the totals are
   computed and readable and still nothing is refused — *"unset means unbounded"* working
   as decided. §9 names that as ADR-0194 §8's own trigger and issue #2116 carries it.
+- **A priced search under a ceiling runs once a period, until an operator says
+  otherwise.** This decision declares a *price* and takes no position on what a
+  completion **reports**, which is ADR-0194 §2's own separation and §3's first clause
+  here. `WebSearchEgress` reports nothing: `_result_of` returns its `ToolResult` with
+  `incurred_cost` unset, since a search response states no figure, and `consumed_call`
+  then writes ADR-0192 §5's *"a `ToolCost` whose basis is `UNKNOWN` otherwise"* onto
+  the completion row. Where `world_spend_unknown_allowance` is unset, ADR-0194 §2 makes
+  that row's period **indeterminate**, and its narrowing — an indeterminate total
+  *"refuses admission **only where that period's own ceiling is configured**"* —
+  refuses every later admission in a period that has one. So a deployment with the
+  figure set, a standing grant, a ceiling and no allowance gets **one search per
+  period**: the second is `SpendUndeterminedError` at the gate, recorded
+  `SearchDisposition.SPEND_REFUSED`. Setting the allowance is what makes a completed
+  search repeatable up to the ceiling itself, and configuring no ceiling for that
+  period is the other way; §8's item 15 pins both. **None of it is this ADR's to
+  fix.** The behaviour fails closed and is ADR-0192 §5 and ADR-0194 §2 working as
+  ratified, and the one repair within reach — copying the declared figure onto the
+  completion — is the derivation ADR-0192 §5 forbids by name. Issue **#2126** carries
+  the decision that would change it, in either direction.
 - **`send_email` keeps its `UNKNOWN` cost, visibly.** §9 defers the general case and
   says why the consequence differs. A reader who notices the asymmetry now finds it
   argued rather than unexplained.
