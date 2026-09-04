@@ -30,12 +30,16 @@ parameter and constructs `WEB_SEARCH` unchanged. So the first limb of that claus
 
 ### Why this matters now rather than eventually
 
-ADR-0235 landed the surface ADR-0231 §19 named as the mechanism's firing condition:
-`grantable_decisions` lists a recorded `CONFIRM` on a `WEB_SEARCH` decision and
-`establish_recipient_grant` performs the act on it. That path works. A user *can*
-establish a standing grant over the search provider's canonical destination set — a
-search's decision meets all seven of ADR-0235 §3's availability conditions, and
-`ActionPolicy.resolve` reaches the `ALLOW` that mints the grant, because `resolve`
+ADR-0235 landed the surface ADR-0231 §19 named as the mechanism's firing condition, and
+it is now **in the tree** rather than only in a ratified text:
+`AssistantEngine.grantable_decisions` lists a recorded `CONFIRM` on a `WEB_SEARCH`
+decision and `AssistantEngine.establish_recipient_grant` performs the act on it, over
+`orchestration/recipient_grants.py`. That path works. A user *can* establish a standing
+grant over the search provider's canonical destination set — a search's decision meets
+all seven of ADR-0235 §3's availability conditions, the two that would exclude it being
+the ones that module tests directly (a `step_id` or `execution_id` set, and a binding
+carrying `planned_with_external_content`), and a `WEB_SEARCH` request carries neither.
+`ActionPolicy.resolve` then reaches the `ALLOW` that mints the grant, because `resolve`
 re-checks the rules and an approved `CONFIRM` is not blocked by a second firing floor.
 
 And then the next search confirms anyway. The grant is recorded, it covers the
@@ -47,7 +51,7 @@ operator's: a standing grant, once a surface offers the establishing act; and th
 thresholds `Settings` already exposes"* — is, as of ADR-0235, an undercount. There is a
 third, and nobody can set it.
 
-### The tree, read rather than assumed, at `origin/main` `bced0df1`
+### The tree, read rather than assumed, at `origin/main` `452dca46`
 
 - `tools/web_search.py` — `WEB_SEARCH` declares `cost=ToolCost(basis=CostBasis.UNKNOWN)`
   as a module constant. Its docstring already anticipates this ADR: *"This template
@@ -80,6 +84,12 @@ third, and nobody can set it.
 - `core/config.py` also already carries ADR-0194 §1's countability predicate as
   `_spend_is_countable`, and `_checked_spend_amount` applies it with a floor, for the
   two ceilings and the allowance.
+- `orchestration/reads.py` — `SearchDisposition` is now merged and carries **exactly
+  fifteen** members, ADR-0231 §13's enumeration one for one: `NOT_CONFIGURED`,
+  `NO_BUDGET`, the four `COMPOSER_*`, `BINDING_FAILED`, `RULING_CONFIRM`, `RULING_DENY`,
+  `RULING_UNAVAILABLE`, and the five carried from `SearchRefusal`. **None names the cost
+  floor**, and none distinguishes a ground within the ruling stage. That is the premise
+  §5 rests on, read off the implementation rather than off the ADR alone.
 - `testing/searching.py` — `FAKE_WEB_SEARCH` declares `UNKNOWN` too, as a module
   constant, and `FakeWebSearcher` takes bounds but no cost. The module states the posture
   this ADR reuses twice over: `DEFAULT_MAX_RESULTS`' comment refuses *"a canonical fake
