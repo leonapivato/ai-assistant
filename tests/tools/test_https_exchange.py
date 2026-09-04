@@ -447,6 +447,27 @@ async def test_a_certificate_that_does_not_verify_reaches_no_write() -> None:
         pytest.param(b"HTTP/1.1 20 OK\r\n\r\n", "three-digit", id="a-two-digit-code"),
         pytest.param(b"HTTP/1.1 2000 OK\r\n\r\n", "three-digit", id="a-four-digit-code"),
         pytest.param(b"HTTP/1.1 2x0 OK\r\n\r\n", "three-digit", id="a-code-that-is-not-digits"),
+        pytest.param(
+            b"HTTP/1.1 200\r\n\r\n", "no space after", id="no-space-after-the-status-code"
+        ),
+        pytest.param(
+            b"HTTP/1.1 200 O\x00K\r\n\r\n", "reason phrase", id="a-control-octet-in-the-reason"
+        ),
+        pytest.param(
+            b"HTTP/1.1 200 OK\r\nX-Value: ok\x00bad\r\n\r\n",
+            "control octet",
+            id="a-control-octet-in-a-field-value",
+        ),
+        pytest.param(
+            b"HTTP/1.1 200 OK\r\nX-Value: ok\x7f\r\n\r\n",
+            "control octet",
+            id="a-delete-octet-in-a-field-value",
+        ),
+        pytest.param(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX-T: a\x00b\r\n\r\n",
+            "control octet",
+            id="a-control-octet-in-a-trailer-value",
+        ),
         pytest.param(b"HTTP/1.1 099 OK\r\n\r\n", "status class", id="a-code-below-every-class"),
         pytest.param(b"HTTP/1.1 600 OK\r\n\r\n", "status class", id="a-code-above-every-class"),
         pytest.param(b"HTTP/1.1 100 Continue\r\n\r\n", "interim", id="an-interim-response"),
@@ -855,3 +876,34 @@ async def test_a_head_alone_past_the_bound_is_refused_before_the_body_is_reached
 
     assert await drained(channel) == len(head) + len(b"body") - 65
     assert channel.closed
+
+
+async def test_an_empty_reason_phrase_is_read_rather_than_refused() -> None:
+    """The boundary the status-line grammar deliberately leaves open.
+
+    RFC 9112 §4 writes the reason phrase as ``1*(...)``, but `HTTP/1.1 200 ` with
+    nothing after the space is what several ordinary front ends send, and refusing
+    it would be refusing a far end nobody would call malformed. What is refused is
+    the missing **space**, and a control octet inside the phrase — not its absence.
+    """
+    channel = far_end(b"HTTP/1.1 200 \r\nContent-Length: 2\r\n\r\nhi")
+    subject, _ = exchange(channel)
+
+    answer = await subject.get(origin=ORIGIN, target=TARGET)
+
+    assert (answer.status, answer.body) == (200, b"hi")
+
+
+async def test_a_field_value_keeps_its_interior_spacing_and_loses_its_edges() -> None:
+    """RFC 9110 §5.5: the surrounding whitespace is framing, the interior is content.
+
+    Asserted beside the control-octet arms above so the new check cannot quietly
+    become a stricter one: a value with tabs and spaces *inside* it is ordinary
+    (`text/html; charset=utf-8` is the everyday case), and only its edges move.
+    """
+    channel = far_end(b"HTTP/1.1 200 OK\r\nContent-Type: \ttext/html; charset=utf-8 \r\n\r\n")
+    subject, _ = exchange(channel)
+
+    answer = await subject.get(origin=ORIGIN, target=TARGET)
+
+    assert answer.headers == (("content-type", "text/html; charset=utf-8"),)
