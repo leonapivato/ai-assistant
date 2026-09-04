@@ -1753,8 +1753,18 @@ close among the resources it has opened (ADR-0042 §2).
 >
 > `async def search(self, call: ToolCall, /) -> SearchOutcome: ...`
 >
-> `name` is stable across calls and non-empty and is what a minted record's
-> `Attestation.reported_by` carries. `request` returns the `ActionRequest` for a
+> `name` is stable across calls, is non-blank, and is **a value `Identifier` accepts
+> unchanged** — `name.strip() == name` — and it is what a minted record's
+> `Attestation.reported_by` carries. That last obligation is stated rather than left
+> implicit because §10 requires the two to be **equal**, and `Attestation.reported_by`
+> is typed `Identifier`, which *"refuses a blank value **and** strips the one it
+> accepts"*: a searcher naming itself `" search "` would otherwise be conforming and
+> yet mint a record whose `reported_by` is `"search"`, which no equality this ADR
+> asserts could hold. The member is declared `str` rather than `Identifier`, keeping it
+> in `Reader.name`'s and `Fetcher.name`'s own form and leaving #667's
+> one-identifier-contract question exactly where it is; what this clause adds is the
+> obligation those two carry implicitly, made explicit for the one producer whose
+> record compares against it. `request` returns the `ActionRequest` for a
 > composed query, or `None` where the deployment has connected no search account, and
 > **reads no store, mints no identifier, opens no channel and reaches no
 > authorisation conclusion**; the `ActionRequest` it returns carries the searcher's own
@@ -1799,10 +1809,12 @@ close among the resources it has opened (ADR-0042 §2).
 
 > **Normative.** The conformance suite holds the clauses expressible **without a
 > provider**: a `SearchOutcome` carries records **or** a refusal and never both or
-> neither; **`name` is non-blank and is the same string on every access and across
-> every call**, read before, between and after a call that succeeds and a call that
-> refuses, which is what keeps one connected source from fragmenting into several
-> provenance instances a reader would take for different sources; at most **the result
+> neither; **`name` is non-blank, is unchanged by `Identifier`'s own validation, and
+> is the same string on every access and across every call** — read before, between
+> and after a call that succeeds and a call that refuses, with `name.strip() == name`
+> asserted beside the stability, so that one connected source cannot fragment into
+> several provenance instances a reader would take for different sources and cannot
+> name itself something a minted record would carry in a stripped form; at most **the result
 > count the implementation under test was configured
 > with**, supplied by the harness for the same reason; every minted record is
 > `SEMANTIC`,
