@@ -29,7 +29,7 @@ from query_composer_contract import (
     ScriptedRefusal,
 )
 
-from ai_assistant.core.types import QueryRefusal
+from ai_assistant.core.types import QueryOutcome, QueryRefusal
 from ai_assistant.testing import DEFAULT_COMPOSED_QUERY, DEFAULT_QUERY_MAX_CHARS, FakeQueryComposer
 
 if TYPE_CHECKING:
@@ -179,6 +179,40 @@ def test_a_blank_scripted_composition_is_refused_at_construction(blank: str) -> 
 
     with pytest.raises(ValueError, match="non-blank"):
         FakeQueryComposer(query=blank)
+
+
+@pytest.mark.parametrize("refusal", ["declined", "not-a-refusal", 0, None, QueryOutcome])
+def test_a_scripted_refusal_that_is_not_a_member_is_refused(refusal: Any) -> None:
+    """The third state this fake could not answer from, refused where the other two are.
+
+    ``QueryRefusal`` is a ``StrEnum``, so ``"declined"`` compares equal to a member
+    without being one — the easy mistake, and the one the annotation cannot stop a
+    caller who ignores it from making. A fake that took it would raise a
+    ``ValidationError`` out of ``compose`` at the call it was scripted for, which is
+    the one thing ADR-0231 §3 says never leaves that member, and would leave a
+    consumer's failure-path test unable to rely on the canonical subject.
+    """
+    with pytest.raises(TypeError, match="QueryRefusal member"):
+        FakeQueryComposer(refusals={UTTERANCE: refusal})
+
+
+async def test_no_accepted_configuration_can_make_compose_raise() -> None:
+    """The guards above, stated as the property they exist for.
+
+    Every value this fake accepts at construction is one it can answer with: the
+    three refusals it declines — a blank composition, an unencodable one, and a
+    refusal that is not a member — are exactly the three that would otherwise
+    surface as a ``ValidationError`` from ``compose``.
+    """
+    composer = FakeQueryComposer(
+        {UTTERANCE: "porto portugal", "over": "q" * (_BOUND + 1)},
+        refusals={"declined": QueryRefusal.DECLINED},
+        max_chars=_BOUND,
+    )
+
+    for utterance in (UTTERANCE, "over", "declined", "unscripted"):
+        outcome = await composer.compose(utterance)
+        assert (outcome.query is None) != (outcome.refusal is None)
 
 
 def test_a_second_armed_suspension_is_refused() -> None:
