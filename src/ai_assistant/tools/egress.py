@@ -2132,19 +2132,27 @@ _MAX_INTERIM_STATUS: Final = 199
 #: once here rather than one being written as the other plus something.
 _VISIBLE_ASCII: Final = frozenset(chr(code) for code in range(0x21, 0x7F))
 
-#: The characters a request target may hold: printable ASCII excluding space, and
-#: excluding ``#``. A space, a control character or any non-ASCII octet is refused
-#: before a channel is opened, because each of them is a request-line injection and
-#: none of them is a target anything legitimate composes — a target is
-#: percent-encoded by the integration that built it.
+#: Every character an origin-form request target may carry **literally**: RFC 3986
+#: §2.3's ``unreserved`` and §2.2's ``sub-delims``, plus the ``":"`` and ``"@"``
+#: §3.3's ``pchar`` admits and the ``"/"`` and ``"?"`` §3.4's ``query`` adds.
+#: ``%`` is deliberately absent and is handled by :func:`_is_origin_form`, which
+#: requires the two hexadecimal digits RFC 3986 §2.1's ``pct-encoded`` states.
 #:
-#: ``#`` is excluded on a second ground: RFC 9112 §3.2.1's origin-form is
-#: ``absolute-path [ "?" query ]`` and carries **no fragment**. A fragment is a
-#: client-side selector that never leaves the client, so writing one into a request
-#: line sends the far end a query nobody composed — the same reason ADR-0231 §8
-#: refuses a fragment in a destination, one field over. Adversarial review found it
-#: on round 5.
-_TARGET_CHARACTERS: Final = _VISIBLE_ASCII - {"#"}
+#: **Everything else is refused before a channel is opened**, and the set is
+#: written from the grammar rather than as "printable ASCII minus the ones we
+#: thought of": a space and a control character are a request-line injection; a
+#: ``#`` is a fragment, which RFC 9112 §3.2.1's origin-form does not carry and
+#: which never leaves a client, so writing one sends the far end a query nobody
+#: composed; ``\``, ``<``, ``>``, ``{``, ``}``, ``|``, ``^`` and a backtick are
+#: outside the URI character repertoire altogether and are what an intermediary
+#: and an origin server are most likely to disagree about; and a lone ``%`` or one
+#: followed by anything but two hexadecimal digits is a malformed escape that some
+#: readers pass through and others decode. None of them is a target anything
+#: legitimate composes — a target is percent-encoded by the integration that built
+#: it. Adversarial review found the fragment on round 5 and the rest on round 6.
+_TARGET_CHARACTERS: Final = frozenset(
+    string.ascii_letters + string.digits + "-._~" + "!$&'()*+,;=" + ":@" + "/?"
+)
 
 #: RFC 9110 §5.6.2's ``token``, which a header field name is. Checked so that a
 #: name carrying a separator — a colon above all — cannot write a second field.
@@ -2515,8 +2523,8 @@ class HttpsExchange:
                 the value a ruling and a grant range over.
             target: The origin-form request target — a path, with a query where
                 there is one, already percent-encoded by whoever composed it. It
-                begins with ``/``, carries no fragment, and holds only printable
-                ASCII other than space.
+                begins with ``/``, carries no fragment, and satisfies RFC 3986's
+                grammar as :func:`_is_origin_form` states it.
             headers: The fields to send, in order, as name-value pairs. Names are
                 compared case-insensitively against the four this exchange writes
                 itself and are refused where they collide. The credential rides
@@ -2596,14 +2604,13 @@ class HttpsExchange:
             TransportPinError: If the target or a field is not one this exchange
                 will write.
         """
-        if not target.startswith("/") or any(
-            character not in _TARGET_CHARACTERS for character in target
-        ):
+        if not _is_origin_form(target):
             msg = (
-                "the request target is an origin-form path beginning with '/', with "
-                "an optional query and no fragment, holding only printable ASCII "
-                "other than space; it is refused rather than encoded, and the value "
-                "is not named"
+                "the request target is not an origin-form path: it begins with '/', "
+                "carries an optional query and no fragment, holds only the "
+                "characters RFC 3986 admits, and writes every other octet as a "
+                "percent escape with two hexadecimal digits. It is refused rather "
+                "than encoded, and the value is not named"
             )
             raise TransportPinError(msg)
         lines = [f"GET {target} HTTP/1.1"]
@@ -2684,6 +2691,43 @@ class HttpsExchange:
         headers = await _headers_of(reader)
         body = await _body_of(reader, headers, status=status)
         return HttpsResponse(status=status, headers=headers, body=body)
+
+
+def _is_origin_form(target: str) -> bool:
+    """Whether ``target`` is an origin-form request target (RFC 9112 §3.2.1).
+
+    ``origin-form = absolute-path [ "?" query ]``, where the path and the query are
+    built from RFC 3986's ``pchar`` — so the whole of the test is a leading ``/``,
+    the characters :data:`_TARGET_CHARACTERS` admits, and a ``%`` followed by
+    **exactly two** hexadecimal digits.
+
+    **The escape is walked rather than pattern-matched**, so that a ``%`` at the
+    end of the string and one followed by a single digit are both refused: a
+    malformed escape is passed through by some readers and decoded by others, and
+    a request line the far end and an intermediary read differently is the shape
+    this module refuses everywhere else.
+
+    Args:
+        target: The value a caller supplied.
+
+    Returns:
+        Whether it is one this exchange will write.
+    """
+    if not target.startswith("/"):
+        return False
+    index = 0
+    while index < len(target):
+        character = target[index]
+        if character == "%":
+            escape = target[index + 1 : index + 3]
+            if len(escape) != len("00") or any(digit not in _HEX_DIGITS for digit in escape):
+                return False
+            index += len("%00")
+            continue
+        if character not in _TARGET_CHARACTERS:
+            return False
+        index += 1
+    return True
 
 
 def _status_of(line: bytes) -> int:
