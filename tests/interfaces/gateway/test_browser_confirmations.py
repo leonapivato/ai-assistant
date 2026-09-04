@@ -672,6 +672,16 @@ async def test_an_argument_carrying_no_span_is_still_a_key_and_a_value_on_the_sc
     only the spans would drop that key silently. It is the one shape where the
     decomposition is not total over the arguments, and the case exists because it is
     exactly the shape a span-by-span renderer loses.
+
+    **The other side of that clause is the case above**, which asserts the rendered
+    values are exactly the spans' own: an array-valued argument is on screen as
+    ``to[0]`` and ``to[1]``, every key named and every element rendered as itself,
+    and its JSON notation is not rendered beside them. §8's own reason is that "a
+    confirmation showing **some** of the arguments a call would run with is not a
+    confirmation of that call", and nothing here is omitted, truncated or hidden by
+    ordering. Adversarial review's round 4 read §8 as requiring the container's
+    notation as well; that reading and round 3's ``blocker`` cannot both be built,
+    and the PR records which was taken and why.
     """
     async with driving(gateway_browser, tmp_path) as drive:
         drive.engine.parked["h-1"] = _confirmation(
