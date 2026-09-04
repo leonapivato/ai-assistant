@@ -496,7 +496,11 @@ class LocalFileFetcher:
         data, read_at = await asyncio.to_thread(self._acquire, name)
         try:
             text = await asyncio.to_thread(
-                extract, data, suffix, max_rendered_bytes=self._max_content_bytes
+                extract,
+                data,
+                suffix,
+                max_rendered_bytes=self._max_content_bytes,
+                max_file_bytes=self._max_file_bytes,
             )
         except ContentTooLargeError as exc:
             raise _FileTooLargeError from exc
@@ -717,19 +721,33 @@ def _refuse_out_of_domain(
     or a second composition root reaches directly, so a guard that only fired when a
     caller went through ``Settings`` is not a guard (ADR-0093 §5).
 
+    **The type is checked as well as the value**, because §6's domain is "integers of
+    at least 1" and this seam takes what it is handed rather than what an annotation
+    says. A ``float`` reaches the entry cap unrefused and fails later and elsewhere —
+    ``entries[:1.5]`` raises ``TypeError`` from inside the first listing, which is the
+    same shape of defect as the negative cap §6 refuses by name: a bound defeated by a
+    configuration value rather than enforced by one. ``bool`` is refused for the same
+    reason and not on grounds of taste: ``True`` is an ``int`` of value one, so a cap
+    written that way is accepted today and *means* one entry, which is a reading §6
+    never gave it. ``type(...) is not int`` rather than ``isinstance`` is what draws
+    both lines at once, ``bool`` being a subclass.
+
     Raises:
         ConfigurationError: Naming the figure and its domain.
     """
-    if listing_ttl <= timedelta(0):
-        msg = f"fetch_listing_ttl must be strictly positive, got {listing_ttl!r} (ADR-0230 §6)"
+    if type(listing_ttl) is not timedelta or listing_ttl <= timedelta(0):
+        msg = (
+            f"fetch_listing_ttl must be a strictly positive timedelta, got "
+            f"{listing_ttl!r} (ADR-0230 §6)"
+        )
         raise ConfigurationError(msg)
     for label, figure in (
         ("fetch_listing_max_entries", listing_max_entries),
         ("fetch_max_file_bytes", max_file_bytes),
         ("fetch_max_content_bytes", max_content_bytes),
     ):
-        if figure < 1:
-            msg = f"{label} must be at least 1, got {figure!r} (ADR-0230 §6)"
+        if type(figure) is not int or figure < 1:
+            msg = f"{label} must be an integer of at least 1, got {figure!r} (ADR-0230 §6)"
             raise ConfigurationError(msg)
 
 

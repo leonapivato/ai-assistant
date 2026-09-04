@@ -15,6 +15,7 @@ one; what it is for is producing a document whose text a test already knows.
 
 from __future__ import annotations
 
+import zlib
 from typing import Final
 
 #: The page box every document here uses. Arbitrary and irrelevant to extraction —
@@ -129,3 +130,36 @@ def amplified_page_tree_pdf(*, fan: int = 20, levels: int = 6) -> bytes:
         )
     objects[2 + levels] = b"<< /Type /Page /Parent 2 0 R /MediaBox " + _MEDIA_BOX + b" >>"
     return _assembled([objects[number] for number in sorted(objects)])
+
+
+def amplified_content_stream_pdf(*, decoded_bytes: int = 16_000_000) -> bytes:
+    """One page whose Flate-compressed content stream decodes to ``decoded_bytes``.
+
+    The compression bomb the *page-tree* fixture above is not. That one hides a huge
+    page count in a small file; this one hides a huge **content stream** in one, and
+    neither of ADR-0230 §6's two figures sees it on its own: the file bound is
+    satisfied by the compressed bytes, and the content bound is counted on extracted
+    text, which exists only after the whole stream has been parsed into operators.
+
+    A run of one repeated ``Tj`` compresses about 340:1, so the document this returns
+    is roughly ``decoded_bytes / 340`` on disk — about 47 KB at the default, against a
+    16 MB stream that took 313 s and 737 MB of resident memory to parse before the fix
+    this fixture pins.
+    """
+    unit = b" (AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA) Tj 0 -1 Td"
+    body = b"BT /F1 24 Tf 72 700 Td" + unit * (decoded_bytes // len(unit)) + b" ET"
+    packed = zlib.compress(body, 9)
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox "
+        + _MEDIA_BOX
+        + b" /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length "
+        + str(len(packed)).encode()
+        + b" /Filter /FlateDecode >>\nstream\n"
+        + packed
+        + b"\nendstream",
+    ]
+    return _assembled(objects)
