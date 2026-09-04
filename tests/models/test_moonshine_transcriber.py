@@ -26,6 +26,7 @@ import asyncio
 import base64
 import contextlib
 import threading
+import time
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -82,6 +83,29 @@ _SPOKEN_SENTENCE = "The dentist appointment is on Thursday afternoon."
 #: the evidence these two runs could not carry.
 _HEARD_CONTENT_WORDS = frozenset({"dentist", "appointment", "thursday", "afternoon"})
 _HEARD_CONTENT_WORDS_REQUIRED = 3
+
+#: The real-engine case's wall-clock budget, and a ceiling on pathology rather
+#: than a latency target. It has to bound the model load as well as the
+#: inference: `MoonshineTranscriber.__init__` loads nothing, so the files are
+#: read inside the first `transcribe` — ADR-0118 §4's shape, which that
+#: constructor's own docstring names — and a budget the cold load sat outside
+#: would bound the cheaper half of this case.
+#:
+#: The figure is measured rather than picked (#2091, filed on the hypothesis
+#: that a `just test-fast` run had exhausted it under CPU contention). On this
+#: project's 8-core box the case costs 2.4-2.6s serially; 7.7s inside a whole
+#: `just test-fast` run, where a dozen unbounded cases cost more and the slowest
+#: costs 23s; and from there it scales with oversubscription rather than with
+#: anything about the engines — 14.2s against 24 runnable processes on 8 cores
+#: (3x, which is exactly what `just test-fast`'s own three-slot lease permits),
+#: 28.9s against 48 (7x, which it does not). Reaching 120s that way needs ~40x,
+#: an order of magnitude past what the recipe can produce.
+#:
+#: So the budget stays where it was. Tightening it toward the measured cost
+#: would trade the ceiling for a latency target and buy the flake #2091 feared,
+#: and widening a bound nothing has been shown to approach would only make the
+#: wedge it exists to catch take longer to report.
+_REAL_ENGINE_SECONDS = 120.0
 
 
 def _tone(seconds: float = 0.4) -> np.ndarray:
@@ -410,13 +434,35 @@ async def test_the_real_engine_hears_real_speech_with_no_socket_opened() -> None
     cannot discharge: that the words come back. The recording is produced by this
     project's own voice, so one case exercises both seams and neither can go stale
     against a re-pinned model.
+
+    An expiry names the leg it died in and what the other leg cost, because the
+    one failure ever seen here (#2091) left no record of either and the run that
+    would have carried it was gone by the time it was looked for.
     """
-    async with asyncio.timeout(120.0):
-        with network_denied():
-            spoken = await SupertonicSynthesizer().synthesize(
-                _SPOKEN_SENTENCE, format=SpokenAudioFormat.WEBM_OPUS
-            )
-            heard = await MoonshineTranscriber().transcribe(spoken)
+    legs: dict[str, float] = {}
+    try:
+        async with asyncio.timeout(_REAL_ENGINE_SECONDS):
+            with network_denied():
+                started = time.monotonic()
+                spoken = await SupertonicSynthesizer().synthesize(
+                    _SPOKEN_SENTENCE, format=SpokenAudioFormat.WEBM_OPUS
+                )
+                legs["synthesis"] = time.monotonic() - started
+                started = time.monotonic()
+                heard = await MoonshineTranscriber().transcribe(spoken)
+                legs["recognition"] = time.monotonic() - started
+    except TimeoutError:
+        finished = ", ".join(f"{leg} {cost:.1f}s" for leg, cost in legs.items()) or "none"
+        # This case's own budget is the only thing here that raises `TimeoutError`:
+        # neither seam takes a deadline (ADR-0200 §1), and `SpeechTimeoutError` —
+        # which only a `Bounded...` decorator raises, and nothing here wires one —
+        # is an `AssistantError` and not a `TimeoutError`.
+        pytest.fail(
+            f"the real engines did not finish inside {_REAL_ENGINE_SECONDS}s; "
+            f"completed legs: {finished}. Serially this case costs ~2.5s and "
+            "~8s inside a whole `just test-fast` run, so a run that reaches this "
+            "budget is stalled rather than merely sharing a busy machine (#2091)."
+        )
 
     assert spoken.media_type is SpokenAudioFormat.WEBM_OPUS
     assert len(spoken.decoded()) > 1000
