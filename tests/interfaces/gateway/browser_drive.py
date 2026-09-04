@@ -53,7 +53,7 @@ if TYPE_CHECKING:
     from datetime import timedelta
     from pathlib import Path
 
-    from playwright.async_api import Browser, BrowserContext, Page
+    from playwright.async_api import Browser, BrowserContext, Page, ViewportSize
 
     from ai_assistant.core.types import Identifier, SpokenDeliveryReport, SpokenTurn
     from ai_assistant.core.types import SpokenAudio as SpokenAudioType
@@ -84,6 +84,19 @@ _TONE_HERTZ = 440.0
 #: a press the page answers with "nothing was recorded" and sends nowhere — and short
 #: enough that it costs the layer nothing.
 PRESS_MILLISECONDS = 400
+
+#: The window a case gets when it asks for none: Playwright's own default, stated
+#: here rather than left implicit because the parameter that overrides it takes
+#: ``None`` to mean *no fixed viewport at all* — which is a third state, and not one
+#: any case in this layer wants.
+_DEFAULT: ViewportSize = {"width": 1280, "height": 720}
+
+#: The two widths ADR-0233 §15 obliges the browser lane to drive its floor at. The
+#: desktop one is PR #1385's, and the phone is the iPhone 13 Pro's viewport — the same
+#: 390x844 #1429's layout lane drove, so a rendering assertion here and a layout one
+#: there are about the same screen.
+DESKTOP: ViewportSize = {"width": 1100, "height": 900}
+PHONE: ViewportSize = {"width": 390, "height": 844}
 
 #: The one probe the pages carry, installed before any of the bundle runs.
 #:
@@ -327,6 +340,7 @@ async def driving(
     *,
     renderings: tuple[str, ...] = (),
     admitted: bool = True,
+    viewport: ViewportSize | None = None,
 ) -> AsyncIterator[Drive]:
     """Bind a gateway, open a page on it, and exchange a session (ADR-0216 §4).
 
@@ -344,6 +358,12 @@ async def driving(
         admitted: Whether to perform the handshake. ``False`` leaves the page on
             its bootstrap panel, which is where a case about *loading* the bundle
             wants it.
+        viewport: The window this page is driven at, or ``None`` for the browser's
+            own default. A case about what is on screen *before a control* is a
+            case about a width — ADR-0233 §15 obliges the browser lane to drive
+            the page "at a desktop width and at a phone-class viewport" — and the
+            context is where a viewport is set, because this layer shares one
+            browser (ADR-0216 §3).
 
     Yields:
         The page, the gateway and the engine behind it.
@@ -370,7 +390,9 @@ async def driving(
     # (adversarial review, round 7, `major`).
     context: BrowserContext | None = None
     try:
-        context = await browser.new_context(permissions=["microphone"])
+        context = await browser.new_context(
+            permissions=["microphone"], viewport=viewport if viewport is not None else _DEFAULT
+        )
         await context.add_init_script(PROBE)
         page = await context.new_page()
         drive = Drive(page=page, gateway=gateway, engine=engine, origin=origin)

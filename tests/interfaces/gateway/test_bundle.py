@@ -33,6 +33,7 @@ from ai_assistant.core.types import (
     NotificationCondition,
     NotificationReach,
     RoutableOperation,
+    SpanCoverage,
     SpokenAudioFormat,
 )
 from ai_assistant.interfaces import cli
@@ -5489,6 +5490,182 @@ def test_the_page_says_who_disclosed_a_span_in_every_word_core_has() -> None:
 
     for provenance in DiscloserProvenance:
         assert f'"{provenance.value}"' in body, provenance.value
+
+
+def test_every_value_is_put_on_the_screen_whole_and_as_a_text_node() -> None:
+    """ADR-0233 §8's rendering floor, at the half a reading of the file decides.
+
+    Three clauses meet in one helper. Every value is inserted "as **data**,
+    neutralised for that target on render", which here is a text node and nothing
+    else — the same rule ADR-0177 §8 already binds this page to, reaching the one
+    text on the page whose exact characters are the thing being answered about.
+    Every value is rendered **whole**, which for prose means the line breaks survive:
+    a paragraph collapses them, so the value gets a block with its own rule rather
+    than the tail of its key's line. And nothing may hide part of one, so the class
+    it carries has no rule that could.
+
+    The **drive** is what says this works on a screen
+    (``test_browser_confirmations.py``, ADR-0233 §15); what a reading decides is that
+    there is one helper, that it is the only way a value reaches the card, and that
+    it uses none of the markup-parsing sinks this file bars everywhere else.
+    """
+    functions = _functions(_code("app.js"))
+    block = functions["valueBlock"]
+
+    assert "textContent" in block
+    assert 'className = "argument-value"' in block
+    for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "createContextualFragment"):
+        assert sink not in block, sink
+    # The two renderers of a confirmation's content, and no third caller.
+    assert {name for name, body in functions.items() if "valueBlock(" in body} == {
+        "valueBlock",
+        "renderParameters",
+        "renderEgress",
+    }
+
+
+def test_the_stylesheet_cannot_hide_part_of_a_value() -> None:
+    """ADR-0233 §8: a value is "not truncated, not elided, not abbreviated, not
+    summarised, not paraphrased, not collapsed behind a control the user must operate
+    to see them".
+
+    A stylesheet is where a page that renders a value whole can still show a third of
+    it, which is the failure ``.confirmation-row`` already has no rule for. So the
+    rule that makes the line breaks render is asserted **present**, and every rule
+    that could clip the block is asserted absent — including the scroller, which is
+    the tempting answer for a long body on a phone and is the one §8 rules out.
+    """
+    rule = _rule(_style("app.css"), ".argument-value")
+
+    assert "white-space: pre-wrap;" in rule
+    for forbidden in ("max-height", "overflow", "line-clamp", "text-overflow", "display: none"):
+        assert forbidden not in rule, forbidden
+
+
+def test_the_values_are_rendered_before_there_is_anything_to_press() -> None:
+    """ADR-0233 §8: "Where a surface has an order, the values precede the controls."
+
+    ADR-0178 §7's own ordering clause is pinned above over the floor's *facts*; this
+    is the same obligation over the **content**, and it is a different assertion
+    because a lane could put the values after the buttons and leave that one green.
+
+    The indexed spans' values are rendered inside ``renderEgress``, which
+    ``renderConfirmation`` calls before ``offerApproval``; the indexless ones are
+    ``renderParameters``' whole arguments, which it calls before both. So the check
+    is over the two functions that build the card between them.
+    """
+    functions = _functions(_code("app.js"))
+    card = functions["renderConfirmation"]
+    egress = functions["renderEgress"]
+
+    assert card.index("renderParameters(") < card.index("offerApproval(")
+    assert card.index("renderEgress(") < card.index("offerApproval(")
+    assert egress.index("valueBlock(") < egress.index("coverageWords(")
+    # An indexed span's value is rendered where the array's JSON does not spell it as
+    # itself; an indexless span's value is the whole argument `renderParameters` has
+    # already put on screen, and a second copy here would be one value twice.
+    assert "one.index !== null" in egress
+
+
+def test_a_confirmation_that_cannot_be_shown_whole_is_not_shown_at_all() -> None:
+    """ADR-0233 §8's second clause: "A surface that cannot render a value whole renders
+    **no** confirmation and says so."
+
+    The guard is asserted to be the **first** thing ``renderConfirmation`` does, ahead
+    of the tool line, the arguments, the egress facts and the control — a card refused
+    after half of it is on screen is the partial confirmation the clause is against.
+    What it says is asserted too, because "and says so" is half the clause.
+    """
+    script = _code("app.js")
+    card = _functions(script)["renderConfirmation"]
+
+    assert card.index("CONFIRMATION_NOT_WHOLE") < card.index("confirmation.tool_id")
+    assert card.index("CONFIRMATION_NOT_WHOLE") < card.index("offerApproval(")
+    assert "spans.some(unlocated)" in card
+    assert "cannot be shown here in full" in _joined(
+        script[script.index("const CONFIRMATION_NOT_WHOLE") :]
+    )
+
+
+def test_the_call_carries_one_coverage_line_in_every_state_core_has() -> None:
+    """ADR-0233 §8's coverage floor, read off `core`'s own vocabulary.
+
+    "A surface renders the call's ``coverage`` … in **all three** states", including
+    the one §6 makes unreachable in a confirmation — because "a fact shown only when
+    it is alarming is a fact a user learns to read as an alarm, and its absence as
+    clearance". A fourth member added to the enum fails here rather than reaching a
+    person as a bare identifier, which is ``disclosureWords``' own arrangement.
+
+    **It is the value the page was handed, and the page derives nothing.** ADR-0178 §3
+    bars a surface inferring a fact with a rule of its own; the arms branch on
+    ``coverage`` and on nothing else, and in particular on neither of the other two
+    axes — a page reading the origin boolean or a span's provenance to decide what to
+    say here would be asserting a marker no ADR mints (ADR-0233 §4, §8).
+    """
+    functions = _functions(_code("app.js"))
+    words = functions["coverageWords"]
+
+    assert "egress.coverage" in functions["renderEgress"]
+    for state in SpanCoverage:
+        assert f'"{state.value}"' in words, state.value
+    for axis in ("planned_with_external_content", "provenance", "tier", "extent", "span"):
+        assert axis not in words, axis
+
+
+def test_no_arm_of_the_coverage_line_is_an_assurance_a_verdict_or_a_span() -> None:
+    """ADR-0233 §8's wording clauses, on the sentences themselves.
+
+    Four of them, each stated as an absence because each is about what the line must
+    not say. It is a statement about **the call**, so the lead-in says so and no arm
+    names an argument, a position or a destination (§8's sixth clause, ADR-0181 §6's
+    fifth read one axis over). ``not_covered`` is **not an assurance** — "it states
+    that no covered path was recorded for this call, never that nothing in it relates
+    to anything the user has told this system, and never that the send is safe". It is
+    not a detection, a score, a risk level, a recommendation or a warning. And it
+    names **no record** and no *kind* of source, which is ADR-0150 §10's second clause
+    kept: no record identifier, no episode, no store-side key, no schema field, no
+    memory.
+
+    Adjacent string literals are joined first, so the assertions read the sentences
+    the browser would show rather than however the source happens to wrap them.
+    """
+    functions = _functions(_code("app.js"))
+    joined = _joined(functions["coverageWords"])
+
+    assert (
+        "About this call as a whole: ${coverageWords(egress.coverage)}" in functions["renderEgress"]
+    )
+    assert (
+        "nothing it would send was recorded as drawn from what this system stores, "
+        "which is what was recorded and not a statement that the send is safe" in joined
+    )
+    assert (
+        "some of what it would send was composed by a model that had been shown "
+        "something this system stores" in joined
+    )
+    assert "it would send something taken from what this system stores directly" in joined
+
+    for forbidden in (
+        "safe",
+        "risk",
+        "warning",
+        "detect",
+        "suspicious",
+        "malicious",
+        "unsafe",
+        "score",
+        "memory",
+        "record id",
+        "episode",
+        "belief",
+        "argument",
+        "recipient",
+        "source you connected",
+    ):
+        # "safe" is admitted in exactly one place: the clause saying the line is *not*
+        # a statement that the send is safe.
+        occurrences = joined.lower().count(forbidden)
+        assert occurrences == (1 if forbidden == "safe" else 0), (forbidden, occurrences)
 
 
 def test_the_page_shows_both_forms_and_reconstructs_neither() -> None:

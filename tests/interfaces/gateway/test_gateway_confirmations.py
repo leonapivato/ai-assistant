@@ -28,6 +28,7 @@ from test_gateway_streams import Harness, _harness
 
 from ai_assistant.core.errors import UnknownContinuationError
 from ai_assistant.core.types import (
+    BoundAccount,
     Confirmation,
     ConfirmationEgress,
     ContinuationToken,
@@ -35,6 +36,7 @@ from ai_assistant.core.types import (
     DestinationProtocol,
     DiscloserProvenance,
     Disposition,
+    EgressBinding,
     EgressDestination,
     EgressSpan,
     ExecutionState,
@@ -44,7 +46,13 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.interfaces.gateway.http import Request
 from ai_assistant.interfaces.gateway.records import RequestClass
-from ai_assistant.interfaces.gateway.server import _ASSISTANT_PATHS, _TURN_BUDGET
+from ai_assistant.interfaces.gateway.server import (
+    _ASSISTANT_PATHS,
+    _TURN_BUDGET,
+    _confirmation_span_view,
+    _recorded_binding_view,
+    _span_view,
+)
 from ai_assistant.testing import FakeAssistantEngine
 
 if TYPE_CHECKING:
@@ -102,13 +110,14 @@ def _span(  # noqa: PLR0913 — one keyword per field of the span being built
     )
 
 
-def _confirmation(
+def _confirmation(  # noqa: PLR0913 — one keyword per member of the confirmation being built
     *spans: EgressSpan,
     handle: str = "h-1",
     identity: str = _IDENTITY,
     parameters: Mapping[str, FrozenJson] | None = None,
     egress: bool = True,
     planned_with_external_content: bool = False,
+    coverage: SpanCoverage = SpanCoverage.NOT_COVERED,
 ) -> Confirmation:
     """One parked confirmation, with an egress member unless ``egress`` is false.
 
@@ -129,7 +138,7 @@ def _confirmation(
                 account_identity=identity,
                 spans=spans,
                 planned_with_external_content=planned_with_external_content,
-                coverage=SpanCoverage.NOT_COVERED,
+                coverage=coverage,
             )
             if egress
             else None
@@ -836,3 +845,147 @@ async def test_an_answer_the_surface_cannot_read_reaches_no_engine(
         assert status == 400
         assert body["fault"] == "malformed-request"
         assert one.engine.calls == []
+
+
+# --- ADR-0233 §8: the content and the coverage the page cannot obtain otherwise ---
+
+
+@pytest.mark.parametrize("coverage", list(SpanCoverage), ids=[one.value for one in SpanCoverage])
+async def test_the_calls_coverage_crosses_in_every_state_and_is_derived_from_nothing(
+    coverage: SpanCoverage,
+) -> None:
+    """ADR-0233 §8: the page renders ``coverage`` "in **all three** states".
+
+    It crosses at all because ADR-0178 §3 leaves the page no other route to it — the
+    value the ruling was taken over is read here, in this process, off the model
+    `core` built. All three states cross, including the one ADR-0233 §6 refuses at
+    construction: a view that carried only the states this gateway expects to meet
+    would leave the page's third arm unreachable and unobservable.
+
+    **Transcribed and not decided**: the key carries the confirmation's own member,
+    and nothing here scores, thresholds or ranks it, and no key beside it says what
+    the page should conclude.
+    """
+    confirmation = _confirmation(_span("body"), coverage=coverage)
+    async with _harness(_holding()) as one:
+        egress = (await _view(one, confirmation))["egress"]
+
+        assert egress["coverage"] == coverage.value
+        assert confirmation.egress is not None
+        assert egress["coverage"] == confirmation.egress.coverage.value
+
+
+async def test_every_spans_own_value_crosses_whole_in_both_decomposition_shapes() -> None:
+    """ADR-0233 §8's first clause, as the page receives it.
+
+    "For every span the ``spans`` tuple carries, that span's own value, taken from
+    ``Confirmation.parameters`` under ADR-0150 §4's decomposition — the argument's
+    whole value where ``index`` is absent, and that argument's value's element at
+    ``index`` otherwise."
+
+    Both shapes are here because both reach the page and only one of them is the
+    obvious one. The element case is also where a page doing its own decomposition
+    would go wrong: the argument crosses as text, so an array reaches the browser as
+    JSON, and its elements are only inside it.
+    """
+    parameters: dict[str, FrozenJson] = {"body": "hello\n\nAlice", "to": ("a@x.test", "b@y.test")}
+    confirmation = _confirmation(
+        _span("body", extent=12),
+        _span("to", index=0, canonical="a@x.test", extent=8),
+        _span("to", index=1, canonical="b@y.test", extent=8),
+        parameters=parameters,
+    )
+    async with _harness(_holding()) as one:
+        egress = (await _view(one, confirmation))["egress"]
+
+        assert [one["value"] for one in egress["spans"]] == [
+            "hello\n\nAlice",
+            "a@x.test",
+            "b@y.test",
+        ]
+
+
+async def test_a_spans_value_crosses_as_losslessly_as_the_argument_it_comes_from() -> None:
+    """:func:`_parameter_text`'s rule, reaching the value beside the description.
+
+    An integer above ``2**53`` read by ``JSON.parse`` is a double, so a value spelled
+    on the page rather than here would reach the owner **changed** — and a confirmation
+    showing a value the call would not run with is worse than one showing none. The
+    same reason the arguments are spelled in this process applies span by span, and a
+    span's value and its argument's are the same string for an indexless span.
+    """
+    big = 9007199254740993
+    parameters: dict[str, FrozenJson] = {"count": big}
+    confirmation = _confirmation(_span("count", extent=16), parameters=parameters)
+    async with _harness(_holding()) as one:
+        view = await _view(one, confirmation)
+
+        assert view["egress"]["spans"][0]["value"] == "9007199254740993"
+        assert view["parameters"] == [{"key": "count", "value": "9007199254740993"}]
+
+
+@pytest.mark.parametrize(
+    ("spans", "parameters"),
+    [
+        ((("subject", None),), {"body": "hello"}),
+        ((("body", 0),), {"body": "hello"}),
+        ((("to", 2),), {"to": ("a@x.test",)}),
+    ],
+    ids=[
+        "an argument the parameters do not carry",
+        "an index on a string",
+        "an index past the end",
+    ],
+)
+async def test_a_span_the_arguments_do_not_locate_crosses_as_no_value_at_all(
+    spans: tuple[tuple[str, int | None], ...], parameters: dict[str, FrozenJson]
+) -> None:
+    """The absence that lets the page perform ADR-0233 §8's refusal.
+
+    Each of the three is a state ``ActionRequest`` refuses at construction (ADR-0150
+    §4), so none is reachable through a request this system built — which is exactly
+    why the view answers rather than raises: a ``KeyError`` here would take down the
+    turn's response, and what a surface owes for an unlocatable value is §8's refusal
+    of the **whole** card, which is the page's to take over every span at once.
+
+    ``null`` cannot be mistaken for a value the owner is looking at: every located
+    value crosses as text, so a JSON ``null`` argument crosses as the four characters
+    ``null``.
+    """
+    confirmation = _confirmation(
+        *[_span(argument, index=index, extent=1) for argument, index in spans],
+        parameters=parameters,
+    )
+    async with _harness(_holding()) as one:
+        egress = (await _view(one, confirmation))["egress"]
+
+        assert [one["value"] for one in egress["spans"]] == [None]
+
+
+def test_a_recorded_decisions_description_carries_no_content() -> None:
+    """ADR-0150 §10's second clause, at the one place ADR-0233 §8 could have breached it.
+
+    §8's floor is stated over "a surface rendering a ``Confirmation``". A decision's
+    **history** row is not one: the ruling was already taken, and the binding it hangs
+    off never held the arguments. So the description stays a description there, and
+    the value rides only on the confirmation's own span view — which is why there are
+    two functions rather than one with a flag.
+    """
+    span = _span("body", extent=5)
+    binding = EgressBinding(
+        spans=(span,),
+        account=BoundAccount(identity=_IDENTITY, reference="conn-1"),
+        transport_endpoint="smtp.example.com:587",
+        planned_with_external_content=False,
+        coverage=SpanCoverage.NOT_COVERED,
+    )
+
+    recorded = _recorded_binding_view(binding)
+
+    assert recorded is not None
+    assert recorded["spans"] == [_span_view(span)]
+    assert "value" not in recorded["spans"][0]
+    assert _confirmation_span_view(span, {"body": "hello"}) == {
+        **_span_view(span),
+        "value": "hello",
+    }
