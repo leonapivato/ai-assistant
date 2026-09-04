@@ -37,6 +37,62 @@
   not. ADR-0230's `Status` line reads `Accepted` and takes the leading token in this
   change (ADR-0082 §2).
 
+- Amended: 2026-09-04 (§10 — the `/ToUnicode` half of the once-and-cached deferral is
+  **fired**: the CMap is re-parsed once per page, so the ground §10 gives for deferring it
+  does not hold). §10 defers a font's **`/ToUnicode` CMap** on exactly one ground and says
+  so in terms: *"Each is read **once** and cached, so no per-parse multiplier acts on
+  either — which is what separates them from the font program and is the **whole** of the
+  ground for deferring them."* Measured against `pypdf` 6.16.2, the adopted version, it is
+  re-parsed **once per page**. `EncodedStreamObject.get_data()` caches the
+  *decompression*, but `PageObject._extract_text` rebuilds a page's fonts on every call,
+  so `Font.from_font_resource` → `get_encoding` → `_parse_to_unicode` → `prepare_cm`
+  re-runs the whole-buffer normalisation and rebuilds the mapping dictionary once for
+  every page of the document. On a document of N content-identical pages sharing one font
+  with a 2 MB CMap, `extract_text()` over all pages measures **0.026 s at 1 page, 0.057 s
+  at 5 and 0.111 s at 10** (#2042) — linear in the page count for a fixed CMap.
+
+  **This ADR's own Context says the mechanism, one input over, which is why the note is an
+  internal contradiction rather than only a fact that postdates the text.** *"The adopted
+  extraction rebuilds a stream's fonts on **every** `_extract_text` call"* is the reason
+  Context gives for charging the font program, and *"`get_data()` caches the
+  **decompression**, so what repeats is the parse … and it repeats as many times as there
+  are pages"* is how it puts the consequence. The CMap is rebuilt by that same
+  `from_font_resource` call, so the sentence is true of it for the same reason. **§10's
+  first firing condition is therefore met** — *"a measurement showing one of them re-read
+  or re-parsed per page, or per any other quantity a document controls"* — and it is met
+  for the `/ToUnicode` half alone. §10's **`/ObjStm`** half is not measured here and
+  nothing in this note reaches it.
+
+  **The measurement supplies no replacement ground, and this note does not offer one.**
+  #2042's fixture reads as a negligible residual — about **0.009 s** per page — but that is
+  a property of its **entry count** rather than of the CMap's size: the per-page cost is
+  driven by the number of mappings parsed, and `pypdf` admits up to 100,000 of them
+  (`MAPPING_DICTIONARY_SIZE_LIMIT`). Holding the CMap at about 2 MB and varying only the
+  entry count, on one machine, the marginal cost per page is **0.020 s** at 1,800 entries,
+  **0.047 s** at 10,000, **0.163 s** at 45,000 and **0.354 s** at 90,000 — linear in pages
+  throughout. That same machine parses 1 MB of `Tj` operators in **1.28 s**, reproducing
+  the *"1 MB of operators → 1.2 s"* §2 records, so the two sides compare without a machine
+  correction. At the adopted version's own entry ceiling the CMap's per-page re-parse is
+  therefore within a factor of about **3.6** of a megabyte of operators — the **same
+  order** as the instruction class, not orders below it — and ten pages sharing that font
+  cost **3.5 s**.
+
+  **Nothing this ADR decided changes and no reader acts differently, which is ADR-0070
+  §1's test applied to this note.** What this ADR decided about this class is §2's, not
+  §10's rationale: these inputs *"are **not bounded by this ADR**, and no implementation,
+  lane or later ADR derives a refusal criterion on them from this field"*. That clause
+  stands entire and never rested on the caching claim, so a lane implementing §2 and §3
+  charges exactly the same bytes before this note and after it. **The deferral stands as a
+  matter of what may move it, and not because the residual is small — it is not.**
+  Charging the CMap is a new refusal criterion, documents that fetch today becoming
+  `TOO_LARGE`, which ADR-0015 puts in an ADR that partially supersedes §2 and §10; that is
+  what §10 means by fired, and firing a deferral is not itself a decision. **#2050 carries
+  that ADR**, with what it has to decide and the `/ObjStm` half still to measure. Under
+  ADR-0070 §1 this is an ADR reconciled with an internal contradiction and with a fact that
+  postdates it, so it is recorded as this appended dated note and no sentence below is
+  rewritten; it names no other ADR as the cause, so no `Status` edit is owed (ADR-0082 §1).
+  Refs #2042, #2050.
+
 ## Context
 
 ### Where this comes from
