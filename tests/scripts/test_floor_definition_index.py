@@ -42,6 +42,8 @@ arbitrary:
 
 from __future__ import annotations
 
+import difflib
+import re
 import sys
 from pathlib import Path
 
@@ -49,7 +51,12 @@ import pytest
 
 _ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(_ROOT / "scripts"))
-from floor_test import UnevaluableError, _python_definitions, defined_names  # noqa: E402
+from floor_test import (  # noqa: E402
+    UnevaluableError,
+    _python_definitions,
+    defined_names,
+    moved_definitions,
+)
 
 # --- Python: one case per binding form ----------------------------------------
 
@@ -170,3 +177,182 @@ def test_the_corpus_boilerplate_names_no_definition(token: str) -> None:
     *evaluated* not-a-symbol rather than an unevaluable test.
     """
     assert token not in defined_names(_ROOT, ["HEAD"])
+
+
+# --- §4's second limb: which definition a *moved line* makes ------------------
+#
+# `defined_names` above answers §3's "is this token a symbol at all". `moved_
+# definitions` answers a different question on the same grammar — "whose
+# definition did this base move change" — and it is asked per line, because a move
+# that changes a signature or an enum member's value changes that name's
+# definition while renaming nothing. So a set difference between the two endpoints
+# is not the reading; a per-line one is.
+#
+# Every case below is mutation-checked against the pattern this replaced, quoted
+# here so the comparison is on the page rather than in a commit:
+#
+#     ^\s*(?:async\s+)?def\s+(?P<def>[^\W\d]\w*)
+#     |^\s*class\s+(?P<cls>[^\W\d]\w*)
+#     |^\s*(?P<bound>[^\W\d]\w*)\s*(?::[^=\n]+)?=(?!=)
+#
+# and the check is stated as `_REPLACED_PATTERN` so each parametrised case says
+# for itself which direction the pattern got wrong: it *matched* three lines of
+# docstring prose (issue #2049, the over-binding this closes), and it *missed* a
+# bare annotated field and a `type` alias (under-binding, the direction ADR-0209
+# §5 forbids). The cases where it agreed are marked so too, so that the
+# assertions below are not silently testing only the disagreements.
+
+_REPLACED_PATTERN = re.compile(
+    r"^\s*(?:async\s+)?def\s+(?P<def>[^\W\d]\w*)"
+    r"|^\s*class\s+(?P<cls>[^\W\d]\w*)"
+    r"|^\s*(?P<bound>[^\W\d]\w*)\s*(?::[^=\n]+)?=(?!=)",
+    re.UNICODE,
+)
+
+
+def _pattern_names(old: str, new: str) -> set[str]:
+    """What the line pattern this change replaced would have returned."""
+    names: set[str] = set()
+    diff = difflib.unified_diff(old.splitlines(), new.splitlines(), n=0, lineterm="")
+    for line in diff:
+        if line[:1] not in {"+", "-"} or line.startswith(("+++", "---")):
+            continue
+        match = _REPLACED_PATTERN.match(line[1:])
+        if match is not None:
+            names.add(match.group("def") or match.group("cls") or match.group("bound"))
+    return names
+
+
+#: `(old, new, expected, what the replaced pattern returned)`. The fourth field is
+#: asserted, not documented: it is what makes each case a regression test rather
+#: than a restatement of the implementation.
+_MOVES = {
+    # Issue #2049 verbatim: `core/types.py`'s own prose, wrapped so that a
+    # sentence begins "class for all of them". `word_in("for", pr.text)` is true
+    # of essentially every PR, so this bound every open lane on the day it landed.
+    "prose in a docstring": (
+        'class Refusal:\n    """A reason.\n\n    One\n    """\n',
+        'class Refusal:\n    """A reason.\n\n    One\n    class for all of them rather\n    """\n',
+        set(),
+        {"for"},
+    ),
+    # The same shape one line lower down, and the same for `def` and for a bound
+    # name: a docstring is a string literal and `ast` cannot see into one.
+    "a def in a docstring": (
+        'def render():\n    """Do it.\n\n    Old.\n    """\n',
+        'def render():\n    """Do it.\n\n    def not really a function\n    """\n',
+        set(),
+        {"not"},
+    ),
+    "an assignment in a docstring": (
+        'def render():\n    """Do it.\n\n    Old.\n    """\n',
+        'def render():\n    """Do it.\n\n    version = whatever the caller passed\n    """\n',
+        set(),
+        {"version"},
+    ),
+    # A comment is invisible to `ast` for a second reason: the tokenizer drops it
+    # before a tree exists. The pattern missed it only because `#` is not
+    # whitespace and every one of its three alternatives is anchored — so this
+    # case is pinned to say that a comment must stay invisible under both
+    # readings, not to record a disagreement.
+    "prose in a comment": (
+        "VERSION = 1\n",
+        "VERSION = 1\n# class for the whole set, or a def for each\n",
+        set(),
+        set(),
+    ),
+    # The four the pattern and the parse agree on, which is most real traffic.
+    "a class added": ("x = 1\n", "x = 1\n\n\nclass Widget:\n    pass\n", {"Widget"}, {"Widget"}),
+    "a class removed": ("class Widget:\n    pass\n", "", {"Widget"}, {"Widget"}),
+    "a def added": ("x = 1\n", "x = 1\n\n\ndef render():\n    ...\n", {"render"}, {"render"}),
+    "an async def added": (
+        "x = 1\n",
+        "x = 1\n\n\nasync def render():\n    ...\n",
+        {"render"},
+        {"render"},
+    ),
+    "a nested def added": (
+        "class C:\n    def a(self) -> None: ...\n",
+        "class C:\n    def a(self) -> None: ...\n\n    def render(self) -> None: ...\n",
+        {"render"},
+        {"render"},
+    ),
+    "an enum member added": (
+        "class R(StrEnum):\n    ONE = 'one'\n",
+        "class R(StrEnum):\n    ONE = 'one'\n    TOO_LARGE = 'too-large'\n",
+        {"TOO_LARGE"},
+        {"TOO_LARGE"},
+    ),
+    # A signature change renames nothing, so a set difference between the two
+    # endpoints clears it. §4 binds on it: the definition of `render` changed.
+    "a signature changed, the name kept": (
+        "def render(a: int) -> None: ...\n",
+        "def render(a: int, b: int) -> None: ...\n",
+        {"render"},
+        {"render"},
+    ),
+    # A decorator is not the definition's line, under either reading.
+    "a decorator added above an untouched def": (
+        "class C:\n    def render(self) -> None: ...\n",
+        "class C:\n    @property\n    def render(self) -> None: ...\n",
+        set(),
+        set(),
+    ),
+    # The two the pattern *missed*. Both are under-binding, which ADR-0209 §5
+    # names as the failure it must not have — a pydantic field and a `Protocol`
+    # member are exactly what `core/types.py` and `core/protocols.py` carry.
+    "a bare annotated field added": (
+        "class Model(BaseModel):\n    a: int\n",
+        "class Model(BaseModel):\n    a: int\n    render: str\n",
+        {"render"},
+        set(),
+    ),
+    "a type alias added": ("x = 1\n", "x = 1\ntype Render = int\n", {"Render"}, set()),
+}
+
+
+@pytest.mark.parametrize("move", _MOVES)
+def test_a_moved_line_defines_what_python_says_it_defines(move: str) -> None:
+    """ADR-0209 §4's second limb, read off the parse rather than off the line."""
+    old, new, expected, _ = _MOVES[move]
+    assert moved_definitions(old, new) == expected, move
+
+
+@pytest.mark.parametrize("move", _MOVES)
+def test_the_replaced_pattern_is_what_each_case_is_measured_against(move: str) -> None:
+    """Pin the mutation: without this, five of the cases above prove nothing.
+
+    A case the pattern already got right is worth keeping — it is what says the
+    narrowing did not throw the real answers out with the false one — but a case
+    it got *wrong* is the regression, and this is what distinguishes them.
+    """
+    old, new, _, by_pattern = _MOVES[move]
+    assert _pattern_names(old, new) == by_pattern, move
+
+
+def test_an_endpoint_that_will_not_parse_binds_under_section_6() -> None:
+    """§6's own first named instance: "a parse failure at either endpoint".
+
+    Not a fallback to the pattern. A fallback would be the pattern back under
+    another name, on precisely the input nobody can vouch for, and it fails open:
+    where its names miss the PR's text `_contract_binding` returns None and the
+    floor clears. `_python_definitions` carried such a fallback and adversarial
+    review of PR #1803 found it short of `type Widget = object`. Raising binds,
+    and `_judge_conditional` publishes the reason.
+    """
+    for old, new in (("def (:\n", "x = 1\n"), ("x = 1\n", "def (:\n")):
+        with pytest.raises(UnevaluableError, match="will not parse"):
+            moved_definitions(old, new)
+
+
+def test_a_form_feed_does_not_shift_the_line_numbering() -> None:
+    """`str.splitlines` breaks on a form feed and Python's tokenizer does not.
+
+    The reading joins a diff's line numbers to `ast`'s `lineno` on equality, so a
+    splitter more generous than the tokenizer puts every definition after the form
+    feed one line out — and the name that then reads as moved is a *different*
+    one, which is wrong in both directions at once.
+    """
+    old = "x = 1\n\x0cdef render() -> None: ...\n"
+    new = "x = 2\n\x0cdef render() -> None: ...\n"
+    assert moved_definitions(old, new) == {"x"}

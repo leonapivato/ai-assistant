@@ -171,25 +171,12 @@ _CORE_PREFIX = "src/ai_assistant/core/"
 # and falls to §6.
 _ADR_FILE_RE = re.compile(r"^(\d{3,4})-.*\.md$")
 
-# A definition in one of the two contract files: a class, a `def`, or a bound
-# name — which is what an enum member and an annotated attribute look like.
-# ADR-0209 §4's second limb turns on "a name whose *definition* the move
-# changed", never on every identifier a hunk happens to contain. Nothing in §3's
-# symbol path reads it: a Python file `ast` refuses binds under §6 rather than
-# falling back to a pattern.
 # `--- /dev/null`, and the two pathname spellings `_DIFF_PATH_RE` reads more
 # closely just below. The prefixes are pinned by the caller's `_diff_opts`
 # (`diff.noprefix=false`, `diff.mnemonicPrefix=false`), and `/dev/null` is the one
 # shape that carries no pathname, so this is what is left once the section walk has
 # taken the path out of the other two.
 _FILE_HEADER_RE = re.compile(r"^(?:\+\+\+|---) (?:a/|b/|/dev/null)")
-
-_DEFINITION_RE = re.compile(
-    r"^\s*(?:async\s+)?def\s+(?P<def>[^\W\d]\w*)"
-    r"|^\s*class\s+(?P<cls>[^\W\d]\w*)"
-    r"|^\s*(?P<bound>[^\W\d]\w*)\s*(?::[^=\n]+)?=(?!=)",
-    re.UNICODE,
-)
 
 # --- §3's "symbol": what the repository actually defines -----------------------
 #
@@ -1029,15 +1016,106 @@ def protocol_widening(old: str, new: str) -> str | None:
     return None
 
 
+def _source_lines(source: str) -> list[str]:
+    """Split ``source`` into lines numbered as :func:`ast.parse` numbers them.
+
+    ``str.splitlines`` is the obvious spelling and is the wrong one: it breaks on
+    a form feed, a vertical tab, the three file/group/record separators, a NEL and
+    the two Unicode line separators, none of which Python's own tokenizer treats
+    as a line break. One form feed — a legal and occasionally used page separator
+    in Python source — would therefore shift every ``splitlines`` index one past
+    the ``lineno`` the parser reports, and the whole reading below joins those two
+    on equality. The tokenizer's own set is the three universal newlines and
+    nothing else, which is what this splits on. Measured on 3.14, not assumed.
+    """
+    return source.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+
+def _definition_sites(source: str, which: str) -> dict[int, set[str]]:
+    """Every name whose **definition statement** stands on a given line.
+
+    This is the reading ADR-0209 §4's second limb asks for — "a class, a ``def``,
+    or an enum member", stated by §4 in those words — resolved by Python rather
+    than matched against a pattern. The covered set is:
+
+    - a ``class``, a ``def`` and an ``async def``, at any nesting, on the line the
+      keyword stands on (a decorator is not that line, which is also where a
+      pattern put it);
+    - every name an assignment binds, annotated or not and with a value or
+      without, because that is what an enum member, a pydantic field and a
+      ``Protocol``'s annotated attribute look like;
+    - a ``type`` alias.
+
+    Nothing else, and in particular not a ``for`` target, a walrus, a ``with ...
+    as`` or an ``except ... as``. Those are bindings rather than definitions, they
+    are outside the set §4 names, and the pattern this replaces never reached them
+    either. :func:`_python_definitions` does reach them, and the difference is not
+    an inconsistency: §3 asks *whether a token names anything this repository
+    defines* and is deliberately over-inclusive about it, while §4 asks *which
+    definition a moved line makes* and is answered per line.
+
+    Against the pattern it replaces this is a strict widening on real definitions
+    — a bare ``field: int`` and a ``type`` alias were both invisible to it, and
+    both are under-binding, the one direction ADR-0209 §5 forbids — and a total
+    narrowing on text that is not Python at all. A pattern reads a line; prose
+    inside a docstring is a line. Issue #2049 is one sentence of
+    ``core/types.py``'s own prose, ``class for all of them rather than adding a
+    sixth member``, read as a class named ``for`` — and ``word_in("for", ...)`` is
+    true of essentially every PR ever written, so a two-file tests-only PR bought
+    a full adversarial round. ``ast`` cannot see inside a string literal at all,
+    and a keyword can never be a name.
+
+    Args:
+        source: One endpoint's whole content. The empty string is a file that
+            does not exist at that endpoint, and defines nothing.
+        which: The endpoint's name, for the reason §6 publishes.
+
+    Returns:
+        A map from 1-based line number to the names defined on that line.
+
+    Raises:
+        UnevaluableError: The endpoint will not parse. §6 names that as its own
+            first instance, and binding is the priced direction — a line-oriented
+            fallback here would be the pattern back again, under a name.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError) as exc:
+        raise UnevaluableError(
+            f"the {which} endpoint will not parse ({exc.__class__.__name__})"
+        ) from exc
+    sites: dict[int, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, _NAMED_DEFINITIONS):
+            sites.setdefault(node.lineno, set()).add(node.name)
+        elif isinstance(node, ast.TypeAlias) and isinstance(node.name, ast.Name):
+            sites.setdefault(node.name.lineno, set()).add(node.name.id)
+        elif isinstance(node, ast.Assign | ast.AnnAssign):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                for bound in ast.walk(target):
+                    if isinstance(bound, ast.Name) and isinstance(bound.ctx, ast.Store):
+                        sites.setdefault(bound.lineno, set()).add(bound.id)
+    return sites
+
+
 def moved_definitions(old: str, new: str) -> set[str]:
     """Names whose *definition* the move changed, in one contract file.
 
     ADR-0209 §4's second limb reads a definition, not a mention: a mention that
-    is not a definition tells a PR nothing it could act on. The hunks are
-    computed here with :mod:`difflib` rather than by shelling out to ``git
-    diff``, so what counts as "moved" does not depend on a rendering option this
-    module would then have to pin against repository config; zero context lines,
-    because a context line is precisely one the move did **not** touch.
+    is not a definition tells a PR nothing it could act on. Which lines the move
+    touched is computed here with :mod:`difflib` rather than by shelling out to
+    ``git diff``, so what counts as "moved" does not depend on a rendering option
+    this module would then have to pin against repository config; zero context
+    lines, because a context line is precisely one the move did **not** touch.
+
+    **A line's definitions, not a set difference between the two endpoints.**
+    Comparing the names each endpoint defines would clear every move that changed
+    a definition without renaming it — a signature, an enum member's value, a
+    field's type — and each of those is "a name whose definition the move
+    changed" in §4's own words. So each endpoint is parsed once into a map from
+    line to the names defined there (:func:`_definition_sites`), and that map is
+    read at the lines this move added or removed.
 
     Args:
         old: The whole content of the old endpoint (empty where none exists).
@@ -1045,16 +1123,24 @@ def moved_definitions(old: str, new: str) -> set[str]:
 
     Returns:
         Every name defined on a line the move added or removed.
+
+    Raises:
+        UnevaluableError: Either endpoint will not parse (ADR-0209 §6).
     """
+    old_lines = _source_lines(old)
+    new_lines = _source_lines(new)
+    old_sites = _definition_sites(old, "old")
+    new_sites = _definition_sites(new, "new")
     names: set[str] = set()
-    diff = difflib.unified_diff(old.splitlines(), new.splitlines(), n=0, lineterm="")
-    for line in diff:
-        if line[:1] not in {"+", "-"} or line.startswith(("+++", "---")):
+    # `get_opcodes` is what `unified_diff` walks, read directly so that the line
+    # numbers are had without re-parsing the `@@` headers back out of a rendering.
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old_lines, new_lines).get_opcodes():
+        if tag == "equal":
             continue
-        match = _DEFINITION_RE.match(line[1:])
-        if match is None:
-            continue
-        names.add(match.group("def") or match.group("cls") or match.group("bound"))
+        for lineno in range(i1 + 1, i2 + 1):
+            names |= old_sites.get(lineno, frozenset())
+        for lineno in range(j1 + 1, j2 + 1):
+            names |= new_sites.get(lineno, frozenset())
     return names
 
 
