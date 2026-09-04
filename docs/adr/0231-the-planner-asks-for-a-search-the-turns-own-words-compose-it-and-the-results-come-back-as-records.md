@@ -1108,9 +1108,18 @@ under it, makes a search fire without the user having authorised the recipient.
 > **Normative.** A record's `content` is **three spans the provider supplied**, in a
 > fixed order and each verbatim: the result's **title**, the **address** it reported
 > for the result, and the result's **snippet**, one per line, separated by a single
-> `\n`, with no other byte added. Where the provider supplied no title or no snippet
-> the line is omitted and the remaining lines keep their order; a result for which the
-> provider supplied **no address** is dropped. **A result any of whose three spans
+> `\n`, with no other byte added. **A span is *absent* exactly when the provider
+> omitted the field, supplied it as `null`, or supplied a string that is empty or
+> whose every character is Unicode whitespace; every other supplied string is
+> *present* and is transcribed byte for byte, leading and trailing whitespace
+> included.** That rule is total over what a provider can send, and it is stated
+> because determinism needs it to be: two implementations disagreeing about whether
+> `""` is a title mint records differing by a line, which is exactly the guarantee
+> below. Where the **title** or the **snippet** is absent its line is omitted and the
+> remaining lines keep their order; a result whose **address** is absent is dropped,
+> and an address that is present is transcribed rather than validated — this decision
+> parses no result address, and §19 is where a fetched one is deferred. **A result any
+> of whose three spans
 > carries an ASCII line break — `\n` or `\r`, at any position — is dropped whole**, and
 > for this clause's own reason: the line structure is the only thing keeping the three
 > spans apart, so a span carrying a break would have to be altered, which would stop it
@@ -1904,10 +1913,15 @@ for less.
    response every one of whose results is over the bound yields nothing. A response
    carrying more results than the configured count mints exactly that many, in the
    order the provider returned them. **The other two drops §10 states are asserted the
-   same way**: a result the provider supplied no address for, and a result whose title,
-   address or snippet carries `\n` or `\r` — one arm per span and per character, since
-   an implementation that guards the title and forgets the snippet passes a single-span
-   test. Each arm asserts the offending result is absent, that its siblings are minted
+   same way**: a result whose address is absent, and a result whose title, address or
+   snippet carries `\n` or `\r` — one arm per span and per character, since an
+   implementation that guards the title and forgets the snippet passes a single-span
+   test. **Absence is asserted by each of the four forms §10 admits** — the field
+   omitted, `null`, `""`, and a string of whitespace alone — over each of the three
+   spans: an absent title or snippet omits its line and no other byte moves, an absent
+   address drops the result, and a present span of one space is transcribed as that
+   space. An implementation that reads `""` as a title mints a record one line longer
+   than a conforming one over the same response and fails here. Each arm asserts the offending result is absent, that its siblings are minted
    in the order the provider returned them, and that a response every result of which
    is dropped for any of the three reasons is `NO_RESULT` rather than an empty success.
    An implementation that transcribes a break passes every other test here and fails
