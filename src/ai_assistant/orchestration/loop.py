@@ -64,6 +64,7 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.conversations import BELIEF_KINDS
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.reads import (
+    SearchServicer,
     ServicedRead,
     Servicing,
     StopReason,
@@ -764,6 +765,7 @@ class LearningLoop:
         registry: ToolRegistry,
         feedback: FeedbackProcessor,
         fetcher: Fetcher | None = None,
+        search: SearchServicer | None = None,
         retrieval_limit: int = _DEFAULT_RETRIEVAL_LIMIT,
         resolution_limit: int = _DEFAULT_RESOLUTION_LIMIT,
         episodic_limit: int | None = None,
@@ -828,6 +830,15 @@ class LearningLoop:
                 no further meaning: it does not distinguish unconfigured, an empty
                 root, an unreadable root or a failed read (§3), and nothing here
                 infers which it was.
+            search: The five contracts a ``WEB_SEARCH`` ask is serviced against
+                (ADR-0231 §5, §6, §17), or ``None`` where this deployment connected
+                no search account. **``None`` is the ordinary case and never an
+                error**, exactly as ``fetcher``'s is: a deployment with no account
+                connected services no search on any of its turns, and ADR-0231
+                §13's disposition records that as a provisioning fact rather than
+                as a fault. It is the loop's only route to the search seam and the
+                seam's only caller — ADR-0231 §11's one-call-site clause, kept by
+                a wiring rather than by a type.
             retrieval_limit: How many memories a turn retrieves. The **belief**
                 budget: it is never reduced, shared or made conditional by the
                 episodic supplement below (ADR-0158 §3).
@@ -877,6 +888,7 @@ class LearningLoop:
         self._registry = registry
         self._feedback = feedback
         self._fetcher = fetcher
+        self._search = search
         self._retrieval_limit = retrieval_limit
         self._resolution_limit = resolution_limit
         # Resolved after the check, and against the *validated* belief budget, so
@@ -1324,6 +1336,20 @@ class LearningLoop:
                 supply=memories,
                 fetcher=self._fetcher,
                 listing=listing,
+                # ADR-0231 §11: **one servicing site**, and this is still it — the
+                # search is a fourth kind of the same emission rather than a second
+                # seam, so the search servicer is handed to the same call the file,
+                # the hop and the query are serviced by, and no other component
+                # holds it.
+                search=self._search,
+                # ADR-0231 §3, §4: the turn's own words, **unrewritten**, which is
+                # the only value a `QueryComposer` is ever supplied. Not `memories`,
+                # not the tail, not the listing and not the plan's rationale — the
+                # composer has no parameter any of them could arrive through, and
+                # this is the call site where that claim is either kept or broken.
+                # `_turn` holds the utterance the caller passed `respond`, which is
+                # the same value the goal's statement was stripped from.
+                utterance=utterance,
                 audit=audit,
             )
             serviced = audit.servicings[-1]

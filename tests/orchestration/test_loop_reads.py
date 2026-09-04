@@ -1238,6 +1238,13 @@ async def test_the_audit_copies_no_text_and_carries_only_the_correlation_id() ->
         # never free text". `None` here, on a servicing that carried no `LOCAL_FILE`
         # ask at all — which is one of the two absences §9 enumerates.
         "refusal",
+        # ADR-0231 §13's **one** added field, on identical terms — "one field per
+        # servicing … a member of `SearchDisposition` … and never free text". `None`
+        # here, on a servicing that carried no `WEB_SEARCH` ask, which is one of the
+        # two absences §13 enumerates. The pin stays closed over it because it is a
+        # class: no query, no fragment, no length, no origin, no host, no address, no
+        # title, no snippet and no provider message can reach this record.
+        "disposition",
         "truncated_kinds",
         "failed",
         "failed_after_read_returned",
@@ -1866,6 +1873,8 @@ async def test_no_caller_can_raise_the_budget() -> None:
             supply=(),
             fetcher=None,
             listing=None,
+            search=None,
+            utterance="when is billing due",
             audit=TurnReadAudit(),
             budget=100,  # type: ignore[call-arg]  # the point of the case
         )

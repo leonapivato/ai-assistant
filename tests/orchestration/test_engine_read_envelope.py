@@ -639,6 +639,13 @@ async def test_no_identifier_the_hop_carried_reaches_a_prompt_a_log_or_the_audit
         # and on this turn — a hop, with no ``LOCAL_FILE`` ask — it is absent, which
         # is one of the two cases §9 enumerates for an empty one.
         "refusal",
+        # ADR-0231 §13's one added field, on the same terms: a closed-enumeration
+        # member or absent, absent here because this turn carried no ``WEB_SEARCH``
+        # ask. It is a **class** and carries no query, no fragment of one, no
+        # length, no origin, no host, no address, no title, no snippet and no
+        # provider message — which is why §9's no-copy rule admits it beside the
+        # counts, and why this assertion still holds over the whole record.
+        "disposition",
         "truncated_kinds",
         "failed",
         "failed_after_read_returned",
