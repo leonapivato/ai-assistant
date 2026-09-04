@@ -179,22 +179,32 @@ lane's own decision.**
 > contract: an act split across two calls is one a client can half-perform, and the
 > half that survives is an approval the user believed was standing.
 
-> **Normative.** Both operations **refuse an expiry that is not strictly after the
-> instant that will stamp the answer**, before anything is recorded, and the refusal
-> names the instant it was compared against. `RecipientGrant` refuses a granting
-> record whose `expires_at` is at or before its `decided_at` (ADR-0193 §9) and
-> `decided_at` is the answer's, so an operation that did not check would record the
-> answer and only then meet a construction refusal — leaving a decision in the trail,
-> no grant, and a user told nothing they could act on. It is the shape §3's seventh
-> condition closes one axis over, closed the same way and for the same reason: a
-> precondition on the act is checked where the act is offered, not where the record is
-> built.
+> **Normative.** Where the answer is going to be an `ALLOW`, both operations
+> **refuse an expiry that is not strictly after the instant that will stamp that
+> answer** — after the policy has ruled and **before that answer is recorded** — and
+> the refusal names the instant it was compared against. `RecipientGrant` refuses a
+> granting record whose `expires_at` is at or before its `decided_at` (ADR-0193 §9)
+> and `decided_at` is the answer's, so an operation that did not check would record
+> the answer and only then meet a construction refusal, leaving a decision in the
+> trail, no grant, and a user told nothing they could act on. It is the shape §3's
+> seventh condition closes one axis over, closed the same way and for the same
+> reason: a precondition on the act is checked where the act is offered, not where
+> the record is built.
+
+> **Normative.** That check is **scoped to the establishing path and reaches no other
+> outcome**. Where the ruling is not an `ALLOW` — a declining answer on `resume`, or a
+> policy that declines an approving one on either operation — the answer is recorded
+> exactly as it would be had no expiry been supplied at all, the supplied instant is
+> not consulted, and no grant is established. ADR-0042 §4's guarantee that
+> `approved=False` yields a recorded `DENY`, and every obligation of
+> `ActionPolicy.resolve`, are preserved whole; this ADR states no exception to either,
+> and no clause of it suppresses the record of a decision the policy made.
 
 > **Normative.** The instant compared against is **the one the operation will stamp
-> on the answer**, read once and used for both. No operation reads the clock a second
-> time between the comparison and the record, because two reads admit an expiry that
-> passes the check and fails the constructor — which is the failure this clause
-> exists to remove rather than to narrow.
+> on the answer**, chosen once and used for both. No operation reads the clock a
+> second time between the comparison and the record, because two reads admit an
+> expiry that passes the check and fails the constructor — which is the failure this
+> clause exists to remove rather than to narrow.
 
 > **Normative.** Every operation offering the act obtains its `RecipientGrant` from
 > `RecipientGrant.established_from` and **mints none of its own**, which is ADR-0193
@@ -273,8 +283,10 @@ declared argument is admitted by that clause rather than by a change to it (§13
 > **recorded** `CONFIRM` no park holds:
 > `establish_recipient_grant(decision_id: str, *, expires_at: UtcInstant) -> RecipientGrant`.
 > It reads the named decision from the `AuditTrail`, obtains the resolving ruling
-> from `ActionPolicy.resolve` with `approved=True`, records that answer, builds the
-> grant with `RecipientGrant.established_from`, records the grant, and returns it.
+> from `ActionPolicy.resolve` with `approved=True`, and — where that ruling is an
+> `ALLOW` and §1's expiry check passes — records that answer, builds the grant with
+> `RecipientGrant.established_from`, records the grant, and returns it. The clauses
+> below say what it does on every other outcome.
 
 > **Normative.** It is available on a decision meeting **all seven** of the
 > following, and is refused on any other: the trail holds it; its ruling is a
@@ -309,6 +321,17 @@ declared argument is admitted by that clause rather than by a change to it (§13
 > such a confirmation may approve the call; they may not, in that act, make the
 > recipients standing (ADR-0193 §2, §4), and the surface must know that before it
 > offers the act rather than after it has collected one.
+
+> **Normative.** Where `ActionPolicy.resolve` answers other than an `ALLOW` on
+> `establish_recipient_grant` — which its second obligation expressly permits for a
+> confirmation answered long after it was asked — **that answer is recorded** and the
+> operation raises, establishing nothing. Suppressing it would be the failure
+> ADR-0042 §4's guarantee exists to prevent, read one operation over: the policy
+> ruled on a question the user answered, and a ruling the trail never sees is a
+> decision nobody can audit. Because a confirmation has one answer (ADR-0044 §2b) the
+> decision is thereby settled, and §3's fourth condition then keeps the act from being
+> offered on it again — which is stated here rather than discovered, since it is the
+> one outcome on this population that costs the user the act.
 
 > **Normative.** The operation **resumes nothing and services nothing**. The
 > `ALLOW` it records authorises a call that has already been abandoned: no lane
@@ -939,11 +962,20 @@ enumeration in its own text (§9).
 > **no** grant were recorded, and each asserts that `grantable_decisions` does not
 > return the decision either.
 
-> **Normative.** Lane 1 ships the expiry pair, on **both** operations: an
-> `expires_at` at or before the instant the answer would carry records neither the
-> answer nor the grant and raises, and one strictly after it establishes the grant.
-> The first fails against an implementation that let the record's own validator do
-> the refusing, which is the outcome §1's clause forbids.
+> **Normative.** Lane 1 ships the expiry pair, on **both** operations: an expiry at
+> or before the instant the answer would carry records neither the answer nor the
+> grant and raises, and one strictly after it establishes the grant. The first fails
+> against an implementation that let the record's own validator do the refusing,
+> which is the outcome §1's clause forbids.
+
+> **Normative.** Lane 1 ships the pair that pins §1's **scoping** of that check, and
+> it is the arm a roster would omit: a `resume` carrying an expiry at or before the
+> answer's instant beside `approved=False` records the `DENY` exactly as a `resume`
+> without the argument does, and an `establish_recipient_grant` carrying one on which
+> the policy answers other than `ALLOW` records that answer. Both assert the trail's
+> contents, so both fail against an implementation that validated the expiry before
+> the policy ruled — the contradiction round 3 of this review found in an earlier
+> draft of §1.
 
 > **Normative.** The last of those is owed **by name and not by a roster**, because
 > it is the one an implementation reaches through a green path: `ActionPolicy.resolve`
