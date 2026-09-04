@@ -4315,7 +4315,11 @@ def _confirmation_view(confirmation: Confirmation) -> dict[str, Any]:
             for key, value in confirmation.parameters.items()
         ],
         "reason": confirmation.reason,
-        "egress": None if confirmation.egress is None else _egress_view(confirmation.egress),
+        "egress": (
+            None
+            if confirmation.egress is None
+            else _egress_view(confirmation.egress, confirmation.parameters)
+        ),
     }
 
 
@@ -4348,7 +4352,9 @@ def _parameter_text(value: FrozenJson) -> str:
     return json.dumps(value, ensure_ascii=False, default=dict)
 
 
-def _egress_view(egress: ConfirmationEgress) -> dict[str, Any]:
+def _egress_view(
+    egress: ConfirmationEgress, parameters: Mapping[str, FrozenJson]
+) -> dict[str, Any]:
     """ADR-0148 §8's fourth clause, as the page receives it (ADR-0178 §7).
 
     Three things, and a confirmation naming the tool and not the recipients is not a
@@ -4384,11 +4390,38 @@ def _egress_view(egress: ConfirmationEgress) -> dict[str, Any]:
     thresholds it, and no key beside it says what the page should conclude — the
     wording is the page's to render in both states (§6's fourth clause), and §7's
     first clause bars any surface from presenting it as a detection.
+
+    **``coverage`` and the spans' values are ADR-0233 §8's floor arriving beside that
+    one, and they are two different additions.** ``coverage`` is the recorded
+    decision's own three-valued fact about **the call**, transcribed onto
+    :class:`ConfirmationEgress` at the assembly sites (ADR-0233 §4) and crossing here
+    for ``planned_with_external_content``'s reason: the page cannot obtain it by any
+    other route, and ADR-0178 §3 forbids a surface inferring one with a rule of its
+    own. Like the boolean it is neither scored nor thresholded here, no key beside it
+    says what the page should conclude, and the three states' wording is the page's to
+    render (ADR-0233 §8). The **values** are the content the approver reads, one per
+    span, and :func:`_span_view` is where they are located and why.
+
+    **Neither is a second carriage of the other, and neither is a fourth member of
+    ADR-0178 §7's floor.** They answer different questions — where what this call
+    would send came from, and whether the material selected into the planning call
+    carried the external mark — so nothing here derives one from the other, and a page
+    that rendered one as the other would be asserting a marker neither ADR mints
+    (ADR-0233 §8).
+
+    Args:
+        egress: The egress facts the confirmation puts to the user.
+        parameters: The arguments the confirmation carries, which each span's own
+            value is located in (ADR-0233 §8).
+
+    Returns:
+        The egress member, as the page receives it.
     """
     return {
         "account_identity": egress.account_identity,
         "destinations": [_destination_view(one) for one in egress.canonical_destination_set],
-        "spans": [_span_view(one) for one in egress.spans],
+        "spans": [_confirmation_span_view(one, parameters) for one in egress.spans],
+        "coverage": egress.coverage.value,
         "planned_with_external_content": egress.planned_with_external_content,
     }
 
@@ -4426,6 +4459,21 @@ def _span_view(span: EgressSpan) -> dict[str, Any]:
     span as the payload-description span it is. Where it is present both ``supplied``
     and ``canonical`` cross, because ADR-0148 §14 names reconstruction of one from the
     other as a failure in terms and the binding carries both so neither is guessed.
+
+    **This is still the description and it carries no content, which is why
+    ADR-0233 §8's value is not here.** Both consumers of this function are entitled to
+    the description; only one of them is a `Confirmation`. A decision's history row
+    (:func:`_recorded_binding_view`) renders a ruling that was already taken, over a
+    binding that never held the arguments — §8's floor is stated over a surface
+    rendering a confirmation, and putting the bytes on a trail row would make the
+    description content-bearing where ADR-0150 §10's second clause keeps it empty.
+    :func:`_confirmation_span_view` is the one that adds them.
+
+    Args:
+        span: The occurrence to describe.
+
+    Returns:
+        The span, as the page receives it.
     """
     destination = span.destination
     return {
@@ -4444,6 +4492,82 @@ def _span_view(span: EgressSpan) -> dict[str, Any]:
             }
         ),
     }
+
+
+def _confirmation_span_view(
+    span: EgressSpan, parameters: Mapping[str, FrozenJson]
+) -> dict[str, Any]:
+    """One occurrence, and the bytes it describes (ADR-0233 §8).
+
+    :func:`_span_view`'s description with the span's **own value** beside it, which is
+    the one member of a confirmation's view that is content. It is not part of the
+    description and does not make one a payload: it is
+    :attr:`Confirmation.parameters` — the arguments the request already carries, which
+    the description is derived *from* (ADR-0233 §2) — decomposed under ADR-0150 §4 and
+    spelled by :func:`_parameter_text`, so what crosses is the whole value and never a
+    summary, an excerpt or a digest of one. The two travel together here for
+    :class:`BoundEgressCall`'s reason one layer down: this is the one place where
+    having both is the point rather than a means.
+
+    **The decomposition is performed here rather than on the page** for
+    :func:`_egress_view`'s reason and for one of its own: the values cross as text,
+    losslessly, so a page indexing into a JSON array would have to parse one back and
+    would round an integer argument on the way (:func:`_parameter_text`).
+
+    **A span whose value this cannot locate crosses as ``null``**, which is what lets
+    the page perform ADR-0233 §8's "a surface that cannot render a value whole renders
+    **no** confirmation and says so": ``ActionRequest``'s validator makes the
+    decomposition total against the request's own ``parameters`` (ADR-0150 §4), so a
+    mismatch is a confirmation this system did not build, and the page refuses the
+    whole card rather than showing part of one.
+
+    Args:
+        span: The occurrence to describe.
+        parameters: The arguments the confirmation carries, which the span's own
+            value is located in.
+
+    Returns:
+        The span and its value, as the page receives them.
+    """
+    return {**_span_view(span), "value": _span_value(span, parameters)}
+
+
+def _span_value(span: EgressSpan, parameters: Mapping[str, FrozenJson]) -> str | None:
+    """One span's own value, located in the arguments (ADR-0233 §8, ADR-0150 §4).
+
+    "The argument's whole value where ``index`` is absent, and that argument's value's
+    element at ``index`` otherwise" — ADR-0233 §8's own words, which is the whole of
+    the rule and is why it is written here rather than reached for in `core`: a frozen
+    JSON array is a ``tuple`` and a ``str`` is not, so "is this argument's value a JSON
+    array" is that test and nothing subtler (``core``'s own
+    ``_decomposition_defect`` says so one module over).
+
+    **Every arm that returns ``None`` is one ``ActionRequest`` refuses at
+    construction**, so none of them is reachable through a request this system built:
+    a span naming an argument the parameters do not carry, an indexed span on a
+    non-array value, and an index past the array's end are the three, and each is a
+    clause of ADR-0150 §4's parameter-relative list. They are answered rather than
+    raised because the alternative is a ``KeyError`` inside a turn's response, and
+    they are answered with an absence rather than with a sentence because what a
+    surface owes for one is ADR-0233 §8's refusal of the **whole** card — a decision
+    the page takes over every span at once, not one this view can take span by span.
+
+    Args:
+        span: The occurrence whose value is wanted.
+        parameters: The arguments the confirmation carries.
+
+    Returns:
+        The value, spelled as :func:`_parameter_text` spells one, or ``None`` where
+        the spans and the arguments do not agree.
+    """
+    if span.argument not in parameters:
+        return None
+    value = parameters[span.argument]
+    if span.index is None:
+        return _parameter_text(value)
+    if not isinstance(value, tuple) or not 0 <= span.index < len(value):
+        return None
+    return _parameter_text(value[span.index])
 
 
 def _summary_view(summary: ConversationSummary) -> dict[str, Any]:
