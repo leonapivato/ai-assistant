@@ -36,7 +36,7 @@ decision of the user made while looking at a recorded call.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -67,27 +67,6 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.runner import EstablishingAnswer
 
 _log = structlog.get_logger(__name__)
-
-#: How many trail rows :meth:`RecipientGrantOperations.establish_recipient_grant`
-#: reads when it looks for a resolution of the confirmation it was named
-#: (ADR-0235 §3's fourth condition).
-#:
-#: **A bound rather than an unbounded read**, because ADR-0235 §11 declines to mint
-#: "a durable, filtered or indexed read of the permission trail" and ADR-0193's
-#: neighbouring store makes the same refusal: the trail carries no read that
-#: resolves "which decision answers this one" without a scan, and ``export`` is the
-#: unbounded read of a Tier 1 store that ADR-0021 §4 keeps distinct from a listing.
-#:
-#: **Correctness does not rest on the window and that is the point.** ADR-0021 §1
-#: and ADR-0044 §2b put the one-answer rule where it is really enforced —
-#: :meth:`~ai_assistant.core.protocols.AuditTrail.record`, which refuses a
-#: resolution where the trail already holds one naming the same ``CONFIRM`` — so a
-#: resolution *older* than this window is caught by the append refusing, and
-#: ADR-0235 §3's late-failure clause converts that refusal into the same
-#: ``UngrantableActError`` the check would have raised. Nothing is recorded either
-#: way. What the window buys is the ordinary case answered before a policy is
-#: consulted at all.
-_RESOLUTION_WINDOW: Final = 200
 
 
 class RecipientGrantOperations:
@@ -543,15 +522,47 @@ class RecipientGrantOperations:
         return answer
 
     async def _resolution_of(self, decision_id: str) -> PermissionDecision | None:
-        """The decision resolving ``decision_id`` within the window, or ``None``.
+        """The decision resolving ``decision_id``, or ``None`` — conclusively.
 
-        A scan of :data:`_RESOLUTION_WINDOW` rows rather than an indexed read,
-        because ADR-0235 §11 mints no filtered read of the trail and
-        :meth:`~ai_assistant.core.protocols.AuditTrail.resolution_of` answers only
-        for a decision carrying **both** an ``execution_id`` and a ``step_id``,
-        which this population carries neither of (ADR-0235 §3's third condition).
+        **A whole read and never a bounded one, and the difference is load-bearing**
+        (ADR-0235 §3). This answer is what §3's fourth condition is decided from at
+        the check *and* what its late-failure clause converts an
+        :class:`~ai_assistant.core.errors.InvalidResolutionError` on — "the operation
+        reads the trail once more for a resolution of the named confirmation, and
+        raises ``UngrantableActError`` where one is now recorded". A bounded scan
+        cannot support that conversion: a confirmation resolved long enough ago that
+        its answer has scrolled past the window would be reported as an
+        ``InvalidResolutionError``, which is §3's refusal wearing the wrong type, and
+        the ADR's own account of why the conversion is sound — six of
+        ``InvalidResolutionError``'s seven grounds closed by construction, so "the
+        read finds the seventh and nothing else" — is what a scan that can *miss* the
+        seventh falsifies.
+
+        **This is not the bound ADR-0235 §3 places on the listing, and the asymmetry
+        is the decision rather than an inconsistency.**
+        :meth:`grantable_decisions` is a **page**: its ``limit`` bounds the rows read
+        so that "the operation makes no unbounded read of a Tier 1 store", and §3's
+        window-completeness rule is what makes the fourth condition decidable *within
+        a page* — a decision the window is not complete for is simply not offered,
+        and the recourse is a larger ``limit``. This operation is about **one named
+        decision** and has no ``limit`` to widen, so the only conclusive answer
+        available on the declared contract is the whole read.
+
+        **``export`` rather than a member of its own**, because ADR-0235 §4 adds no
+        member to :class:`~ai_assistant.core.protocols.AuditTrail` and §11 declines
+        "a durable, filtered or indexed read of the permission trail" — the one that
+        would make this cheap — with the condition that fires it: "a measurement
+        showing that real use loses decisions to the window".
+        :meth:`~ai_assistant.core.protocols.AuditTrail.resolution_of` is not it
+        either: it answers only for a decision carrying **both** an ``execution_id``
+        and a ``step_id``, which §3's third condition requires this population to
+        carry neither of.
+
+        **The cost is stated rather than hidden**: this is a read of the whole trail,
+        on an act a user performs deliberately and rarely, and it is the same read
+        ``export_decisions`` already offers that user. It is not on any turn's path.
         """
-        rows: Sequence[PermissionDecision] = await self._trail.recent(limit=_RESOLUTION_WINDOW)
+        rows: Sequence[PermissionDecision] = await self._trail.export()
         return next((row for row in rows if row.resolves == decision_id), None)
 
 

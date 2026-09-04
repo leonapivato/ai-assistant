@@ -2179,7 +2179,14 @@ class FakeAssistantEngine:
                 f"it and its answer rides resume rather than this operation (ADR-0235 §3)"
             )
             raise UngrantableActError(msg)
-        rows = await self.trail.recent(limit=DEFAULT_PAGE_SIZE)
+        # **The whole trail and never a page** (ADR-0235 §3). This answer is what §3's
+        # fourth condition is decided from, and a bounded scan would report a
+        # confirmation whose answer has scrolled past the window as *offerable* — the
+        # one refusal that would then arrive as the trail's `InvalidResolutionError`
+        # instead of as this operation's own type. `grantable_decisions` above is a
+        # page and is bounded by its `limit` with §3's window-completeness rule; this
+        # is about one named decision and has no `limit` to widen.
+        rows = await self.trail.export()
         resolution = next((row for row in rows if row.resolves == decision_id), None)
         if resolution is not None:
             msg = (

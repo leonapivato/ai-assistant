@@ -616,6 +616,52 @@ async def test_a_confirmation_already_answered_is_refused_before_anything_is_rul
     assert await store.export() == []
 
 
+async def test_a_confirmation_answered_long_ago_is_refused_at_the_check() -> None:
+    """The resolution question is answered conclusively and never over a page (§3).
+
+    A resolution that is **not** in any recent page — a confirmation answered long
+    enough ago that many decisions have been recorded since — must still refuse §3's
+    fourth condition, at the check and with ``UngrantableActError``.
+
+    It fails against an implementation that scanned a bounded window for the
+    resolution: that one finds nothing at the check, seeks a ruling, has its answer
+    refused by ``AuditTrail.record``, re-reads the same bounded window, finds nothing
+    again, and lets an ``InvalidResolutionError`` escape — §3's refusal wearing the
+    trail's type, on a decision the user is simply told is spent. The ADR's own
+    account of the conversion is what a bounded scan falsifies: six of that class's
+    seven grounds are closed by construction here "which is why the read finds the
+    seventh and nothing else", and a scan that can miss the seventh finds neither.
+    """
+    confirmed = confirmation(binding(ALICE))
+    answered = PermissionDecision.from_confirmation(
+        confirmed,
+        PermissionRuling(
+            outcome=PermissionOutcome.ALLOW,
+            reason="already answered",
+            authorised_by=confirmed.id,
+        ),
+        id="d-answer",
+        decided_at=_ANSWERED_AT,
+    )
+    later = [
+        confirmation(
+            binding(f"later-{index}@example.com"),
+            decision_id=f"d-later-{index}",
+            at=_ANSWERED_AT + timedelta(minutes=index + 1),
+        )
+        for index in range(300)
+    ]
+    trail = await _seeded(confirmed, answered, *later)
+    store = FakeRecipientGrantStore(now=lambda: _ANSWERED_AT)
+    operations = _operations(trail=trail, store=store)
+
+    with pytest.raises(UngrantableActError, match="already answered"):
+        await operations.establish_recipient_grant(confirmed.id, expires_at=_UNTIL)
+
+    assert await store.export() == []
+    assert [row for row in await trail.export() if row.resolves == confirmed.id] == [answered]
+
+
 async def test_a_resolution_recorded_during_the_act_raises_the_acts_own_type() -> None:
     """ADR-0235 §12's concurrent-resolution test, deterministic through the policy seam.
 
