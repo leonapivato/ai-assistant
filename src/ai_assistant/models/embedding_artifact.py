@@ -26,6 +26,17 @@ once every file matches the manifest — a mismatch therefore fails the build
 leaving nothing staged. It then re-hashes **every** file in the destination,
 including files that were already there, because an sdist or a stale staging
 directory can carry a corrupted file that no download would ever replace.
+
+**And a file the manifest does not name is refused rather than ignored**, which
+is the half a per-file check does not give on its own. The build hook
+force-includes the whole vendored *directory*, so anything sitting in it is
+packaged — a file left behind by an earlier pin, or one dropped there by anyone
+with write access to the tree. Verifying only the named files would let such a
+file be redistributed under this project's name with no digest, no manifest entry
+and no mention in ``THIRD-PARTY-NOTICES.md``, which is exactly what "the SHA-256
+of each file as shipped" forecloses. ``speech_artifact.py`` met the shape rather
+than imagining it (issue #1683): dropping two files from a manifest left them on
+disk and staged for packaging until they were removed by hand.
 """
 
 from __future__ import annotations
@@ -270,18 +281,40 @@ def missing_files(directory: Path) -> list[str]:
     return sorted(name for name in ARTIFACT_MANIFEST if not (directory / name).is_file())
 
 
+def unexpected_files(directory: Path) -> list[str]:
+    """Return the files in ``directory`` the manifest does not name, sorted.
+
+    Args:
+        directory: The directory to inspect.
+
+    Returns:
+        Their paths relative to ``directory``, with ``/`` separators as the
+        manifest spells them.
+    """
+    if not directory.is_dir():
+        return []
+    named = set(ARTIFACT_MANIFEST)
+    return sorted(
+        path.relative_to(directory).as_posix()
+        for path in directory.rglob("*")
+        if path.is_file() and path.relative_to(directory).as_posix() not in named
+    )
+
+
 def verify_artifact(directory: Path) -> None:
-    """Re-hash every manifest file in ``directory`` and reject any that differs.
+    """Check ``directory`` holds the manifest's files, their bytes, and nothing else.
 
     Presence is not trust (ADR-0024 §5): a file already staged, or one unpacked
-    from an sdist, is hashed here exactly as a freshly downloaded one is.
+    from an sdist, is hashed here exactly as a freshly downloaded one is. Absence
+    of anything else is checked too, because the build packages the whole
+    directory — see this module's docstring for why that is not a nicety.
 
     Args:
         directory: The directory holding the artifact.
 
     Raises:
-        ArtifactError: If a file is missing, unreadable, or its digest does not
-            match the recorded manifest.
+        ArtifactError: If a file is missing, unreadable, carries a digest the
+            manifest does not record, or is not named by the manifest at all.
     """
     for name in sorted(ARTIFACT_MANIFEST):
         path = directory / name
@@ -300,6 +333,15 @@ def verify_artifact(directory: Path) -> None:
                 f"digest: expected {expected}, got {actual}"
             )
             raise ArtifactError(msg)
+    unexpected = unexpected_files(directory)
+    if unexpected:
+        msg = (
+            f"the embedding model artifact in {directory} holds {len(unexpected)} file(s) "
+            f"its manifest does not name, and the build packages the whole directory: "
+            f"{', '.join(unexpected)}. Remove them, or record them in the manifest if "
+            f"they are meant to ship."
+        )
+        raise ArtifactError(msg)
 
 
 def ensure_artifact(directory: Path, *, download: Download = hf_download) -> None:
@@ -316,8 +358,9 @@ def ensure_artifact(directory: Path, *, download: Download = hf_download) -> Non
         download: The acquisition seam. Substituted in tests.
 
     Raises:
-        ArtifactError: If a download fails, or if any file does not match the
-            recorded manifest.
+        ArtifactError: If a download fails, if any file does not match the
+            recorded manifest, or if the directory holds a file the manifest does
+            not name.
     """
     absent = missing_files(directory)
     if absent:
