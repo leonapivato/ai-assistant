@@ -273,8 +273,17 @@ def _resolve_type_parameter(parameter: object, seen: list[object], errors: list[
 
 
 def _resolve_alias(alias: TypeAliasType, seen: list[object], errors: list[str]) -> None:
-    """Read one alias's value and its parameters, in *its own* module's namespace."""
-    namespace = _namespace_of(alias)
+    """Read one alias's value and its parameters, in *its own* module's namespace.
+
+    A generic alias's parameters are added to that namespace, because they are in
+    scope inside its value and nowhere else: ``type Identity[T] = tuple["T"]`` is
+    valid and has no global ``T``, so resolving its quoted reference against
+    module globals alone reports a name that is not missing. `typing` scopes a
+    parameter the same way, which is the test this follows rather than invents.
+    """
+    namespace = _namespace_of(alias) | {
+        parameter.__name__: parameter for parameter in alias.__type_params__
+    }
     for parameter in alias.__type_params__:
         _resolve(parameter, namespace, seen, errors)
     try:
@@ -463,7 +472,9 @@ def test_the_check_catches_a_type_checking_only_name(tmp_path: Path) -> None:
       the value check alone passes all three; the failure waits in
       ``__type_params__[0]``. ``Generic`` is their control — the same shape with
       a bound the module can see — so that a walk which reported every generic
-      alias would fail here.
+      alias would fail here, and ``Identity`` — round 6's shape, a quoted
+      reference to the alias's *own* parameter, which has no global to resolve
+      against and must not be reported — is the second.
     * ``LegacyBound`` is round 5's: the same defect carried by a ``TypeVar``
       *object* the alias picks up from its value rather than by an inline
       parameter. The two are the same kind of object, which is why one branch
@@ -485,6 +496,7 @@ def test_the_check_catches_a_type_checking_only_name(tmp_path: Path) -> None:
         "type Constrained[T: (Sequence[int], int)] = list[T]\n"
         "type Defaulted[T = Sequence[int]] = list[T]\n"
         "type Generic[T: int] = list[T]\n"
+        "type Identity[T] = tuple['T']\n"
         "_Legacy = TypeVar('_Legacy', bound='Sequence[int]')\n"
         "type LegacyBound = list[_Legacy]\n"
         "_Plain = TypeVar('_Plain', bound=int)\n"
@@ -510,6 +522,7 @@ def test_the_check_catches_a_type_checking_only_name(tmp_path: Path) -> None:
             "Constrained",
             "Defaulted",
             "Generic",
+            "Identity",
             "LegacyBound",
             "LegacyFine",
             "Fine",
