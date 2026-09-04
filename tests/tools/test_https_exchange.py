@@ -765,6 +765,15 @@ def test_an_accepted_origin_pins_the_host_and_the_port_it_named() -> None:
         pytest.param("/v1/search\x00", id="a-control-character"),
         pytest.param("/v1/search?q=weather#fragment", id="a-fragment"),
         pytest.param("/#", id="a-bare-fragment-marker"),
+        pytest.param("/v1/search?q=%ZZ", id="an-escape-that-is-not-hexadecimal"),
+        pytest.param("/v1/search?q=%A", id="an-escape-of-one-digit"),
+        pytest.param("/v1/search?q=a%", id="a-percent-at-the-end"),
+        pytest.param("/v1/search\\path", id="a-backslash"),
+        pytest.param("/v1/search?q=a<b", id="an-angle-bracket"),
+        pytest.param("/v1/search?q=a|b", id="a-pipe"),
+        pytest.param("/v1/search?q=a`b", id="a-backtick"),
+        pytest.param("/v1/search?q=a{b}", id="a-brace"),
+        pytest.param('/v1/search?q="a"', id="a-quotation-mark"),
     ],
 )
 async def test_a_target_this_seam_will_not_write_opens_no_channel(target: str) -> None:
@@ -989,3 +998,31 @@ async def test_a_header_value_may_carry_the_octet_a_target_may_not() -> None:
 
     assert ("etag", '"v1#2"') in answer.headers
     assert 'If-Match: "v1#2"' in request_of(channel)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        pytest.param("/", id="the-root"),
+        pytest.param("/v1/search?q=a%20b%2Fc", id="well-formed-escapes"),
+        pytest.param("/v1/search?q=a%2f%2F", id="escapes-in-either-case"),
+        pytest.param("/a-b_c.~/x?y=z&w=1", id="unreserved-and-sub-delims"),
+        pytest.param("/v1/search?q=!$&'()*+,;=:@/?", id="every-literal-the-grammar-admits"),
+    ],
+)
+async def test_an_origin_form_target_is_written_exactly_as_it_was_given(target: str) -> None:
+    """The other side of the target refusals, so the grammar is not read as a ban.
+
+    Every character RFC 3986 admits literally in a path or a query is admitted
+    here, and a well-formed escape passes in either case — an implementation that
+    refused `%2F` while accepting `%2f`, or that re-encoded what it was handed,
+    would fail this. The target is written **byte for byte**: encoding is the
+    composer's, and a seam that touched it would be composing a different request
+    from the one it was asked for.
+    """
+    channel = far_end(response(body=b"{}"))
+    subject, _ = exchange(channel)
+
+    await subject.get(origin=ORIGIN, target=target)
+
+    assert request_of(channel)[0] == f"GET {target} HTTP/1.1"
