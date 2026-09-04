@@ -354,7 +354,10 @@ declared argument is admitted by that clause rather than by a change to it (§13
 > **Normative.** Every pre-record refusal of the act on **both** operations — §3's
 > seven availability conditions below, §2's binding refusal, and §1's expiry refusal —
 > raises `UngrantableActError`, one new `AssistantError` subclass this ADR mints and
-> the only one it mints. The message names which condition failed and **no lane
+> the only one it mints **for a pre-record refusal of the act** — §4's two
+> `InvalidRecipientGrantError` subclasses are the other two classes this ADR adds, and
+> they name a refusal the store makes after the answer rather than one this operation
+> makes before it. The message names which condition failed and **no lane
 > branches on the message**; where more than one fails, the first in the order §3
 > states is the one named, so the refusal is deterministic across implementations.
 
@@ -887,7 +890,9 @@ holds.
 > It returns the `TurnOutcome` for the call it approved and executed, and that outcome
 > **carries a `RecipientGrantOutcome` naming what became of the standing request**
 > (§4): `established` where a grant was recorded, and otherwise `not_established` carrying
-> `CEILING_REACHED`, `ALREADY_STANDING`, `REFUSED` or `STORE_UNAVAILABLE`. A raise is
+> `CEILING_REACHED`, `ALREADY_STANDING`, `REFUSED`, `STORE_UNAVAILABLE` or
+> `DECLINED` — the last where the resolving ruling was not an `ALLOW`, so the store
+> was never reached (§2). A raise is
 > refused here because
 > by the time `record` is asked the call has been sent, so it would report a failure
 > for an egress nobody can un-send — breaching this section's own bar below on
@@ -1153,7 +1158,11 @@ which is what "a product surface with a user action behind it" describes.
 > were already authorised and points at `assistant recipient-grants`; on `REFUSED` it
 > says no standing authorisation was created and names no cause it was not given; and
 > on `STORE_UNAVAILABLE` it says the grant store could not be written and that the
-> call itself was unaffected, never that the request was declined. A refusal of the
+> call itself was unaffected, never that the request was declined; and on `DECLINED`
+> it says the call was declined when it was ruled on, that the decision is recorded
+> and settled, and that nothing was made standing — the same sentence `assistant
+> remember-recipients` gives for `PermissionDeniedError`, because it is the same
+> outcome reaching the user by the other road. A refusal of the
 > act **before** the answer — §1's expiry, §2's binding, §3's seven — reaches the
 > terminal as `UngrantableActError` and is rendered at the command's own error
 > boundary, with the call left answerable.
@@ -1582,12 +1591,15 @@ enumeration in its own text (§9).
 > any client is built. Without them §9 is prose an implementation satisfies under any
 > name, which is the gap round 8 of this review found in an earlier draft of it.
 
-> **Normative.** Lane 1 ships the terminal arm for §9's **four** carrier renderings:
+> **Normative.** Lane 1 ships the terminal arm for §9's **five** carrier renderings:
 > on `CEILING_REACHED` the output names the ceiling and `assistant
 > revoke-recipient-grant`, on `ALREADY_STANDING` it names the standing listing, on
-> `REFUSED` it names no cause, and on `STORE_UNAVAILABLE` it says the grant store
-> could not be written **and that the confirmed call was unaffected** — the arm that
-> fails against a terminal rendering a storage fault as a declined request. It is
+> `REFUSED` it names no cause, on `STORE_UNAVAILABLE` it says the grant store could
+> not be written **and that the confirmed call was unaffected** — the arm that fails
+> against a terminal rendering a storage fault as a declined request — and on
+> `DECLINED` it gives the recorded-and-settled, nothing-made-standing sentence, over
+> both inputs that reach it: a policy `DENY` on an approving answer, and the argument
+> supplied beside `approved=False`. It is
 > asserted over the rendered output, because ADR-0193 §1's obligation is discharged in
 > what the user reads and nowhere else.
 
