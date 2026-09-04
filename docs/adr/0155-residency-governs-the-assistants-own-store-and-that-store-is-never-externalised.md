@@ -1,9 +1,10 @@
 # 155. Residency governs the assistant's own store, and that store is never externalised
 
-- Status: Partially superseded by ADR-0233 (§3's third clause, to the extent of the four conditions the commissioned approval surface states; §3's second clause and every other clause of this ADR stand)
+- Status: Partially superseded by ADR-0233 (§3's third clause, to the extent of the four conditions the commissioned approval surface states, and §4's marked no-mechanism clause, to the extent a recorded coverage makes the refusal mechanical; §3's second clause and every other clause of this ADR stand)
 - Date: 2026-08-14
 - **Partially superseded: 2026-09-04 by ADR-0233 — §3's third clause, in two of its
-  sentences, and nothing else in this ADR.** The owner ruled arm **(b)** on 2026-09-04
+  sentences, and §4's marked clause, in one direction. Those two scopes, and nothing
+  else in this ADR.** The owner ruled arm **(b)** on 2026-09-04
   (#1996), and ADR-0233 is the ADR that arm commissions: it designs the content-bearing
   approval surface, states its privacy consequences, and states four conditions on a
   call under which this clause no longer forbids a span.
@@ -32,7 +33,21 @@
   §3's **second** clause is untouched, unrelaxed and now *more* strictly enforced:
   ADR-0233 §6 makes a call any covered path of whose content contains no model call
   refusable at `EgressBinding` construction, which is the first mechanism any clause
-  of §3 has ever had. §3's first, fourth, fifth and sixth
+  of §3 has ever had.
+  **That mechanism is the second scope, because it is what §4's marked clause denied
+  was possible.** §4 rules that "No lane, ADR or surface states or implies that §3 is
+  enforced mechanically in this tree", resting on the observation that "Nothing in the
+  payload path can distinguish a span drawn from the assistant's own store from one
+  composed for the send". ADR-0233 §4 does not contradict that observation — it records
+  the distinguishing fact **beside** the payload rather than seeking it inside one — and
+  §6 then enforces §3's second clause on it. So the conclusion no longer holds whole and
+  a reader of this ADR alone would read it over-wide.
+  **The remainder of §4's clause binds entire, and it is the larger half.** ADR-0233 §6's
+  fourth clause discharges this clause "only to the extent the value was honestly
+  recorded": nothing detects a component that records the wrong coverage for a call
+  carrying a store value, nothing inspects content to check a recorded state against it,
+  and no bound in this corpus is obtained from a claim that something does. A lane citing
+  ADR-0233 for more than that is citing it against its own text. §3's first, fourth, fifth and sixth
   clauses bind entire, and ADR-0233 is neither the export ADR §3's fifth clause
   reserves nor cited toward one. §4's marked clause is discharged only for spans
   whose coverage was honestly recorded, and ADR-0233 §6 says so in its own marked

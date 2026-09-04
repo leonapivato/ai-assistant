@@ -3,7 +3,8 @@
 - Status: Proposed
 - Date: 2026-09-04
 - **Partially supersedes** [ADR-0155](0155-residency-governs-the-assistants-own-store-and-that-store-is-never-externalised.md)
-  — **§3's third clause, to the extent §9 below states, and nothing else in ADR-0155.**
+  — **§3's third clause, to the extent §9 below states; and §4's marked clause, to the
+  extent §6 below discharges it. Those two, and nothing else in ADR-0155.**
   That clause forbids an egress span carrying covered content all of whose covered
   paths contain a model call; reserves to an owner ruling the choice between **(a)**
   ratifying it as permanent and **(b)** commissioning a later ADR designing a
@@ -36,12 +37,25 @@
   could, and §7 argues at length why the surface is not a route around it. §3's
   fourth clause — no authorisation cures either prohibition — binds entire, and §9
   is stated so as not to breach it. §3's fifth and sixth clauses reserve the export
-  ADR, and this ADR is not it and is not read as it. §4's marked clause (nothing
-  states that §3 is enforced mechanically) is discharged in part and *only* in part
-  by §6 below, which says exactly how far.
+  ADR, and this ADR is not it and is not read as it.
+  **§4's marked clause is the second scope, and it is displaced in one direction
+  only.** It reads that "No lane, ADR or surface states or implies that §3 is enforced
+  mechanically in this tree", resting on the fact that "Nothing in the payload path can
+  distinguish a span drawn from the assistant's own store from one composed for the
+  send". §4's *conclusion* stops holding whole: §6 below makes a call whose binding
+  carries `PATH_WITHOUT_MODEL` refusable at construction, which is mechanical
+  enforcement of §3's second clause, and §4's premise stops holding because the
+  distinguishing fact is no longer sought in the payload — §4 was right that nothing in
+  the payload path can find it, and §4 below records it beside the payload instead.
+  **The remainder binds entire and is the larger half.** §6's fourth clause discharges
+  §4 "only to the extent the value was honestly recorded": nothing detects a component
+  that records `NOT_COVERED` for a call carrying a store value, nothing inspects content
+  to check a recorded state against it, and no bound in this corpus is obtained from a
+  claim that something does. A lane citing §6 for more than that is citing it against
+  its own text.
 - **Partially supersedes** [ADR-0184](0184-a-decision-recorded-before-the-origin-field-is-legible-history-and-the-absence-is-its-own-value.md)
-  — **§1's exception roster, three sentences of §2, §3's discrimination sentence and
-  §9's first clause; those, and no others.** The instrument is supersession for the
+  — **§1's exception roster, three sentences of §2, §3's discrimination sentence,
+  §10's discrimination-test clause and §9's first clause; those, and no others.** The instrument is supersession for the
   reason it is on ADR-0155: each of these sentences is one a lane **acts on
   differently** once this ADR stands, which is ADR-0070 §1's line. That is also how the
   corpus has recorded every widening of a roster clause — ADR-0181 partially superseded
@@ -54,9 +68,9 @@
   second sibling and a version, in its own text". §4 below is that member and §14 makes
   that choice: **a second sibling**, because a version key names a schema and supplies
   no representable value for a row lacking a required field. Adding a member to
-  `EgressBinding` and a third shape to the union moves five sentences, each named here
+  `EgressBinding` and a third shape to the union moves six sentences, each named here
   because ADR-0082 §1 puts the naming in this ADR's text, and each stated in its
-  repaired form in §14:
+  repaired form in §14 or §15:
   **§1** recognises a row by its carrying "every member `EgressBinding` requires
   **except** `planned_with_external_content`" — an exception list that must now carry
   two names, since a genuine pre-origin row lacks `coverage` as well, and which read
@@ -73,6 +87,16 @@
   structural, total and mutually exclusive, with no discriminator field — is preserved
   exactly and is why the ladder works; it is the two-shape **sentence** that is replaced
   by a three-rung one, and §14 states it.
+  **§10's** discrimination-test clause fixes the cases the implementing lane must ship
+  over a real `SqliteAuditTrail`: the stored decision "with the key" decodes as an
+  `EgressBinding`, "the same JSON with exactly that key removed" decodes as an
+  `OriginUnrecordedBinding`, and that JSON with a second fault still raises. The middle
+  case becomes **unsatisfiable** once `coverage` exists: a row with only
+  `planned_with_external_content` removed still carries `coverage`, which
+  `OriginUnrecordedBinding` does not declare, so `extra="forbid"` makes it raise rather
+  than decode. §15 states the three cases that replace it, and §10's other clauses —
+  the construction, correspondence, shared-base, reader, round-trip, `pending_confirmation`
+  and `authorises` tests — all still hold of the two models they name.
   **§9's first clause** ("No lane adds a second sibling to this union") is the clause
   §9's second clause licenses this ADR to spend.
   **Everything else stands and is relied on**: §2's declare-each-member-once rule is
@@ -1056,8 +1080,11 @@ already corrected twice.
   §1's exception roster, §2's first, third and fifth clauses, §3's discrimination
   sentence and §9's first clause. Two things are *not* owed there. One is a record about
   §9's *deferral*, which is unmarked prose in a marked ADR (ADR-0089 §3) and is
-  discharged rather than superseded. The other is any record on §4, §5, §6, §7 or §8:
-  each stays true and each is relied on below. §4's write-path refusal, §5's readers and
+  discharged rather than superseded. The other is any record on §4, §5, §6, §7, §8 or
+  the clauses of §10 the header does not name: each stays true and each is relied
+  on below. **§10 splits the way §3 does** — one clause of it states a case this ADR
+  makes unsatisfiable and is recorded; the rest state cases that still hold of the two
+  models they name, and §15 adds the third model's parallels rather than rewriting them. §4's write-path refusal, §5's readers and
   §8's refusals speak of the *origin*-unrecorded shape and keep speaking of it exactly;
   the clauses below state the parallel rules for the new sibling in this ADR's own text
   rather than widening theirs, which is the same instrument §7's floor is extended by.
@@ -1314,6 +1341,18 @@ builds the case rather than inventing one:
 - A decision recorded before `coverage` reads back as a `CoverageUnrecordedBinding`,
   renders its account, destinations and description as legible history, and `resolve`
   returns no `ALLOW` on it.
+- **The three-epoch discrimination, over a real `SqliteAuditTrail` with the JSON written
+  into the `data` column directly**, because §14's refusals make none of the older rows
+  producible through `record`. These replace ADR-0184 §10's two-shape cases, whose middle
+  case this ADR makes unsatisfiable: the stored decision carrying **both**
+  `planned_with_external_content` and `coverage` decodes as an `EgressBinding`; the same
+  JSON with **only `coverage`** removed decodes as a `CoverageUnrecordedBinding`; the
+  same JSON with **both** keys removed decodes as an `OriginUnrecordedBinding`; the JSON
+  with `planned_with_external_content` alone removed — the shape ADR-0184 §10 asked for —
+  **raises**, because no member of the union declares a row of that shape; and any of
+  these with a second fault elsewhere still raises `AuditError`. The last two are the
+  cases that fail an implementation which widened the tolerance rather than shaping it,
+  which is ADR-0184 §10's own reason for the case it stated.
 
 > **Normative.** No lane widens the relaxation while implementing it. §9's four
 > conditions are conjunctive, and a lane that finds one of them awkward files an issue
