@@ -98,7 +98,11 @@ class FakeQueryComposer:
         Raises:
             TypeError: If ``max_chars`` is not an ``int`` (``bool`` included) — the
                 type is part of the domain for the concrete composer's reason, and
-                the canonical fake must not be the looser of the two.
+                the canonical fake must not be the looser of the two; or if a value
+                of ``refusals`` is not a :class:`QueryRefusal` member. ``QueryRefusal``
+                is a ``StrEnum``, so ``"declined"`` compares equal to a member without
+                being one, and a fake that took it would raise out of :meth:`compose`
+                at the call it was scripted for.
             ValueError: If ``max_chars`` is below 1; or if ``query`` or any value of
                 ``queries`` is blank or has no UTF-8 encoding — both halves of what
                 :attr:`~ai_assistant.core.types.QueryOutcome.query` accepts, refused
@@ -135,6 +139,24 @@ class FakeQueryComposer:
         self._queries = scripted
         self._query = query
         self._refusals = dict(refusals or {})
+        for utterance, refusal in self._refusals.items():
+            if type(refusal) is not QueryRefusal:
+                # `QueryOutcome.refusal` is typed to the enum, so a plain string here
+                # would raise out of `compose` at the call it was scripted for —
+                # `type(...) is not` rather than `isinstance`, for `max_chars`'s
+                # reason two guards up: the annotation already forbids this, so mypy
+                # reads an `isinstance` narrowing as unreachable and this guard is
+                # for the caller who ignored the annotation, which is the only
+                # caller who can reach it.
+                # again the one thing ADR-0231 §3 says never leaves that member, and
+                # again in a fake whose whole job is to be the conforming subject. A
+                # `StrEnum` makes this the easy mistake: `"declined"` *looks* like a
+                # member and compares equal to one, and is not an instance of it.
+                msg = (
+                    f"a scripted refusal must be a QueryRefusal member, got "
+                    f"{refusal!r} for {utterance!r}"
+                )
+                raise TypeError(msg)
         self._max_chars = max_chars
         self._resource = SuspendableResource()
         #: Every utterance this composer was handed, in call order. Appended to

@@ -70,6 +70,22 @@ _QUERY_KEY: Final = "query"
 #: the model, §5 fixes the one origin from the connected account's configuration, and
 #: §19 defers a provider a turn names as "a model-reachable address by another name".
 #: A prompt that invited ``site:`` would be inviting exactly that.
+#:
+#: **And that last instruction is stated, not enforced**, in ADR-0211 §6's own sense —
+#: nothing downstream of the model inspects the composed query for a ``site:``, a URL
+#: or any other operator, and this module does not convert one into a refusal. Three
+#: reasons, and the first is decisive on its own. **ADR-0231 §18's arm 4a requires the
+#: searcher to receive this composer's output byte-identical, "not merely containing
+#: it, since an implementation that appended a site filter or stripped punctuation
+#: would pass a containment assertion"** — the ADR naming that class of edit as a
+#: thing the tests must fail. Second, an operator inside the query moves **no
+#: address**: §5 opens the channel to "the one origin the connected account names",
+#: and "the one value that crosses into the request from outside is the authorised
+#: query string", which the provider answers under its own rules. §2's prohibition is
+#: on an address *crossing the seam*, and none does. Third, a syntactic detector over
+#: query text is the instrument ADR-0098 §6 forbids buying a bound from, and ADR-0098
+#: §5's honesty clause forbids reading its absence as an assurance either way — the
+#: same corridor §12 states plainly for a credential the user pasted into a turn.
 _SYSTEM_PROMPT: Final = """\
 You turn one request from a user of an AI assistant into a single web-search \
 query. Reply with exactly one of the two JSON objects below — one JSON object and \
