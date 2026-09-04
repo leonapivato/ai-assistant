@@ -751,6 +751,30 @@ async def test_a_title_carrying_literal_brackets_is_transcribed_verbatim() -> No
     assert [record.content for record in outcome.records] == [f"{brackets}\nhttps://a.invalid/x"]
 
 
+async def test_an_escaped_quote_does_not_end_the_string_the_brackets_are_inside() -> None:
+    """The scanner's third direction: ``\\"`` is a character, not a terminator.
+
+    A title carrying a quotation mark *and* more brackets than the structural bound is
+    a perfectly ordinary result — §10 transcribes it verbatim — and it is refused by a
+    scanner that read the escaped quote as ending the string, because every bracket
+    after it would then be counted as structure. The other two arms never enter this
+    branch: one has no quote inside its span and the other has no escape.
+
+    **One quotation mark and not two**, which is what makes this discriminate: an even
+    number restores the parity a broken scanner lost, so the brackets land back inside
+    a mis-parsed string and are not counted either way. With one, a scanner that
+    ignored the escape reads everything after it as structure — verified by removing
+    the branch and watching this fail.
+    """
+    quoted = 'he said " ' + "[" * (MAX_JSON_DEPTH * 4)
+
+    outcome, _ = await _searched(
+        channels=[answering(result(title=quoted, url="https://a.invalid/x", description=None))]
+    )
+
+    assert [record.content for record in outcome.records] == [f"{quoted}\nhttps://a.invalid/x"]
+
+
 async def test_closers_inside_a_string_do_not_buy_a_deeper_response() -> None:
     """The bound's other failure direction, which is the one an attacker would use.
 
