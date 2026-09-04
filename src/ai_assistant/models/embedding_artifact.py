@@ -27,6 +27,18 @@ leaving nothing staged. It then re-hashes **every** file in the destination,
 including files that were already there, because an sdist or a stale staging
 directory can carry a corrupted file that no download would ever replace.
 
+**All-or-nothing spans that closing check, not only the download.** The
+re-hashing can refuse over something staging never looked at — a file that was
+already present and is corrupt, or one the manifest does not name — and until
+issue #2081 a build failing that way left the files it had just moved in behind.
+So a failed acquisition now removes what *this* call staged, and the directories
+it created for them, leaving the destination as it found it (its own existence
+aside). It undoes a recorded journal of what it actually created rather than a
+list of names, so a directory that was already there survives a rollback that
+merely emptied it. What was already there is never touched: it is exactly the
+material the build is refusing to trust, and deleting it would destroy the
+evidence a maintainer needs to act on the refusal.
+
 **And a file the manifest does not name is refused rather than ignored**, which
 is the half a per-file check does not give on its own. The build hook
 force-includes the whole vendored *directory*, so anything sitting in it is
@@ -353,24 +365,49 @@ def ensure_artifact(directory: Path, *, download: Download = hf_download) -> Non
     the destination is then re-hashed, so an already-present but corrupted file
     fails the build rather than being shipped.
 
+    **A failure at any point leaves the destination as it found it.** The closing
+    re-hash refuses over material staging never looked at, so anything this call
+    moved in is removed again when it does (issue #2081); files that were already
+    present are left alone, since they are what the refusal is about.
+
     Args:
         directory: Where the artifact must end up.
         download: The acquisition seam. Substituted in tests.
 
     Raises:
         ArtifactError: If a download fails, if any file does not match the
-            recorded manifest, or if the directory holds a file the manifest does
-            not name.
+            recorded manifest, if the directory holds a file the manifest does
+            not name, or if a manifest entry that has to be fetched cannot be
+            staged — its name is not a confined relative path, or something that
+            is not a plain directory or a regular file occupies it.
     """
+    _refuse_a_blocked_root(directory)
     absent = missing_files(directory)
-    if absent:
-        _stage(directory, absent, download)
-    verify_artifact(directory)
+    if not absent:
+        verify_artifact(directory)
+        return
+    created: list[Path] = []
+    try:
+        _stage(directory, absent, download, created)
+        verify_artifact(directory)
+    except Exception as exc:
+        _unstage(created, exc)
+        raise
 
 
-def _stage(directory: Path, names: list[str], download: Download) -> None:
-    """Download ``names``, verify them in isolation, then move them into place."""
+def _stage(directory: Path, names: list[str], download: Download, created: list[Path]) -> None:
+    """Download ``names``, verify them in isolation, then move them into place.
+
+    Every path this call creates under ``directory`` is appended to ``created`` in
+    the order it makes them, so the caller can undo exactly this call's work even
+    when this raises partway through. ``directory`` itself is not recorded, and
+    nothing above it is: ``_vendor/`` is shared with every other artifact a build
+    acquires, so it is not this call's to remove.
+    """
     directory.mkdir(parents=True, exist_ok=True)
+    named = set(ARTIFACT_MANIFEST)
+    for name in names:
+        _refuse_a_blocked_entry(directory, name, named)
     with tempfile.TemporaryDirectory(prefix="ai-assistant-artifact-") as staging:
         staged = Path(staging)
         for name in names:
@@ -393,4 +430,151 @@ def _stage(directory: Path, names: list[str], download: Download) -> None:
                 )
                 raise ArtifactError(msg)
         for name in names:
-            shutil.move(str(staged / name), str(directory / name))
+            destination = directory / name
+            for parent in _parents_to_create(destination, directory):
+                parent.mkdir()
+                created.append(parent)
+            # Journalled *before* the move, not after: across filesystems
+            # `shutil.move` copies and then unlinks the source, so a failure
+            # after the copy leaves a destination this call made. Recording a
+            # path that never appears costs nothing — the rollback tolerates it.
+            created.append(destination)
+            shutil.move(str(staged / name), str(destination))
+
+
+def _refuse_a_blocked_root(directory: Path) -> None:
+    """Refuse an artifact directory this build must not write the artifact into.
+
+    Everything else is resolved relative to this path, so a symlink *here* moves
+    the whole artifact outside the tree the build packages — the same escape
+    :func:`_refuse_a_blocked_entry` refuses one level down, at the one place its
+    walk deliberately stops (``_vendor/`` is shared with every other artifact, so
+    it is not this call's to judge). A plain file here would otherwise surface as
+    a raw ``FileExistsError`` from ``mkdir``, outside this module's own failure
+    contract.
+    """
+    if directory.is_symlink():
+        msg = (
+            f"the embedding model artifact directory {directory} is a symlink, so the "
+            f"artifact would be staged and verified outside the packaged tree"
+        )
+        raise ArtifactError(msg)
+    if directory.exists() and not directory.is_dir():
+        msg = f"the embedding model artifact directory {directory} is not a directory"
+        raise ArtifactError(msg)
+
+
+def _refuse_a_blocked_entry(directory: Path, name: str, named: set[str]) -> None:
+    """Refuse a manifest entry whose path is occupied, before anything is fetched.
+
+    Two shapes, either of which the staging below would otherwise walk into after
+    the download rather than before it:
+
+    - **A parent that is not a plain directory.** A symlink most of all: staging
+      through one writes the file *outside* the artifact directory, and nothing
+      downstream notices — ``verify_artifact`` follows the same link and passes,
+      while ``unexpected_files`` does not follow it and so reports nothing there.
+    - **A destination that is not a regular file.** ``missing_files`` asks whether
+      each entry *is a file*, so a directory sitting where an entry belongs reads
+      as "absent" and is downloaded — and ``shutil.move`` onto an existing
+      directory moves the file *inside* it, which verification then reports as the
+      entry still missing while the downloaded bytes sit one level down.
+    - **A name that is not a confined relative path.** ``directory / name``
+      silently discards ``directory`` for an absolute name, and a ``..``
+      component walks out of it, so an entry of either shape would be staged
+      outside the artifact directory entirely.
+    - **A name another entry's name is a directory of.** A manifest holding both
+      ``a`` and ``a/b`` asks for one path to be a file and a directory at once,
+      and staging the second would meet the first as a raw ``FileExistsError``
+      out of ``mkdir``.
+
+    This governs the acquisition path. What a manifest entry *already present* in
+    the directory may be is :func:`verify_artifact`'s question, and it follows a
+    symlink today (issue #2093).
+    """
+    entry = Path(name)
+    if entry.is_absolute() or not entry.parts or ".." in entry.parts:
+        msg = (
+            f"the embedding model manifest entry {name!r} is not a confined relative "
+            f"path, so it cannot be staged into {directory}"
+        )
+        raise ArtifactError(msg)
+    for prefix in entry.parents:
+        if str(prefix) in named:
+            msg = (
+                f"the embedding model manifest names both {str(prefix)!r} and {name!r}, so "
+                f"one path would have to be a file and a directory at once"
+            )
+            raise ArtifactError(msg)
+    destination = directory / name
+    _parents_to_create(destination, directory)
+    if destination.exists() or destination.is_symlink():
+        msg = (
+            f"cannot stage the embedding model artifact file {name!r}: {destination} "
+            f"already exists and is not a regular file"
+        )
+        raise ArtifactError(msg)
+
+
+def _parents_to_create(destination: Path, directory: Path) -> list[Path]:
+    """Return the directories ``destination`` needs under ``directory``, outermost first.
+
+    Only the ones that do not exist yet, so a caller that creates them can record
+    exactly what it made and a rollback cannot remove a directory that was
+    already there. Every component between ``directory`` and ``destination`` is
+    inspected, not merely the innermost: a symlink anywhere along the way leads
+    out of the artifact directory, so the walk cannot stop at the first component
+    that happens to be a directory already.
+
+    Everything *above* ``directory`` is left alone — ``_vendor/`` is shared with
+    every other artifact a build acquires, so it is not this call's to judge.
+    ``directory`` itself is inspected but never created here; it has already been
+    judged by :func:`_refuse_a_blocked_root` and made by the staging below.
+    """
+    needed: list[Path] = []
+    for parent in reversed(destination.parents):
+        if parent != directory and directory not in parent.parents:
+            continue  # `directory` itself, or above it: not this call's to touch
+        if parent.is_symlink():
+            msg = (
+                f"cannot stage into {parent}: it is a symlink, so the artifact would be "
+                f"written outside {directory}"
+            )
+            raise ArtifactError(msg)
+        if parent.is_dir():
+            continue
+        if parent.exists():
+            msg = f"cannot stage into {parent}: it already exists and is not a directory"
+            raise ArtifactError(msg)
+        needed.append(parent)
+    return needed
+
+
+def _unstage(created: list[Path], failure: BaseException) -> None:
+    """Undo, newest first, exactly what one acquisition created under the destination.
+
+    ``created`` is the journal :func:`_stage` keeps, so this removes the files it
+    moved into place and the directories it made for them, and nothing else — not
+    a file that was already present (which is the evidence a refusal is about),
+    and not a directory that was already there.
+
+    ``failure`` is the acquisition failure on its way out. A path that cannot be
+    removed does not replace it — that error is the one a maintainer has to act
+    on — but it is recorded as a note on it, because a rollback that silently did
+    not happen would leave the next build finding a supposedly removed file
+    "already present" with nothing anywhere saying why.
+    """
+    stranded: list[Path] = []
+    for path in reversed(created):
+        try:
+            if path.is_dir():
+                path.rmdir()
+            else:
+                path.unlink(missing_ok=True)
+        except OSError:
+            stranded.append(path)
+    if stranded:
+        failure.add_note(
+            "the destination was NOT left as this build found it: could not remove "
+            + ", ".join(str(path) for path in stranded)
+        )
