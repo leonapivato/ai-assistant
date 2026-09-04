@@ -21,11 +21,11 @@ from __future__ import annotations
 import re
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 from zoneinfo import ZoneInfo
 
 import pytest
-from hostile_values import Hostile, NumericName, Unnameable
+from hostile_values import Hostile, HostilePath, HostileZone, NumericName, Unnameable
 from pydantic import ValidationError
 
 from ai_assistant.core.config import _MAX_CALENDAR_WINDOW, Settings, load_settings
@@ -203,7 +203,127 @@ def test_the_constructor_refuses_a_source_that_is_not_a_path(value: object) -> N
         CalendarReader(value)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("field", ["window_past", "window_future", "read_timeout"])
+#: The two ways a type can fail to name itself: the read of ``__name__`` raises, or
+#: it answers with something that is not a ``str`` whose own rendering would then
+#: raise (#2104). Named rather than built here — see :func:`_unnameable`.
+_UNNAMEABLE: Final = ["unreadable", "not-a-str"]
+
+#: Every duration this constructor guards, spelled as the keyword a caller passes.
+_DURATION_GUARDS: Final = ["window_past", "window_future", "read_timeout"]
+
+
+def _unnameable(kind: str) -> object:
+    """An instance of a class that will not say what it is called.
+
+    **Built inside the arm rather than passed to it**, which is not a style
+    preference: pytest renders a failing test's arguments, and rendering *this* one
+    asks the class the very question it refuses — so a regression that ought to
+    show as one red assertion crashes the whole session with an ``INTERNALERROR``
+    from inside pytest's own traceback formatter instead. Verified by mutation.
+    """
+    metaclass = Unnameable if kind == "unreadable" else NumericName
+    return metaclass("Evil", (), {})()
+
+
+def test_a_hostile_repr_does_not_raise_past_the_source_guard() -> None:
+    """The source guard is reached by a value of *arbitrary* type, like the rest.
+
+    ``Settings`` refuses a non-path at load and ``mypy`` refuses one at a
+    type-checked call site, so what reaches here is the direct caller ADR-0093 §10
+    names — for whom a refusal that raised ``RuntimeError`` would describe nothing.
+    """
+    with pytest.raises(ValueError, match="the calendar source must be a Path, got Hostile"):
+        CalendarReader(Hostile())  # type: ignore[arg-type]
+
+
+def test_a_hostile_repr_does_not_raise_past_the_zone_guard() -> None:
+    """The zone guard's half of the same rule."""
+    with pytest.raises(ValueError, match="the calendar timezone must be a str, got Hostile"):
+        CalendarReader(_ABSOLUTE, timezone=Hostile())  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("kind", _UNNAMEABLE)
+def test_a_hostile_type_name_does_not_raise_past_the_source_guard(kind: str) -> None:
+    """The half of #1978 that survives substituting ``repr``, at the source guard.
+
+    Naming the type is a call into the refused object's *class*, so a metaclass
+    that raises on ``__name__`` — or answers with a second object that raises when
+    rendered — moves the wrong-exception-class escape rather than closing it. The
+    integer guards were pointed at :func:`~ai_assistant.readers.calendar._type_name_of`
+    by #1978's lane and these four were parked as #2104; this is that asymmetry
+    closed.
+    """
+    expected = "the calendar source must be a Path, got an unnameable type"
+    with pytest.raises(ValueError, match=expected):
+        CalendarReader(_unnameable(kind))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("kind", _UNNAMEABLE)
+def test_a_hostile_type_name_does_not_raise_past_the_zone_guard(kind: str) -> None:
+    """#2104 at the zone guard."""
+    expected = "the calendar timezone must be a str, got an unnameable type"
+    with pytest.raises(ValueError, match=expected):
+        CalendarReader(_ABSOLUTE, timezone=_unnameable(kind))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("field", _DURATION_GUARDS)
+@pytest.mark.parametrize("kind", _UNNAMEABLE)
+def test_a_hostile_type_name_does_not_raise_past_a_duration_guard(field: str, kind: str) -> None:
+    """#2104 at each of the three duration guards."""
+    kwargs: dict[str, Any] = {field: _unnameable(kind)}
+    expected = re.escape(f"calendar_{field} must be a timedelta, got an unnameable type")
+    with pytest.raises(ValueError, match=expected):
+        CalendarReader(_ABSOLUTE, **kwargs)
+
+
+def test_a_path_subclass_cannot_lie_its_way_past_the_source_guard() -> None:
+    """Proving ``isinstance`` proves nothing about the overrides (#2104).
+
+    Both halves of this guard are reachable through an accepted subclass:
+    ``is_absolute`` is the guard's own question and the subclass answers it, so a
+    relative location was admitted by saying it was not one — and the refusal that
+    would have reported it renders the value, which the same subclass raises from.
+    Rebuilding the accepted value into a built-in ``Path`` and asking *that* is
+    :func:`~ai_assistant.readers.calendar._checked_duration`'s answer for the
+    durations, at the seam that had not got it (#1979).
+    """
+    with pytest.raises(ValueError, match=re.escape("must be an absolute path, got 'documents'")):
+        CalendarReader(HostilePath("documents"))
+
+
+def test_an_accepted_source_is_stored_as_a_builtin_path() -> None:
+    """The rebuilt location is what is kept, not the subclass that carried it.
+
+    Storing the caller's object would push the same overrides downstream into the
+    ``os.open`` and into every message that names the source, which is
+    :func:`test_an_accepted_duration_is_stored_as_a_builtin_timedelta`'s reason at
+    this seam.
+    """
+    reader = CalendarReader(HostilePath(str(_ABSOLUTE)))
+
+    assert type(reader._path) is type(Path("/"))
+    assert reader._path == _ABSOLUTE
+
+
+def test_a_str_subclass_cannot_raise_past_the_zone_refusal() -> None:
+    """The zone guard's half of the subclass shape (#2104).
+
+    ``isinstance(value, str)`` admits a subclass, and the refusal below it reports
+    the zone that was not found — by rendering the value it was handed. The guard
+    rebuilds through ``str.__str__``, which reads the C-level slot.
+    """
+    with pytest.raises(ValueError, match=re.escape("unknown timezone 'Mars/Olympus_Mons'")):
+        CalendarReader(_ABSOLUTE, timezone=HostileZone("Mars/Olympus_Mons"))
+
+
+def test_a_str_subclass_naming_a_real_zone_is_still_accepted() -> None:
+    """Acceptance is unchanged by the rebuild: ``ZoneInfo`` keys on the characters."""
+    reader = CalendarReader(_ABSOLUTE, timezone=HostileZone("Europe/Rome"))
+
+    assert reader._zone == ZoneInfo("Europe/Rome")
+
+
+@pytest.mark.parametrize("field", _DURATION_GUARDS)
 def test_a_hostile_repr_does_not_raise_past_a_duration_guard(field: str) -> None:
     """Nothing but a ``ValueError`` leaves this constructor, whatever it was handed.
 

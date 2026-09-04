@@ -916,7 +916,7 @@ def _when(occurrence: Occurrence) -> str:
 
 
 def _checked_path(value: object) -> Path:
-    """The configured source as an absolute ``Path``, or a refusal naming the field.
+    """The configured source as an absolute built-in ``Path``, or a refusal naming it.
 
     **Typed before it is called into**, which is this constructor's rule for every
     argument rather than a guard bolted onto one: a ``str`` has no ``is_absolute``
@@ -928,8 +928,31 @@ def _checked_path(value: object) -> Path:
     Typed ``object`` and returning the narrowed value, for
     :func:`_refuse_a_non_duration`'s reason: a ``Path`` annotation would make the
     refusal statically unreachable, which is the reasoning that let the value
-    through. ``type(value).__name__`` rather than ``repr`` — a hostile
-    ``__repr__`` must not raise past a guard.
+    through. The type refusal names the type rather than the value — a hostile
+    ``__repr__`` must not raise past a guard (#1978) — and it reaches that name
+    through :func:`_type_name_of`, because the read is itself a call into the
+    refused object's class and owes it the same distrust (#2104).
+
+    **Accepted by ``isinstance``, then rebuilt**, which is
+    :func:`_checked_duration`'s two halves at this seam and for its reason (#1979).
+    Acceptance stays ``isinstance`` because honest ``Path`` subclasses exist and
+    none is *silently* accepted the way ``bool`` is by the integer guards. The
+    rebuild is what makes the check below hold and its message safe, because both
+    ask the refused value about itself: a subclass may override ``is_absolute`` to
+    answer ``True`` for a relative location, and ``__str__`` or ``__fspath__`` to
+    raise inside the message that reports one. ``Path(value)`` copies the unparsed
+    strings a ``PurePath`` already holds, so it consults none of those three, and
+    it is **not** ``resolve()`` — no symbolic link is followed and no component is
+    renamed, so a plain ``Path`` rebuilds to itself. It is the rebuilt path that is
+    checked, reported and returned.
+
+    The rebuild reads ``PurePath``'s own ``parser`` and ``_raw_paths``, so it
+    closes the overrides this guard is documented against rather than every
+    conceivable one — unlike :func:`_checked_duration`'s ``timedelta.__sub__``,
+    which reads C-level slots and is total.
+
+    Returns:
+        The same location as a built-in ``Path``, whatever subclass carried it.
 
     Raises:
         ValueError: If ``value`` is not a ``Path``, or is not absolute. Absoluteness
@@ -937,16 +960,17 @@ def _checked_path(value: object) -> Path:
             instant and is checked at run time, where it degrades under ADR-0093 §8.
     """
     if not isinstance(value, Path):
-        msg = f"the calendar source must be a Path, got {type(value).__name__}"
+        msg = f"the calendar source must be a Path, got {_type_name_of(value)}"
         raise ValueError(msg)
-    if not value.is_absolute():
+    source = Path(value)
+    if not source.is_absolute():
         msg = (
-            f"the calendar source must be an absolute path, got {str(value)!r}; a "
+            f"the calendar source must be an absolute path, got {str(source)!r}; a "
             f"relative value resolves against each process's working directory "
             f"(ADR-0093 §7)"
         )
         raise ValueError(msg)
-    return value
+    return source
 
 
 def _checked_zone(value: object) -> ZoneInfo:
@@ -958,16 +982,24 @@ def _checked_zone(value: object) -> ZoneInfo:
     object, not NoneType`` — a message naming neither this reader's field nor the
     rule the ``Raises:`` clause above promises for it.
 
+    **Accepted by ``isinstance``, then rebuilt**, for :func:`_checked_path`'s
+    reason at the other end of the same problem: a ``str`` subclass overriding
+    ``__repr__`` raises inside the refusal that reports an unknown zone. Here the
+    rebuild *is* total — ``str.__str__`` reads the C-level slot and answers with a
+    built-in ``str`` — and it changes nothing a caller sees, because ``ZoneInfo``
+    keys on the characters rather than on the object.
+
     Raises:
         ValueError: If ``value`` is not a ``str``, or is not a known IANA zone.
     """
     if not isinstance(value, str):
-        msg = f"the calendar timezone must be a str, got {type(value).__name__}"
+        msg = f"the calendar timezone must be a str, got {_type_name_of(value)}"
         raise ValueError(msg)
+    name = str.__str__(value)
     try:
-        return ZoneInfo(value)
+        return ZoneInfo(name)
     except (ZoneInfoNotFoundError, ValueError) as exc:
-        msg = f"unknown timezone {value!r}"
+        msg = f"unknown timezone {name!r}"
         raise ValueError(msg) from exc
 
 
@@ -985,11 +1017,12 @@ def _checked_duration(field: str, value: object) -> timedelta:
     refuses anything that is not exactly an ``int`` while a duration reached a
     bare ``<``, so ``window_past=None`` escaped as a ``TypeError`` from an
     operator rather than as the ``ValueError`` this constructor documents
-    (#1057). ``type(value).__name__`` rather than ``repr``, for
-    :func:`_checked_path`'s reason: this guard is reached by a value of
-    *arbitrary* type, so a hostile ``__repr__`` would raise straight past a
-    refusal whose whole purpose is that nothing but a ``ValueError`` leaves this
-    constructor.
+    (#1057). The type rather than ``repr``, for :func:`_checked_path`'s reason:
+    this guard is reached by a value of *arbitrary* type, so a hostile
+    ``__repr__`` would raise straight past a refusal whose whole purpose is that
+    nothing but a ``ValueError`` leaves this constructor — and the type is named
+    through :func:`_type_name_of`, because the name read is itself a call into
+    the refused object's class (#2104).
 
     **Accepted by ``isinstance``, then canonicalised** — the two halves answer
     different problems and neither substitutes for the other. Acceptance is
@@ -1017,7 +1050,7 @@ def _checked_duration(field: str, value: object) -> timedelta:
         ValueError: If ``value`` is not a ``timedelta``.
     """
     if not isinstance(value, timedelta):
-        msg = f"{field} must be a timedelta, got {type(value).__name__}"
+        msg = f"{field} must be a timedelta, got {_type_name_of(value)}"
         raise ValueError(msg)
     return timedelta.__sub__(value, timedelta(0))
 
