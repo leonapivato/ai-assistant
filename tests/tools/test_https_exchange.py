@@ -917,6 +917,18 @@ async def test_a_field_value_keeps_its_interior_spacing_and_loses_its_edges() ->
         ),
         pytest.param(b"HTTP/1.1 204 No Content\r\n\r\n", 204, id="204-with-no-framing-at-all"),
         pytest.param(
+            b"HTTP/1.1 205 Reset Content\r\nContent-Length: 3\r\n\r\nbad",
+            205,
+            id="205-with-a-length",
+        ),
+        pytest.param(
+            b"HTTP/1.1 205 Reset Content\r\nTransfer-Encoding: chunked\r\n"
+            b"\r\n3\r\nbad\r\n0\r\n\r\n",
+            205,
+            id="205-with-a-coding",
+        ),
+        pytest.param(b"HTTP/1.1 205 Reset Content\r\n\r\nbad", 205, id="205-framed-by-the-close"),
+        pytest.param(
             b"HTTP/1.1 204 No Content\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\nx",
             204,
             id="204-framed-two-ways-at-once",
@@ -939,11 +951,18 @@ async def test_a_status_that_admits_no_content_is_framed_by_the_header_section(
     the framing itself, so there is nothing to resolve and nothing to refuse — the
     refusal for a body framed two ways governs a response that *has* one.
 
-    **Only ``204`` is driven here, and the other two members of §6.3's list are
-    covered where they are actually refused**: an interim status is a malformed
-    shape (above), and ``304`` is inside the ``3xx`` class this seam refuses whole,
-    which the redirect row asserts for it by name. A test driving a ``304`` through
-    the body reader would be asserting over a path no response can take.
+    **``205`` is here on a different rule and the arms say so.** RFC 9112 §6.3's
+    list does not hold it; RFC 9110 §15.3.6 does the work instead — "a server MUST
+    NOT generate content in a ``205`` response" — so a ``205`` carrying a length, a
+    coding or bare octets is a server breaking that, and the octets are declined
+    rather than handed back as payload. All three of those framings are driven,
+    because a set-membership fix that missed one would pass a single-arm test.
+
+    **The other two members of §6.3's list are covered where they are actually
+    refused**: an interim status is a malformed shape (above), and ``304`` is
+    inside the ``3xx`` class this seam refuses whole, which the redirect row
+    asserts for it by name. A test driving a ``304`` through the body reader would
+    be asserting over a path no response can take.
     """
     channel = far_end(octets)
     subject, _ = exchange(channel)
