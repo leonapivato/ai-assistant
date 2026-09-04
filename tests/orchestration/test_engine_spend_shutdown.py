@@ -43,21 +43,6 @@ if TYPE_CHECKING:
     from datetime import datetime
     from pathlib import Path
 
-#: ADR-0233 §15 leaves ``StepRunner._bound`` passing the fail-closed constant, and §6
-#: refuses that value at construction — so every egress call in this tree is
-#: unconstructable until the lane that follows computes it. This module's one case
-#: drives a parked *egress* confirmation through ``resume``, which is the one engine
-#: operation reaching ``ToolInvoker.invoke`` without a model in the loop, so the whole
-#: module is affected and the marker is stated once here rather than on the case.
-#: **Strict**, so it is an obligation rather than a licence: #2051's first act is
-#: deleting it, a case that still fails then is a real defect, and one that passes
-#: while still marked fails the suite. Not one assertion below is changed by it.
-_REFUSED_UNTIL_THE_COMPOSER_LANDS: Final = (
-    "ADR-0233 §15: the seam refuses every send until the composer lane (#2051) computes coverage"
-)
-
-pytestmark = pytest.mark.xfail(strict=True, reason=_REFUSED_UNTIL_THE_COMPOSER_LANDS)
-
 #: Long enough that a released worker finishes inside it on any machine this runs
 #: on, and short enough that a genuine hang fails rather than stalls the suite.
 _WAITING: Final = 5.0
