@@ -532,6 +532,10 @@ def test_close_is_idempotent_and_releases_the_descriptor(root: Path) -> None:
         ("max_file_bytes", True),
         ("max_content_bytes", 32.5),
         ("max_content_bytes", True),
+        ("max_decoded_bytes", 0),
+        ("max_decoded_bytes", -1),
+        ("max_decoded_bytes", 1.5),
+        ("max_decoded_bytes", True),
     ],
 )
 def test_a_bound_outside_its_domain_refuses_the_construction(
@@ -552,7 +556,7 @@ def test_a_bound_outside_its_domain_refuses_the_construction(
     entry, a reading §6 never gave it. Both are refused here rather than somewhere
     later and less legibly.
     """
-    with pytest.raises(ConfigurationError, match=r"ADR-0230 §6"):
+    with pytest.raises(ConfigurationError, match=r"ADR-023[02] §[26]"):
         build(root, **{figure: value})  # type: ignore[arg-type]
 
 
