@@ -1317,16 +1317,17 @@ it says so.
 > **Normative.** The record gains **one field per servicing**: the **disposition** a
 > `WEB_SEARCH` ask resolved to, where it resolved to one, and nothing where the search
 > yielded records or where no `WEB_SEARCH` ask was made. It is a member of
-> **`SearchDisposition`**, a `StrEnum` closed at exactly **twelve** members and never
-> free text: `NOT_CONFIGURED`, `NO_BUDGET`, `COMPOSER_DECLINED`,
-> `COMPOSER_UNAVAILABLE`, `COMPOSER_MALFORMED`, `RULING_CONFIRM`, `RULING_DENY`, and
+> **`SearchDisposition`**, a `StrEnum` closed at exactly **thirteen** members and
+> never free text: `NOT_CONFIGURED`; `NO_BUDGET`; the four members of `QueryRefusal`
+> carried across one for one as `COMPOSER_DECLINED`, `COMPOSER_UNAVAILABLE`,
+> `COMPOSER_MALFORMED` and `COMPOSER_TOO_LONG`; `RULING_CONFIRM`; `RULING_DENY`; and
 > the five members of `SearchRefusal` that can reach the servicer, carried across one
 > for one: `SPEND_REFUSED`, `TRANSPORT_FAILED`, `PROVIDER_REFUSED`,
-> `RESPONSE_TOO_LARGE` and `UNATTESTED`. `SearchRefusal.NO_RESULT` is **not** a
+> `RESPONSE_TOO_LARGE` and `UNATTESTED`. **The mapping from each refusal vocabulary is
+> injective**, so no two causes are collapsed. `SearchRefusal.NO_RESULT` is **not** a
 > disposition: a search that reached the provider and yielded nothing is a completed
 > servicing whose returned count is zero, which ADR-0226 §9 already records, and
-> calling it a disposition would double-count it. A `QueryRefusal.TOO_LONG` is
-> recorded as `COMPOSER_MALFORMED`.
+> calling it a disposition would double-count it.
 
 > **Normative.** **`SearchDisposition` lives in `ai_assistant.orchestration`, beside
 > `TurnReadAudit` in `orchestration/reads.py`, and not in `core`.** It crosses no
@@ -1784,7 +1785,7 @@ for less.
    order the provider returned them.
 9a. **The three vocabularies are complete and the mapping is total.** `QueryRefusal`
     holds exactly its four members, `SearchRefusal` exactly its six, and
-    `SearchDisposition` exactly its twelve; every `QueryRefusal` member and every
+    `SearchDisposition` exactly its thirteen; every `QueryRefusal` member and every
     `SearchRefusal` member except `NO_RESULT` maps to a distinct `SearchDisposition`
     member, and `NO_RESULT` maps to none. Asserted over the enums themselves, so a
     member added without an arm fails.
@@ -2040,9 +2041,10 @@ is that statement, and it answers #95 for nothing else.
 This ADR is in **ADR-0089's marked regime**: it carries well-formed clauses, so the
 marked clauses are the whole of what it obligates and the prose beside them supplies
 nothing. ADR-0089 §5 makes marking forward-only, so nothing this ADR cites is
-retro-marked. What binds is **one hundred clauses**: §1's four, §2's two, §3's eight, §4's two,
-§5's eight, §6's six, §8's seven, §9's five, §10's eight, §11's nine, §12's four,
-§13's seven, §14's five, §15's three, §16's eight, §17's thirteen and §18's one. §7's table, §19's
+retro-marked. What binds is **one hundred clauses**: §1's four, §2's two, §3's eight,
+§4's two, §5's eight, §6's six, §8's seven, §9's five, §10's eight, §11's nine, §12's
+four, §13's seven, §14's five, §15's three, §16's eight, §17's thirteen and §18's one.
+§7's table, §19's
 list, §20's classification and every argument in this document are deliberately
 unmarked: they are attestation, deferral and argument, which ADR-0089 §1 classifies as
 non-normative however load-bearing.
