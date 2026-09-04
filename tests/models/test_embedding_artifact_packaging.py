@@ -1116,6 +1116,42 @@ def test_a_padded_notice_table_declares_what_the_unpadded_one_declares() -> None
         assert _declared_revisions(padded) == _declared_revisions(unpadded) == [revision]
 
 
+def test_a_qualified_row_label_is_a_row_neither_parser_reads() -> None:
+    """The negative half of #1932's agreement: a label is the whole cell, not a prefix.
+
+    ``_rows_labelled`` matches a row's *label cell* — the reading
+    :func:`_declared_revisions`' own regex has always used — so
+    ``| Pinned commit (upstream) |`` is a different label and is counted by
+    neither parser. Every other assertion here is positive, and a weakening back
+    to the exact-prefix form this replaced would restore the split reading the
+    two parsers had before it: a qualified label counted as a pin by the
+    inventory parser and as nothing by the revision one, leaving one document
+    with two readings and every existing test green.
+
+    Asserted in both directions, because only the pair is the behaviour. With
+    both labels qualified the table declares nothing at all and is skipped as
+    prose; with only the pin label qualified beside a plain ``Files`` row the
+    table is *refused*, rather than the qualifier standing in for the pin the
+    inventory is credited to. Mutation-checked: restoring
+    ``row.startswith("| Pinned commit ")`` fails both — the first reads the
+    qualified table as a declared inventory, the second parses it without raising.
+    """
+    revision = "0" * 40
+    header = "| | |\n|---|---|\n"
+    fully_qualified = (
+        f"{header}| Pinned commit (upstream) | `{revision}` |\n| Files (vendored) | `a.onnx` |"
+    )
+
+    assert _declared_inventories(fully_qualified) == []
+    assert _declared_revisions(fully_qualified) == []
+
+    a_qualified_pin = f"{header}| Pinned commit (upstream) | `{revision}` |\n| Files | `a.onnx` |"
+
+    assert _declared_revisions(a_qualified_pin) == []
+    with pytest.raises(AssertionError, match="declares 0 pinned commits"):
+        _declared_inventories(a_qualified_pin)
+
+
 def test_the_notices_are_declared_as_a_licence_file() -> None:
     """The declaration is what puts the notices in a distribution.
 
