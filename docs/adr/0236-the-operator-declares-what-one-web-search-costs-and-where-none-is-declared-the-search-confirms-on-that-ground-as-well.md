@@ -381,6 +381,36 @@ a figure it has every right to declare.
 > where that route is stated. No lane reads the `core/protocols.py` sentence above as
 > licence to implement ahead of this ADR's merge.
 
+**Why one lane and not four, under ADR-0137 §1 rather than under `CLAUDE.md`'s short
+form.** The bound is not "one subsystem per change" flatly; it is *"A slice is one lane
+only if its implementation puts substantial **new machinery** into at most one
+subsystem"*, and §1's second clause is explicit that *"Adaptation does not count against
+the bound in this section. A lane may carry adaptation across any number of
+subsystems."* §1 names the distinction in terms — new machinery is *"a store, a loop, a
+codec, a producer, a policy engine"*, and adaptation is *"a call site updated, **an
+argument threaded through**, a method added to a class that already had the rest of
+them"*.
+
+> **Normative.** **The classification of this lane under ADR-0137 §1 is that at most
+> one subsystem receives new machinery, and it is `core/config.py`**: two fields and
+> their refusals, and even those are built from `_checked_spend_amount` and
+> `world_spend_currency`'s shape check, which already exist. Everything else is
+> **adaptation** in §1's own sense — two keyword parameters threaded through a builder
+> that already takes ten onto a constructor call it already makes; two values passed on
+> the composition path that already passes three; the same pair on a canonical fake
+> whose constructor already takes bounds and already refuses them. **This lane invokes
+> no exception**: it needs neither ADR-0137 §2's contract-seam widening — it adds no
+> Protocol and no triad — nor any other, because §1's bound is not reached. A reviewer
+> disputing this disputes which of the four is a second **machine**, and naming one is
+> what would decompose the lane.
+
+**Splitting it would cost what this decision exists to buy.** A `core/config.py` lane
+landing two fields nothing reads is the figure ADR-0231 §5's own commentary refuses —
+*"a bound nothing reads is a figure an operator can set and watch do nothing"* — and a
+builder lane landing a parameter the composition root does not pass leaves **every
+configured deployment at `UNKNOWN`**, which is the third clause below's whole subject.
+The four move together or the window between them is the gap #2111 records.
+
 **Four obligations, one per file, each marked — because §3 of ADR-0089 makes the marked
 set the whole of what this ADR obliges, and a per-file requirement stated only in a
 bullet list would bind nothing.**
