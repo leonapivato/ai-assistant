@@ -139,13 +139,15 @@ must be bounded, and neither one bounds the other.
   for it — so there is no decoded length to charge — but the two mappings are built as
   often as the document asks for a font-build, which is a number the document controls
   entirely.
-- **The number of font-builds is itself an amplifier, and it is not this ADR's to
-  bound.** One font object under a thousand resource names, on fifty pages, is fifty
+- **The number of font-builds is itself an amplifier, and bounding it is not this ADR's
+  to do.** One font object under a thousand resource names, on fifty pages, is fifty
   thousand `Font.from_font_resource` calls from a **608 KB** file: **3.08 s** where those
   fonts carry a name-valued `/ToUnicode`, and **5.23 s** where they carry none at all and
   no `/FontFile` either — about 62 to 105 µs a build, of which the `/ToUnicode` parse is a
-  small part. §1 below charges the mappings, which bounds the first class; the second is
-  charged nothing by ADR-0232 or by this ADR, and §9 defers the quantity by name.
+  small part. §1 below charges the mappings, which bounds the first class loosely; the
+  second is charged nothing by ADR-0232 or by this ADR. §9 records that quantity's
+  deferral as **fired by this measurement** and routes it to #2060, which is the treatment
+  the 2026-09-04 note on ADR-0232 gave the `/ToUnicode` half this ADR now closes.
 - **The mappings a parse builds are not the dictionary that survives it.** A CMap whose
   ranges overlap in their source codes declares more mappings than it leaves keys: 90,000
   declared through `bfrange` lines that wrap the two-byte code space builds 90,000 and
@@ -809,21 +811,24 @@ two per-fetch memos §3 requires — one on the font, one on its CMap stream.
   defaults. **Fired by** that audit, or by a `pypdf` release that stops rebuilding fonts
   per page. Not fired by raising a default, which §5 measures and rejects for the same
   reason ADR-0232 §2 did.
-- **The number of font-builds an extraction performs.** Measured above: fifty thousand
-  builds from a 608 KB file cost 3.08 s with a name-valued `/ToUnicode` and 5.23 s with
-  none, and most of that is not the `/ToUnicode` parse — it is `/Encoding` resolution,
-  width tables and the rest of `Font.from_font_resource`, run once per resource name per
-  page. §1's two-mapping charge bounds the first class **loosely** and says so: at the
-  default it admits 200,000 builds, measured at about 12 s, where the figure is chosen to
-  be worth 1.3 s. And it bounds the second not at all — a font with **no** `/ToUnicode`
-  and no `/FontFile` is charged nothing by ADR-0232 §3 and nothing here, and its builds
-  are limited only by `fetch_max_file_bytes`. **This is a fourth quantity — font-builds,
-  whose consumer is the font builder — and bounding it tightly means a figure of its own,
-  argued as §5 argues these two, with its own arms.** It is not reached here because it is
-  not a `/ToUnicode` question: the same document costs more with the CMap removed.
-  **Fired by** ADR-0230 §9's audit showing `TOO_LARGE` at a rate this charge cannot
-  explain, or by a measurement showing a font-build class reaching the instruction class
-  with both of this ADR's fields inside their defaults.
+- **The number of font-builds an extraction performs — recorded here as *already fired*,
+  by this ADR's own measurement, and carried by #2060.** Fifty thousand builds from a
+  608 KB file cost **3.08 s** with a name-valued `/ToUnicode` and **5.23 s** with none at
+  all, at 62 to 105 µs a build; most of that is not the `/ToUnicode` parse but `/Encoding`
+  resolution, the width tables and the rest of `Font.from_font_resource`, which is why the
+  row with no CMap is the dearer. §1's two-mapping charge bounds the first class
+  **loosely** and says so — at the default it admits 200,000 builds, about 12 s, where the
+  figure is sized to be worth 1.3 s — and it bounds the second **not at all**: a font with
+  no `/ToUnicode` and no `/FontFile` is charged nothing by ADR-0232 §3 and nothing here,
+  and its builds are limited only by `fetch_max_file_bytes`. That is a class reaching
+  seconds with every field of both ADRs at zero, so **there is no firing condition left to
+  write** — the condition is met on the page it would have been written on. **Firing a
+  deferral is not itself a decision.** Bounding this is a **fourth quantity** —
+  font-builds, whose consumer is the font builder — needing its own `Settings` field, its
+  own argued default and its own arms, and it is a new refusal criterion, which ADR-0015
+  puts in an ADR rather than in a lane. This ADR does not make that decision, for the same
+  reason it is the one making the `/ToUnicode` decision the 2026-09-04 note on ADR-0232
+  said was owed: **#2060 carries it**, with the measurement and what it has to decide.
 - **A descent-depth bound for the form-invocation chain.** #2045 records that the walk
   descends further into a chain of Form XObjects than the interpreter's recursion limit
   lets the extraction descend, so between the two depths it charges forms the extraction
