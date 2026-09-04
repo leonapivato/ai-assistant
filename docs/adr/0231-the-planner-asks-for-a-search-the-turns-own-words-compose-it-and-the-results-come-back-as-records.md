@@ -1126,8 +1126,20 @@ under it, makes a search fire without the user having authorised the recipient.
 > omitted the field, supplied it as `null`, or supplied a string that is empty or
 > whose every character is Unicode whitespace; every other supplied string is
 > *present* and is transcribed byte for byte, leading and trailing whitespace
-> included.** That rule is total over what a provider can send, and it is stated
-> because determinism needs it to be: two implementations disagreeing about whether
+> included; and a field the provider supplied as a value that is neither a string nor
+> `null` — a number, a boolean, an object or an array — drops the result whole.**
+> That rule is **total over every value a well-formed response can carry in one of
+> these three positions**: omitted, `null`, a string, or something else, and
+> each of the four has exactly one outcome. A non-string is dropped rather than called
+> absent, because the provider did supply a value and calling it absent would discard
+> a field it filled; and rather than called present, because there is no string to
+> transcribe and rendering `42` as `"42"` would be this system adding a word of its
+> own, which this clause's transcription-not-rendering rule forbids in terms. **A
+> response whose top-level shape is not the one the provider documents is refused
+> `PROVIDER_REFUSED` before this clause is reached** (§17's Lane 2 failure-path suite);
+> what is decided here is the well-shaped response carrying one ill-typed field for
+> one result. It is stated because determinism needs it to be: two implementations
+> disagreeing about whether
 > `""` is a title mint records differing by a line, which is exactly the guarantee
 > below. Where the **title** or the **snippet** is absent its line is omitted and the
 > remaining lines keep their order; a result whose **address** is absent is dropped,
@@ -1139,8 +1151,8 @@ under it, makes a search fire without the user having authorised the recipient.
 > spans apart, so a span carrying a break would have to be altered, which would stop it
 > being verbatim, or would produce a record whose lines no reader can assign to a span.
 > Dropping is the one answer that keeps both properties, it is the answer this section
-> already gives an over-long result and an address-less one, and §13's audit counts it
-> with those. This form is fixed here so that two
+> already gives an over-long result, an address-less one and one carrying a non-string
+> span, and §13's audit counts it with those. This form is fixed here so that two
 > conforming implementations over one response produce byte-identical records; it adds
 > no word of this system's, and is a **transcription** rather than a rendering in
 > exactly the sense ADR-0230 §5 gives for a decoding.
@@ -1170,7 +1182,13 @@ under it, makes a search fire without the user having authorised the recipient.
 > written: it is not the instant we sent the request, not the instant we received the
 > response, not a clock this system read, and not a value derived from any of them. A
 > response that declares **no** instant mints **no record** — the whole search yields
-> nothing and §13's audit records the class. `Provenance.last_updated` and
+> nothing and §13's audit records the class. **A value carried in that position which
+> cannot be read as an instant is not a declared one**: a malformed string, a value of
+> a type the provider's documented format does not admit, or one naming no determinate
+> instant is treated exactly as a response declaring none — `UNATTESTED`, no record,
+> and no substitute. That is the same closed answer rather than a new one, and it is
+> written down so that no implementation reads an unparseable field as licence to fall
+> back to a clock it read. `Provenance.last_updated` and
 > `last_confirmed_at` are ours and keep ADR-0045 §3's meaning.
 
 > **Normative.** **What is attested is the provider's claim about what its index
@@ -1290,8 +1308,18 @@ disk, on the stronger case; this one needs no argument at all.
 > than one slot remains when the search is reached, no request is composed, no ruling
 > is sought and no channel is opened**, and §13's audit records it.
 
-> **Normative.** The minted records enter **ADR-0226 §7's fourth group**, appended
-> whole with the rest of the servicing's yield in servicing order. There is no fifth
+> **Normative.** **The fourth group is never larger than ADR-0226 §6 admits, and this
+> kind adds no exception to that.** Where the slots remaining when the search is
+> reached are fewer than the results the provider returned, the servicer admits the
+> records that fit, in the order §10 minted them, and admits no more; the hop and the
+> query are then serviced with whatever is left, which may be nothing, exactly as
+> ADR-0226 §6's own truncation clause already rules. No lane grows the budget for this
+> kind, funds it from another, or admits a minted record the budget has no slot for.
+
+> **Normative.** The minted records the clause above admits enter **ADR-0226 §7's
+> fourth group**, appended whole with the rest of the servicing's yield in servicing
+> order — *whole* meaning as one group in one position, never that a record the budget
+> has no slot for is admitted. There is no fifth
 > group and no attested group (ADR-0228 §7); the three groups the planner saw keep
 > their contents, their order and their positions; and §7's whole-union deduplication,
 > discards-nothing-by-class clause and constructed-once rule bind on a minted record as
@@ -1351,7 +1379,7 @@ budget happened to be rather than of what the planner asked for, and would put t
 weakest-cap read ahead of the strongest namer — the inversion ADR-0230 §7 refused for
 the file.
 
-**So the residual is named instead of removed.** With the search third, an `EXTERNAL`
+**So the residual is named instead of removed.** With the search second, an `EXTERNAL`
 record that a *later* inward read of the **same** servicing would have contributed is
 not in view when the search's binding is stamped, and that binding can therefore carry
 `False` where the turn's final supply would have carried `True`. Three things bound it.
@@ -1365,6 +1393,21 @@ ADR-0181 §2's second clause and ADR-0223 §7 already forbid reading a `False` a
 assurance that nothing external was involved. What is left is one turn's window, on a
 record the second inward read found and the first did not, and this ADR states it
 rather than claiming a completeness it does not have.
+
+**The clause above is a guard rather than a mechanism this ordering reaches, and the
+arithmetic is written out because a reader who mistakes the search's position would
+conclude otherwise.** The order fixed above puts the search **second**, so the only
+kind that can have drawn on the budget when the search is reached is the local file,
+which ADR-0230 §7 caps at *"one file, one record, always"* and whose own clause states
+that where the fetch takes its slot *"the hop is serviced with nine"*. **At least nine
+of the ten slots therefore remain, against a cap §5 admits no value above three for**,
+so no ordering this ADR fixes can present the servicer with fewer slots than the
+search returns results. The truncation clause is stated anyway, and stated as a rule
+rather than as an impossibility, because a later ADR reordering the kinds or raising
+the file's cap would reach it and because a clause that holds only under an
+arithmetic elsewhere is a clause a reader cannot check locally. What no reader should
+take from it is that this kind is ever starved on `origin/main`'s ordering: it is not,
+and the fewer-than-one-slot clause above is unreachable for the same reason.
 
 **Compose before bind, because the query is what is being ruled on.** ADR-0148 §6
 makes the payload description a deterministic derivation of the request's own
@@ -1984,7 +2027,10 @@ for less.
 8. **A response declaring no report instant mints nothing.** The searcher's own test,
    over a response the provider shape admits and that carries no declared instant: the
    outcome is a refusal, and the suite's unconstructability clause covers the type-level
-   half.
+   half. **A response whose instant is present but unreadable is the same refusal** —
+   a malformed string, and a value of a type the documented format does not admit —
+   which fails an implementation that falls back to the instant it sent, the instant it
+   received or any clock it read.
 9. **A result over the content bound is dropped and its siblings are minted**, and a
    response every one of whose results is over the bound yields nothing. A response
    carrying more results than the configured count mints exactly that many, in the
@@ -2006,6 +2052,14 @@ for less.
    is dropped for any of the three reasons is `NO_RESULT` rather than an empty success.
    An implementation that transcribes a break passes every other test here and fails
    these, because its record's line count no longer says which span is which.
+   **The fourth form §10's totality rule admits is asserted beside the other three**: a
+   span supplied as a number, as a boolean, as an object and as an array — each over
+   each of the three span positions — drops its result, its siblings are minted in the
+   order the provider returned them, and a response every result of which drops that
+   way is `NO_RESULT`. That fails an implementation that coerces a non-string to its
+   textual form, which would mint a record no other conforming implementation over the
+   same response mints, and one that treats it as absent, which would mint a record one
+   line shorter.
 9a. **The three vocabularies are complete and the mapping is total.** `QueryRefusal`
     holds exactly its four members, `SearchRefusal` exactly its six, and
     `SearchDisposition` exactly its fifteen; every `QueryRefusal` member and every
@@ -2358,9 +2412,9 @@ is that statement, and it answers #95 for nothing else.
 This ADR is in **ADR-0089's marked regime**: it carries well-formed clauses, so the
 marked clauses are the whole of what it obligates and the prose beside them supplies
 nothing. ADR-0089 §5 makes marking forward-only, so nothing this ADR cites is
-retro-marked. What binds is **one hundred and five clauses**: §1's four, §2's two,
+retro-marked. What binds is **one hundred and six clauses**: §1's four, §2's two,
 §3's eight, §4's two, §5's ten, §6's seven, §8's eight, §9's five, §10's eight,
-§11's ten, §12's four, §13's seven, §14's five, §15's three, §16's eight, §17's
+§11's eleven, §12's four, §13's seven, §14's five, §15's three, §16's eight, §17's
 thirteen and §18's one. §7's table, §19's
 list, §20's classification and every argument in this document are deliberately
 unmarked: they are attestation, deferral and argument, which ADR-0089 §1 classifies as
