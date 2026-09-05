@@ -7,6 +7,7 @@ rather than reach a policy that has to guess.
 
 from __future__ import annotations
 
+import json
 import operator
 from datetime import timedelta
 from decimal import Decimal
@@ -605,9 +606,14 @@ def test_a_large_but_renderable_integer_is_still_accepted() -> None:
 def test_a_definition_tampered_to_hold_an_unserialisable_value_is_refused() -> None:
     """The third way the render fails, reachable only past ``frozen=True``.
 
-    ``model_dump(mode="json")`` raises ``PydanticSerializationError`` — itself a
-    ``ValueError`` — rather than returning something ``json.dumps`` chokes on,
-    so it has to be caught around the dump and not only around the render.
+    The class serializer raises ``PydanticSerializationError`` — itself a
+    ``ValueError`` — rather than returning something ``json.dumps`` chokes on, so
+    it has to be caught around the projection and not only around the render.
+    That the exception is a ``ValueError`` is what lets the one refusal clause
+    stand unchanged now the projection is taken by
+    ``ToolDefinition.__pydantic_serializer__`` rather than by ``self.model_dump``
+    (issue #1992) — ``model_dump`` was only ever a wrapper around that
+    serializer, so this test pins the clause on either form.
     """
     tampered = _definition()
     object.__setattr__(tampered, "parameters_schema", {"x": object()})
@@ -637,3 +643,109 @@ def test_a_hostile_repr_on_a_tampered_identifier_cannot_destroy_the_diagnosis() 
 
     with pytest.raises(ValidationError, match="JSON encoding"):
         _Recorded(tool=tampered)
+
+
+# --- the check cannot be answered by the value it checks (issue #1992) ---
+
+
+def _storable_dump(*_args: object, **_kwargs: object) -> dict[str, object]:
+    """A dump of a *different*, storable definition — the false answer a shadow gives.
+
+    Deliberately ignores its arguments, and deliberately describes a definition
+    other than the one it is attached to: that is the whole of the attack, and a
+    stub that consulted ``self`` would not be one.
+    """
+    return _definition().model_dump(mode="json")
+
+
+class _NominatingTool(ToolDefinition):
+    """A subclass that answers about a definition it is not.
+
+    The subclass half of the same attribute. ``model_dump`` is an ordinary
+    method, so a subclass overrides it as easily as an instance shadows it, and
+    a definition of this type reaches every field annotated ``ToolDefinition``
+    without any tampering at all.
+    """
+
+    def model_dump(self, *args: object, **kwargs: object) -> dict[str, object]:
+        return _storable_dump()
+
+
+def _tampered(**overrides: object) -> ToolDefinition:
+    """A definition holding a value it refused at construction.
+
+    ``object.__setattr__`` is the bypass ADR-0018 §3 and ADR-0021 §4 keep inside
+    this repository's threat model, and — since the type refuses to build one —
+    the only way to hold an unstorable definition at all. Without it these tests
+    would pass because the value could not exist rather than because the check
+    caught it.
+    """
+    definition = _definition()
+    for field, value in overrides.items():
+        object.__setattr__(definition, field, value)
+    return definition
+
+
+def test_an_instance_shadowing_model_dump_cannot_answer_its_own_storability() -> None:
+    r"""The predicate must not be nominated by the value it is asked about.
+
+    ``model_dump`` is an ordinary attribute, so ``object.__setattr__`` puts a
+    replacement in the instance ``__dict__`` where normal attribute lookup finds
+    it ahead of the class's — and it is reached by exactly the route that put the
+    surrogate in ``description``, so a threat model that admits one admits the
+    other. Rendering through ``ToolDefinition.__pydantic_serializer__`` instead
+    is what makes the shadow inert: the serializer is resolved on the class and
+    reads the instance's field values.
+
+    Assigned to a model-typed field rather than constructed, because that is
+    where the re-check lives: pydantic re-runs an ``after`` model validator on an
+    already-built instance, which is what lets an unstorable definition be caught
+    on its way into a :class:`PermissionDecision`.
+    """
+    tampered = _tampered(description="Send \ud800 mail.")
+    object.__setattr__(tampered, "model_dump", _storable_dump)
+
+    assert "model_dump" in tampered.__dict__
+    assert tampered.model_dump(mode="json")["description"] == "Send an email."
+
+    with pytest.raises(ValidationError, match="JSON encoding"):
+        _Recorded(tool=tampered)
+
+
+def test_a_subclass_overriding_model_dump_cannot_answer_its_own_storability() -> None:
+    r"""The same rule reached through the class rather than through the instance."""
+    tampered = _NominatingTool(**_definition().model_dump())
+    object.__setattr__(tampered, "description", "Send \ud800 mail.")
+
+    assert tampered.model_dump(mode="json")["description"] == "Send an email."
+
+    with pytest.raises(ValidationError, match="JSON encoding"):
+        _Recorded(tool=tampered)
+
+
+@pytest.mark.filterwarnings("ignore:Pydantic serializer warnings:UserWarning")
+def test_the_render_is_taken_under_the_declared_field_set() -> None:
+    r"""``ToolDefinition``'s serializer, not ``type(self)``'s — and what that trades.
+
+    The declared type is the schema every holder stores this value through:
+    ``PermissionDecision.tool`` is a ``ToolDefinition``, so a subclass's own
+    fields are dropped on the way to durable state and were never what this
+    predicate protects. ``type(self)`` would also leave the render nominated by
+    the value, through the class it chose instead of through the attribute just
+    closed.
+
+    The trade is stated here rather than only asserted in prose: a subclass-only
+    field with no encoding is not refused, *and* nothing that reaches a holder
+    carries it. Were the predicate ever moved back under ``type(self)``, this
+    test fails and the reasoning above gets re-read.
+    """
+
+    class _ExtraField(ToolDefinition):
+        tenant: str
+
+    extended = _ExtraField(**_definition().model_dump(), tenant="acme \ud800")
+
+    stored = _Recorded(tool=extended).model_dump(mode="json")
+
+    assert "tenant" not in stored["tool"]
+    assert ToolDefinition.model_validate_json(json.dumps(stored["tool"])) == _definition()
