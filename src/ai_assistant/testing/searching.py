@@ -386,9 +386,11 @@ class FakeWebSearcher:
                 ``max_results`` is above ADR-0231 §5's ceiling of three, if
                 ``reported_at`` is not timezone-aware, if
                 ``name`` is blank or is a value ``Identifier`` would strip, if
-                ``origin`` is present and blank, or if the cost pair is outside
+                ``origin`` is present and blank, if the cost pair is outside
                 ADR-0236 §2's domain — exactly one of the two given, a non-finite,
-                negative or uncountable amount, or a malformed currency code. Each is
+                negative or uncountable amount, or a malformed currency code — or if
+                the pair is given while ``origin`` is ``None``, which is this fake's
+                shape of §2's registration-whole refusal. Each is
                 a state this fake could not answer from, refused here rather than at
                 an arbitrary later call — which is the one thing ADR-0231 §17 says
                 never leaves either member.
@@ -396,6 +398,21 @@ class FakeWebSearcher:
         _check_bounds(max_results, max_result_chars)
         _check_source(name, origin, reported_at)
         cost = _checked_cost(cost_per_call, cost_currency)
+        if cost is not None and origin is None:
+            # ADR-0236 §2's registration-whole refusal, in the one shape this fake has
+            # for it: `origin=None` **is** "a deployment that connected no search
+            # account", and neither cost field may be set unless the registration is
+            # whole. A fake that took a figure in that state would be configurable into
+            # a state no deployment can be in — which is the failure this module's
+            # `DEFAULT_MAX_RESULTS` comment refuses one field pair along, on the one
+            # field ADR-0236 moves. `request` answers `None` here, so the figure would
+            # reach no declaration and no policy either.
+            msg = (
+                "cost_per_call and cost_currency are given and origin is None; a per-call "
+                "figure for a searcher that proposes nothing is a value nothing reads "
+                "(ADR-0236 §2), so give an origin as well or give neither cost field"
+            )
+            raise ValueError(msg)
         #: This fake's own registered declaration, built per instance exactly as
         #: `build_web_search_integration` builds the production one (ADR-0236 §1):
         #: the module constant is never mutated, and where the pair is unset the
