@@ -23,6 +23,7 @@ names an ``.invalid`` origin (RFC 6761 §6.4).
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
@@ -30,10 +31,11 @@ import pytest
 from ai_assistant.app import build_engine
 from ai_assistant.app import composition as composition_module
 from ai_assistant.core.config import EmbedderKind, Settings
+from ai_assistant.core.types import CostBasis
 from ai_assistant.tools import WebSearchIntegration, build_web_search_integration
 from ai_assistant.tools.egress import StreamOutboundTransport, WebSearchTransport
 from ai_assistant.tools.egress_binder import EgressBindingSeam
-from ai_assistant.tools.web_search import WEB_SEARCH, WEB_SEARCH_ID
+from ai_assistant.tools.web_search import WEB_SEARCH, WEB_SEARCH_ID, WebSearchEgress
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -45,21 +47,35 @@ CONNECTION: Final = "conn-0001"
 SEARCH_ORIGIN: Final = "https://search.example.invalid"
 
 
-def _settings(*, configured: bool) -> Settings:
+#: The per-call figure ADR-0236 §1 lets an operator declare, and the code it is
+#: denominated in. Distinctive enough that an assertion about the wired declaration
+#: is not an assertion about a coincidence.
+FIGURE: Final = Decimal("0.005")
+CODE: Final = "USD"
+
+
+def _settings(*, configured: bool, priced: bool = False) -> Settings:
     """Settings for a deployment that has, or has not, connected a search account.
 
     Args:
         configured: Whether to name the connection and the origin.
+        priced: Whether to declare ADR-0236 §1's per-call figure as well. Neither
+            cost field may be set without the registration pair, so this is only
+            meaningful beside ``configured``.
 
     Returns:
         The settings.
     """
     if not configured:
         return Settings(embedder=EmbedderKind.HASHING)
+    cost: dict[str, Any] = (
+        {"web_search_cost_per_call": FIGURE, "web_search_cost_currency": CODE} if priced else {}
+    )
     return Settings(
         embedder=EmbedderKind.HASHING,
         web_search_connection=CONNECTION,
         web_search_origin=SEARCH_ORIGIN,
+        **cost,
     )
 
 
@@ -269,3 +285,82 @@ async def test_a_deployment_that_connected_no_account_services_no_search(
         assert engine._loop._search is None
     finally:
         await engine.aclose()
+
+
+async def test_the_composition_root_forwards_the_configured_per_call_figure(
+    tmp_path: Path,
+) -> None:
+    """ADR-0236 §8 item 11, and the obligation §7's third clause exists for.
+
+    "Over ``app/composition.py``'s own wiring, with ``Settings`` carrying the pair and
+    a connected account: the declaration the built ``WebSearchIntegration`` registers
+    is ``PER_CALL`` with that amount and that code."
+
+    **Not asserted over the builder called directly**, which is what
+    ``tests/tools/test_web_search_cost.py`` does — "it is exactly the assertion a
+    composition root that dropped the pair would still pass". A lane that landed the
+    fields, the builder and every other test while this root passed neither value
+    would leave **every configured deployment at ``UNKNOWN``** with a green gate,
+    which is precisely the failure the whole decision exists to remove.
+
+    Read off the searcher the loop actually holds, rather than off the builder's
+    return value, so a root that built one declaration and wired another would fail.
+    """
+    engine = build_engine(_settings(configured=True, priced=True), data_dir=tmp_path)
+    try:
+        servicer = engine._loop._search
+        assert servicer is not None, "a configured deployment services searches"
+        searcher = servicer._searcher
+        assert isinstance(searcher, WebSearchEgress), "the production searcher, not a fake"
+        declared = searcher._declaration
+
+        assert declared.cost.basis is not CostBasis.FREE, "ADR-0236 §3: unreachable from here"
+        assert declared.cost.basis is CostBasis.PER_CALL
+        assert declared.cost.amount == FIGURE
+        assert declared.cost.currency == CODE
+    finally:
+        await engine.aclose()
+
+
+async def test_a_deployment_that_declared_no_figure_is_wired_at_unknown(tmp_path: Path) -> None:
+    """§8 item 11's companion, which keeps the arm above from passing vacuously.
+
+    ADR-0236 §4: "Where neither field is set the declaration's ``cost`` is
+    ``ToolCost(basis=CostBasis.UNKNOWN)``" — the shipped default, and the state the
+    decision makes legible rather than accidental. Without this row a root that hard
+    coded a ``PER_CALL`` cost would pass the one above.
+    """
+    engine = build_engine(_settings(configured=True), data_dir=tmp_path)
+    try:
+        servicer = engine._loop._search
+        assert servicer is not None
+        searcher = servicer._searcher
+        assert isinstance(searcher, WebSearchEgress), "the production searcher, not a fake"
+        declared = searcher._declaration
+
+        assert declared.cost.basis is CostBasis.UNKNOWN
+        assert declared == WEB_SEARCH, "the template, registered unchanged"
+    finally:
+        await engine.aclose()
+
+
+async def test_a_cost_pair_with_no_search_account_is_refused_at_settings_load() -> None:
+    """ADR-0236 §2's registration-whole clause, at the wiring it protects.
+
+    "A per-call figure for a searcher no deployment builds is a value nothing reads,
+    and the quiet reading of it is the unsafe one." This root builds no
+    ``WebSearchIntegration`` at all where the registration pair is absent, so the
+    figure would reach no builder — refused at load instead, in
+    ``_the_search_registration_is_whole_or_absent``'s own shape.
+
+    Asserted here beside the wiring it is about as well as in
+    ``tests/core/test_config.py``, for
+    ``test_half_a_search_registration_is_refused_at_settings_load``'s reason one field
+    pair along.
+    """
+    with pytest.raises(ValueError, match="web_search_connection"):
+        Settings(
+            embedder=EmbedderKind.HASHING,
+            web_search_cost_per_call=FIGURE,
+            web_search_cost_currency=CODE,
+        )

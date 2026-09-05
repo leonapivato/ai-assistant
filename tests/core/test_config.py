@@ -2391,3 +2391,298 @@ def test_reconciler_settings_parse_from_the_environment(monkeypatch: pytest.Monk
 
     assert settings.reconciler_model == "openai:gpt-5"
     assert settings.reconciler_max_conflicts == 5
+
+
+class TestTheSearchCostSettings:
+    """The operator's per-call figure, refused where it is configured (ADR-0236 §2).
+
+    ADR-0236 §8's items 4, 5 and 6 — every load-time refusal the decision owes —
+    beside the pair's happy path. What the figure then *does* is
+    ``tests/tools/test_web_search_cost.py``'s subject; what is here is the domain,
+    asserted at the one place §2 says an operator meets it.
+
+    **The registration pair is set in every case that is not about it.** Neither cost
+    field may be set unless ``web_search_connection`` and ``web_search_origin`` both
+    are, so a case that omitted them would exercise that cross-field refusal rather
+    than the per-field guard it means to — which is ``_COMPANIONS``' own argument, one
+    field pair along.
+    """
+
+    _CONNECTION: Final = "conn-0001"
+    _ORIGIN: Final = "https://search.example.invalid"
+
+    def _registered(self, **overrides: Any) -> Settings:
+        """``Settings`` for a deployment with a search account connected."""
+        fields: dict[str, Any] = {
+            "web_search_connection": self._CONNECTION,
+            "web_search_origin": self._ORIGIN,
+        }
+        fields.update(overrides)
+        return Settings(**fields)
+
+    def test_unset_is_the_ordinary_state_and_declares_an_unknown_cost(self) -> None:
+        """No deployment is obliged to price its searches (ADR-0236 §4).
+
+        Unset is the shipped default and the state the decision makes *legible*
+        rather than accidental: the declaration's cost stays ``UNKNOWN``, the cost
+        floor fires beside the disclosure one, and no standing grant is consulted.
+        """
+        settings = Settings()
+
+        assert settings.web_search_cost_per_call is None
+        assert settings.web_search_cost_currency is None
+
+    def test_the_pair_loads_verbatim_where_a_search_account_is_connected(self) -> None:
+        """Without this, every refusal below proves nothing.
+
+        Verbatim on both: the amount is carried as written rather than normalised to
+        a canonical scale — ADR-0194 §2's one-representation rule governs a computed
+        *total* and not a configured input — and the code is neither normalised nor
+        checked against the live register (ADR-0236 §2).
+        """
+        settings = self._registered(
+            web_search_cost_per_call=Decimal("0.0050"), web_search_cost_currency="USD"
+        )
+
+        assert settings.web_search_cost_per_call == Decimal("0.0050")
+        assert settings.web_search_cost_per_call.as_tuple().exponent == -4, "as written"
+        assert settings.web_search_cost_currency == "USD"
+
+    def test_the_two_settings_add_exactly_two_fields_and_no_third(self) -> None:
+        """ADR-0236 §1 fixes the count: "no lane adds a third under it"."""
+        named = {field for field in Settings.model_fields if field.startswith("web_search_cost")}
+
+        assert named == {"web_search_cost_per_call", "web_search_cost_currency"}
+
+    def test_no_setting_of_any_name_selects_a_cost_basis(self) -> None:
+        """ADR-0236 §3, asserted as the absence it is stated as.
+
+        "No lane adds a basis selector, a ``free`` sentinel, or any third setting
+        whose effect is a ``FREE`` basis." The unreachability of ``FREE`` is meant to
+        be a property of the configuration surface rather than a rule somebody
+        remembers, so the surface is what this reads.
+        """
+        fields = set(Settings.model_fields)
+
+        assert not {name for name in fields if "cost_basis" in name or "search_cost_free" in name}
+        assert not {name for name in fields if name.startswith("web_search_") and "free" in name}
+
+    # --- §8 item 4: every half-configuration is refused, and names its field ---
+
+    @pytest.mark.parametrize(
+        ("overrides", "named"),
+        [
+            pytest.param(
+                {"web_search_cost_per_call": Decimal("0.005")},
+                "web_search_cost_currency",
+                id="amount-alone",
+            ),
+            pytest.param(
+                {"web_search_cost_currency": "USD"},
+                "web_search_cost_per_call",
+                id="currency-alone",
+            ),
+        ],
+    )
+    def test_half_a_cost_pair_is_refused_and_the_message_names_the_other_half(
+        self, overrides: dict[str, Any], named: str
+    ) -> None:
+        """§8 item 4's first two cases (ADR-0236 §2's both-or-neither clause).
+
+        ``ToolCost`` needs an amount *and* a code for a ``PER_CALL`` basis, so a lone
+        one of them can become no declaration at all — and the quiet reading, falling
+        back to ``UNKNOWN``, is the unsafe one: an operator who set one variable
+        believes their searches are priced.
+        """
+        with pytest.raises(ValidationError, match=named):
+            self._registered(**overrides)
+
+    def test_a_figure_with_no_search_registration_is_refused(self) -> None:
+        """§8 item 4's third case: "either set with the registration absent".
+
+        "A per-call figure for a searcher no deployment builds is a value nothing
+        reads, and the quiet reading of it is the unsafe one" (ADR-0236 §2). The
+        composition root builds no ``WebSearchIntegration`` at all without the
+        registration pair, so the figure would reach no builder and no declaration.
+        """
+        with pytest.raises(ValidationError, match="web_search_connection"):
+            Settings(web_search_cost_per_call=Decimal("0.005"), web_search_cost_currency="USD")
+
+    @pytest.mark.parametrize(
+        "registration",
+        [{"web_search_connection": _CONNECTION}, {"web_search_origin": _ORIGIN}],
+        ids=["connection-alone", "origin-alone"],
+    )
+    def test_a_figure_beside_half_a_registration_is_refused(
+        self, registration: dict[str, Any]
+    ) -> None:
+        """§8 item 4's fourth case: "either set with exactly one of the pair set".
+
+        The registration's own whole-or-absent clause is what answers first here, and
+        that is the right answer rather than a near miss: a deployment in this state
+        has two things wrong with it, and the message names the one an operator must
+        fix before the figure can mean anything.
+        """
+        with pytest.raises(ValidationError, match=r"web_search_connection|web_search_origin"):
+            Settings(
+                web_search_cost_per_call=Decimal("0.005"),
+                web_search_cost_currency="USD",
+                **registration,
+            )
+
+    # --- §8 item 5: every out-of-domain amount is refused at load --------------
+
+    @pytest.mark.parametrize(
+        "amount",
+        [
+            pytest.param(Decimal("-0.01"), id="negative"),
+            pytest.param(Decimal("Infinity"), id="positive-infinity"),
+            pytest.param(Decimal("-Infinity"), id="negative-infinity"),
+            pytest.param(Decimal("NaN"), id="nan"),
+            pytest.param(Decimal("1E15"), id="at-the-ceiling"),
+            pytest.param(Decimal("1E16"), id="above-the-ceiling"),
+            pytest.param(Decimal("0.0000000001"), id="a-tenth-fractional-digit"),
+        ],
+    )
+    def test_an_out_of_domain_amount_is_refused_at_load_and_names_the_field(
+        self, amount: Decimal
+    ) -> None:
+        """§8 item 5, at the moment ADR-0230 §6's style says a bound is refused.
+
+        Refusing an uncountable figure here costs an operator one error message;
+        admitting it would mean a declaration that loads, registers, rules ``ALLOW``
+        and is then refused at the gate with ``SpendUndeterminedError`` on every call
+        — ADR-0194 §1's first ground, met at the latest possible moment for a fact
+        known at the earliest (ADR-0236 §2).
+        """
+        with pytest.raises(ValidationError, match="web_search_cost_per_call"):
+            self._registered(web_search_cost_per_call=amount, web_search_cost_currency="USD")
+
+    @pytest.mark.parametrize(
+        "amount",
+        [
+            pytest.param(Decimal("0"), id="zero"),
+            pytest.param(Decimal("1.0000000000"), id="a-trailing-zero-representation"),
+            pytest.param(Decimal("999999999999999.999999999"), id="just-under-the-ceiling"),
+        ],
+    )
+    def test_an_in_domain_amount_is_admitted(self, amount: Decimal) -> None:
+        """§8 item 5's admitted case, which the refusals above would pass without.
+
+        ``Decimal("1.0000000000")`` is admitted "because ADR-0194 §1's predicate is a
+        test on the value and not on the representation", and **zero is admissible**:
+        ADR-0236 §2's floor is ``>= 0``, which is ``ToolCost.amount``'s own and a
+        ceiling's rather than the allowance's. §1 refuses a zero *allowance* because
+        an allowance stands in for an unknown; nothing in that argument reaches a
+        price an operator states about a call they are paying for.
+        """
+        settings = self._registered(web_search_cost_per_call=amount, web_search_cost_currency="USD")
+
+        assert settings.web_search_cost_per_call == amount
+
+    # --- §8 item 6: a malformed currency is refused at load --------------------
+
+    @pytest.mark.parametrize(
+        "code",
+        [
+            pytest.param("usd", id="lowercase"),
+            pytest.param("USDX", id="four-letters"),
+            pytest.param("US", id="two-letters"),
+            pytest.param("US1", id="digits"),
+            pytest.param("", id="empty"),
+        ],
+    )
+    def test_a_malformed_currency_is_refused_at_load(self, code: str) -> None:
+        """§8 item 6, "in ``world_spend_currency``'s own cases".
+
+        The same validator decides both fields (ADR-0236 §2: *"``ToolCost.currency``'s
+        rule (ADR-0016 §4) and ``world_spend_currency``'s, and not a third one"*), so
+        this list is that field's list. The empty string is the case the environment
+        makes easy to produce: ``ASSISTANT_WEB_SEARCH_COST_CURRENCY=`` sets the
+        variable to a blank rather than to nothing.
+        """
+        with pytest.raises(ValidationError, match="web_search_cost_currency"):
+            self._registered(
+                web_search_cost_per_call=Decimal("0.005"), web_search_cost_currency=code
+            )
+
+    # --- §6: the two currencies are independent -------------------------------
+
+    def test_the_search_currency_need_not_equal_the_spend_currency(self) -> None:
+        """ADR-0236 §6, and §8 item 14's load half.
+
+        "``web_search_cost_currency`` is **not** required to equal
+        ``world_spend_currency``, and no implementation compares them, converts
+        between them, refuses one for the other, or reads either setting to validate
+        the other." Coupling them at load "would cost a real configuration — a
+        deployment metering no spend at all has ``world_spend_currency`` unset, and a
+        rule requiring equality would refuse it a figure it has every right to
+        declare."
+
+        What the mismatch then costs is stated rather than smoothed over, and it is
+        asserted at the gate in ``tests/tools/test_web_search_cost.py``.
+        """
+        mismatched = self._registered(
+            web_search_cost_per_call=Decimal("0"),
+            web_search_cost_currency="EUR",
+            world_spend_currency="USD",
+            world_spend_day_ceiling=Decimal("10"),
+        )
+        unmetered = self._registered(
+            web_search_cost_per_call=Decimal("0.005"), web_search_cost_currency="EUR"
+        )
+
+        assert mismatched.web_search_cost_currency == "EUR"
+        assert mismatched.world_spend_currency == "USD"
+        assert unmetered.world_spend_currency is None, "a deployment metering no spend at all"
+
+    def test_the_figure_needs_no_spend_currency_of_its_own(self) -> None:
+        """``_spend_amounts_need_a_currency`` governs the ``world_spend`` amounts only.
+
+        A reader could reasonably expect the new amount to have joined that
+        validator's list, and it deliberately has not: ADR-0236 §6 keeps the
+        declaration independent of the spend settings, and the currency this figure is
+        denominated in is its own field.
+        """
+        settings = self._registered(
+            web_search_cost_per_call=Decimal("0.005"), web_search_cost_currency="USD"
+        )
+
+        assert settings.web_search_cost_per_call == Decimal("0.005")
+        assert settings.world_spend_currency is None
+
+    def test_the_pair_is_read_from_the_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An operator sets it with two variables, and ``extra="ignore"`` is why this matters.
+
+        A name the model does not declare is dropped in silence, so an operator who
+        exported these against a build without the fields would get ``UNKNOWN`` and no
+        indication their setting had been discarded. Declaring them is what makes the
+        values reachable at all, so they are asserted through the environment rather
+        than through the constructor.
+        """
+        monkeypatch.setenv("ASSISTANT_WEB_SEARCH_CONNECTION", self._CONNECTION)
+        monkeypatch.setenv("ASSISTANT_WEB_SEARCH_ORIGIN", self._ORIGIN)
+        monkeypatch.setenv("ASSISTANT_WEB_SEARCH_COST_PER_CALL", "0.005")
+        monkeypatch.setenv("ASSISTANT_WEB_SEARCH_COST_CURRENCY", "USD")
+
+        settings = load_settings()
+
+        assert settings.web_search_cost_per_call == Decimal("0.005")
+        assert settings.web_search_cost_currency == "USD"
+
+    def test_a_half_pair_from_the_environment_reaches_the_operator_as_a_configuration_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The refusal an operator actually meets is a ``ConfigurationError``.
+
+        ``load_settings`` is the production entry point, and it is what turns
+        pydantic's ``ValidationError`` into the class ADR-0194 §1's configured-amount
+        clause requires — so the constructor-level cases above are asserted to reach
+        the operator here rather than assumed to.
+        """
+        monkeypatch.setenv("ASSISTANT_WEB_SEARCH_CONNECTION", self._CONNECTION)
+        monkeypatch.setenv("ASSISTANT_WEB_SEARCH_ORIGIN", self._ORIGIN)
+        monkeypatch.setenv("ASSISTANT_WEB_SEARCH_COST_PER_CALL", "0.005")
+
+        with pytest.raises(ConfigurationError, match="web_search_cost_currency"):
+            load_settings()

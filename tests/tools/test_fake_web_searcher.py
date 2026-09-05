@@ -17,8 +17,10 @@ exactly the narrowed runs that most want it.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING, Final
 
 import pytest
@@ -33,6 +35,7 @@ from web_searcher_contract import (
 
 from ai_assistant.core.types import (
     ActionRequest,
+    CostBasis,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
@@ -347,3 +350,161 @@ def test_the_default_source_name_is_one_identifier_accepts_unchanged() -> None:
     """The constant every unnamed fake carries satisfies §17's own clause."""
     assert DEFAULT_SEARCH_SOURCE_NAME.strip() == DEFAULT_SEARCH_SOURCE_NAME
     assert DEFAULT_SEARCH_SOURCE_NAME.strip()
+
+
+# --------------------------------------------------------------------------- #
+# ADR-0236 §7's parity clause, and §8's items 8, 9 and 12                       #
+# --------------------------------------------------------------------------- #
+
+#: Every cost pair ADR-0236 §2 refuses, asked of this fake's constructor. The
+#: production builder's own list, in ``tests/tools/test_web_search_cost.py``, is the
+#: same one — which is what "at parity" means here: a fake that could be made
+#: **cheaper** to rule on than any deployment can be is the failure this module's
+#: subject is designed against, on the one field ADR-0236 moves.
+_REFUSED_COSTS: Final = [
+    pytest.param(Decimal("0.005"), None, id="an-amount-with-no-currency"),
+    pytest.param(None, "USD", id="a-currency-with-no-amount"),
+    pytest.param(Decimal("-0.01"), "USD", id="a-negative-amount"),
+    pytest.param(Decimal("Infinity"), "USD", id="a-positive-infinity"),
+    pytest.param(Decimal("-Infinity"), "USD", id="a-negative-infinity"),
+    pytest.param(Decimal("NaN"), "USD", id="a-nan"),
+    pytest.param(Decimal("1E15"), "USD", id="at-the-magnitude-ceiling"),
+    pytest.param(Decimal("1E16"), "USD", id="above-the-magnitude-ceiling"),
+    pytest.param(Decimal("0.0000000001"), "USD", id="a-tenth-fractional-digit"),
+    pytest.param(Decimal("0.005"), "usd", id="a-lowercase-code"),
+    pytest.param(Decimal("0.005"), "USDX", id="a-four-letter-code"),
+    pytest.param(Decimal("0.005"), "US", id="a-two-letter-code"),
+    pytest.param(Decimal("0.005"), "US1", id="a-code-carrying-a-digit"),
+    pytest.param(Decimal("0.005"), "", id="an-empty-code"),
+]
+
+
+@pytest.mark.parametrize(("amount", "code"), _REFUSED_COSTS)
+def test_the_fake_refuses_every_cost_state_a_deployment_cannot_be_in(
+    amount: Decimal | None, code: str | None
+) -> None:
+    """ADR-0236 §8 item 8: every case of items 4, 5 and 6, asked of the constructor.
+
+    ADR-0236 §7's parity clause: ``FakeWebSearcher`` "is refused every state a
+    deployment cannot be in — an amount with no currency, a currency with no amount, a
+    negative or uncountable amount, a malformed code". The module's own reason governs
+    — a fake *"ruled on more leniently than the real thing would let a consumer's
+    policy test pass for a reason no deployment enjoys"*.
+
+    Refused **at build** rather than at the first ``request``, which is this fake's
+    posture everywhere else (ADR-0231 §17: nothing unexpected ever leaves either
+    member).
+    """
+    with pytest.raises((TypeError, ValueError), match=r"cost_per_call|cost_currency"):
+        FakeWebSearcher(cost_per_call=amount, cost_currency=code)
+
+
+def test_the_fake_refuses_an_amount_that_is_not_a_decimal() -> None:
+    """The type is part of the domain, and the canonical fake is not the looser of the two.
+
+    ``_check_bounds`` already refuses a non-``int`` bound on the same argument
+    (ADR-0231 §5's domain includes the type), and a ``float`` amount is the same
+    mistake one field along: it would reach ``ToolCost`` and be coerced into a
+    ``Decimal`` carrying binary-float error, which is precisely the value ADR-0194
+    §1's exact arithmetic exists to keep out of a running total.
+    """
+    with pytest.raises(TypeError, match="cost_per_call"):
+        FakeWebSearcher(cost_per_call=0.005, cost_currency="USD")  # type: ignore[arg-type]  # the subject
+
+
+def test_no_argument_of_any_name_gives_the_fake_a_free_basis() -> None:
+    """ADR-0236 §8 item 8's second half, and §3 asserted as the absence it is.
+
+    "Plus the assertion that no argument of any name produces a ``FREE`` basis."
+    ``FREE`` is unreachable by there being no parameter that could ask for one — the
+    same move ADR-0231 §5 made by giving ``build_web_search_integration`` no registry
+    parameter — so the assertion is over the constructor's own signature rather than
+    over a guard somebody remembered to write.
+    """
+    accepted = set(inspect.signature(FakeWebSearcher.__init__).parameters)
+
+    assert {"cost_per_call", "cost_currency"} <= accepted
+    assert not {name for name in accepted if "free" in name or "basis" in name}
+
+
+@pytest.mark.parametrize(
+    "amount",
+    [Decimal("0"), Decimal("1"), Decimal("1.0000000000")],
+    ids=["zero", "one", "a-trailing-zero-representation"],
+)
+async def test_a_configured_fake_carries_the_figure_it_was_configured_with(
+    amount: Decimal,
+) -> None:
+    """ADR-0236 §8 item 12, the parity clause asserted on its **happy path**.
+
+    "``FakeWebSearcher`` constructed with ``Decimal("1")`` and ``"USD"``: the
+    ``ActionRequest`` its ``request`` returns carries a ``tool`` whose ``cost`` is
+    ``PER_CALL`` with exactly that amount and that code."
+
+    "It is owed separately from items 8 and 9 because those two are jointly
+    satisfiable by a fake that refuses every bad pair, leaves ``FAKE_WEB_SEARCH``
+    alone, and then hands out the ``UNKNOWN`` constant whatever it was constructed
+    with — the one implementation the rest of this list cannot fail."
+
+    A zero figure is in the parametrisation because it is the one an implementation
+    reading falsiness would drop back to ``UNKNOWN``.
+    """
+    searcher = FakeWebSearcher(cost_per_call=amount, cost_currency="USD")
+
+    proposed = await searcher.request(QUERY)
+
+    assert proposed is not None
+    assert proposed.tool.cost.basis is not CostBasis.FREE, "no argument reaches that basis"
+    assert proposed.tool.cost.basis is CostBasis.PER_CALL
+    assert proposed.tool.cost.amount == amount
+    assert proposed.tool.cost.currency == "USD"
+
+
+async def test_an_unconfigured_fake_carries_the_unknown_declaration_it_always_did() -> None:
+    """Item 12's second half, and what makes every existing consumer unaffected.
+
+    "And one constructed with neither carries ``UNKNOWN``." Asserted by **equality**
+    and not by identity: ``ActionRequest`` is a pydantic model that revalidates the
+    declaration it is handed, so no request preserves the identity of any constant and
+    an identity assertion here would be about pydantic rather than about this fake.
+    """
+    proposed = await FakeWebSearcher().request(QUERY)
+
+    assert proposed is not None
+    assert proposed.tool == FAKE_WEB_SEARCH, "the declaration every existing consumer sees"
+    assert proposed.tool.cost.basis is CostBasis.UNKNOWN
+
+
+async def test_a_configured_fake_leaves_the_module_constant_alone() -> None:
+    """ADR-0236 §8 item 9's half for this fake, beside the fake it belongs to.
+
+    "``FAKE_WEB_SEARCH.cost`` … is ``UNKNOWN`` after a registration built with a
+    figure — the §1 clause that keeps a recorded decision's definition from being
+    edited under it." Asserted after a configured fake has been built *and driven*,
+    because an implementation mutating the constant would do it at either moment.
+    """
+    searcher = FakeWebSearcher(cost_per_call=Decimal("1"), cost_currency="USD")
+
+    proposed = await searcher.request(QUERY)
+
+    assert proposed is not None
+    assert proposed.tool != FAKE_WEB_SEARCH, "a second value, built per instance"
+    assert FAKE_WEB_SEARCH.cost.basis is CostBasis.UNKNOWN
+    assert FAKE_WEB_SEARCH.cost.amount is None
+    assert FAKE_WEB_SEARCH.cost.currency is None
+    assert proposed.tool.model_copy(update={"cost": FAKE_WEB_SEARCH.cost}) == FAKE_WEB_SEARCH, (
+        "and equal to it in every other field, which is what parity means"
+    )
+
+
+async def test_a_configured_fake_still_answers_none_where_no_account_is_connected() -> None:
+    """The cost pair is orthogonal to the account, and neither knob shadows the other.
+
+    ADR-0231 §17's ``None`` arm is the configuration fact this fake exhibits and the
+    production searcher cannot, and a lane that built the declaration eagerly in
+    ``request`` before the origin check would have quietly moved it.
+    """
+    searcher = FakeWebSearcher(origin=None, cost_per_call=Decimal("1"), cost_currency="USD")
+
+    assert await searcher.request(QUERY) is None
+    assert searcher.requested == [QUERY], "and the query is still recorded on entry"

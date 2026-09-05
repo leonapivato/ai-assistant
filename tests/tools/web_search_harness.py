@@ -54,6 +54,7 @@ from ai_assistant.core.types import (
     SpendTotal,
     ToolCall,
     ToolCost,
+    ToolDefinition,
 )
 from ai_assistant.testing import FakeAuditTrail, FakeByteChannel, FakeOutboundTransport, authorised
 from ai_assistant.testing.cancellation import SuspendableResource
@@ -64,6 +65,7 @@ from ai_assistant.tools.web_search import WEB_SEARCH
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from decimal import Decimal
 
     from egress_transport_harness import Keyring
 
@@ -514,6 +516,21 @@ class Built:
     trail: FakeAuditTrail
 
     @property
+    def declaration(self) -> ToolDefinition:
+        """The declaration this registration carries (ADR-0236 §1).
+
+        :data:`~ai_assistant.tools.web_search.WEB_SEARCH` where the builder was given
+        no cost pair, and its ``PER_CALL`` twin where it was — read off the searcher
+        rather than rebuilt, so a case cannot assert against a declaration the seam
+        was never registered with.
+
+        Returns:
+            The declaration.
+        """
+        declaration: ToolDefinition = self.integration.searcher._declaration
+        return declaration
+
+    @property
     def searcher(self) -> Any:
         """The ``WebSearcher`` under test.
 
@@ -540,10 +557,13 @@ async def built(  # noqa: PLR0913 — one knob per double a case arranges, and e
     secrets: SuspendableKeyring | None = None,
     holds: str | None = CREDENTIAL,
     gate: SpendGate | None = None,
+    trail: FakeAuditTrail | None = None,
     origin: str = ORIGIN,
     max_results: int = MAX_RESULTS,
     max_result_chars: int = MAX_RESULT_CHARS,
     max_response_bytes: int = MAX_RESPONSE_BYTES,
+    cost_per_call: Decimal | None = None,
+    cost_currency: str | None = None,
     refusal: TransportError | None = None,
 ) -> Built:
     """One deployment that configured a search account, wired to scripted doubles.
@@ -560,11 +580,21 @@ async def built(  # noqa: PLR0913 — one knob per double a case arranges, and e
         holds: What the keyring holds under the record's slot, or ``None`` for a
             keyring with no entry — which is what an interrupted provisioning act
             leaves behind.
-        gate: The ``SpendGate``; defaults to the trail, which admits unconditionally.
+        gate: The ``SpendGate``; defaults to the trail, which admits unconditionally
+            where no ceiling is configured on it.
+        trail: The one object wired as ``AuditTrail`` and ``InvocationLedger``, and —
+            where ``gate`` is not supplied — as ``SpendGate`` too. Supplied by a case
+            that needs ADR-0194's own arithmetic rather than a stub, which is the
+            arrangement a *ceiling* case needs: one object holds the rows the totals
+            are computed over, and two holders keyed by them could disagree about a
+            total (ADR-0194 §5).
         origin: The origin the account names.
         max_results: ``Settings.search_max_results``.
         max_result_chars: ``Settings.search_max_result_chars``.
         max_response_bytes: ``Settings.search_max_response_bytes``.
+        cost_per_call: ``Settings.web_search_cost_per_call`` (ADR-0236 §1); ``None``
+            with ``cost_currency`` leaves the registered declaration ``UNKNOWN``.
+        cost_currency: ``Settings.web_search_cost_currency``.
         refusal: Arms the canonical transport to refuse every open with this, after
             recording the attempt.
 
@@ -572,7 +602,7 @@ async def built(  # noqa: PLR0913 — one knob per double a case arranges, and e
         The integration and every double behind it.
     """
     ring = await keyring(holds=holds) if secrets is None else secrets
-    trail = FakeAuditTrail()
+    recorder = FakeAuditTrail() if trail is None else trail
     capability = transport
     if capability is None:
         served = FakeOutboundTransport().serve(*channels)
@@ -586,18 +616,20 @@ async def built(  # noqa: PLR0913 — one knob per double a case arranges, and e
         records=store,
         secrets=ring,
         transport=capability,  # type: ignore[arg-type]  # each double satisfies the Protocol
-        ledger=trail,
-        gate=trail if gate is None else gate,
+        ledger=recorder,
+        gate=recorder if gate is None else gate,
         max_results=max_results,
         max_result_chars=max_result_chars,
         max_response_bytes=max_response_bytes,
+        cost_per_call=cost_per_call,
+        cost_currency=cost_currency,
     )
     return Built(
         integration=integration,
         transport=capability,  # type: ignore[arg-type]  # likewise
         keyring=ring,
         records=store,
-        trail=trail,
+        trail=recorder,
     )
 
 
