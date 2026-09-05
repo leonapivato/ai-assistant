@@ -762,3 +762,25 @@ def test_a_subclass_cannot_nominate_the_schema_its_base_fields_are_checked_under
 
     with pytest.raises(ValidationError, match="JSON encoding"):
         _Recorded(tool=tampered)
+
+
+def test_a_subclass_whose_class_object_is_unhashable_still_constructs() -> None:
+    r"""Selecting the second schema must not hash a class object.
+
+    A subclass may set ``__hash__ = None`` on its metaclass — pydantic builds the
+    model fine — and then the class object cannot be a dict key or a set member.
+    Deduplicating the two schemas through ``dict.fromkeys`` or a set would raise a
+    bare ``TypeError`` from inside this validator for a declaration that is
+    perfectly storable, which is a failure the ``self.model_dump`` form did not
+    have. An identity comparison introduces no such dependency.
+    """
+
+    class _UnhashableMeta(type(ToolDefinition)):  # type: ignore[misc]  # a pydantic metaclass subclass
+        __hash__ = None  # type: ignore[assignment]  # deliberately unhashable class objects
+
+    class _Unhashable(ToolDefinition, metaclass=_UnhashableMeta):
+        pass
+
+    definition = _Unhashable(**_definition().model_dump())
+
+    assert definition.description == "Send an email."

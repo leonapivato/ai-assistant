@@ -8973,11 +8973,16 @@ class ToolDefinition(BaseModel):
             ValueError: If the definition has no JSON encoding.
         """
         renders: list[str] = []
-        # The base schema first and always; ``type(self)`` only when it is a
-        # subclass, deduplicated rather than branched so neither render can be
-        # reached without the other having run.
-        schemas: tuple[type[ToolDefinition], ...] = (ToolDefinition, type(self))
-        for schema in dict.fromkeys(schemas):
+        # The base schema first and always; ``type(self)`` as well when it is a
+        # subclass. Deduplicated by *identity* rather than through a set or
+        # ``dict.fromkeys``, because those hash the class object and a subclass
+        # is free to make its own unhashable through its metaclass — which would
+        # turn an otherwise storable declaration into a raw ``TypeError`` from
+        # inside this validator, a failure the ``model_dump`` form did not have.
+        schemas: list[type[ToolDefinition]] = [ToolDefinition]
+        if type(self) is not ToolDefinition:
+            schemas.append(type(self))
+        for schema in schemas:
             try:
                 projection = schema.__pydantic_serializer__.to_python(
                     self, mode="json", warnings=False
