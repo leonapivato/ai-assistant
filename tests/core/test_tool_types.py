@@ -7,7 +7,6 @@ rather than reach a policy that has to guess.
 
 from __future__ import annotations
 
-import json
 import operator
 from datetime import timedelta
 from decimal import Decimal
@@ -723,29 +722,43 @@ def test_a_subclass_overriding_model_dump_cannot_answer_its_own_storability() ->
         _Recorded(tool=tampered)
 
 
-@pytest.mark.filterwarnings("ignore:Pydantic serializer warnings:UserWarning")
-def test_the_render_is_taken_under_the_declared_field_set() -> None:
-    r"""``ToolDefinition``'s serializer, not ``type(self)``'s — and what that trades.
+def test_a_subclass_field_with_no_encoding_is_still_refused() -> None:
+    r"""The move costs no coverage, which is why the subtype schema is checked too.
 
-    The declared type is the schema every holder stores this value through:
-    ``PermissionDecision.tool`` is a ``ToolDefinition``, so a subclass's own
-    fields are dropped on the way to durable state and were never what this
-    predicate protects. ``type(self)`` would also leave the render nominated by
-    the value, through the class it chose instead of through the attribute just
-    closed.
-
-    The trade is stated here rather than only asserted in prose: a subclass-only
-    field with no encoding is not refused, *and* nothing that reaches a holder
-    carries it. Were the predicate ever moved back under ``type(self)``, this
-    test fails and the reasoning above gets re-read.
+    ``self.model_dump`` included a subclass's own fields, so a subclass declaring
+    an unstorable field of its own was refused here before this change. Rendering
+    under ``ToolDefinition``'s schema alone would drop that field and accept the
+    definition — a real loss, however narrow, and an avoidable one: the base
+    render answers the bypass, and a second render under ``type(self)`` answers
+    this, because a subtype render can only *add* refusals.
     """
 
     class _ExtraField(ToolDefinition):
         tenant: str
 
-    extended = _ExtraField(**_definition().model_dump(), tenant="acme \ud800")
+    with pytest.raises(ValidationError, match="JSON encoding"):
+        _ExtraField(**_definition().model_dump(), tenant="acme \ud800")
 
-    stored = _Recorded(tool=extended).model_dump(mode="json")
 
-    assert "tenant" not in stored["tool"]
-    assert ToolDefinition.model_validate_json(json.dumps(stored["tool"])) == _definition()
+def test_a_subclass_cannot_nominate_the_schema_its_base_fields_are_checked_under() -> None:
+    r"""Which is what makes the subtype render pure gain rather than a re-opening.
+
+    ``type(self)`` is chosen by the value, so a subclass that replaced its own
+    ``__pydantic_serializer__`` would answer for itself — if that were the only
+    render. It is not: ``ToolDefinition``'s runs first and unconditionally over
+    the instance's true field values, so no subtype render can withdraw a refusal
+    the base render made. That is the property the fix rests on, and the reason
+    checking the subtype schema as well does not hand the check back to the value.
+    """
+
+    class _NominatingSerializer(ToolDefinition):
+        pass
+
+    tampered = _NominatingSerializer(**_definition().model_dump())
+    object.__setattr__(tampered, "description", "Send \ud800 mail.")
+    # A serializer belonging to an unrelated model: it renders this instance as
+    # something storable and says nothing about `description` at all.
+    _NominatingSerializer.__pydantic_serializer__ = ToolCost.__pydantic_serializer__
+
+    with pytest.raises(ValidationError, match="JSON encoding"):
+        _Recorded(tool=tampered)
