@@ -584,9 +584,17 @@ bullet list would bind nothing.**
     declared estimate and runs to completion; the completion row's `incurred_cost` is
     asserted to carry an `UNKNOWN` basis and **not** the declared figure; and a second
     search in that period is refused at the gate with `SpendUndeterminedError`,
-    recorded `SearchDisposition.SPEND_REFUSED`. A companion arm sets the allowance and
-    asserts the second search is admitted, which is what makes the pair a statement
-    about the allowance rather than about the search. This is the Consequences bullet
+    recorded `SearchDisposition.SPEND_REFUSED`. A companion arm sets the allowance
+    **and a ceiling that covers the allowance the completed row now contributes plus
+    the second call's own declared estimate**, and asserts the second search is
+    admitted; a third arm holds the allowance and shrinks that ceiling below the sum,
+    and asserts `SpendCeilingError` rather than `SpendUndeterminedError`. The
+    companion's ceiling is stated because the allowance does not make a period
+    unbounded — it makes it **countable**, and a countable total is then compared
+    against the ceiling like any other, so an arm that set the allowance and left a
+    ceiling of the declared figure's own size would assert an admission the gate is
+    right to refuse. Together they make the pair a statement about the allowance
+    rather than about the search. This is the Consequences bullet
     asserted, and it fails an implementation that reached for
     `ToolResult.incurred_cost` and put the declared figure there — which ADR-0192 §5
     forbids in terms: *"No lane copies `ToolDefinition.cost` into it, or derives it
@@ -712,9 +720,49 @@ what the integration is called, and the figure is **declared** — by the party 
 knows it, which for an integration registered against one operator's account is the
 operator.
 
-**ADR-0194 is not amended.** §6 above takes its §2 non-conversion clause and its §1
-countability predicate as they stand and adds no fifth spend field; the two fields §1
-adds are a **price**, which §2 already names as an input the projection reads.
+**ADR-0194 is not amended, and that includes §1's closure clause.** §6 above takes its
+§2 non-conversion clause and its §1 countability predicate as they stand and adds no
+fifth spend field; the two fields §1 adds are a **price**, which §2 already names as an
+input the projection reads. The sentence a reader will press is §1's:
+
+> They are the whole of what this mechanism **adds** to configuration: no lane adds a
+> fifth field, and these four are the only settings that turn the mechanism on or
+> change what it refuses **given a period**.
+
+**Three grounds, and the third is decisive on its own.** *First, the clause's subject
+is what this mechanism adds and reads*, and the clause immediately below it closes that
+in terms: the mechanism *"reads exactly one **existing** setting besides them,
+`Settings.timezone`"*. After this ADR it still reads exactly those five. What §1 above
+adds is read by `Settings` validation, by `build_web_search_integration` and by the
+composition root, and by the gate never.
+
+*Second, a declaration is an input to this mechanism and not a setting of it.* The
+gate's answer is a function of its five settings, the rows falling in the period, and
+the declaration pinned on the call — the last of which ADR-0194 §2 names in its own
+words: *"that call's own **declared** cost — the `ToolCost` on the `ToolDefinition` the
+call's recorded decision pins"*. Hold that declaration fixed and the four settings are
+still the only ones that move a refusal; what §1 above moves is the declaration itself,
+which is the thing §2 was written to read. The other reading makes every future setting
+that reaches any tool's `cost` a partial supersession of ADR-0194 §1 — an obligation
+the corpus does not observe anywhere.
+
+*Third, and decisive: on that other reading the clause was falsified by ADR-0231 and
+not here.* ADR-0231 §5 is Accepted and merged and already ratifies *"a `cost` that is
+the operator's configured per-call figure where one is configured and `UNKNOWN` where
+none is"* — an operator-configured figure reaching this declaration, and so the gate's
+answer, decided a decision ago. ADR-0231 §15 reasoned about ADR-0194 §1 **by name** in
+the spend context — *"A deployment that configures none has none, exactly as ADR-0194
+§1 rules"* — and recorded nothing against it, and ADR-0194's header stands `Accepted`
+with no supersession record of any kind. This ADR supplies the mechanism for a clause
+already ratified, so recording one now would be recording a change ADR-0231 made: the
+same working §10 applies to ADR-0016 §4 in the paragraph above, on the same evidence.
+
+**The overturn route, stated so a reviewer who disagrees has one.** Name the sentence
+and say why an operator-configured declaration is a setting of this mechanism rather
+than an input to it; the record is then a header-only first-partial `Status` addition
+on ADR-0194 naming §1's closure clause alone, with no body byte moved. Whoever takes it
+weighs first whether the record belongs to this ADR or to ADR-0231, which is where the
+configured figure was decided.
 
 **ADR-0235 is not amended.** Its population (b) becomes consequential for search rather
 than changing shape: `grantable_decisions` lists the same rows and
@@ -738,9 +786,11 @@ to admit exactly the state §1 constructs, and the one clause that reads narrowl
 face (§5's four fields) has already been read the other way on `main` by the lane that
 wrote it.
 
-**The reading under which a record *is* owed was available and is not taken.** It would
-run: a reader of ADR-0231 §5 counting search `Settings` fields gets four and would now
-get five, so the clause reads more widely than it holds. It is not taken because the
+**Two readings under which a record *is* owed were available and neither is taken**,
+each with its sentence named and its route given — ADR-0194 §1's closure clause in §10
+above, and this one. It would run: a reader of ADR-0231 §5 counting search `Settings`
+fields gets four and would now get five, so the clause reads more widely than it
+holds. It is not taken because the
 clause's subject is what ADR-0231 adds, not what the kind may ever have, and because
 taking it would require the same record for `web_search_connection` and
 `web_search_origin`, which are already on `main` with none. A reviewer who disagrees
