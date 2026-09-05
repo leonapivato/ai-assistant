@@ -578,7 +578,8 @@ bullet list would bind nothing.**
     currencies at load or silently converted between them.
 15. **A completed search reports `UNKNOWN`, and what that does to the period is
     asserted rather than left to be found.** With the pair set in
-    `world_spend_currency`, a covering grant, a ceiling configured for the period and
+    `world_spend_currency`, a covering grant, a ceiling configured for the period that
+    the declared figure fits under at a zero accounted total, and
     `world_spend_unknown_allowance` **unset**: the first search is admitted on its
     declared estimate and runs to completion; the completion row's `incurred_cost` is
     asserted to carry an `UNKNOWN` basis and **not** the declared figure; and a second
@@ -821,9 +822,16 @@ implements against §§1–8 until this has merged (ADR-0015 §5, golden rule 5)
   that row's period **indeterminate**, and its narrowing — an indeterminate total
   *"refuses admission **only where that period's own ceiling is configured**"* —
   refuses every later admission in a period that has one. So a deployment with the
-  figure set, a standing grant, a ceiling and no allowance gets **one search per
-  period**: the second is `SpendUndeterminedError` at the gate, recorded
-  `SearchDisposition.SPEND_REFUSED`. Setting the allowance is what makes a completed
+  figure set, a standing grant, a ceiling the declared figure fits under and no
+  allowance gets **one search per period**: the second is `SpendUndeterminedError` at
+  the gate, recorded `SearchDisposition.SPEND_REFUSED`. **Where the figure does not fit
+  the count is zero rather than one** — a `10` figure under a `1` day ceiling projects
+  `10` at the very first admission and is refused `SpendCeilingError` — the crossing
+  ADR-0194 §4 evaluates **last of all**, reached here because the period is still
+  determinate, no completion having been written for the indeterminacy to arise from.
+  That is a ceiling doing the job it was set for and is not this consequence; the
+  consequence is the deployment whose figure fits, which is the one that expected to
+  search more than once. Setting the allowance is what makes a completed
   search repeatable up to the ceiling itself, and configuring no ceiling for that
   period is the other way; §8's item 15 pins both. **None of it is this ADR's to
   fix.** The behaviour fails closed and is ADR-0192 §5 and ADR-0194 §2 working as
