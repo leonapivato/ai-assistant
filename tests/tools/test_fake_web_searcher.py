@@ -497,14 +497,36 @@ async def test_a_configured_fake_leaves_the_module_constant_alone() -> None:
     )
 
 
-async def test_a_configured_fake_still_answers_none_where_no_account_is_connected() -> None:
-    """The cost pair is orthogonal to the account, and neither knob shadows the other.
+def test_a_figure_with_no_connected_account_is_refused_at_build() -> None:
+    """§8 item 8's remaining case of item 4: "either set with the registration absent".
+
+    ``origin=None`` **is** the registration-absent state for this fake — its own
+    parameter documentation says so, "``None`` for a deployment that connected no
+    search account" — and ADR-0236 §2 refuses either cost field unless the search
+    registration is whole. Production ``Settings`` refuses that configuration at load
+    and ``build_web_search_integration`` cannot express it at all, its ``connection``
+    and ``origin`` being required; a fake that accepted it would be configurable into
+    a state no deployment can be in, which is exactly what
+    :data:`DEFAULT_MAX_RESULTS`' own comment refuses one field pair along.
+
+    The figure would reach no declaration either, since :meth:`request` answers
+    ``None`` in that state — so this is a value nothing reads, refused where it is
+    given rather than silently carried.
+    """
+    with pytest.raises(ValueError, match="origin"):
+        FakeWebSearcher(origin=None, cost_per_call=Decimal("1"), cost_currency="USD")
+
+
+async def test_an_unpriced_fake_with_no_account_still_answers_none() -> None:
+    """And the refusal above reaches only the priced case, leaving §17's arm intact.
 
     ADR-0231 §17's ``None`` arm is the configuration fact this fake exhibits and the
-    production searcher cannot, and a lane that built the declaration eagerly in
-    ``request`` before the origin check would have quietly moved it.
+    production searcher cannot. Asserted beside the refusal so that a guard written
+    one condition too wide — refusing ``origin=None`` outright — fails here rather
+    than silently removing the only implementation that exhibits the contract's
+    unconnected branch.
     """
-    searcher = FakeWebSearcher(origin=None, cost_per_call=Decimal("1"), cost_currency="USD")
+    searcher = FakeWebSearcher(origin=None)
 
     assert await searcher.request(QUERY) is None
     assert searcher.requested == [QUERY], "and the query is still recorded on entry"
