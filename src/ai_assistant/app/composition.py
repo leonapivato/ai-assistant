@@ -1206,6 +1206,17 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 max_results=settings.search_max_results,
                 max_result_chars=settings.search_max_result_chars,
                 max_response_bytes=settings.search_max_response_bytes,
+                # **Read and passed through unchanged, which is the whole of what
+                # this root does with them** (ADR-0236 §1, §7). Passing a value is
+                # not interpreting it: no default is applied, no arithmetic is
+                # performed, no `ToolCost` is constructed here, and whether the pair
+                # is whole was decided at `Settings` load. Forwarding is an
+                # obligation rather than a convenience — a lane that landed the
+                # fields, the builder and every test while this root passed neither
+                # would leave every configured deployment at `UNKNOWN` with a green
+                # gate, which is the failure the decision exists to remove.
+                cost_per_call=settings.web_search_cost_per_call,
+                cost_currency=settings.web_search_cost_currency,
             )
         )
 

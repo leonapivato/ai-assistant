@@ -3698,6 +3698,63 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- What one search costs this deployment (ADR-0236 §1, §2) -----------
+    # **The operator's per-call figure, in two fields, and the whole of what
+    # ADR-0236 adds to configuration.** ADR-0231 §5's declaration clause already
+    # names the field these supply — "a `cost` that is the operator's configured
+    # per-call figure where one is configured and `UNKNOWN` where none is" — and
+    # left no route to configure one; these are that route.
+    #
+    # **Two fields rather than one, and neither carries a grammar** (§1). A single
+    # setting holding `"USD 0.005"` would invent a parse, a third spelling of a
+    # currency alongside `ToolCost.currency`'s and `world_spend_currency`'s. The
+    # pair is `web_search_connection`/`web_search_origin`'s shape one field pair
+    # along, refused half-set for the same stated reason.
+    #
+    # **The `web_search_` prefix and not `search_`, deliberately** (§1). The four
+    # `search_*` bounds are what the composer, the searcher and the transport
+    # enforce; this is the connected account's commercial fact, in the same class
+    # as which account and which origin.
+    #
+    # **They reach a `ToolCost` at exactly one place in production**
+    # (`ai_assistant.tools.builtin.build_web_search_integration`, §1): the
+    # composition root reads both and passes them through unchanged, applying no
+    # default, performing no arithmetic and constructing no `ToolCost`, and
+    # nothing in `interfaces/`, `orchestration/` or `permissions/` reads either.
+    #
+    # **`FREE` is unreachable from here** (§3): the only two states a deployment
+    # can put the declaration's `cost` field in are the `PER_CALL` figure the pair
+    # builds and the `UNKNOWN` its absence leaves. An operator whose account bills
+    # them nothing states `web_search_cost_per_call = 0` with the currency they
+    # are denominated in, which is a positive assertion carrying a register.
+    web_search_cost_per_call: Decimal | None = Field(
+        default=None,
+        description=(
+            "What one search costs this deployment, as the operator's own figure "
+            "(ADR-0236 §1). At least zero — a free tier is a zero figure, not a "
+            "FREE basis — finite, and countable under ADR-0194 §1. Set it "
+            "together with web_search_cost_currency, and only where a search "
+            "account is connected. Unset, the declaration's cost is UNKNOWN: the "
+            "cost floor fires alongside the disclosure floor, so no standing "
+            "grant is consulted and no search can be ALLOWed, and the ruling is "
+            "CONFIRM unless this deployment's own deny thresholds reach a LOW, "
+            "REVERSIBLE declaration."
+        ),
+    )
+    web_search_cost_currency: str | None = Field(
+        default=None,
+        description=(
+            "ISO-4217 alphabetic code web_search_cost_per_call is denominated in "
+            "(ADR-0236 §1, §2). Shape only, neither normalised nor checked "
+            "against the live register. It is not required to equal "
+            "world_spend_currency (§6); where the two differ the gate treats the "
+            "declared cost exactly as it treats an UNKNOWN basis. Set it together "
+            "with web_search_cost_per_call: unset, the declaration's cost is "
+            "UNKNOWN, so no standing grant is consulted and no search can be "
+            "ALLOWed."
+        ),
+    )
+
     # --- The registered egress integration (ADR-0152 §10, ADR-0154 §6) ----
     # **Which connected account `send_email` is registered against, and where it
     # submits.** Both, or neither: a deployment that names both gets the tool
@@ -3978,7 +4035,7 @@ class Settings(BaseSettings):
         ),
     )
 
-    @field_validator("world_spend_currency")
+    @field_validator("world_spend_currency", "web_search_cost_currency")
     @classmethod
     def _spend_currency_is_iso_4217_alphabetic(cls, value: str | None) -> str | None:
         """Require ADR-0194 §1's shape, or nothing at all.
@@ -3989,6 +4046,15 @@ class Settings(BaseSettings):
         spelled the same way. ``ASSISTANT_WORLD_SPEND_CURRENCY=`` sets the variable
         to the empty string rather than to nothing, which is why the blank is
         refused here rather than read as unconfigured.
+
+        **``web_search_cost_currency`` is validated by this same validator and not
+        by a copy of it** (ADR-0236 §2): that section states the code's rule as
+        *"``ToolCost.currency``'s rule (ADR-0016 §4) and ``world_spend_currency``'s,
+        and not a third one"*, and one decorator naming both fields is what makes
+        that a property of the code rather than of two functions staying in step.
+        The two settings are still **independent** (§6): nothing here compares
+        them, and a deployment may denominate its search in one currency and meter
+        its spend in another.
         """
         if value is None:
             return value
@@ -4029,6 +4095,34 @@ class Settings(BaseSettings):
         one direction the mechanism must never move in.
         """
         return _checked_spend_amount(value, info.field_name, floor="positive")
+
+    @field_validator("web_search_cost_per_call")
+    @classmethod
+    def _search_cost_is_countable_and_not_negative(
+        cls, value: Decimal | None, info: ValidationInfo
+    ) -> Decimal | None:
+        """Require ADR-0236 §2's domain for the operator's per-call figure.
+
+        Finite, at least zero, and countable under ADR-0194 §1 — **reusing**
+        :func:`_checked_spend_amount` at the ceilings' own floor rather than
+        restating §1's predicate a third time in this module, which is what
+        ADR-0236 §7's first clause asks for.
+
+        **Countability is not a bound this decision invents.** ADR-0194 §1's
+        predicate *"governs every amount this mechanism reads: a configured
+        ceiling, the allowance, a declared ``ToolCost.amount`` and a reported
+        one"*, and this figure becomes a declared ``ToolCost.amount`` the moment
+        the builder runs. Admitting an uncountable one would mean a declaration
+        that loads, registers, rules ``ALLOW`` and is then refused at the gate with
+        ``SpendUndeterminedError`` on every call.
+
+        **Zero is admissible**, which is the floor ``ToolCost.amount`` itself
+        carries and a ceiling's rather than the allowance's: ADR-0194 §1 refuses a
+        zero *allowance* because an allowance stands in for an unknown, and nothing
+        in that argument reaches a price an operator states about a call they are
+        paying for (ADR-0236 §2, §3).
+        """
+        return _checked_spend_amount(value, info.field_name, floor="zero")
 
     @model_validator(mode="after")
     def _spend_amounts_need_a_currency(self) -> Settings:
@@ -4139,6 +4233,55 @@ class Settings(BaseSettings):
             f"both the connected account it asks as and the one origin it asks "
             f"(ADR-0231 §5), so set {missing} as well or unset {set_one} to leave no "
             f"searcher built"
+        )
+        raise ValueError(msg)
+
+    @model_validator(mode="after")
+    def _the_search_cost_is_whole_and_only_where_a_search_is(self) -> Settings:
+        """Refuse half a per-call figure, and a figure nothing would read (ADR-0236 §2).
+
+        Two refusals, in the shape
+        :meth:`_the_search_registration_is_whole_or_absent` already gives this kind
+        and for its reasons.
+
+        **Both or neither.** ``ToolCost`` needs an amount *and* an ISO-4217 code
+        for a ``PER_CALL`` basis, so a lone amount is a figure denominated in
+        nothing and a lone code is a register for no figure. Neither can become a
+        declaration, and the quiet reading — silently falling back to ``UNKNOWN`` —
+        is the unsafe one: an operator who set one variable believes their searches
+        are priced, and would meet the cost floor on every one of them with no
+        indication that their configuration had half-landed.
+
+        **And only where a search is registered.** A per-call figure for a searcher
+        no deployment builds is a value nothing reads: ``app/composition.py``
+        constructs no ``WebSearchIntegration`` at all unless both
+        ``web_search_connection`` and ``web_search_origin`` are set, so the pair
+        would reach no builder and no declaration.
+
+        Raises:
+            ValueError: If exactly one of the two is set, or if either is set while
+                the search registration is not whole.
+        """
+        amount, currency = self.web_search_cost_per_call, self.web_search_cost_currency
+        if (amount is None) != (currency is None):
+            set_one = "web_search_cost_per_call" if currency is None else "web_search_cost_currency"
+            missing = "web_search_cost_currency" if currency is None else "web_search_cost_per_call"
+            msg = (
+                f"{set_one} is set and {missing} is not; a declared per-call cost needs "
+                f"both the figure and the ISO-4217 code it is denominated in "
+                f"(ADR-0236 §1), so set {missing} as well or unset {set_one} to leave the "
+                f"search declaring an UNKNOWN cost"
+            )
+            raise ValueError(msg)
+        if amount is None:
+            return self
+        if self.web_search_connection is not None and self.web_search_origin is not None:
+            return self
+        msg = (
+            "web_search_cost_per_call and web_search_cost_currency are set and no search "
+            "account is connected; a per-call figure for a searcher no deployment builds "
+            "is a value nothing reads (ADR-0236 §2), so set web_search_connection and "
+            "web_search_origin as well or unset both cost fields"
         )
         raise ValueError(msg)
 

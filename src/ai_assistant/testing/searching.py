@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING, Final, final
 from uuid import uuid4
 
@@ -76,6 +77,7 @@ from ai_assistant.core.types import (
     ToolDefinition,
 )
 from ai_assistant.testing.cancellation import SuspendableResource
+from ai_assistant.testing.spend import countable
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -195,6 +197,80 @@ def _check_bounds(max_results: int, max_result_chars: int) -> None:
             raise ValueError(msg)
 
 
+#: ISO-4217's alphabetic form is three letters — ``ToolCost.currency``'s own rule
+#: (ADR-0016 §4), which ADR-0236 §2 says is the code's whole domain here too.
+_CURRENCY_CODE_LENGTH: Final = 3
+
+
+def _checked_cost(amount: Decimal | None, currency: str | None) -> ToolCost | None:
+    """The declared cost a configured fake carries, or ``None`` for absence.
+
+    ADR-0236 §7's parity clause: this fake takes "the same pair, in the same domain,
+    and builds its declaration the same way", and it is "refused every state a
+    deployment cannot be in". The module's own posture is what governs — a fake
+    *"ruled on more leniently than the real thing would let a consumer's policy test
+    pass for a reason no deployment enjoys"* — and a fake that could be made
+    **cheaper** to rule on than any deployment can be is exactly that failure, on the
+    one field ADR-0236 moves.
+
+    **A ``FREE`` basis is refused by there being no parameter that could ask for
+    one** (§3), which is the structural form of the prohibition rather than a check:
+    the two states this returns are the whole of what a deployment can reach.
+
+    **The countability predicate is imported and not restated.**
+    :func:`ai_assistant.testing.spend.countable` is ADR-0194 §1's predicate as this
+    package already states it, and reaching for it here crosses no subsystem boundary
+    — which is why the production builder needs its own statement and this fake does
+    not.
+
+    Args:
+        amount: ``Settings.web_search_cost_per_call``, or ``None``.
+        currency: ``Settings.web_search_cost_currency``, or ``None``.
+
+    Returns:
+        The ``PER_CALL`` cost where both are given, and ``None`` where neither is.
+
+    Raises:
+        TypeError: If ``amount`` is not an exact ``Decimal``. The type is part of the
+            domain for the two bounds' reason, and the canonical fake must not be the
+            looser of the two.
+        ValueError: If exactly one of the two is given; if ``amount`` is non-finite,
+            negative, or not countable under ADR-0194 §1; or if ``currency`` is not
+            exactly three uppercase ASCII letters.
+    """
+    if (amount is None) != (currency is None):
+        given = "cost_per_call" if currency is None else "cost_currency"
+        missing = "cost_currency" if currency is None else "cost_per_call"
+        msg = (
+            f"{given} is given and {missing} is not; a declared per-call cost needs both "
+            f"the figure and the ISO-4217 code it is denominated in (ADR-0236 §1)"
+        )
+        raise ValueError(msg)
+    if amount is None or currency is None:
+        return None
+    if type(amount) is not Decimal:
+        msg = f"cost_per_call must be a Decimal, got {amount!r}"
+        raise TypeError(msg)
+    if not amount.is_finite():
+        msg = f"cost_per_call must be finite (ADR-0236 §2), got {amount!r}"
+        raise ValueError(msg)
+    if amount < 0:
+        msg = f"cost_per_call must not be negative (ADR-0236 §2), got {amount!r}"
+        raise ValueError(msg)
+    if not countable(amount):
+        msg = (
+            f"cost_per_call must be countable — below 1E15 and to at most nine "
+            f"fractional digits (ADR-0194 §1), got {amount!r}"
+        )
+        raise ValueError(msg)
+    if len(currency) != _CURRENCY_CODE_LENGTH or not (
+        currency.isascii() and currency.isupper() and currency.isalpha()
+    ):
+        msg = f"cost_currency must be three uppercase ASCII letters (ISO-4217), got {currency!r}"
+        raise ValueError(msg)
+    return ToolCost(basis=CostBasis.PER_CALL, amount=amount, currency=currency)
+
+
 def _check_source(name: str, origin: str | None, reported_at: datetime) -> None:
     """Refuse a source this fake could not mint an attested record for.
 
@@ -234,7 +310,7 @@ def _check_source(name: str, origin: str | None, reported_at: datetime) -> None:
 class FakeWebSearcher:
     """A scriptable, conforming ``WebSearcher`` over a mapping (ADR-0231 §17)."""
 
-    def __init__(  # noqa: PLR0913 — a script, an identity, an origin, a refusal script, an instant, two bounds and an id factory; each is one knob a consumer sets on its own
+    def __init__(  # noqa: PLR0913 — a script, an identity, an origin, a refusal script, an instant, two bounds, ADR-0236 §7's cost pair and an id factory; each is one knob a consumer sets on its own
         self,
         contents: Mapping[str, Sequence[str]] | None = None,
         *,
@@ -245,6 +321,8 @@ class FakeWebSearcher:
         reported_at: datetime = DEFAULT_REPORTED_AT,
         max_results: int = DEFAULT_MAX_RESULTS,
         max_result_chars: int = DEFAULT_MAX_RESULT_CHARS,
+        cost_per_call: Decimal | None = None,
+        cost_currency: str | None = None,
         id_factory: Callable[[], str] | None = None,
     ) -> None:
         """Create a searcher over a scripted set of answers.
@@ -282,12 +360,24 @@ class FakeWebSearcher:
             max_result_chars: ``Settings.search_max_result_chars``, counted on the
                 quoted rendering as ADR-0230 §6 counts it. A scripted content beyond
                 it is **dropped** at :meth:`search`, never truncated.
+            cost_per_call: ``Settings.web_search_cost_per_call`` — the operator's own
+                per-call figure, which this fake's declaration then carries as a
+                ``PER_CALL`` cost (ADR-0236 §1, §7). Set it with ``cost_currency`` or
+                not at all; with neither, the declaration carries
+                :data:`FAKE_WEB_SEARCH`'s own ``UNKNOWN`` cost, which is the state
+                ADR-0236 §4 governs and the one every existing consumer keeps.
+            cost_currency: ``Settings.web_search_cost_currency`` — the ISO-4217 code
+                that figure is denominated in. **There is no argument of any name
+                that produces a ``FREE`` basis** (ADR-0236 §3): a deployment asserting
+                a free tier states a zero figure with the currency it is denominated
+                in, and this fake takes exactly that.
             id_factory: Mints each record's id. Defaults to a fresh UUID hex, and is
                 injectable so a suite can assert over a value it chose.
 
         Raises:
             TypeError: If ``max_results`` or ``max_result_chars`` is not an ``int``
-                (``bool`` included), or if a value of ``refusals`` is not a
+                (``bool`` included), if ``cost_per_call`` is not a ``Decimal``, or if
+                a value of ``refusals`` is not a
                 :class:`SearchRefusal` member. ``SearchRefusal`` is a ``StrEnum``, so
                 ``"no_result"`` compares equal to a member without being one, and a
                 fake that took it would raise out of :meth:`search` at the call it
@@ -295,13 +385,24 @@ class FakeWebSearcher:
             ValueError: If ``max_results`` or ``max_result_chars`` is below 1, if
                 ``max_results`` is above ADR-0231 §5's ceiling of three, if
                 ``reported_at`` is not timezone-aware, if
-                ``name`` is blank or is a value ``Identifier`` would strip, or if
-                ``origin`` is present and blank. Each is a state this fake could not
-                answer from, refused here rather than at an arbitrary later call —
-                which is the one thing ADR-0231 §17 says never leaves either member.
+                ``name`` is blank or is a value ``Identifier`` would strip, if
+                ``origin`` is present and blank, or if the cost pair is outside
+                ADR-0236 §2's domain — exactly one of the two given, a non-finite,
+                negative or uncountable amount, or a malformed currency code. Each is
+                a state this fake could not answer from, refused here rather than at
+                an arbitrary later call — which is the one thing ADR-0231 §17 says
+                never leaves either member.
         """
         _check_bounds(max_results, max_result_chars)
         _check_source(name, origin, reported_at)
+        cost = _checked_cost(cost_per_call, cost_currency)
+        #: This fake's own registered declaration, built per instance exactly as
+        #: `build_web_search_integration` builds the production one (ADR-0236 §1):
+        #: the module constant is never mutated, and where the pair is unset the
+        #: constant itself is carried rather than an equal copy of it.
+        self._declaration = (
+            FAKE_WEB_SEARCH if cost is None else FAKE_WEB_SEARCH.model_copy(update={"cost": cost})
+        )
         self._name = name
         self._origin = origin
         self._contents = {query: tuple(scripted) for query, scripted in (contents or {}).items()}
@@ -366,14 +467,16 @@ class FakeWebSearcher:
             query: The query one composition wrote.
 
         Returns:
-            The request to rule on, or ``None`` where this fake was built with no
-            connected account.
+            The request to rule on, carrying this fake's own declaration — which is
+            :data:`FAKE_WEB_SEARCH` where no cost was configured and its ``PER_CALL``
+            twin where one was (ADR-0236 §1) — or ``None`` where this fake was built
+            with no connected account.
         """
         self.requested.append(query)
         if self._origin is None:
             return None
         parameters: dict[str, FrozenJson] = {"origin": self._origin, "query": query}
-        return ActionRequest(tool=FAKE_WEB_SEARCH, parameters=parameters)
+        return ActionRequest(tool=self._declaration, parameters=parameters)
 
     async def search(self, call: ToolCall, /) -> SearchOutcome:
         """Return the scripted answer for the query ``call`` carries.
