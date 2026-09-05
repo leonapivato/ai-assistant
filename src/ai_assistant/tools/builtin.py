@@ -68,10 +68,16 @@ from ai_assistant.tools.egress import (
 from ai_assistant.tools.egress_binder import EgressRegistration, RegistrationTable
 from ai_assistant.tools.registry import InMemoryToolRegistry
 from ai_assistant.tools.send_email import SEND_EMAIL, SendEmail
-from ai_assistant.tools.web_search import WEB_SEARCH, WEB_SEARCH_ID, WebSearchEgress
+from ai_assistant.tools.web_search import (
+    WEB_SEARCH,
+    WEB_SEARCH_ID,
+    WebSearchEgress,
+    checked_search_cost,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
+    from decimal import Decimal
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
@@ -331,7 +337,7 @@ class WebSearchIntegration:
     registration: EgressRegistration
 
 
-def build_web_search_integration(  # noqa: PLR0913 — one parameter per injected seam ADR-0231 §5, §6 and §15 name, plus the account's two configured facts and the three bounds §5 adds; each is one thing a deployment supplies on its own
+def build_web_search_integration(  # noqa: PLR0913 — one parameter per injected seam ADR-0231 §5, §6 and §15 name, plus the account's two configured facts, the three bounds §5 adds and ADR-0236 §1's per-call figure; each is one thing a deployment supplies on its own
     *,
     connection: str,
     origin: str,
@@ -343,6 +349,8 @@ def build_web_search_integration(  # noqa: PLR0913 — one parameter per injecte
     max_results: int,
     max_result_chars: int,
     max_response_bytes: int,
+    cost_per_call: Decimal | None = None,
+    cost_currency: str | None = None,
 ) -> WebSearchIntegration:
     """Register the web search against one connected account (ADR-0231 §5, §17).
 
@@ -396,6 +404,16 @@ def build_web_search_integration(  # noqa: PLR0913 — one parameter per injecte
         max_results: ``Settings.search_max_results``.
         max_result_chars: ``Settings.search_max_result_chars``.
         max_response_bytes: ``Settings.search_max_response_bytes``.
+        cost_per_call: ``Settings.web_search_cost_per_call`` — what one search costs
+            this deployment, as the operator's own figure (ADR-0236 §1). Passed
+            through from the composition root unchanged; **this function is the only
+            place in production where it becomes a ``ToolCost``**, and it becomes one
+            on a declaration built per registration rather than by editing
+            :data:`~ai_assistant.tools.web_search.WEB_SEARCH`.
+        cost_currency: ``Settings.web_search_cost_currency`` — the ISO-4217 code that
+            figure is denominated in (ADR-0236 §1). Set with ``cost_per_call`` or not
+            at all; with neither, the registered declaration keeps ``WEB_SEARCH``'s
+            own ``UNKNOWN`` cost, which is the state ADR-0236 §4 governs.
 
     Returns:
         The searcher and the registration as one value.
@@ -404,12 +422,24 @@ def build_web_search_integration(  # noqa: PLR0913 — one parameter per injecte
         TransportPinError: If ``origin`` is not a form this seam pins. The same class
             the transport raises for the same fact, so a deployment reads one error for
             one mistake whether it is caught at startup or at a search.
-        ValueError: If a bound is outside ADR-0231 §5's stated domain for it.
+        ValueError: If a bound is outside ADR-0231 §5's stated domain for it, or if
+            the declared cost is outside ADR-0236 §2's — half a pair, a non-finite,
+            negative or uncountable amount, or a malformed currency code.
             ``Settings`` refuses each at load; this states the same rules at the one
             place a searcher can be built without going through it.
     """
     # Fail-fast only; the parsed value is deliberately discarded. See above.
     parse_https_origin(origin)
+    # **The per-registration declaration ADR-0236 §1 requires, and never a mutation
+    # of the module constant.** A permission decision is recorded against the
+    # definition that was in force (ADR-0016 §1's ``frozen=True`` argument), so a
+    # shared constant whose ``cost`` was rewritten at start-up would be the back door
+    # that clause names. Where the pair is unset the constant itself is registered,
+    # because ADR-0236 §4's state is exactly what it already declares — and building
+    # an equal copy of it would make ``WEB_SEARCH`` no longer the object a reader can
+    # compare against.
+    cost = checked_search_cost(cost_per_call, cost_currency)
+    declaration = WEB_SEARCH if cost is None else WEB_SEARCH.model_copy(update={"cost": cost})
     registration = EgressRegistration(
         tool_id=WEB_SEARCH_ID, reference=connection, transport_endpoint=origin
     )
@@ -425,7 +455,7 @@ def build_web_search_integration(  # noqa: PLR0913 — one parameter per injecte
             gate=gate,
             max_results=max_results,
             max_result_chars=max_result_chars,
-            declaration=WEB_SEARCH,
+            declaration=declaration,
         ),
         registration=registration,
     )
