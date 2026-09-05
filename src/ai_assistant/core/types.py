@@ -8923,11 +8923,52 @@ class ToolDefinition(BaseModel):
         clause covers them and the definition is refused with the same
         diagnostic rather than with a runtime-specific one.
 
+        **Rendered by this class's own serializer, never through
+        ``self.model_dump``** (issue #1992). That method is an ordinary
+        attribute: an instance shadows it through ``__dict__`` and a subclass
+        overrides it, and either can answer with a mapping that is not this
+        definition's field state — so the check would be *nominated by the value
+        it is checking*. That is not a hypothetical here but the other half of
+        the bypass the paragraph above relies on: the ``object.__setattr__``
+        route ADR-0018 §3 and ADR-0021 §4 keep inside the threat model reaches
+        the method as easily as it reaches the field, and a nominated dump would
+        walk an unstorable declaration into a :class:`PermissionDecision` —
+        issue #156's failure, through the one re-check that exists to stop it.
+        ``ai_assistant.orchestration.executor``,
+        ``ai_assistant.permissions._detachment``,
+        :meth:`RecipientGrant._digest_projection` and
+        :data:`_MEMORY_RECORD_PROJECTION` state the same rule about the same
+        method; the serializer is resolved on the class, reads the instance's
+        field values, and consults no instance attribute.
+
+        ``ToolDefinition``'s serializer and not ``type(self)``'s, on two counts.
+        The declared type is the schema every holder actually stores this value
+        through — :attr:`PermissionDecision.tool` is a ``ToolDefinition``, and
+        :func:`_detached_tool` rebuilds as one — so a subclass's extra fields are
+        dropped on the way to durable state and were never the thing this
+        predicate protects; and ``type(self)`` is chosen by the value, which
+        would leave the check nominated by a different route than the one just
+        closed. What that trades away is narrow and deliberate: an unstorable
+        *subclass-only* field is no longer refused here, and it is a field no
+        holder ever writes down. ``warnings=False`` because serialising a
+        subclass through the base's schema warns, and the warning is noise here.
+
+        The refusal clause is unchanged by the move, which is the second thing
+        issue #1992 asked to be established rather than assumed: the serializer
+        raises ``PydanticSerializationError`` for a value it cannot render and
+        ``UnicodeEncodeError`` for an unencodable mapping key, and both are
+        ``ValueError`` subclasses — the same single clause the ``model_dump``
+        form was written with, because ``model_dump`` was only ever a wrapper
+        around this serializer.
+
         Raises:
             ValueError: If the definition has no JSON encoding.
         """
         try:
-            rendered = json.dumps(self.model_dump(mode="json"), ensure_ascii=False)
+            projection = ToolDefinition.__pydantic_serializer__.to_python(
+                self, mode="json", warnings=False
+            )
+            rendered = json.dumps(projection, ensure_ascii=False)
         except ValueError as exc:
             # An unencodable *key* fails inside the render rather than after it,
             # because pydantic encodes a mapping key on the way to JSON. Caught
