@@ -8941,17 +8941,24 @@ class ToolDefinition(BaseModel):
         method; the serializer is resolved on the class, reads the instance's
         field values, and consults no instance attribute.
 
-        ``ToolDefinition``'s serializer and not ``type(self)``'s, on two counts.
-        The declared type is the schema every holder actually stores this value
-        through — :attr:`PermissionDecision.tool` is a ``ToolDefinition``, and
-        :func:`_detached_tool` rebuilds as one — so a subclass's extra fields are
-        dropped on the way to durable state and were never the thing this
-        predicate protects; and ``type(self)`` is chosen by the value, which
-        would leave the check nominated by a different route than the one just
-        closed. What that trades away is narrow and deliberate: an unstorable
-        *subclass-only* field is no longer refused here, and it is a field no
-        holder ever writes down. ``warnings=False`` because serialising a
-        subclass through the base's schema warns, and the warning is noise here.
+        **``ToolDefinition``'s schema is the authoritative one, and a subclass's
+        own is checked as well as it — never instead of it.** The declared type
+        is what every holder stores this value through
+        (:attr:`PermissionDecision.tool` is a ``ToolDefinition``, and
+        :func:`_detached_tool` rebuilds as one), and it is the one schema the
+        value cannot choose: ``type(self)`` *is* chosen by the value, so resolving
+        only there would re-open through the class exactly what the paragraph
+        above closed at the attribute. Rendering under the base schema
+        unconditionally is what makes that impossible, because a subtype render
+        can then only *add* refusals and never withdraw one — whatever a hostile
+        subclass does to its own serializer, the base render has already run on
+        the instance's true field values.
+
+        The subtype render is then pure gain, and it is why this change costs no
+        coverage: ``self.model_dump`` used to include a subclass's extra fields,
+        so a subclass declaring an unstorable field of its own was refused here,
+        and it still is. Skipped when there is no subclass, which is every
+        definition this repository builds.
 
         The refusal clause is unchanged by the move, which is the second thing
         issue #1992 asked to be established rather than assumed: the serializer
@@ -8959,23 +8966,30 @@ class ToolDefinition(BaseModel):
         ``UnicodeEncodeError`` for an unencodable mapping key, and both are
         ``ValueError`` subclasses — the same single clause the ``model_dump``
         form was written with, because ``model_dump`` was only ever a wrapper
-        around this serializer.
+        around this serializer. ``warnings=False`` because serialising a subclass
+        through the base's schema warns, and the warning is noise here.
 
         Raises:
             ValueError: If the definition has no JSON encoding.
         """
-        try:
-            projection = ToolDefinition.__pydantic_serializer__.to_python(
-                self, mode="json", warnings=False
-            )
-            rendered = json.dumps(projection, ensure_ascii=False)
-        except ValueError as exc:
-            # An unencodable *key* fails inside the render rather than after it,
-            # because pydantic encodes a mapping key on the way to JSON. Caught
-            # here so every half of the same defect raises the same error rather
-            # than one arriving as a bare codec or limit failure.
-            raise ValueError(self._unstorable(exc)) from exc
-        if not _is_encodable(rendered):
+        renders: list[str] = []
+        # The base schema first and always; ``type(self)`` only when it is a
+        # subclass, deduplicated rather than branched so neither render can be
+        # reached without the other having run.
+        schemas: tuple[type[ToolDefinition], ...] = (ToolDefinition, type(self))
+        for schema in dict.fromkeys(schemas):
+            try:
+                projection = schema.__pydantic_serializer__.to_python(
+                    self, mode="json", warnings=False
+                )
+                renders.append(json.dumps(projection, ensure_ascii=False))
+            except ValueError as exc:
+                # An unencodable *key* fails inside the render rather than after
+                # it, because pydantic encodes a mapping key on the way to JSON.
+                # Caught here so every half of the same defect raises the same
+                # error rather than one arriving as a bare codec or limit failure.
+                raise ValueError(self._unstorable(exc)) from exc
+        if not all(_is_encodable(rendered) for rendered in renders):
             raise ValueError(self._unstorable(None))
         return self
 
