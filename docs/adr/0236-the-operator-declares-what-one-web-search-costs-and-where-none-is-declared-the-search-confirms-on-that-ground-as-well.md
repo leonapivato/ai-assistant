@@ -1,6 +1,6 @@
 # 236. The operator declares what one web search costs, and where none is declared the search confirms on that ground as well
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-04
 
 ## Context
