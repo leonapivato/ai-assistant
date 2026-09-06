@@ -440,8 +440,9 @@ ADR-0204 already performs before a reply is spoken, taken one seam further out.
 > **Normative.** **What replaces it is not a structural claim.** The bound on a closed
 > loop is: the destination is one the user chose and told this system it may be told
 > about them (§1); what may be supplied is closed by type and filtered by a recorded
-> record-level fact (§2, §3); the loop is bounded in calls and time per conversation and
-> the draw is recorded (§8); and every one of those is decided from recorded facts. **No
+> record-level fact (§2, §3); the loop is bounded in **provider calls** per conversation
+> and the draw is recorded (§8) — **in calls and not in elapsed time**, which §8 states it
+> does not bound; and every one of those is decided from recorded facts. **No
 > lane cites budget or audit as making the channel structurally absent.** They bound it
 > and they make it visible; they do not remove it.
 
@@ -1030,12 +1031,20 @@ relaxation legible in the way §9 wanted.
 > **Normative.** **The window it leaves is stated rather than claimed away, and it is
 > bounded at both ends.** It opens when turn A admits its disqualifying span and closes when
 > A's `observe_search` commits — one store write, with none of A's composition, transport or
-> capture inside it. Before the early fold that window ran to A's *capture*. What it costs
-> when it is reached is **one
-> search of one concurrent turn**, whose recorded-half read fell inside it, ruled
-> closed-loop on a conversation that had already admitted a span it had not yet recorded;
-> every request whose read falls after it is refused, and §11's audit records both
-> dispositions. **The window is a property of the read's instant and not of the
+> capture inside it. Before the early fold that window ran to A's *capture*.
+
+> **Normative.** **What it costs when it is reached is every search whose recorded-half read
+> falls inside it, up to the conversation's remaining call allowance — not one search.** An
+> earlier revision of this section said "one search of one concurrent turn" and that was
+> true only while a provisional elapsed charge serialised searching per conversation. **That
+> charge is deleted (above), so nothing serialises them**: `admit_search` gates on the call
+> counter alone, so with *n* calls left in the budget, *n* concurrent turns can each be
+> admitted, each take its build-time `search_draw` before A's fold commits, each read the
+> not-yet-lowered flag and each be ruled closed-loop. **The residual is therefore bounded by
+> the call ceiling and by nothing tighter**, and it is stated at that size deliberately
+> rather than at the flattering one. Every request whose read falls after the fold is
+> refused, and §11's audit records both dispositions, so the size of a real occurrence is
+> answerable from the audit rather than from this estimate. **The window is a property of the read's instant and not of the
 > admission's**, which is why §5 puts the read as late as it can go.
 > **Closing it entirely means serialising servicings of one conversation**, which is a new
 > obligation on `orchestration` across concurrent turns that nothing in this corpus provides
@@ -1482,7 +1491,15 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > lands **while A's admission fold is still in flight** — the arm blocks inside
 > `observe_search` and releases it, rather than sequencing the two calls and hoping — and B
 > **does** read the not-yet-lowered flag, which is the residual §8 names and this arm
-> records so that it is a ratified property and not a surprise found later.
+> records so that it is a ratified property and not a surprise found later. **(iv) The
+> residual is asserted at its true size, which is not one.** The same blocked fold is held
+> open while **the conversation's whole remaining call allowance** is admitted — *n*
+> concurrent turns for a draw with *n* left — and the arm asserts that **every one of them**
+> reads the not-yet-lowered flag and is ruled closed-loop, that the *(n+1)*th is refused by
+> `admit_search` on the counter rather than by the footing, and that every read landing
+> after the fold commits is not closed-loop. **A one-turn arm cannot catch this**: it passes
+> identically whether the residual is one search or the whole budget, which is exactly how
+> an earlier revision of §8 came to claim the smaller figure.
 
 > **Normative.** **Arm 5d — a revocation recorded before the build-time read is honoured,
 > in two shapes and by two writers.** On a conversation whose destination reads
@@ -1839,8 +1856,10 @@ before any lane implements against it (golden rule 5).
   footing — so §5 carries it as an obligation on where the read sits, and §15's Arms
   6f2(iii) and 6f3 are what hold a lane to it.
   Closing it needs a per-conversation ordering across concurrent turns that this corpus does
-  not have; §16 defers it with what fires it, and §15's Arm 6f2(iii) pins the boundary that
-  *is* guaranteed so that a later lane cannot quietly widen it.
+  not have; §16 defers it with what fires it, and §15's Arms 6f2(iii) and 6f2(iv) pin the
+  boundary that *is* guaranteed — including the residual's true size, the conversation's
+  whole remaining call allowance — so that a later lane can neither quietly widen it nor
+  restate it at the flattering figure.
 - **A result's content is lost with the turn that read it.** ADR-0231 §16 stands:
   refinement over raw results is a within-turn capability, and a later turn works from the
   captured episode. The honest mechanism is narrower than the milestone's sentence sounds,
