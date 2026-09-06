@@ -47,6 +47,7 @@ from ai_assistant.core.types import (
     MemoryWriteMode,
     NonBlankEncodableText,
     RecordChunk,
+    TopicLabel,
     WalkPosition,
     band_of,
     caseless_key,
@@ -63,7 +64,6 @@ if TYPE_CHECKING:
         MemoryRecord,
         MemoryWrite,
         TimeWindow,
-        TopicLabel,
     )
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
 
@@ -234,6 +234,44 @@ def _selects_nothing(*axes: frozenset[object] | None) -> bool:
         Whether at least one applied axis is empty.
     """
     return any(axis is not None and not axis for axis in axes)
+
+
+#: The refusal ADR-0237 §2 attributes to the type, made whatever a caller passes.
+#: A Protocol signature is not a validated model — an ``Annotated`` alias in a
+#: method's annotations runs no validator at a normal call — so the type is asked
+#: explicitly, and it is *this* type rather than a hand-written check so the form a
+#: filter value must take cannot drift from the form a stored label must take
+#: (ADR-0213 §3).
+_TOPIC_LABEL: Final = TypeAdapter[str](TopicLabel)
+
+
+def _topic_keys(values: Sequence[str]) -> frozenset[str]:
+    """The ``topics`` filter as a comparison set, refusing a non-canonical label.
+
+    ADR-0237 §2: "a ``topics`` value not already in ``TopicLabel``'s canonical form
+    is refused by the type". Refused rather than allowed to match nothing, and that
+    is not a nicety: an unrefused ``"Health"`` returns an **empty result**, which is
+    the one answer ADR-0237 §7 spends four clauses insisting a caller must never
+    read as "nothing happened". A caller's typo would be indistinguishable from a
+    true absence, on the read whose whole contract is about what an absence means.
+
+    Matching is equality of the stored characters (ADR-0213 §3), so the values need
+    no fold — unlike the two person axes — and duplicates collapse into the set.
+
+    Args:
+        values: The labels the call named.
+
+    Returns:
+        Them, as a set.
+
+    Raises:
+        ValueError: If any value is not already in ``TopicLabel``'s canonical form —
+            not equal to its own ``str.casefold()``, empty, over-long, carrying
+            whitespace other than ``U+0020``, leading or trailing a space, or
+            carrying a run of two. Pydantic's ``ValidationError`` is a ``ValueError``,
+            which is the class §2 names for the sibling refusal on this parameter.
+    """
+    return frozenset(_TOPIC_LABEL.validate_python(value) for value in values)
 
 
 def _person_keys(argument: str, values: Sequence[str]) -> frozenset[str]:
@@ -778,7 +816,7 @@ class FakeMemoryStore:
         wanted = None if kinds is None else frozenset(str(kind) for kind in kinds)
         wanted_bands = None if bands is None else frozenset(bands)
         wanted_people = None if participants is None else _person_keys("participants", participants)
-        wanted_topics = None if topics is None else frozenset(topics)
+        wanted_topics = None if topics is None else _topic_keys(topics)
         wanted_subjects = (
             None if about_person is None else _person_keys("about_person", about_person)
         )
@@ -885,7 +923,7 @@ class FakeMemoryStore:
         wanted_kinds = None if kinds is None else frozenset(str(kind) for kind in kinds)
         wanted_bands = None if bands is None else frozenset(bands)
         wanted_people = None if participants is None else _person_keys("participants", participants)
-        wanted_topics = None if topics is None else frozenset(topics)
+        wanted_topics = None if topics is None else _topic_keys(topics)
         wanted_subjects = (
             None if about_person is None else _person_keys("about_person", about_person)
         )

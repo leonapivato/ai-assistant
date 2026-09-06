@@ -1394,8 +1394,10 @@ class MemoryStore(Protocol):
                 characters** and nothing else, which is the only relation
                 :data:`~ai_assistant.core.types.TopicLabel` has (ADR-0213 §3): no
                 fold is applied and none is needed, since the type already refuses
-                any value that does not equal its own ``str.casefold()``. No
-                hierarchy, prefix, synonym, stem or similarity is a topic relation.
+                any value that does not equal its own ``str.casefold()`` — and a
+                value that does not is **refused with ``ValueError``** rather than
+                left to match nothing. No hierarchy, prefix, synonym, stem or
+                similarity is a topic relation.
                 Records carrying no topic are reached by no value here, which is
                 every episode this system captures today (ADR-0213 §6).
             about_person: If given, restrict results to records whose
@@ -1418,11 +1420,16 @@ class MemoryStore(Protocol):
 
         Raises:
             ValueError: If a ``participants`` or ``about_person`` value is blank or
-                whitespace-only (ADR-0237 §2). Such a value is never read as
-                "unstated" and never matches a record, so it is refused rather than
-                quietly ignored. The annotation states the same refusal, and an
-                implementation makes it whatever a caller passes: this is a
-                Protocol signature, not a validated model.
+                whitespace-only, or a ``topics`` value is not already in
+                :data:`~ai_assistant.core.types.TopicLabel`'s canonical form
+                (ADR-0237 §2). **An implementation makes both refusals whatever a
+                caller passes**: this is a Protocol signature, not a validated
+                model, so an ``Annotated`` alias in it runs no validator at a
+                normal call and an unenforced annotation would refuse nothing.
+                Neither malformed value may be left to simply match nothing — an
+                empty result is the one answer this contract insists a caller must
+                not read as "nothing happened" (§7), so a caller's typo has to be
+                distinguishable from a true absence.
         """
         ...
 
@@ -1597,10 +1604,12 @@ class MemoryStore(Protocol):
                 is **equality of the stored characters** and nothing else, the only
                 relation :data:`~ai_assistant.core.types.TopicLabel` has (ADR-0213
                 §3): no fold is applied and none is needed, since the type already
-                refuses any value that does not equal its own ``str.casefold()``.
-                No hierarchy, prefix, synonym, stem or similarity is a topic
-                relation. Records carrying no topic are reached by no value here,
-                which is every episode this system captures today (ADR-0213 §6).
+                refuses any value that does not equal its own ``str.casefold()``
+                — and a value that does not is **refused with ``ValueError``**
+                rather than left to match nothing. No hierarchy, prefix, synonym,
+                stem or similarity is a topic relation. Records carrying no topic
+                are reached by no value here, which is every episode this system
+                captures today (ADR-0213 §6).
             about_person: If given, restrict results to records whose
                 ``about_person`` matches at least one of these values, by the same
                 D145 rule and with the same blank refusal as ``participants`` — one
@@ -1627,12 +1636,15 @@ class MemoryStore(Protocol):
 
         Raises:
             ValueError: If the call applies **no** axis — every one of the six
-                ``None`` (ADR-0237 §4) — or if a ``participants`` or
-                ``about_person`` value is blank or whitespace-only (§2). A blank is
-                never read as "unstated" and never matches a record, so it is
-                refused rather than quietly ignored. The annotations state the same
-                refusal, and an implementation makes it whatever a caller passes:
-                this is a Protocol signature, not a validated model.
+                ``None`` (ADR-0237 §4) — if a ``participants`` or ``about_person``
+                value is blank or whitespace-only, or if a ``topics`` value is not
+                already in :data:`~ai_assistant.core.types.TopicLabel`'s canonical
+                form (§2). **An implementation makes both refusals whatever a caller
+                passes**: this is a Protocol signature, not a validated model, so an
+                ``Annotated`` alias in it runs no validator at a normal call.
+                Neither malformed value may be left to simply match nothing — an
+                empty result is the one answer this contract insists a caller must
+                not read as "nothing happened" (§7).
             MemoryStoreError: If the store cannot be read, or a stored record is
                 corrupt.
         """
