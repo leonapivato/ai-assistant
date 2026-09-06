@@ -350,8 +350,7 @@ exists and is live, or it does not.
 > **Normative.** **`SearchSupply` refuses at construction** any `records` member whose
 > `placement.reach` is not `PlacementReach.ANYONE` (§3). The refusal is on the type, so
 > no producer, decode, test double or later lane can construct a supply carrying an
-> excluded record, and the property is decidable from the value rather than kept by a
-> caller.
+> excluded record. §3 states what that check binds at and what it leaves standing.
 
 > **Normative.** **A supply carrying a non-empty `records` is constructed only for a
 > destination whose recorded trust is `USER_CHOSEN`.** Where the destination the
@@ -420,8 +419,8 @@ any caller, and what it guarantees is what it *contains*, never who built it.
 > **Normative.** The record-level fact that keeps information out of a query is
 > **`Placement.reach`** (ADR-0217 §1), read exactly as ADR-0217 defines it and with no
 > field, member, axis, tag or band added by this ADR. A record whose reach is
-> `PlacementReach.OWNER` is never supplied to a `QueryComposer`, and §2's validator is
-> where that is enforced.
+> `PlacementReach.OWNER` is not supplied to a `QueryComposer` on any conforming path, and
+> §2's validator is where that is enforced.
 
 > **Normative.** **No component decides exclusion by inspecting content**, and no lane
 > reads this section as licence to filter a record, a span, a query or a supply by
@@ -434,6 +433,22 @@ any caller, and what it guarantees is what it *contains*, never who built it.
 > `OWNER` reach is not detected, is not subtracted, and may reach a query. That is
 > ADR-0098 §5's corridor, unchanged and unnarrowed, and no clause of this ADR is read as
 > an assurance about it.
+
+> **Normative.** **The validator binds at construction, and the bypass past it is the
+> corpus's accepted one.** A caller that builds a conforming supply and then rewrites a
+> referenced record's `placement` through `__dict__` or `object.__setattr__` defeats the
+> check exactly as it defeats every other frozen `core` type. ADR-0068 rules that whole
+> class "the caller's responsibility, inside the repository's threat model (ADR-0018 §3),
+> and defended where it matters by revalidation at durable boundaries", and fixes the bar
+> this ADR meets and does not raise: "exactly the bar every other frozen `core` type
+> already sits at — no higher, and no lower". **No detachment obligation is placed on
+> `SearchSupply`.** In this corpus detachment is a *store-read* obligation, discharged
+> before a record reaches a supply — a `MemoryStore` read hands back "detached snapshots,
+> like every other `MemoryStore` read" — and `MemorySearchResult`, the ratified frozen
+> container of `tuple[MemoryRecord, ...]`, carries none of its own. A supply site that
+> tampers with the value it has just built is an `orchestration` defect, not a supply
+> this type admitted, and §2's single construction site is what makes that one site
+> reviewable.
 
 **ADR-0217 is the answer already in the corpus and inventing a second axis would have
 been the defect.** `Placement` records *who may receive this record*; a search provider
