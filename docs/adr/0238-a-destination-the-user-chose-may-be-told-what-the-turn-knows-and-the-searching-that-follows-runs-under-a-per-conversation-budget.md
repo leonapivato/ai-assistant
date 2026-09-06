@@ -950,9 +950,20 @@ relaxation legible in the way §9 wanted.
 
 > **Normative.** **A claim of a conversation that is stamped or gone settles to nothing,
 > and creates nothing.** A user may delete a conversation while one of its searches is
-> still in flight; `settle_search` on an unknown conversation, on a stamped one, on a
-> forgotten claim, or on a claim already settled changes nothing and raises nothing, so the
-> servicing that was in flight completes and reports normally.
+> still in flight; `settle_search` **called with a well-formed `elapsed`** on an unknown
+> conversation, on a stamped one, on a forgotten claim, or on a claim already settled
+> changes nothing and raises nothing, so the servicing that was in flight completes and
+> reports normally.
+
+> **Normative.** **Argument validation comes first, and the no-op above is what happens
+> *after* it.** `settle_search` checks `elapsed` against the domain below **before** it looks
+> at the claim at all, so a call carrying an out-of-domain value raises whether or not the
+> conversation is still there. **The precedence is stated because the two clauses would
+> otherwise both govern one call** and disagree about it. It is decided this way because an
+> out-of-domain argument is a defect in the caller and the stale-claim rule is a fact about
+> the world: validating second would let a deletion the caller never saw silence that
+> defect, so the same bug would raise or not raise depending on a race, which is the one
+> outcome neither clause is for.
 
 > **Normative.** **`settle_search` replaces that claim's provisional charge with the
 > interval the claim actually occupied, whether that is smaller or larger.** There is no
@@ -964,8 +975,11 @@ relaxation legible in the way §9 wanted.
 > fail-closed direction, and the reason nothing is owed for a turn that ends in an
 > exception, a `PlanningError` on a later revision, a restart or a disconnection.
 
-> **Normative.** **`settle_search`'s `elapsed` is finite and non-negative, and a value
-> outside that domain is refused before anything is written.** The member replaces a charge
+> **Normative.** **`settle_search`'s `elapsed` is non-negative, and a negative value is
+> refused before anything is written.** The domain is stated as non-negativity and nothing
+> else, because `timedelta` admits no non-finite value to exclude — constructing one from
+> `inf` or `NaN` raises before a `timedelta` exists — and a clause excluding an
+> unconstructible value would name a test with no input. The member replaces a charge
 > rather than adding to one, so an unrestricted argument is the one input that could drive
 > the stored `elapsed` **below** zero — breaking `ConversationSearchDraw.elapsed`'s own
 > non-negative invariant and, worse, handing a conversation back budget it never had, so a
@@ -973,7 +987,8 @@ relaxation legible in the way §9 wanted.
 > `ValueError`, the class `ConversationStore.append` already raises for an argument outside
 > its stated domain (ADR-0023 §3's naive instant), and it is raised **before the claim is
 > settled and before any counter moves**: the charge stands at its full provisional value,
-> which is the fail-closed direction this section takes everywhere else. **No path lowers
+> which is the fail-closed direction this section takes everywhere else, and it stands the
+> same way for a claim the store has already settled or forgotten. **No path lowers
 > `calls`**, this one included.
 
 > **Normative.** **The interval is `orchestration`'s await and not the provider exchange,
@@ -1470,10 +1485,12 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > refused; after `settle_search` releases the unused remainder, a further claim is admitted.
 > A claim settled **below** its charge returns the remainder; one settled **above** it
 > raises the stored `elapsed` past the bound, and the next `claim_search` is then refused.
-> **And the domain is asserted**: a `settle_search` whose `elapsed` is negative, or not
-> finite, raises `ValueError`, settles nothing, leaves the claim outstanding at its full
+> **And the domain is asserted, in both orders**: a `settle_search` whose `elapsed` is
+> negative raises `ValueError`, settles nothing, leaves the claim outstanding at its full
 > charge and leaves `calls` where it was — so the next `claim_search` is still refused, and
-> no path drives the stored `elapsed` below zero.
+> no path drives the stored `elapsed` below zero. **The same call on a stale claim, and on
+> one whose conversation is stamped or gone, raises `ValueError` too** and still changes
+> nothing, which is §8's stated precedence and the arm that pins it.
 
 > **Normative.** **Arm 6c3 — a deletion under an outstanding claim.** A conversation
 > deleted while one of its searches is in flight: `settle_search` on that claim afterwards
