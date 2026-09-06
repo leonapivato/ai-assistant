@@ -20,6 +20,13 @@
   eighth-check clause in its seventh limb alone, each for a closed-loop request.**
   Those three, and nothing else — §5's rule that a grant reaches the recipient and never
   the payload is left standing deliberately, and §1 below is built so that it can be.
+- **Partially supersedes** [ADR-0074](0074-conversation-is-an-entity-and-every-turn-is-an-episode.md)
+  — **§9's enumeration of what the `ConversationStore` owes, which §8 below widens by
+  four operations carrying a per-conversation search budget.** That enumeration, and
+  nothing else — §9's `core/types.py` enumeration, its per-conversation exclusion
+  obligation, its bounded-and-ordered read rule, its two-store reasoning, §7's retention
+  reclaim and §8's deletion protocol are relied upon as written, and §8 below adds no step
+  to either sequence.
 
 ## Context
 
@@ -340,8 +347,8 @@ exists and is live, or it does not.
 > reaches it", and "**a second turn re-searches** … because nothing was retained". So the
 > third population above is **within one turn** — the refinement ADR-0228 §2's revision
 > makes real, where a second servicing of the same turn composes over the first's
-> results — and **no later turn reaches a result's content by any route**. §8's store
-> holds two counters and one flag and no result, and no lane reads this ADR as deciding
+> results — and **no later turn reaches a result's content by any route**. §8's budget is
+> two counters and one flag and no result, and no lane reads this ADR as deciding
 > retention, an archive admission or a store write for a minted record.
 
 > **Normative.** **What a later turn has instead is the captured episode**, stamped and
@@ -453,8 +460,8 @@ recipient.
 > (§1); **every recorded external span this conversation has carried — on any earlier
 > turn, and on this turn up to the moment the request is built — was minted by a
 > `WEB_SEARCH` servicing at a destination of recorded trust `USER_CHOSEN`** (the two
-> halves are stated in the clause below); and **this request holds a claim §8's store
-> granted for this call**. A request
+> halves are stated in the clause below); and **this request holds a claim §8's
+> `claim_search` granted for this call**. A request
 > failing any of the four is not closed-loop, and every clause this ADR supersedes binds
 > on it exactly as it does today.
 
@@ -484,7 +491,7 @@ recipient.
 > content, a query or a reply**, and no component asks a model for either.
 
 > **Normative.** **The fourth condition is a claim already held, never capacity still
-> unspent.** `claim` charges the call it admits (§8), so by the time the request is built
+> unspent.** `claim_search` charges the call it admits (§8), so by the time the request is built
 > the draw no longer has room for it — a condition reading "the draw leaves room for one
 > more call" would therefore be false for **every** admitted request, and false first for
 > the last call a conversation is allowed. The order is fixed for that reason: **claim,
@@ -711,7 +718,7 @@ stated exception over one kind, one destination class and one closed population 
 ADR-0233's conjunction intact for everything else — which is what makes its own
 relaxation legible in the way §9 wanted.
 
-### 8. The budget: calls and elapsed time per conversation, carried on the turn row
+### 8. The budget: calls and elapsed time per conversation, carried on the conversation record
 
 > **Normative.** `core.config.Settings` gains exactly two fields.
 > **`search_calls_per_conversation: int`**, defaulting to **8**, domain the integers
@@ -726,75 +733,141 @@ relaxation legible in the way §9 wanted.
 > chooses; a bound the milestone's exit is stated over may not be absent by omission, so
 > a deployment that configures nothing still searches under both.
 
+> **Normative.** **The budget is state on the conversation record, and the store that
+> holds it is `ConversationStore`.** It is not a store of its own. A per-conversation
+> durable counter has a lifecycle — it must be fenced when the conversation is deleted and
+> destroyed when the record is — and **that lifecycle already exists, ratified, on exactly
+> one object**: `stamp_deleted` fences the record and `drop_if_eligible` destroys it
+> (ADR-0074 §8). Putting the counters anywhere else obliges some protocol to reproduce that
+> lifecycle across two stores with no transaction between them, which this corpus does not
+> have.
+
+> **Normative.** **That is a correction of an earlier revision of this decision, recorded
+> because the reasoning is the load-bearing part.** A draft gave the budget a
+> `SearchBudgetStore` of its own, and every protocol for telling it about a deletion failed
+> in a different place. An ordering leaves a crash window on the side ADR-0074 §7 makes
+> unavoidable — the retention reclaim only learns a conversation is eligible **once
+> `drop_if_eligible` has already destroyed the record**, so the cleanup can only be ordered
+> after the destructive act, and one process death strands the counter with nothing able to
+> rediscover it. A durable stamp fences the fold but does not decide when to drop. And a
+> reconciliation walk in ADR-0076's shape rests on a cross-store read that **aliases a
+> tombstoned conversation with a dropped one** — `ConversationStore.get` answers `None`
+> "when the id names nothing **or** names a conversation stamped deleted" — and that can be
+> defeated by a re-minted id, which ADR-0074 §1 refuses to argue away by probability
+> ("the factory is *injected*, so a repeating test double, a seeded factory, or a future
+> non-random scheme makes a collision reachable in a way probability does not answer").
+> **Moving the counters removes the question instead of answering it**, and every mechanism
+> those drafts needed — a second store, a stamp of its own, an enumeration, a drop, a
+> reconciliation pass, a stated orphan window — is deleted rather than repaired.
+
 > **Normative.** `core/types.py` gains **`ConversationSearchDraw`**, a frozen model
 > refusing unknown fields, with exactly three fields: `calls: int`, non-negative, the
 > provider calls this conversation has claimed; `elapsed: timedelta`, non-negative and
 > finite, the time those calls were allowed; and `all_external_user_chosen: bool`,
 > **required with no default**, false once any turn of this conversation has carried a
 > recorded external span that was **not** minted by a `WEB_SEARCH` servicing at a
-> destination of recorded trust `USER_CHOSEN`.
+> destination of recorded trust `USER_CHOSEN`. It is a **read model** — what `search_draw`
+> answers — and no member takes one as an argument.
 
-> **Normative.** **The field is required with no default, and that is the structural half of
-> §5's legacy refusal.** A default of `True` would be a creation default: whichever store
-> member first touched an unknown conversation would mint a clean-history row, and §5's
-> recorded half — which reads the stored flag wherever a row exists — would then accept a
-> legacy conversation whose prior turns this decision had never seen. **No member of this
-> store creates a row carrying a flag its caller did not supply**, so that path does not
-> exist rather than being forbidden.
+> **Normative.** **The flag's value at creation is `True`, and that is safe because the
+> only thing that creates it is `ConversationStore.start`.** A conversation `start` mints
+> has **no turns at all** — ADR-0074 §2's `last_turn_at` is "unset until a turn lands" — so
+> "every recorded external span this conversation has carried was minted by a `WEB_SEARCH`
+> servicing at a destination of recorded trust `USER_CHOSEN`" is **vacuously true** of it.
+> **No caller supplies the value, and no member of this store creates a conversation as a
+> side effect of anything else.** The laundering hole an earlier revision had — a first
+> `claim` minting a clean row for a conversation that already had turns, permanently
+> closing a legacy conversation into the exception — is therefore unreachable by
+> construction rather than forbidden by a rule: the field is created by the act that
+> creates the conversation, at the one instant when `True` cannot be wrong.
 
-> **Normative.** `core/protocols.py` gains **one** further `@runtime_checkable` Protocol,
-> **`SearchBudgetStore`**, keyed by conversation, with exactly **seven** members:
-> **`draw_of`**, answering a conversation's `ConversationSearchDraw` **or `None` where it
-> holds no row for that conversation and where the row it holds is stamped deleted**;
-> **`claim`**; **`settle`**; **`observe`**, folding the value its caller computed into the
-> stored flag by logical **and**, creating the row where none exists; **`forget`**,
-> **stamping** a conversation's row deleted and creating that stamp where no row exists;
-> **`budgeted_conversation_ids`**, the bounded cursor-paged walk over every conversation
-> this store holds a row for; and **`drop`**, removing one conversation's row entirely. An
-> eighth member is added by no lane without the ADR that decides it.
+> **Normative.** **A conversation record written before this decision decodes with the flag
+> `False`.** That is ADR-0181 §12's own reading of a pre-existing row and the fail-closed
+> direction: this decision never observed such a conversation's turns, so it may not report
+> them clean. `observe_search` folds by **and**, so no later clean turn raises it, and §5's
+> recorded half refuses every search of such a conversation for as long as it lives. **No
+> lane back-fills the field, infers it from an episode, a log or a trail, or reads its
+> absence as a clean history.**
 
-> **Normative.** The seven members are declared with exactly these signatures, all `async`:
+> **Normative.** `core/protocols.py` gains **no** Protocol for the budget. It adds exactly
+> **four** members to **`ConversationStore`**: **`search_draw`**, answering a
+> conversation's `ConversationSearchDraw`; **`claim_search`**; **`settle_search`**; and
+> **`observe_search`**, folding the value its caller computed into the stored flag by
+> logical **and**. A fifth is added by no lane without the ADR that decides it. **This
+> supersedes ADR-0074 §9's enumeration of what `ConversationStore` owes**, in the same
+> scope ADR-0205 and ADR-0212 each recorded on that section, and §17 records it.
+
+> **Normative.** The four members are declared with exactly these signatures, all `async`,
+> and they take `conversation_id: str` because every other member of this store does:
 >
-> - `draw_of(self, conversation_id: Identifier, /) -> ConversationSearchDraw | None`
-> - `claim(self, conversation_id: Identifier, /, *, max_calls: int, max_elapsed: timedelta, initial_footing: bool) -> SearchClaim | None`
-> - `settle(self, claim: SearchClaim, /, *, elapsed: timedelta) -> None`
-> - `observe(self, conversation_id: Identifier, /, *, all_external_user_chosen: bool) -> None`
-> - `forget(self, conversation_id: Identifier, /) -> None`
-> - `budgeted_conversation_ids(self, /, *, limit: int | None = None, after_id: Identifier | None = None) -> list[Identifier]`
-> - `drop(self, conversation_id: Identifier, /) -> None`
+> - `search_draw(self, conversation_id: str, /) -> ConversationSearchDraw | None`
+> - `claim_search(self, conversation_id: str, /, *, max_calls: int, max_elapsed: timedelta) -> SearchClaim | None`
+> - `settle_search(self, claim: SearchClaim, /, *, elapsed: timedelta) -> None`
+> - `observe_search(self, conversation_id: str, /, *, all_external_user_chosen: bool) -> None`
 >
-> `claim` answers `None` where it refuses. The bounds are **passed in** rather than read by
-> the store, so the store holds no `Settings`, no clock and no policy — it is a counter with
-> an exclusion, and every judgement about what a bound is stays in `orchestration`.
+> `claim_search` answers `None` where it refuses. **The bounds are passed in** rather than
+> read by the store, so these four members read no `Settings` field, consult no clock and
+> hold no policy — the elapsed interval is measured by the caller and every judgement about
+> what a bound is stays in `orchestration`. That the store has a clock of its own for
+> `drop_if_eligible`'s grace (ADR-0074 §8) is not a licence for these to read it.
 
-> **Normative.** **`initial_footing` is used only where `claim` creates the row, and is
-> ignored where one exists** — the stored flag is authoritative and monotone, and no
-> argument raises it. `orchestration` supplies the **history-only** component and that
-> alone: whether this conversation had **no recorded turn before this one**. So a legacy
-> conversation's row is created `False` by the very call that charges its first search, and
-> §5's recorded half refuses that search rather than the one after it.
+> **Normative.** **No `initial_footing`, and no argument on any member decides what the
+> flag starts at.** An earlier revision passed a history fact into `claim` because that
+> member could create a row; this one cannot create anything, so there is nothing for such
+> an argument to be for. **A lane that adds one has reintroduced the creation path this
+> clause removes.**
 
-> **Normative.** **`initial_footing` is *not* the value `observe` receives, and no lane
-> reads the two as one argument.** `observe` takes the **conjunction** of that history fact
-> with the completed turn's **own** external-origin result (below); `claim` takes the
-> history fact by itself, because the turn's own result does not exist when `claim` runs —
-> **claim precedes composition, servicing and capture** (§5's fixed order). So a turn
-> admitted on a true footing whose own supply then proves dirty is closed by `observe` and
-> never by `claim`, and a lane that passes the conjunction to `claim` would be passing a
-> value it cannot yet compute.
+> **Normative.** **`claim_search` is one atomic step: admit, charge, and answer the
+> deadline.** Given a conversation and the two bounds, it refuses where the stored `calls`
+> have reached `search_calls_per_conversation` or the stored `elapsed` has reached
+> `search_elapsed_per_conversation`; otherwise it increments `calls` by one and charges to
+> `elapsed` **the conversation's whole remaining elapsed budget**, which `settle_search`
+> then replaces with what the call actually took, releasing the remainder. **The read, the
+> comparison and the write are one indivisible step.**
 
-> **Normative.** **The claim, the charge and the row's creation are one indivisible step.**
-> No implementation reads, decides, creates and charges as separate awaits, and none creates
-> a row in one operation and sets its flag in another.
+> **Normative.** **That atomicity is an obligation this store already carries, extended to
+> these members rather than invented for them.** ADR-0074 §9 rules that "**`ConversationStore`
+> therefore owes per-conversation mutual exclusion between an append and a deletion as a
+> contract obligation** … which every implementation satisfies in its own way: an in-memory
+> store with a lock, a SQLite-backed one with a transaction, which is also what makes it
+> hold across processes", and gives the reason a caller-side lock is not an answer: "the
+> engine's own code already contemplates 'another engine over the same durable stores', so
+> two engines — in one process or two — hold two locks and serialise nothing." **The
+> exclusion the charge needs is the exclusion the record already owes**, and it is why
+> concurrent turns, a failed turn and a process exit are answered by one clause rather than
+> three: **two turns of one conversation, two servicings of one turn, and two engines over
+> one data directory can none of them be admitted against the same draw.** That, and not
+> the counters' address, is what answers the defect a per-turn budget had — and a
+> `PlanningError` on a later revision still cannot erase a completed search's draw, because
+> the charge is durable and taken before the call, not written at capture.
+
+> **Normative.** **`claim_search` and `observe_search` create nothing, and that is
+> `append`'s property rather than a new one.** For an id that names nothing, and for one
+> naming a conversation **stamped deleted**, `claim_search` answers `None` and
+> `observe_search` does nothing and raises nothing. `ConversationStore.append` refuses both
+> cases too — `UnknownConversationError` "if `conversation_id` names nothing, or names a
+> conversation stamped deleted — an append to a stamped conversation is refused, which is
+> what makes a deletion durable against a racing capture" — and these two **answer instead
+> of raising** because each is reached by a servicing that may already have been in flight
+> when the deletion landed, and a user deleting a conversation should not turn a running
+> turn into an error.
+
+> **Normative.** **There is nothing for a late fold to resurrect.** The budget is a
+> property of the conversation record, so a fold arriving after the record is stamped
+> writes nothing, and one arriving after the record is dropped finds nothing to write to.
+> **The whole class of hazard an earlier revision needed a durable stamp, an enumeration
+> walk and a reconciliation pass to bound does not arise**, and no clause here fences a
+> write with a read of another store: the refusal and the record are one object under the
+> exclusion the store already owes.
 
 > **Normative.** **The provisional charge is the whole remainder, and three things follow
 > from that one choice.** First, **`orchestration` never needs to know the transport's
 > timeout**: that value is `WebSearchEgress`'s own state inside the seam, it is on no
 > Protocol and in no `Settings` field this ADR adds, and reaching for it would cross golden
 > rule 1. Second, **at most one claim of a conversation is outstanding at a time** — while
-> one is in flight the stored `elapsed` equals the bound, so the next `claim` refuses — which
-> serialises searching per conversation without a lock anywhere. Third, the overrun is
-> therefore **one call's**, and §8 can say so truthfully.
+> one is in flight the stored `elapsed` equals the bound, so the next `claim_search`
+> refuses — which serialises searching per conversation without a lock anywhere. Third, the
+> overrun is therefore **one call's**, and §8 can say so truthfully.
 
 > **Normative.** **So the settled total may exceed the bound by at most one call's excess
 > over the remainder it was granted, and by no more.** No lane states a bound on the size of
@@ -805,77 +878,28 @@ relaxation legible in the way §9 wanted.
 > fields, with exactly three fields: `conversation_id: Identifier`, `id: Identifier` minted
 > by the store, and `charge: timedelta`, the provisional amount this claim added. **At most
 > one claim of a conversation is outstanding at a time** (above), so the handle is not there
-> to disambiguate concurrent claims; it is there so that `settle` can be **idempotent and
-> stale-safe**. A second `settle` of one claim changes nothing; a `settle` naming a claim the
-> store has already settled, or one whose conversation has been forgotten, changes nothing;
-> and a `settle` naming a conversation alone could not tell a late settlement of a
-> superseded claim from a settlement of the claim now outstanding. `settle` replaces the
-> charge of **that** claim and no other.
+> to disambiguate concurrent claims; it is there so that `settle_search` can be **idempotent
+> and stale-safe**. A second `settle_search` of one claim changes nothing; one naming a claim
+> the store has already settled, or one whose conversation has been stamped or dropped,
+> changes nothing; and a `settle_search` naming a conversation alone could not tell a late
+> settlement of a superseded claim from a settlement of the claim now outstanding.
+> `settle_search` replaces the charge of **that** claim and no other.
 
-> **Normative.** **`forget` is the lifecycle member, it is a *stamp* and not a drop, and it
-> is idempotent.** It stamps one conversation's row deleted — **creating that stamp where
-> the store holds no row at all**, because a stamp on nothing is exactly what makes a later
-> observation unable to create one — answers the same whether a row was there or not, and is
-> safe to call again after a partial failure, which is what a sweep that may be interrupted
-> and re-run needs (ADR-0074 §7, §8).
+> **Normative.** **A claim of a conversation that is stamped or gone settles to nothing,
+> and creates nothing.** A user may delete a conversation while one of its searches is
+> still in flight; `settle_search` on an unknown conversation, on a stamped one, on a
+> forgotten claim, or on a claim already settled changes nothing and raises nothing, so the
+> servicing that was in flight completes and reports normally.
 
-> **Normative.** **The stamp is `ConversationStore.stamp_deleted`'s shape, taken from the
-> corpus rather than invented here.** That member is durable, "hides the conversation from
-> every presenting read, and **refuses every later append**, so a capture racing the deletion
-> cannot slip a turn in behind it", and "what the stamp does *not* do is remove anything".
-> This store's stamp does the same three things to its own row: it is durable, `draw_of`
-> answers `None` for a stamped conversation, and every later `claim` and `observe` is
-> refused. **A check-then-act across two stores could not do it.** Reading from one store
-> that a conversation exists and then writing to another is a decision taken before `forget`
-> lands and acted on after; this section contemplates **two engines over one data
-> directory**, so no
-> in-process ordering closes that gap, and a correctness argument that depends on it is one
-> this ADR declines to state. The stamp closes it because the refusal and the row are one
-> object under this store's own per-conversation exclusion.
-
-> **Normative.** **`claim` and `observe` are decided against the stamp inside the store,
-> atomically, and neither creates anything for a stamped conversation.** `claim` on a
-> stamped conversation **refuses**, answering `None` exactly as it does at an exhausted
-> bound, so the servicing takes this section's no-slot posture and composes nothing.
-> `observe` on a stamped conversation is a **no-op that raises nothing**: it folds nothing,
-> creates nothing and reports nothing to its caller — a fold arriving after a deletion has
-> nothing left to be true of, and raising would break a servicing that was already in flight
-> when the deletion landed. `settle` is unchanged and was already this shape. **No member
-> consults the `ConversationStore`, and none is passed a value its caller read from one**:
-> the stamp is the whole of the test, and it is read in the same indivisible step as the
-> write it guards.
-
-> **Normative.** **`forget` invalidates every outstanding claim of that conversation, and
-> settling one afterwards is a no-op that creates nothing.** A user may delete a
-> conversation while one of its searches is still in flight; the claim then names a row that
-> is stamped, or one already dropped, and `settle` **must revive neither** — a deleted
-> conversation leaving spendable budget state behind would breach this section's
-> row-goes-with-the-conversation clause and ADR-0074 §8's deletion. `settle` on an unknown
-> conversation, on a stamped one, on a forgotten claim, or on a claim already settled
-> changes nothing and raises nothing, so the servicing that was in flight completes and
-> reports normally.
-
-> **Normative.** **`claim` is one atomic step: admit, charge, and answer the deadline.**
-> Given a conversation and the two bounds, it refuses where the stored `calls` have reached
-> `search_calls_per_conversation` or the stored `elapsed` has reached
-> `search_elapsed_per_conversation`; otherwise it increments `calls` by one and charges to
-> `elapsed` **the conversation's whole remaining elapsed budget**, which `settle` then
-> replaces with what the call actually took, releasing the remainder. **The read, the
-> comparison and the write are one indivisible step.** That is `RecipientGrantStore`'s
-> atomic count-with-append (ADR-0193 §1) applied to a counter, and it is why concurrent
-> turns, a failed turn and a process exit are answered by one clause rather than three:
-> **two turns of one conversation, two servicings of one turn, and two engines over one
-> data directory can none of them be admitted against the same draw.**
-
-> **Normative.** **`settle` replaces that claim's provisional charge with the interval the
-> claim actually occupied, whether that is smaller or larger.** There is no direction rule:
-> a settlement that could only lower would let a call that overran its charge cost the
-> conversation nothing, which is the wrong direction for a bound. **The accounted interval
-> is the one `orchestration` can measure — its own await of the search servicing**, from
-> before the seam is entered to after it returns. `settle` changes no `calls`, and **a claim
-> that is never settled stands at its full charge** — the fail-closed direction, and the
-> reason nothing is owed for a turn that ends in an exception, a `PlanningError` on a later
-> revision, a restart or a disconnection.
+> **Normative.** **`settle_search` replaces that claim's provisional charge with the
+> interval the claim actually occupied, whether that is smaller or larger.** There is no
+> direction rule: a settlement that could only lower would let a call that overran its
+> charge cost the conversation nothing, which is the wrong direction for a bound. **The
+> accounted interval is the one `orchestration` can measure — its own await of the search
+> servicing**, from before the seam is entered to after it returns. `settle_search` changes
+> no `calls`, and **a claim that is never settled stands at its full charge** — the
+> fail-closed direction, and the reason nothing is owed for a turn that ends in an
+> exception, a `PlanningError` on a later revision, a restart or a disconnection.
 
 > **Normative.** **The interval is `orchestration`'s await and not the provider exchange,
 > because the exchange's duration is a fact no contract reports.** `SearchOutcome` carries no
@@ -912,61 +936,61 @@ relaxation legible in the way §9 wanted.
 > second timeout in a second place, which is the shape this corpus has already refused.
 > Firing the overrun open is an ADR deciding how a deadline reaches that seam at all.
 
-> **Normative.** **The flag means two things at once, and `orchestration` computes both.**
-> It means *every turn this decision has observed was clean* **and** *this decision has
-> observed every turn this conversation has had*. For every turn it captures,
-> `orchestration` calls `observe` with the conjunction of: whether **every** recorded
-> external span that turn's final supply carried was minted by a `WEB_SEARCH` servicing at a
-> destination of recorded trust `USER_CHOSEN` — computed from records it holds as data it
-> fetched, at the same instant and by the same component as ADR-0223 §1's own value; **and**,
-> where the store holds no row for this conversation yet, whether the conversation had **no
-> recorded turn before this one**.
+> **Normative.** **The flag means *every turn this decision has observed was clean*, and
+> `orchestration` computes it.** For every turn it captures, `orchestration` calls
+> `observe_search` with whether **every** recorded external span that turn's final supply
+> carried was minted by a `WEB_SEARCH` servicing at a destination of recorded trust
+> `USER_CHOSEN` — computed from records it holds as data it fetched, at the same instant and
+> by the same component as ADR-0223 §1's own value. **The second conjunct an earlier
+> revision needed — "and this decision has observed every turn this conversation has
+> had" — is gone**, because creation is `start`'s: a conversation whose first turn this
+> decision did not see is one created before it, and such a record decodes `False`.
 
 > **Normative.** **The early fold is triggered by admission and not by a request: the
 > moment `orchestration` admits to a turn a recorded external span that was **not** minted
 > by a `WEB_SEARCH` servicing at a destination of recorded trust `USER_CHOSEN`, it calls
-> `observe` with `False` for that conversation.** The trigger is that admission — the same
-> fact §5's current-turn half is stated over — and it fires **whether or not that turn ever
-> builds a `WEB_SEARCH` request**. **Capture's fold remains and is unchanged**; this one is
-> earlier, not instead, and the two agree because `observe` folds by **and**.
+> `observe_search` with `False` for that conversation.** The trigger is that admission — the
+> same fact §5's current-turn half is stated over — and it fires **whether or not that turn
+> ever builds a `WEB_SEARCH` request**. **Capture's fold remains and is unchanged**; this
+> one is earlier, not instead, and the two agree because `observe_search` folds by **and**.
 
 > **Normative.** **Admission is the trigger because neither a request nor a capture is
 > early enough.** §5's current-turn half is computed when a request is **built**, so a turn
 > that reads a local file and never searches computes it nowhere, and a turn that reads one
-> and *does* search computes it only after `claim` has already admitted that call. Both
-> leave the stored flag true for as long as the turn is in flight, and `settle` releases the
-> draw inside that window — so a **second servicing of the same conversation** could claim,
-> read the stale-true flag, find its own supply clean and be ruled closed-loop, although the
-> conversation had already carried the file. Folding at admission puts the false in the row
-> **as early as the fact exists**, which narrows that window from the whole of a turn to a
-> single store write — and the two clauses below state exactly what that does and does not
-> guarantee.
+> and *does* search computes it only after `claim_search` has already admitted that call.
+> Both leave the stored flag true for as long as the turn is in flight, and `settle_search`
+> releases the draw inside that window — so a **second servicing of the same conversation**
+> could claim, read the stale-true flag, find its own supply clean and be ruled closed-loop,
+> although the conversation had already carried the file. Folding at admission puts the
+> false on the record **as early as the fact exists**, which narrows that window from the
+> whole of a turn to a single store write — and the two clauses below state exactly what
+> that does and does not guarantee.
 
 > **Normative.** **What the early fold guarantees is a boundary, not an ordering.** The
 > guarantee is this and no more: **every claim of that conversation admitted after the fold
-> has returned reads the false**, because the flag is monotone and `claim` reads it in the
-> same indivisible step that charges the draw. **No clause here claims more.**
+> has returned reads the false**, because the flag is monotone and `claim_search` reads it
+> in the same indivisible step that charges the draw. **No clause here claims more.**
 > `orchestration` cannot fold a fact before it holds it, and admission is the instant it
-> holds it, so a claim concurrent with that single `observe` await can still be admitted on
-> a flag the fold has not yet lowered. **Nothing in this decision serialises two turns of
-> one conversation**: `claim`'s atomicity serialises the *draw* and not the flag, and this
-> section's own two-engines case makes an in-process ordering unavailable in principle.
-> **A lane that reads "before any later claim" as an ordering obligation on the caller has
-> misread this section** — there is no such obligation here, and none would be
-> dischargeable.
+> holds it, so a claim concurrent with that single `observe_search` await can still be
+> admitted on a flag the fold has not yet lowered. **Nothing in this decision serialises two
+> turns of one conversation**: the store's per-conversation exclusion serialises each
+> member's own read-and-write, not two turns' worth of work, and ADR-0074 §9's two-engines
+> case makes an in-process ordering unavailable in principle. **A lane that reads "before
+> any later claim" as an ordering obligation on the caller has misread this section** —
+> there is no such obligation here, and none would be dischargeable.
 
 > **Normative.** **The window it leaves is stated rather than claimed away.** Before the
 > early fold it spanned turn A's whole composition, servicing, transport and capture — every
-> await of a search — and `settle` released the draw inside it. After it, it is one store
-> write with none of turn A's I/O inside it. What it costs when it is reached is **one
+> await of a search — and `settle_search` released the draw inside it. After it, it is one
+> store write with none of turn A's I/O inside it. What it costs when it is reached is **one
 > search of one concurrent turn** ruled closed-loop on a conversation that had, at that
 > instant, admitted a disqualifying span it had not yet recorded; the conversation is closed
 > for every claim admitted after the fold returns, and §11's audit records both dispositions.
 > **Closing it entirely means serialising servicings of one conversation**, which is a new
 > obligation on `orchestration` across concurrent turns that nothing in this corpus provides
 > today; §16 defers it with what fires it, and **no lane closes it by having `orchestration`
-> hold a lock**, for the reason ADR-0074 §8 gives about exactly that shape — two engines
-> hold two locks and serialise nothing.
+> hold a lock**, for ADR-0074 §9's own reason — two engines hold two locks and serialise
+> nothing.
 
 > **Normative.** **A half that reads *true* is never folded early.** Reporting a turn
 > **clean** stays capture's alone, because only capture sees the turn's **final** supply; an
@@ -974,160 +998,60 @@ relaxation legible in the way §9 wanted.
 > direction this section fails closed in everywhere else. The early fold writes `False` and
 > nothing else, it is idempotent, and repeating it costs nothing.
 
-> **Normative.** **A fold reaching this store after `forget` is expected, and the stamp is
-> what makes it harmless.** `observe` creates a row where none exists (above), so an
-> observation racing a deletion would otherwise resurrect budget state for a conversation
-> ADR-0074 §8 has destroyed — the hazard `settle` is already fenced against, now fenced the
-> same way. **The fence is the stamp and nothing else.** In particular **no clause obliges
-> `orchestration` to fold only for a conversation whose record the `ConversationStore` still
-> holds**: that is a read of one store used to license a write to another, it can be true
-> when it is read and false when the write lands, and it is unavailable in principle under
-> this section's two engines. **A lane that finds a fold reaching this store after `forget`
-> has found the case this clause is written for, not a breach of it** — what it must find,
-> and what §15's arms assert, is that the fold created nothing.
-
-> **Normative.** **So a row created for a conversation that already had turns is created
-> false**, and the refusal §5's recorded half makes for an unobserved legacy conversation
-> survives the row's creation. Without the second conjunct, one clean turn of a legacy
-> conversation whose tainting episode had expired would mint a `True` row and the prior-turn
-> test would never run again — the same hole a `None`-means-true reading opens, arriving one
-> turn later.
-
 > **Normative.** **Once false the flag never returns to true**, which is ADR-0106 §4's
 > monotonicity read on this axis, and it is what keeps a conversation closed after the
 > tainting episode has fallen out of the tail (ADR-0223 §6's un-tainting, which this ADR does
-> not disturb). `observe` folds by **and** and by no other operation; no lane adds a member,
-> a flag or a repair that raises it.
+> not disturb). `observe_search` folds by **and** and by no other operation; no lane adds a
+> member, a flag or a repair that raises it.
 
-> **Normative.** **Absence of a row is not evidence of a clean history, and §5's recorded
-> half says so in terms.** That half is satisfied where `draw_of` answers a row whose
-> `all_external_user_chosen` is **true**, **or** where `draw_of` answers `None` **and** the
-> `ConversationStore` holds no recorded turn of that conversation before this one. It is
-> **not** satisfied by `None` alone. A conversation with no prior turn cannot have a history
-> to hide, which is why the first limb of the disjunction is vacuous truth rather than a
-> guess; a conversation that has turns and no row is one this decision has never observed,
-> and it fails.
-
-> **Normative.** **A stamped conversation reads as `None` here too, and that is fail-closed
-> in both branches.** One with recorded turns fails the recorded half outright, on the
-> clause above. One with none — a conversation stamped before it ever took a turn — would
-> satisfy the recorded half vacuously, and it reaches nothing: `claim` refuses for a stamped
-> conversation before a supply is constructed or a query composed, so no request of a
-> deleted conversation is ever ruled on. **No lane closes that by making `draw_of` present
-> the stamp**; hiding a stamped row from every presenting read is what makes it
-> `ConversationStore.stamp_deleted`'s shape rather than a sixth state for §5 to read.
+> **Normative.** **§5's recorded half is one read and no disjunction.** It is satisfied
+> where `search_draw` answers a draw whose `all_external_user_chosen` is **true**, and by
+> nothing else. `search_draw` answers **`None`** for an id that names nothing and for a
+> conversation stamped deleted — `ConversationStore.get`'s own rule, "`None` when the id
+> names nothing **or** names a conversation stamped deleted" — and `None` fails the
+> condition. **An earlier revision needed a second limb** — no row, *and* no recorded prior
+> turn — because a separate store could be silent about a conversation that existed. This
+> store cannot be silent about one, so the limb is gone and the prior-turn test with it.
 
 > **Normative.** **This is what closes a legacy conversation whose stamped episode is
 > gone.** A conversation that read a file before this decision landed may, by the time of
 > its next turn, have lost that episode — expired under ADR-0007 §2, deleted, or simply
 > fallen out of the tail (ADR-0223 §6's own un-tainting, which ADR-0231 §12 records) — and
 > `ConversationLifecycle.history` skips a turn whose episode does not resolve. Its current
-> turn's supply can therefore be clean. **The prior-turn test is what refuses it**, and no
-> later clean capture rescues it: `observe` folds by **and** onto a row that, once created,
+> turn's supply can therefore be clean. **The decoded `False` is what refuses it**, and no
+> later clean capture rescues it: `observe_search` folds by **and** onto a field that
 > records what this decision has actually seen.
 
-> **Normative.** **The store is local, durable and never written to a remote service**
-> (ADR-0004 §2), it holds a Tier 1 fact, it ships as a **triad**, and it holds **two
-> counters, one flag, one deletion stamp and no content** — no query, no result, no
-> destination, no record, no text.
+> **Normative.** **What the record now carries is two counters and one flag and no
+> content** — no query, no result, no destination, no record, no text. It is local, durable
+> and never written to a remote service (ADR-0004 §2), it is a Tier 1 fact, and it lives
+> under the retention, deletion and export rules the conversation record already has rather
+> than under new ones.
 
-> **Normative.** **A conversation's row goes when the conversation goes, and the removal is
-> driven by a walk rather than by an ordering between two stores.** The capture/lifecycle
-> stage in `orchestration` owns both halves, because ADR-0074 §9 already rules that "the
-> **capture/lifecycle stage in `orchestration`** owns every cross-store sequence".
->
-> - **The fence, in ADR-0074 §8's deletion.** `forget` runs **immediately after
->   `ConversationStore.stamp_deleted` succeeds** and before any episode is destroyed. That
->   order is normative and not an implementer's choice: the budget stamp is only ever
->   written for a conversation already stamped, so a process that dies between the two can
->   never leave a **stamped budget row on a live conversation** — a state nothing would
->   repair and which would silently end that conversation's searching for good. A death the
->   other way round leaves a stamped conversation with an unstamped row, which
->   `ConversationStore.stamped_conversation_ids` (ADR-0076) makes discoverable and which the
->   reclaim's re-run repairs, `forget` being idempotent.
-> - **ADR-0074 §7's retention reclaim is not extended at all.** It calls `drop_if_eligible`
->   exactly as it does today and says nothing to this store, so **no crash window is opened
->   between a conversation's destruction and its row's removal** — there is no such
->   sequence to interrupt. The row of a reclaimed conversation is removed by the walk below,
->   like every other row whose conversation is gone.
->
-> **No step of either sequence removes a row**, which is what keeps both re-runnable in
-> ADR-0074 §8's sense: every member either stamps or is idempotent, and a repeat after a
-> crash at any point converges on the same state.
+> **Normative.** **The conversation's lifecycle is not extended, and no cleanup is added.**
+> ADR-0074 §7's retention reclaim and §8's deletion protocol are **unchanged by this
+> decision** — no new step, no new call, no new ordering and no sweep. `stamp_deleted`
+> fences the budget with the record it is part of; `drop_if_eligible` destroys the budget
+> with the record; and the residue between them is exactly the tombstone ADR-0074 §8
+> already states and bounds, which this ADR neither enlarges nor re-argues. **A lane that
+> finds itself writing a lifecycle member, a sweep or a reconciliation for this budget has
+> put the counters somewhere they do not belong.**
 
-> **Normative.** **`budgeted_conversation_ids` is the recovery read, and it is ADR-0076's
-> read applied to this store.** ADR-0076 exists because "a process that died between the
-> stamp and the drop left work **no later run could rediscover**", making "the residue §8's
-> grace and reclaim exist to reclaim … permanent by the absence of a way to enumerate it".
-> A store whose rows are removed by a cross-store sequence has exactly that defect and needs
-> exactly that remedy. So this store owes an enumeration, in ADR-0076's shape member for
-> member: **ids and nothing else** — no draw, no flag, no stamp instant, because the pass
-> needs an id and nothing more, and a value-returning read would be a resurrection of
-> exactly what the stamp hides; **`id` ascending with the cursor placed lexically
-> and not by looking the row up**, which is a correctness requirement here for ADR-0076's
-> own reason — this walk's rows are removed by the very sweep walking them, so an id naming
-> no row is a perfectly good cursor and is not an error; **reading removes nothing**, so a
-> resumed walk is as safe as a restarted one; and a **bounded batch**, `limit` defaulting to
-> the store's configured **100**, the figure ADR-0076's walk already uses, a fixed figure
-> and not a `Settings` field. It yields **every** conversation this store holds a row for,
-> stamped or not, because the row a retention reclaim leaves behind was never stamped.
+> **Normative.** **`Conversation`, `ConversationTurn` and `ConversationExport` gain no
+> field and change no version.** The counters are the store's own row state rather than
+> presented model state — the position the turn index and `ParkedBinding`'s uniqueness
+> already hold — and `search_draw` is the read that presents them, added for
+> `orchestration`'s use and not for a surface. So `ConversationExport.schema_version` stays
+> at **2** and ADR-0212 §8 and ADR-0014 §5 are untouched. **A lane that finds a user-facing
+> need for the draw moves that version in the same change**, with the records that entails,
+> rather than reading this clause as permission not to; §16 records what fires it.
 
-> **Normative.** **`drop` removes one conversation's row entirely, stamped or not, and the
-> reconciliation is its only caller.** It is idempotent and answers the same on a
-> conversation the store holds no row for. **The lifecycle stage calls it for one reason
-> only: the walk yielded an id for which the `ConversationStore` holds no record at all.**
-> The reconciliation is the same sweep ADR-0074 §8 already runs — in the deleting call, at
-> engine start, and later on the hub's schedule — extended by one pass that drains
-> `budgeted_conversation_ids` to an empty batch and drops what no conversation claims. Like
-> every other part of that sweep it is idempotent, resumable and re-runnable.
-
-> **Normative.** **This cross-store read is admissible where §8's earlier one was not, and
-> the difference is stated rather than assumed.** The read this section refuses is one that
-> **licenses a write creating state at a servicing site**, where a stale answer becomes a
-> wrong ruling and where two engines make the ordering unavailable. This one licenses a
-> **removal, in the lifecycle stage ADR-0074 §9 already gives every cross-store sequence**,
-> and its staleness is one-directional and harmless in both directions. A conversation
-> record is never resurrected — ids are opaque and minted per conversation (ADR-0074 §1) —
-> so "no record" cannot become "a record", and a row dropped on that answer was never a live
-> conversation's. And where the answer is stale the *other* way, the row is simply kept and
-> reconsidered on the next pass. **A lane that reads this clause as re-admitting the fence
-> §8 removed has misread it**: nothing here is consulted by `claim`, by `observe`, or by any
-> path that decides whether a search may be serviced.
-
-> **Normative.** **The residue is bounded by the sweep, which is ADR-0074 §8's own bound
-> for the same class of thing.** Between a conversation's destruction and the next
-> reconciliation pass, this store holds that conversation's row — **two counters, one flag
-> and a stamp; no query, no result, no destination, no record and no text**. That is
-> strictly less than the tombstone ADR-0074 §8 already accepts for the same interval,
-> "ordinals, timestamps and episode ids — **no content** — surviving a deletion the user was
-> told succeeded", and it is bounded the same way: by a sweep that runs in the deleting call,
-> at start-up and on the hub's schedule. ADR-0074 §8 names an *unbounded* version of this
-> the "content-free-but-real residue" it bounds, and **bounded is the whole of what makes it
-> permissible**. ADR-0126's destruction of the cold data directory removes the store with
-> everything else.
-
-> **Normative.** **The walk is also what closes the window a fold suspended past a deletion
-> would otherwise leave open.** A fold that commits after both the stamp and the record are
-> gone creates a row for a conversation that no longer exists — ADR-0074 §8's orphaned-write
-> shape, which that section accepts permanently for an episode because nothing can
-> enumerate what to sweep. Here something can: the next reconciliation pass yields that id,
-> finds no record, and drops it. **So this store's version of that window is bounded by one
-> sweep rather than accepted for good**, and the ADR claims exactly that and no more — a row
-> created after the last pass stands until the next one, and a system whose sweep never runs
-> again keeps it, which is the same condition under which ADR-0074's own tombstones persist.
-
-> **Normative.** This ADR adds **one call** to ADR-0074 §8's deletion and **nothing** to
-> §7's reclaim, changing the shape of neither, and **`ConversationStore` gains no member,
-> `Conversation` and `ConversationTurn` gain no field, and `ConversationExport` does not
-> change shape or version** — the walk this decision needs is the one ADR-0076 already put
-> on that store, read rather than widened.
-
-> **Normative.** **`claim` is called before a query is composed**, at the servicing site §2
-> names. Where it refuses, **no supply is constructed, no query is composed, no ruling is
-> sought, no credential is read and no channel is opened**, and §11's audit records it. This
-> is ADR-0231 §11's no-slot clause in a second place and by the same posture: the servicing
-> does not yield, the turn composes from what it has, the user is asked nothing and nothing
-> is parked.
+> **Normative.** **`claim_search` is called before a query is composed**, at the servicing
+> site §2 names. Where it refuses, **no supply is constructed, no query is composed, no
+> ruling is sought, no credential is read and no channel is opened**, and §11's audit
+> records it. This is ADR-0231 §11's no-slot clause in a second place and by the same
+> posture: the servicing does not yield, the turn composes from what it has, the user is
+> asked nothing and nothing is parked.
 
 > **Normative.** **This ADR adds no monetary bound**, no `SpendGate`, no ledger row, no
 > ceiling and no `Settings` field for one, and ADR-0194's mechanism is neither coupled
@@ -1215,7 +1139,7 @@ from the audit two weeks later.
 > ADR-0004 §5 bind without qualification.
 
 > **Normative.** **`SearchDisposition` gains exactly one member and is closed at
-> sixteen**, recording that a servicing did not reach a query because `claim` refused. It is
+> sixteen**, recording that a servicing did not reach a query because `claim_search` refused. It is
 > not free text, it collapses with no existing member, the mapping from each refusal
 > vocabulary stays **injective**, and it lives in `ai_assistant.orchestration` beside the
 > rest of that enumeration, which crosses no subsystem boundary. **This supersedes ADR-0231
@@ -1237,8 +1161,8 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 ### 12. The negative arm, stated as obligations
 
 > **Normative.** **An injected result cannot raise the budget.** Both bounds are
-> `Settings` values read by `orchestration`; the draw is a durable counter §8's store
-> increments atomically before a channel opens. **`settle` writes a clock reading
+> `Settings` values read by `orchestration`; the draw is a durable counter §8's
+> `claim_search` increments atomically before a channel opens. **`settle_search` writes a clock reading
 > `orchestration` took, not a value anything else produced** — and a provider that stalled
 > to inflate it would only spend the conversation's budget faster, which is the fail-closed
 > direction. No value a model produced, a request carried or a search result contained
@@ -1281,15 +1205,18 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > **Normative.** The `core` surface this decision adds is exactly this and no more. In
 > `core/types.py`: `DestinationTrust`, `DestinationTrustRecord`, `SearchSupply` and
 > `ConversationSearchDraw` and `SearchClaim` as new types, and one member on each of `EgressBinding` and
-> `CarriedProvenance` (`closed_loop`, defaulting to `False`). In `core/protocols.py`: two
-> new `@runtime_checkable` Protocols, `DestinationTrustStore` with its five members and
-> `SearchBudgetStore` with its seven, and the changed parameter type on
+> `CarriedProvenance` (`closed_loop`, defaulting to `False`). In `core/protocols.py`: **one**
+> new `@runtime_checkable` Protocol, `DestinationTrustStore` with its five members; **four
+> new members on `ConversationStore`** (§8), which is the one existing Protocol this
+> decision widens; and the changed parameter type on
 > `QueryComposer.compose`. In `core/errors.py`: `InvalidDestinationTrustError`. In
 > `core.config.Settings`: the two fields §8 names and the cross-field refusal §10 states.
 > **No other member of any `core` type or Protocol changes its type, its default or its
-> meaning** — `ActionPolicy`, `AuditTrail`, `ConversationStore`, `MemoryStore` and
-> `WebSearcher` each gain no member, no argument and no widened return; `Conversation`,
-> `ConversationTurn` and `ConversationExport` gain no field and change no version;
+> meaning** — `ActionPolicy`, `AuditTrail`, `MemoryStore` and
+> `WebSearcher` each gain no member, no argument and no widened return; **no existing
+> member of `ConversationStore` changes its signature, its answer or its meaning**;
+> `Conversation`, `ConversationTurn` and `ConversationExport` gain no field and change no
+> version;
 > `Provenance` gains no field, so ADR-0098 §5's deferral of a per-span externality fact is
 > neither taken nor narrowed; and `CarriedProvenance.spans`, its key and value types, its
 > detachment validator and its serializer all stand.
@@ -1305,8 +1232,9 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > **Normative.** **`ConfirmationEgress` gains no member and `ConversationExport` changes
 > neither shape nor version.** `closed_loop` is an authorisation-route fact rather than a
 > fact about what would leave, and ADR-0233 §8's floor — the one thing a surface owes about
-> a model-composed span — turns on `coverage` and not on this; §8's counters live in their
-> own store precisely so that `Conversation` and `ConversationTurn` stay as they are, which
+> a model-composed span — turns on `coverage` and not on this; §8's counters are the
+> conversation record's own row state and appear on neither presented model, so
+> `Conversation` and `ConversationTurn` stay as they are, which
 > leaves `ConversationExport.schema_version` at **2** and ADR-0212 §8 and ADR-0014 §5
 > untouched. **A lane that finds either statement false moves the corresponding version in
 > the same change** rather than reading this clause as permission not to.
@@ -1317,11 +1245,10 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > is the state every binding in this corpus carries today, so nothing decoded changes
 > behaviour.
 
-> **Normative.** **A conversation §8's store holds no row for reads a zero draw and no flag
-> at all** — `draw_of` answers `None` — and §5's recorded half is then satisfied only where
-> that conversation has no recorded turn before this one. No lane back-fills a row, infers
-> one, reconstructs one from an episode, a log or a trail, or reads a missing row as a clean
-> history.
+> **Normative.** **A conversation record written before this decision decodes with a zero
+> draw and the flag `False`** (§8), so §5's recorded half refuses it and every search of it
+> runs under ADR-0231 §12 as ratified. No lane back-fills the field, infers it, reconstructs
+> it from an episode, a log or a trail, or reads a pre-existing record as a clean history.
 
 > **Normative.** **A conversation in progress when the implementing lane lands behaves
 > exactly as it does under ADR-0231 today**: it is not closed-loop, so it searches under
@@ -1331,43 +1258,32 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 
 ### 14. What the implementing lane owes
 
-> **Normative.** **Both** new Protocols ship as **triads** — the Protocol, a shared
+> **Normative.** **One new Protocol, and it ships as a triad** — the Protocol, a shared
 > conformance suite asserting its obligations, and a canonical fake in
 > `ai_assistant.testing` — in one change, never deferred (`CONTRIBUTING.md` → "Adding a
-> Protocol"). The `QueryComposer` conformance suite's one-positional-parameter check is
-> kept and is restated over the new parameter type.
+> Protocol"). That is `DestinationTrustStore`. **§8's four members are a widening of an
+> existing Protocol, not a triad**: `ConversationStore`'s conformance suite and its
+> canonical fake already exist, and the lane extends both in the same change. The
+> `QueryComposer` conformance suite's one-positional-parameter check is kept and is
+> restated over the new parameter type.
 
-> **Normative.** **`SearchBudgetStore`'s conformance suite asserts the atomicity `claim`
-> claims**, in the shape `RecipientGrantStore`'s ceiling test already takes: concurrent
-> claims against a bound of one yield exactly one admission, and an implementation that
-> reads, compares and writes as three awaits fails it. An implementation that cannot be
-> opened twice states so and skips, as the ledger contracts already do.
+> **Normative.** **`ConversationStore`'s conformance suite asserts the atomicity
+> `claim_search` claims**, in the shape `RecipientGrantStore`'s ceiling test already takes:
+> concurrent claims against a bound of one yield exactly one admission, and an
+> implementation that reads, compares and writes as three awaits fails it. An
+> implementation that cannot be opened twice states so and skips, as the ledger contracts
+> already do. **This is the suite that already asserts §9's append-versus-deletion
+> exclusion**, so the new arms extend a property the suite states rather than introducing
+> one.
 
-> **Normative.** **That suite also asserts the stamp, because the stamp is the whole of §8's
-> deletion fence and an implementation that merely dropped the row would pass every other
-> assertion in it.** After `forget`: `draw_of` answers `None`; `claim` answers `None`;
-> `observe` raises nothing and leaves `draw_of` answering `None`; a second `forget` changes
-> nothing; and `forget` on a conversation the store never held leaves a state in which
-> `observe` still creates no row — the arm that separates a stamp from a drop. And after
-> `drop`: the row is gone, `draw_of` answers `None`, a second `drop` changes nothing, and
-> `observe` **creates a row again**, because `drop` removes the stamp with the row and the
-> conversation it named is gone.
-
-> **Normative.** **The suite asserts `budgeted_conversation_ids` as a walk, in the shape
-> ADR-0076's own conformance already takes**: it yields every id the store holds a row for,
-> stamped and unstamped alike; it is `id` ascending; an `after_id` naming **no row** is a
-> valid cursor and not an error; `limit` of `0` answers an empty batch; reading removes
-> nothing; and a walk interleaved with `drop` of the ids it has already yielded still drains
-> to an empty batch without skipping an id it had not yet reached. That last arm is the one
-> the sweep's real shape needs and the one a lookup-placed cursor fails.
-
-> **Normative.** **The lane wires the reconciliation pass into the sweep that already
-> exists**, and does not add a second scheduler, a background task or a `Settings` field for
-> an interval. ADR-0074 §8's reclaim already runs in the deleting call, at engine start and
-> on the hub's schedule; §8's pass is one more step of it, draining
-> `budgeted_conversation_ids` to an empty batch. **Draining is not optional**: finishing a
-> batch and stopping is the failure ADR-0076 names for its own walk, and a pass that stops
-> early leaves exactly the residue the walk was added to bound.
+> **Normative.** **That suite also asserts what the four members do at the two lifecycle
+> edges**, because an implementation that stored the counters anywhere but on the record
+> would pass every other assertion in it. On an id that **names nothing**: `search_draw`
+> answers `None`, `claim_search` answers `None`, `observe_search` raises nothing, and
+> afterwards `search_draw` still answers `None` — **nothing was created**. On a conversation
+> **stamped deleted**: the same four answers, alongside the `append` refusal the suite
+> already asserts for that state. And after `drop_if_eligible` has removed the record, the
+> same again. **No arm asserts a budget lifecycle member, because there is none.**
 
 > **Normative.** **The `PROTOCOL_VERSION` move (§13) rides the `core` change**, with its
 > `wire/envelope.py` log entry, because the field lands there and a version behind the
@@ -1458,29 +1374,29 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > interval turns out to be, and no call is cancelled from outside the seam.
 
 > **Normative.** **Arm 6c2 — one claim at a time, and settlement in both directions.**
-> While a claim of a conversation is outstanding, a second `claim` for it is refused; after
-> `settle` releases the unused remainder, a further claim is admitted. A claim settled
-> **below** its charge returns the remainder; one settled **above** it raises the stored
-> `elapsed` past the bound, and the next `claim` is then refused.
+> While a claim of a conversation is outstanding, a second `claim_search` for it is
+> refused; after `settle_search` releases the unused remainder, a further claim is admitted.
+> A claim settled **below** its charge returns the remainder; one settled **above** it
+> raises the stored `elapsed` past the bound, and the next `claim_search` is then refused.
 
-> **Normative.** **Arm 6c3 — `forget` under an outstanding claim.** A conversation deleted
-> while one of its searches is in flight reads as no row afterwards — stamped when the
-> deletion lands, then removed by the reconciliation pass; settling that claim revives
-> neither, raises nothing, and the in-flight servicing completes and reports normally.
+> **Normative.** **Arm 6c3 — a deletion under an outstanding claim.** A conversation
+> deleted while one of its searches is in flight: `settle_search` on that claim afterwards
+> changes nothing, raises nothing and creates nothing, and the in-flight servicing completes
+> and reports normally.
 
-> **Normative.** **Arm 6c4 — no fold resurrects a deleted conversation, and the arm forces
-> the interleaving rather than assuming it.** A conversation deleted between `claim` and the
-> admission fold, and one deleted between its search returning and its capture, each leave
-> **no row** afterwards: neither the admission fold, nor capture's fold, nor `settle`
-> creates one, and `draw_of` answers `None` for both.
+> **Normative.** **Arm 6c4 — a late fold writes nothing, and the arm forces the
+> interleaving rather than assuming it.** A conversation stamped between `claim_search` and
+> the admission fold, and one stamped between its search returning and its capture: neither
+> fold changes anything, neither raises, and `search_draw` answers `None` for both. The same
+> is driven **after the record is dropped**, where there is nothing left to write to at all.
 
-> **Normative.** **Arm 6c4b — the fold that a cross-store check would have licensed.** The
-> arm drives the exact order the removed check-then-act would have got wrong: the fold's
-> caller reads the conversation as **existing**, then `forget` lands, then the fold calls
-> `observe`. **No row exists afterwards** and `draw_of` answers `None`. The same order is
-> asserted for `claim` — read-exists, `forget`, `claim` — which answers `None` and charges
-> nothing. Both are asserted on a conversation the store held **no row for** when `forget`
-> ran, which is the case a drop could not fence and the stamp does.
+> **Normative.** **Arm 6c4b — the order a cross-store check would have got wrong.** The arm
+> drives it explicitly: the fold's caller reads the conversation as **existing**, the
+> deletion then lands, and the fold calls `observe_search`. Nothing is created, `search_draw`
+> answers `None`, and a subsequent `claim_search` answers `None` and charges nothing. The
+> arm exists because this is the interleaving no ordering between two stores could have
+> fenced, and it is the one this decision makes unreachable by putting the counters on the
+> record.
 
 > **Normative.** **Arm 6d — a claimed call is never refunded.** A servicing whose ruling is
 > not `ALLOW`, one whose binding refused, and one whose provider answered
@@ -1491,71 +1407,60 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > stays false when a later turn's supply carries nothing external at all, including after
 > the tainting episode has fallen out of the tail.
 
-> **Normative.** **Arm 6f — absence is not a clean history, and creating a row does not
-> launder one.** A conversation with recorded turns and no budget row is not closed-loop,
-> **including where its stamped episode no longer resolves and its current supply carries
-> nothing external at all**; and after a clean turn of that conversation has been observed —
-> which creates its row — it is **still** not closed-loop, because the row was created false.
-> A conversation with no recorded prior turn and no row is closed-loop on the first two
-> conditions. All three are asserted, because the middle one is the hole that opens one turn
-> after the first is closed.
+> **Normative.** **Arm 6f — a legacy conversation cannot be laundered clean.** A
+> conversation record written before this decision — decoding with the flag `False` — is not
+> closed-loop, **including where its stamped episode no longer resolves and its current
+> supply carries nothing external at all**; and after a clean turn of it has been observed
+> it is **still** not closed-loop, because `observe_search` folds by **and** and never
+> raises. A conversation `start` minted after the decision landed is closed-loop on the
+> first two conditions from its first turn. Both are asserted, because the first is the hole
+> that opens one turn after a naive reading closes it.
 
 > **Normative.** **Arm 6f2 — a dirty turn closes the conversation at admission, not at
 > capture, and closes it even when it never searches.** With
 > `search_calls_per_conversation` above one, on a conversation whose destination reads
-> `USER_CHOSEN` and whose row is true, in two shapes. **(i)** Turn A services a local-file
+> `USER_CHOSEN` and whose stored flag is true, in two shapes. **(i)** Turn A services a local-file
 > read and then a `WEB_SEARCH`, so A's own request binds `closed_loop` false; a second
 > servicing of that conversation, admitted **after A's claim is settled and before A is
 > captured**, carries nothing external of its own and is **not** closed-loop. **(ii)** Turn
 > A services a local-file read and **builds no search request at all**; a concurrent turn B
 > claims and composes, and B is **not** closed-loop for the same reason. The stored flag is
 > false in both, and A's later capture folds false again to no effect. **(iii) The window,
-> asserted as the boundary §8 states and not as an ordering.** B's `claim` is admitted
-> **while A's admission fold is still in flight** — the arm blocks inside `observe` and
-> releases it, rather than sequencing the two calls and hoping — and B **is** admitted on
+> asserted as the boundary §8 states and not as an ordering.** B's `claim_search` is admitted
+> **while A's admission fold is still in flight** — the arm blocks inside `observe_search`
+> and releases it, rather than sequencing the two calls and hoping — and B **is** admitted on
 > the not-yet-lowered flag, which is the residual §8 names and this arm records so that it
 > is a ratified property and not a surprise found later. The arm then asserts the guarantee
-> that *is* made: once that `observe` has returned, the next `claim` of the conversation is
-> admitted on a false flag and its request is **not** closed-loop.
+> that *is* made: once that `observe_search` has returned, the next `claim_search` of the
+> conversation is admitted on a false flag and its request is **not** closed-loop.
 
 > **Normative.** **Arm 6g — the last permitted call is usable.** With
 > `search_calls_per_conversation` set to one, the admitted servicing's own request is
 > closed-loop: the fourth condition reads the claim this request holds, not the capacity
 > left after charging it. The same is asserted for the last second of the elapsed bound.
 
-> **Normative.** **Arm 6h — `forget` stamps and the reconciliation clears.** A deleted
-> conversation and a reclaimed one each leave **no row** once the reconciliation pass has
-> run; `forget` answers the same on a second call and on a conversation that never had a
-> row; `drop` answers the same on a second call and on a conversation that never had a row;
-> and a conversation whose row is gone and whose turns are gone reads as a conversation with
-> no recorded prior turn.
+> **Normative.** **Arm 6h — the budget goes with the record, and no step is added to make
+> it.** A deleted conversation and a reclaimed one each leave nothing behind: after
+> `stamp_deleted` all four members answer as §8 states, and after `drop_if_eligible` has
+> removed the record `search_draw` answers `None`. **The arm asserts that ADR-0074 §7's and
+> §8's sequences run exactly as they run on `origin/main`** — no extra call, no extra
+> ordering — and that a conversation whose record is gone reads as an unknown id.
 
-> **Normative.** **Arm 6h2 — the two sequences and the pass, in place.** ADR-0074 §8's
-> deletion run whole, followed by a reconciliation pass, leaves no row. **§7's reclaim of an
-> ineligible conversation** — `drop_if_eligible` answering `False` — leaves that
-> conversation's row **exactly as it was**, flag and counters included, and its next search
-> is admitted against it; **the pass leaves it alone too**, because the `ConversationStore`
-> still holds its record. And a deletion interrupted after `stamp_deleted` and re-run leaves
-> the same state as one that ran straight through, which is what ADR-0074 §8's
-> re-runnability requires of the store this ADR adds to it.
+> **Normative.** **Arm 6h2 — the three crash points that cost an earlier revision two
+> rounds, each now a no-op.** **(i)** A retention reclaim whose `drop_if_eligible` answered
+> `True`, after which the process dies: **there is nothing left to clean**, because the
+> counters went with the record in that one call. **(ii)** A deletion interrupted after
+> `stamp_deleted` and re-run: the same state as one that ran straight through, and the
+> budget is fenced from the first stamp onward. **(iii)** A fold that commits after the
+> record is dropped: it writes nothing and creates nothing, and no sweep is needed to
+> collect anything. Each arm asserts `search_draw` answers `None` and that no path
+> reintroduces a row.
 
-> **Normative.** **Arm 6h3 — the three crash windows the walk exists for, each driven and
-> each recovered.** **(i)** A retention reclaim whose `drop_if_eligible` answered `True`,
-> after which the process dies: the row stands with no conversation, and **the next
-> reconciliation pass removes it**. **(ii)** A deletion that dies after
-> `ConversationStore.stamp_deleted` and before `forget`: the conversation is still
-> enumerable through `stamped_conversation_ids`, the reclaim's re-run stamps the row, and
-> the pass removes it once the record is dropped. **(iii)** A fold that commits after both
-> the record and the row are gone, creating a row for a conversation that no longer exists:
-> **the next pass removes that too.** Each arm asserts `budgeted_conversation_ids` yields
-> the stranded id and that `draw_of` answers `None` afterwards.
-
-> **Normative.** **Arm 6h4 — a stamped row is never left on a live conversation.** The arm
-> drives a deletion that dies **between** `stamp_deleted` and `forget` and asserts the
-> conversation's row is **not** stamped; and it asserts that no path in either sequence
-> calls `forget` for a conversation the `ConversationStore` does not hold stamped. That is
-> the state nothing repairs — a live conversation whose searching is silently over — and
-> the ordering in §8 is what makes it unreachable.
+> **Normative.** **Arm 6h3 — a reclaim that declines leaves the draw alone.** §7's reclaim
+> of an **ineligible** conversation — `drop_if_eligible` answering `False` — leaves that
+> conversation's counters and flag **exactly as they were**, and its next search is admitted
+> against them. That is the arm that would fail for any design in which some sweep decided,
+> from outside the store's exclusion, that a conversation's budget could be cleared.
 
 > **Normative.** **Arm 7 — the spend interaction.** A deployment with a declared per-call
 > figure, a period ceiling and no `world_spend_unknown_allowance` is refused at
@@ -1611,17 +1516,18 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
   how a deadline reaches `WebSearcher.search` at all. Not fired by a lane finding one
   conversation's overrun large.
 - **Serialising servicings of one conversation**, which is what would close §8's stated
-  window between an admission fold and a concurrent turn's `claim`. Fired by an ADR that
+  window between an admission fold and a concurrent turn's `claim_search`. Fired by an ADR that
   gives `orchestration` a per-conversation ordering across concurrent turns and holds it
   across two engines — a store-level obligation in ADR-0074 §9's shape, not a lock, which
   §8 records as answering nothing. Not fired by a lane finding the window narrow, and not
   by one finding it wide.
-- **Removing the residue *between* reconciliation passes**, rather than bounding it by
-  one. §8's walk drops a stranded row on the next pass; what it does not do is make the
-  destruction of a conversation and the removal of its row one act. ADR-0074 §8 names what
-  would — "a transactional posture across the local stores, which is leg 5's 'stores'
-  concurrent-access posture' hardening tail" — and this ADR inherits that entry rather than
-  opening a second one. Not fired by a lane finding a sweep interval long.
+- **Presenting the draw to the user, and with it a `ConversationExport` version move.**
+  §8 keeps the counters as the store's own row state, so `Conversation`,
+  `ConversationTurn` and `ConversationExport` are untouched and
+  `ConversationExport.schema_version` stays at 2. Fired by an ADR or a surface lane that
+  finds a user-facing need for the draw, which moves that version in the same change with
+  the ADR-0014 §5 and ADR-0212 §8 records it entails. Not fired by an implementing lane
+  finding it convenient.
 - **The surfaces that offer §1's act.** ADR-0193 §13's assignment (§14).
 - **The two corpus findings this ADR reports rather than settles**: ADR-0223 §6's and
   ADR-0233 §9's disagreement about which clause of ADR-0181 §5 is the lineage floor
@@ -1631,14 +1537,27 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 
 ### 17. Scope, and what this records against earlier ADRs
 
-> **Normative.** This ADR partially supersedes **five** ratified ADRs and amends none.
-> ADR-0231 in six scopes, ADR-0233 in two, ADR-0155 in one, ADR-0181 in one and ADR-0193
+> **Normative.** This ADR partially supersedes **six** ratified ADRs and amends none.
+> ADR-0231 in six scopes, ADR-0233 in two, ADR-0155 in one, ADR-0181 in one, ADR-0193
 > in **three** — §3's fifth comparison, §4's first clause and §6's eighth-check clause in
-> one limb — each named on that ADR's `Status` line and in its appended dated note under
-> ADR-0082 §1 and §2. **No other ADR's text moves**, and in particular ADR-0014, ADR-0074,
-> ADR-0098, ADR-0106, ADR-0146, ADR-0148, ADR-0152, ADR-0154, ADR-0178, ADR-0184,
-> ADR-0194, ADR-0204, ADR-0205, ADR-0212, ADR-0217, ADR-0223, ADR-0226, ADR-0228,
-> ADR-0230, ADR-0235 and ADR-0236 are relied upon as written.
+> one limb — and **ADR-0074 in one**: §9's enumeration of what `ConversationStore` owes,
+> which §8 widens by four members. Each is named on that ADR's `Status` line and in its
+> appended dated note under ADR-0082 §1 and §2. **No other ADR's text moves**, and in
+> particular ADR-0014, ADR-0076, ADR-0098, ADR-0106, ADR-0146, ADR-0148, ADR-0152,
+> ADR-0154, ADR-0178, ADR-0184, ADR-0194, ADR-0204, ADR-0205, ADR-0212, ADR-0217, ADR-0223,
+> ADR-0226, ADR-0228, ADR-0230, ADR-0235 and ADR-0236 are relied upon as written.
+
+> **Normative.** **ADR-0074's record is the scope ADR-0205 and ADR-0212 each took on that
+> same section, and no wider.** Its `Status` line already reads "ADR-0205 (§9's enumeration
+> of what a `ConversationTurn` carries and of what the `ConversationStore` owes)" and
+> "ADR-0212 (§9's enumeration of what Conversation carries and what ConversationStore
+> owes …)", so this pair **accumulates** under ADR-0070 §4 beside them and displaces
+> neither. **What moves is the obligation list alone**: a reader holding ADR-0074 would
+> build a `ConversationStore` owing eleven things and find four missing. **ADR-0074 §7's
+> retention reclaim, §8's deletion protocol, §9's exclusion obligation, its two-store
+> reasoning and its `core/types.py` enumeration are relied upon as written and are not
+> moved** — §8 adds no step to either sequence and no field to either type, which is the
+> whole point of putting the counters where the lifecycle already is.
 
 > **Normative.** **These records are made in this ADR's own change, while it stands
 > `Proposed`, and that is ADR-0082 §7's rule rather than an oversight.** §7 names the
@@ -1648,14 +1567,17 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > ratified** — the hazard §1 names is a `Status` line pointing at nothing, and an atomic
 > pair makes that unreachable." ADR-0231's own header records that ADR-0235 did exactly
 > this. **And the alternative would cost a round**: ADR-0165 exempts a ratification flip only
-> where it is one ADR file and one changed line, so moving five other files' `Status` lines
+> where it is one ADR file and one changed line, so moving six other files' `Status` lines
 > in that commit would forfeit the exemption. No lane defers these records to the flip.
 
-> **Normative.** **Four near misses are named, because each was a supersession an earlier
+> **Normative.** **Two near misses are named, because each was a supersession an earlier
 > draft of this ADR would have owed and each is avoided by a decision rather than by luck.**
-> ADR-0152 §7's transcription count, by §5's default. ADR-0212 §8's and ADR-0014 §5's
-> export version, and ADR-0074 §9's enumeration, by §8's own store. A lane that reverses any
-> of those three decisions owes the record that decision avoids, and says so.
+> ADR-0152 §7's transcription count, by §5's default; and ADR-0212 §8's and ADR-0014 §5's
+> export version, by §8 keeping the counters as the store's own row state rather than
+> putting them on `Conversation`. A lane that reverses either decision owes the record it
+> avoids, and says so. **ADR-0074 §9's enumeration is no longer among them** — an earlier
+> draft avoided it with a store of its own, and §8 now takes that record instead, which is
+> the trade this decision makes deliberately.
 
 > **Normative.** **ADR-0231 §16 is relied upon and is not moved.** Nothing here retains a
 > minted record, admits one to a store, an archive or a later turn, or leaves a hook for
@@ -1668,12 +1590,12 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > act does not contain; §8's two `Settings` fields; §10's cross-field refusal; and §11's
 > two counts and one `SearchDisposition` member.
 
-> **Normative.** On ADR-0231, ADR-0155 and ADR-0193, whose `Status` lines already lead
-> with `Partially superseded by`, this ADR's pair is **appended** to the existing pairs on
-> the same line under ADR-0070 §4's accumulation rule, and no existing pair is dropped or
+> **Normative.** On ADR-0231, ADR-0155, ADR-0193 and ADR-0074, whose `Status` lines already
+> lead with `Partially superseded by`, this ADR's pair is **appended** to the existing pairs
+> on the same line under ADR-0070 §4's accumulation rule, and no existing pair is dropped or
 > rewritten. On ADR-0233 and ADR-0181 the line takes the leading token and `Accepted` is
-> dropped, as `docs/adr/template.md` requires. **No ratified sentence of any of the six is rewritten**, and no
-> body text outside the header is touched.
+> dropped, as `docs/adr/template.md` requires. **No ratified sentence of any of the seven is
+> rewritten**, and no body text outside the header is touched.
 
 ### 18. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
@@ -1706,11 +1628,18 @@ differently, or read one of its clauses more widely than it now holds?
   would then stop the search anyway. Supersession. The other seven limbs, the
   `OriginUnrecordedBinding` arm, the ordering rule, the revocation rule and the digest
   recomputation are untouched.
-- **ADR-0074 §9's enumeration, ADR-0212 §8's `Literal[2]`, ADR-0014 §5's version rule and
-  ADR-0152 §7's transcription count** — **no**, on all four, and each is a near miss §17
-  names. `ConversationTurn` and `Conversation` gain nothing, so the export's shape and
-  version stand; and `rebind` transcribes nothing new, so §7's count stands. A reader of
-  any of the four acts identically.
+- **ADR-0074 §9's enumeration of what `ConversationStore` owes** — **yes.** A reader
+  holding only ADR-0074 would build that store owing eleven things and would find
+  `search_draw`, `claim_search`, `settle_search` and `observe_search` missing; §8 requires
+  all four. Supersession, in that enumeration alone. §9's exclusion obligation, its
+  two-store reasoning, its `core/types.py` enumeration, §7's reclaim and §8's deletion
+  protocol are untouched — §8 leans on them rather than moving them, and a reader of any of
+  those acts identically.
+- **ADR-0212 §8's `Literal[2]`, ADR-0014 §5's version rule and ADR-0152 §7's transcription
+  count** — **no**, on all three, and each is a near miss §17 names. `ConversationTurn` and
+  `Conversation` gain nothing, so the export's shape and version stand; and `rebind`
+  transcribes nothing new, so §7's count stands. A reader of any of the three acts
+  identically.
 - **ADR-0223 §6** — **no.** Its clause requires the floor to apply for a stamped-episode
   cause exactly as for any other, and forbids an episode-shaped carve-out. §5's condition
   is cause-blind, so a reader of ADR-0223 acts identically. No record owed, and §16 files
@@ -1744,8 +1673,8 @@ before any lane implements against it (golden rule 5).
 - **The exclusion question has an answer that already exists.** `Placement` is the user's
   own act, already on every record, already narrowable only downward by a model.
 - **The budget is visible.** Calls and elapsed time per conversation are recorded on the
-  turn row and reported in counts, so "how much did the loop search" is answerable from
-  the audit rather than from a guess.
+  conversation record and reported in counts, so "how much did the loop search" is
+  answerable from the audit rather than from a guess.
 - **#2126's trap is closed before anyone falls into it**, by a refusal at load rather than
   a `SpendUndeterminedError` on the second search of a period.
 
@@ -1766,31 +1695,32 @@ before any lane implements against it (golden rule 5).
   mechanism is inert, and a user who performs only the first gets the old behaviour with no
   explanation — which is ADR-0231 §19's "telling the user a search was refused" deferral,
   inherited and now costing more.
-- **Two new stores, and two triads for one implementing lane.** Destination trust and the
-  search budget are each small and each genuinely new, but a lane owing two Protocols, two
-  conformance suites and two canonical fakes beside a composer change and a binding field is
-  a large lane, and the batch that briefs it should expect that.
+- **One new store and one widened one.** Destination trust is genuinely new and ships as a
+  triad; the budget is four members on `ConversationStore`, whose conformance suite and
+  canonical fake already exist and are extended in the same change. That is a smaller lane
+  than an earlier revision's two triads, and it is the second time this decision has got
+  smaller by taking something out.
+- **`ConversationStore` is a large Protocol and this makes it larger.** Four more members on
+  a contract that already carries seventeen is a real cost, and a reader looking for "what
+  does a conversation store owe" now has more to hold. It is paid deliberately: the
+  alternative was a second store whose whole content was a lifecycle this one already has,
+  and twelve review rounds established that reproducing that lifecycle across two stores is
+  where the defects live.
 - **A conversation's budget is charged in full and then settled, in either direction.** A
   claim takes the whole remaining elapsed budget up front, so while a search is in flight
   that conversation cannot start another — searching is serialised per conversation, which
-  is a real constraint on a conversation being driven from two devices at once. `settle`
-  then writes what the call actually took, **which may be more than was charged**: the
+  is a real constraint on a conversation being driven from two devices at once.
+  `settle_search` then writes what the call actually took, **which may be more than was charged**: the
   accounted interval includes ADR-0192's unbounded ledger writes, so one call may carry the
   total past the bound and no size is claimed for that excess. A turn that dies after
   claiming leaves the whole remainder charged, so an unlucky conversation searches less than
   its bound would allow. Both are the fail-closed direction, and they are the price of not
-  writing to the store twice per call.
-- **A deleted conversation's row outlives it until the next sweep, and this store owes a
-  walk to make that bounded.** §8's `forget` is a stamp rather than a drop, because a drop
-  cannot fence an observation that arrives after it and this decision would not rest on a
-  cross-store check that can go stale between two awaits. Removing the row then cannot ride
-  the deletion sequence — every ordering across the two stores leaves a crash window in
-  which the conversation is destroyed and its row is left with nothing able to rediscover
-  it — so removal is a reconciliation pass over `budgeted_conversation_ids`, which is
-  ADR-0076's remedy for ADR-0074 §8's identical defect. The price is a seventh member and a
-  sweep obligation on the implementing lane; what it buys is that the residue is bounded by
-  a sweep rather than accepted for good, including the orphan ADR-0074 §8 accepts
-  permanently for an episode.
+  writing to the record twice per call.
+- **A deleted conversation leaves no budget residue at all, and that is the whole return
+  on the widening.** Because the counters are the record's, `stamp_deleted` fences them and
+  `drop_if_eligible` destroys them, so this decision adds nothing to ADR-0074 §8's residue
+  and owes no sweep, no stamp of its own and no recovery walk. The three crash windows an
+  earlier revision had to name are not narrowed here; they do not exist.
 - **Two turns of one conversation are not ordered against each other, and §8 says so.** The
   early fold narrows the window in which a concurrent turn can be admitted on a
   not-yet-lowered flag from a whole turn to a single store write, and does not close it.
@@ -1852,42 +1782,45 @@ it crosses ADR-0194 §2's estimate/reported boundary and substitutes a figure no
 measured, which that clause's no-stand-in rule refuses. The allowance is the mechanism the
 corpus already has for a reported `UNKNOWN`.
 
-**Fence `observe`'s creation power with the `ConversationStore`, rather than with a stamp.**
-Refused, and it is what §8 said in an earlier draft. `orchestration` reading that a
-conversation still exists and then folding is check-then-act across two stores: the read can
-be true when it is taken and false when the write lands, and §8's own two-engines case makes
-an in-process ordering unavailable in principle. The check would also have been unfenceable
-in the one case that matters most — a conversation the budget store holds **no row** for,
-where there is nothing for a drop to have removed.
+**Give the budget a `SearchBudgetStore` of its own.** Refused, and it is what §8 said
+through eleven review rounds, so the reasoning is recorded rather than summarised. A
+separate store needs a lifecycle — the counters must be fenced when a conversation is
+deleted and destroyed when its record is — and every protocol for supplying one failed in a
+different place. **An ordering** leaves a crash window on the side ADR-0074 §7 makes
+unavoidable: the retention reclaim only learns a conversation is eligible once
+`drop_if_eligible` has already destroyed the record, so the cleanup can only follow the
+destructive act, and one process death strands the counters with nothing able to rediscover
+them — the exact defect ADR-0076 was written to close for ADR-0074's own tombstones.
+**A durable stamp** fences a late fold but does not decide when to drop. **A reconciliation
+walk** in ADR-0076's shape then rests on a cross-store absence read that aliases a
+tombstoned conversation with a dropped one (`ConversationStore.get` answers `None` for
+both) and that a re-minted id defeats, which ADR-0074 §1 refuses to argue away by
+probability. Every one of those mechanisms exists only to reproduce a lifecycle
+`ConversationStore` already has, so the counters moved to where the lifecycle is and all of
+them were deleted.
 
-**Scope observation to the claim, so a fold whose claim `forget` invalidated is a no-op.**
-Refused as insufficient rather than wrong: it reuses a fence §8 already ratifies for
-`settle` and adds no residue, but §8's fold is triggered by **admission** and fires for a
-turn that never claims — precisely the case the request-triggered draft got wrong — so the
-path with no claim to scope to would stay open and the stamp would be owed anyway.
+**Keep the budget on `ConversationTurn` and fold it per turn.** Refused earlier in this
+decision's life and still refused: concurrent turns of one conversation spend the same draw
+and an ordinary `PlanningError` erases a completed search's draw, because a turn row is
+written at capture and a search is admitted long before. **What answers that is
+`claim_search`'s atomicity, not the counters' address** — the charge is durable, taken
+before the call, and made under the per-conversation exclusion ADR-0074 §9 already puts on
+this store — which is why the same defect does not return now that the counters live on the
+conversation record instead.
 
-**Serialise servicings of one conversation at the site, instead of fencing the store.**
+**Serialise servicings of one conversation at the site, instead of at the store.**
 Refused: it is a new obligation on `orchestration` across concurrent turns, and nothing in
 this corpus provides it — `Engine._admit_and_reserve` is written for "the Nth concurrent
 turn", and §8 names two concurrent turns of one conversation as a case it answers. A lock
-inside one engine answers nothing, for ADR-0074 §8's own reason, and the store-level
-exclusion that would work is a contract obligation an ADR has to decide. §16 defers it with
+inside one engine answers nothing, for ADR-0074 §9's own reason, and the store-level
+ordering that would work is a contract obligation an ADR has to decide. §16 defers it with
 that trigger.
 
-**Remove the budget row inside the deletion sequence, and get recoverability from the
-ordering.** Refused, and it is what §8 said in an earlier draft. Every ordering of "destroy
-the conversation" against "remove its row" leaves a crash window, and each one is worse in
-its own way: removing the row after `drop_if_eligible` strands it with nothing able to
-rediscover it, which is precisely the defect ADR-0076 was written to close for ADR-0074's
-tombstones; removing it before, on a reading of eligibility taken outside
-`drop_if_eligible`'s exclusion, resets a live conversation's draw. ADR-0074 §7's reclaim
-makes the first unavoidable, because eligibility is only known once the record is already
-gone. The walk removes the ordering question rather than answering it, and §8 keeps the
-stamp for the fence and the walk for the removal.
-
-**Remove `observe`'s power to create a row and leave creation to `claim` alone.** Refused,
-and named because it looks like the clean version of the stamp. A conversation whose first
-turn does not search would have its row created by a later `claim` carrying
-`initial_footing` **false** — a prior turn exists — permanently closing a conversation that
-was never dirty, and making §15's Arm 1b unreachable for every conversation that says hello
-before it asks for anything.
+**Let a member other than `start` create the flag.** Refused, and named because every
+variant of it has already been tried here. A member that mints the flag for a conversation
+it did not create must guess what that conversation's earlier turns carried: guessing
+`True` launders a legacy conversation into the exception, and guessing `False` permanently
+closes a conversation whose first turn simply did not search, making §15's Arm 1b
+unreachable for every conversation that says hello before it asks for anything. **`start`
+is the only moment at which the answer is knowable without guessing**, because it is the
+only moment at which the conversation provably has no turns.
