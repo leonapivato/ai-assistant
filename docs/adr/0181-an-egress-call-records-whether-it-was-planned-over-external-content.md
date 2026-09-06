@@ -1,7 +1,38 @@
 # 181. An egress call records whether it was planned over external content, and that fact is the origin the authoriser evaluates
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0238 (§5's second clause, the lineage floor, for a closed-loop request as ADR-0238 §5 defines one — a `WEB_SEARCH` request to a destination whose recorded trust is `USER_CHOSEN`, in a conversation every one of whose externally-supplied turns recorded that all of that turn's external content was minted at such a destination, and inside a per-conversation budget — and for no other request; §5's remaining clauses, its memory-ruling-point clause, its ADR-0154 §4 floor clause and every other section of this ADR stand entire)
 - Date: 2026-08-23
+- **Partially superseded: 2026-09-05 by ADR-0238 — §5's second clause, in the scope
+  of a closed-loop request alone, and nothing else in this ADR.** That clause closes
+  *"no ruling an `ActionPolicy` returns is `ALLOW` on a request whose binding carries
+  `planned_with_external_content` except under ADR-0148 §3's route (a)"*. The owner
+  ruled milestone 31 on 2026-09-05 (#1908), whose exit is a follow-up search answering
+  *"without repeated permission requests"*; ADR-0238 §6 is what that requires, and a
+  reader holding only this ADR would return no `ALLOW`, which is ADR-0070 §1's test on
+  the supersession side.
+
+  **The exception is a conjunction of four recorded facts, not a kind.** ADR-0238 §5
+  admits a request only where its kind is `WEB_SEARCH`, the destination's recorded
+  trust is `USER_CHOSEN` (a user act, never a configuration and never a model's), every
+  externally-supplied turn of its conversation recorded that all of that turn's
+  external content was minted at such a destination, and the conversation's recorded
+  draw leaves room in a per-conversation budget. A conversation that has read a page, a
+  file, a calendar or any other external record fails the third condition permanently
+  and rules under this clause as written.
+
+  **This ADR's own reason for ruling the clause with no live subject is why the
+  exception is narrow.** §5 records that the lane opening standing authorisation *"will
+  be doing it because per-call confirmation has become tiresome"*, which describes
+  ADR-0238 exactly — so the exception names one kind, one destination class, one closed
+  population of external content and one budget, all four checked per request from
+  recorded values, rather than the widest thing the argument would carry.
+
+  **§5's tenth clause is what ADR-0238 does not do.** ADR-0154 §4's floor is not lifted
+  further: ADR-0193 §12 opened it in exactly one respect and ADR-0238 moves what
+  ADR-0193 §3 requires without adding a second standing-authorisation carrier at the
+  seam. §5's memory-ruling-point clause, its `decide`/`resolve` separation, the two
+  carried comparisons, the no-widening-of-`ActionPolicy` clause and §1–§4 and §6–§12
+  stand entire. Refs #1908, PR for ADR-0238.
 - **Note (2026-08-23): §12's condition "the first deployment holding a
   pre-ADR-0181 egress row" has fired.** `EgressBinding` is a **stored** member of
   `PermissionDecision`, so §3's "required with no default" reaches rows the audit

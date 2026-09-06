@@ -1,7 +1,40 @@
 # 193. A standing recipient grant is a user act on a canonical destination set, and never covers a call planned over external content
 
-- Status: Partially superseded by ADR-0235 (§1's "one class rather than several" limb alone: `RecipientGrantStore.record` gains two subclasses of `InvalidRecipientGrantError` — `RecipientGrantCeilingError` for the outstanding-count ceiling and `DuplicateRecipientGrantError` for a granting record duplicating an outstanding grant's `tool`, `account` and `destinations` — because on those two grounds the caller's recourse is not identical, which is the limb's own stated ground; every other refusal ground keeps the base class, the base class still catches all of them, and the rest of §1 stands entire, its exact store surface, its ceiling value and placement and its atomic count-with-append included)
+- Status: Partially superseded by ADR-0235 (§1's "one class rather than several" limb alone: `RecipientGrantStore.record` gains two subclasses of `InvalidRecipientGrantError` — `RecipientGrantCeilingError` for the outstanding-count ceiling and `DuplicateRecipientGrantError` for a granting record duplicating an outstanding grant's `tool`, `account` and `destinations` — because on those two grounds the caller's recourse is not identical, which is the limb's own stated ground; every other refusal ground keeps the base class, the base class still catches all of them, and the rest of §1 stands entire, its exact store surface, its ceiling value and placement and its atomic count-with-append included) and ADR-0238 (§3's first clause in its fifth comparison, and §4's first clause, for a closed-loop request as ADR-0238 §5 defines one and for no other request: such a request may be covered by a grant and ruled `ALLOW` on ADR-0148 §3's route (b) notwithstanding its binding carrying `planned_with_external_content`; §3's other four comparisons and its no-inference clause, §4's remaining clauses, and §5's rule that a grant reaches the recipient and never the payload all stand entire, and ADR-0238 §1 records the payload permission as a separate user act precisely so that §5 can be left standing)
 - Date: 2026-08-24
+- **Partially superseded: 2026-09-05 by ADR-0238 — §3's first clause in its fifth
+  comparison and §4's first clause, in the scope of a closed-loop request alone, and
+  nothing else in this ADR.** §3's fifth comparison requires that *"the request's
+  binding does not carry `planned_with_external_content`"*, and §4's first clause closes
+  *"On such a request an `ActionPolicy` returns no `ALLOW` on route (b), whatever grants
+  exist, and route (a) — a decision of the user about **that** request — is the only
+  route to an `ALLOW`."* Both are moved, together, for a request ADR-0238 §5 makes
+  closed-loop; the owner ruled milestone 31 on 2026-09-05 (#1908) and its exit —
+  *"without repeated permission requests"* — is unreachable while either stands.
+
+  **Both, because either alone would still refuse.** §4's bar is the policy's and §3's
+  is `RecipientGrants.covering`'s own conjunction, and this ADR states in terms that
+  *"coverage is their conjunction and no component treats either half as the whole"*.
+  §4's last limb is general rather than grant-shaped, so no alternative standing
+  carrier escapes it either.
+
+  **§5 is left standing on purpose, and ADR-0238 is built so that it can be.** *"A
+  grant states nothing about the payload and authorises no content"* stays true: what
+  permits a search query composed over memory is a **separate** recorded act of the
+  user about that destination, in its own store behind its own `core` Protocol
+  (ADR-0238 §1), and no component reads the existence, breadth, age or liveness of a
+  grant as evidence of it. Deriving a payload permission from a recipient grant would
+  be the shape ADR-0097 §7 refuses — *"the floor satisfied by a consent the user gave
+  about something else entirely"* — and it is refused here for that reason and because
+  a destination nobody chose has no grant to carry such a fact at all.
+
+  **§4's second, third and fourth clauses stand entire**, including that no lane reads
+  the section as detecting external content in text whose recorded origin is not
+  external, and that no lane widens the fact or derives a per-span variant of it.
+  ADR-0238 widens neither: it reads the same one-bit fact and adds a second, separately
+  recorded per-turn fact beside it. §1's store and its three faces, §2's user act, §3's
+  other four comparisons, §6–§16 and ADR-0235's scope are untouched. Refs #1908, PR for
+  ADR-0238.
 - **Partially superseded: 2026-09-04 by ADR-0235 — §1's "one class rather than
   several" limb alone, and nothing else in this ADR.** That limb closes *"**One class
   rather than several**, on `InvalidGrantError`'s reasoning and for its reason: the

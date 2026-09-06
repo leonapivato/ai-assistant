@@ -1,7 +1,49 @@
 # 231. The planner asks for a search, the turn's own words compose it, and the results come back as records
 
-- Status: Partially superseded by ADR-0235 (§9's second clause, in its second limb alone: a recorded `CONFIRM` on a `WEB_SEARCH` decision may be read from the trail and offered to a surface for the establishing act, as history and never as outstanding work; the limb's two siblings bind entire, so no lane resumes such a decision or treats it as outstanding work, and §9's first, third, fourth and fifth clauses, §19's entries and every other section of this ADR stand entire)
+- Status: Partially superseded by ADR-0235 (§9's second clause, in its second limb alone: a recorded `CONFIRM` on a `WEB_SEARCH` decision may be read from the trail and offered to a surface for the establishing act, as history and never as outstanding work; the limb's two siblings bind entire, so no lane resumes such a decision or treats it as outstanding work, and §9's first, third, fourth and fifth clauses, §19's entries and every other section of this ADR stand entire) and ADR-0238 (§3's argument-is-the-turn's-own-utterance clause, §4's first and second clauses, and §12's second and third clauses — the composer's one positional-only parameter becomes a `SearchSupply`, which at a destination whose recorded trust is `USER_CHOSEN` may carry memory records, this conversation's episodes and its own prior results, so a search result may reach a later search request and a second search in a conversation that has read one may be ruled `ALLOW`; §3's one-parameter, one-member, no-store-seam-dependency and `planning`/`ModelProvider` clauses stand entire, the utterance-only content property still holds at every destination whose trust reads `UNCHOSEN`, §12's first and fourth clauses stand, and §1, §2, §5–§11, §13–§21 are untouched)
 - Date: 2026-09-04
+- **Partially superseded: 2026-09-05 by ADR-0238 — §3's utterance-only clause,
+  §4's first and second clauses, and §12's second and third clauses. Those five,
+  and nothing else in this ADR.** The owner ruled milestone 31 onto `track:planning`'s
+  live record (#1908) on 2026-09-05 in terms naming this ADR: *"Removes two of 29's
+  limits: the composer sees only the latest utterance (ADR-0231 §3), and a conversation
+  that has read a result declines every later search (ADR-0231 §12). **This is a
+  contract reversal, not a relaxation.**"* ADR-0238 is the ADR that reversal takes.
+
+  **§3's argument clause.** *"The argument is the turn's own utterance and nothing
+  else"*, and the enumeration of what no implementation may be passed, no longer hold:
+  ADR-0238 §2 replaces the parameter's type with a `SearchSupply` that may carry
+  memory records, this conversation's episodes and its own prior results, for a
+  destination whose recorded trust is `USER_CHOSEN`. **The rest of §3 is relied upon
+  rather than moved** — one positional-only parameter, one member, no keyword, no
+  constructor dependency on any store seam, a `ModelProvider` and nothing else that
+  reads, and the production composer in `planning` — and ADR-0238 §2 restates each as
+  its own obligation.
+
+  **§4's first clause** — *"No component supplies a `QueryComposer` with covered
+  content in ADR-0155 §3's sense"* — is reversed for that same destination class, and
+  ADR-0238 §7 states the second exception ADR-0155 §3's third clause now carries.
+  **§4's second clause** — *"the ADR that fork commissions is the only instrument that
+  may move it"* — is spent: ADR-0233 is that ADR, it is ratified and implemented, and
+  ADR-0155's own record states that its "until then" has stopped running. A reader
+  holding only this ADR would refuse ADR-0238 on that sentence, which is ADR-0070 §1's
+  test coming out on the supersession side.
+
+  **§12's second clause is the property given up, and ADR-0238 §4 says so rather than
+  claiming it survives.** *"No byte of a search result can reach a later search
+  request"* ceases to hold for a closed-loop request; what replaces it is trust in a
+  destination the user chose, plus a budget and an audit, and no lane cites those as
+  making the channel structurally absent. **§12's third clause** — the second search
+  refused by the policy — is moved exactly as far as ADR-0238 §5's closed-loop
+  condition reaches and no further.
+
+  **§12's first and fourth clauses stand and are load-bearing.** A revision's request
+  may still be composed over a result's content and no lane filters the fourth group;
+  and ADR-0098 §5's honesty clause binds ADR-0238 as it binds this ADR. §19's
+  memory-enriched-query and second-search deferrals are fired by ADR-0238; every other
+  entry in §19 stands, and §5's one connected account, §9's ruling chain, §10's
+  minting, §11's servicing order and budget, §13's audit and §15's spend restraint are
+  untouched. Refs #1908, #2096, PR for ADR-0238.
 - **Partially superseded: 2026-09-04 by ADR-0235 — §9's second clause, in its second
   limb alone, and nothing else in this ADR.** That clause closes *"A recorded
   `CONFIRM` on a `WEB_SEARCH` decision **resolves in no turn**: no lane resumes it,

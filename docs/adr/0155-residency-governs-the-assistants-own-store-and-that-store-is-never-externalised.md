@@ -1,7 +1,32 @@
 # 155. Residency governs the assistant's own store, and that store is never externalised
 
-- Status: Partially superseded by ADR-0233 (§3's third clause, to the extent of the four conditions the commissioned approval surface states, and §4's marked no-mechanism clause, to the extent a recorded coverage makes the refusal mechanical; §3's second clause and every other clause of this ADR stand)
+- Status: Partially superseded by ADR-0233 (§3's third clause, to the extent of the four conditions the commissioned approval surface states, and §4's marked no-mechanism clause, to the extent a recorded coverage makes the refusal mechanical; §3's second clause and every other clause of this ADR stand) and ADR-0238 (§3's third clause a second time — the prohibition sentence acquires a second exception beside ADR-0233 §9's four conditions, for a search query composed over a supply ADR-0238 §2 admits, on a closed-loop request ruled `ALLOW`; §3's second clause and its absolute prohibition, §3's covered-content and covered-path definitions, the export exception and every other clause of this ADR stand)
 - Date: 2026-08-14
+- **Partially superseded: 2026-09-05 by ADR-0238 — §3's third clause, in its
+  prohibition sentence alone, and nothing else in this ADR.** The owner ruled arm
+  **(b)** on 2026-09-04 and ADR-0233 is the ADR that arm commissions; this clause's
+  condition — *"relaxation requires the commissioned ADR and its approval surface,
+  ratified, and **until then** every lane implements the prohibition as written"* — was
+  met by ADR-0233 and its "until then" stopped running there. The owner then ruled
+  milestone 31 on 2026-09-05 (#1908) in terms requiring this clause to move again, and
+  ADR-0238 is that decision. **A lane may not make this relaxation without an owner
+  ruling**, and nothing in this record makes the next one easier.
+
+  **The sentence, and its second exception.** *"An egress span may not carry covered
+  content all of whose covered paths contain a model call"* now admits, beside
+  ADR-0233 §9's four conditions, a span that is the query of a `QueryOutcome` composed
+  over a `SearchSupply` ADR-0238 §2 admits, on a request ADR-0238 §5 makes closed-loop,
+  ruled `ALLOW` under ADR-0238 §6. Where any of those three fails the clause forbids
+  the span exactly as written.
+
+  **§3's second clause is untouched and has no subject in the relaxed class.** Every
+  covered path of a composer's output continues back through the composer's own model
+  call, so nothing ADR-0238 admits has a covered path containing none — which is this
+  ADR's own observation that the reserved fork *"reaches exactly the model-influenced
+  subclass and nothing adjacent to it"*, holding for the second exception as it did for
+  the first. The absolute prohibition, the covered-content and covered-path
+  definitions, the no-authorisation-cures-it clause, the export exception and §1, §2,
+  §4–§7 all stand. Refs #1908, PR for ADR-0238.
 - **Partially superseded: 2026-09-04 by ADR-0233 — §3's third clause, in two of its
   sentences, and §4's marked clause, in one direction. Those two scopes, and nothing
   else in this ADR.** The owner ruled arm **(b)** on 2026-09-04
