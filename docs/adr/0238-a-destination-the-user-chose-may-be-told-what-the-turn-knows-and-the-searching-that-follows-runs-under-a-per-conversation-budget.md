@@ -888,29 +888,43 @@ relaxation legible in the way §9 wanted.
 > where the store holds no row for this conversation yet, whether the conversation had **no
 > recorded turn before this one**.
 
-> **Normative.** **A current-turn half that reads false is folded in at once — before the
-> claim is settled — and is not left to capture.** §5's second half is computed when the
-> request is built; where it is **false**, `orchestration` calls `observe` with `False` for
-> that conversation **before it settles the claim it holds**, and a turn that is then
-> refused, that raises, or that never reaches a request still folds the false it computed.
-> **Capture's fold remains and is unchanged**; this one is earlier, not instead.
+> **Normative.** **The early fold is triggered by admission and not by a request: the
+> moment `orchestration` admits to a turn a recorded external span that was **not** minted
+> by a `WEB_SEARCH` servicing at a destination of recorded trust `USER_CHOSEN`, it calls
+> `observe` with `False` for that conversation.** The trigger is that admission — the same
+> fact §5's current-turn half is stated over — and it fires **whether or not that turn ever
+> builds a `WEB_SEARCH` request**. **Capture's fold remains and is unchanged**; this one is
+> earlier, not instead, and the two agree because `observe` folds by **and**.
 
-> **Normative.** **Without that ordering the flag is stale for exactly as long as a dirty
-> turn is in flight, and `settle` releases the draw inside that window.** A turn that reads
-> a local file before its search (ADR-0231 §11's ordinary order) binds `closed_loop` false
-> on its own request, but the stored flag stays true until that turn is captured; once its
-> `settle` returns the unused remainder, a **second servicing of the same conversation** may
-> claim, read the stale-true flag, find its own supply clean, and be ruled closed-loop —
-> although the conversation had already carried the file. **The early fold is what makes
-> §5's third condition true of the conversation and not merely of the turns already
-> captured.**
+> **Normative.** **Admission is the trigger because neither a request nor a capture is
+> early enough.** §5's current-turn half is computed when a request is **built**, so a turn
+> that reads a local file and never searches computes it nowhere, and a turn that reads one
+> and *does* search computes it only after `claim` has already admitted that call. Both
+> leave the stored flag true for as long as the turn is in flight, and `settle` releases the
+> draw inside that window — so a **second servicing of the same conversation** could claim,
+> read the stale-true flag, find its own supply clean and be ruled closed-loop, although the
+> conversation had already carried the file. Folding at admission puts the false in the row
+> **before any later claim of that conversation can be admitted**, which is what makes §5's
+> third condition true of the **conversation** and not merely of the turns already captured.
 
-> **Normative.** **The early fold is safe to repeat and safe to run early, and a half that
-> reads *true* is never folded here.** `observe` folds by **and** (below), so an early
-> `False` and capture's later conjunction agree and neither can undo the other. Reporting a
-> turn **clean** stays capture's alone, because only capture sees the turn's **final**
-> supply; an early true would report a turn clean before it had finished carrying things,
-> which is the direction this section fails closed in everywhere else.
+> **Normative.** **A half that reads *true* is never folded early.** Reporting a turn
+> **clean** stays capture's alone, because only capture sees the turn's **final** supply; an
+> early true would report a turn clean before it had finished carrying things, which is the
+> direction this section fails closed in everywhere else. The early fold writes `False` and
+> nothing else, it is idempotent, and repeating it costs nothing.
+
+> **Normative.** **No fold of any kind follows `forget`, and `observe`'s power to create a
+> row is fenced by the conversation's own existence.** `observe` creates a row where none
+> exists (above), so an observation racing a deletion would resurrect budget state for a
+> conversation ADR-0126 requires destroyed — which is the hazard `settle` is already fenced
+> against, and it is fenced the same way. **`orchestration` folds only for a conversation
+> whose record the `ConversationStore` still holds**, and it runs `forget` as the **last**
+> step of ADR-0074 §8's deletion and §7's reclaim sequences, once that record is already
+> gone. So no admission is made to a turn of a conversation that is gone, no turn of one is
+> captured, and a servicing in flight when the deletion lands settles a claim that creates
+> nothing and folds nothing further. **A lane that finds any fold reaching this store after
+> `forget` has breached this clause**, and the ADR-0074 §9 stage that owns both sequences is
+> the one place that can hold the ordering.
 
 > **Normative.** **So a row created for a conversation that already had turns is created
 > false**, and the refusal §5's recorded half makes for an unobserved legacy conversation
@@ -1274,6 +1288,11 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > while one of its searches is in flight has no row afterwards; settling that claim creates
 > none, raises nothing, and the in-flight servicing completes and reports normally.
 
+> **Normative.** **Arm 6c4 — no fold resurrects a deleted conversation.** A conversation
+> deleted between `claim` and the admission fold, and one deleted between its search
+> returning and its capture, each leave **no row** afterwards: neither the admission fold,
+> nor capture's fold, nor `settle` creates one, and `draw_of` answers `None` for both.
+
 > **Normative.** **Arm 6d — a claimed call is never refunded.** A servicing whose ruling is
 > not `ALLOW`, one whose binding refused, and one whose provider answered
 > `SearchRefusal.PROVIDER_REFUSED` each spend their `calls` increment, and no path lowers
@@ -1292,15 +1311,16 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > conditions. All three are asserted, because the middle one is the hole that opens one turn
 > after the first is closed.
 
-> **Normative.** **Arm 6f2 — a dirty turn closes the conversation before the next
-> servicing, not at capture.** With `search_calls_per_conversation` above one, a
-> conversation whose destination reads `USER_CHOSEN` and whose row is true: turn A services
-> a local-file read before its `WEB_SEARCH`, so A's own request binds `closed_loop` false;
-> **A's claim is settled and A is not yet captured**, and a second servicing of that
-> conversation is then admitted with a supply carrying nothing external of its own. It is
-> **not** closed-loop, because the false half A computed was folded in before A's claim was
-> settled. The same conversation asserts the fold once more at A's capture, and the stored
-> flag is false after each.
+> **Normative.** **Arm 6f2 — a dirty turn closes the conversation at admission, not at
+> capture, and closes it even when it never searches.** With
+> `search_calls_per_conversation` above one, on a conversation whose destination reads
+> `USER_CHOSEN` and whose row is true, in two shapes. **(i)** Turn A services a local-file
+> read and then a `WEB_SEARCH`, so A's own request binds `closed_loop` false; a second
+> servicing of that conversation, admitted **after A's claim is settled and before A is
+> captured**, carries nothing external of its own and is **not** closed-loop. **(ii)** Turn
+> A services a local-file read and **builds no search request at all**; a concurrent turn B
+> claims and composes, and B is **not** closed-loop for the same reason. The stored flag is
+> false in both, and A's later capture folds false again to no effect.
 
 > **Normative.** **Arm 6g — the last permitted call is usable.** With
 > `search_calls_per_conversation` set to one, the admitted servicing's own request is
