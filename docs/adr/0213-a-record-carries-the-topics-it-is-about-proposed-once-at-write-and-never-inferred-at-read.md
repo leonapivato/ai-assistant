@@ -1,7 +1,26 @@
 # 213. A record carries the topics it is about, proposed once at write and never inferred at read
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0239 (§4's set-at-write clause, §6's producer enumeration and its no-labelling-another-producer's-record clause, and §8's revised-only-by-two-routes clause — each for `EpisodicMemory` records only)
 - Date: 2026-08-29
+- **Partially superseded: 2026-09-05 by
+  [ADR-0239](0239-the-observation-pass-labels-the-episodes-it-read-and-a-label-lands-as-a-conditional-write-at-the-episodes-own-id.md),
+  in the scope the `Status` line names.** An episode is labelled by the observation
+  pass that read it, and the labels land as a conditional write at the episode's own
+  id. ADR-0239 §14 names each replaced clause, quotes it, and applies ADR-0070 §1's
+  test to it. **Replaced, for `EpisodicMemory` records alone** — §4's "Topics are set
+  by the producer of the record, at the moment the record is written, and by nothing
+  else" (its read-time half stands whole); §6's enumeration of *what* the observer
+  labels, and its "no producer proposes topics on a record another producer wrote";
+  and §8's "revised only by the two routes below … no re-observation … no scheduler
+  job … revises the topics of a record already in the store". **Everything else here
+  stands** and is relied on by ADR-0239 rather than replaced: §1's field, bound and
+  canonical order; §3's label form and equality rule; §4's envelope discipline, its
+  constants and its ignored-entry rule; §5's vocabulary rules, the observer's
+  exclusion included; §6's capture clause, whose first sentence stays true and whose
+  second is self-limiting to this ADR; §7; §9; §10; §14; and §8's fold union,
+  retained subset and `SUPERSEDE` rule on every record. §15's "topics on episodes"
+  deferral fires as its second case. Appended note per ADR-0070 §1; no text below it
+  is rewritten.
 - **One record is owed on an earlier ADR (ADR-0082 §1), and this change writes it.**
   §16 names the clause — ADR-0111 §4's second normative clause, which §1 amends by
   admitting one bounded local operation that carries no deadline — quotes it, and
