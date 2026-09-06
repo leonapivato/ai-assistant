@@ -299,14 +299,73 @@ about the axis, and §7 below states in terms that sharing a form shares nothing
 > **abandoned**: not retried, not re-read, not re-proposed and not written
 > unconditionally. The pass continues with the rest of its labellings.
 
+> **Normative.** **A labelling is written only where the destination episode's
+> placement reach is not wider than the reach of every episode of the batch the
+> producer was handed.** Where it is wider, the labelling is discarded and that episode
+> stays unlabelled. No labelling write changes a placement, narrows one, or is
+> permitted to make one narrower elsewhere.
+
 > **Normative.** The labelling write is **not** part of the batch that installs the
 > pass's proposals, and neither is a condition of the other. A refused or failed
 > labelling write leaves every belief the pass installed exactly where the write path
-> put it, and a failed belief install leaves an already-committed labelling standing.
+> put it, and leaves the watermark exactly where the pass committed it.
+
+> **Normative.** **The labelling write is attempted only after the pass's watermark
+> advance has committed, and for the episodes of the page that advance covers.** Where
+> the advance is not attempted, does not commit, or the pass fails before it, **no
+> labelling is written at all** and every episode of that page stays exactly as it was.
 
 > **Normative.** The labelling write is **never a condition of the watermark**.
-> ADR-0212 §5's advance is computed and committed exactly as it is today; no clause
-> here delays it, lowers it, or makes it depend on whether a labelling landed.
+> ADR-0212 §5's advance is computed, attempted and committed exactly as it is today: it
+> is unchanged where a proposal fails to be ruled or a belief install raises
+> (ADR-0212 §§5-6), and no clause here delays it, lowers it, adds a condition to it, or
+> makes it depend on whether a labelling landed or could have landed.
+
+> **Normative.** **A labelling write is not a write of a belief, and the
+> proposal-to-policy path does not reach it.** It passes through no `MemoryPolicy`, is
+> ruled by no `Disposition`, opens no deferred question and is counted in no
+> `MemoryIngestResult`. Every belief the pass proposes goes through that path exactly as
+> it does today, and no lane may cite this clause for any write that asserts something
+> about the user.
+
+> **Normative.** What stands in the gate's place is stated rather than assumed, and an
+> implementation owes all six: the producer names labels and never a record (§2); the
+> destination is a record the caller selected and read, never one the model named (§1);
+> the form is refused at the seam and never repaired (§4, §5); the write is conditional,
+> write-once, two fields wide and abandoned on a race (§3); the label carries no
+> posture, no permission, no band and no disclosure consequence (§7); and the owner's
+> relabel is final over it (ADR-0213 §9).
+
+**Why the gate does not reach it, in ADR-0075's own currency.** ADR-0075 §1 replaced
+ADR-0005's "every write goes through a reviewable proposal → policy path" with "**every
+write of a belief** goes through that path", and §2 gives the test that decides which
+side a write is on: "the exemption follows the record's *claim*, not the provenance of
+its characters" — recording that something happened is an event, recording "that X is
+true of the user" is an assertion. A labelling asserts nothing about the user. It adds
+no claim to the store, contradicts nothing already in it, and says only how an existing
+record is filed; ADR-0213 §14 rules that a topic is "not a tier and not a sensitivity",
+carries "no posture, no permission, no band and no disclosure consequence", and §7 above
+binds a participant label to the same. So the rule ADR-0075 §1 states does not reach
+this write, and this write claims no exemption from it.
+
+**And the gate has nothing to rule with.** `MemoryPolicy`'s five outcomes are
+operations on a belief — accept it, reinforce it, supersede one, defer it to the owner,
+reject it. A labelling offers none of them: there is no belief to accept, nothing to
+reinforce, nothing for it to contradict, and nothing an owner could usefully be asked
+about that ADR-0213 §9's relabel does not answer better and deterministically. Putting
+it through the gate would mean inventing an operation for it, which is a
+`core/protocols.py` change and a larger decision than this one; ADR-0213 §10 already
+took the same view of the field from the other side when it excluded `topics` from the
+proposal fingerprint, so the policy's own dedupe does not see a label today either.
+
+**What that argument is not.** It is not a claim that a model's output about a person
+needs no check — ADR-0075 §2 is right that "the observer is the paradigm case the gate
+exists for", and every belief that producer proposes still goes through it, unchanged.
+It is a claim about **which** of the observer's outputs is a belief. The clause above
+therefore states the replacement discipline as six obligations rather than leaving it as
+an absence, which is ADR-0075 §3's own shape: "The exemption is not 'no safeguards'; it
+is a different set." §14 applies ADR-0070 §1's test to ADR-0005 and ADR-0075 and finds
+no clause of either made false or over-wide.
 
 **Why in place at the same id rather than a superseding record.** ADR-0213 §8 already
 argued this for the owner's relabel and the argument is stronger for an episode: "a
@@ -338,6 +397,54 @@ readings in which one turn is selected again — a trailing unresolved run, two
 concurrent passes, and a page whose advance did not commit. Without the clause above,
 the third of those would re-label an already-labelled episode with a second model
 judgement over the same words, for no gain and at the cost of ADR-0213 §8's "set once".
+
+**Why after the advance, and why an empty tuple alone would not have been enough.**
+Emptiness is a proxy for "never labelled", and the owner can produce emptiness: ADR-0213
+§9's relabel replaces the whole of a record's `topics` with a set the owner states, and
+that set may be empty. Left on the emptiness test alone, this decision would admit a
+sequence that undoes an owner's act — a pass labels an episode, its advance does not
+commit, the owner clears those labels, and the next pass re-reads the page, sees two
+empty tuples, reads the owner's current revision and writes model labels back over the
+correction. That defeats ADR-0213 §9's guarantee that a relabel is "final for that
+record until the owner acts again", and no `IF_UNCHANGED` can catch it because the
+revision the second pass expects is the one the owner's own act left.
+
+Ordering the write **after** the advance closes it without a byte of new state, because
+it makes the premise unreachable. ADR-0220 §1 rules that where the stamp did commit the
+page "is not re-read and does not need to be", and where it did not, the page "is
+re-read whole by the next pass". So an episode a later pass re-reads is one whose
+advance did not commit — and under the clause above, one no pass ever labelled. The
+other two re-readings are safe on the two clauses already stated: an unresolved turn has
+no episode to label, and two concurrent passes over one page are separated by
+`IF_UNCHANGED` and by the write-once test, whichever of them writes first. What the
+ordering costs is named rather than hidden: a labelling write that fails after a
+committed advance is never retried and that page is never re-read, so those episodes
+stay unlabelled for good. That is §8's horizon in miniature and it is the safe
+direction — a lost label, never a wrong one, and never a label over the owner's word.
+
+**Why a labelling declines to cross a narrowing rather than moving one.** A batch is
+not uniform in placement: capture writes reach `OWNER` setter `DERIVED` on an episode
+whose turn ran over withheld content and the default `Placement()` — reach `ANYONE` —
+on every other, so one page can hold both. A label proposed over such a batch is a
+derivation over all of it, and ADR-0217 §3 rules that "a producer deriving a record from
+records of this store writes the **narrowest** reach over every record it was supplied,
+never over the subset it cited, selected, ranked or judged relevant". Its ground is
+ADR-0204 §5's: an `OWNER` input discarded is "an `OWNER` input **laundered**". Without a
+rule, a model that resolves a reference in an `OWNER` episode could file an `ANYONE`
+episode under the label that reference produced, and the narrowing would have leaked
+into a record that stays as disclosable as it was.
+
+Two answers were available and the conservative one is taken. Writing the meet onto the
+destination — the shape §3's derivation clause describes for a derived *record* — would
+make a filing word change what may be said about an episode, silently narrowing records
+the owner never asked to narrow because they happened to be observed beside a withheld
+turn. §7 forbids exactly that: a label "carries no posture and no disclosure
+consequence". So this decision **declines the write** instead. Nothing is laundered
+because nothing is written, no placement moves, and the loss is a page's wider episodes
+going unlabelled in the minority of batches that are mixed — visible through §6's
+disclosure like every other unlabelled episode. Note what the clause is not: it is not a
+placement rule and it writes no placement, so ADR-0217 §3 and ADR-0204 §5 bind exactly
+as they did, and §14 records it as a stacked addition rather than a change to either.
 With it, a machine labelling happens at most once per episode and the owner's act is
 final over it, which is ADR-0213 §8's shape preserved rather than merely respected.
 
@@ -563,9 +670,10 @@ that was never argued for it.
 > "A lane that wants re-reading asks for a new operation, never a lower watermark" —
 > binds this ADR exactly as it binds every other.
 
-> **Normative.** A surface presenting the result of a label-scoped read over episodes
-> discloses that episodes recorded before this decision's implementation landed carry
-> no labels and were not reached, on the same terms and at the same times §6 obliges.
+> **Normative.** The disclosure a surface owes is §6's and is keyed on the **absence of
+> a label**, never on a date: episodes carrying no label were not reached, whenever they
+> were captured and whatever the reason they carry none. No surface states or implies
+> that a capture date decides reachability.
 
 **Why no pass, in the terms of what one would cost.** A backfill is a model call over
 every episode the store holds, which is a number no configuration bounds and no run
@@ -576,9 +684,16 @@ conversations the owner may never ask about, and it would do it by re-reading ma
 the system already read once. Against that, what it buys is a horizon a month of use
 erases on its own.
 
-**What it costs, stated so nobody discovers it.** Every episode captured before this
-lands is permanently unlabelled, and §6's reading applies to it: a structured read over
-participants or topics does not reach it, ever, and no later act repairs that. The
+**What it costs, stated so nobody discovers it.** Every episode the observation walk
+had already passed when this landed is permanently unlabelled, and §6's reading applies
+to it: a structured read over participants or topics does not reach it, ever, and no
+later act repairs that. **The horizon is the watermark's, not the calendar's**, and the
+difference is not pedantry — an episode captured long before the upgrade but still above
+its conversation's watermark is read and labelled by the first pass after it, exactly
+like any other, so a disclosure phrased as "conversations before the upgrade were not
+reached" would be false in the owner's favour on precisely the records they are most
+likely to ask about. That is why the clause above keys on the missing label, which is
+what a read can actually see. The
 owner's own relabel (ADR-0213 §9) is the one instrument that can label such an episode,
 one record at a time, once the surface deferred there exists. §11 names a bounded,
 owner-initiated pass as a deferral with the condition that would fire it — a measured
@@ -631,17 +746,31 @@ The lane briefed from this text owes, beyond the change itself:
   `IF_UNCHANGED` against the revision the pass read; that a stale write is abandoned and
   not retried; that an episode carrying a label on either axis is not written; that no
   field but the two moves, asserted field by field against the stored record.
-- **The two independence arms.** A failed labelling write leaves the pass's installed
-  beliefs standing; a failed belief install leaves a committed labelling standing. And
-  the watermark advances in both.
+- **The ordering and the two failure arms.** That no labelling is written where the
+  watermark advance is not attempted or does not commit — a belief install that raises
+  leaves the watermark unmoved (ADR-0212 §§5-6) and therefore leaves every episode of
+  that page unlabelled, which is the existing advance behaviour asserted afresh rather
+  than changed. And that a labelling write which fails or is refused **after** a
+  committed advance leaves the pass's installed beliefs and its committed watermark
+  exactly where they were.
+- **The clear-then-reread arm.** A pass labels a page, its advance does not commit, the
+  owner clears those labels, and the next pass re-reads the page: the owner's empty
+  labels stand, because the ordering means the first pass wrote none. Pinned as the arm
+  that holds ADR-0213 §9's finality.
+- **The mixed-placement batch arm.** A batch holding one reach-`OWNER` episode and
+  several reach-`ANYONE` ones labels the `OWNER` episode and none of the others, and no
+  episode's placement moves.
 - **The provider-down arm.** A `ModelError` leaves every episode of the batch exactly
   as capture wrote it, and the pass reports what it reports today.
 - **The owner arm.** An episode the owner relabelled between the pass's read and its
   write keeps the owner's labels, and the pass's labelling is discarded.
-- **A representative-input arm on the label form.** A response naming "Alex" is refused
-  by the canonical form, not folded to "alex" — the producer folds its model's output
-  before it constructs a label, and a non-canonical value reaching the type is a
-  producer error (ADR-0213 §3).
+- **A representative-input arm on the label form.** A response naming "Alex" leaves the
+  participants axis empty for that episode. The value the model emitted is validated **as
+  it stands**: nothing case-folds, strips or otherwise repairs it on the way to a label,
+  because §5's ignore-never-repair rule and ADR-0213 §3's prohibition on normalising both
+  bind here, and a producer that folded its response would hide its own miss "in the one
+  place nobody looks". A producer that wants canonical output constrains its prompt; it
+  does not correct the answer.
 - **The owner-never-named arm.** A response naming the owner, the user or the assistant
   as a participant yields no participants for that episode.
 
@@ -729,6 +858,16 @@ or an index.
 > are untouched, and `orchestration/conversations.py` writes exactly what it writes
 > today.
 
+> **Normative.** **Anything about a placement.** ADR-0217's three setters, its meet and
+> its precedence, and ADR-0204 §5's ratchet, are untouched. §3's placement clause
+> decides only whether a *labelling* is written; no clause here writes, narrows, widens
+> or reads a placement for any other purpose, and no lane may cite it as a placement
+> rule.
+
+> **Normative.** **Whether a labelling should ever be retried, or a failed one
+> recovered.** §3 abandons and §8 declines a pass; a bounded recovery is §11's deferral
+> and is not opened here.
+
 > **Normative.** **Any client-facing surface.** No `Belief`, `BeliefSummary`, gateway,
 > CLI or spoke renders, filters on or sets a label under this ADR.
 
@@ -770,8 +909,16 @@ only.**
   store." §3 above is a scheduled pass revising a stored record's topics, so the clause
   is false for episodes. Replaced for `EpisodicMemory` records, and replaced narrowly:
   §3's write-once rule and §8's prohibition on migrations and backfills keep everything
-  else that clause was protecting, and the fold's union, the retained subset, the
-  `SUPERSEDE` rule and the owner's act are all untouched on every record.
+  else that clause was protecting, and the fold's union, the retained subset and the
+  `SUPERSEDE` rule are untouched on every record.
+- **§8's last clause.** "**The owner's act** (§9) is the only in-place write of this
+  field, and it writes the record's topics at the record's own id." §3 above introduces
+  a second in-place writer, so the word "only" becomes false and a reader holding just
+  ADR-0213 would refuse the write. Replaced for `EpisodicMemory` records, and replaced
+  as narrowly as the sentence allows: the owner's act remains an in-place write at the
+  record's own id, remains the only one on every other kind of record, and remains
+  **final** over an episode a pass has labelled — §3's write-once rule and its ordering
+  are what keep that half true rather than merely asserted.
 
 **§6's second clause is *not* superseded, and the distinction is load-bearing.**
 "Capture (`orchestration/conversations.py`) writes no topics on the `EpisodicMemory` it
@@ -791,10 +938,25 @@ prohibitions.
 **No record is owed on any other ADR, and each near case is named with the test's
 answer.**
 
-- **ADR-0074 and ADR-0075.** Capture is unchanged in every particular, so no sentence of
-  either becomes false or over-wide. ADR-0074 §4's observation that `participants` is
-  "the field an observer means to fill" is a docstring's phrasing of the same
-  expectation; this ADR meets it rather than contradicting it.
+- **ADR-0074.** Capture is unchanged in every particular, so no sentence of it becomes
+  false or over-wide. Its §4 observation that `participants` is "the field an observer
+  means to fill" is the same expectation this ADR meets rather than contradicts.
+- **ADR-0005 and ADR-0075.** ADR-0075 §1 already narrowed ADR-0005's path to "**every
+  write of a belief**", and §3 above argues at length that a labelling is not one: it
+  adds no claim about the user, which is the test ADR-0075 §2 states in terms. So the
+  rule does not reach this write and this write claims no exemption from it — ADR-0075
+  §2's list is a list of what **capture's** exemption does not cover, and nothing here
+  invokes capture's exemption. Neither ADR has a clause made false or read more widely:
+  every belief the observer proposes still goes through the gate, capture is still the
+  one exempt producer, and the observer is still "the paradigm case the gate exists for"
+  for the output that is a belief. **No record is owed on either**, and the reason is
+  recorded here so a reviewer can check the test rather than the label.
+- **ADR-0217 and ADR-0204.** §3's placement clause **writes no placement**, so ADR-0217
+  §3's three setters, its meet and its precedence are untouched, and ADR-0204 §5's
+  ratchet is neither weakened nor restated. What the clause does is decline a write
+  whose result would have carried a narrowing's information onto a wider record — it
+  honours their ground by refusing, where a derived *record* would have inherited. A
+  **stacked addition**, recorded here and nowhere else.
 - **ADR-0077.** §3's minimal payload is honoured, not widened (§5). §4's
   discard-and-count rule binds the proposals population exactly as written; §5 above
   states a fresh rule for a new object and takes nothing from it. §9.5's declining to
@@ -846,9 +1008,13 @@ answer.**
 - **Labels do not converge across passes.** Two conversations about one subject may be
   filed under two labels with nothing to bring them together. §5 names it; §11 names the
   instrument and the measurement that would close it.
-- **Every episode already in a store is permanently unlabelled.** §8 is explicit about
-  this and §6 obliges every surface to say so. A store with a year of history has a year
-  of conversations no structured read reaches.
+- **Every episode the walk had already passed is permanently unlabelled.** §8 is
+  explicit about this and §6 obliges every surface to say so — keyed on the missing
+  label rather than on a date, because the horizon is the watermark's.
+- **A mixed-placement page loses labels on its wider episodes**, and a labelling write
+  that fails after a committed advance loses them for that page for good. Both are §3's
+  choices and both fail in the same direction: a lost label, never a wrong one and never
+  one over the owner's word.
 - **A `core` type widens, and the implementation lane is a `core` holder.** #2133 briefed
   it as "no `core`"; it is one additive member and one small model, with
   `core/protocols.py` untouched, but it has to be sequenced with the batch's other `core`
