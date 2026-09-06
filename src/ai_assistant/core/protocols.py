@@ -1397,9 +1397,13 @@ class MemoryStore(Protocol):
                 any value that does not equal its own ``str.casefold()`` — and a
                 value that does not is **refused with ``ValueError``** rather than
                 left to match nothing. No hierarchy, prefix, synonym, stem or
-                similarity is a topic relation.
-                Records carrying no topic are reached by no value here, which is
-                every episode this system captures today (ADR-0213 §6).
+                similarity is a topic relation. Records carrying no topic are
+                reached by no value here — which is every episode **capture**
+                writes, since it labels none (ADR-0213 §6's capture clause, which
+                stands). It is not every episode a store holds for ever: ADR-0239
+                gives the observation pass a labelling write at an episode's own
+                id, so once that lands this axis reaches the episodes it labelled
+                and no others.
             about_person: If given, restrict results to records whose
                 ``about_person`` matches at least one of these values, by the same
                 D145 rule and with the same blank refusal as ``participants`` — one
@@ -1608,8 +1612,12 @@ class MemoryStore(Protocol):
                 — and a value that does not is **refused with ``ValueError``**
                 rather than left to match nothing. No hierarchy, prefix, synonym,
                 stem or similarity is a topic relation. Records carrying no topic
-                are reached by no value here, which is every episode this system
-                captures today (ADR-0213 §6).
+                are reached by no value here — which is every episode **capture**
+                writes, since it labels none (ADR-0213 §6's capture clause, which
+                stands). It is not every episode a store holds for ever: ADR-0239
+                gives the observation pass a labelling write at an episode's own
+                id, so once that lands this axis reaches the episodes it labelled
+                and no others.
             about_person: If given, restrict results to records whose
                 ``about_person`` matches at least one of these values, by the same
                 D145 rule and with the same blank refusal as ``participants`` — one
