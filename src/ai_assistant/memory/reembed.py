@@ -59,8 +59,14 @@ from ai_assistant.core.errors import (
     MemoryStoreEmbeddingExpiredError,
     MemoryStoreError,
 )
+from ai_assistant.core.types import EpisodicMemory
 from ai_assistant.memory._transactions import transaction
-from ai_assistant.memory.sqlite_store import _ADAPTER, SqliteMemoryStore, _to_micros
+from ai_assistant.memory.sqlite_store import (
+    _ADAPTER,
+    SqliteMemoryStore,
+    _labels_of,
+    _to_micros,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -366,8 +372,10 @@ def _decode(data: str, record_id: object) -> MemoryRecord:
         raise MemoryStoreError(msg) from exc
 
 
-def _derived(record: MemoryRecord) -> tuple[int | None, int | None, int | None, str | None]:
-    """The lifecycle, window and subject columns, as the store's write path derives them.
+def _derived(
+    record: MemoryRecord,
+) -> tuple[int | None, int | None, int | None, str | None, int | None]:
+    """The lifecycle, window, subject and instant columns, as the write path derives them.
 
     Kept in this shape — read off the decoded model, not re-parsed from the JSON —
     so it cannot drift from ``SqliteMemoryStore._persist_record``, which is the
@@ -381,6 +389,14 @@ def _derived(record: MemoryRecord) -> tuple[int | None, int | None, int | None, 
     quietest failure this module can produce — a not-yet-live record becomes
     searchable on a store that was only re-embedded — so :func:`_verify` compares
     this tuple against the blob for every row before anything is moved.
+
+    **``occurred_at`` is here for exactly that reason, one axis on** (ADR-0237 §1).
+    It binds before ``search``'s ranking cut and before ``select``'s, which it can
+    only do from a column; a rebuild that carried the blob and left the column
+    ``NULL`` would leave every window filter reaching *nothing* while every record
+    round-tripped intact — the same quiet failure as ``valid_from``'s, in the other
+    direction. The label index ``record_labels`` is the same hazard once more and is
+    written by :func:`_insert` and checked by :func:`_verify` beside these.
     """
     expires = _to_micros(record.expires_at) if record.expires_at is not None else None
     valid_until = (
@@ -389,7 +405,8 @@ def _derived(record: MemoryRecord) -> tuple[int | None, int | None, int | None, 
     valid_from = (
         _to_micros(record.validity.valid_from) if record.validity.valid_from is not None else None
     )
-    return expires, valid_until, valid_from, record.about_person
+    occurred_at = _to_micros(record.occurred_at) if isinstance(record, EpisodicMemory) else None
+    return expires, valid_until, valid_from, record.about_person, occurred_at
 
 
 def _discard(path: Path) -> None:
@@ -1025,17 +1042,40 @@ def _insert(
     if stamp is None or int(stamp) == 0:
         work.execute("UPDATE revision_issuer SET issued = issued + 1 WHERE singleton = 0")
         (stamp,) = work.execute("SELECT issued FROM revision_issuer WHERE singleton = 0").fetchone()
-    expires, valid_until, valid_from, about_person = _derived(record)
+    expires, valid_until, valid_from, about_person, occurred_at = _derived(record)
     work.execute(
         "INSERT INTO records"
-        "(rowid, id, kind, data, expires_at, valid_until, valid_from, about_person, revision) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (rowid, record_id, kind, data, expires, valid_until, valid_from, about_person, stamp),
+        "(rowid, id, kind, data, expires_at, valid_until, valid_from, about_person, revision, "
+        "occurred_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            rowid,
+            record_id,
+            kind,
+            data,
+            expires,
+            valid_until,
+            valid_from,
+            about_person,
+            stamp,
+            occurred_at,
+        ),
     )
     work.execute(
         "INSERT INTO vec_records(rowid, embedding) VALUES (?, ?)",
         (rowid, sqlite_vec.serialize_float32(list(vector))),
     )
+    # The label index goes across with the row (ADR-0237 §1). The work store's
+    # schema carries an *empty* ``record_labels``, and the store's own backfill
+    # runs only on the open that creates the table — so a copy that skipped this
+    # would swap in a store whose three label axes reach nothing at all, with
+    # every record intact and every read silently narrower.
+    labels = [(rowid, axis, value) for axis, value in _labels_of(record)]
+    if labels:
+        work.executemany(
+            "INSERT OR IGNORE INTO record_labels(record_rowid, axis, value) VALUES (?, ?, ?)",
+            labels,
+        )
 
 
 def _write_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
@@ -1045,6 +1085,45 @@ def _write_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         (key, value),
     )
+
+
+def _verify_labels(
+    work: sqlite3.Connection, expected: set[tuple[int, str, str]], what: str
+) -> None:
+    """Check the copied label index against the one the records themselves imply.
+
+    The third quiet failure this module can produce (ADR-0237 §1). ``record_labels``
+    is a derived index the three label axes bind through *before* either read's cut,
+    and it is not in the blob — so a rebuild that carried every row and left the
+    table empty would swap in a store on which ``topics``, ``participants`` and
+    ``about_person`` reach nothing at all, with every record round-tripping intact
+    and no read reporting a fault.
+
+    Compared as one set rather than row by row: the expected side is accumulated
+    while :func:`_verify` is already decoding each record, and the stored side is one
+    scan, so the check costs a query rather than a query per record. ``INSERT OR
+    IGNORE`` collapses two of a record's own values that fold to one key, which is
+    why the expected side is a set and not a list.
+
+    Raises:
+        MemoryStoreError: If the table cannot be read, or holds anything other than
+            exactly the rows the copied records imply.
+    """
+    try:
+        stored = {
+            (int(row[0]), str(row[1]), str(row[2]))
+            for row in work.execute("SELECT record_rowid, axis, value FROM record_labels")
+        }
+    except sqlite3.Error as exc:
+        msg = f"failed to read the label index in {what}: {exc}"
+        raise MemoryStoreError(msg) from exc
+    if stored != expected:
+        missing = len(expected - stored)
+        orphaned = len(stored - expected)
+        _fail(
+            f"its label index is wrong: {missing} label rows the records imply are "
+            f"absent and {orphaned} name nothing the records carry"
+        )
 
 
 def _rowids(conn: sqlite3.Connection, table: str, what: str) -> set[int]:
@@ -1162,19 +1241,23 @@ def _verify(
         _fail(f"it is {meta.get('dimensions')}-dimensional, expected {embedder.dimensions}")
 
     destination = (
-        "rowid, id, kind, data, expires_at, valid_until, valid_from, about_person, revision"
+        "rowid, id, kind, data, expires_at, valid_until, valid_from, about_person, revision, "
+        "occurred_at"
     )
     highest = 0
+    labels: set[tuple[int, str, str]] = set()
     for left, right in zip_longest(_rows(source, columns), _rows(work, destination)):
         if left is None or right is None:
             _fail("it holds a different number of records")
         if left[:4] != right[:4]:
             _fail(f"row {right[0]!r} differs from the live store's row {left[0]!r}")
         record = _decode(str(right[3]), right[1])
-        if tuple(right[4:8]) != _derived(record):
+        if (*right[4:8], right[9]) != _derived(record):
             _fail(f"row {right[0]!r} has columns that disagree with the record stored in it")
+        labels.update((int(right[0]), axis, value) for axis, value in _labels_of(record))
         highest = max(highest, _verified_stamp(left, right))
     _verify_issuer(source, work, highest)
+    _verify_labels(work, labels, str(plan.work))
 
     record_rowids = _rowids(work, "records", str(plan.work))
     vector_rowids = _rowids(work, "vec_records", str(plan.work))

@@ -44,6 +44,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.protocols import MemoryStore
 from ai_assistant.core.types import (
     BeliefBand,
+    EpisodicMemory,
     MemoryKind,
     MemoryRecord,
     MemorySource,
@@ -55,6 +56,7 @@ from ai_assistant.core.types import (
     PreferenceMemory,
     Provenance,
     SemanticMemory,
+    TimeWindow,
     Validity,
 )
 from ai_assistant.memory import SqliteMemoryStore
@@ -80,6 +82,10 @@ pytestmark = pytest.mark.integration
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 _NOW = datetime(2026, 6, 1, tzinfo=UTC)
+#: The half-open period ADR-0237 §2's window cases here filter on, and an instant
+#: inside it, all comfortably before ``_NOW`` so nothing is accidentally unreadable.
+_MARCH = datetime(2026, 3, 1, tzinfo=UTC)
+_APRIL = datetime(2026, 4, 1, tzinfo=UTC)
 #: How long ``_GatedEmbedder`` waits for a call to arrive before declaring the
 #: scenario broken. Generous — only reached when a case has already hung.
 _GATE_SECONDS = 5.0
@@ -1243,6 +1249,169 @@ async def test_purge_expired_removes_only_expired_and_returns_count(
     assert await store.purge_expired() == 1
     assert await store.get("live") is not None
     assert await store.purge_expired() == 0
+
+
+# --- ADR-0237's storage: the instant column and the label index ---------------
+# ADR-0237 §9 item 4 leaves the mechanism to this lane under §1's observable
+# obligation, and these are the cases that hold the mechanism itself rather than
+# the behaviour the shared suite already runs against all three implementations:
+# the migration onto a store written before it, the deletes that must take the
+# index with them, and the rewrite that must replace it rather than accumulate.
+
+
+def _episode_with_every_axis(record_id: str, content: str = "coffee") -> MemoryRecord:
+    """An episode carrying a value on all four of ADR-0237 §1's axes."""
+    return EpisodicMemory(
+        id=record_id,
+        content=content,
+        provenance=_provenance(),
+        occurred_at=_MARCH,
+        participants=("Alex",),
+        topics=("renovation",),
+        about_person="Alex",
+    )
+
+
+def _strip_the_filter_index(path: Path) -> None:
+    """Put a current store back on the schema that immediately precedes ADR-0237.
+
+    Surgery on a store the current writer built, rather than a hand-rolled legacy
+    table: every other column, the revision issuer and the vector table are then
+    exactly what a deployment carries today, and the *only* difference is the two
+    things this decision adds. Building the whole prior schema by hand would test
+    the fixture as much as the migration.
+
+    ``DROP COLUMN`` is available because nothing indexes ``occurred_at`` — the
+    label axes are indexed through ``record_labels``, which goes whole.
+    """
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("ALTER TABLE records DROP COLUMN occurred_at")
+        conn.execute("DROP TABLE record_labels")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+async def test_a_store_written_before_the_filter_index_gains_it_on_the_next_open(
+    tmp_path: Path,
+) -> None:
+    """The migration backfills both, or every structured read comes out empty.
+
+    The quiet failure ADR-0128's own ``valid_from`` migration names, one decision
+    on: a store that carried every blob faithfully and left ``occurred_at``
+    ``NULL`` and ``record_labels`` empty would round-trip every record intact,
+    pass every count check, and answer *nothing* to every window and every label
+    filter — with no read reporting a fault. So the assertion is that the filters
+    **reach**, on both members, and it is made through the reads rather than
+    through the columns.
+    """
+    path = tmp_path / "memory.db"
+    embedder = HashingEmbedder(dimensions=8)
+    before = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=path, embedder=embedder, now=_fixed_now
+    )
+    try:
+        await before.add(_episode_with_every_axis("captured"))
+    finally:
+        before.close()
+    _strip_the_filter_index(path)
+
+    after = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=path, embedder=embedder, now=_fixed_now
+    )
+    try:
+        window = TimeWindow(start=_MARCH, end=_APRIL)
+        assert {r.id for r in (await after.select(occurred_within=window)).records} == {"captured"}
+        assert {r.id for r in (await after.select(topics=["renovation"])).records} == {"captured"}
+        assert {r.id for r in (await after.select(participants=["alex"])).records} == {"captured"}
+        assert {r.id for r in (await after.select(about_person=["alex"])).records} == {"captured"}
+        found = await after.search("coffee", occurred_within=window, topics=["renovation"])
+        assert {r.id for r in found.records} == {"captured"}
+    finally:
+        after.close()
+
+
+def _label_rows(path: Path) -> list[tuple[object, ...]]:
+    """Every row of the label index, for the cases that assert it is emptied."""
+    conn = sqlite3.connect(str(path))
+    try:
+        return [
+            tuple(row)
+            for row in conn.execute("SELECT record_rowid, axis, value FROM record_labels")
+        ]
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("erase", ["delete", "clear", "purge_expired"])
+async def test_erasing_a_record_takes_its_label_rows_with_it(
+    make_store: Callable[..., SqliteMemoryStore], tmp_path: Path, erase: str
+) -> None:
+    """Every door that removes a row removes its index rows in the same transaction.
+
+    An orphaned label row is matched by a filter and resolves to nothing, which on
+    a read that joins by ``rowid`` is either a silently short answer or a row that
+    no longer exists being counted as a candidate. The three doors are asserted
+    separately because they are three statements: ``delete`` names one row,
+    ``clear`` empties the table, and ``purge_expired`` names a set.
+    """
+    store = make_store(dimensions=8)
+    record = _episode_with_every_axis("gone")
+    if erase == "purge_expired":
+        record = record.model_copy(update={"expires_at": _WHEN - timedelta(days=1)})
+    await store.add(record)
+    assert _label_rows(tmp_path / "memory.db"), "the premise: the write indexed the record"
+
+    if erase == "delete":
+        assert await store.delete("gone") is True
+    elif erase == "clear":
+        assert await store.clear() == 1
+    else:
+        assert await store.purge_expired() == 1
+
+    assert _label_rows(tmp_path / "memory.db") == [], (
+        f"{erase} left the record's label rows behind, so a filter still names a "
+        "row the store no longer holds (ADR-0237 §1)"
+    )
+
+
+async def test_rewriting_a_record_replaces_its_label_rows_rather_than_adding_to_them(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    """An upsert's index is the new record's, not the union of both versions.
+
+    The accumulating failure is the one a delete-then-insert exists to prevent and
+    an insert-only writer would produce: a record relabelled from ``renovation`` to
+    ``garden`` would go on being reached by ``renovation`` for ever, which is
+    ADR-0237 §1's "a comparison against a stored field" quietly becoming a
+    comparison against a stored *history*.
+    """
+    store = make_store(dimensions=8)
+    await store.add(_episode_with_every_axis("relabelled"))
+    relabelled = EpisodicMemory(
+        id="relabelled",
+        content="coffee",
+        provenance=_provenance(),
+        occurred_at=_MARCH,
+        participants=("Bob",),
+        topics=("garden",),
+        about_person="Bob",
+    )
+
+    await store.add(relabelled)
+
+    assert {r.id for r in (await store.select(topics=["garden"])).records} == {"relabelled"}
+    stale = (
+        await store.select(topics=["renovation"]),
+        await store.select(participants=["alex"]),
+        await store.select(about_person=["alex"]),
+    )
+    for reached in stale:
+        assert reached.records == (), (
+            "a rewritten record is still reached by a value only its previous "
+            "version carried (ADR-0237 §1)"
+        )
 
 
 def _write_legacy_db(
@@ -2493,13 +2662,15 @@ class TestSqliteMemoryStoreContract(MemoryStoreContract):
         would let the mutation land past every read, observe one coherent version,
         and certify the bug.
 
-        **Three of the five operations suspend on the embedder and two do not**,
+        **Three of the six operations suspend on the embedder and three do not**,
         which is why the widened hook takes the operation's name (#436).
         ``add``, ``write_atomic`` and ``search`` all embed before they touch the
         connection, so the injected ``Embedder`` is their first ``await``.
-        ``list_beliefs`` and ``get_many`` embed nothing: the first ``await`` of each
-        is ``async with self._lock``, so the lever there is the lock itself, wrapped
-        so one acquisition can be held at the door. Suspending it anywhere later — inside
+        ``list_beliefs``, ``get_many`` and ``select`` embed nothing: the first
+        ``await`` of each is ``async with self._lock``, so the lever there is the
+        lock itself, wrapped so one acquisition can be held at the door. ``select``
+        joins them because it carries no query and so reaches no embedder at all
+        (ADR-0237 §4). Suspending it anywhere later — inside
         ``_list_beliefs_sync``, say — would put the mutation past the point a
         non-conforming implementation would have read ``bands``, which is the
         entry-side mistake ADR-0065 §3 warns about, in mirror image.
@@ -2518,7 +2689,7 @@ class TestSqliteMemoryStoreContract(MemoryStoreContract):
         lock = _GatedLock(store._lock)
 
         def arm(operation: str) -> SuspendedCall:
-            if operation in {"list_beliefs", "get_many"}:
+            if operation in {"list_beliefs", "get_many", "select"}:
                 # Installed only when it is needed, so every other case runs on the
                 # store's own lock. `_lock` is typed `asyncio.Lock`; this stands in
                 # for one and is only ever entered through `async with`.
