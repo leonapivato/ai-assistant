@@ -15,14 +15,15 @@
   — **§5's second clause, the lineage floor, for a closed-loop request as §5 below
   defines one.** That clause in that scope, and nothing else.
 - **Partially supersedes** [ADR-0193](0193-a-standing-recipient-grant-is-a-user-act-on-a-canonical-destination-set-and-never-covers-a-call-planned-over-external-content.md)
-  — **§3's first clause in its fifth comparison, and §4's first clause, for a
-  closed-loop request alone.** Those two, and nothing else — §5's rule that a grant
-  reaches the recipient and never the payload is left standing deliberately, and §1
-  below is built so that it can be.
+  — **§3's first clause in its fifth comparison, §4's first clause, and §6's
+  eighth-check clause in its seventh limb alone, each for a closed-loop request.**
+  Those three, and nothing else — §5's rule that a grant reaches the recipient and never
+  the payload is left standing deliberately, and §1 below is built so that it can be.
 - **Partially supersedes** [ADR-0074](0074-conversation-is-an-entity-and-every-turn-is-an-episode.md)
   — **§9's enumeration of what a `ConversationTurn` carries and of what the
   `ConversationStore` owes.** That enumeration, in the same scope ADR-0205 and
-  ADR-0212 already moved it, and nothing else.
+  ADR-0212 already moved it, and nothing else: the row gains one member and `append`
+  takes its value, and **no member is added to the store**.
 
 ## Context
 
@@ -205,9 +206,49 @@ the fifth of five comparisons a grant must satisfy, so moving §4 alone would le
 > revocation takes effect for every later request and rewrites no recorded decision, and
 > a destination whose record is revoked reads `UNCHOSEN` from that moment.
 
-> **Normative.** The fact is recorded in **its own store**, reached through **one new
-> `@runtime_checkable` Protocol in `core/protocols.py`**, and is **not** a field on
-> `RecipientGrant`. Two reasons, and each is sufficient. **A destination nobody chose
+> **Normative.** `core/types.py` gains **`DestinationTrustRecord`**, a frozen model
+> refusing unknown fields, with exactly five fields: `id: Identifier`, minted by the
+> store's injected id factory and supplied by no caller; `destinations:
+> tuple[CanonicalDestination, ...]`, non-empty, the canonical destination set this record
+> is over; `trust: DestinationTrust`; `established_at: UtcInstant`, the instant of the
+> user's act; and `revoked_at: UtcInstant | None`, defaulting to `None`. It carries **no
+> tool, no account, no payload, no description and no content**: it is a fact about a
+> destination set and nothing else, which is what makes it readable for a destination no
+> grant covers.
+
+> **Normative.** A `DestinationTrustRecord` whose `trust` is `UNCHOSEN` is **refused at
+> construction**. `UNCHOSEN` is what absence means (above), so a record asserting it
+> would be a second spelling of nothing, and two spellings of one state is the shape
+> ADR-0217 §1's refusal table exists to prevent.
+
+> **Normative.** `core/protocols.py` gains **one** `@runtime_checkable` Protocol,
+> **`DestinationTrustStore`**, with exactly **four** members and no more: **`record`**,
+> taking a `DestinationTrustRecord` and appending it, refusing a duplicate `id`, an empty
+> destination set and a record duplicating a live record's destination set, by an
+> `InvalidDestinationTrustError` beside `InvalidRecipientGrantError`; **`trust_of`**,
+> taking a sequence of `CanonicalDestination` and answering a `DestinationTrust`;
+> **`revoke`**, taking a record `id` and the instant of the user's act, prospective and
+> idempotent, refusing an unknown id by the same error; and **`live`**, answering the
+> records that are not revoked, ordered, for the surface that lets a user see and revoke
+> what they granted. **No member is added, no argument widened and no return changed by
+> any later lane** without the ADR that decides it.
+
+> **Normative.** **`trust_of` answers `USER_CHOSEN` only where every member of the
+> sequence it was given is a member of some one live record's `destinations`**, compared
+> as `CanonicalDestination` compares — every field, never across protocols — and
+> `UNCHOSEN` otherwise, including for an empty sequence. **Coverage is a comparison of
+> recorded values and is never an inference**: no implementation folds case, matches a
+> domain, treats an account member as covering a recipient member or the reverse, relates
+> the two sets by anything but membership, or re-canonicalises either side. That is
+> ADR-0193 §3's second clause, restated over this store because the hazard is identical
+> and the store is a different one.
+
+> **Normative.** The store is **local and durable and is never written to a remote
+> service** (ADR-0004 §2), it holds a Tier 1 fact, and it ships as a **triad** — Protocol,
+> shared conformance suite, canonical fake — under `CONTRIBUTING.md` → "Adding a
+> Protocol".
+
+> **Normative.** The store is **not** a field on `RecipientGrant`. Two reasons, and each is sufficient. **A destination nobody chose
 > has no grant to carry a field** — milestone 32's subject is a site the provider
 > returned, for which no `RecipientGrant` exists or ever will, so a grant-carried field
 > could not express the value that milestone reads. And **ADR-0193 §5 is correct and is
@@ -275,11 +316,26 @@ exists and is live, or it does not.
 > **Normative.** **What may enter `records` is closed to three populations and nothing
 > else**: episodes of this conversation that `orchestration` selected into the turn's
 > supply; `MemoryRecord`s the turn's retrieval and episodic supplement selected; and
-> records this conversation's own `WEB_SEARCH` servicings minted at a destination whose
+> records **this turn's own** `WEB_SEARCH` servicings minted at a destination whose
 > recorded trust is `USER_CHOSEN`. No record of any other origin enters, and in
 > particular no record minted at an `UNCHOSEN` destination, by a fetch, by a file read,
 > by a reader or by any tool does — which is what §5's condition is stated over from the
 > other side.
+
+> **Normative.** **ADR-0231 §16 binds entire and this ADR retains nothing.** A minted
+> record's `id` "is minted for one turn … and resolves in no store", "no later turn
+> reaches it", and "**a second turn re-searches** … because nothing was retained". So the
+> third population above is **within one turn** — the refinement ADR-0228 §2's revision
+> makes real, where a second servicing of the same turn composes over the first's
+> results — and **no later turn reaches a result's content by any route**. `TurnSearchRecord`
+> (§8) carries three quantities and no result, and no lane reads this ADR as deciding
+> retention, an archive admission or a store write for a minted record.
+
+> **Normative.** **What a later turn has instead is the captured episode**, stamped and
+> retrieved exactly as ADR-0221, ADR-0223 and retrieval already deliver it, plus whatever
+> `MemoryRecord`s the turn selected. That is what resolves "find more about **that**"
+> across turns, and it is the first two populations doing the work rather than the
+> third.
 
 > **Normative.** Every other clause of ADR-0231 §11 binds unchanged. The only value
 > `WebSearcher.request` is passed is the `query` of a `QueryOutcome` the composer
@@ -381,22 +437,71 @@ recipient.
 
 > **Normative.** A request is **closed-loop** when **all four** hold: its kind is
 > `WEB_SEARCH`; the destination its binding carries has recorded trust `USER_CHOSEN`
-> (§1); **every turn of its conversation that carries external content in ADR-0223 §1's
-> sense has recorded that all of that turn's external content was minted by a
-> `WEB_SEARCH` servicing to a destination of recorded trust `USER_CHOSEN`** (§8's
-> record); and the conversation's recorded draw leaves room in every bound of §8. A
-> request failing any of the four is not closed-loop, and every clause this ADR
-> supersedes binds on it exactly as it does today.
+> (§1); **every recorded external span this conversation has carried — on any earlier
+> turn, and on this turn up to the moment the request is built — was minted by a
+> `WEB_SEARCH` servicing at a destination of recorded trust `USER_CHOSEN`** (the two
+> halves are stated in the clause below); and the conversation's accumulated draw (§8)
+> leaves room in every bound of §8 for the call this request would make. A request
+> failing any of the four is not closed-loop, and every clause this ADR supersedes binds
+> on it exactly as it does today.
 
-> **Normative.** **The third condition is decided from a recorded fact and never from
-> the taint bit.** `planned_with_external_content` is one bit over a selection
-> (ADR-0181 §4) and ADR-0223 §1 stamps one bit on the captured episode, so neither can
-> say *what* the external content was on an earlier turn. The condition is therefore
-> read from `TurnSearchRecord.external_all_user_chosen` (§8), written by `orchestration`
-> at capture from records it held as data it fetched, at the same instant, by the same
-> component and under the same discipline as ADR-0223 §1's own value. **No component
-> recovers the condition by inspecting an episode, a record's content, a query or a
-> reply**, and no component asks a model for it.
+> **Normative.** **The third condition ranges over the conversation's recorded turns
+> *and* over the current turn**, and the current turn is evaluated live rather than from
+> a record that does not exist yet. Its two halves are: every recorded turn's
+> `TurnSearchRecord.external_all_user_chosen` (§8) is true; **and** every recorded
+> external span in the turn's pre-servicing supply and in every record this servicing has
+> already contributed was minted by a `WEB_SEARCH` servicing at a destination of recorded
+> trust `USER_CHOSEN`. The second half is computed by `orchestration` at the moment the
+> request is built, from records it holds as data it fetched — the same site, the same
+> instant and the same data as ADR-0231 §11's tenth clause computes
+> `planned_with_external_content` over.
+
+> **The current-turn half is not an optimisation; without it the condition is wrong in
+> both directions.** ADR-0231 §11 fixes the servicing order as local file, then web
+> search, then citation hop, then sighted query, so a turn may read a file and *then*
+> reach the search. Recorded turns still say true, so a condition reading history alone
+> would admit exactly the cross-kind request §5 exists to refuse; and treating the
+> current turn's missing record as false would refuse every first search of every turn,
+> which is every search there is.
+
+> **Normative.** **Neither half is decided from the taint bit.**
+> `planned_with_external_content` is one bit over a selection (ADR-0181 §4) and ADR-0223
+> §1 stamps one bit on the captured episode, so neither can say *what* the external
+> content was. **No component recovers either half by inspecting an episode, a record's
+> content, a query or a reply**, and no component asks a model for either.
+
+> **Normative.** **The whole condition reaches the ruling as one recorded fact on the
+> binding.** `EgressBinding` gains `closed_loop: bool`, **required with no default**: true
+> exactly where all four conditions above hold for this request, and false otherwise —
+> so false for every request that is not a `WEB_SEARCH`, and false on every binding this
+> corpus builds today. `CarriedProvenance` gains the same field, required with no
+> default, and the seam writes the binding's value from the carrier's unchanged. This is
+> ADR-0181 §3's carriage and ADR-0233 §4's shape, and it is stated over the same two
+> types for the same reason.
+
+> **Normative.** **`closed_loop` is written by `orchestration`, at the moment the request
+> is built, and by nothing else.** It is computed from the conversation's recorded turns,
+> the current turn's supply, the trust store's answer and the budget fold — every one of
+> them a value `orchestration` holds as data it fetched. **It is discarded, never merged,
+> if any producer emitted one**; no model output contributes to it; no component infers
+> it, defaults it, repairs it or recomputes it downstream; and a lane that finds itself
+> computing it outside `orchestration` has breached this clause.
+
+> **Normative.** **A stored binding written before this decision decodes with
+> `closed_loop` false**, which is ADR-0181 §12's own case and the fail-closed direction.
+> The two comparisons that already carry a binding carry this field for no reason special
+> to it: `EgressBinder.rebind` re-derives and refuses unless the binding equals the parked
+> one (ADR-0152 §7), and `PermissionDecision.authorises` compares the whole binding at the
+> seam (ADR-0181 §5's fifth clause). Neither is moved, duplicated or widened here.
+
+> **Normative.** **What the fact buys is a value the ruling can read, and not a claim
+> anybody re-derives.** No `ActionPolicy` acquires a store handle, a trail read, a grant
+> seam or a conversation identity in order to check the four conditions — ADR-0181 §5's
+> third clause and ADR-0097 §7 forbid the last of those outright — and no `AuditTrail`
+> revalidates them. The trust boundary is exactly the one this corpus already accepts for
+> `planned_with_external_content` (ADR-0181 §2, §4) and for `coverage` (ADR-0233 §5): the
+> component that composed the arguments computes the fact, and everything downstream reads
+> what it wrote.
 
 > **Normative.** **A turn with no such record fails the condition**, and so does a
 > conversation holding one. Absence is the fail-closed direction here as it is in §1, so
@@ -448,6 +553,35 @@ trust and requiring a per-turn record are what make the sentence checkable.
 > equality, account equality, and every member of the request's canonical destination set
 > being a member of the grant's — bind entire and are not narrowed, widened or reordered.
 > The fifth comparison stands unchanged for every request that is not closed-loop.
+
+> **Normative.** **ADR-0193 §6's eighth-check clause is superseded in one limb, for a
+> closed-loop request alone.** That clause admits a route-(b) `ALLOW` only where all eight
+> hold, the seventh being that "the decision's `egress_binding` is an **`EgressBinding`**
+> whose `planned_with_external_content` **is `False`**". That limb becomes: whose
+> `planned_with_external_content` is `False`, **or** whose `closed_loop` is `True`. **The
+> other seven are untouched** — the outstanding-grant read, both ends of liveness, tool
+> equality, account equality, destination-set containment and the recomputed
+> `subject_digest` — and each is still taken over the record the store returned rather than
+> over the decision's account of it.
+
+> **Normative.** **The `OriginUnrecordedBinding` arm stays refused by name.** ADR-0193 §6
+> states the origin check "over the binding's **arm**, not only over a field's value", and
+> a binding that records no origin carries no `closed_loop` either. Such a decision is
+> refused exactly as today, and no lane reads this section as making an unrecorded origin
+> readable as a closed loop.
+
+> **Normative.** **`record` validates the fact on the binding and not the conditions
+> behind it**, and this ADR claims no more. It holds no conversation store, no trust store
+> and no supply, and ADR-0193 §6's "nothing is taken on trust" is stated over the *grant*,
+> which `record` can and does re-read. The four conditions are `orchestration`'s to compute
+> at the one site §5 names, exactly as `planned_with_external_content` is, and the trail has
+> never revalidated that field either.
+
+> **Normative.** **The `AuditTrailContract` suite gains both arms in the same change as the
+> field**: a closed-loop route-(b) `ALLOW` over external content is recorded, and one whose
+> `closed_loop` is false is refused exactly as
+> `test_a_decision_planned_over_external_content_is_refused` requires today. Neither arm is
+> deferred to a later lane.
 
 > **Normative.** **ADR-0193 §5 is not superseded and is relied upon.** A grant still
 > reaches the recipient and never the payload; it still authorises no content, classifies
@@ -570,17 +704,37 @@ relaxation legible in the way §9 wanted.
 > record graph is frozen (ADR-0068) and `MemoryStore` offers no update, so the index row
 > is what can carry a per-turn fact at all.
 
-> **Normative.** `ConversationStore` gains exactly one member, writing that value for one
-> turn of one conversation. It stamps a row only where the row belongs to the conversation
-> the caller named, carries no `search` value already, and the conversation is not
-> stamped deleted; it is inside the store's own mutation exclusion, never interleaving
-> with `append`, `mark_active`, `record_delivery`, `record_observed`, `stamp_deleted` or
-> `drop_if_eligible`; and it writes once and is never an update.
+> **Normative.** **The value is written by `append`, in the same write that records the
+> turn, and by no second member.** `ConversationStore` gains **no** new member: the fact is
+> known inside the turn, unlike `delivery`, so `append` takes it and the row lands with it
+> or not at all. That removes the window a two-write shape would have, and it is why §17
+> records this ADR against ADR-0074 §9's enumeration of what the store owes as well as of
+> what the row carries.
 
 > **Normative.** **The conversation's accumulated draw is the fold of `search` over its
-> recorded turns, computed by `orchestration`.** A turn carrying no `search` contributes
-> **zero** to `calls` and to `elapsed`, and **false** to §5's third condition. Nothing
-> else contributes to either quantity.
+> recorded turns *plus the current turn's own draw so far*, computed by `orchestration`.**
+> The current turn's draw is the calls this turn's servicings have already completed and
+> the time they occupied, held by `orchestration` for the life of the turn and consumed at
+> admission rather than at capture. **A servicing counts its call against the bound before
+> the channel is opened, and a second servicing of the same turn sees the first's call.** A
+> recorded turn carrying no `search` contributes **zero** to `calls` and to `elapsed`, and
+> **false** to §5's third condition. Nothing else contributes to any of the three.
+
+> **Normative.** **Admission and consumption are one step per call**, not a read followed
+> by an unrelated write: no two servicings of one turn, and no two calls of one servicing,
+> are admitted against the same draw. **A call admitted and then not made returns its
+> draw**; a call whose channel was opened is consumed whatever the outcome, because the
+> query left.
+
+> **Normative.** **The residue is a turn interrupted between a call and its `append`, and
+> it is bounded and stated rather than closed.** A process that exits after a search has
+> left and before the turn's row lands loses that turn's draw from the fold — and loses
+> that turn's episode and its `external_all_user_chosen` with it, so the turn contributes
+> nothing to the budget, nothing to the taint and nothing to §5's condition, and the
+> conversation resumes as though it had not happened. The loss is bounded by one turn,
+> which ADR-0228 §3 bounds at two servicings, so at most two calls per interruption.
+> **Nothing an injected result can do causes an interruption**, which is why this residue is
+> accepted rather than bought out with a durable write per call.
 
 > **Normative.** **The bounds are checked before a query is composed**, at the servicing
 > site §2 names, over the fold above and the `Settings` values. Where either bound is
@@ -708,10 +862,17 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > **Normative.** **An injected result cannot make a destination trusted.** §1's fact is
 > set by a recorded user act alone and is never proposed, raised or judged by a model.
 
-> **Normative.** **An injected result cannot widen the closed-loop population.** §5's
-> third condition is read from records `orchestration` wrote; a result that arrives from
-> an `UNCHOSEN` destination or by any other route sets `external_all_user_chosen` false
-> for its turn and closes the loop for the rest of that conversation.
+> **Normative.** **An injected result cannot widen the closed-loop population.** Both
+> halves of §5's third condition are computed by `orchestration` from records it holds as
+> data it fetched. A record that arrives from an `UNCHOSEN` destination or by any other
+> route fails the current-turn half **at once** — before the next request of that same
+> turn is built, not only at capture — and fails the recorded half for every later turn of
+> the conversation.
+
+> **Normative.** **An injected result cannot make a binding claim a closed loop.**
+> `closed_loop` is written by `orchestration` alone, discarded and never merged if any
+> producer emitted one, and compared through `rebind` and `authorises` on every resumed
+> path. No model output, no request content and no search result contributes to it.
 
 > **Normative.** **Credentials stay out structurally and no clause here moves them
 > nearer.** No composer holds a `Secrets` face; nothing in `planning/` or
@@ -723,20 +884,37 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 
 ### 13. The `core` surface, the version, and what a record written before this decodes to
 
-> **Normative.** The `core` surface this decision adds is exactly: in `core/types.py`,
-> `DestinationTrust`, `SearchSupply` and `TurnSearchRecord`, plus one member on
-> `ConversationTurn` and the trust store's own record type; in `core/protocols.py`, one
-> new `@runtime_checkable` Protocol for the trust store, one member on
-> `ConversationStore`, and the changed parameter type on `QueryComposer.compose`. **No
-> other member of any `core` type or Protocol changes its type, its default or its
-> meaning**, and `Provenance` gains no field — ADR-0098 §5's deferral of a per-span
-> externality field is neither taken nor narrowed here.
+> **Normative.** The `core` surface this decision adds is exactly this and no more. In
+> `core/types.py`: `DestinationTrust`, `DestinationTrustRecord`, `SearchSupply` and
+> `TurnSearchRecord` as new types; one member on `ConversationTurn` (`search`); and one
+> member on each of `EgressBinding` and `CarriedProvenance` (`closed_loop`, required with
+> no default). In `core/protocols.py`: one new `@runtime_checkable` Protocol,
+> `DestinationTrustStore` with its four members; the changed parameter type on
+> `QueryComposer.compose`; and the value `ConversationStore.append` now takes. In
+> `core/errors.py`: `InvalidDestinationTrustError`. In `core.config.Settings`: the two
+> fields §8 names and the cross-field refusal §10 states. **No other member of any `core`
+> type or Protocol changes its type, its default or its meaning** — `ActionPolicy` gains
+> no member, no argument and no widened return; `AuditTrail` gains none; `Provenance` gains
+> no field, so ADR-0098 §5's deferral of a per-span externality fact is neither taken nor
+> narrowed; and `CarriedProvenance.spans`, its key and value types, its detachment
+> validator and its serializer all stand.
 
-> **Normative.** **`PROTOCOL_VERSION` does not move for this decision.** No type this ADR
-> adds or changes is carried by any module of `wire/`, `ConversationTurn` is returned by
-> no member of the promoted `AssistantEngine` surface, and the trust store is
-> hub-internal. A lane that finds otherwise moves the number in the same change and says
-> which type crossed rather than reading this clause as permission not to.
+> **Normative.** **`PROTOCOL_VERSION` does not move for this decision**, and the test is
+> ADR-0178 §6's, applied rather than assumed. `ConfirmationEgress` gains **no** member: it
+> is the projection a surface renders, `closed_loop` is an authorisation-route fact rather
+> than a fact about what would leave, and ADR-0233 §8's floor — the one thing a surface
+> owes about a model-composed span — turns on `coverage` and not on this. `EgressBinding`
+> and `CarriedProvenance` are carried by no module of `wire/`; `ConversationTurn` is
+> returned by no member of the promoted `AssistantEngine` surface; and the trust store is
+> hub-internal. **A lane that finds any of those four statements false moves the number in
+> the same change, with the `wire/envelope.py` log entry naming this ADR**, rather than
+> reading this clause as permission not to.
+
+> **Normative.** **A stored `PermissionDecision` whose `egress_binding` predates this
+> decision decodes with `closed_loop` false**, on ADR-0181 §12's own reading of a
+> pre-existing row, and no lane back-fills it, infers it or reconstructs it. A false value
+> is the state every binding in this corpus carries today, so nothing decoded changes
+> behaviour.
 
 > **Normative.** **A `ConversationTurn` decoded from a row written before this decision
 > carries `search` as `None`**, which §8's fold reads as a zero draw and §5's third
@@ -780,10 +958,17 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > policy, the production composer seam and the production servicing path, and not over a
 > double standing in for one of them.
 
-> **Normative.** **Arm 1 — the exit's positive arm.** A conversation whose destination
-> reads `USER_CHOSEN`, whose first turn searched and minted a result, composes a second
-> query over a supply carrying that result and the conversation's own episodes, rules
-> `ALLOW` on route (b), and asks the user nothing.
+> **Normative.** **Arm 1a — refinement, within one turn.** On a turn whose destination
+> reads `USER_CHOSEN`, a first servicing mints results and a plan revision (ADR-0228 §2)
+> asks again; the second servicing's supply carries the first's minted records, the query
+> differs, the ruling is `ALLOW` on route (b), and the user is asked nothing.
+
+> **Normative.** **Arm 1b — the exit's cross-turn arm.** A later turn of the same
+> conversation, whose supply carries the stamped episode and no minted record of any
+> earlier turn, composes a query resolving a reference the utterance alone cannot ("find
+> more about that"), rules `ALLOW` on route (b) with the binding carrying both
+> `planned_with_external_content` **and** `closed_loop` true, is recorded by
+> `AuditTrail.record` rather than refused, and asks the user nothing.
 
 > **Normative.** **Arm 2 — the same conversation with the trust record absent.** Every
 > other fact identical, the destination reads `UNCHOSEN`: the supply carries the
@@ -800,13 +985,34 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > selection the result influenced and in one it did not, and the withheld count reaches
 > the audit.
 
-> **Normative.** **Arm 5 — the cross-kind closure.** A conversation that read a search
-> result and then read one record of any other external origin is not closed-loop from
-> that turn onward, and its next search draws a non-`ALLOW` under ADR-0181 §5 as written.
+> **Normative.** **Arm 5 — the cross-kind closure, in both directions.** A conversation
+> that read a search result and then read one record of any other external origin is not
+> closed-loop from that turn onward, and its next search draws a non-`ALLOW` under
+> ADR-0181 §5 as written. **And within one servicing**: a turn that services a local-file
+> read before its `WEB_SEARCH` — which ADR-0231 §11's fixed order makes the ordinary
+> case — binds `closed_loop` false on that same turn's search, however its recorded turns
+> read.
+
+> **Normative.** **Arm 5b — the audit trail's own refusal.** A route-(b) `ALLOW` over
+> external content whose binding carries `closed_loop` false is refused by
+> `AuditTrail.record` exactly as today, and one carrying it true is recorded; a decision
+> whose binding is an `OriginUnrecordedBinding` is refused by name in both cases.
+
+> **Normative.** **Arm 5c — nothing else rides it.** A `send_email` and a
+> non-`WEB_SEARCH` egress call in a closed-loop conversation each bind `closed_loop`
+> false and rule exactly as they do today.
 
 > **Normative.** **Arm 6 — the legacy conversation.** A conversation whose turns carry no
 > `search` record is not closed-loop, contributes a zero draw, and behaves as ADR-0231
 > §12 rules.
+
+> **Normative.** **Arm 6b — the budget is consumed at admission.** With
+> `search_calls_per_conversation` set to one and a conversation whose recorded draw is
+> zero, two servicings of one turn yield one call and not two; with it set to eight and a
+> recorded draw of seven, the same pair yields one call and not two. A turn interrupted
+> after a call and before its `append` leaves the conversation with that turn absent
+> entirely — no draw, no episode, no `external_all_user_chosen` — which is the residue §8
+> states, asserted rather than assumed.
 
 > **Normative.** **Arm 7 — the spend interaction.** A deployment with a declared per-call
 > figure, a period ceiling and no `world_spend_unknown_allowance` is refused at
@@ -817,6 +1023,14 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > output writes, raises or is consulted about a destination's trust, and the conformance
 > suite for the trust store asserts that its recording member is reached by no component
 > holding a `ModelProvider`.
+
+> **Normative.** **Arm 9 — the trust store's own conformance.** `trust_of` answers
+> `USER_CHOSEN` only where every member of the sequence is in one live record's set;
+> `UNCHOSEN` for an empty sequence, for a partial match, for a match spanning two records,
+> for a revoked record, and where the two sides differ in any field of a
+> `CanonicalDestination` or across protocols; `record` refuses a duplicate id, an empty
+> set, a duplicate live set and an `UNCHOSEN` record; `revoke` is prospective and
+> idempotent and rewrites no recorded decision.
 
 ### 16. Deferred, by name, each with what fires it
 
@@ -851,10 +1065,17 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 
 > **Normative.** This ADR partially supersedes **six** ratified ADRs and amends none.
 > ADR-0231 in five scopes, ADR-0233 in two, ADR-0155 in one, ADR-0181 in one, ADR-0193 in
-> two and ADR-0074 in one, each named on that ADR's `Status` line and in its appended
+> **three** — §3's fifth comparison, §4's first clause and §6's eighth-check clause in one
+> limb — and ADR-0074 in one, each named on that ADR's `Status` line and in its appended
 > dated note under ADR-0082 §1 and §2. **No other ADR's text moves**, and in particular
-> ADR-0223, ADR-0217, ADR-0204, ADR-0146, ADR-0098, ADR-0148, ADR-0154, ADR-0194,
-> ADR-0226, ADR-0228, ADR-0230, ADR-0235 and ADR-0236 are relied upon as written.
+> ADR-0223, ADR-0217, ADR-0204, ADR-0146, ADR-0098, ADR-0148, ADR-0152, ADR-0154,
+> ADR-0178, ADR-0184, ADR-0194, ADR-0226, ADR-0228, ADR-0230, ADR-0235 and ADR-0236 are
+> relied upon as written.
+
+> **Normative.** **ADR-0231 §16 is relied upon and is not moved.** Nothing here retains a
+> minted record, admits one to a store, an archive or a later turn, or leaves a hook for
+> one; §2's third population is within a turn for exactly that reason, and §16's own
+> sentence — "a second turn re-searches … because nothing was retained" — stays true.
 
 > **Normative.** Additions this ADR makes that contradict no sentence an earlier ADR
 > wrote are **stacked additions** under ADR-0082 §1 and are recorded here and nowhere
@@ -891,6 +1112,11 @@ differently, or read one of its clauses more widely than it now holds?
 - **ADR-0181 §5's second clause** — yes; a reader would return no `ALLOW`. Supersession.
 - **ADR-0193 §3's fifth comparison and §4's first clause** — yes on both; a reader would
   find no grant covering, and would hold route (a) to be the only route. Supersession.
+- **ADR-0193 §6's eighth-check clause, in its seventh limb** — yes; a reader would refuse
+  to record the `ALLOW` §6 above permits, and ADR-0231 §9's *"only on a recorded `ALLOW`"*
+  would then stop the search anyway. Supersession. The other seven limbs, the
+  `OriginUnrecordedBinding` arm, the ordering rule, the revocation rule and the digest
+  recomputation are untouched.
 - **ADR-0074 §9's enumeration** — yes; a reader would hold `ConversationTurn` to carry six
   members and `ConversationStore` to owe the listed operations. Supersession, in the scope
   ADR-0205 and ADR-0212 already moved it.
@@ -899,8 +1125,12 @@ differently, or read one of its clauses more widely than it now holds?
   is cause-blind, so a reader of ADR-0223 acts identically. No record owed, and §16 files
   its clause-number discrepancy rather than editing it.
 - **ADR-0193 §5, ADR-0154 §4, ADR-0148 §3, ADR-0217, ADR-0146 §2, ADR-0098 §5 and §6,
-  ADR-0194 §1, §2 and §8** — **no.** Each is used as written and §6, §7, §9 and §12 state
-  so in terms.
+  ADR-0194 §1, §2 and §8, ADR-0231 §16, ADR-0152 §7 and ADR-0178 §6** — **no.** Each is
+  used as written and §2, §5, §6, §7, §9, §12 and §13 state so in terms.
+- **ADR-0181 §3 and ADR-0233 §4** — **no**, and they are the shape §5's binding fact is
+  built to. Each puts one fact about a call on `EgressBinding` and `CarriedProvenance`,
+  computed by the component that composed the arguments; §5 adds a third by the same
+  construction and moves neither. A reader of either acts identically.
 
 ### 19. Marking, review and ratification
 
@@ -945,9 +1175,20 @@ before any lane implements against it (golden rule 5).
   mechanism is inert, and a user who performs only the first gets the old behaviour with no
   explanation — which is ADR-0231 §19's "telling the user a search was refused" deferral,
   inherited and now costing more.
-- **`ConversationTurn` is carrying its second late-written per-turn fact.** A third would
-  be the point at which the row stops being an index entry, and the next lane proposing one
-  should be asked what the row is for.
+- **`ConversationTurn` is carrying its second per-turn fact beside `delivery`.** A third
+  would be the point at which the row stops being an index entry, and the next lane
+  proposing one should be asked what the row is for.
+- **A conversation's search budget is lost with an interrupted turn, and a result's
+  content is lost with the turn that read it.** The first is §8's stated residue, bounded
+  at two calls per interruption. The second is ADR-0231 §16 standing: refinement over raw
+  results is a within-turn capability, and a later turn works from the captured episode.
+  Both are places where the honest mechanism is narrower than the milestone's sentence
+  sounds, and both are stated rather than engineered around.
+- **`EgressBinding` now carries three facts about a call's origin and coverage.**
+  `planned_with_external_content`, `coverage` and `closed_loop` are each required, each
+  written by the component that composed the arguments, and each compared through `rebind`
+  and `authorises`. That is a coherent set today; a fourth would be worth asking whether
+  the binding wants one value rather than three flags.
 
 **Revisit when** §11's audit shows what conversations actually draw — which decides the
 rolling window and the two defaults together — or when milestone 32's ADR needs a third

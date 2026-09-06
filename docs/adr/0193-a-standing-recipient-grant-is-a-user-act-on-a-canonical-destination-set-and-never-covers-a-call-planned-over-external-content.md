@@ -1,10 +1,10 @@
 # 193. A standing recipient grant is a user act on a canonical destination set, and never covers a call planned over external content
 
-- Status: Partially superseded by ADR-0235 (§1's "one class rather than several" limb alone: `RecipientGrantStore.record` gains two subclasses of `InvalidRecipientGrantError` — `RecipientGrantCeilingError` for the outstanding-count ceiling and `DuplicateRecipientGrantError` for a granting record duplicating an outstanding grant's `tool`, `account` and `destinations` — because on those two grounds the caller's recourse is not identical, which is the limb's own stated ground; every other refusal ground keeps the base class, the base class still catches all of them, and the rest of §1 stands entire, its exact store surface, its ceiling value and placement and its atomic count-with-append included) and ADR-0238 (§3's first clause in its fifth comparison, and §4's first clause, for a closed-loop request as ADR-0238 §5 defines one and for no other request: such a request may be covered by a grant and ruled `ALLOW` on ADR-0148 §3's route (b) notwithstanding its binding carrying `planned_with_external_content`; §3's other four comparisons and its no-inference clause, §4's remaining clauses, and §5's rule that a grant reaches the recipient and never the payload all stand entire, and ADR-0238 §1 records the payload permission as a separate user act precisely so that §5 can be left standing)
+- Status: Partially superseded by ADR-0235 (§1's "one class rather than several" limb alone: `RecipientGrantStore.record` gains two subclasses of `InvalidRecipientGrantError` — `RecipientGrantCeilingError` for the outstanding-count ceiling and `DuplicateRecipientGrantError` for a granting record duplicating an outstanding grant's `tool`, `account` and `destinations` — because on those two grounds the caller's recourse is not identical, which is the limb's own stated ground; every other refusal ground keeps the base class, the base class still catches all of them, and the rest of §1 stands entire, its exact store surface, its ceiling value and placement and its atomic count-with-append included) and ADR-0238 (§3's first clause in its fifth comparison, §4's first clause, and §6's eighth-check clause in its seventh limb — the limb requiring the decision's binding to carry `planned_with_external_content` as `False`, which now reads "`False`, or `closed_loop` `True`" — each for a closed-loop request as ADR-0238 §5 defines one and for no other request: such a request may be covered by a grant, ruled `ALLOW` on ADR-0148 §3's route (b) and recorded, notwithstanding its binding carrying `planned_with_external_content`; §3's other four comparisons and its no-inference clause, §4's remaining clauses, §6's other seven checks, its `OriginUnrecordedBinding` arm, its ordering, revocation and digest rules, and §5's rule that a grant reaches the recipient and never the payload all stand entire, and ADR-0238 §1 records the payload permission as a separate user act precisely so that §5 can be left standing)
 - Date: 2026-08-24
 - **Partially superseded: 2026-09-05 by ADR-0238 — §3's first clause in its fifth
-  comparison and §4's first clause, in the scope of a closed-loop request alone, and
-  nothing else in this ADR.** §3's fifth comparison requires that *"the request's
+  comparison, §4's first clause and §6's eighth-check clause in its seventh limb, each in
+  the scope of a closed-loop request alone, and nothing else in this ADR.** §3's fifth comparison requires that *"the request's
   binding does not carry `planned_with_external_content`"*, and §4's first clause closes
   *"On such a request an `ActionPolicy` returns no `ALLOW` on route (b), whatever grants
   exist, and route (a) — a decision of the user about **that** request — is the only
@@ -17,6 +17,19 @@
   *"coverage is their conjunction and no component treats either half as the whole"*.
   §4's last limb is general rather than grant-shaped, so no alternative standing
   carrier escapes it either.
+
+  **§6's eighth check moves in one limb, because the policy and the trail refuse
+  independently.** §6 admits a route-(b) `ALLOW` only where all eight hold, the seventh
+  being that *"the decision's `egress_binding` is an **`EgressBinding`** whose
+  `planned_with_external_content` **is `False`**"*. Without moving it, a closed-loop
+  request the policy permitted would be refused at `record`, and ADR-0231 §9's *"serviced
+  **only on a recorded `ALLOW`**"* would stop the search anyway. That limb becomes
+  "`False`, or whose `closed_loop` is `True`"; **the other seven are untouched**, each
+  still taken over the record the store returned and not over the decision's account of
+  it, and the `OriginUnrecordedBinding` arm is still refused by name. `record` validates
+  the fact ADR-0238 §5 puts on the binding and not the four conditions behind it, which is
+  the same trust boundary this corpus already accepts for `planned_with_external_content`
+  itself.
 
   **§5 is left standing on purpose, and ADR-0238 is built so that it can be.** *"A
   grant states nothing about the payload and authorises no content"* stays true: what
