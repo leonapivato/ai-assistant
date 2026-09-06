@@ -745,15 +745,28 @@ relaxation legible in the way §9 wanted.
 > **Normative.** The five members are declared with exactly these signatures, all `async`:
 >
 > - `draw_of(self, conversation_id: Identifier, /) -> ConversationSearchDraw | None`
-> - `claim(self, conversation_id: Identifier, /, *, max_calls: int, max_elapsed: timedelta, charge: timedelta) -> SearchClaim | None`
+> - `claim(self, conversation_id: Identifier, /, *, max_calls: int, max_elapsed: timedelta) -> SearchClaim | None`
 > - `settle(self, claim: SearchClaim, /, *, elapsed: timedelta) -> None`
 > - `observe(self, conversation_id: Identifier, /, *, all_external_user_chosen: bool) -> None`
 > - `forget(self, conversation_id: Identifier, /) -> None`
 >
-> `claim` answers `None` where it refuses. The bounds and the provisional charge are
-> **passed in** rather than read by the store, so the store holds no `Settings`, no clock
-> and no policy — it is a counter with an exclusion, and every judgement about what a bound
-> is stays in `orchestration`.
+> `claim` answers `None` where it refuses. The bounds are **passed in** rather than read by
+> the store, so the store holds no `Settings`, no clock and no policy — it is a counter with
+> an exclusion, and every judgement about what a bound is stays in `orchestration`.
+
+> **Normative.** **The provisional charge is the whole remainder, and three things follow
+> from that one choice.** First, **`orchestration` never needs to know the transport's
+> timeout**: that value is `WebSearchEgress`'s own state inside the seam, it is on no
+> Protocol and in no `Settings` field this ADR adds, and reaching for it would cross golden
+> rule 1. Second, **at most one claim of a conversation is outstanding at a time** — while
+> one is in flight the stored `elapsed` equals the bound, so the next `claim` refuses — which
+> serialises searching per conversation without a lock anywhere. Third, the overrun is
+> therefore **one call's**, and §8 can say so truthfully.
+
+> **Normative.** **So the settled total may exceed the bound by at most one call's excess
+> over the remainder it was granted, and by no more.** No lane states a bound on the size of
+> that one excess — the accounted interval includes ADR-0192's unbounded ledger writes — but
+> **no lane states that two calls can overrun**, because two cannot be outstanding.
 
 > **Normative.** `core/types.py` gains **`SearchClaim`**, a frozen model refusing unknown
 > fields, with exactly three fields: `conversation_id: Identifier`, `id: Identifier` minted
@@ -769,12 +782,21 @@ relaxation legible in the way §9 wanted.
 > call again after a partial failure — which is what a sweep that may be interrupted and
 > re-run needs (ADR-0074 §7, §8).
 
+> **Normative.** **`forget` invalidates every outstanding claim of that conversation, and
+> settling one afterwards is a no-op that creates nothing.** A user may delete a
+> conversation while one of its searches is still in flight; the claim then names a row that
+> is gone, and `settle` **must not recreate it** — a deleted conversation leaving budget
+> state behind would breach both this section's row-goes-with-the-conversation clause and
+> ADR-0126's destruction. `settle` on an unknown conversation, on a forgotten claim, or on a
+> claim already settled changes nothing and raises nothing, so the servicing that was in
+> flight completes and reports normally.
+
 > **Normative.** **`claim` is one atomic step: admit, charge, and answer the deadline.**
 > Given a conversation and the two bounds, it refuses where the stored `calls` have reached
 > `search_calls_per_conversation` or the stored `elapsed` has reached
-> `search_elapsed_per_conversation`; otherwise it increments `calls` by one and adds to
-> `elapsed` **the transport's own timeout** as a provisional charge, which `settle` then
-> replaces. **The read, the
+> `search_elapsed_per_conversation`; otherwise it increments `calls` by one and charges to
+> `elapsed` **the conversation's whole remaining elapsed budget**, which `settle` then
+> replaces with what the call actually took, releasing the remainder. **The read, the
 > comparison and the write are one indivisible step.** That is `RecipientGrantStore`'s
 > atomic count-with-append (ADR-0193 §1) applied to a counter, and it is why concurrent
 > turns, a failed turn and a process exit are answered by one clause rather than three:
@@ -815,15 +837,9 @@ relaxation legible in the way §9 wanted.
 > and which `WebSearcher.search(call, /)` takes no parameter to override. That is ADR-0228
 > §4's shape — a bound checked at the start of an operation rather than enforced mid-flight.
 
-> **Normative.** **What is guaranteed is the admission rule and nothing about the size of
-> the overrun.** No call is admitted once the stored `elapsed` has reached the bound; the
-> settled total may exceed the bound, by the amount by which the calls admitted before it
-> was reached overran their provisional charges. **No lane states a bound on that excess**,
-> and in particular no lane states that at most one call overruns: several claims of one
-> conversation may be outstanding at once, each admitted while the stored total was still
-> below the bound, and each may settle above its charge because the accounted interval
-> includes ADR-0192's unbounded ledger writes. The provisional charge is what keeps the
-> number of such claims small, and it is not a proof that there is only one.
+> **Normative.** **No call is admitted once the stored `elapsed` has reached the bound**,
+> and while a claim is outstanding the stored value *is* the bound. The excess is the one
+> stated above, and no lane claims a size for it.
 
 > **Normative.** **No lane closes the overrun by adding a timeout parameter to
 > `WebSearcher.search`, by wrapping the seam in a cancellation outside it, or by having
@@ -1194,11 +1210,15 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > further call is admitted and the next is refused, whatever the admitted call's settled
 > interval turns out to be, and no call is cancelled from outside the seam.
 
-> **Normative.** **Arm 6c2 — concurrent claims and settlement.** Two claims of one
-> conversation outstanding at once are settled independently against their own
-> `SearchClaim`s and never against each other's charge; a second `settle` of one claim
-> changes nothing; and a claim settled **above** its provisional charge raises the stored
-> `elapsed`, which the next admission then reads.
+> **Normative.** **Arm 6c2 — one claim at a time, and settlement in both directions.**
+> While a claim of a conversation is outstanding, a second `claim` for it is refused; after
+> `settle` releases the unused remainder, a further claim is admitted. A claim settled
+> **below** its charge returns the remainder; one settled **above** it raises the stored
+> `elapsed` past the bound, and the next `claim` is then refused.
+
+> **Normative.** **Arm 6c3 — `forget` under an outstanding claim.** A conversation deleted
+> while one of its searches is in flight has no row afterwards; settling that claim creates
+> none, raises nothing, and the in-flight servicing completes and reports normally.
 
 > **Normative.** **Arm 6d — a claimed call is never refunded.** A servicing whose ruling is
 > not `ALLOW`, one whose binding refused, and one whose provider answered
@@ -1429,10 +1449,16 @@ before any lane implements against it (golden rule 5).
   search budget are each small and each genuinely new, but a lane owing two Protocols, two
   conformance suites and two canonical fakes beside a composer change and a binding field is
   a large lane, and the batch that briefs it should expect that.
-- **A conversation's budget is spent optimistically and settles down, never up.** A turn
-  that dies after claiming leaves its full deadline charged, so an unlucky conversation
-  searches slightly less than its bound would allow. That is the fail-closed direction and
-  it is the price of not writing twice per call.
+- **A conversation's budget is charged in full and then settled, in either direction.** A
+  claim takes the whole remaining elapsed budget up front, so while a search is in flight
+  that conversation cannot start another — searching is serialised per conversation, which
+  is a real constraint on a conversation being driven from two devices at once. `settle`
+  then writes what the call actually took, **which may be more than was charged**: the
+  accounted interval includes ADR-0192's unbounded ledger writes, so one call may carry the
+  total past the bound and no size is claimed for that excess. A turn that dies after
+  claiming leaves the whole remainder charged, so an unlucky conversation searches less than
+  its bound would allow. Both are the fail-closed direction, and they are the price of not
+  writing to the store twice per call.
 - **A result's content is lost with the turn that read it.** ADR-0231 §16 stands:
   refinement over raw results is a within-turn capability, and a later turn works from the
   captured episode. The honest mechanism is narrower than the milestone's sentence sounds,
