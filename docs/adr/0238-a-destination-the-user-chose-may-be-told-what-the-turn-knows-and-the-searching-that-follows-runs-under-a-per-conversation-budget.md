@@ -476,6 +476,23 @@ recipient.
 > instant and the same data as ADR-0231 §11's tenth clause computes
 > `planned_with_external_content` over.
 
+> **Normative.** **Both halves are evaluated at the moment the request is built, and the
+> recorded half is read *then* and not earlier.** `orchestration` obtains the stored flag
+> by calling `search_draw` at that instant, alongside the current-turn half, and **no
+> value read earlier in the servicing is cached, reused or carried forward** — not one read
+> before `claim_search`, not one read to decide whether to search at all, and not one
+> carried on the `SearchClaim`, which does not hold it. **A read taken at admission would
+> be the wrong instant**: `claim_search` is admitted before the query is composed, so a
+> footing read there would be separated from the binding by the composition itself, and a
+> fold that committed in between would be ignored by a request built after it. The flag is
+> monotone, so reading it as late as possible is strictly the fail-closed direction.
+
+> **Normative.** **Nothing awaits between that read and the binding's construction.** The
+> recorded half is the **last** value `orchestration` obtains before it builds the request
+> and constructs the `EgressBinding`; every other input — the destination's trust, the
+> current-turn half, the claim — is already in hand. **A lane that awaits anything between
+> them has widened the window §8 states** and has breached this clause.
+
 > **The current-turn half is not an optimisation; without it the condition is wrong in
 > both directions.** ADR-0231 §11 fixes the servicing order as local file, then web
 > search, then citation hop, then sighted query, so a turn may read a file and *then*
@@ -966,26 +983,35 @@ relaxation legible in the way §9 wanted.
 > whole of a turn to a single store write — and the two clauses below state exactly what
 > that does and does not guarantee.
 
-> **Normative.** **What the early fold guarantees is a boundary, not an ordering.** The
-> guarantee is this and no more: **every claim of that conversation admitted after the fold
-> has returned reads the false**, because the flag is monotone and `claim_search` reads it
-> in the same indivisible step that charges the draw. **No clause here claims more.**
-> `orchestration` cannot fold a fact before it holds it, and admission is the instant it
-> holds it, so a claim concurrent with that single `observe_search` await can still be
-> admitted on a flag the fold has not yet lowered. **Nothing in this decision serialises two
-> turns of one conversation**: the store's per-conversation exclusion serialises each
-> member's own read-and-write, not two turns' worth of work, and ADR-0074 §9's two-engines
-> case makes an in-process ordering unavailable in principle. **A lane that reads "before
-> any later claim" as an ordering obligation on the caller has misread this section** —
-> there is no such obligation here, and none would be dischargeable.
+> **Normative.** **The guarantee is stated over the *read*, not over the claim, because
+> `claim_search` does not consult the flag.** It admits on `calls` and `elapsed` and on
+> nothing else, and no member of this store gates admission on the footing. So the boundary
+> is this and no more: **every request whose recorded-half read (§5) returns after the fold
+> has committed sees the false**, the flag being monotone and `search_draw` a single
+> indivisible read of it. **A claim is not that instant, and no clause here says it is** —
+> a servicing may be admitted before a fold and still build a request after it, and §5
+> requires it to read the flag at build time precisely so that such a request sees the
+> false rather than a value it read earlier.
 
-> **Normative.** **The window it leaves is stated rather than claimed away.** Before the
-> early fold it spanned turn A's whole composition, servicing, transport and capture — every
-> await of a search — and `settle_search` released the draw inside it. After it, it is one
-> store write with none of turn A's I/O inside it. What it costs when it is reached is **one
-> search of one concurrent turn** ruled closed-loop on a conversation that had, at that
-> instant, admitted a disqualifying span it had not yet recorded; the conversation is closed
-> for every claim admitted after the fold returns, and §11's audit records both dispositions.
+> **Normative.** **Nothing in this decision serialises two turns of one conversation.** The
+> store's per-conversation exclusion serialises each member's own read-and-write, not two
+> turns' worth of work; ADR-0074 §9's two-engines case makes an in-process ordering
+> unavailable in principle; and `orchestration` cannot fold a fact before it holds it, so a
+> read concurrent with the single `observe_search` await can still return the
+> not-yet-lowered value. **A lane that reads any clause here as an ordering obligation on
+> the caller has misread this section** — there is no such obligation, and none would be
+> dischargeable.
+
+> **Normative.** **The window it leaves is stated rather than claimed away, and it is
+> bounded at both ends.** It opens when turn A admits its disqualifying span and closes when
+> A's `observe_search` commits — one store write, with none of A's composition, transport or
+> capture inside it. Before the early fold that window ran to A's *capture*, and
+> `settle_search` released the draw inside it. What it costs when it is reached is **one
+> search of one concurrent turn**, whose recorded-half read fell inside it, ruled
+> closed-loop on a conversation that had already admitted a span it had not yet recorded;
+> every request whose read falls after it is refused, and §11's audit records both
+> dispositions. **The window is a property of the read's instant and not of the claim's**,
+> which is why §5 puts the read as late as it can go.
 > **Closing it entirely means serialising servicings of one conversation**, which is a new
 > obligation on `orchestration` across concurrent turns that nothing in this corpus provides
 > today; §16 defers it with what fires it, and **no lane closes it by having `orchestration`
@@ -1285,6 +1311,14 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > already asserts for that state. And after `drop_if_eligible` has removed the record, the
 > same again. **No arm asserts a budget lifecycle member, because there is none.**
 
+> **Normative.** **The lane reads the recorded half last, and the review of that lane
+> checks the call order rather than taking it on trust.** §5 puts `search_draw` immediately
+> before the request is built with nothing awaited in between, and that is the whole of what
+> makes §8's boundary true — the store cannot enforce it, because `claim_search` does not
+> consult the flag and no member does. A lane that reads the footing once and carries it
+> through composition has silently widened the window §8 states, and §15's Arm 6f3 is the
+> arm that catches it.
+
 > **Normative.** **The `PROTOCOL_VERSION` move (§13) rides the `core` change**, with its
 > `wire/envelope.py` log entry, because the field lands there and a version behind the
 > shape is the defect that log exists to prevent.
@@ -1426,13 +1460,21 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > A services a local-file read and **builds no search request at all**; a concurrent turn B
 > claims and composes, and B is **not** closed-loop for the same reason. The stored flag is
 > false in both, and A's later capture folds false again to no effect. **(iii) The window,
-> asserted as the boundary §8 states and not as an ordering.** B's `claim_search` is admitted
-> **while A's admission fold is still in flight** — the arm blocks inside `observe_search`
-> and releases it, rather than sequencing the two calls and hoping — and B **is** admitted on
-> the not-yet-lowered flag, which is the residual §8 names and this arm records so that it
-> is a ratified property and not a surprise found later. The arm then asserts the guarantee
-> that *is* made: once that `observe_search` has returned, the next `claim_search` of the
-> conversation is admitted on a false flag and its request is **not** closed-loop.
+> asserted as the boundary §8 states and not as an ordering.** B's **recorded-half read**
+> lands **while A's admission fold is still in flight** — the arm blocks inside
+> `observe_search` and releases it, rather than sequencing the two calls and hoping — and B
+> **does** read the not-yet-lowered flag, which is the residual §8 names and this arm
+> records so that it is a ratified property and not a surprise found later.
+
+> **Normative.** **Arm 6f3 — a claim taken before the fold does not carry a stale footing
+> past it.** The arm drives the interleaving the boundary would be false for if the read
+> were taken at admission: turn B calls `claim_search` and is admitted **while the flag is
+> still true**; turn A then admits a local-file span and its `observe_search(False)`
+> **commits**; only then does B compose, read the recorded half and build its request.
+> **B's request is not closed-loop**, its binding carries `closed_loop` false, and its
+> ruling is the non-`ALLOW` ADR-0181 §5 gives. The arm asserts in the same breath that **no
+> value read before `claim_search`, and no field of the `SearchClaim`, reached the binding**
+> — `SearchClaim` carries three fields and the footing is not among them.
 
 > **Normative.** **Arm 6g — the last permitted call is usable.** With
 > `search_calls_per_conversation` set to one, the admitted servicing's own request is
@@ -1516,7 +1558,7 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
   how a deadline reaches `WebSearcher.search` at all. Not fired by a lane finding one
   conversation's overrun large.
 - **Serialising servicings of one conversation**, which is what would close §8's stated
-  window between an admission fold and a concurrent turn's `claim_search`. Fired by an ADR that
+  window between an admission fold and a concurrent turn's recorded-half read. Fired by an ADR that
   gives `orchestration` a per-conversation ordering across concurrent turns and holds it
   across two engines — a store-level obligation in ADR-0074 §9's shape, not a lock, which
   §8 records as answering nothing. Not fired by a lane finding the window narrow, and not
@@ -1722,8 +1764,11 @@ before any lane implements against it (golden rule 5).
   and owes no sweep, no stamp of its own and no recovery walk. The three crash windows an
   earlier revision had to name are not narrowed here; they do not exist.
 - **Two turns of one conversation are not ordered against each other, and §8 says so.** The
-  early fold narrows the window in which a concurrent turn can be admitted on a
-  not-yet-lowered flag from a whole turn to a single store write, and does not close it.
+  early fold narrows the window in which a concurrent turn can *read* a not-yet-lowered flag
+  from a whole turn to a single store write, and does not close it. **The store cannot
+  enforce the boundary on its own** — `claim_search` admits on the counters and never on the
+  footing — so §5 carries it as an obligation on where the read sits, and §15's Arms
+  6f2(iii) and 6f3 are what hold a lane to it.
   Closing it needs a per-conversation ordering across concurrent turns that this corpus does
   not have; §16 defers it with what fires it, and §15's Arm 6f2(iii) pins the boundary that
   *is* guaranteed so that a later lane cannot quietly widen it.
