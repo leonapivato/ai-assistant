@@ -488,33 +488,56 @@ recipient.
 > monotone, so reading it as late as possible is strictly the fail-closed direction.
 
 > **Normative.** **The destination's trust is read at that same instant, and an earlier
-> trust read authorises nothing.** `trust_of` is necessarily consulted **before** the
-> supply is built, because §2 and §3 make it the fact that decides whether records may
-> enter a `SearchSupply` at all — but that earlier answer decides only *what may be
-> composed over*, and **no clause reads it as deciding what may be sent**. §1 makes the
-> fact prospective: "a revocation takes effect for every later request and rewrites no
-> recorded decision, and a destination whose record is revoked reads `UNCHOSEN` from that
-> moment." A request built after a revocation is a later request, so **the second condition
-> is evaluated from a `trust_of` call at build time**, and a value carried over the
-> composition satisfies it in no case.
+> trust read authorises nothing.** `trust_of` is necessarily consulted **before** the supply
+> is built, because §2 and §3 make it the fact that decides whether records may enter a
+> `SearchSupply` at all — but that earlier answer decides only *what may be composed over*,
+> and **no clause reads it as deciding what may be sent**. So the second condition is
+> evaluated from a `trust_of` call taken at build time beside the recorded half, and a
+> value carried over the composition satisfies it in no case.
 
-> **Normative.** **So a revocation during composition costs that servicing its search, and
-> nothing has left.** Where trust read `USER_CHOSEN` when the supply was assembled and reads
-> `UNCHOSEN` when the request is built, the second condition fails, the request is **not**
-> closed-loop, ADR-0181 §5's floor binds it as written, and the ruling is the non-`ALLOW`
-> ADR-0231 §12 gives — the servicing yields nothing and the turn composes from what it has.
-> **No byte reached the destination in the meantime**: composition is a `ModelProvider`
-> call inside `planning` (ADR-0231 §3), so the widened supply reaches the local model and
-> the transport is not entered until after the ruling. The user's revocation is therefore
-> honoured for the request it precedes, without any need to cancel work in flight.
+> **Normative.** **The boundary is the read, and it is not the send — which is
+> ADR-0193 §9's boundary, arrived at for ADR-0193 §9's reason.** These are two separate
+> awaits on two stores with no transaction between them, and neither is a capability held
+> through egress, so **no clause here claims that a revocation recorded after a read stops
+> the request that read authorised.** ADR-0193 §9 states exactly this for a recipient grant
+> and records that an earlier draft of it said otherwise and was blocked in review for it:
+> what a revocation moves is the boundary "from the policy's lookup to `record`'s resolution
+> read. It does not move it to the append: those are two awaits". §1's prospectivity is
+> read the same way here — **`UNCHOSEN` "from that moment" governs every read that begins
+> after the revocation is recorded**, and it is not a claim about work already past its
+> read.
 
-> **Normative.** **Nothing awaits between those two reads and the binding's construction.**
-> The recorded half and `trust_of` are the **last** values `orchestration` obtains before it
-> builds the request and constructs the `EgressBinding`; the current-turn half and the claim
-> are already in hand, and neither is a fact another actor can change under this servicing —
-> the current-turn half is computed from records this component holds, and the claim's only
-> role is the fourth condition. **A lane that awaits anything between those reads and the
-> binding has widened the window §8 states** and has breached this clause.
+> **Normative.** **What the window contains is stated exactly, on both facts, because
+> stating it as "one call" or as closed would be false.** The set that still passes after a
+> revocation, or after an `observe_search(False)` commits, is **every request whose
+> corresponding read had already answered and whose binding has not yet been ruled on** —
+> bounded by the servicings in flight at that instant and by nothing this ADR states. There
+> is no per-conversation serialisation, no reservation and no cap, and no clause here claims
+> one. **The two facts have their own boundaries and are not one snapshot**: a request is
+> closed-loop only if *each* read returned true at its own instant, and either may be
+> falsified after its own read and before the ruling. What is **not** in the window is any
+> request whose read begins after the revocation or the fold is recorded, and any widening:
+> every call that passes goes to a destination the user had chosen when it was read, over a
+> supply assembled under that same answer.
+
+> **Normative.** **Closing the remainder is not attempted here, and what would close it is
+> named.** It would take a linearisation across the trust store, the conversation record and
+> the trail, or a capability held from the read through egress — the cross-store transaction
+> ADR-0193 §9, ADR-0074 §8 and ADR-0007 §4 each decline to invent, refused there for reasons
+> this ADR has no better answer to. **And it is the prospectivity the corpus already
+> ships**: ADR-0097 §4 delivers revocation in exactly this sense for source grants, and a
+> user who needs a send to stop *now* has the recourse they have for anything already in
+> flight, which is not this ADR's to supply. §16 defers it with what fires it.
+
+> **Normative.** **Nothing awaits between those two reads and the binding's construction,
+> which is what makes the window as small as this shape allows.** The recorded half and
+> `trust_of` are the **last** values `orchestration` obtains before it builds the request
+> and constructs the `EgressBinding`; the current-turn half and the claim are already in
+> hand, and neither is a fact another actor can change under this servicing — the
+> current-turn half is computed from records this component holds, and the claim's only role
+> is the fourth condition. **A lane that awaits anything between those reads and the binding
+> has widened the window above** and has breached this clause. What the obligation buys is a
+> narrower window, never a closed one, and no lane reads it as the latter.
 
 > **The current-turn half is not an optimisation; without it the condition is wrong in
 > both directions.** ADR-0231 §11 fixes the servicing order as local file, then web
@@ -1489,14 +1512,24 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > **does** read the not-yet-lowered flag, which is the residual §8 names and this arm
 > records so that it is a ratified property and not a surprise found later.
 
-> **Normative.** **Arm 5d — a revocation during composition is honoured by the request
-> that follows it.** On a conversation whose destination reads `USER_CHOSEN`, the supply is
-> assembled carrying records and the composer is entered; the trust record is **revoked
-> while the composition is in flight**; the request is then built. It is **not**
-> closed-loop, its binding carries `closed_loop` false, its ruling is the non-`ALLOW`
-> ADR-0181 §5 and ADR-0231 §12 give, and **nothing reached the destination** — the arm
-> asserts no transport call was made. The same is asserted where the revocation is written
-> by a second engine over the same data directory rather than by the same one.
+> **Normative.** **Arm 5d — a revocation recorded before the build-time read is honoured,
+> in two shapes and by two writers.** On a conversation whose destination reads
+> `USER_CHOSEN`, the supply is assembled carrying records and the composer is entered; the
+> trust record is **revoked while the composition is in flight**; the request is then built.
+> It is **not** closed-loop, its binding carries `closed_loop` false, its ruling is the
+> non-`ALLOW` ADR-0181 §5 and ADR-0231 §12 give, and **nothing reached the destination** —
+> the arm asserts no transport call was made, because composition is a `ModelProvider` call
+> inside `planning` (ADR-0231 §3) and the transport is not entered until after the ruling.
+> The same is asserted where the revocation is written by a **second engine** over the same
+> data directory rather than by the same one, which is the case no in-process ordering
+> reaches.
+
+> **Normative.** **Arm 5e — the window §5 states is asserted as a property, not assumed
+> away.** A revocation committed **after** the build-time `trust_of` read and before the
+> ruling leaves that one request closed-loop and ruled `ALLOW`, and the **next** request of
+> that conversation is not. The arm exists so that the boundary is a ratified and tested
+> property rather than a surprise, and so that a lane cannot later read §5 as promising that
+> a revocation stops a request already past its read.
 
 > **Normative.** **Arm 6f3 — a claim taken before the fold does not carry a stale footing
 > past it.** The arm drives the interleaving the boundary would be false for if the read
@@ -1589,12 +1622,20 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
   superseded ADR-0029 §4's reach. Fired by an ADR bounding those writes, or by one deciding
   how a deadline reaches `WebSearcher.search` at all. Not fired by a lane finding one
   conversation's overrun large.
-- **Serialising servicings of one conversation**, which is what would close §8's stated
-  window between an admission fold and a concurrent turn's recorded-half read. Fired by an ADR that
-  gives `orchestration` a per-conversation ordering across concurrent turns and holds it
-  across two engines — a store-level obligation in ADR-0074 §9's shape, not a lock, which
-  §8 records as answering nothing. Not fired by a lane finding the window narrow, and not
-  by one finding it wide.
+- **Closing §5's read-to-ruling window on either of its two facts** — a revocation
+  recorded after the build-time `trust_of` read, or an `observe_search(False)` committed
+  after the recorded-half read. Closing it takes a linearisation across the trust store,
+  the conversation record and the trail, or a capability held from the read through egress:
+  the cross-store transaction ADR-0193 §9, ADR-0074 §8 and ADR-0007 §4 each decline to
+  invent, and this ADR inherits their refusal rather than opening a fourth. Fired by the
+  ADR that decides a transactional posture across the local stores — ADR-0074 §8's "leg 5's
+  'stores' concurrent-access posture' hardening tail". Not fired by a lane finding the
+  window narrow, and not by one finding it wide.
+- **Serialising servicings of one conversation**, which is the separate thing that would
+  make two turns of one conversation ordered against each other at all. Fired by an ADR
+  that gives `orchestration` a per-conversation ordering across concurrent turns and holds
+  it across two engines — a store-level obligation in ADR-0074 §9's shape, not a lock,
+  which §8 records as answering nothing.
 - **Presenting the draw to the user, and with it a `ConversationExport` version move.**
   §8 keeps the counters as the store's own row state, so `Conversation`,
   `ConversationTurn` and `ConversationExport` are untouched and
