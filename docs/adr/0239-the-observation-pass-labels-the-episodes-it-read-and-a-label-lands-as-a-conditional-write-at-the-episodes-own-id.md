@@ -237,6 +237,16 @@ field it names.
 > gains nothing and changes nothing**: `Observer.observe`'s signature is untouched, no
 > `MemoryStore` member is added or widened, and no other Protocol is touched.
 
+> **Normative.** **An outcome carries at most one labelling per episode.** A
+> `labellings` tuple holding two entries with equal `episode_id` is **refused at
+> construction**, so no seam value can name one episode twice and no caller has to
+> decide which of two it meant.
+
+> **Normative.** A response naming one episode **more than once** yields **no labels
+> for that episode**, on either axis, whatever each entry says. The entries are ignored
+> — not merged, not reconciled, and not resolved by response order — and every other
+> episode of the batch is unaffected. Nothing is counted for them (§5).
+
 > **Normative.** No existing member of any `core` type changes its type, its default
 > or its meaning. `EpisodicMemory.participants` keeps its `tuple[EncodableText, ...]`
 > annotation and gains no validator: a record already stored, or imported from a
@@ -272,8 +282,23 @@ rather than by review.
 **Why a named value and not two parallel mappings.** `ObservationOutcome`'s own
 docstring gives the rule: it "follows :class:`MemoryIngestResult`'s precedent that a
 seam returning more than one fact returns a named value rather than a tuple". Two
-`Mapping[str, tuple[...]]` members can disagree about which episodes were labelled;
-one model per episode cannot.
+`Mapping[str, tuple[...]]` members can disagree about which episodes were labelled; one
+model carrying both axes cannot.
+
+**Why uniqueness is refused at construction rather than left to the writer, when
+ADR-0213 §1 put its own bound at the seam instead.** That section keeps the topics bound
+off the type because the bound is a number a later ADR is likely to *raise*, and a
+`max_length` would make a record written at the new bound unreadable to a peer at the
+old one — an argument about a **stored, wire-crossing** type and about a constraint that
+moves. Neither holds here. `ObservationOutcome` crosses no wire and no store decodes into
+it (§9), so there is no older peer and no stored value to refuse; and uniqueness is not a
+figure anybody raises. What the validator buys is that the ambiguity cannot reach the
+stage at all: without it a conforming outcome could name one episode twice, and the stage
+would have to choose between an atomic batch carrying duplicate ids and a sequence whose
+result depends on response order — two undefined behaviours where the ADR needs one. §5's
+ignore-never-repair rule then decides the *producer's* half, and it is deliberately
+order-independent: both entries are dropped rather than the first winning, because
+"the first" is a property of a response nobody guaranteed the order of.
 
 **Why `TopicLabel` annotates both tuples.** The canonical form §4 fixes for a
 participant label is *literally* ADR-0213 §3's, and minting a second annotated type
@@ -534,17 +559,47 @@ label would trade a belief for a filing word").
 > measure — is reserved to a later ADR, which is the only instrument that may lift the
 > clause above. No lane reaches that answer by implementing one.
 
-> **Normative.** **The owner is never named.** No labelling names the owner, the user,
-> the assistant, this system or any constant standing for one of them as a participant.
-> There is no user identity anywhere in this system (ADR-0036 §3, ADR-0097 §1), and the
-> two parties to a turn are structural rather than informative
-> (`orchestration/conversations.py`, ADR-0074 §4).
+> **Normative.** **The owner and the assistant are not participants, and this binds the
+> producer's ask rather than the seam's check.** A producer does not solicit the owner,
+> the user, the assistant or this system as a participant label, and its prompt says so.
+> It is **not** a value the seam refuses: there is no user identity anywhere in this
+> system (ADR-0036 §3, ADR-0097 §1) and §5 supplies no vocabulary, so nothing downstream
+> holds anything a candidate label could be compared against, and a clause obliging a
+> refusal would oblige an unobservable one.
+
+> **Normative.** A participant label a model emitted anyway is therefore written like
+> any other, and no implementation invents a test for it — no name list, no heuristic, no
+> model call and no `Settings` value naming the owner. The residue is stated in §11 with
+> the instrument that would close it.
 
 > **Normative.** A producer proposes at most `MAX_TOPICS_PER_PROPOSAL` topic labels
 > and at most `MAX_TOPICS_PER_PROPOSAL` participant labels per episode, and each tuple
 > is strictly increasing by code point with no repeats, exactly as ADR-0213 §1 requires
 > of a stored `topics` tuple. `MAX_TOPICS_PER_PROPOSAL` is 4 and no constant is added
 > or changed by this ADR.
+
+**Why the owner clause binds the ask and not the check, and why that is the honest
+form.** The two parties to a turn are structural rather than informative — capture says
+so in terms, declining to write them for that reason — so a labelling that named the
+owner would be filing every conversation under one word and saying nothing. But *ruling*
+that such a value is refused would be a clause no conforming implementation could
+satisfy: this system holds no user identity by decision (ADR-0036 §3, ADR-0097 §1), §5
+supplies the producer no vocabulary, and a canonical label naming the owner is
+byte-identical to one naming anybody else with that name. ADR-0213 §9 met the same
+choice and took the same side — "Writing the guarantee anyway would be a clause no
+conforming implementation could satisfy, which is worse than a named deferral" — and
+ADR-0100's own reason for keeping the owner out of `about_person` is that "a label naming
+the owner would be a second spelling of a subject that already has one: the absence".
+
+So the obligation sits where it can actually be discharged, on what the producer asks
+for, and the residue is stated rather than papered over: a model that names the owner
+anyway produces an episode filed under that word, indistinguishable from any other label.
+What that costs is bounded by §7 and by nothing else — the label keys no erasure, no
+disclosure, no grant and no band, so the cost is a structured read offering conversations
+for a question about a person who was in all of them, which is a false positive the owner
+sees and dismisses. It is emphatically **not** a licence to build a check: a name list or
+a heuristic would be a second, unratified identity in the one system that has decided not
+to have one, and §11 names the instrument that could do it properly.
 
 **Why a participant label is case-folded, when ADR-0100 §6 keeps a subject label
 verbatim.** ADR-0100 §6 stores `about_person` exactly as given because the value is a
@@ -585,10 +640,12 @@ the axis is a filing aid whose reach is disclosed, not a claim about who was the
 > the instrument that changes them. The producer proposes from the batch it was handed
 > and from nothing else.
 
-> **Normative.** A labelling entry is judged **per axis**. An axis naming more than
-> `MAX_TOPICS_PER_PROPOSAL` labels, naming a value the canonical form refuses, or
-> naming a value §4's owner clause forbids yields **no labels on that axis** for that
-> episode; the other axis stands. The offending value is ignored — never repaired,
+> **Normative.** A labelling entry is judged **per axis**, and on **observable
+> properties of the value alone**. An axis naming more than `MAX_TOPICS_PER_PROPOSAL`
+> labels, naming a value the canonical form refuses, or repeating one yields **no labels
+> on that axis** for that episode; the other axis stands. No clause of this ADR obliges
+> a seam to refuse a label for what it *denotes*, which is the one thing nothing here can
+> see. The offending value is ignored — never repaired,
 > never re-prompted for, never truncated to the bound, and never inferred locally.
 
 > **Normative.** An ignored axis, an ignored labelling and a labelling for an episode
@@ -758,7 +815,8 @@ owner sees before it is spent.
 ### 9. Scope: the `core` surface, the version, and the triad
 
 > **Normative.** The `core` change is exactly: `core/types.py` gains
-> `EpisodeLabelling`, and `ObservationOutcome` gains `labellings`. **`core/protocols.py`
+> `EpisodeLabelling`, and `ObservationOutcome` gains `labellings` together with the
+> validator §2 requires of it. **`core/protocols.py`
 > gains nothing, changes nothing and removes nothing.** No constant is added or changed,
 > no enum gains a member, and `core/errors.py` is untouched.
 
@@ -829,8 +887,16 @@ The lane briefed from this text owes, beyond the change itself:
   bind here, and a producer that folded its response would hide its own miss "in the one
   place nobody looks". A producer that wants canonical output constrains its prompt; it
   does not correct the answer.
-- **The owner-never-named arm.** A response naming the owner, the user or the assistant
-  as a participant yields no participants for that episode.
+- **The duplicate-episode arms, both halves.** That an `ObservationOutcome` carrying two
+  `labellings` entries with equal `episode_id` is refused at construction; and that a
+  model response naming one episode twice yields no labels for that episode on either
+  axis, whichever order the entries arrive in, while every other episode of the batch is
+  labelled normally. The canonical fake owes the second arm too.
+- **The owner arm, pinned as the honest behaviour rather than a refusal.** That the
+  producer's prompt states the exclusion, and that a participant label the model emitted
+  anyway is written like any other — no name list, no heuristic and no identity check
+  appears on any path. A test asserting the label is *refused* would pin a rule this ADR
+  does not make (§4).
 
 ### 11. Deferred, by name, each with the condition that fires it
 
@@ -856,6 +922,12 @@ The lane briefed from this text owes, beyond the change itself:
 - **Two people with one name.** §4 names the loss. **Fires** with the person registry
   #691 and ADR-0094 §10 defer, which is the only instrument that can tell them apart; no
   string rule can.
+- **Telling the owner's own name from anyone else's.** §4 binds the producer's ask and
+  declines to oblige a check, because this system holds no user identity (ADR-0036 §3,
+  ADR-0097 §1) and a label naming the owner is byte-identical to one naming a stranger
+  with that name. **Fires** with the same person registry, and with nothing short of it:
+  a lane that closes this with a name list or a heuristic has built a second identity the
+  corpus decided not to have, and owes the ADR that decides to have one.
 - **`about_person` on an episode.** §7 forbids this producer from writing one and
   ADR-0100 §4 forbids inferring one. **Fires** only with an ADR that reckons with that
   clause; an episode's subject is not a gap this decision left, it is a field the corpus
@@ -1124,6 +1196,10 @@ answer.**
   write that fails is never retried — the page's advance still commits, so nothing brings
   those episodes back. Both are §3's choices and both fail in the same direction: a lost
   label, never a wrong one and never one that laundered a restriction.
+- **The owner can be filed as a participant and nothing will catch it.** §4 binds what
+  the producer asks for and refuses to oblige a check no component can perform, so the
+  guarantee is a prompt's rather than a type's. §7 is what bounds the cost, and §11 names
+  the only instrument that could do better.
 - **One guarantee is inherited rather than delivered.** ADR-0213 §9's finality holds for
   every episode a pass has labelled, and the write-once test is what holds it; what it
   cannot hold is an episode the owner emptied before any pass reached it. That act does
