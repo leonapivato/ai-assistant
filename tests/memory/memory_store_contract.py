@@ -2441,17 +2441,26 @@ class MemoryStoreContract:
     async def test_a_captured_episode_as_written_today_is_reached_by_no_label_filter(
         self, store: MemoryStore, read: str
     ) -> None:
-        """ADR-0237 §10 item 7: the specified behaviour over today's captured data.
+        """ADR-0237 §10 item 7: the specified behaviour over an unlabelled episode.
 
         Capture writes no ``topics``, no ``participants`` and no ``about_person``
-        on the episodes it records, and ADR-0213 §6 forbids **any** producer from
-        labelling an episode today — so a label filter reaches no captured episode
-        at all on any store as it stands. That is asserted here as the *specified*
-        behaviour rather than left to be discovered as a bug, and it is the arm the
-        producer lane will deliberately invert.
+        on the episodes it records (ADR-0213 §6's capture clause, which stands), so
+        a label filter reaches an episode as capture leaves it — no matter how many
+        such episodes a store holds. That is asserted here as the *specified*
+        behaviour rather than left to be discovered as a bug.
 
-        The time axis is asserted beside it, because it is the one today's data
-        does support and the milestone's first slice is built on it.
+        **What this case does not say**, because it stopped being true while this
+        branch was open: that no producer may label an episode. ADR-0213 §6's
+        second sentence was self-limiting to that ADR, and ADR-0239 is now ratified
+        — the observation pass labels the episodes it read, as a conditional write
+        at each episode's own id. So this is the arm that inverts for a *labelled*
+        episode once ADR-0239's implementation lands, and it stays true for ever of
+        an episode nothing has labelled, which is what the fixture builds. The
+        record here is unlabelled by construction rather than by an appeal to what
+        producers exist, so nothing about it goes stale when they change.
+
+        The time axis is asserted beside it, because it is the one axis capture
+        populates on its own and the milestone's first slice is built on it.
         """
         as_captured = _episode("captured", _ANY, occurred_at=_IN_WINDOW)
         await store.add(as_captured)
