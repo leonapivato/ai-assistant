@@ -3,8 +3,9 @@
 - Status: Proposed
 - Date: 2026-09-05
 - **Partially supersedes** [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
-  — **§3's utterance-only clause, §4's first and second clauses, and §12's second
-  and third clauses.** Those five, and nothing else in that ADR.
+  — **§3's utterance-only clause, §4's first and second clauses, §12's second and
+  third clauses, and §13's closure of `SearchDisposition` at exactly fifteen members
+  in that count alone.** Those six, and nothing else in that ADR.
 - **Partially supersedes** [ADR-0233](0233-the-approver-is-shown-the-bytes-that-would-leave-and-that-is-the-whole-of-what-makes-a-model-composed-span-approvable.md)
   — **§9's first clause, in its exclusivity alone (the word "only"), and §9's second
   clause, for the one class §1 below names.** Those two scopes, and nothing else.
@@ -741,6 +742,28 @@ relaxation legible in the way §9 wanted.
 > where none exists; and **`forget`**, dropping a conversation's row entirely. A sixth
 > member is added by no lane without the ADR that decides it.
 
+> **Normative.** The five members are declared with exactly these signatures, all `async`:
+>
+> - `draw_of(self, conversation_id: Identifier, /) -> ConversationSearchDraw | None`
+> - `claim(self, conversation_id: Identifier, /, *, max_calls: int, max_elapsed: timedelta, charge: timedelta) -> SearchClaim | None`
+> - `settle(self, claim: SearchClaim, /, *, elapsed: timedelta) -> None`
+> - `observe(self, conversation_id: Identifier, /, *, all_external_user_chosen: bool) -> None`
+> - `forget(self, conversation_id: Identifier, /) -> None`
+>
+> `claim` answers `None` where it refuses. The bounds and the provisional charge are
+> **passed in** rather than read by the store, so the store holds no `Settings`, no clock
+> and no policy — it is a counter with an exclusion, and every judgement about what a bound
+> is stays in `orchestration`.
+
+> **Normative.** `core/types.py` gains **`SearchClaim`**, a frozen model refusing unknown
+> fields, with exactly three fields: `conversation_id: Identifier`, `id: Identifier` minted
+> by the store, and `charge: timedelta`, the provisional amount this claim added. **It is
+> the handle that makes `settle` unambiguous**: two claims of one conversation may be
+> outstanding at once (two servicings of a turn, two turns of a conversation), so a
+> `settle` naming only a conversation could not say which charge it replaces. `settle`
+> replaces the charge of **that** claim and no other, and is idempotent — a second `settle`
+> of one claim changes nothing.
+
 > **Normative.** **`forget` is the lifecycle member, and it is idempotent.** It drops the
 > row for one conversation, answers the same whether a row was there or not, and is safe to
 > call again after a partial failure — which is what a sweep that may be interrupted and
@@ -758,13 +781,15 @@ relaxation legible in the way §9 wanted.
 > **two turns of one conversation, two servicings of one turn, and two engines over one
 > data directory can none of them be admitted against the same draw.**
 
-> **Normative.** **`settle` replaces a claim's provisional charge with the interval that
-> claim actually occupied**, which may be smaller or larger than the charge. **The accounted
-> interval is the one `orchestration` can measure: its own await of the search servicing**,
-> from before the seam is entered to after it returns. `settle` lowers no `calls`, and **a
-> claim that is never settled stands at its full charge** — the fail-closed direction, and
-> the reason nothing is owed for a turn that ends in an exception, a `PlanningError` on a
-> later revision, a restart or a disconnection.
+> **Normative.** **`settle` replaces that claim's provisional charge with the interval the
+> claim actually occupied, whether that is smaller or larger.** There is no direction rule:
+> a settlement that could only lower would let a call that overran its charge cost the
+> conversation nothing, which is the wrong direction for a bound. **The accounted interval
+> is the one `orchestration` can measure — its own await of the search servicing**, from
+> before the seam is entered to after it returns. `settle` changes no `calls`, and **a claim
+> that is never settled stands at its full charge** — the fail-closed direction, and the
+> reason nothing is owed for a turn that ends in an exception, a `PlanningError` on a later
+> revision, a restart or a disconnection.
 
 > **Normative.** **The interval is `orchestration`'s await and not the provider exchange,
 > because the exchange's duration is a fact no contract reports.** `SearchOutcome` carries no
@@ -787,13 +812,18 @@ relaxation legible in the way §9 wanted.
 > `WebSearcher` is not widened to carry a deadline.** A call is admitted only while the
 > stored `elapsed` is **strictly below** the bound; once admitted it runs under the
 > transport's own timeout, which ADR-0231 §6 and ADR-0029 §4 already place inside the seam
-> and which `WebSearcher.search(call, /)` takes no parameter to override. **So the settled
-> total may exceed the bound by one admitted call's accounted interval**, because the call
-> that crossed it was the last one admitted. That is ADR-0228 §4's shape — a bound checked at
-> the start of an operation rather than enforced mid-flight. **The overrun is not bounded by
-> the transport timeout**: the accounted interval includes ADR-0192's unbounded ledger
-> writes, so what is claimed is that at most **one** call overruns, never that the overrun is
-> small.
+> and which `WebSearcher.search(call, /)` takes no parameter to override. That is ADR-0228
+> §4's shape — a bound checked at the start of an operation rather than enforced mid-flight.
+
+> **Normative.** **What is guaranteed is the admission rule and nothing about the size of
+> the overrun.** No call is admitted once the stored `elapsed` has reached the bound; the
+> settled total may exceed the bound, by the amount by which the calls admitted before it
+> was reached overran their provisional charges. **No lane states a bound on that excess**,
+> and in particular no lane states that at most one call overruns: several claims of one
+> conversation may be outstanding at once, each admitted while the stored total was still
+> below the bound, and each may settle above its charge because the accounted interval
+> includes ADR-0192's unbounded ledger writes. The provisional charge is what keeps the
+> number of such claims small, and it is not a proof that there is only one.
 
 > **Normative.** **No lane closes the overrun by adding a timeout parameter to
 > `WebSearcher.search`, by wrapping the seam in a cancellation outside it, or by having
@@ -947,10 +977,15 @@ from the audit two weeks later.
 > title, no snippet and no provider message appears — ADR-0231 §13's Tier 1 clause and
 > ADR-0004 §5 bind without qualification.
 
-> **Normative.** **`SearchDisposition` gains exactly one member**, recording that a
-> servicing did not reach a query because a bound of §8 was met. It is not free text, it
-> collapses with no existing member, and it lives in `ai_assistant.orchestration` beside
-> the rest of that enumeration, which crosses no subsystem boundary.
+> **Normative.** **`SearchDisposition` gains exactly one member and is closed at
+> sixteen**, recording that a servicing did not reach a query because `claim` refused. It is
+> not free text, it collapses with no existing member, the mapping from each refusal
+> vocabulary stays **injective**, and it lives in `ai_assistant.orchestration` beside the
+> rest of that enumeration, which crosses no subsystem boundary. **This supersedes ADR-0231
+> §13's closure of that enumeration at exactly fifteen**, in that clause's count alone: the
+> fifteen members it names, their values, their injective mapping, the no-message rule on
+> `BINDING_FAILED` and `RULING_UNAVAILABLE`, and its exclusion of `SearchRefusal.NO_RESULT`
+> all stand entire, and no lane reads this as licence to add a seventeenth.
 
 > **Normative.** **The destination's recorded trust is not written to this event.** It
 > is a durable fact about a configured account, readable from the store that holds it,
@@ -966,8 +1001,11 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 
 > **Normative.** **An injected result cannot raise the budget.** Both bounds are
 > `Settings` values read by `orchestration`; the draw is a durable counter §8's store
-> increments atomically before a channel opens, and it is never lowered by any write but
-> `settle`, which only ever replaces a granted deadline with a smaller elapsed.
+> increments atomically before a channel opens. **`settle` writes a clock reading
+> `orchestration` took, not a value anything else produced** — and a provider that stalled
+> to inflate it would only spend the conversation's budget faster, which is the fail-closed
+> direction. No value a model produced, a request carried or a search result contained
+> reaches either side of the comparison.
 > **No value produced by a model, carried in a request, contained in a search result, or
 > read from any record contributes to either side of the comparison**, and no component
 > raises, extends, resets, suspends or re-reads a bound on account of a turn's content.
@@ -1005,10 +1043,10 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 
 > **Normative.** The `core` surface this decision adds is exactly this and no more. In
 > `core/types.py`: `DestinationTrust`, `DestinationTrustRecord`, `SearchSupply` and
-> `ConversationSearchDraw` as new types, and one member on each of `EgressBinding` and
+> `ConversationSearchDraw` and `SearchClaim` as new types, and one member on each of `EgressBinding` and
 > `CarriedProvenance` (`closed_loop`, defaulting to `False`). In `core/protocols.py`: two
 > new `@runtime_checkable` Protocols, `DestinationTrustStore` with its five members and
-> `SearchBudgetStore` with its four, and the changed parameter type on
+> `SearchBudgetStore` with its five, and the changed parameter type on
 > `QueryComposer.compose`. In `core/errors.py`: `InvalidDestinationTrustError`. In
 > `core.config.Settings`: the two fields §8 names and the cross-field refusal §10 states.
 > **No other member of any `core` type or Protocol changes its type, its default or its
@@ -1156,6 +1194,12 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > further call is admitted and the next is refused, whatever the admitted call's settled
 > interval turns out to be, and no call is cancelled from outside the seam.
 
+> **Normative.** **Arm 6c2 — concurrent claims and settlement.** Two claims of one
+> conversation outstanding at once are settled independently against their own
+> `SearchClaim`s and never against each other's charge; a second `settle` of one claim
+> changes nothing; and a claim settled **above** its provisional charge raises the stored
+> `elapsed`, which the next admission then reads.
+
 > **Normative.** **Arm 6d — a claimed call is never refunded.** A servicing whose ruling is
 > not `ALLOW`, one whose binding refused, and one whose provider answered
 > `SearchRefusal.PROVIDER_REFUSED` each spend their `calls` increment, and no path lowers
@@ -1247,13 +1291,24 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 ### 17. Scope, and what this records against earlier ADRs
 
 > **Normative.** This ADR partially supersedes **five** ratified ADRs and amends none.
-> ADR-0231 in five scopes, ADR-0233 in two, ADR-0155 in one, ADR-0181 in one and ADR-0193
+> ADR-0231 in six scopes, ADR-0233 in two, ADR-0155 in one, ADR-0181 in one and ADR-0193
 > in **three** — §3's fifth comparison, §4's first clause and §6's eighth-check clause in
 > one limb — each named on that ADR's `Status` line and in its appended dated note under
 > ADR-0082 §1 and §2. **No other ADR's text moves**, and in particular ADR-0014, ADR-0074,
 > ADR-0098, ADR-0106, ADR-0146, ADR-0148, ADR-0152, ADR-0154, ADR-0178, ADR-0184,
 > ADR-0194, ADR-0204, ADR-0205, ADR-0212, ADR-0217, ADR-0223, ADR-0226, ADR-0228,
 > ADR-0230, ADR-0235 and ADR-0236 are relied upon as written.
+
+> **Normative.** **These records are made in this ADR's own change, while it stands
+> `Proposed`, and that is ADR-0082 §7's rule rather than an oversight.** §7 names the
+> contrary reading as "**the recurring misreading of ADR-0070 §1's 'a supersession that has
+> landed' clause … not a governance gap but a reviewer failure mode**", and states the
+> condition: "**§1's condition is that the superseding ADR *exists*, not that it is
+> ratified** — the hazard §1 names is a `Status` line pointing at nothing, and an atomic
+> pair makes that unreachable." ADR-0231's own header records that ADR-0235 did exactly
+> this. **And the alternative would cost a round**: ADR-0165 exempts a ratification flip only
+> where it is one ADR file and one changed line, so moving five other files' `Status` lines
+> in that commit would forfeit the exemption. No lane defers these records to the flip.
 
 > **Normative.** **Four near misses are named, because each was a supersession an earlier
 > draft of this ADR would have owed and each is avoided by a decision rather than by luck.**
@@ -1301,6 +1356,10 @@ differently, or read one of its clauses more widely than it now holds?
 - **ADR-0181 §5's second clause** — yes; a reader would return no `ALLOW`. Supersession.
 - **ADR-0193 §3's fifth comparison and §4's first clause** — yes on both; a reader would
   find no grant covering, and would hold route (a) to be the only route. Supersession.
+- **ADR-0231 §13's closure of `SearchDisposition` at exactly fifteen members** — yes; a
+  reader would refuse a sixteenth, and the contract test asserting the count would fail.
+  Supersession, in that count alone. §13's members, values, injective mapping, no-message
+  rule and `NO_RESULT` exclusion are untouched.
 - **ADR-0193 §6's eighth-check clause, in its seventh limb** — yes; a reader would refuse
   to record the `ALLOW` §6 above permits, and ADR-0231 §9's *"only on a recorded `ALLOW`"*
   would then stop the search anyway. Supersession. The other seven limbs, the
