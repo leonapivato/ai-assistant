@@ -31,10 +31,12 @@ from ai_assistant.core.errors import (
     MemoryStoreError,
 )
 from ai_assistant.core.types import (
+    EpisodicMemory,
     MemoryRecord,
     MemorySource,
     Provenance,
     SemanticMemory,
+    TimeWindow,
     Validity,
 )
 from ai_assistant.memory import SqliteMemoryStore
@@ -340,6 +342,51 @@ async def test_a_not_yet_live_record_stays_hidden_across_a_re_embed(tmp_path: Pa
     try:
         found = await opened.search("espresso", limit=10)
         assert [record.id for record in found.records] == ["live"]
+    finally:
+        opened.close()
+
+
+async def test_the_structured_read_axes_survive_a_re_embed(tmp_path: Path) -> None:
+    """The instant column and the label index cross the swap (ADR-0237 §1).
+
+    The same class of quiet failure as the window column above, one decision on and
+    twice over. ``occurred_at`` is a column and ``record_labels`` is a derived
+    index; neither is in the blob, and the store's own backfill for the index runs
+    only on the open that *creates* the table — which the work store's schema
+    already has, empty. So a rebuild that carried every record faithfully and wrote
+    neither would swap in a store on which every window and every label filter
+    reaches nothing, with every record round-tripping intact and no read reporting
+    a fault.
+
+    Asserted through both reads rather than through the tables, because that is
+    where the failure would show and the tables are the mechanism.
+    """
+    store = tmp_path / "memory.db"
+    when = _WHEN + timedelta(days=60)
+    episode = EpisodicMemory(
+        id="captured",
+        content="espresso renovation",
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.6, last_updated=_WHEN),
+        occurred_at=when,
+        participants=("Alex",),
+        topics=("renovation",),
+        about_person="Alex",
+    )
+    await _seed(store, [episode, _record("other", "espresso")])
+
+    target = HashingEmbedder(dimensions=_NEW)
+    outcome = await Reembedder(store=store, embedder=target).run()
+
+    assert outcome.swapped
+    opened = SqliteMemoryStore(traces_sink=FakeTraceSink(), path=store, embedder=target)
+    try:
+        window = TimeWindow(start=when - timedelta(days=1), end=when + timedelta(days=1))
+        assert {r.id for r in (await opened.select(occurred_within=window)).records} == {"captured"}
+        assert {r.id for r in (await opened.select(topics=["renovation"])).records} == {"captured"}
+        assert {r.id for r in (await opened.select(participants=["alex"])).records} == {"captured"}
+        assert {r.id for r in (await opened.select(about_person=["alex"])).records} == {"captured"}
+        found = await opened.search("espresso", occurred_within=window)
+        assert {r.id for r in found.records} == {"captured"}
     finally:
         opened.close()
 

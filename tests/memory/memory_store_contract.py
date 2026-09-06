@@ -50,6 +50,7 @@ from ai_assistant.core.types import (
     ExchangeDisposition,
     MemoryKind,
     MemoryRecord,
+    MemorySearchResult,
     MemorySource,
     MemoryWrite,
     MemoryWriteMode,
@@ -60,6 +61,7 @@ from ai_assistant.core.types import (
     PreferenceMemory,
     Provenance,
     SemanticMemory,
+    TimeWindow,
     Validity,
     WalkPosition,
     band_of,
@@ -78,6 +80,24 @@ _ONE_MINUTE = timedelta(minutes=1)
 #: The transaction stamp every fixture record carries unless a case varies it —
 #: comfortably before ``_STORE_NOW``, so nothing is accidentally not-yet-live.
 _REVISED = datetime(2026, 1, 1, tzinfo=UTC)
+#: The word every ADR-0237 fixture's ``content`` carries, so ``search`` reaches
+#: all of them and the axis under test is the only thing separating the records.
+#: The **flood** records carry it alone, which makes them an exact match for the
+#: query and therefore the *nearest* neighbours — the crowding ADR-0128 §5 asks
+#: for; the eligible ones carry :data:`_FURTHER` and sit behind them.
+_ANY = "coffee"
+_FURTHER = "coffee please"
+#: The half-open period ADR-0237 §2's window cases filter on, and three instants
+#: around it: one inside, one exactly at the exclusive end, one before the start.
+#: All are comfortably before ``_STORE_NOW``, so nothing is accidentally unreadable.
+_WINDOW_START = datetime(2026, 3, 1, tzinfo=UTC)
+_WINDOW_END = datetime(2026, 4, 1, tzinfo=UTC)
+_IN_WINDOW = datetime(2026, 3, 15, tzinfo=UTC)
+_BEFORE_WINDOW = datetime(2026, 2, 15, tzinfo=UTC)
+#: A write stamp *later* than ``_REVISED``, so a record carrying it sorts ahead of
+#: every other fixture record in ``select``'s order — which is what makes a flood
+#: crowd a read that ranks nothing (ADR-0237 §5).
+_RESTAMPED = datetime(2026, 5, 1, tzinfo=UTC)
 #: When the narrowing a placement records was made (ADR-0217 §1). Every derivation
 #: this system performs writes one, so the round-trip arm pins one too.
 _NARROWED_AT = datetime(2026, 2, 1, tzinfo=UTC)
@@ -191,6 +211,8 @@ def _semantic(  # noqa: PLR0913 — one keyword per record axis a case may need 
     validity: Validity | None = None,
     source: MemorySource = MemorySource.OBSERVED,
     last_updated: datetime = _REVISED,
+    topics: tuple[str, ...] = (),
+    about_person: str | None = None,
 ) -> MemoryRecord:
     return SemanticMemory(
         id=record_id,
@@ -199,6 +221,45 @@ def _semantic(  # noqa: PLR0913 — one keyword per record axis a case may need 
         provenance=_provenance(source=source, last_updated=last_updated),
         expires_at=expires_at,
         validity=validity or Validity(),
+        topics=topics,
+        about_person=about_person,
+    )
+
+
+def _episode(  # noqa: PLR0913 — one keyword per ADR-0237 axis a case may need to vary
+    record_id: str,
+    content: str = _ANY,
+    *,
+    occurred_at: datetime = _IN_WINDOW,
+    participants: tuple[str, ...] = (),
+    topics: tuple[str, ...] = (),
+    about_person: str | None = None,
+    last_updated: datetime = _REVISED,
+    source: MemorySource = MemorySource.OBSERVED,
+) -> MemoryRecord:
+    """An episode carrying whichever of ADR-0237 §1's four axes a case varies.
+
+    Every one of them lands on this kind — ``occurred_at`` and ``participants``
+    are :class:`EpisodicMemory`'s, ``topics`` and ``about_person`` are
+    :class:`MemoryBase`'s — so one builder serves all four axes and a case that
+    varies one holds the other three fixed. ``occurred_at`` defaults **inside**
+    the window the cases filter on, so a case testing the person or label axes is
+    never quietly decided by the time one.
+
+    Nothing here is what capture writes today (ADR-0213 §6 forbids a producer to
+    label an episode at all): the fixture states the values the read is specified
+    over, and
+    ``test_a_captured_episode_as_written_today_is_reached_by_no_label_filter``
+    pins the state of the tree beside it.
+    """
+    return EpisodicMemory(
+        id=record_id,
+        content=content,
+        provenance=_provenance(source=source, last_updated=last_updated),
+        occurred_at=occurred_at,
+        participants=participants,
+        topics=topics,
+        about_person=about_person,
     )
 
 
@@ -231,6 +292,69 @@ def _episodic(record_id: str, content: str) -> EpisodicMemory:
         provenance=_provenance(),
         occurred_at=_REVISED,
     )
+
+
+#: The two reads ADR-0237 §1 puts its four axes on. Every axis case below is
+#: parametrised over this rather than written twice: §9 requires it in terms —
+#: "two bodies asserting one axis set is the drift §4 refuses, and a suite that
+#: reproduced it would be the instrument that failed to catch it".
+_READS = ("search", "select")
+
+#: ADR-0237 §3's matching rule is Unicode canonical caseless equality (D145), and
+#: these four pairs are what tell it apart from a ``str.lower`` comparison, which
+#: passes the obvious two and fails the rest (§10 item 8). Each is (stored label,
+#: queried label, whether they match).
+_FOLD_PAIRS: tuple[tuple[str, str, bool], ...] = (
+    ("Marta", "marta", True),
+    ("Marta", "Márta", False),
+    ("Straße", "STRASSE", True),
+    ("Márta", "Márta", True),
+)
+_FOLD_IDS = ("case", "accent", "full-fold", "canonical-equivalence")
+
+#: What a failure of an axis case means, in one place: the read applied the axis to
+#: something other than the record's own stored value, or applied it at all.
+_AXIS_WRONG = (
+    "the read returned a record set the call's filters do not select — an axis "
+    "either reached a record carrying no value on it, or matched by a rule other "
+    "than the one ADR-0237 §3 states (ADR-0237 §§1-3, §6)"
+)
+#: What a failure of a crowding case means: the axis bound *after* the cut, so a
+#: flood of nearer — or, on the unranked read, higher-sorting — ineligible records
+#: spent the budget the cut is taken from and the eligible records never arrived.
+_BOUND_LATE = (
+    "a read returned none of the eligible records while every one of them is live "
+    "and matches the call's filters — the axis bound after the cut and the flood "
+    "spent the candidate budget (ADR-0237 §1, ADR-0128 §1)"
+)
+
+
+async def _filtered(store: MemoryStore, read: str, **axes: Any) -> MemorySearchResult:
+    """Run ``axes`` through one of the two reads ADR-0237 §1 carries them on.
+
+    ``search`` is given :data:`_ANY` as its query, which every fixture record's
+    ``content`` carries, so the axes under test are the only thing separating the
+    records it returns — the query is a constant of the harness rather than a
+    variable of a case. ``select`` is given no query, because it has none.
+
+    Args:
+        store: The implementation under test.
+        read: ``"search"`` or ``"select"``.
+        axes: The filter axes and any ``limit``, passed through unchanged.
+
+    Returns:
+        What that read returned.
+    """
+    if read == "search":
+        return await store.search(_ANY, **axes)
+    if read == "select":  # pragma: no branch — the parametrisation produces no third
+        return await store.select(**axes)
+    raise AssertionError(read)  # pragma: no cover — a name the parametrisation never emits
+
+
+def _ids(result: MemorySearchResult) -> set[str]:
+    """The ids one filtered read returned, as a set."""
+    return {record.id for record in result.records}
 
 
 #: Positions no chunk read could have issued, each reaching a different line of a
@@ -627,6 +751,26 @@ class _ListBeliefsOp(_ReadOp):
         return store.list_beliefs(kinds=[MemoryKind.PREFERENCE])
 
 
+class _SelectOp(_ReadOp):
+    """``select`` — ADR-0237 §4's structured read, its own lock site.
+
+    In for :class:`_ListBeliefsOp`'s reason, at the newest read on the surface:
+    ADR-0060 §3 binds "any method that acquires the resource", and this one holds
+    the connection lock across its own ``_run_to_completion`` like every other
+    read. The two calls select disjoint kinds, so they are independent subjects.
+    """
+
+    name = "select"
+
+    def first(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Select the semantic records — the call that is cancelled."""
+        return store.select(kinds=[MemoryKind.SEMANTIC])
+
+    def second(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Select the preferences concurrently."""
+        return store.select(kinds=[MemoryKind.PREFERENCE])
+
+
 class _ExportOp(_ReadOp):
     """``export`` — the whole-store read, its own lock site."""
 
@@ -716,6 +860,7 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _PurgeExpiredOp,
     _GetOp,
     _SearchOp,
+    _SelectOp,
     _ListBeliefsOp,
     _ExportOp,
     _WalkRecordsOp,
@@ -1734,6 +1879,823 @@ class MemoryStoreContract:
         ):
             assert result.records == ()
             assert result.capped is False
+
+    # --- ADR-0237: four filters over what the records carry, on two reads -----
+    # §9 fixes the shape of this section and it is followed literally: **every axis
+    # case is written once and run against both reads**, parametrised over the
+    # member through `_filtered`, because "two bodies asserting one axis set is the
+    # drift §4 refuses, and a suite that reproduced it would be the instrument that
+    # failed to catch it". The crowding cases are ADR-0128 §5's clause on four more
+    # axes; the balanced cases beside them prove the comparison, and the crowded
+    # ones prove it is *reached*.
+    #
+    # A record's `content` carries `_ANY` throughout, so `search` reaches every
+    # fixture record and the axis under test is the only thing separating them.
+    # That is deliberate rather than incidental: ADR-0237 §10 item 3 is the arm
+    # where a caption an adversary wrote is *nearest* to the query, and a fixture
+    # whose eligible records happened to be the best textual matches would certify
+    # a store that ignored the filters entirely.
+
+    @pytest.mark.parametrize("read", _READS)
+    async def test_a_window_selects_the_half_open_period_on_both_ends(
+        self, store: MemoryStore, read: str
+    ) -> None:
+        """ADR-0237 §2's window, both ends, on both reads.
+
+        ``[start, end)``: a record exactly **at** ``start`` is inside and a record
+        exactly **at** ``end`` is outside, which is the pair two stores answer
+        differently unless the convention is pinned. The unbounded forms are
+        asserted in the same case, because ``None`` at an end is the third answer
+        the same ambiguity has.
+        """
+        await store.add(_episode("before", _ANY, occurred_at=_BEFORE_WINDOW))
+        await store.add(_episode("at-start", _ANY, occurred_at=_WINDOW_START))
+        await store.add(_episode("inside", _ANY, occurred_at=_IN_WINDOW))
+        await store.add(_episode("at-end", _ANY, occurred_at=_WINDOW_END))
+
+        bounded = await _filtered(
+            store, read, occurred_within=TimeWindow(start=_WINDOW_START, end=_WINDOW_END)
+        )
+        open_start = await _filtered(store, read, occurred_within=TimeWindow(end=_WINDOW_END))
+        open_end = await _filtered(store, read, occurred_within=TimeWindow(start=_WINDOW_START))
+
+        assert _ids(bounded) == {"at-start", "inside"}, _AXIS_WRONG
+        assert _ids(open_start) == {"before", "at-start", "inside"}, _AXIS_WRONG
+        assert _ids(open_end) == {"at-start", "inside", "at-end"}, _AXIS_WRONG
+
+    async def test_a_time_window_refuses_an_unbounded_and_an_inverted_span(self) -> None:
+        """ADR-0237 §2's two refusals, made at construction rather than at a read.
+
+        A window with **both ends unset** is refused where ``Validity()`` permits
+        one, and the asymmetry is the difference between a stored value and a
+        query: ``Validity()`` means "live forever until something retires it", a
+        fact about a record, while ``TimeWindow()`` would mean "any instant" — a
+        caller that reached for a bound and named none. A caller wanting every
+        record omits the argument.
+
+        An ``end`` at or before ``start`` is refused for ``Validity``'s reason: it
+        describes an interval nothing can be inside.
+
+        Asserted on the type and not through a store, because that is where the
+        refusal belongs — a check on a read is a check three implementations each
+        have to remember, and the two that forgot would silently answer "every
+        record" and "no record". ``ValueError`` is the class ADR-0237 §2 names, and
+        pydantic's ``ValidationError`` is one, so this holds however the type
+        expresses it.
+        """
+        with pytest.raises(ValueError, match="at least one end"):
+            TimeWindow()
+        for end in (_WINDOW_START, _BEFORE_WINDOW):
+            with pytest.raises(ValueError, match="after start"):
+                TimeWindow(start=_WINDOW_START, end=end)
+
+    @pytest.mark.parametrize("read", _READS)
+    @pytest.mark.parametrize(("stored", "queried", "matches"), _FOLD_PAIRS, ids=_FOLD_IDS)
+    @pytest.mark.parametrize("axis", ["participants", "about_person"])
+    async def test_a_person_axis_matches_by_unicode_canonical_caseless_equality(  # noqa: PLR0913 — the fold table is one parameter per column
+        self, store: MemoryStore, read: str, axis: str, stored: str, queried: str, matches: bool
+    ) -> None:
+        """ADR-0237 §3's fold, on **both** person axes and on both reads.
+
+        The rule is ADR-0101 §2's, unchanged: ``NFD(toCasefold(NFD(q)))`` equal for
+        both labels — Unicode canonical caseless equality, definition D145 — and
+        nothing else compared. The four pairs are ADR-0237 §10 item 8's, and the
+        last two are what pin the rule rather than a lowercase comparison:
+        ``"Straße"``/``"STRASSE"`` match under *full* case folding and not under
+        ``str.lower``, and a name written with a precomposed acute matches the same
+        name written with a combining one only because of the outer and inner
+        ``NFD``.
+
+        Run on both axes because ADR-0237 §3 gives them **one** rule: applying a
+        different one to ``participants`` would put two incompatible answers to
+        "are these the same person label?" in one method, and the one a caller got
+        would depend on which field the label happened to be stored in.
+        """
+        record = (
+            _episode("subject", _ANY, participants=(stored,))
+            if axis == "participants"
+            else _episode("subject", _ANY, about_person=stored)
+        )
+        await store.add(record)
+
+        found = await _filtered(store, read, **{axis: [queried]})
+
+        assert _ids(found) == ({"subject"} if matches else set()), (
+            f"{queried!r} against a record carrying {stored!r}: {_AXIS_WRONG}"
+        )
+
+    @pytest.mark.parametrize("read", _READS)
+    async def test_topics_matches_the_stored_characters_and_nothing_wider(
+        self, store: MemoryStore, read: str
+    ) -> None:
+        """ADR-0237 §3's third rule: exact stored characters, on both reads.
+
+        Equality of the stored characters is the only relation ``TopicLabel`` has
+        (ADR-0213 §3) and no fold is applied — the type is already canonical,
+        refusing any value that does not equal its own ``str.casefold()``. So the
+        arms that matter are the *wider* rules a store might reach for: a prefix,
+        a hierarchy, a stem. ``"health"`` does not reach ``"healthcare"``, which
+        ADR-0213 §15 names as the first owner surprise a wider rule would fix and
+        the supersession it would cost.
+        """
+        await store.add(_episode("health", _ANY, topics=("health",)))
+        await store.add(_episode("healthcare", _ANY, topics=("healthcare",)))
+        await store.add(_episode("both", _ANY, topics=("health", "healthcare")))
+
+        exact = await _filtered(store, read, topics=["health"])
+
+        assert _ids(exact) == {"health", "both"}, _AXIS_WRONG
+
+    @pytest.mark.parametrize("read", _READS)
+    @pytest.mark.parametrize(
+        ("axes", "unlabelled"),
+        [
+            pytest.param(
+                {"occurred_within": TimeWindow(start=_WINDOW_START, end=_WINDOW_END)},
+                lambda: _semantic("unlabelled", _ANY),
+                id="window-over-a-kind-with-no-instant",
+            ),
+            pytest.param(
+                {"participants": ["alex"]},
+                lambda: _episode("unlabelled", _ANY),
+                id="participants-empty-on-the-record",
+            ),
+            pytest.param(
+                {"topics": ["renovation"]},
+                lambda: _episode("unlabelled", _ANY),
+                id="topics-empty-on-the-record",
+            ),
+            pytest.param(
+                {"about_person": ["alex"]},
+                lambda: _episode("unlabelled", _ANY),
+                id="about-person-unset",
+            ),
+        ],
+    )
+    async def test_a_record_carrying_no_value_on_an_axis_is_reached_by_no_filter_on_it(
+        self,
+        store: MemoryStore,
+        read: str,
+        axes: dict[str, Any],
+        unlabelled: Callable[[], MemoryRecord],
+    ) -> None:
+        """ADR-0237 §6, once per axis and on both reads.
+
+        A filter reaches a record **if and only if** the record carries a value on
+        that axis and the value matches — whether the value is absent because the
+        field is empty, because it is unset, or because the record's kind has no
+        such field at all. The two wrong readings are damaging in opposite
+        directions: read as "every value", an unlabelled record is admitted to
+        every structured read and the answer to "which conversations involved
+        Alex" is every conversation; read as "no value", nothing changes about what
+        comes back but the owner is told the axis works.
+
+        The window arm carries the third form of absence — a :class:`SemanticMemory`
+        has no ``occurred_at`` field at all — which is the one an implementation
+        reaching through a nullable column is most likely to get wrong, because SQL
+        ``NULL`` comparisons are unknown rather than false.
+        """
+        await store.add(unlabelled())
+
+        found = await _filtered(store, read, **axes)
+
+        assert _ids(found) == set(), _AXIS_WRONG
+
+    @pytest.mark.parametrize("read", _READS)
+    @pytest.mark.parametrize(
+        ("axis", "matching", "other"),
+        [
+            pytest.param("participants", "Alex", "Bob", id="participants"),
+            pytest.param("topics", "renovation", "garden", id="topics"),
+            pytest.param("about_person", "Alex", "Bob", id="about_person"),
+        ],
+    )
+    async def test_none_applies_no_axis_and_an_empty_sequence_selects_nothing(
+        self, store: MemoryStore, read: str, axis: str, matching: str, other: str
+    ) -> None:
+        """ADR-0237 §2's convention, per sequence axis and on both reads.
+
+        ``None`` means the axis is not applied, an **empty sequence selects
+        nothing**, and duplicates are set semantics. Stated by the ADR for each
+        axis rather than left to be read off a sibling parameter, "for the reason
+        ADR-0113 §3 gives: leaving it to be inherited is how one implementation
+        comes to treat ``bands=()`` as 'no filter' — the opposite outcome" — so the
+        empty arm is the one that bites and it is asserted here rather than folded
+        into the ``None`` arm.
+
+        ``None`` is not asserted through ``select``, which refuses a call applying
+        no axis at all: the ``None`` arm there names a *second* axis so the call
+        still applies one, which is the honest shape of "this axis is not applied".
+        """
+        labelled = {axis: (matching,)} if axis != "about_person" else {axis: matching}
+        await store.add(_episode("labelled", _ANY, **labelled))
+        await store.add(_episode("unlabelled", _ANY))
+
+        not_applied = await _filtered(store, read, kinds=[MemoryKind.EPISODIC], **{axis: None})
+        empty = await _filtered(store, read, **{axis: []})
+        once = await _filtered(store, read, **{axis: [matching]})
+        repeated = await _filtered(store, read, **{axis: [matching, matching, matching]})
+        widened = await _filtered(store, read, **{axis: [matching, other]})
+
+        assert _ids(not_applied) == {"labelled", "unlabelled"}, _AXIS_WRONG
+        assert _ids(empty) == set(), (
+            f"an empty {axis} sequence selected records — it selects **nothing**, "
+            f"which is the opposite outcome ADR-0113 §3 names by hand"
+        )
+        assert empty.capped is False, "a filter selecting nothing matches nothing by construction"
+        assert _ids(once) == {"labelled"}, _AXIS_WRONG
+        assert _ids(repeated) == _ids(once), "duplicates are set semantics and change nothing"
+        assert _ids(widened) == {"labelled"}, _AXIS_WRONG
+
+    @pytest.mark.parametrize("read", _READS)
+    async def test_axes_conjoin_and_the_values_within_one_axis_disjoin(
+        self, store: MemoryStore, read: str
+    ) -> None:
+        """ADR-0237 §2's composition rules, on both reads.
+
+        **Across** axes the composition is conjunction: a record is eligible when
+        it is eligible on every axis the call applies. **Within** one axis it is
+        disjunction: a record is eligible when it matches at least one value given.
+        The fixture is built so a store that got either backwards fails — the two
+        records each satisfy one half of the conjunction and neither satisfies
+        both, so an implementation composing the axes by disjunction returns two
+        where one is owed.
+        """
+        await store.add(_episode("both", _ANY, about_person="Alex", topics=("renovation",)))
+        await store.add(_episode("person-only", _ANY, about_person="Alex", topics=("garden",)))
+        await store.add(_episode("topic-only", _ANY, about_person="Bob", topics=("renovation",)))
+
+        conjoined = await _filtered(store, read, about_person=["alex"], topics=["renovation"])
+        disjoined = await _filtered(store, read, topics=["renovation", "garden"])
+
+        assert _ids(conjoined) == {"both"}, (
+            "the axes composed by disjunction: a record eligible on one axis and "
+            "not the other was returned (ADR-0237 §2)"
+        )
+        assert _ids(disjoined) == {"both", "person-only", "topic-only"}, (
+            "the values within one axis composed by conjunction: a record matching "
+            "one of the two labels was excluded (ADR-0237 §2)"
+        )
+
+    @pytest.mark.parametrize("read", _READS)
+    @pytest.mark.parametrize(
+        ("axes", "ineligible", "eligible"),
+        [
+            pytest.param(
+                {"occurred_within": TimeWindow(start=_WINDOW_START, end=_WINDOW_END)},
+                lambda index: _episode(
+                    f"flood-{index}",
+                    _ANY,
+                    occurred_at=_BEFORE_WINDOW,
+                    last_updated=_RESTAMPED,
+                ),
+                lambda index: _episode(f"mine-{index}", _FURTHER, occurred_at=_IN_WINDOW),
+                id="occurred_within",
+            ),
+            pytest.param(
+                {"participants": ["alex"]},
+                lambda index: _episode(
+                    f"flood-{index}", _ANY, participants=("Bob",), last_updated=_RESTAMPED
+                ),
+                lambda index: _episode(f"mine-{index}", _FURTHER, participants=("Alex",)),
+                id="participants",
+            ),
+            pytest.param(
+                {"topics": ["renovation"]},
+                lambda index: _episode(
+                    f"flood-{index}", _ANY, topics=("garden",), last_updated=_RESTAMPED
+                ),
+                lambda index: _episode(f"mine-{index}", _FURTHER, topics=("renovation",)),
+                id="topics",
+            ),
+            pytest.param(
+                {"about_person": ["alex"]},
+                lambda index: _episode(
+                    f"flood-{index}", _ANY, about_person="Bob", last_updated=_RESTAMPED
+                ),
+                lambda index: _episode(f"mine-{index}", _FURTHER, about_person="Alex"),
+                id="about_person",
+            ),
+        ],
+    )
+    async def test_a_structured_axis_binds_before_the_cut_under_crowding(
+        self,
+        store: MemoryStore,
+        read: str,
+        axes: dict[str, Any],
+        ineligible: Callable[[int], MemoryRecord],
+        eligible: Callable[[int], MemoryRecord],
+    ) -> None:
+        """ADR-0237 §9's first clause: one crowding case per axis, on both reads.
+
+        Forty ineligible records and three eligible ones, at ``limit=2``. The
+        flood is built to be *first in line* on whichever read is running: it
+        carries :data:`_ANY` alone, so it is an exact match for ``search``'s query
+        and therefore the nearest neighbour, and it carries a later
+        ``provenance.last_updated``, so it heads ``select``'s order (ADR-0237 §5).
+        A store applying the axis **after** its cut spends the whole budget on the
+        flood and serves none of the three, while every one of them is live and
+        matches the filter.
+
+        That is the failure ADR-0113's spike measured on the band axis (zero of
+        four live assertions at a 49x skew) and #799 measured on the window axis as
+        a threshold — 0% below a filtered-neighbour density of ``fetch_k - limit``
+        and 100% above it. On these axes the skew is worse and structurally so: a
+        window over "last week" excludes, by construction, every record the store
+        has ever written outside it.
+
+        **The assertion is that the eligible records arrive**, never merely that no
+        ineligible one did: §9 names the weaker form by hand — "a case asserting
+        only that no ineligible record is returned is satisfied by returning
+        nothing and does not test §1". The flood size is 40, an order of magnitude
+        past ``limit``, which survives any candidate margin an implementation might
+        keep without the suite reaching for a constant belonging to one of them.
+        """
+        for index in range(40):
+            await store.add(ineligible(index))
+        for index in range(3):
+            await store.add(eligible(index))
+
+        found = await _filtered(store, read, limit=2, **axes)
+
+        assert found.records, _BOUND_LATE
+        assert len(found.records) == 2, "two eligible records were asked for and three exist"
+        assert _ids(found) <= {"mine-0", "mine-1", "mine-2"}, _AXIS_WRONG
+
+    @pytest.mark.parametrize("read", _READS)
+    async def test_structure_isolates_the_one_conversation(
+        self, store: MemoryStore, read: str
+    ) -> None:
+        """ADR-0237 §10 item 1, the milestone's own exit, on both reads.
+
+        Several conversations on one topic, all near in similarity; exactly one
+        carries the asked person **and** falls in the asked period. A call
+        conjoining ``about_person`` and ``occurred_within`` returns that one and no
+        other — and returns it with the distractors crowding the budget, because
+        every distractor carries the query word alone and a later write stamp.
+
+        This is the arm the milestone is *for*: the store is already semantic, so
+        different-wording retrieval does not isolate structure's contribution. What
+        isolates it is that the answer is decided by what the records carry rather
+        than by what they say.
+        """
+        for index in range(20):
+            await store.add(
+                _episode(
+                    f"wrong-person-{index}",
+                    _ANY,
+                    about_person="Bob",
+                    occurred_at=_IN_WINDOW,
+                    last_updated=_RESTAMPED,
+                )
+            )
+            await store.add(
+                _episode(
+                    f"wrong-period-{index}",
+                    _ANY,
+                    about_person="Alex",
+                    occurred_at=_BEFORE_WINDOW,
+                    last_updated=_RESTAMPED,
+                )
+            )
+        await store.add(_episode("the-one", _FURTHER, about_person="Alex", occurred_at=_IN_WINDOW))
+
+        found = await _filtered(
+            store,
+            read,
+            about_person=["alex"],
+            occurred_within=TimeWindow(start=_WINDOW_START, end=_WINDOW_END),
+            limit=5,
+        )
+
+        assert _ids(found) == {"the-one"}, _BOUND_LATE
+
+    @pytest.mark.parametrize("read", _READS)
+    async def test_a_caption_is_never_the_reason_a_record_is_returned(
+        self, store: MemoryStore, read: str
+    ) -> None:
+        """ADR-0237 §10 item 3: similarity does not admit a record the filters exclude.
+
+        The caption's ``content`` is engineered to sit nearest the query — it is
+        the query, exactly — while the answer's is further away. On ``search`` that
+        is the arm that matters, because it is the one where similarity would have
+        won; on ``select`` it is the arm that shows the read has no similarity to
+        be won by. Either way, a caption an adversary wrote is content the read
+        returns and never the reason it was selected.
+        """
+        await store.add(_episode("caption", _ANY, about_person="Bob"))
+        await store.add(_episode("answer", _FURTHER, about_person="Alex"))
+
+        found = await _filtered(store, read, about_person=["alex"])
+
+        assert _ids(found) == {"answer"}, _AXIS_WRONG
+
+    @pytest.mark.parametrize("read", _READS)
+    async def test_a_filter_naming_a_value_no_record_carries_returns_an_empty_uncapped_result(
+        self, store: MemoryStore, read: str
+    ) -> None:
+        """ADR-0237 §10 item 5, and the two failures §6 sits between.
+
+        A filter naming a value no record carries returns an empty result with
+        ``capped`` ``False``, and the suite asserts the result is empty **and**
+        that no unlabelled record leaked into it. Those are the two opposite wrong
+        readings of an absent value: admitting the unlabelled to every read, and
+        reporting a ceiling that was never reached.
+        """
+        await store.add(_episode("unlabelled", _ANY))
+        await store.add(_episode("labelled", _ANY, topics=("garden",)))
+
+        found = await _filtered(store, read, topics=["renovation"])
+
+        assert found.records == (), _AXIS_WRONG
+        assert found.capped is False, (
+            "a filter that selects nothing matches nothing by construction, so the "
+            "store's candidate ceiling was never reached (ADR-0128 §2, ADR-0237 §7)"
+        )
+
+    @pytest.mark.parametrize("read", _READS)
+    async def test_two_records_matching_one_person_and_period_both_come_back(
+        self, store: MemoryStore, read: str
+    ) -> None:
+        """ADR-0237 §10 item 6: an ambiguous answer is both records, unranked by any quantity.
+
+        Neither is preferred by a band, a confidence, an evidence strength or an
+        importance — ADR-0112 §§1-2 bind unchanged and neither read is granted
+        weighting authority over any quantity by ADR-0237. The two here differ in
+        band and in confidence precisely so a store that let either act would
+        return one.
+        """
+        await store.add(
+            _episode(
+                "asserted",
+                _ANY,
+                about_person="Alex",
+                occurred_at=_IN_WINDOW,
+                source=MemorySource.USER_ASSERTED,
+            )
+        )
+        await store.add(
+            _episode(
+                "inferred",
+                _ANY,
+                about_person="Alex",
+                occurred_at=_IN_WINDOW,
+                source=MemorySource.INFERRED,
+            )
+        )
+
+        found = await _filtered(
+            store,
+            read,
+            about_person=["alex"],
+            occurred_within=TimeWindow(start=_WINDOW_START, end=_WINDOW_END),
+        )
+
+        assert _ids(found) == {"asserted", "inferred"}, _AXIS_WRONG
+
+    @pytest.mark.parametrize("read", _READS)
+    @pytest.mark.parametrize("axis", ["participants", "about_person"])
+    async def test_a_blank_value_on_a_person_axis_is_refused(
+        self, store: MemoryStore, read: str, axis: str
+    ) -> None:
+        """ADR-0237 §2's blank refusal, on both person axes and both reads.
+
+        A blank or whitespace-only value is refused with ``ValueError``. It is
+        never read as "unstated" and it never matches a record — which is the
+        quiet alternative a store might take, and the one that would make
+        ``about_person=[""]`` an unspellable way of asking for the owner's own
+        records that ADR-0100 §3 forbids.
+        """
+        await store.add(_episode("subject", _ANY, about_person="Alex", participants=("Alex",)))
+
+        for blank in ("", "   ", "\t"):
+            with pytest.raises(ValueError, match="blank"):
+                await _filtered(store, read, **{axis: [blank]})
+
+    @pytest.mark.parametrize("read", _READS)
+    async def test_a_captured_episode_as_written_today_is_reached_by_no_label_filter(
+        self, store: MemoryStore, read: str
+    ) -> None:
+        """ADR-0237 §10 item 7: the specified behaviour over today's captured data.
+
+        Capture writes no ``topics``, no ``participants`` and no ``about_person``
+        on the episodes it records, and ADR-0213 §6 forbids **any** producer from
+        labelling an episode today — so a label filter reaches no captured episode
+        at all on any store as it stands. That is asserted here as the *specified*
+        behaviour rather than left to be discovered as a bug, and it is the arm the
+        producer lane will deliberately invert.
+
+        The time axis is asserted beside it, because it is the one today's data
+        does support and the milestone's first slice is built on it.
+        """
+        as_captured = _episode("captured", _ANY, occurred_at=_IN_WINDOW)
+        await store.add(as_captured)
+
+        for axes in (
+            {"topics": ["renovation"]},
+            {"participants": ["alex"]},
+            {"about_person": ["alex"]},
+        ):
+            assert _ids(await _filtered(store, read, **axes)) == set(), (
+                "a label filter reached an episode as capture writes them today, "
+                "which carries no such value (ADR-0213 §6, ADR-0237 §6)"
+            )
+        by_time = await _filtered(
+            store, read, occurred_within=TimeWindow(start=_WINDOW_START, end=_WINDOW_END)
+        )
+        assert _ids(by_time) == {"captured"}, (
+            "the time axis is the one today's captured data supports, and it did not reach"
+        )
+
+    # --- select alone: the query-less read's own clauses (ADR-0237 §§4-5, 7) ---
+    # Everything above is written once and run against both members. What follows
+    # is what `select` has and `search` does not: a total specified order, a
+    # cleared `score`, the refusal of a call naming no criterion, and its own
+    # `limit` boundaries — which §9 is explicit are **not** inherited from
+    # `search`'s existing ones, "because every one of those supplies a query and
+    # none of them executes this read's path".
+
+    async def test_select_orders_by_last_updated_descending_then_id_ascending(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0237 §5's order: total, stable and specified.
+
+        ``provenance.last_updated`` descending, ties broken by ``id`` ascending —
+        the order ADR-0073 §1 already names for ``list_beliefs``, so the corpus has
+        one enumeration order and not two. Some total order has to be named or two
+        stores answer the same call differently while each believes it conforms.
+
+        The tie is the half a store gets wrong by leaving the sort to its own row
+        order, so two records share an instant here and the case pins which comes
+        first. The order is keyed on the **write** stamp and not on ``occurred_at``
+        for totality's sake, so ``occurred_at`` is deliberately set in the opposite
+        direction: a store ordering by event time returns this exactly reversed.
+        """
+        await store.add(
+            _episode(
+                "b-old",
+                _ANY,
+                topics=("renovation",),
+                last_updated=_REVISED,
+                occurred_at=_WINDOW_END,
+            )
+        )
+        await store.add(
+            _episode(
+                "a-old",
+                _ANY,
+                topics=("renovation",),
+                last_updated=_REVISED,
+                occurred_at=_WINDOW_END,
+            )
+        )
+        await store.add(
+            _episode(
+                "newest",
+                _ANY,
+                topics=("renovation",),
+                last_updated=_RESTAMPED,
+                occurred_at=_BEFORE_WINDOW,
+            )
+        )
+
+        found = await store.select(topics=["renovation"])
+
+        assert [record.id for record in found.records] == ["newest", "a-old", "b-old"], (
+            "select's order is provenance.last_updated descending, ties by id "
+            "ascending (ADR-0237 §5) — and never event time, which only one kind carries"
+        )
+
+    async def test_select_clears_score_on_every_record(self, store: MemoryStore) -> None:
+        """ADR-0237 §5: ``score`` is ``None`` — cleared, not merely absent.
+
+        Nothing was ranked, so there is no relevance to report. A *stored* record
+        can already carry one, since ``add`` accepts any ``MemoryRecord`` including
+        one ``search`` returned with its score populated — so the record is planted
+        here through exactly that route, which is the only way the difference
+        between "cleared" and "never set" is observable.
+        """
+        await store.add(_episode("scored", _ANY, topics=("renovation",)))
+        ranked = (await store.search(_ANY)).records
+        assert ranked, "the premise: search returns the record it will re-store"
+        assert ranked[0].score is not None, "the premise: search populates a score"
+        await store.add(ranked[0])
+
+        found = await store.select(topics=["renovation"])
+
+        assert [record.score for record in found.records] == [None], (
+            "select cleared no score: a record re-added carrying a search's relevance "
+            "came back still carrying it (ADR-0237 §5)"
+        )
+
+    async def test_select_refuses_a_call_that_applies_no_axis(self, store: MemoryStore) -> None:
+        """ADR-0237 §4: a call applying none of its six axes is refused.
+
+        No value of any axis means "everything", so a call naming no criterion is a
+        caller that reached for one and gave none — and answering it would make
+        ``select`` a second ``list_beliefs``, which §4 refuses in terms: "a caller
+        inspecting the profile calls ``list_beliefs``; a caller retrieving by
+        structure calls ``select``". The ``limit``-only form is asserted beside the
+        bare one because a store checking "were any keyword arguments passed?"
+        rather than "is any axis applied?" answers it.
+        """
+        await store.add(_episode("present", _ANY, topics=("renovation",)))
+
+        with pytest.raises(ValueError, match="at least one axis"):
+            await store.select()
+        with pytest.raises(ValueError, match="at least one axis"):
+            await store.select(limit=5)
+
+    async def test_select_has_its_own_limit_boundaries(self, store: MemoryStore) -> None:
+        """ADR-0237 §10 item 10, asserted on this read and never inherited.
+
+        ``limit=0`` and ``limit=-1`` each return an empty, uncapped result:
+        ``select`` matches nothing at a non-positive limit and does **not** refuse
+        it, which is deliberately unlike ``list_beliefs`` (ADR-0073 §2 refuses an
+        out-of-range value there) and exactly like ``search``.
+
+        ``limit=2**63`` returns records and **raises nothing** — the case a store
+        binding ``limit`` straight into its query language fails while passing
+        every other fixture here. ADR-0237 §7 states it: an implementation binding
+        ``limit`` into a query language clamps at its own boundary, and a ``limit``
+        no store can represent is one that returns records, never one that raises.
+        """
+        await store.add(_episode("present", _ANY, topics=("renovation",)))
+
+        for limit in (0, -1):
+            empty = await store.select(topics=["renovation"], limit=limit)
+            assert empty.records == ()
+            assert empty.capped is False, "a non-positive limit matches nothing by construction"
+
+        unrepresentable = await store.select(topics=["renovation"], limit=2**63)
+
+        assert _ids(unrepresentable) == {"present"}, (
+            "a limit larger than any bind parameter must clamp at the store's own "
+            "boundary and return records, never raise (ADR-0237 §7)"
+        )
+
+    @pytest.fixture
+    def select_candidate_ceiling(self) -> int | None:
+        """The store-under-test's candidate ceiling **on ``select``**, or ``None``.
+
+        Separate from :meth:`candidate_ceiling`, which is ``search``'s: a store may
+        have a KNN ``k`` cap on one read and nothing at all on the other, and
+        ``SqliteMemoryStore`` is exactly that store — ``select`` runs no KNN, so
+        nothing but ``limit`` shortens its result. No shipped implementation has one
+        today, so the case below skips everywhere; it is carried rather than omitted
+        because ADR-0237 §10 item 11 requires the pair §7's completeness clause and
+        §5's cut clause have to be read together to satisfy, and a store that later
+        grows a ceiling binds it by overriding this fixture rather than by
+        remembering to write the case.
+        """
+        return None
+
+    @pytest.mark.optional_obligation
+    async def test_select_reports_a_ceiling_that_bound_it_and_keeps_its_order(
+        self, store: MemoryStore, select_candidate_ceiling: int | None
+    ) -> None:
+        """ADR-0237 §10 item 11: the ceiling, on the read with no ranking.
+
+        ``ceiling < eligible count < limit``: the read returns at most the
+        ceiling's worth with ``capped`` ``True`` and §5's order over what came
+        back, and never the whole eligible set. On an implementation with no
+        ceiling the case is **skipped rather than faked**, exactly as ADR-0128 §5
+        does with its own two — neither input is constructible against a store with
+        no ceiling, and a case that manufactured one would be testing the
+        manufacture.
+        """
+        if select_candidate_ceiling is None:
+            pytest.skip(
+                "this store has no candidate ceiling on select, so the input is unconstructible"
+            )
+        await store.write_atomic(
+            [
+                MemoryWrite(
+                    record=_episode(f"ceil-{index}", _ANY, topics=("renovation",)),
+                    mode=MemoryWriteMode.UPSERT,
+                )
+                for index in range(select_candidate_ceiling + 1)
+            ]
+        )
+
+        found = await store.select(topics=["renovation"], limit=select_candidate_ceiling + 2)
+
+        assert len(found.records) <= select_candidate_ceiling
+        assert found.capped is True
+        stamps = [(record.provenance.last_updated, record.id) for record in found.records]
+        assert stamps == sorted(stamps, key=lambda pair: (-pair[0].timestamp(), pair[1]))
+
+    async def test_the_two_reads_are_not_each_other(self, store: MemoryStore) -> None:
+        """ADR-0237 §10 item 12: one store, one fixture, two different answers.
+
+        ``search`` over a query with a window returns the nearest-first records of
+        that window with ``score`` populated; ``select`` over the same window
+        returns §5's order with ``score`` ``None``. Asserted **together**, because
+        the pair is what §4 decided and a reader of §5 will want to see it held:
+        the fixture is built so relevance and the write stamp order the two records
+        in opposite directions, which is the only way the two orders are
+        distinguishable at all.
+        """
+        query = "coffee renovation"
+        await store.add(_episode("nearer", query, occurred_at=_IN_WINDOW, last_updated=_REVISED))
+        await store.add(_episode("newer", _ANY, occurred_at=_IN_WINDOW, last_updated=_RESTAMPED))
+        window = TimeWindow(start=_WINDOW_START, end=_WINDOW_END)
+
+        ranked = await store.search(query, occurred_within=window)
+        structured = await store.select(occurred_within=window)
+
+        assert [record.id for record in ranked.records] == ["nearer", "newer"], (
+            "search's order is relevance, best first — unchanged by a filter (ADR-0113 §4)"
+        )
+        assert all(record.score is not None for record in ranked.records), (
+            "search is a retrieval and its score stays populated (ADR-0128)"
+        )
+        assert [record.id for record in structured.records] == ["newer", "nearer"], (
+            "select's order is the write stamp, newest first (ADR-0237 §5)"
+        )
+        assert all(record.score is None for record in structured.records), (
+            "select ranked nothing, so its score is cleared (ADR-0237 §5)"
+        )
+
+    async def test_the_first_slice_end_to_end(self, store: MemoryStore) -> None:
+        """ADR-0237 §10 item 2: a window over episodes **plus** the existing text query.
+
+        "What did we discuss about the renovation last week" is a filtered
+        *relevance* read — the caller has text and wants the nearest records within
+        a period — which is why the four axes are not confined to the new member.
+        The month-before conversation is worded **identically**, so nothing about
+        the text distinguishes the two and only the window does. This is the one
+        arm today's captured data supports without any new producer.
+        """
+        wording = "coffee renovation quote"
+        await store.add(_episode("this-week", wording, occurred_at=_IN_WINDOW))
+        await store.add(_episode("month-before", wording, occurred_at=_BEFORE_WINDOW))
+
+        found = await store.search(
+            wording, occurred_within=TimeWindow(start=_WINDOW_START, end=_WINDOW_END)
+        )
+
+        assert _ids(found) == {"this-week"}, (
+            "an identically-worded conversation from outside the window was returned, "
+            "or the one inside it was not — the window is the only thing separating "
+            "them (ADR-0237 §10 item 2)"
+        )
+
+    async def test_a_structured_read_answers_a_question_whose_words_it_does_not_carry(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0237 §10 item 4: wording shares nothing with the record.
+
+        The question is "which conversations involved Alex in March", and none of
+        its words appear anywhere in the stored record. There is no text to be near
+        and no query to supply, which is the whole reason §4 puts the structured
+        read on a member of its own: expressed as a similarity search it would be a
+        similarity search, and the records it returned would be the ones nearest
+        some text the caller had to invent.
+        """
+        await store.add(
+            _episode(
+                "kitchen", "coffee and the boiler", participants=("Alex",), occurred_at=_IN_WINDOW
+            )
+        )
+        await store.add(_episode("other", "coffee and the garden", participants=("Bob",)))
+
+        found = await store.select(
+            participants=["alex"], occurred_within=TimeWindow(start=_WINDOW_START, end=_WINDOW_END)
+        )
+
+        assert _ids(found) == {"kitchen"}, _AXIS_WRONG
+
+    async def test_select_observes_its_filters_before_its_first_await(
+        self, store: MemoryStore
+    ) -> None:
+        """``core.protocols``' input clause, on ``select`` (ADR-0065 §3, ADR-0237 §9).
+
+        The obligation the standing clauses put on the new member. ``participants``
+        is a caller-owned ``Sequence`` — a mutable container of immutable elements,
+        so a re-read cannot tear a value but it can change *which* values the call
+        sees. Growing the list while the call is suspended must not widen the
+        answer, because a conforming ``select`` observed the filter before it
+        suspended.
+
+        Both seeded records carry a participant, so the filter is the only thing
+        deciding the result and a late read is the only way the second can appear.
+        """
+        async with self._observation_subject(store, vacuous=self.reads_without_suspending) as (
+            subject,
+            arm,
+        ):
+            await subject.add(_episode("obs-select-alex", _ANY, participants=("Alex",)))
+            await subject.add(_episode("obs-select-bob", _ANY, participants=("Bob",)))
+            people = ["alex"]
+            # Armed after the seeding writes, so the collaborator that stops the
+            # read is not spent on a precondition.
+            gate = None if arm is None else arm("select")
+            async with held_at_its_first_await(gate, subject.select(participants=people)) as call:
+                people.append("bob")  # grow the caller's own list mid-flight
+            found = _ids(await call)
+
+            assert found == {"obs-select-alex"}, _LATE_FILTER
 
     # --- band-scoped relevance read: search(bands=...) (ADR-0113) --------------
     # ADR-0113 §7 states what this half owes and warns which clauses a suite
