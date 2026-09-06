@@ -1,6 +1,6 @@
 # 239. The observation pass labels the episodes it read, and a label lands as a conditional write at the episode's own id
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-09-05
 - **Two records are owed on earlier ADRs and this change writes both.** §14 names
   every clause this decision replaces, quotes each, and applies ADR-0070 §1's test to
@@ -820,10 +820,13 @@ owner sees before it is spent.
 > gains nothing, changes nothing and removes nothing.** No constant is added or changed,
 > no enum gains a member, and `core/errors.py` is untouched.
 
-> **Normative.** `PROTOCOL_VERSION` does **not** move for this change.
-> `ObservationOutcome` and `EpisodeLabelling` cross no wire: they appear in
-> `core/types.py`, `core/protocols.py`, `learning/observer.py` and
-> `testing/observation.py` and in no other module, and no wire payload reaches either.
+> **Normative.** `PROTOCOL_VERSION` does **not** move for this change. Neither new
+> shape crosses a wire, and the modules each reaches are named per type rather than
+> together: `ObservationOutcome` appears in `core/types.py`, `core/protocols.py` — where
+> `Observer.observe`'s unchanged return annotation already names it — `learning/observer.py`
+> and `testing/observation.py`; `EpisodeLabelling` appears in `core/types.py`,
+> `learning/observer.py` and `testing/observation.py`, and **`core/protocols.py` neither
+> gains it nor needs it**. No wire payload reaches either.
 > `EpisodicMemory` does cross the wire, inside `TurnResult.memories`, and this decision
 > changes neither its shape nor its defaults — a labelled episode serialises through the
 > members it already had, so an older peer decodes a newer hub's episode exactly as it
