@@ -964,6 +964,18 @@ relaxation legible in the way §9 wanted.
 > fail-closed direction, and the reason nothing is owed for a turn that ends in an
 > exception, a `PlanningError` on a later revision, a restart or a disconnection.
 
+> **Normative.** **`settle_search`'s `elapsed` is finite and non-negative, and a value
+> outside that domain is refused before anything is written.** The member replaces a charge
+> rather than adding to one, so an unrestricted argument is the one input that could drive
+> the stored `elapsed` **below** zero — breaking `ConversationSearchDraw.elapsed`'s own
+> non-negative invariant and, worse, handing a conversation back budget it never had, so a
+> later `claim_search` passes the comparison although the call was spent. The refusal is a
+> `ValueError`, the class `ConversationStore.append` already raises for an argument outside
+> its stated domain (ADR-0023 §3's naive instant), and it is raised **before the claim is
+> settled and before any counter moves**: the charge stands at its full provisional value,
+> which is the fail-closed direction this section takes everywhere else. **No path lowers
+> `calls`**, this one included.
+
 > **Normative.** **The interval is `orchestration`'s await and not the provider exchange,
 > because the exchange's duration is a fact no contract reports.** `SearchOutcome` carries no
 > elapsed value and `WebSearcher` is not widened here to add one, so the only honest quantity
@@ -1458,6 +1470,10 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > refused; after `settle_search` releases the unused remainder, a further claim is admitted.
 > A claim settled **below** its charge returns the remainder; one settled **above** it
 > raises the stored `elapsed` past the bound, and the next `claim_search` is then refused.
+> **And the domain is asserted**: a `settle_search` whose `elapsed` is negative, or not
+> finite, raises `ValueError`, settles nothing, leaves the claim outstanding at its full
+> charge and leaves `calls` where it was — so the next `claim_search` is still refused, and
+> no path drives the stored `elapsed` below zero.
 
 > **Normative.** **Arm 6c3 — a deletion under an outstanding claim.** A conversation
 > deleted while one of its searches is in flight: `settle_search` on that claim afterwards
