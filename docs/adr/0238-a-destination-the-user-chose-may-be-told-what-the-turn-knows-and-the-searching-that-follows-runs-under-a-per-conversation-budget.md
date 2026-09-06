@@ -743,20 +743,23 @@ relaxation legible in the way §9 wanted.
 > exist rather than being forbidden.
 
 > **Normative.** `core/protocols.py` gains **one** further `@runtime_checkable` Protocol,
-> **`SearchBudgetStore`**, keyed by conversation, with exactly **five** members:
+> **`SearchBudgetStore`**, keyed by conversation, with exactly **six** members:
 > **`draw_of`**, answering a conversation's `ConversationSearchDraw` **or `None` where it
-> holds no row for that conversation**; **`claim`**; **`settle`**; **`observe`**, folding
-> the value its caller computed into the stored flag by logical **and**, creating the row
-> where none exists; and **`forget`**, dropping a conversation's row entirely. A sixth
-> member is added by no lane without the ADR that decides it.
+> holds no row for that conversation and where the row it holds is stamped deleted**;
+> **`claim`**; **`settle`**; **`observe`**, folding the value its caller computed into the
+> stored flag by logical **and**, creating the row where none exists; **`forget`**,
+> **stamping** a conversation's row deleted and creating that stamp where no row exists;
+> and **`drop_forgotten`**, removing a stamped row entirely. A seventh member is added by
+> no lane without the ADR that decides it.
 
-> **Normative.** The five members are declared with exactly these signatures, all `async`:
+> **Normative.** The six members are declared with exactly these signatures, all `async`:
 >
 > - `draw_of(self, conversation_id: Identifier, /) -> ConversationSearchDraw | None`
 > - `claim(self, conversation_id: Identifier, /, *, max_calls: int, max_elapsed: timedelta, initial_footing: bool) -> SearchClaim | None`
 > - `settle(self, claim: SearchClaim, /, *, elapsed: timedelta) -> None`
 > - `observe(self, conversation_id: Identifier, /, *, all_external_user_chosen: bool) -> None`
 > - `forget(self, conversation_id: Identifier, /) -> None`
+> - `drop_forgotten(self, conversation_id: Identifier, /) -> None`
 >
 > `claim` answers `None` where it refuses. The bounds are **passed in** rather than read by
 > the store, so the store holds no `Settings`, no clock and no policy — it is a counter with
@@ -807,19 +810,48 @@ relaxation legible in the way §9 wanted.
 > superseded claim from a settlement of the claim now outstanding. `settle` replaces the
 > charge of **that** claim and no other.
 
-> **Normative.** **`forget` is the lifecycle member, and it is idempotent.** It drops the
-> row for one conversation, answers the same whether a row was there or not, and is safe to
-> call again after a partial failure — which is what a sweep that may be interrupted and
-> re-run needs (ADR-0074 §7, §8).
+> **Normative.** **`forget` is the lifecycle member, it is a *stamp* and not a drop, and it
+> is idempotent.** It stamps one conversation's row deleted — **creating that stamp where
+> the store holds no row at all**, because a stamp on nothing is exactly what makes a later
+> observation unable to create one — answers the same whether a row was there or not, and is
+> safe to call again after a partial failure, which is what a sweep that may be interrupted
+> and re-run needs (ADR-0074 §7, §8).
+
+> **Normative.** **The stamp is `ConversationStore.stamp_deleted`'s shape, taken from the
+> corpus rather than invented here.** That member is durable, "hides the conversation from
+> every presenting read, and **refuses every later append**, so a capture racing the deletion
+> cannot slip a turn in behind it", and "what the stamp does *not* do is remove anything".
+> This store's stamp does the same three things to its own row: it is durable, `draw_of`
+> answers `None` for a stamped conversation, and every later `claim` and `observe` is
+> refused. **A check-then-act across two stores could not do it.** Reading from one store
+> that a conversation exists and then writing to another is a decision taken before `forget`
+> lands and acted on after; this section contemplates **two engines over one data
+> directory**, so no
+> in-process ordering closes that gap, and a correctness argument that depends on it is one
+> this ADR declines to state. The stamp closes it because the refusal and the row are one
+> object under this store's own per-conversation exclusion.
+
+> **Normative.** **`claim` and `observe` are decided against the stamp inside the store,
+> atomically, and neither creates anything for a stamped conversation.** `claim` on a
+> stamped conversation **refuses**, answering `None` exactly as it does at an exhausted
+> bound, so the servicing takes this section's no-slot posture and composes nothing.
+> `observe` on a stamped conversation is a **no-op that raises nothing**: it folds nothing,
+> creates nothing and reports nothing to its caller — a fold arriving after a deletion has
+> nothing left to be true of, and raising would break a servicing that was already in flight
+> when the deletion landed. `settle` is unchanged and was already this shape. **No member
+> consults the `ConversationStore`, and none is passed a value its caller read from one**:
+> the stamp is the whole of the test, and it is read in the same indivisible step as the
+> write it guards.
 
 > **Normative.** **`forget` invalidates every outstanding claim of that conversation, and
 > settling one afterwards is a no-op that creates nothing.** A user may delete a
 > conversation while one of its searches is still in flight; the claim then names a row that
-> is gone, and `settle` **must not recreate it** — a deleted conversation leaving budget
-> state behind would breach both this section's row-goes-with-the-conversation clause and
-> ADR-0126's destruction. `settle` on an unknown conversation, on a forgotten claim, or on a
-> claim already settled changes nothing and raises nothing, so the servicing that was in
-> flight completes and reports normally.
+> is stamped, or one already dropped, and `settle` **must revive neither** — a deleted
+> conversation leaving spendable budget state behind would breach this section's
+> row-goes-with-the-conversation clause and ADR-0074 §8's deletion. `settle` on an unknown
+> conversation, on a stamped one, on a forgotten claim, or on a claim already settled
+> changes nothing and raises nothing, so the servicing that was in flight completes and
+> reports normally.
 
 > **Normative.** **`claim` is one atomic step: admit, charge, and answer the deadline.**
 > Given a conversation and the two bounds, it refuses where the stored `calls` have reached
@@ -904,8 +936,35 @@ relaxation legible in the way §9 wanted.
 > draw inside that window — so a **second servicing of the same conversation** could claim,
 > read the stale-true flag, find its own supply clean and be ruled closed-loop, although the
 > conversation had already carried the file. Folding at admission puts the false in the row
-> **before any later claim of that conversation can be admitted**, which is what makes §5's
-> third condition true of the **conversation** and not merely of the turns already captured.
+> **as early as the fact exists**, which narrows that window from the whole of a turn to a
+> single store write — and the two clauses below state exactly what that does and does not
+> guarantee.
+
+> **Normative.** **What the early fold guarantees is a boundary, not an ordering.** The
+> guarantee is this and no more: **every claim of that conversation admitted after the fold
+> has returned reads the false**, because the flag is monotone and `claim` reads it in the
+> same indivisible step that charges the draw. **No clause here claims more.**
+> `orchestration` cannot fold a fact before it holds it, and admission is the instant it
+> holds it, so a claim concurrent with that single `observe` await can still be admitted on
+> a flag the fold has not yet lowered. **Nothing in this decision serialises two turns of
+> one conversation**: `claim`'s atomicity serialises the *draw* and not the flag, and this
+> section's own two-engines case makes an in-process ordering unavailable in principle.
+> **A lane that reads "before any later claim" as an ordering obligation on the caller has
+> misread this section** — there is no such obligation here, and none would be
+> dischargeable.
+
+> **Normative.** **The window it leaves is stated rather than claimed away.** Before the
+> early fold it spanned turn A's whole composition, servicing, transport and capture — every
+> await of a search — and `settle` released the draw inside it. After it, it is one store
+> write with none of turn A's I/O inside it. What it costs when it is reached is **one
+> search of one concurrent turn** ruled closed-loop on a conversation that had, at that
+> instant, admitted a disqualifying span it had not yet recorded; the conversation is closed
+> for every claim admitted after the fold returns, and §11's audit records both dispositions.
+> **Closing it entirely means serialising servicings of one conversation**, which is a new
+> obligation on `orchestration` across concurrent turns that nothing in this corpus provides
+> today; §16 defers it with what fires it, and **no lane closes it by having `orchestration`
+> hold a lock**, for the reason ADR-0074 §8 gives about exactly that shape — two engines
+> hold two locks and serialise nothing.
 
 > **Normative.** **A half that reads *true* is never folded early.** Reporting a turn
 > **clean** stays capture's alone, because only capture sees the turn's **final** supply; an
@@ -913,18 +972,17 @@ relaxation legible in the way §9 wanted.
 > direction this section fails closed in everywhere else. The early fold writes `False` and
 > nothing else, it is idempotent, and repeating it costs nothing.
 
-> **Normative.** **No fold of any kind follows `forget`, and `observe`'s power to create a
-> row is fenced by the conversation's own existence.** `observe` creates a row where none
-> exists (above), so an observation racing a deletion would resurrect budget state for a
-> conversation ADR-0126 requires destroyed — which is the hazard `settle` is already fenced
-> against, and it is fenced the same way. **`orchestration` folds only for a conversation
-> whose record the `ConversationStore` still holds**, and it runs `forget` as the **last**
-> step of ADR-0074 §8's deletion and §7's reclaim sequences, once that record is already
-> gone. So no admission is made to a turn of a conversation that is gone, no turn of one is
-> captured, and a servicing in flight when the deletion lands settles a claim that creates
-> nothing and folds nothing further. **A lane that finds any fold reaching this store after
-> `forget` has breached this clause**, and the ADR-0074 §9 stage that owns both sequences is
-> the one place that can hold the ordering.
+> **Normative.** **A fold reaching this store after `forget` is expected, and the stamp is
+> what makes it harmless.** `observe` creates a row where none exists (above), so an
+> observation racing a deletion would otherwise resurrect budget state for a conversation
+> ADR-0074 §8 has destroyed — the hazard `settle` is already fenced against, now fenced the
+> same way. **The fence is the stamp and nothing else.** In particular **no clause obliges
+> `orchestration` to fold only for a conversation whose record the `ConversationStore` still
+> holds**: that is a read of one store used to license a write to another, it can be true
+> when it is read and false when the write lands, and it is unavailable in principle under
+> this section's two engines. **A lane that finds a fold reaching this store after `forget`
+> has found the case this clause is written for, not a breach of it** — what it must find,
+> and what §15's arms assert, is that the fold created nothing.
 
 > **Normative.** **So a row created for a conversation that already had turns is created
 > false**, and the refusal §5's recorded half makes for an unobserved legacy conversation
@@ -948,6 +1006,15 @@ relaxation legible in the way §9 wanted.
 > guess; a conversation that has turns and no row is one this decision has never observed,
 > and it fails.
 
+> **Normative.** **A stamped conversation reads as `None` here too, and that is fail-closed
+> in both branches.** One with recorded turns fails the recorded half outright, on the
+> clause above. One with none — a conversation stamped before it ever took a turn — would
+> satisfy the recorded half vacuously, and it reaches nothing: `claim` refuses for a stamped
+> conversation before a supply is constructed or a query composed, so no request of a
+> deleted conversation is ever ruled on. **No lane closes that by making `draw_of` present
+> the stamp**; hiding a stamped row from every presenting read is what makes it
+> `ConversationStore.stamp_deleted`'s shape rather than a sixth state for §5 to read.
+
 > **Normative.** **This is what closes a legacy conversation whose stamped episode is
 > gone.** A conversation that read a file before this decision landed may, by the time of
 > its next turn, have lost that episode — expired under ADR-0007 §2, deleted, or simply
@@ -958,14 +1025,72 @@ relaxation legible in the way §9 wanted.
 > records what this decision has actually seen.
 
 > **Normative.** **The store is local, durable and never written to a remote service**
-> (ADR-0004 §2), it holds a Tier 1 fact, it ships as a **triad**, and it holds **counters
-> and one flag and no content** — no query, no result, no destination, no record, no text.
+> (ADR-0004 §2), it holds a Tier 1 fact, it ships as a **triad**, and it holds **two
+> counters, one flag, one deletion stamp and no content** — no query, no result, no
+> destination, no record, no text.
 
-> **Normative.** **A conversation's row goes when the conversation goes.** The
-> capture/lifecycle stage in `orchestration` calls **`forget`** in the same sequences it
-> already runs — ADR-0074 §8's deletion and §7's retention reclaim — because ADR-0074 §9
-> already rules that "the **capture/lifecycle stage in `orchestration`** owns every cross-store
-> sequence". This ADR adds a store to those sequences and changes neither, and
+> **Normative.** **A conversation's row goes when the conversation goes, in two steps that
+> ride ADR-0074 §8's own two.** The capture/lifecycle stage in `orchestration` calls both,
+> in the sequences it already runs, because ADR-0074 §9 already rules that "the
+> **capture/lifecycle stage in `orchestration`** owns every cross-store sequence".
+>
+> - **ADR-0074 §8's deletion, which is unconditional.** `forget` runs **with step 1**,
+>   beside `ConversationStore.stamp_deleted` and before any episode is destroyed — **not
+>   last**. Two durable stamps land, each refusing later writes to its own store; the order
+>   between them does not matter, because neither is read to decide the other. Then, where
+>   **step 3's `drop_if_eligible` answers `True`** — the record is gone, its grace has
+>   passed, and nothing its index names still resolves — the stage calls
+>   **`drop_forgotten`**.
+> - **ADR-0074 §7's retention reclaim, which is conditional.** Eligibility is
+>   `drop_if_eligible`'s own judgement, taken under its per-conversation exclusion against
+>   its own clock, so this store is touched **only after that member answers `True`**, and
+>   then `forget` then `drop_forgotten`. **A reclaim that answers `False` reaches this store
+>   not at all** — which is what keeps a sweep that decided *not* to reclaim a conversation
+>   from stamping a live conversation's row.
+>
+> Both sequences stay re-runnable, which ADR-0074 §8 requires of them: every member involved
+> is idempotent, and a repeat after a crash at any point converges on the same state.
+
+> **Normative.** **`drop_forgotten` removes a stamped row and refuses to remove anything
+> else.** On a row that is **not** stamped, and on a conversation the store holds no row
+> for, it does nothing and raises nothing. **So the only path by which a row leaves this
+> store is stamp-then-drop**, and no sweep, repair or maintenance act removes a live
+> conversation's draw — the same posture, and for the same reason, as `drop_if_eligible`
+> re-checking eligibility rather than trusting the decision that called it.
+
+> **Normative.** **The stamp's lifetime is the conversation tombstone's, by construction
+> rather than by a parallel setting.** It is created beside that tombstone and removed on
+> the answer of the member that removes it, so it is bounded by
+> `conversation_tombstone_grace` (ADR-0074 §8) **without this ADR reading that field, adding
+> one, or giving this store a clock** — the no-`Settings`, no-clock, no-policy property
+> above stands entire. **The residue in the meantime is one conversation id and one bit** —
+> no counters, no flag, no query, no result, no destination and no text — which is strictly
+> less than the tombstone it accompanies, ADR-0074 §8's own "ordinals, timestamps and
+> episode ids — **no content** — surviving a deletion the user was told succeeded". That
+> section names an *unbounded* version of this the "content-free-but-real residue" it
+> bounds. **Bounded is what makes the stamp permissible and permanent would not be**, and no
+> lane leaves one standing past the conversation record it accompanies.
+
+> **Normative.** **One window survives `drop_forgotten`, and it is ADR-0074 §8's own.** A
+> fold suspended from before the stamp until after both the record and the stamp are gone
+> would create a row for a conversation that no longer exists. That is the conjunction of
+> two failures **ADR-0074 §8** states for the orphaned episode — a write that commits after
+> the check that should have caught it, **and** a tombstone already reclaimed when it does —
+> and two of that section's three grounds for accepting it hold here unchanged: **no
+> protocol over two stores closes it**, only a transaction spanning both, and there is no
+> seam that spans them; and **the reachable version is already gone**, since a deletion and
+> a servicing of one conversation cannot overlap through anything shipped. **Its third
+> ground does not hold and is not claimed here**: ADR-0074 §8's residue is visible in
+> `assistant beliefs` and `export` and the user can destroy it, where an orphaned row in
+> this store is on no user-facing surface. What stands in its place is that the orphan is
+> smaller in three ways — it is **two counters and a flag and no content**, where ADR-0074
+> §8 accepts an orphaned *episode*; it is keyed by an opaque id (ADR-0074 §1) whose
+> conversation no longer exists, so it names nothing a user could recognise; and it is
+> inside the cold data directory, so **ADR-0126's destruction removes it** with everything
+> else. **No lane closes this window with a second stamp, a longer grace or a transaction
+> across two stores**, for ADR-0074 §8's own reason, and §16 records what would.
+
+> This ADR adds a store to ADR-0074 §7's and §8's sequences and changes neither, and
 > **`ConversationStore` gains no member, `Conversation` and `ConversationTurn` gain no
 > field, and `ConversationExport` does not change shape or version.**
 
@@ -1130,7 +1255,7 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > `ConversationSearchDraw` and `SearchClaim` as new types, and one member on each of `EgressBinding` and
 > `CarriedProvenance` (`closed_loop`, defaulting to `False`). In `core/protocols.py`: two
 > new `@runtime_checkable` Protocols, `DestinationTrustStore` with its five members and
-> `SearchBudgetStore` with its five, and the changed parameter type on
+> `SearchBudgetStore` with its six, and the changed parameter type on
 > `QueryComposer.compose`. In `core/errors.py`: `InvalidDestinationTrustError`. In
 > `core.config.Settings`: the two fields §8 names and the cross-field refusal §10 states.
 > **No other member of any `core` type or Protocol changes its type, its default or its
@@ -1189,6 +1314,15 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > claims against a bound of one yield exactly one admission, and an implementation that
 > reads, compares and writes as three awaits fails it. An implementation that cannot be
 > opened twice states so and skips, as the ledger contracts already do.
+
+> **Normative.** **That suite also asserts the stamp, because the stamp is the whole of §8's
+> deletion fence and an implementation that merely dropped the row would pass every other
+> assertion in it.** After `forget`: `draw_of` answers `None`; `claim` answers `None`;
+> `observe` raises nothing and leaves `draw_of` answering `None`; a second `forget` changes
+> nothing; and `forget` on a conversation the store never held leaves a state in which
+> `observe` still creates no row — the arm that separates a stamp from a drop. And after
+> `drop_forgotten`: the row is gone; `drop_forgotten` on an **unstamped** row leaves that
+> row exactly as it was, which is the arm that separates it from a second `forget`.
 
 > **Normative.** **The `PROTOCOL_VERSION` move (§13) rides the `core` change**, with its
 > `wire/envelope.py` log entry, because the field lands there and a version behind the
@@ -1285,13 +1419,23 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > `elapsed` past the bound, and the next `claim` is then refused.
 
 > **Normative.** **Arm 6c3 — `forget` under an outstanding claim.** A conversation deleted
-> while one of its searches is in flight has no row afterwards; settling that claim creates
-> none, raises nothing, and the in-flight servicing completes and reports normally.
+> while one of its searches is in flight reads as no row afterwards — stamped from step 1,
+> then dropped when the deletion's last step runs; settling that claim revives neither,
+> raises nothing, and the in-flight servicing completes and reports normally.
 
-> **Normative.** **Arm 6c4 — no fold resurrects a deleted conversation.** A conversation
-> deleted between `claim` and the admission fold, and one deleted between its search
-> returning and its capture, each leave **no row** afterwards: neither the admission fold,
-> nor capture's fold, nor `settle` creates one, and `draw_of` answers `None` for both.
+> **Normative.** **Arm 6c4 — no fold resurrects a deleted conversation, and the arm forces
+> the interleaving rather than assuming it.** A conversation deleted between `claim` and the
+> admission fold, and one deleted between its search returning and its capture, each leave
+> **no row** afterwards: neither the admission fold, nor capture's fold, nor `settle`
+> creates one, and `draw_of` answers `None` for both.
+
+> **Normative.** **Arm 6c4b — the fold that a cross-store check would have licensed.** The
+> arm drives the exact order the removed check-then-act would have got wrong: the fold's
+> caller reads the conversation as **existing**, then `forget` lands, then the fold calls
+> `observe`. **No row exists afterwards** and `draw_of` answers `None`. The same order is
+> asserted for `claim` — read-exists, `forget`, `claim` — which answers `None` and charges
+> nothing. Both are asserted on a conversation the store held **no row for** when `forget`
+> ran, which is the case a drop could not fence and the stamp does.
 
 > **Normative.** **Arm 6d — a claimed call is never refunded.** A servicing whose ruling is
 > not `ALLOW`, one whose binding refused, and one whose provider answered
@@ -1320,17 +1464,35 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > captured**, carries nothing external of its own and is **not** closed-loop. **(ii)** Turn
 > A services a local-file read and **builds no search request at all**; a concurrent turn B
 > claims and composes, and B is **not** closed-loop for the same reason. The stored flag is
-> false in both, and A's later capture folds false again to no effect.
+> false in both, and A's later capture folds false again to no effect. **(iii) The window,
+> asserted as the boundary §8 states and not as an ordering.** B's `claim` is admitted
+> **while A's admission fold is still in flight** — the arm blocks inside `observe` and
+> releases it, rather than sequencing the two calls and hoping — and B **is** admitted on
+> the not-yet-lowered flag, which is the residual §8 names and this arm records so that it
+> is a ratified property and not a surprise found later. The arm then asserts the guarantee
+> that *is* made: once that `observe` has returned, the next `claim` of the conversation is
+> admitted on a false flag and its request is **not** closed-loop.
 
 > **Normative.** **Arm 6g — the last permitted call is usable.** With
 > `search_calls_per_conversation` set to one, the admitted servicing's own request is
 > closed-loop: the fourth condition reads the claim this request holds, not the capacity
 > left after charging it. The same is asserted for the last second of the elapsed bound.
 
-> **Normative.** **Arm 6h — `forget` clears the row.** A deleted conversation and a
-> reclaimed one each leave no row behind; `forget` answers the same on a second call and on
-> a conversation that never had a row; and a conversation whose row was forgotten and whose
-> turns are gone reads as a conversation with no recorded prior turn.
+> **Normative.** **Arm 6h — `forget` stamps and `drop_forgotten` clears.** A deleted
+> conversation and a reclaimed one each leave no row behind once their sequence has run to
+> completion; `forget` answers the same on a second call and on a conversation that never
+> had a row; `drop_forgotten` answers the same on a second call, on a conversation that
+> never had a row, and — **leaving the row untouched** — on one whose row is not stamped;
+> and a conversation whose row was forgotten and whose turns are gone reads as a
+> conversation with no recorded prior turn.
+
+> **Normative.** **Arm 6h2 — the two sequences, in place.** ADR-0074 §8's deletion run
+> whole leaves no row and no stamp. §7's reclaim of an **ineligible** conversation —
+> `drop_if_eligible` answering `False` — leaves that conversation's row **exactly as it
+> was**, flag and counters included, and its next search is admitted against it. And a
+> deletion interrupted after step 1 and re-run leaves the same state as one that ran
+> straight through, which is what ADR-0074 §8's re-runnability requires of the store this
+> ADR adds to it.
 
 > **Normative.** **Arm 7 — the spend interaction.** A deployment with a declared per-call
 > figure, a period ceiling and no `world_spend_unknown_allowance` is refused at
@@ -1385,6 +1547,18 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
   superseded ADR-0029 §4's reach. Fired by an ADR bounding those writes, or by one deciding
   how a deadline reaches `WebSearcher.search` at all. Not fired by a lane finding one
   conversation's overrun large.
+- **Serialising servicings of one conversation**, which is what would close §8's stated
+  window between an admission fold and a concurrent turn's `claim`. Fired by an ADR that
+  gives `orchestration` a per-conversation ordering across concurrent turns and holds it
+  across two engines — a store-level obligation in ADR-0074 §9's shape, not a lock, which
+  §8 records as answering nothing. Not fired by a lane finding the window narrow, and not
+  by one finding it wide.
+- **Closing ADR-0074 §8's orphan window in this store**, where a fold suspended past both
+  the stamp and its drop creates a row for a conversation that is gone. §8 accepts the same
+  window for an orphaned episode and names what closes it — "a transactional posture across
+  the local stores, which is leg 5's 'stores' concurrent-access posture' hardening tail".
+  This ADR inherits that entry rather than opening a second one, and fires on the same
+  thing.
 - **The surfaces that offer §1's act.** ADR-0193 §13's assignment (§14).
 - **The two corpus findings this ADR reports rather than settles**: ADR-0223 §6's and
   ADR-0233 §9's disagreement about which clause of ADR-0181 §5 is the lineage floor
@@ -1543,6 +1717,20 @@ before any lane implements against it (golden rule 5).
   claiming leaves the whole remainder charged, so an unlucky conversation searches less than
   its bound would allow. Both are the fail-closed direction, and they are the price of not
   writing to the store twice per call.
+- **A deleted conversation leaves a stamp behind for as long as its tombstone stands.**
+  §8's `forget` is a stamp rather than a drop, because a drop cannot fence an observation
+  that arrives after it and this decision would not rest on a cross-store check that can go
+  stale between two awaits. The price is one conversation id and one bit surviving a
+  deletion the user was told succeeded, until `drop_forgotten` runs — bounded by the same
+  grace, and accompanying a `ConversationStore` tombstone that carries strictly more. It is
+  the same trade ADR-0074 §8 already made, in a second store, and it is the reason this
+  store has six members rather than five.
+- **Two turns of one conversation are not ordered against each other, and §8 says so.** The
+  early fold narrows the window in which a concurrent turn can be admitted on a
+  not-yet-lowered flag from a whole turn to a single store write, and does not close it.
+  Closing it needs a per-conversation ordering across concurrent turns that this corpus does
+  not have; §16 defers it with what fires it, and §15's Arm 6f2(iii) pins the boundary that
+  *is* guaranteed so that a later lane cannot quietly widen it.
 - **A result's content is lost with the turn that read it.** ADR-0231 §16 stands:
   refinement over raw results is a within-turn capability, and a later turn works from the
   captured episode. The honest mechanism is narrower than the milestone's sentence sounds,
@@ -1597,3 +1785,32 @@ reviewer can check it once.
 it crosses ADR-0194 §2's estimate/reported boundary and substitutes a figure nobody
 measured, which that clause's no-stand-in rule refuses. The allowance is the mechanism the
 corpus already has for a reported `UNKNOWN`.
+
+**Fence `observe`'s creation power with the `ConversationStore`, rather than with a stamp.**
+Refused, and it is what §8 said in an earlier draft. `orchestration` reading that a
+conversation still exists and then folding is check-then-act across two stores: the read can
+be true when it is taken and false when the write lands, and §8's own two-engines case makes
+an in-process ordering unavailable in principle. The check would also have been unfenceable
+in the one case that matters most — a conversation the budget store holds **no row** for,
+where there is nothing for a drop to have removed.
+
+**Scope observation to the claim, so a fold whose claim `forget` invalidated is a no-op.**
+Refused as insufficient rather than wrong: it reuses a fence §8 already ratifies for
+`settle` and adds no residue, but §8's fold is triggered by **admission** and fires for a
+turn that never claims — precisely the case the request-triggered draft got wrong — so the
+path with no claim to scope to would stay open and the stamp would be owed anyway.
+
+**Serialise servicings of one conversation at the site, instead of fencing the store.**
+Refused: it is a new obligation on `orchestration` across concurrent turns, and nothing in
+this corpus provides it — `Engine._admit_and_reserve` is written for "the Nth concurrent
+turn", and §8 names two concurrent turns of one conversation as a case it answers. A lock
+inside one engine answers nothing, for ADR-0074 §8's own reason, and the store-level
+exclusion that would work is a contract obligation an ADR has to decide. §16 defers it with
+that trigger.
+
+**Remove `observe`'s power to create a row and leave creation to `claim` alone.** Refused,
+and named because it looks like the clean version of the stamp. A conversation whose first
+turn does not search would have its row created by a later `claim` carrying
+`initial_footing` **false** — a prior turn exists — permanently closing a conversation that
+was never dirty, and making §15's Arm 1b unreachable for every conversation that says hello
+before it asks for anything.
