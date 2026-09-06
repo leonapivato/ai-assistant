@@ -954,15 +954,32 @@ relaxation legible in the way §9 wanted.
 > **no lane states that two calls can overrun**, because two cannot be outstanding.
 
 > **Normative.** `core/types.py` gains **`SearchClaim`**, a frozen model refusing unknown
-> fields, with exactly three fields: `conversation_id: Identifier`, `id: Identifier` minted
-> by the store, and `charge: timedelta`, the provisional amount this claim added. **At most
-> one claim of a conversation is outstanding at a time** (above), so the handle is not there
-> to disambiguate concurrent claims; it is there so that `settle_search` can be **idempotent
-> and stale-safe**. A second `settle_search` of one claim changes nothing; one naming a claim
-> the store has already settled, or one whose conversation has been stamped or dropped,
-> changes nothing; and a `settle_search` naming a conversation alone could not tell a late
-> settlement of a superseded claim from a settlement of the claim now outstanding.
-> `settle_search` replaces the charge of **that** claim and no other.
+> fields, with exactly two fields: `conversation_id: Identifier` and `id: Identifier`,
+> minted by the store. **At most one claim of a conversation is outstanding at a time**
+> (above), so the handle is not there to disambiguate concurrent claims; it is there so that
+> `settle_search` can be **idempotent and stale-safe**. A second `settle_search` of one claim
+> changes nothing; one naming a claim the store has already settled, or one whose
+> conversation has been stamped or dropped, changes nothing; and a `settle_search` naming a
+> conversation alone could not tell a late settlement of a superseded claim from a
+> settlement of the claim now outstanding. `settle_search` replaces the charge of **that**
+> claim and no other.
+
+> **Normative.** **The handle carries no quantity, and the store's own record is the only
+> authority for one.** `SearchClaim` does **not** carry the provisional charge, and no later
+> lane adds it or any other amount, instant or count to this type. `settle_search` resolves
+> the claim **by its store-minted `id`** and reads the charge it is replacing, and the
+> conversation it belongs to, from the row the store already holds — it trusts no field of
+> the handle as an input to the arithmetic, so a handle whose `conversation_id` does not
+> match that row changes nothing about which row is settled. **The store necessarily holds
+> that state already**: idempotence and stale-safety above are exactly the properties that
+> oblige it to know whether this claim is outstanding. The field is removed rather than
+> fenced with a comparison, because a caller can write past a frozen model through
+> `__dict__` (`RecipientGrantStore.record`'s detachment clause, ADR-0193 §1), and a
+> provisional charge the caller could raise is the one input that would drive the stored
+> `elapsed` **below** zero through the settlement path — which the domain clause below and
+> Arm 6c2 both state can never happen. **A quantity that is not on the handle cannot be
+> forged on it**, which is this section's `initial_footing` move: unreachable by
+> construction rather than forbidden by a rule.
 
 > **Normative.** **A claim of a conversation that is stamped or gone settles to nothing,
 > and creates nothing.** A user may delete a conversation while one of its searches is
@@ -1506,7 +1523,11 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > charge and leaves `calls` where it was — so the next `claim_search` is still refused, and
 > no path drives the stored `elapsed` below zero. **The same call on a stale claim, and on
 > one whose conversation is stamped or gone, raises `ValueError` too** and still changes
-> nothing, which is §8's stated precedence and the arm that pins it.
+> nothing, which is §8's stated precedence and the arm that pins it. **And a handle the
+> caller has tampered with settles by the store's row regardless**: a `SearchClaim` carrying
+> an outstanding claim's `id` beside another conversation's `conversation_id` — reached by
+> writing past the frozen model — settles that `id`'s own row and no other, and leaves every
+> other conversation's draw untouched.
 
 > **Normative.** **Arm 6c3 — a deletion under an outstanding claim.** A conversation
 > deleted while one of its searches is in flight: `settle_search` on that claim afterwards
@@ -1588,7 +1609,7 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > **B's request is not closed-loop**, its binding carries `closed_loop` false, and its
 > ruling is the non-`ALLOW` ADR-0181 §5 gives. The arm asserts in the same breath that **no
 > value read before `claim_search`, and no field of the `SearchClaim`, reached the binding**
-> — `SearchClaim` carries three fields and the footing is not among them.
+> — `SearchClaim` carries two fields and the footing is not among them.
 
 > **Normative.** **Arm 6g — the last permitted call is usable.** With
 > `search_calls_per_conversation` set to one, the admitted servicing's own request is
