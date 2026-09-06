@@ -312,10 +312,11 @@ about the axis, and §7 below states in terms that sharing a form shares nothing
 > labelling write leaves every belief the pass installed exactly where the write path
 > put it, and leaves the watermark exactly where the pass committed it.
 
-> **Normative.** **The labelling write is attempted only after the pass's watermark
-> advance has committed, and for the episodes of the page that advance covers.** Where
-> the advance is not attempted, does not commit, or the pass fails before it, **no
-> labelling is written at all** and every episode of that page stays exactly as it was.
+> **Normative.** **The labelling write is an effect of the chunk and is made durable
+> before the watermark advance is attempted** (ADR-0111 §3). It is attempted after the
+> pass's proposals have been through the write path and before `record_observed`; a
+> failure or refusal of it does not stop the advance, and the advance is computed and
+> attempted exactly as it is today whether or not any labelling landed.
 
 > **Normative.** The labelling write is **never a condition of the watermark**.
 > ADR-0212 §5's advance is computed, attempted and committed exactly as it is today: it
@@ -400,44 +401,57 @@ concurrent passes, and a page whose advance did not commit. Without the clause a
 the third of those would re-label an already-labelled episode with a second model
 judgement over the same words, for no gain and at the cost of ADR-0213 §8's "set once".
 
-**Why after the advance, and why an empty tuple alone would not have been enough.**
-Emptiness is a proxy for "never labelled", and the owner can produce emptiness: ADR-0213
-§9's relabel replaces the whole of a record's `topics` with a set the owner states, and
-that set may be empty. Left on the emptiness test alone, this decision would admit a
-sequence that undoes an owner's act — a pass labels an episode, its advance does not
-commit, the owner clears those labels, and the next pass re-reads the page, sees two
-empty tuples, reads the owner's current revision and writes model labels back over the
-correction. That defeats ADR-0213 §9's guarantee that a relabel is "final for that
-record until the owner acts again", and no `IF_UNCHANGED` can catch it because the
-revision the second pass expects is the one the owner's own act left.
+**What the write-once test cannot see, stated plainly rather than argued away.**
+Emptiness is a proxy for "never labelled", and it is not a perfect one: ADR-0213 §9's
+relabel replaces the whole of a record's `topics` with a set the owner states, and that
+set may be empty. An episode the owner deliberately emptied is indistinguishable, to
+this test, from one no pass has reached — so a pass that met such an episode would label
+it, and ADR-0213 §9's guarantee that a relabel is "final for that record until the owner
+acts again" would not hold for it.
 
-Ordering the write **after** the advance closes it without a byte of new state, because
-it makes the premise unreachable. ADR-0220 §1 rules that where the stamp did commit the
-page "is not re-read and does not need to be", and where it did not, the page "is
-re-read whole by the next pass". So an episode a later pass re-reads is one whose
-advance did not commit — and under the clause above, one no pass ever labelled. The
-other two re-readings are safe on the two clauses already stated: an unresolved turn has
-no episode to label, and two concurrent passes over one page are separated by
-`IF_UNCHANGED` and by the write-once test, whichever of them writes first.
+**No ordering closes that, and this ADR does not pretend one does.** An earlier draft
+argued that writing after the advance made the case unreachable; that argument was
+false, and the reason it was false is worth recording so nobody rebuilds it.
+`ObservationStage` selects a page of `ConversationTurn`s and resolves their episodes in
+a **second** read (`_page`, then `_resolve`), and ADR-0212 §5 permits two passes over one
+conversation to overlap; the two stores share no snapshot, so a pass can hold a page
+selected early and fetch its episodes late, after another pass has labelled one of them
+and the owner has cleared it. Its expectation is then the owner's own revision,
+`IF_UNCHANGED` is satisfied, the tuples are empty, and the write lands. Pinning the
+expectation to the record the producer was handed removes every race in which the row
+moves *after* that read — which is worth having and is why the clause stands — but it
+cannot reach a row that moved before it.
 
-**The overlap race is why the expected revision is pinned to the selecting read, and
-that is the load-bearing half.** ADR-0212 §5 permits two passes over one conversation to
-select the same page and advance to different positions, so ordering the write after an
-advance does not by itself stop this: pass A advances, labels an episode, the owner
-clears those labels, and pass B — which had already selected that page — writes model
-labels back over the correction, because by then the tuples are empty again and the
-revision B holds is the owner's. **The clause above closes it because B's expectation is
-not the owner's revision.** B's page can only contain that episode if B selected it
-before A's advance, so the record B was handed carries the revision the row held *then*,
-and A's own labelling write has moved it since. B's write is refused, its labelling is
-abandoned, and the owner's empty labels stand. Re-reading the episode after the producer
-returns would throw exactly that guarantee away, which is why the clause forbids it in
-terms rather than leaving the read site to an implementer.
+**What makes the residue tolerable is that no owner can perform the act.** ADR-0213 §9
+rules that the surface carrying `relabel` and `merge` "is not decided here, and no lane
+implements one without an ADR deciding it". So on every tree this decision authorises
+there is no way for an owner to empty an episode's labels, and the sequence above has no
+first step. The gap is reachable only from the lane that would open it, which is why §11
+puts the obligation there in terms — the durable distinction between an emptied record
+and an unreached one, and the eligibility rule that reads it — rather than inventing a
+field here for an act that does not exist. That is the same disposition ADR-0213 §9 took
+of its own concurrency contract, deferring it to "the lane that builds the surface,
+because the remedy's shape depends on the act's".
 
-What the ordering costs is named rather than hidden: a labelling write that fails after a
-committed advance is never retried and that page is never re-read, so those episodes
-stay unlabelled for good. That is §8's horizon in miniature and it is the safe
-direction — a lost label, never a wrong one, and never a label over the owner's word.
+**What the write-once test does close, and it is the case that exists today.** ADR-0220
+§1 names three readings in which one turn is selected again — a trailing unresolved run,
+two concurrent passes, and a page whose advance did not commit. An unresolved turn has
+no episode to label; a page re-read after an uncommitted advance carries the labels the
+earlier pass wrote, so the test declines it; and two concurrent passes are separated by
+`IF_UNCHANGED` and by the test, whichever writes first. So no episode is labelled twice,
+no model judgement overwrites another, and ADR-0213 §8's "set once" survives in the shape
+that matters.
+
+**Why the effects go before the cursor, which is not a preference.** ADR-0111 §3 rules
+that "Where the effects land in a different store from the cursor, the effects are made
+durable first and the cursor is advanced afterwards, never the reverse", and gives the
+asymmetry: "A cursor that lags its effects costs repeated work; a cursor that leads them
+costs coverage, permanently and silently." A labelling is an effect in `MemoryStore` and
+the watermark lives in `ConversationStore`, so the ordering is the ratified one and this
+ADR takes it. Its at-least-once obligation is met rather than merely tolerated: a crash
+between the labelling and the advance re-processes the page, and the write-once test
+makes the repeated labelling a no-op instead of a second judgement — the repetition
+ADR-0111 §3 requires be safe, made safe by a clause that was already there.
 
 **Why a labelling declines a non-uniform page rather than moving a placement.** A batch
 is not uniform in placement: capture writes reach `OWNER` setter `DERIVED` on an episode
@@ -783,26 +797,23 @@ The lane briefed from this text owes, beyond the change itself:
   `IF_UNCHANGED` against the revision the pass read; that a stale write is abandoned and
   not retried; that an episode carrying a label on either axis is not written; that no
   field but the two moves, asserted field by field against the stored record.
-- **The ordering and the two failure arms.** That no labelling is written where the
-  watermark advance is not attempted or does not commit — a belief install that raises
-  leaves the watermark unmoved (ADR-0212 §§5-6) and therefore leaves every episode of
-  that page unlabelled, which is the existing advance behaviour asserted afresh rather
-  than changed. And that a labelling write which fails or is refused **after** a
-  committed advance leaves the pass's installed beliefs and its committed watermark
-  exactly where they were.
-- **The clear-then-reread arm.** A pass labels a page, its advance does not commit, the
-  owner clears those labels, and the next pass re-reads the page: the owner's empty
-  labels stand, because the ordering means the first pass wrote none. Pinned as the arm
-  that holds ADR-0213 §9's finality.
+- **The ordering and the two failure arms.** That the labelling write is durable before
+  `record_observed` is attempted (ADR-0111 §3), and that a labelling that fails or is
+  refused stops neither the advance nor anything else — the advance is computed and
+  attempted exactly as it is today, including leaving the watermark unmoved where a
+  belief install raises (ADR-0212 §§5-6).
+- **The re-read arm.** A pass labels a page and its advance does not commit; the next
+  pass re-reads the page whole and writes nothing, because every episode already carries
+  labels. Pinned as ADR-0111 §3's at-least-once repetition made a no-op.
 - **The non-uniform placement arms, both of them.** A page holding a reach-`OWNER`
   episode beside reach-`ANYONE` ones is labelled nowhere; and a page whose episodes share
   reach `OWNER` but split between setters `DERIVED` and `OWNER_ACT` is labelled nowhere
   either. No episode's placement moves in either arm.
-- **The overlap-race arm.** Two passes select one page; the first advances and labels;
-  the owner clears those labels; the second — holding the record it was handed at
-  selection — is refused by `IF_UNCHANGED` and writes nothing. Pinned as the arm that
-  holds ADR-0213 §9's finality against ADR-0212 §5's permitted concurrency, and it fails
-  only if an implementation re-reads the episode after the producer returns.
+- **The overlap arm.** Two passes select one page and both label it; the second is
+  refused by `IF_UNCHANGED` against the record it was handed and writes nothing. And the
+  arm that pins the clause rather than the outcome: an implementation that re-reads an
+  episode between the producer's call and the write is not conforming, whatever the
+  re-read returns.
 - **The provider-down arm.** A `ModelError` leaves every episode of the batch exactly
   as capture wrote it, and the pass reports what it reports today.
 - **The owner arm.** An episode the owner relabelled between the pass's read and its
@@ -857,16 +868,14 @@ The lane briefed from this text owes, beyond the change itself:
   event time distinct from a recording time.
 - **The owner's relabel and merge surface, and the one obligation this decision adds to
   it.** ADR-0213 §9 defers the surface and this decision inherits the deferral unchanged.
-  It adds one thing that lane owes: **a rule distinguishing an episode whose labels the
-  owner deliberately emptied from one no pass has yet reached.** §3's eligibility test is
-  the two empty tuples, and it cannot tell those apart. Every sequence in which that
-  matters *after* a pass has labelled is closed by §3's ordering and its pinned revision;
-  what is not closed is an owner emptying an episode's labels **before** any pass reaches
-  it, after which the next pass labels it. That act is unperformable today — §9 rules
-  that no lane implements the surface without an ADR deciding it — so the gap is
-  reachable only from the lane that would open it, and it is that lane's to close, with
-  the durable distinction and the eligibility rule it implies. **Fires** as §9 says, with
-  this obligation attached.
+  It adds one thing that lane owes: **a durable distinction between an episode whose
+  labels the owner deliberately emptied and one no pass has yet reached, and an
+  eligibility rule that reads it.** §3's write-once test is the two empty tuples and
+  cannot tell those apart; §3 records why no ordering and no conditional write closes
+  that, and why the residue is unreachable today — the act that would create an emptied
+  episode is exactly the act §9 says no lane implements without an ADR. So the gap opens
+  only with that surface, and it is that lane's to close, as §9's own concurrency
+  contract already is. **Fires** as §9 says, with this obligation attached.
 
 ### 12. This ADR fires ADR-0213 §15's "topics on episodes", as its second case
 
@@ -1004,6 +1013,19 @@ answer.**
   one exempt producer, and the observer is still "the paradigm case the gate exists for"
   for the output that is a belief. **No record is owed on either**, and the reason is
   recorded here so a reviewer can check the test rather than the label.
+
+  One reading that says otherwise was put and is answered, because it is the reading a
+  later reviewer will reach for. ADR-0075's Alternatives reject "**Supersede ADR-0005's
+  write-path rule wholly, and re-ratify it for beliefs only**" — but read the rest of
+  that bullet: it is rejected because "a whole supersession would drag §3's
+  `MemoryPolicy` seam and its five outcomes … through a re-ratification that changes none
+  of them. **Partial supersession is the sanctioned tool for exactly this**." What is
+  refused there is the *mechanism*, not the restriction; §1 then performs the restriction
+  by partial supersession, in the words "every write of a belief goes through that path".
+  So ADR-0075's live rule **is** the belief-scoped one, and a write that is not of a
+  belief is outside it rather than exempted from it. ADR-0082 §1 asks for the sentence
+  that becomes false or over-wide; on ADR-0005 and ADR-0075 there is none, and it also
+  rules that a record may not be demanded "on book-keeping grounds alone".
 - **ADR-0217 and ADR-0204.** §3's placement clause **writes no placement**, so ADR-0217
   §3's three setters, its meet and its precedence are untouched, and ADR-0204 §5's
   ratchet is neither weakened nor restated. What the clause does is decline a write
@@ -1064,10 +1086,16 @@ answer.**
 - **Every episode the walk had already passed is permanently unlabelled.** §8 is
   explicit about this and §6 obliges every surface to say so — keyed on the missing
   label rather than on a date, because the horizon is the watermark's.
-- **A mixed-placement page loses labels on its wider episodes**, and a labelling write
-  that fails after a committed advance loses them for that page for good. Both are §3's
-  choices and both fail in the same direction: a lost label, never a wrong one and never
-  one over the owner's word.
+- **A page whose episodes' placements differ is labelled nowhere**, and a labelling
+  write that fails is never retried — the page's advance still commits, so nothing brings
+  those episodes back. Both are §3's choices and both fail in the same direction: a lost
+  label, never a wrong one and never one that laundered a restriction.
+- **One guarantee is inherited rather than delivered.** ADR-0213 §9's finality holds for
+  every episode a pass has labelled, and the write-once test is what holds it; what it
+  cannot hold is an episode the owner emptied before any pass reached it. That act does
+  not exist and cannot be built without ADR-0213 §9's surface ADR, which §11 hands the
+  obligation to — but a reader should know it is an obligation passed on, not one
+  discharged here.
 - **A `core` type widens, and the implementation lane is a `core` holder.** #2133 briefed
   it as "no `core`"; it is one additive member and one small model, with
   `core/protocols.py` untouched, but it has to be sequenced with the batch's other `core`
