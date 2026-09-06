@@ -1,6 +1,6 @@
 # 213. A record carries the topics it is about, proposed once at write and never inferred at read
 
-- Status: Partially superseded by ADR-0239 (§4's set-at-write clause, §6's producer enumeration and its no-labelling-another-producer's-record clause, and §8's revised-only-by-two-routes clause — each for `EpisodicMemory` records only)
+- Status: Partially superseded by ADR-0239 (§4's set-at-write clause, §6's producer enumeration and its no-labelling-another-producer's-record clause, and §8's revised-only-by-two-routes and only-in-place-write clauses — each for `EpisodicMemory` records only)
 - Date: 2026-08-29
 - **Partially superseded: 2026-09-05 by
   [ADR-0239](0239-the-observation-pass-labels-the-episodes-it-read-and-a-label-lands-as-a-conditional-write-at-the-episodes-own-id.md),
@@ -12,8 +12,11 @@
   else" (its read-time half stands whole); §6's enumeration of *what* the observer
   labels, and its "no producer proposes topics on a record another producer wrote";
   and §8's "revised only by the two routes below … no re-observation … no scheduler
-  job … revises the topics of a record already in the store". **Everything else here
-  stands** and is relied on by ADR-0239 rather than replaced: §1's field, bound and
+  job … revises the topics of a record already in the store" together with its "The
+  owner's act (§9) is the **only** in-place write of this field" — the owner's act
+  stays an in-place write at the record's own id, stays the only one on every other
+  kind of record, and stays final over an episode a pass has labelled.
+  **Everything else here stands** and is relied on by ADR-0239 rather than replaced: §1's field, bound and
   canonical order; §3's label form and equality rule; §4's envelope discipline, its
   constants and its ignored-entry rule; §5's vocabulary rules, the observer's
   exclusion included; §6's capture clause, whose first sentence stays true and whose
