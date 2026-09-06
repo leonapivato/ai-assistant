@@ -1,6 +1,6 @@
 # 239. The observation pass labels the episodes it read, and a label lands as a conditional write at the episode's own id
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-05
 - **Two records are owed on earlier ADRs and this change writes both.** §14 names
   every clause this decision replaces, quotes each, and applies ADR-0070 §1's test to
