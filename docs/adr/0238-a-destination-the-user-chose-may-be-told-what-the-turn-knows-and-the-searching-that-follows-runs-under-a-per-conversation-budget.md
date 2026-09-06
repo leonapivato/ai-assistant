@@ -93,7 +93,7 @@ theoretical, and so nobody reads the supersessions as taking effect on merge.
   `PermissionDecision.authorises`.
 - `ConversationExport` carries `schema_version: Literal[2]`, `conversations` and `turns`,
   so a field on `Conversation` or on `ConversationTurn` would change a portable document's
-  shape and move that literal (ADR-0212 §8, ADR-0014 §5). §8 puts this decision's counters
+  shape and move that literal (ADR-0212 §8, ADR-0014 §5). §8 puts this decision's counter
   in their own store instead, and neither type is touched.
 - `MemoryRecord` is a discriminated union over the four record kinds, every one of
   which carries `placement` on `MemoryBase` (ADR-0217 §1).
@@ -364,7 +364,7 @@ exists and is live, or it does not.
 > third population above is **within one turn** — the refinement ADR-0228 §2's revision
 > makes real, where a second servicing of the same turn composes over the first's
 > results — and **no later turn reaches a result's content by any route**. §8's budget is
-> two counters and one flag and no result, and no lane reads this ADR as deciding
+> one counter and one flag and no result, and no lane reads this ADR as deciding
 > retention, an archive admission or a store write for a minted record.
 
 > **Normative.** **What a later turn has instead is the captured episode**, stamped and
@@ -476,8 +476,8 @@ recipient.
 > (§1); **every recorded external span this conversation has carried — on any earlier
 > turn, and on this turn up to the moment the request is built — was minted by a
 > `WEB_SEARCH` servicing at a destination of recorded trust `USER_CHOSEN`** (the two
-> halves are stated in the clause below); and **this request holds a claim §8's
-> `claim_search` granted for this call**. A request
+> halves are stated in the clause below); and **this request holds an admission §8's
+> `admit_search` granted for this call**. A request
 > failing any of the four is not closed-loop, and every clause this ADR supersedes binds
 > on it exactly as it does today.
 
@@ -496,9 +496,9 @@ recipient.
 > recorded half is read *then* and not earlier.** `orchestration` obtains the stored flag
 > by calling `search_draw` at that instant, alongside the current-turn half, and **no
 > value read earlier in the servicing is cached, reused or carried forward** — not one read
-> before `claim_search`, not one read to decide whether to search at all, and not one
-> carried on the `SearchClaim`, which does not hold it. **A read taken at admission would
-> be the wrong instant**: `claim_search` is admitted before the query is composed, so a
+> before `admit_search`, not one read to decide whether to search at all, and **not the draw
+> `admit_search` itself answered**. **A read taken at admission would
+> be the wrong instant**: `admit_search` is admitted before the query is composed, so a
 > footing read there would be separated from the binding by the composition itself, and a
 > fold that committed in between would be ignored by a request built after it. The flag is
 > monotone, so reading it as late as possible is strictly the fail-closed direction.
@@ -548,10 +548,10 @@ recipient.
 > **Normative.** **Nothing awaits between those two reads and the binding's construction,
 > which is what makes the window as small as this shape allows.** The recorded half and
 > `trust_of` are the **last** values `orchestration` obtains before it builds the request
-> and constructs the `EgressBinding`; the current-turn half and the claim are already in
+> and constructs the `EgressBinding`; the current-turn half and the admission are already in
 > hand, and neither is a fact another actor can change under this servicing — the
-> current-turn half is computed from records this component holds, and the claim's only role
-> is the fourth condition. **A lane that awaits anything between those reads and the binding
+> current-turn half is computed from records this component holds, and the admission's only
+> role is the fourth condition. **A lane that awaits anything between those reads and the binding
 > has widened the window above** and has breached this clause. What the obligation buys is a
 > narrower window, never a closed one, and no lane reads it as the latter.
 
@@ -569,14 +569,14 @@ recipient.
 > content was. **No component recovers either half by inspecting an episode, a record's
 > content, a query or a reply**, and no component asks a model for either.
 
-> **Normative.** **The fourth condition is a claim already held, never capacity still
-> unspent.** `claim_search` charges the call it admits (§8), so by the time the request is built
-> the draw no longer has room for it — a condition reading "the draw leaves room for one
-> more call" would therefore be false for **every** admitted request, and false first for
-> the last call a conversation is allowed. The order is fixed for that reason: **claim,
-> then compose, then build the request, then bind, then rule, then send.** A servicing that
-> did not claim composes nothing, so no request lacking a claim ever reaches the fourth
-> condition at all.
+> **Normative.** **The fourth condition is an admission already granted, never capacity
+> still unspent.** `admit_search` spends the call it admits (§8), so by the time the request
+> is built the draw no longer has room for it — a condition reading "the draw leaves room
+> for one more call" would therefore be false for **every** admitted request, and false
+> first for the last call a conversation is allowed. The order is fixed for that reason:
+> **admit, then compose, then build the request, then bind, then rule, then send.** A
+> servicing that was not admitted composes nothing, so no request lacking an admission ever
+> reaches the fourth condition at all.
 
 > **Normative.** **The whole condition reaches the ruling as one recorded fact on the
 > binding.** `EgressBinding` gains `closed_loop: bool`, **defaulting to `False`**: true
@@ -797,27 +797,47 @@ stated exception over one kind, one destination class and one closed population 
 ADR-0233's conjunction intact for everything else — which is what makes its own
 relaxation legible in the way §9 wanted.
 
-### 8. The budget: calls and elapsed time per conversation, carried on the conversation record
+### 8. The budget: provider calls per conversation, carried on the conversation record
 
-> **Normative.** `core.config.Settings` gains exactly two fields.
+> **Normative.** `core.config.Settings` gains exactly **one** field.
 > **`search_calls_per_conversation: int`**, defaulting to **8**, domain the integers
 > from **0** through **64** inclusive, where **0 means no search is serviced in any
-> conversation**. And **`search_elapsed_per_conversation: timedelta`**, defaulting to
-> **60 seconds**, domain finite and non-negative, where zero means the same. A value
-> outside either domain is refused at `Settings` load with the `ConfigurationError`
-> ADR-0194 §1's configured-amount clause requires, naming the field.
+> conversation**. A value outside that domain is refused at `Settings` load with the
+> `ConfigurationError` ADR-0194 §1's configured-amount clause requires, naming the field.
 
-> **Normative.** **Both bounds ship with a value rather than meaning "unbounded" when
+> **Normative.** **The bound ships with a value rather than meaning "unbounded" when
 > unset.** ADR-0194 §1's "unset means unbounded" governs a monetary ceiling an operator
 > chooses; a bound the milestone's exit is stated over may not be absent by omission, so
-> a deployment that configures nothing still searches under both.
+> a deployment that configures nothing still searches under it.
+
+> **Normative.** **There is no per-conversation elapsed-time bound, and time is bounded
+> already.** An earlier revision of this decision carried a second `Settings` field, a
+> stored elapsed counter, a provisional charge and a `SearchClaim` handle settled after
+> each call. **All of it is deleted**, and nothing replaces it, because the quantity it
+> bounded is bounded on ground this corpus has already ratified: **ADR-0228 §4 gives each
+> conversational operation a per-turn planning budget** — "a duration, from the turn's
+> entry into the loop, within which an additional planner call may be **started**" —
+> and `converse` and `converse_streaming` declare **PT20S** while `converse_spoken`
+> declares **none** and does not iterate at all. A search servicing is reached only from a
+> planner call, so **a turn stops starting searches once its planning budget is reached**,
+> and a conversation's total search time is bounded by the product of the call ceiling
+> above and that per-turn budget.
+
+> **Normative.** **That product is stated as the bound it is, and not as a hard ceiling.**
+> ADR-0228 §4 is a gate on **starting** an iteration and says so — "a turn's total duration
+> may therefore exceed its budget by one planner call and one servicing" — so the product
+> is exceeded by at most one servicing per turn, for the same reason and to the same extent
+> that ADR-0228 §4's own budget is. **This ADR neither tightens that nor restates it as
+> exact**, and §16 defers a finer accounting with what fires it. **No lane reintroduces a
+> per-conversation elapsed counter, a claim handle, a settlement member or a deadline
+> parameter to reach a tighter figure** without the ADR that decides it.
 
 > **Normative.** **The budget is state on the conversation record, and the store that
 > holds it is `ConversationStore`.** It is not a store of its own. A per-conversation
 > durable counter has a lifecycle — it must be fenced when the conversation is deleted and
 > destroyed when the record is — and **that lifecycle already exists, ratified, on exactly
 > one object**: `stamp_deleted` fences the record and `drop_if_eligible` destroys it
-> (ADR-0074 §8). Putting the counters anywhere else obliges some protocol to reproduce that
+> (ADR-0074 §8). Putting the counter anywhere else obliges some protocol to reproduce that
 > lifecycle across two stores with no transaction between them, which this corpus does not
 > have.
 
@@ -840,9 +860,8 @@ relaxation legible in the way §9 wanted.
 > reconciliation pass, a stated orphan window — is deleted rather than repaired.
 
 > **Normative.** `core/types.py` gains **`ConversationSearchDraw`**, a frozen model
-> refusing unknown fields, with exactly three fields: `calls: int`, non-negative, the
-> provider calls this conversation has claimed; `elapsed: timedelta`, non-negative and
-> finite, the time those calls were allowed; and `all_external_user_chosen: bool`,
+> refusing unknown fields, with exactly two fields: `calls: int`, non-negative, the
+> provider calls this conversation has spent; and `all_external_user_chosen: bool`,
 > **required with no default**, false once any turn of this conversation has carried a
 > recorded external span that was **not** minted by a `WEB_SEARCH` servicing at a
 > destination of recorded trust `USER_CHOSEN`. It is a **read model** — what `search_draw`
@@ -855,7 +874,7 @@ relaxation legible in the way §9 wanted.
 > servicing at a destination of recorded trust `USER_CHOSEN`" is **vacuously true** of it.
 > **No caller supplies the value, and no member of this store creates a conversation as a
 > side effect of anything else.** The laundering hole an earlier revision had — a first
-> `claim` minting a clean row for a conversation that already had turns, permanently
+> admission minting a clean row for a conversation that already had turns, permanently
 > closing a legacy conversation into the exception — is therefore unreachable by
 > construction rather than forbidden by a rule: the field is created by the act that
 > creates the conversation, at the one instant when `True` cannot be wrong.
@@ -869,40 +888,40 @@ relaxation legible in the way §9 wanted.
 > absence as a clean history.**
 
 > **Normative.** `core/protocols.py` gains **no** Protocol for the budget. It adds exactly
-> **four** members to **`ConversationStore`**: **`search_draw`**, answering a
-> conversation's `ConversationSearchDraw`; **`claim_search`**; **`settle_search`**; and
-> **`observe_search`**, folding the value its caller computed into the stored flag by
-> logical **and**. A fifth is added by no lane without the ADR that decides it. **This
+> **three** members to **`ConversationStore`**: **`search_draw`**, answering a
+> conversation's `ConversationSearchDraw`; **`admit_search`**, which admits or refuses the
+> next search call against the ceiling in one step; and **`observe_search`**, folding the
+> value its caller computed into the stored flag by logical **and**. A fourth is added by
+> no lane without the ADR that decides it. **This
 > supersedes ADR-0074 §9's enumeration of what `ConversationStore` owes**, in the same
 > scope ADR-0205 and ADR-0212 each recorded on that section, and §17 records it.
 
-> **Normative.** The four members are declared with exactly these signatures, all `async`,
+> **Normative.** The three members are declared with exactly these signatures, all `async`,
 > and they take `conversation_id: str` because every other member of this store does:
 >
 > - `search_draw(self, conversation_id: str, /) -> ConversationSearchDraw | None`
-> - `claim_search(self, conversation_id: str, /, *, max_calls: int, max_elapsed: timedelta) -> SearchClaim | None`
-> - `settle_search(self, claim: SearchClaim, /, *, elapsed: timedelta) -> None`
+> - `admit_search(self, conversation_id: str, /, *, max_calls: int) -> ConversationSearchDraw | None`
 > - `observe_search(self, conversation_id: str, /, *, all_external_user_chosen: bool) -> None`
 >
-> `claim_search` answers `None` where it refuses. **The bounds are passed in** rather than
-> read by the store, so these four members read no `Settings` field, consult no clock and
-> hold no policy — the elapsed interval is measured by the caller and every judgement about
-> what a bound is stays in `orchestration`. That the store has a clock of its own for
-> `drop_if_eligible`'s grace (ADR-0074 §8) is not a licence for these to read it.
+> `admit_search` answers `None` where it refuses, and otherwise the draw **as it stands
+> after the increment**. **There is no handle**: it returns no token, nothing is settled
+> afterwards, and no member takes a claim, a charge, a deadline or an interval. **The bound
+> is passed in** rather than read by the store, so these three members read no `Settings`
+> field, consult no clock and hold no policy — every judgement about what a bound is stays
+> in `orchestration`. That the store has a clock of its own for `drop_if_eligible`'s grace
+> (ADR-0074 §8) is not a licence for these to read it.
 
 > **Normative.** **No `initial_footing`, and no argument on any member decides what the
-> flag starts at.** An earlier revision passed a history fact into `claim` because that
-> member could create a row; this one cannot create anything, so there is nothing for such
-> an argument to be for. **A lane that adds one has reintroduced the creation path this
-> clause removes.**
+> flag starts at.** An earlier revision passed a history fact into `admit_search` because
+> that member could create a row; this one cannot create anything, so there is nothing for
+> such an argument to be for. **A lane that adds one has reintroduced the creation path
+> this clause removes.**
 
-> **Normative.** **`claim_search` is one atomic step: admit, charge, and answer the
-> deadline.** Given a conversation and the two bounds, it refuses where the stored `calls`
-> have reached `search_calls_per_conversation` or the stored `elapsed` has reached
-> `search_elapsed_per_conversation`; otherwise it increments `calls` by one and charges to
-> `elapsed` **the conversation's whole remaining elapsed budget**, which `settle_search`
-> then replaces with what the call actually took, releasing the remainder. **The read, the
-> comparison and the write are one indivisible step.**
+> **Normative.** **`admit_search` is one atomic step: compare, increment, and answer.**
+> Given a conversation and the bound, it refuses where the stored `calls` have reached
+> `search_calls_per_conversation`; otherwise it increments `calls` by one and answers the
+> draw. **The read, the comparison and the write are one indivisible step**, and there is
+> nothing outstanding afterwards to settle, release or reconcile.
 
 > **Normative.** **That atomicity is an obligation this store already carries, extended to
 > these members rather than invented for them.** ADR-0074 §9 rules that "**`ConversationStore`
@@ -912,17 +931,17 @@ relaxation legible in the way §9 wanted.
 > hold across processes", and gives the reason a caller-side lock is not an answer: "the
 > engine's own code already contemplates 'another engine over the same durable stores', so
 > two engines — in one process or two — hold two locks and serialise nothing." **The
-> exclusion the charge needs is the exclusion the record already owes**, and it is why
+> exclusion the increment needs is the exclusion the record already owes**, and it is why
 > concurrent turns, a failed turn and a process exit are answered by one clause rather than
 > three: **two turns of one conversation, two servicings of one turn, and two engines over
 > one data directory can none of them be admitted against the same draw.** That, and not
-> the counters' address, is what answers the defect a per-turn budget had — and a
+> the counter's address, is what answers the defect a per-turn budget had — and a
 > `PlanningError` on a later revision still cannot erase a completed search's draw, because
-> the charge is durable and taken before the call, not written at capture.
+> the increment is durable and taken before the call, not written at capture.
 
-> **Normative.** **`claim_search` and `observe_search` create nothing, and that is
+> **Normative.** **`admit_search` and `observe_search` create nothing, and that is
 > `append`'s property rather than a new one.** For an id that names nothing, and for one
-> naming a conversation **stamped deleted**, `claim_search` answers `None` and
+> naming a conversation **stamped deleted**, `admit_search` answers `None` and
 > `observe_search` does nothing and raises nothing. `ConversationStore.append` refuses both
 > cases too — `UnknownConversationError` "if `conversation_id` names nothing, or names a
 > conversation stamped deleted — an append to a stamped conversation is refused, which is
@@ -939,125 +958,14 @@ relaxation legible in the way §9 wanted.
 > write with a read of another store: the refusal and the record are one object under the
 > exclusion the store already owes.
 
-> **Normative.** **The provisional charge is the whole remainder, and three things follow
-> from that one choice.** First, **`orchestration` never needs to know the transport's
-> timeout**: that value is `WebSearchEgress`'s own state inside the seam, it is on no
-> Protocol and in no `Settings` field this ADR adds, and reaching for it would cross golden
-> rule 1. Second, **at most one claim of a conversation is outstanding at a time** — while
-> one is in flight the stored `elapsed` equals the bound, so the next `claim_search`
-> refuses — which serialises searching per conversation without a lock anywhere. Third, the
-> overrun is therefore **one call's**, and §8 can say so truthfully.
-
-> **Normative.** **So the settled total may exceed the bound by at most one call's excess
-> over the remainder it was granted, and by no more.** No lane states a bound on the size of
-> that one excess — the accounted interval includes ADR-0192's unbounded ledger writes — but
-> **no lane states that two calls can overrun**, because two cannot be outstanding.
-
-> **Normative.** `core/types.py` gains **`SearchClaim`**, a frozen model refusing unknown
-> fields, with exactly two fields: `conversation_id: Identifier` and `id: Identifier`,
-> minted by the store. **At most one claim of a conversation is outstanding at a time**
-> (above), so the handle is not there to disambiguate concurrent claims; it is there so that
-> `settle_search` can be **idempotent and stale-safe**. A second `settle_search` of one claim
-> changes nothing; one naming a claim the store has already settled, or one whose
-> conversation has been stamped or dropped, changes nothing; and a `settle_search` naming a
-> conversation alone could not tell a late settlement of a superseded claim from a
-> settlement of the claim now outstanding. `settle_search` replaces the charge of **that**
-> claim and no other.
-
-> **Normative.** **The handle carries no quantity, and the store's own record is the only
-> authority for one.** `SearchClaim` does **not** carry the provisional charge, and no later
-> lane adds it or any other amount, instant or count to this type. `settle_search` resolves
-> the claim **by its store-minted `id`** and reads the charge it is replacing, and the
-> conversation it belongs to, from the row the store already holds — it trusts no field of
-> the handle as an input to the arithmetic, so a handle whose `conversation_id` does not
-> match that row changes nothing about which row is settled. **The store necessarily holds
-> that state already**: idempotence and stale-safety above are exactly the properties that
-> oblige it to know whether this claim is outstanding. The field is removed rather than
-> fenced with a comparison, because a caller can write past a frozen model through
-> `__dict__` (`RecipientGrantStore.record`'s detachment clause, ADR-0193 §1), and a
-> provisional charge the caller could raise is the one input that would drive the stored
-> `elapsed` **below** zero through the settlement path — which the domain clause below and
-> Arm 6c2 both state can never happen. **A quantity that is not on the handle cannot be
-> forged on it**, which is this section's `initial_footing` move: unreachable by
-> construction rather than forbidden by a rule.
-
-> **Normative.** **A claim of a conversation that is stamped or gone settles to nothing,
-> and creates nothing.** A user may delete a conversation while one of its searches is
-> still in flight; `settle_search` **called with a well-formed `elapsed`** on an unknown
-> conversation, on a stamped one, on a forgotten claim, or on a claim already settled
-> changes nothing and raises nothing, so the servicing that was in flight completes and
-> reports normally.
-
-> **Normative.** **Argument validation comes first, and the no-op above is what happens
-> *after* it.** `settle_search` checks `elapsed` against the domain below **before** it looks
-> at the claim at all, so a call carrying an out-of-domain value raises whether or not the
-> conversation is still there. **The precedence is stated because the two clauses would
-> otherwise both govern one call** and disagree about it. It is decided this way because an
-> out-of-domain argument is a defect in the caller and the stale-claim rule is a fact about
-> the world: validating second would let a deletion the caller never saw silence that
-> defect, so the same bug would raise or not raise depending on a race, which is the one
-> outcome neither clause is for.
-
-> **Normative.** **`settle_search` replaces that claim's provisional charge with the
-> interval the claim actually occupied, whether that is smaller or larger.** There is no
-> direction rule: a settlement that could only lower would let a call that overran its
-> charge cost the conversation nothing, which is the wrong direction for a bound. **The
-> accounted interval is the one `orchestration` can measure — its own await of the search
-> servicing**, from before the seam is entered to after it returns. `settle_search` changes
-> no `calls`, and **a claim that is never settled stands at its full charge** — the
-> fail-closed direction, and the reason nothing is owed for a turn that ends in an
-> exception, a `PlanningError` on a later revision, a restart or a disconnection.
-
-> **Normative.** **`settle_search`'s `elapsed` is non-negative, and a negative value is
-> refused before anything is written.** The domain is stated as non-negativity and nothing
-> else, because `timedelta` admits no non-finite value to exclude — constructing one from
-> `inf` or `NaN` raises before a `timedelta` exists — and a clause excluding an
-> unconstructible value would name a test with no input. The member replaces a charge
-> rather than adding to one, so an unrestricted argument is the one input that could drive
-> the stored `elapsed` **below** zero — breaking `ConversationSearchDraw.elapsed`'s own
-> non-negative invariant and, worse, handing a conversation back budget it never had, so a
-> later `claim_search` passes the comparison although the call was spent. The refusal is a
-> `ValueError`, the class `ConversationStore.append` already raises for an argument outside
-> its stated domain (ADR-0023 §3's naive instant), and it is raised **before the claim is
-> settled and before any counter moves**: the charge stands at its full provisional value,
-> which is the fail-closed direction this section takes everywhere else, and it stands the
-> same way for a claim the store has already settled or forgotten. **No path lowers
-> `calls`**, this one included.
-
-> **Normative.** **The interval is `orchestration`'s await and not the provider exchange,
-> because the exchange's duration is a fact no contract reports.** `SearchOutcome` carries no
-> elapsed value and `WebSearcher` is not widened here to add one, so the only honest quantity
-> is the one the caller holds. It includes ADR-0192's ledger claim and completion writes,
-> which that ADR left unbounded when it superseded ADR-0029 §4's reach — **so no lane states
-> that a call's accounted time is bounded by the transport's timeout**, and §16 defers
-> bounding it with what fires that.
-
-> **Normative.** **A claimed call is consumed whatever the outcome, and there is no
-> refund.** A servicing that claims and then does not transmit — a binding that refused, a
+> **Normative.** **An admitted call is consumed whatever the outcome, and there is no
+> refund.** A servicing that is admitted and then does not transmit — a binding that refused, a
 > ruling that was not `ALLOW`, a provider that rejected before or after receiving the query
 > — still spends its `calls` increment. **`SearchOutcome` carries no transmission fact** and
 > `WebSearcher` is not widened here to add one, so a refund rule would oblige the servicer
 > to tell two `SearchRefusal.PROVIDER_REFUSED` outcomes apart when nothing in the contract
 > distinguishes them. Conservative admission is the honest reading, and it errs toward
 > searching less.
-
-> **Normative.** **The elapsed bound is a start-only bound with a stated overrun, and
-> `WebSearcher` is not widened to carry a deadline.** A call is admitted only while the
-> stored `elapsed` is **strictly below** the bound; once admitted it runs under the
-> transport's own timeout, which ADR-0231 §6 and ADR-0029 §4 already place inside the seam
-> and which `WebSearcher.search(call, /)` takes no parameter to override. That is ADR-0228
-> §4's shape — a bound checked at the start of an operation rather than enforced mid-flight.
-
-> **Normative.** **No call is admitted once the stored `elapsed` has reached the bound**,
-> and while a claim is outstanding the stored value *is* the bound. The excess is the one
-> stated above, and no lane claims a size for it.
-
-> **Normative.** **No lane closes the overrun by adding a timeout parameter to
-> `WebSearcher.search`, by wrapping the seam in a cancellation outside it, or by having
-> `orchestration` time the call and abandon it.** ADR-0029 §4 puts the timeout inside the
-> implementation and ADR-0231 §6 keeps it there; a caller-imposed cancellation would be a
-> second timeout in a second place, which is the shape this corpus has already refused.
-> Firing the overrun open is an ADR deciding how a deadline reaches that seam at all.
 
 > **Normative.** **The flag means *every turn this decision has observed was clean*, and
 > `orchestration` computes it.** For every turn it captures, `orchestration` calls
@@ -1080,24 +988,25 @@ relaxation legible in the way §9 wanted.
 > **Normative.** **Admission is the trigger because neither a request nor a capture is
 > early enough.** §5's current-turn half is computed when a request is **built**, so a turn
 > that reads a local file and never searches computes it nowhere, and a turn that reads one
-> and *does* search computes it only after `claim_search` has already admitted that call.
-> Both leave the stored flag true for as long as the turn is in flight, and `settle_search`
-> releases the draw inside that window — so a **second servicing of the same conversation**
-> could claim, read the stale-true flag, find its own supply clean and be ruled closed-loop,
-> although the conversation had already carried the file. Folding at admission puts the
+> and *does* search computes it only after `admit_search` has already admitted that call.
+> Both leave the stored flag true for as long as the turn is in flight — so a **second
+> servicing of the same conversation** could be admitted, read the stale-true flag, find its
+> own supply clean and be ruled closed-loop, although the conversation had already carried
+> the file. Folding at admission puts the
 > false on the record **as early as the fact exists**, which narrows that window from the
 > whole of a turn to a single store write — and the two clauses below state exactly what
 > that does and does not guarantee.
 
-> **Normative.** **The guarantee is stated over the *read*, not over the claim, because
-> `claim_search` does not consult the flag.** It admits on `calls` and `elapsed` and on
-> nothing else, and no member of this store gates admission on the footing. So the boundary
-> is this and no more: **every request whose recorded-half read (§5) returns after the fold
-> has committed sees the false**, the flag being monotone and `search_draw` a single
-> indivisible read of it. **A claim is not that instant, and no clause here says it is** —
-> a servicing may be admitted before a fold and still build a request after it, and §5
-> requires it to read the flag at build time precisely so that such a request sees the
-> false rather than a value it read earlier.
+> **Normative.** **The guarantee is stated over the *read*, not over the admission, because
+> `admit_search` does not consult the flag.** It admits on `calls` and on nothing else, and
+> no member of this store gates admission on the footing. So the boundary is this and no
+> more: **every request whose recorded-half read (§5) returns after the fold has committed
+> sees the false**, the flag being monotone and `search_draw` a single indivisible read of
+> it. **An admission is not that instant, and no clause here says it is** — a servicing may
+> be admitted before a fold and still build a request after it, and §5 requires it to read
+> the flag at build time precisely so that such a request sees the false rather than a value
+> it read earlier. **The draw `admit_search` returns is not that read either**: it is the
+> value at the moment of admission, and §5 forbids carrying it forward.
 
 > **Normative.** **Nothing in this decision serialises two turns of one conversation.** The
 > store's per-conversation exclusion serialises each member's own read-and-write, not two
@@ -1111,13 +1020,13 @@ relaxation legible in the way §9 wanted.
 > **Normative.** **The window it leaves is stated rather than claimed away, and it is
 > bounded at both ends.** It opens when turn A admits its disqualifying span and closes when
 > A's `observe_search` commits — one store write, with none of A's composition, transport or
-> capture inside it. Before the early fold that window ran to A's *capture*, and
-> `settle_search` released the draw inside it. What it costs when it is reached is **one
+> capture inside it. Before the early fold that window ran to A's *capture*. What it costs
+> when it is reached is **one
 > search of one concurrent turn**, whose recorded-half read fell inside it, ruled
 > closed-loop on a conversation that had already admitted a span it had not yet recorded;
 > every request whose read falls after it is refused, and §11's audit records both
-> dispositions. **The window is a property of the read's instant and not of the claim's**,
-> which is why §5 puts the read as late as it can go.
+> dispositions. **The window is a property of the read's instant and not of the
+> admission's**, which is why §5 puts the read as late as it can go.
 > **Closing it entirely means serialising servicings of one conversation**, which is a new
 > obligation on `orchestration` across concurrent turns that nothing in this corpus provides
 > today; §16 defers it with what fires it, and **no lane closes it by having `orchestration`
@@ -1154,7 +1063,7 @@ relaxation legible in the way §9 wanted.
 > later clean capture rescues it: `observe_search` folds by **and** onto a field that
 > records what this decision has actually seen.
 
-> **Normative.** **What the record now carries is two counters and one flag and no
+> **Normative.** **What the record now carries is one counter and one flag and no
 > content** — no query, no result, no destination, no record, no text. It is local, durable
 > and never written to a remote service (ADR-0004 §2), it is a Tier 1 fact, and it lives
 > under the retention, deletion and export rules the conversation record already has rather
@@ -1167,10 +1076,10 @@ relaxation legible in the way §9 wanted.
 > with the record; and the residue between them is exactly the tombstone ADR-0074 §8
 > already states and bounds, which this ADR neither enlarges nor re-argues. **A lane that
 > finds itself writing a lifecycle member, a sweep or a reconciliation for this budget has
-> put the counters somewhere they do not belong.**
+> put the counter somewhere it does not belong.**
 
 > **Normative.** **`Conversation`, `ConversationTurn` and `ConversationExport` gain no
-> field and change no version.** The counters are the store's own row state rather than
+> field and change no version.** The counter and the flag are the store's own row state rather than
 > presented model state — the position the turn index and `ParkedBinding`'s uniqueness
 > already hold — and `search_draw` is the read that presents them, added for
 > `orchestration`'s use and not for a surface. So `ConversationExport.schema_version` stays
@@ -1178,7 +1087,7 @@ relaxation legible in the way §9 wanted.
 > need for the draw moves that version in the same change**, with the records that entails,
 > rather than reading this clause as permission not to; §16 records what fires it.
 
-> **Normative.** **`claim_search` is called before a query is composed**, at the servicing
+> **Normative.** **`admit_search` is called before a query is composed**, at the servicing
 > site §2 names. Where it refuses, **no supply is constructed, no query is composed, no
 > ruling is sought, no credential is read and no channel is opened**, and §11's audit
 > records it. This is ADR-0231 §11's no-slot clause in a second place and by the same
@@ -1193,8 +1102,12 @@ relaxation legible in the way §9 wanted.
 
 **A conversation and not a period, because the milestone says so and because the unit is
 the one the user can see.** #1908 states the bound as "calls, time and cost per
-conversation", and the conversation is the object a user starts, reads and abandons. The
-honest cost is stated in Consequences: a long-lived conversation exhausts its budget and
+conversation", and the conversation is the object a user starts, reads and abandons. **This
+decision meets that in three different ways rather than with three settings**: calls are
+bounded here per conversation; **time** is bounded by ADR-0228 §4's per-turn planning
+budget, whose product with the call ceiling is the per-conversation figure (above); and
+**cost** is declined in §9 in terms, ADR-0231 §15's `SpendGate` inside the seam being the
+money backstop. The honest cost is stated in Consequences: a long-lived conversation exhausts its budget and
 searches no more, and the remedy is a new conversation. The rolling-window variant is
 deferred in §16 with its trigger rather than smuggled in as a default.
 
@@ -1265,13 +1178,13 @@ from the audit two weeks later.
 
 > **Normative.** The record gains, per turn: the count of records supplied to the
 > composer; the count of records withheld from the supply by §3's filter; and this
-> turn's `calls` and `elapsed`. **Counts and quantities only.** No record id, no
+> turn's `calls`. **Counts only.** No record id, no
 > conversation id, no destination, no query text, no fragment or length of one, no
 > title, no snippet and no provider message appears — ADR-0231 §13's Tier 1 clause and
 > ADR-0004 §5 bind without qualification.
 
 > **Normative.** **`SearchDisposition` gains exactly one member and is closed at
-> sixteen**, recording that a servicing did not reach a query because `claim_search` refused. It is
+> sixteen**, recording that a servicing did not reach a query because `admit_search` refused. It is
 > not free text, it collapses with no existing member, the mapping from each refusal
 > vocabulary stays **injective**, and it lives in `ai_assistant.orchestration` beside the
 > rest of that enumeration, which crosses no subsystem boundary. **This supersedes ADR-0231
@@ -1292,13 +1205,13 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 
 ### 12. The negative arm, stated as obligations
 
-> **Normative.** **An injected result cannot raise the budget.** Both bounds are
-> `Settings` values read by `orchestration`; the draw is a durable counter §8's
-> `claim_search` increments atomically before a channel opens. **`settle_search` writes a clock reading
-> `orchestration` took, not a value anything else produced** — and a provider that stalled
-> to inflate it would only spend the conversation's budget faster, which is the fail-closed
-> direction. No value a model produced, a request carried or a search result contained
-> reaches either side of the comparison.
+> **Normative.** **An injected result cannot raise the budget.** The bound is a `Settings`
+> value read by `orchestration`; the draw is a durable counter §8's `admit_search`
+> increments atomically before a channel opens. **The comparison has no other input** — no
+> clock reading, no interval, no duration a provider could stretch, because the elapsed
+> bound this decision once carried is deleted and time is bounded by ADR-0228 §4's per-turn
+> planning budget instead (§8). No value a model produced, a request carried or a search
+> result contained reaches either side of the comparison.
 > **No value produced by a model, carried in a request, contained in a search result, or
 > read from any record contributes to either side of the comparison**, and no component
 > raises, extends, resets, suspends or re-reads a bound on account of a turn's content.
@@ -1336,9 +1249,9 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 
 > **Normative.** The `core` surface this decision adds is exactly this and no more. In
 > `core/types.py`: `DestinationTrust`, `DestinationTrustRecord`, `SearchSupply` and
-> `ConversationSearchDraw` and `SearchClaim` as new types, and one member on each of `EgressBinding` and
+> `ConversationSearchDraw` as new types, and one member on each of `EgressBinding` and
 > `CarriedProvenance` (`closed_loop`, defaulting to `False`). In `core/protocols.py`: **one**
-> new `@runtime_checkable` Protocol, `DestinationTrustStore` with its five members; **four
+> new `@runtime_checkable` Protocol, `DestinationTrustStore` with its five members; **three
 > new members on `ConversationStore`** (§8), which is the one existing Protocol this
 > decision widens; and the changed parameter type on
 > `QueryComposer.compose`. In `core/errors.py`: `InvalidDestinationTrustError`. In
@@ -1364,7 +1277,7 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > **Normative.** **`ConfirmationEgress` gains no member and `ConversationExport` changes
 > neither shape nor version.** `closed_loop` is an authorisation-route fact rather than a
 > fact about what would leave, and ADR-0233 §8's floor — the one thing a surface owes about
-> a model-composed span — turns on `coverage` and not on this; §8's counters are the
+> a model-composed span — turns on `coverage` and not on this; §8's counter is the
 > conversation record's own row state and appear on neither presented model, so
 > `Conversation` and `ConversationTurn` stay as they are, which
 > leaves `ConversationExport.schema_version` at **2** and ADR-0212 §8 and ADR-0014 §5
@@ -1393,34 +1306,34 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > **Normative.** **One new Protocol, and it ships as a triad** — the Protocol, a shared
 > conformance suite asserting its obligations, and a canonical fake in
 > `ai_assistant.testing` — in one change, never deferred (`CONTRIBUTING.md` → "Adding a
-> Protocol"). That is `DestinationTrustStore`. **§8's four members are a widening of an
+> Protocol"). That is `DestinationTrustStore`. **§8's three members are a widening of an
 > existing Protocol, not a triad**: `ConversationStore`'s conformance suite and its
 > canonical fake already exist, and the lane extends both in the same change. The
 > `QueryComposer` conformance suite's one-positional-parameter check is kept and is
 > restated over the new parameter type.
 
 > **Normative.** **`ConversationStore`'s conformance suite asserts the atomicity
-> `claim_search` claims**, in the shape `RecipientGrantStore`'s ceiling test already takes:
-> concurrent claims against a bound of one yield exactly one admission, and an
+> `admit_search` claims**, in the shape `RecipientGrantStore`'s ceiling test already takes:
+> concurrent admissions against a bound of one yield exactly one admission, and an
 > implementation that reads, compares and writes as three awaits fails it. An
 > implementation that cannot be opened twice states so and skips, as the ledger contracts
 > already do. **This is the suite that already asserts §9's append-versus-deletion
 > exclusion**, so the new arms extend a property the suite states rather than introducing
 > one.
 
-> **Normative.** **That suite also asserts what the four members do at the two lifecycle
-> edges**, because an implementation that stored the counters anywhere but on the record
+> **Normative.** **That suite also asserts what the three members do at the two lifecycle
+> edges**, because an implementation that stored the counter anywhere but on the record
 > would pass every other assertion in it. On an id that **names nothing**: `search_draw`
-> answers `None`, `claim_search` answers `None`, `observe_search` raises nothing, and
+> answers `None`, `admit_search` answers `None`, `observe_search` raises nothing, and
 > afterwards `search_draw` still answers `None` — **nothing was created**. On a conversation
-> **stamped deleted**: the same four answers, alongside the `append` refusal the suite
+> **stamped deleted**: the same three answers, alongside the `append` refusal the suite
 > already asserts for that state. And after `drop_if_eligible` has removed the record, the
 > same again. **No arm asserts a budget lifecycle member, because there is none.**
 
 > **Normative.** **The lane reads the recorded half last, and the review of that lane
 > checks the call order rather than taking it on trust.** §5 puts `search_draw` immediately
 > before the request is built with nothing awaited in between, and that is the whole of what
-> makes §8's boundary true — the store cannot enforce it, because `claim_search` does not
+> makes §8's boundary true — the store cannot enforce it, because `admit_search` does not
 > consult the flag and no member does. A lane that reads the footing once and carries it
 > through composition has silently widened the window §8 states, and §15's Arm 6f3 is the
 > arm that catches it.
@@ -1506,36 +1419,10 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > yield one call and not two; a turn that searches and then fails on a later revision
 > (`PlanningError`, so capture is never reached) leaves the draw at one, so the **next
 > turn** searches not at all; and a store reopened after a process exit reads that same
-> one, with the unsettled claim standing at its full deadline.
-
-> **Normative.** **Arm 6c — the elapsed bound is start-only, with its overrun.** With
-> `search_elapsed_per_conversation` at sixty seconds and fifty-nine already stored, one
-> further call is admitted and the next is refused, whatever the admitted call's settled
-> interval turns out to be, and no call is cancelled from outside the seam.
-
-> **Normative.** **Arm 6c2 — one claim at a time, and settlement in both directions.**
-> While a claim of a conversation is outstanding, a second `claim_search` for it is
-> refused; after `settle_search` releases the unused remainder, a further claim is admitted.
-> A claim settled **below** its charge returns the remainder; one settled **above** it
-> raises the stored `elapsed` past the bound, and the next `claim_search` is then refused.
-> **And the domain is asserted, in both orders**: a `settle_search` whose `elapsed` is
-> negative raises `ValueError`, settles nothing, leaves the claim outstanding at its full
-> charge and leaves `calls` where it was — so the next `claim_search` is still refused, and
-> no path drives the stored `elapsed` below zero. **The same call on a stale claim, and on
-> one whose conversation is stamped or gone, raises `ValueError` too** and still changes
-> nothing, which is §8's stated precedence and the arm that pins it. **And a handle the
-> caller has tampered with settles by the store's row regardless**: a `SearchClaim` carrying
-> an outstanding claim's `id` beside another conversation's `conversation_id` — reached by
-> writing past the frozen model — settles that `id`'s own row and no other, and leaves every
-> other conversation's draw untouched.
-
-> **Normative.** **Arm 6c3 — a deletion under an outstanding claim.** A conversation
-> deleted while one of its searches is in flight: `settle_search` on that claim afterwards
-> changes nothing, raises nothing and creates nothing, and the in-flight servicing completes
-> and reports normally.
+> one, the increment having been taken before the call rather than at capture.
 
 > **Normative.** **Arm 6c4 — a late fold writes nothing, and the arm forces the
-> interleaving rather than assuming it.** A conversation stamped between `claim_search` and
+> interleaving rather than assuming it.** A conversation stamped between `admit_search` and
 > the admission fold, and one stamped between its search returning and its capture: neither
 > fold changes anything, neither raises, and `search_draw` answers `None` for both. The same
 > is driven **after the record is dropped**, where there is nothing left to write to at all.
@@ -1543,12 +1430,12 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > **Normative.** **Arm 6c4b — the order a cross-store check would have got wrong.** The arm
 > drives it explicitly: the fold's caller reads the conversation as **existing**, the
 > deletion then lands, and the fold calls `observe_search`. Nothing is created, `search_draw`
-> answers `None`, and a subsequent `claim_search` answers `None` and charges nothing. The
+> answers `None`, and a subsequent `admit_search` answers `None` and spends nothing. The
 > arm exists because this is the interleaving no ordering between two stores could have
-> fenced, and it is the one this decision makes unreachable by putting the counters on the
+> fenced, and it is the one this decision makes unreachable by putting the counter on the
 > record.
 
-> **Normative.** **Arm 6d — a claimed call is never refunded.** A servicing whose ruling is
+> **Normative.** **Arm 6d — an admitted call is never refunded.** A servicing whose ruling is
 > not `ALLOW`, one whose binding refused, and one whose provider answered
 > `SearchRefusal.PROVIDER_REFUSED` each spend their `calls` increment, and no path lowers
 > `calls`.
@@ -1571,10 +1458,10 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > `search_calls_per_conversation` above one, on a conversation whose destination reads
 > `USER_CHOSEN` and whose stored flag is true, in two shapes. **(i)** Turn A services a local-file
 > read and then a `WEB_SEARCH`, so A's own request binds `closed_loop` false; a second
-> servicing of that conversation, admitted **after A's claim is settled and before A is
-> captured**, carries nothing external of its own and is **not** closed-loop. **(ii)** Turn
-> A services a local-file read and **builds no search request at all**; a concurrent turn B
-> claims and composes, and B is **not** closed-loop for the same reason. The stored flag is
+> servicing of that conversation, admitted **before A is captured**, carries nothing
+> external of its own and is **not** closed-loop. **(ii)** Turn A services a local-file read
+> and **builds no search request at all**; a concurrent turn B is admitted and composes, and
+> B is **not** closed-loop for the same reason. The stored flag is
 > false in both, and A's later capture folds false again to no effect. **(iii) The window,
 > asserted as the boundary §8 states and not as an ordering.** B's **recorded-half read**
 > lands **while A's admission fold is still in flight** — the arm blocks inside
@@ -1601,36 +1488,34 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > property rather than a surprise, and so that a lane cannot later read §5 as promising that
 > a revocation stops a request already past its read.
 
-> **Normative.** **Arm 6f3 — a claim taken before the fold does not carry a stale footing
-> past it.** The arm drives the interleaving the boundary would be false for if the read
-> were taken at admission: turn B calls `claim_search` and is admitted **while the flag is
+> **Normative.** **Arm 6f3 — an admission taken before the fold does not carry a stale
+> footing past it.** The arm drives the interleaving the boundary would be false for if the read
+> were taken at admission: turn B calls `admit_search` and is admitted **while the flag is
 > still true**; turn A then admits a local-file span and its `observe_search(False)`
 > **commits**; only then does B compose, read the recorded half and build its request.
 > **B's request is not closed-loop**, its binding carries `closed_loop` false, and its
 > ruling is the non-`ALLOW` ADR-0181 §5 gives. The arm asserts in the same breath that **no
-> value read before `claim_search`, and no field of the `SearchClaim`, reached the binding**
-> — `SearchClaim` carries two fields and the footing is not among them.
+> value read before `admit_search`, and not the draw `admit_search` itself answered, reached
+> the binding** — the footing on the binding is the one §5's build-time read returned.
 
 > **Normative.** **Arm 6g — the last permitted call is usable.** With
 > `search_calls_per_conversation` set to one, the admitted servicing's own request is
-> closed-loop: the fourth condition reads the claim this request holds, not the capacity
-> left after charging it. The same is asserted for the last second of the elapsed bound.
+> closed-loop: the fourth condition reads the admission this request holds, not the capacity
+> left after spending it.
 
 > **Normative.** **Arm 6g2 — a zero bound refuses every search, and each bound is
 > asserted on its own.** With `search_calls_per_conversation` set to **zero**, a fresh
-> conversation whose stored draw is zero is refused at admission — `claim_search` answers
-> `None`, because the stored `calls` have already **reached** the bound — and the same is
-> asserted for `search_elapsed_per_conversation` at **zero**, each with the other bound
-> set permissively so that neither arm can pass on the other's refusal. Nothing composes,
+> conversation whose stored draw is zero is refused at admission — `admit_search` answers
+> `None`, because the stored `calls` have already **reached** the bound. Nothing composes,
 > no supply is built, no request reaches the seam, and the disposition §11 adds is
 > recorded. **The arm exists because zero is a legal setting whose stated meaning is that
 > no search is serviced in any conversation (§8), and because the idiomatic spelling of a
-> reached-the-bound comparison — a truthiness guard on the bound — admits at zero**, both
-> settings being falsy: the arms at one call and at sixty seconds cannot catch it.
+> reached-the-bound comparison — a truthiness guard on the bound — admits at zero**, `0`
+> being falsy: the arm at one call cannot catch it.
 
 > **Normative.** **Arm 6h — the budget goes with the record, and no step is added to make
 > it.** A deleted conversation and a reclaimed one each leave nothing behind: after
-> `stamp_deleted` all four members answer as §8 states, and after `drop_if_eligible` has
+> `stamp_deleted` all three members answer as §8 states, and after `drop_if_eligible` has
 > removed the record `search_draw` answers `None`. **The arm asserts that ADR-0074 §7's and
 > §8's sequences run exactly as they run on `origin/main`** — no extra call, no extra
 > ordering — and that a conversation whose record is gone reads as an unknown id.
@@ -1638,7 +1523,7 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > **Normative.** **Arm 6h2 — the three crash points that cost an earlier revision two
 > rounds, each now a no-op.** **(i)** A retention reclaim whose `drop_if_eligible` answered
 > `True`, after which the process dies: **there is nothing left to clean**, because the
-> counters went with the record in that one call. **(ii)** A deletion interrupted after
+> counter went with the record in that one call. **(ii)** A deletion interrupted after
 > `stamp_deleted` and re-run: the same state as one that ran straight through, and the
 > budget is fenced from the first stamp onward. **(iii)** A fold that commits after the
 > record is dropped: it writes nothing and creates nothing, and no sweep is needed to
@@ -1647,7 +1532,7 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 
 > **Normative.** **Arm 6h3 — a reclaim that declines leaves the draw alone.** §7's reclaim
 > of an **ineligible** conversation — `drop_if_eligible` answering `False` — leaves that
-> conversation's counters and flag **exactly as they were**, and its next search is admitted
+> conversation's counter and flag **exactly as they were**, and its next search is admitted
 > against them. That is the arm that would fail for any design in which some sweep decided,
 > from outside the store's exclusion, that a conversation's budget could be cleared.
 
@@ -1687,7 +1572,15 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
   Not fired by a lane finding a snippet thin.
 - **A third `DestinationTrust` member.** Fired by an ADR with a policy that reads it. Not
   fired by a lane wanting a finer scale, which is inspection by another name.
-- **A rolling window for §8's bounds**, in place of the flat per-conversation figure.
+- **A finer elapsed accounting than the product of §8's call ceiling and ADR-0228 §4's
+  per-turn planning budget.** §8 deletes the per-conversation elapsed bound and leans on
+  that budget, which is a gate on *starting* an iteration, so the product is exceeded by at
+  most one servicing per turn and is a loose figure rather than an exact one. **Fired by
+  §11's audit showing that product too loose in practice** — conversations whose wall-clock
+  search time is materially above it, or a deployment that needs a tighter guarantee than a
+  per-turn gate can give. Not fired by a lane finding the arithmetic inelegant, and not by a
+  lane wanting to reintroduce a claim handle or a settlement member for their own sake.
+- **A rolling window for §8's bound**, in place of the flat per-conversation figure.
   Fired by §11's audit showing conversations exhausting their budget while still useful.
   Not fired by a lane finding a bound tight.
 - **A monetary per-conversation bound**, and ADR-0194 §8's default ceiling (#2116). Fired
@@ -1702,11 +1595,6 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 - **Moving `search_max_results`, or a second search per servicing.** ADR-0231 §19's entry
   is untouched: this ADR widens what one query is composed over and how many servicings a
   conversation may have, and moves neither ceiling.
-- **Bounding a search's accounted interval.** §8 accounts `orchestration`'s own await,
-  which includes ADR-0192's ledger claim and completion writes — unbounded since that ADR
-  superseded ADR-0029 §4's reach. Fired by an ADR bounding those writes, or by one deciding
-  how a deadline reaches `WebSearcher.search` at all. Not fired by a lane finding one
-  conversation's overrun large.
 - **Closing §5's read-to-ruling window on either of its two facts** — a revocation
   recorded after the build-time `trust_of` read, or an `observe_search(False)` committed
   after the recorded-half read. Closing it takes a linearisation across the trust store,
@@ -1722,7 +1610,7 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
   it across two engines — a store-level obligation in ADR-0074 §9's shape, not a lock,
   which §8 records as answering nothing.
 - **Presenting the draw to the user, and with it a `ConversationExport` version move.**
-  §8 keeps the counters as the store's own row state, so `Conversation`,
+  §8 keeps the counter as the store's own row state, so `Conversation`,
   `ConversationTurn` and `ConversationExport` are untouched and
   `ConversationExport.schema_version` stays at 2. Fired by an ADR or a surface lane that
   finds a user-facing need for the draw, which moves that version in the same change with
@@ -1741,7 +1629,7 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > ADR-0231 in six scopes, ADR-0233 in two, ADR-0155 in one, ADR-0181 in one, ADR-0193
 > in **three** — §3's fifth comparison, §4's first clause and §6's eighth-check clause in
 > one limb — and **ADR-0074 in one**: §9's enumeration of what `ConversationStore` owes,
-> which §8 widens by four members. Each is named on that ADR's `Status` line and in its
+> which §8 widens by three members. Each is named on that ADR's `Status` line and in its
 > appended dated note under ADR-0082 §1 and §2. **No other ADR's text moves**, and in
 > particular ADR-0014, ADR-0076, ADR-0098, ADR-0106, ADR-0146, ADR-0148, ADR-0152,
 > ADR-0154, ADR-0178, ADR-0184, ADR-0194, ADR-0204, ADR-0205, ADR-0212, ADR-0217, ADR-0223,
@@ -1757,7 +1645,7 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > retention reclaim, §8's deletion protocol, §9's exclusion obligation, its two-store
 > reasoning and its `core/types.py` enumeration are relied upon as written and are not
 > moved** — §8 adds no step to either sequence and no field to either type, which is the
-> whole point of putting the counters where the lifecycle already is.
+> whole point of putting the counter where the lifecycle already is.
 
 > **Normative.** **These records are made in this ADR's own change, while it stands
 > `Proposed`, and that is ADR-0082 §7's rule rather than an oversight.** §7 names the
@@ -1773,7 +1661,7 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > **Normative.** **Two near misses are named, because each was a supersession an earlier
 > draft of this ADR would have owed and each is avoided by a decision rather than by luck.**
 > ADR-0152 §7's transcription count, by §5's default; and ADR-0212 §8's and ADR-0014 §5's
-> export version, by §8 keeping the counters as the store's own row state rather than
+> export version, by §8 keeping the counter as the store's own row state rather than
 > putting them on `Conversation`. A lane that reverses either decision owes the record it
 > avoids, and says so. **ADR-0074 §9's enumeration is no longer among them** — an earlier
 > draft avoided it with a store of its own, and §8 now takes that record instead, which is
@@ -1830,8 +1718,7 @@ differently, or read one of its clauses more widely than it now holds?
   recomputation are untouched.
 - **ADR-0074 §9's enumeration of what `ConversationStore` owes** — **yes.** A reader
   holding only ADR-0074 would build that store owing eleven things and would find
-  `search_draw`, `claim_search`, `settle_search` and `observe_search` missing; §8 requires
-  all four. Supersession, in that enumeration alone. §9's exclusion obligation, its
+  `search_draw`, `admit_search` and `observe_search` missing; §8 requires all three. Supersession, in that enumeration alone. §9's exclusion obligation, its
   two-store reasoning, its `core/types.py` enumeration, §7's reclaim and §8's deletion
   protocol are untouched — §8 leans on them rather than moving them, and a reader of any of
   those acts identically.
@@ -1872,7 +1759,7 @@ before any lane implements against it (golden rule 5).
   chose, and milestone 32 reads the same fact rather than drawing a second boundary.
 - **The exclusion question has an answer that already exists.** `Placement` is the user's
   own act, already on every record, already narrowable only downward by a model.
-- **The budget is visible.** Calls and elapsed time per conversation are recorded on the
+- **The budget is visible.** Provider calls per conversation are recorded on the
   conversation record and reported in counts, so "how much did the loop search" is
   answerable from the audit rather than from a guess.
 - **#2126's trap is closed before anyone falls into it**, by a refusal at load rather than
@@ -1896,7 +1783,7 @@ before any lane implements against it (golden rule 5).
   explanation — which is ADR-0231 §19's "telling the user a search was refused" deferral,
   inherited and now costing more.
 - **One new store and one widened one.** Destination trust is genuinely new and ships as a
-  triad; the budget is four members on `ConversationStore`, whose conformance suite and
+  triad; the budget is three members on `ConversationStore`, whose conformance suite and
   canonical fake already exist and are extended in the same change. That is a smaller lane
   than an earlier revision's two triads, and it is the second time this decision has got
   smaller by taking something out.
@@ -1906,25 +1793,30 @@ before any lane implements against it (golden rule 5).
   alternative was a second store whose whole content was a lifecycle this one already has,
   and twelve review rounds established that reproducing that lifecycle across two stores is
   where the defects live.
-- **A conversation's budget is charged in full and then settled, in either direction.** A
-  claim takes the whole remaining elapsed budget up front, so while a search is in flight
-  that conversation cannot start another — searching is serialised per conversation, which
-  is a real constraint on a conversation being driven from two devices at once.
-  `settle_search` then writes what the call actually took, **which may be more than was charged**: the
-  accounted interval includes ADR-0192's unbounded ledger writes, so one call may carry the
-  total past the bound and no size is claimed for that excess. A turn that dies after
-  claiming leaves the whole remainder charged, so an unlucky conversation searches less than
-  its bound would allow. Both are the fail-closed direction, and they are the price of not
-  writing to the record twice per call.
+- **The budget counts calls and does not measure time, and a conversation's search time is
+  bounded only as a product.** `admit_search` spends one call and there is nothing to settle
+  afterwards, so a turn that dies mid-search costs its conversation exactly the one call it
+  was admitted for — no remainder is stranded and no unlucky conversation searches less than
+  its bound allows. What is given up is a direct bound on elapsed time: time is held by
+  ADR-0228 §4's per-turn planning budget instead, so the honest per-conversation figure is
+  the call ceiling times that budget, **exceeded by at most one servicing per turn** for
+  ADR-0228 §4's own stated reason. A deployment that wants a tighter figure than the product
+  gives has no setting for one, and §16 records what would fire an ADR that adds it.
+- **Searching is no longer serialised per conversation.** The earlier revision's provisional
+  charge made a second admission impossible while a search was in flight; counting calls
+  does not, so two turns of one conversation may search concurrently up to the ceiling. That
+  is a deliberate relaxation — the serialisation was a side effect of the charge rather than
+  a property anything asked for — and the atomicity of the increment is what still makes the
+  ceiling exact under concurrency.
 - **A deleted conversation leaves no budget residue at all, and that is the whole return
-  on the widening.** Because the counters are the record's, `stamp_deleted` fences them and
-  `drop_if_eligible` destroys them, so this decision adds nothing to ADR-0074 §8's residue
+  on the widening.** Because the counter is the record's, `stamp_deleted` fences it and
+  `drop_if_eligible` destroys it, so this decision adds nothing to ADR-0074 §8's residue
   and owes no sweep, no stamp of its own and no recovery walk. The three crash windows an
   earlier revision had to name are not narrowed here; they do not exist.
 - **Two turns of one conversation are not ordered against each other, and §8 says so.** The
   early fold narrows the window in which a concurrent turn can *read* a not-yet-lowered flag
   from a whole turn to a single store write, and does not close it. **The store cannot
-  enforce the boundary on its own** — `claim_search` admits on the counters and never on the
+  enforce the boundary on its own** — `admit_search` admits on the counter and never on the
   footing — so §5 carries it as an obligation on where the read sits, and §15's Arms
   6f2(iii) and 6f3 are what hold a lane to it.
   Closing it needs a per-conversation ordering across concurrent turns that this corpus does
@@ -2006,9 +1898,9 @@ them were deleted.
 decision's life and still refused: concurrent turns of one conversation spend the same draw
 and an ordinary `PlanningError` erases a completed search's draw, because a turn row is
 written at capture and a search is admitted long before. **What answers that is
-`claim_search`'s atomicity, not the counters' address** — the charge is durable, taken
+`admit_search`'s atomicity, not the counter's address** — the increment is durable, taken
 before the call, and made under the per-conversation exclusion ADR-0074 §9 already puts on
-this store — which is why the same defect does not return now that the counters live on the
+this store — which is why the same defect does not return now that the counter lives on the
 conversation record instead.
 
 **Serialise servicings of one conversation at the site, instead of at the store.**
