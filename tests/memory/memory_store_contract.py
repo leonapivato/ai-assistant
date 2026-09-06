@@ -2399,22 +2399,43 @@ class MemoryStoreContract:
 
     @pytest.mark.parametrize("read", _READS)
     @pytest.mark.parametrize("axis", ["participants", "about_person"])
-    async def test_a_blank_value_on_a_person_axis_is_refused(
-        self, store: MemoryStore, read: str, axis: str
+    @pytest.mark.parametrize(
+        "malformed",
+        [
+            pytest.param("", id="empty"),
+            pytest.param("   ", id="spaces"),
+            pytest.param("\t", id="tab"),
+            pytest.param("\ud800", id="lone-surrogate"),
+        ],
+    )
+    async def test_a_malformed_value_on_a_person_axis_is_refused(
+        self, store: MemoryStore, read: str, axis: str, malformed: str
     ) -> None:
-        """ADR-0237 §2's blank refusal, on both person axes and both reads.
+        """ADR-0237 §2's refusal on both person axes, over the declared type's two halves.
 
         A blank or whitespace-only value is refused with ``ValueError``. It is
         never read as "unstated" and it never matches a record — which is the
         quiet alternative a store might take, and the one that would make
         ``about_person=[""]`` an unspellable way of asking for the owner's own
         records that ADR-0100 §3 forbids.
+
+        **The unencodable arm is the same refusal's other half**, and it is the one
+        an implementation checking only ``value.strip()`` fails. The parameter's
+        declared type is :data:`~ai_assistant.core.types.NonBlankEncodableText`,
+        which refuses a blank *and* a string with no UTF-8 encoding, and ADR-0087 §7
+        rules that "the place a non-encodable value is refused is the type, not the
+        frame". A lone surrogate is non-blank, so a hand-written blank check admits
+        it — and then the implementations **disagree**: an in-memory store matches
+        nothing and hands back an empty result, while a SQL one raises a raw
+        ``UnicodeEncodeError`` out of its parameter binding, past the
+        ``MemoryStoreError`` boundary the store documents. Issue #565 is the same
+        value doing the same thing one seam over, and #1933 is this store already
+        refusing to let a raw builtin escape that boundary.
         """
         await store.add(_episode("subject", _ANY, about_person="Alex", participants=("Alex",)))
 
-        for blank in ("", "   ", "\t"):
-            with pytest.raises(ValueError, match="blank"):
-                await _filtered(store, read, **{axis: [blank]})
+        with pytest.raises(ValueError, match=axis):
+            await _filtered(store, read, **{axis: [malformed]})
 
     @pytest.mark.parametrize("read", _READS)
     async def test_a_captured_episode_as_written_today_is_reached_by_no_label_filter(

@@ -53,6 +53,7 @@ from ai_assistant.core.types import (
     MemorySearchResult,
     MemorySource,
     MemoryWriteMode,
+    NonBlankEncodableText,
     RecordChunk,
     TopicLabel,
     TraceKind,
@@ -364,31 +365,60 @@ def _topic_keys(values: Sequence[str]) -> frozenset[str]:
     return frozenset(_TOPIC_LABEL.validate_python(value) for value in values)
 
 
-def _person_keys(argument: str, values: Sequence[str]) -> frozenset[str]:
-    """Fold one person-axis filter to ADR-0101 §2's comparison keys.
+#: The refusal ADR-0237 §2 puts on the two person axes, asked of the declared type
+#: rather than hand-written. ``NonBlankEncodableText`` carries **both** halves — it
+#: refuses a blank *and* a string with no UTF-8 encoding — and asking the type is
+#: what keeps the two from drifting apart: a hand-written blank check let
+#: ``"\\ud800"`` through, where the in-memory stores matched nothing and the SQL one
+#: raised a raw ``UnicodeEncodeError`` out of its parameter binding, past the
+#: ``MemoryStoreError`` boundary the store documents. ADR-0087 §7 rules that "the
+#: place a non-encodable value is refused is the type, not the frame", and issue
+#: #565 is the same value doing the same thing one seam over.
+_PERSON_LABEL: Final = TypeAdapter[str](NonBlankEncodableText)
 
-    The same shape ``InMemoryMemoryStore`` and ``FakeMemoryStore`` carry, and the
-    duplication is theirs: ``ai_assistant.testing`` may not import a subsystem
-    (golden rule 1). The **fold** is not duplicated — it is
-    :func:`~ai_assistant.core.types.caseless_key` in ``core``, so the key this
-    computes for a query is the key :func:`_labels_of` stored for a record.
+
+def _person_keys(argument: str, values: Sequence[str]) -> frozenset[str]:
+    """Fold one person-axis filter to ADR-0101 §2's comparison keys, refusing a bad value.
+
+    Duplicated across the two stores and the canonical fake rather than shared,
+    exactly as ``_check_page_bounds`` is: ``ai_assistant.testing`` may not import a
+    subsystem (golden rule 1). The **fold** is not duplicated — it is
+    :func:`~ai_assistant.core.types.caseless_key` in ``core``, because a fold that
+    drifted between three implementations would make one call answer differently
+    per backend, which is the divergence ADR-0237 §3 borrows an external standard
+    to prevent. Neither is the *refusal*: the declared type makes it.
+
+    Duplicates collapse into the set, which is the set semantics ADR-0237 §2 gives
+    every sequence axis, and the caller's sequence is read exactly once.
+
+    **The refusal is re-raised naming the parameter**, which is the one thing the
+    type cannot say: :func:`~ai_assistant.core.types._rejecting_non_blank`
+    deliberately names no field, because three unrelated ones reach it. Here the
+    caller needs to know *which* argument it passed badly, and there are two.
 
     Args:
         argument: The parameter's name, for the refusal message.
         values: The labels the call named.
 
     Returns:
-        Their canonical caseless keys; duplicates collapse (ADR-0237 §2).
+        Their canonical caseless keys.
 
     Raises:
-        ValueError: If any value is blank or whitespace-only (ADR-0237 §2).
+        ValueError: If any value is blank or whitespace-only (ADR-0237 §2), or has
+            no UTF-8 encoding. A blank is never read as "unstated" and never
+            matches a record, so it is refused rather than quietly ignored; an
+            unencodable one is refused because the parameter's declared type
+            refuses it and because a value that reaches no backend intact must
+            fail the same way on every one of them.
     """
     keys: set[str] = set()
     for value in values:
-        if not value.strip():
-            msg = f"a {argument} value must not be blank (ADR-0237 §2)"
-            raise ValueError(msg)
-        keys.add(caseless_key(value))
+        try:
+            checked = _PERSON_LABEL.validate_python(value)
+        except ValidationError as exc:
+            msg = f"a {argument} value must be non-blank text with a UTF-8 encoding: {exc}"
+            raise ValueError(msg) from exc
+        keys.add(caseless_key(checked))
     return frozenset(keys)
 
 
