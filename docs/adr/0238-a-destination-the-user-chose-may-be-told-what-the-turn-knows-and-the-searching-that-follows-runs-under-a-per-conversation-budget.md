@@ -730,9 +730,17 @@ relaxation legible in the way §9 wanted.
 > refusing unknown fields, with exactly three fields: `calls: int`, non-negative, the
 > provider calls this conversation has claimed; `elapsed: timedelta`, non-negative and
 > finite, the time those calls were allowed; and `all_external_user_chosen: bool`,
-> defaulting to `True`, false once any turn of this conversation has carried a recorded
-> external span that was **not** minted by a `WEB_SEARCH` servicing at a destination of
-> recorded trust `USER_CHOSEN`.
+> **required with no default**, false once any turn of this conversation has carried a
+> recorded external span that was **not** minted by a `WEB_SEARCH` servicing at a
+> destination of recorded trust `USER_CHOSEN`.
+
+> **Normative.** **The field is required with no default, and that is the structural half of
+> §5's legacy refusal.** A default of `True` would be a creation default: whichever store
+> member first touched an unknown conversation would mint a clean-history row, and §5's
+> recorded half — which reads the stored flag wherever a row exists — would then accept a
+> legacy conversation whose prior turns this decision had never seen. **No member of this
+> store creates a row carrying a flag its caller did not supply**, so that path does not
+> exist rather than being forbidden.
 
 > **Normative.** `core/protocols.py` gains **one** further `@runtime_checkable` Protocol,
 > **`SearchBudgetStore`**, keyed by conversation, with exactly **five** members:
@@ -745,7 +753,7 @@ relaxation legible in the way §9 wanted.
 > **Normative.** The five members are declared with exactly these signatures, all `async`:
 >
 > - `draw_of(self, conversation_id: Identifier, /) -> ConversationSearchDraw | None`
-> - `claim(self, conversation_id: Identifier, /, *, max_calls: int, max_elapsed: timedelta) -> SearchClaim | None`
+> - `claim(self, conversation_id: Identifier, /, *, max_calls: int, max_elapsed: timedelta, initial_footing: bool) -> SearchClaim | None`
 > - `settle(self, claim: SearchClaim, /, *, elapsed: timedelta) -> None`
 > - `observe(self, conversation_id: Identifier, /, *, all_external_user_chosen: bool) -> None`
 > - `forget(self, conversation_id: Identifier, /) -> None`
@@ -753,6 +761,17 @@ relaxation legible in the way §9 wanted.
 > `claim` answers `None` where it refuses. The bounds are **passed in** rather than read by
 > the store, so the store holds no `Settings`, no clock and no policy — it is a counter with
 > an exclusion, and every judgement about what a bound is stays in `orchestration`.
+
+> **Normative.** **`initial_footing` is used only where `claim` creates the row, and is
+> ignored where one exists** — the stored flag is authoritative and monotone, and no
+> argument raises it. `orchestration` supplies the same value it would supply to `observe`:
+> whether this conversation had **no recorded turn before this one**. So a legacy
+> conversation's row is created `False` by the very call that charges its first search, and
+> §5's recorded half refuses that search rather than the one after it.
+
+> **Normative.** **The claim, the charge and the row's creation are one indivisible step.**
+> No implementation reads, decides, creates and charges as separate awaits, and none creates
+> a row in one operation and sets its flag in another.
 
 > **Normative.** **The provisional charge is the whole remainder, and three things follow
 > from that one choice.** First, **`orchestration` never needs to know the transport's
@@ -770,12 +789,14 @@ relaxation legible in the way §9 wanted.
 
 > **Normative.** `core/types.py` gains **`SearchClaim`**, a frozen model refusing unknown
 > fields, with exactly three fields: `conversation_id: Identifier`, `id: Identifier` minted
-> by the store, and `charge: timedelta`, the provisional amount this claim added. **It is
-> the handle that makes `settle` unambiguous**: two claims of one conversation may be
-> outstanding at once (two servicings of a turn, two turns of a conversation), so a
-> `settle` naming only a conversation could not say which charge it replaces. `settle`
-> replaces the charge of **that** claim and no other, and is idempotent — a second `settle`
-> of one claim changes nothing.
+> by the store, and `charge: timedelta`, the provisional amount this claim added. **At most
+> one claim of a conversation is outstanding at a time** (above), so the handle is not there
+> to disambiguate concurrent claims; it is there so that `settle` can be **idempotent and
+> stale-safe**. A second `settle` of one claim changes nothing; a `settle` naming a claim the
+> store has already settled, or one whose conversation has been forgotten, changes nothing;
+> and a `settle` naming a conversation alone could not tell a late settlement of a
+> superseded claim from a settlement of the claim now outstanding. `settle` replaces the
+> charge of **that** claim and no other.
 
 > **Normative.** **`forget` is the lifecycle member, and it is idempotent.** It drops the
 > row for one conversation, answers the same whether a row was there or not, and is safe to
