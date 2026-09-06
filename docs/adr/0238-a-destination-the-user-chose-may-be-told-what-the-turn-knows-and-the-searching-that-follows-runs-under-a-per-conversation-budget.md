@@ -487,11 +487,34 @@ recipient.
 > fold that committed in between would be ignored by a request built after it. The flag is
 > monotone, so reading it as late as possible is strictly the fail-closed direction.
 
-> **Normative.** **Nothing awaits between that read and the binding's construction.** The
-> recorded half is the **last** value `orchestration` obtains before it builds the request
-> and constructs the `EgressBinding`; every other input — the destination's trust, the
-> current-turn half, the claim — is already in hand. **A lane that awaits anything between
-> them has widened the window §8 states** and has breached this clause.
+> **Normative.** **The destination's trust is read at that same instant, and an earlier
+> trust read authorises nothing.** `trust_of` is necessarily consulted **before** the
+> supply is built, because §2 and §3 make it the fact that decides whether records may
+> enter a `SearchSupply` at all — but that earlier answer decides only *what may be
+> composed over*, and **no clause reads it as deciding what may be sent**. §1 makes the
+> fact prospective: "a revocation takes effect for every later request and rewrites no
+> recorded decision, and a destination whose record is revoked reads `UNCHOSEN` from that
+> moment." A request built after a revocation is a later request, so **the second condition
+> is evaluated from a `trust_of` call at build time**, and a value carried over the
+> composition satisfies it in no case.
+
+> **Normative.** **So a revocation during composition costs that servicing its search, and
+> nothing has left.** Where trust read `USER_CHOSEN` when the supply was assembled and reads
+> `UNCHOSEN` when the request is built, the second condition fails, the request is **not**
+> closed-loop, ADR-0181 §5's floor binds it as written, and the ruling is the non-`ALLOW`
+> ADR-0231 §12 gives — the servicing yields nothing and the turn composes from what it has.
+> **No byte reached the destination in the meantime**: composition is a `ModelProvider`
+> call inside `planning` (ADR-0231 §3), so the widened supply reaches the local model and
+> the transport is not entered until after the ruling. The user's revocation is therefore
+> honoured for the request it precedes, without any need to cancel work in flight.
+
+> **Normative.** **Nothing awaits between those two reads and the binding's construction.**
+> The recorded half and `trust_of` are the **last** values `orchestration` obtains before it
+> builds the request and constructs the `EgressBinding`; the current-turn half and the claim
+> are already in hand, and neither is a fact another actor can change under this servicing —
+> the current-turn half is computed from records this component holds, and the claim's only
+> role is the fourth condition. **A lane that awaits anything between those reads and the
+> binding has widened the window §8 states** and has breached this clause.
 
 > **The current-turn half is not an optimisation; without it the condition is wrong in
 > both directions.** ADR-0231 §11 fixes the servicing order as local file, then web
@@ -1465,6 +1488,15 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > `observe_search` and releases it, rather than sequencing the two calls and hoping — and B
 > **does** read the not-yet-lowered flag, which is the residual §8 names and this arm
 > records so that it is a ratified property and not a surprise found later.
+
+> **Normative.** **Arm 5d — a revocation during composition is honoured by the request
+> that follows it.** On a conversation whose destination reads `USER_CHOSEN`, the supply is
+> assembled carrying records and the composer is entered; the trust record is **revoked
+> while the composition is in flight**; the request is then built. It is **not**
+> closed-loop, its binding carries `closed_loop` false, its ruling is the non-`ALLOW`
+> ADR-0181 §5 and ADR-0231 §12 give, and **nothing reached the destination** — the arm
+> asserts no transport call was made. The same is asserted where the revocation is written
+> by a second engine over the same data directory rather than by the same one.
 
 > **Normative.** **Arm 6f3 — a claim taken before the fold does not carry a stale footing
 > past it.** The arm drives the interleaving the boundary would be false for if the read
