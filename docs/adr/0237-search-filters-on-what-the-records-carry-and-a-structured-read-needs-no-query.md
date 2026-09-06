@@ -1,6 +1,6 @@
 # 237. `search` filters on what the records already carry, and a structured read needs no query
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-05
 
 ## Context
