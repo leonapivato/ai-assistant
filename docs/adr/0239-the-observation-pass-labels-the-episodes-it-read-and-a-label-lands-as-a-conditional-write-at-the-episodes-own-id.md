@@ -2,14 +2,17 @@
 
 - Status: Proposed
 - Date: 2026-09-05
-- **One record is owed on an earlier ADR and this change writes it.** §14 names
-  the clauses of ADR-0213 this decision replaces — §4's set-at-write clause, §6's
-  producer enumeration and its no-labelling-another-producer's-record clause, and
-  §8's revised-only-by-two-routes clause, **each for `EpisodicMemory` records
-  only** — quotes each, and applies ADR-0070 §1's test to it. ADR-0213's `Status`
-  line carries no leading token, so under ADR-0082 §2 the record is written on that
-  line **and** in an appended dated note. No other ADR's text is touched by this
-  change, and nothing here supersedes anything else.
+- **Two records are owed on earlier ADRs and this change writes both.** §14 names
+  every clause this decision replaces, quotes each, and applies ADR-0070 §1's test to
+  it. On **ADR-0213** — §4's set-at-write clause, §6's producer enumeration and its
+  no-labelling-another-producer's-record clause, and §8's revised-only-by-two-routes
+  and only-in-place-write clauses, **each for `EpisodicMemory` records only**. On
+  **ADR-0075** — §2's exclusion of leg 3's observer and §5's "the path is untouched
+  for every producer except the one §2 names", for **one write alone**: the
+  label-only write onto an episode already in the store. Neither `Status` line
+  carries a leading token, so under ADR-0082 §2 each record is written on that line
+  **and** in an appended dated note. No other ADR's text is touched by this change,
+  and nothing here supersedes anything else.
 
 ## Context
 
@@ -367,8 +370,9 @@ exists for", and every belief that producer proposes still goes through it, unch
 It is a claim about **which** of the observer's outputs is a belief. The clause above
 therefore states the replacement discipline as six obligations rather than leaving it as
 an absence, which is ADR-0075 §3's own shape: "The exemption is not 'no safeguards'; it
-is a different set." §14 applies ADR-0070 §1's test to ADR-0005 and ADR-0075 and finds
-no clause of either made false or over-wide.
+is a different set." §14 applies ADR-0070 §1's test to ADR-0005 and to ADR-0075 and
+records what it finds: nothing of ADR-0005 moves, and ADR-0075 is partially superseded
+one write wide.
 
 **Why in place at the same id rather than a superseding record.** ADR-0213 §8 already
 argued this for the owner's relabel and the argument is stronger for an episode: "a
@@ -982,6 +986,52 @@ only.**
   **final** over an episode a pass has labelled — §3's write-once rule and its ordering
   are what keep that half true rather than merely asserted.
 
+**ADR-0075 — partially superseded, one write wide.**
+
+- **§2's observer bullet.** Its exhaustive list of what capture's exemption does not
+  cover names "**Leg 3's observer.** … The observer is the paradigm case the gate exists
+  for: a model's inference about a person, which must be rejectable." §3 above admits one
+  write by that producer's pass that does not reach the gate, so the bullet can no longer
+  be read as covering everything the pass writes. Replaced **to the extent of the
+  label-only write onto an `EpisodicMemory` already in the store**, and to no greater
+  extent: every belief the observer proposes still goes through the gate, unchanged, and
+  the sentence stays true — and stays the reason the gate exists — of that output.
+- **§5's second bullet.** "**Any change to the gate for any other write.** The path is
+  untouched for every producer except the one §2 names." A reader holding only ADR-0075
+  and asked whether the observation pass may write into the store without the gate
+  answers **no** today, and after this ADR answers *yes, for a labelling*. That is
+  ADR-0070 §1's test — "would a reader holding only the earlier ADR now act differently"
+  — coming out on the supersession side, and the record is owed on that ground rather
+  than on the ground that some sentence is now false.
+- **Everything else in ADR-0075 stands**: §1's scope replacement and its
+  belief-scoped restatement of ADR-0005's rule; §2's capture exemption, its
+  one-producer width, its "at most one insert attempt per outcome" and every other
+  bullet of its list; §3's replacement safeguards; §4; and §5's remaining bullets.
+  Capture's exemption is neither widened nor lent to anything.
+
+**The narrower reading was argued first and is recorded because a later reviewer will
+reach for it.** It runs: §1's live rule is belief-scoped, a labelling is not a belief
+write, so the rule never reached it and no exemption is claimed; §2's list is a list of
+what *capture's* exemption does not cover; and §5's bullet sits under "What this ADR does
+not decide", which is where a later ADR is invited to decide. On the text alone that
+reading holds. It is **not** taken, for two reasons. ADR-0070 §1's test is about what a
+reader would *do*, not only about which sentence is falsified, and on that test §5's
+bullet and §2's observer sentence both read more narrowly after this decision than
+before. And the costs are asymmetric in the way ADR-0082's own Context describes: a
+record that turns out not to have been strictly owed is a dated note a reader can check,
+while a missing one is the inconsistency "a future reviewer re-litigates". Recording it
+is also what puts the judgement where ADR-0082 §1 says it belongs — "in the later ADR's
+text, which is where it is reviewed".
+
+One reading that would have made the record *unarguable* is not relied on, and is
+corrected here so it is not repeated. ADR-0075's Alternatives reject "**Supersede
+ADR-0005's write-path rule wholly, and re-ratify it for beliefs only**" — but that
+bullet's own reason is that "a whole supersession would drag §3's `MemoryPolicy` seam and
+its five outcomes … through a re-ratification that changes none of them. **Partial
+supersession is the sanctioned tool for exactly this**." What is refused there is the
+*mechanism*, not the belief-scoping, which §1 then performs. The record above rests on §2
+and §5, not on that bullet.
+
 **§6's second clause is *not* superseded, and the distinction is load-bearing.**
 "Capture (`orchestration/conversations.py`) writes no topics on the `EpisodicMemory` it
 records per turn. No topic is proposed on any episode under this ADR, by any producer."
@@ -1003,29 +1053,13 @@ answer.**
 - **ADR-0074.** Capture is unchanged in every particular, so no sentence of it becomes
   false or over-wide. Its §4 observation that `participants` is "the field an observer
   means to fill" is the same expectation this ADR meets rather than contradicts.
-- **ADR-0005 and ADR-0075.** ADR-0075 §1 already narrowed ADR-0005's path to "**every
-  write of a belief**", and §3 above argues at length that a labelling is not one: it
-  adds no claim about the user, which is the test ADR-0075 §2 states in terms. So the
-  rule does not reach this write and this write claims no exemption from it — ADR-0075
-  §2's list is a list of what **capture's** exemption does not cover, and nothing here
-  invokes capture's exemption. Neither ADR has a clause made false or read more widely:
-  every belief the observer proposes still goes through the gate, capture is still the
-  one exempt producer, and the observer is still "the paradigm case the gate exists for"
-  for the output that is a belief. **No record is owed on either**, and the reason is
-  recorded here so a reviewer can check the test rather than the label.
+- **ADR-0005 — no record owed.** ADR-0075 §1 already replaced its write-path clause
+  with "**every write of a belief** goes through that path", and a labelling is not a
+  belief write by §3's argument above. ADR-0005's typed kinds, its provenance model, its
+  `MemoryPolicy` seam and its five outcomes are untouched, and every belief this system
+  writes still reaches the gate. No sentence of it becomes false or over-wide, and
+  ADR-0082 §1 rules that absent one "there is nothing to record".
 
-  One reading that says otherwise was put and is answered, because it is the reading a
-  later reviewer will reach for. ADR-0075's Alternatives reject "**Supersede ADR-0005's
-  write-path rule wholly, and re-ratify it for beliefs only**" — but read the rest of
-  that bullet: it is rejected because "a whole supersession would drag §3's
-  `MemoryPolicy` seam and its five outcomes … through a re-ratification that changes none
-  of them. **Partial supersession is the sanctioned tool for exactly this**." What is
-  refused there is the *mechanism*, not the restriction; §1 then performs the restriction
-  by partial supersession, in the words "every write of a belief goes through that path".
-  So ADR-0075's live rule **is** the belief-scoped one, and a write that is not of a
-  belief is outside it rather than exempted from it. ADR-0082 §1 asks for the sentence
-  that becomes false or over-wide; on ADR-0005 and ADR-0075 there is none, and it also
-  rules that a record may not be demanded "on book-keeping grounds alone".
 - **ADR-0217 and ADR-0204.** §3's placement clause **writes no placement**, so ADR-0217
   §3's three setters, its meet and its precedence are untouched, and ADR-0204 §5's
   ratchet is neither weakened nor restated. What the clause does is decline a write
@@ -1100,9 +1134,12 @@ answer.**
   it as "no `core`"; it is one additive member and one small model, with
   `core/protocols.py` untouched, but it has to be sequenced with the batch's other `core`
   lanes rather than beside them.
-- **ADR-0213 acquires a partial supersession four clauses wide.** A reader of that ADR
-  now has to carry "except for episodes" through §4, §6 and §8. §14 states the scope
-  exactly so the exception is bounded rather than atmospheric.
+- **Two ADRs acquire a partial supersession.** A reader of ADR-0213 now carries "except
+  for episodes" through §4, §6 and §8; a reader of ADR-0075 carries "except for a
+  label-only write" through §2 and §5, and that ADR's `Status` line now leads with a
+  supersession token, so a future amendment record on it lives in its note alone
+  (ADR-0082 §2). §14 states both scopes exactly so each exception is bounded rather than
+  atmospheric.
 
 ## Alternatives considered
 

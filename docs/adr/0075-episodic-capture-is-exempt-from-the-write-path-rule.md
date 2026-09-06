@@ -1,7 +1,21 @@
 # 75. Deterministic episodic capture is exempt from the proposal → policy write path
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0239 (§2's exclusion of leg 3's observer, and §5's "the path is untouched for every producer except the one §2 names", for one write alone: the label-only write onto an `EpisodicMemory` already in the store)
 - Date: 2026-07-28
+- **Partially superseded: 2026-09-05 by
+  [ADR-0239](0239-the-observation-pass-labels-the-episodes-it-read-and-a-label-lands-as-a-conditional-write-at-the-episodes-own-id.md),
+  in the scope the `Status` line names.** The observation pass writes `topics` and
+  `participants` onto an episode it read, at that episode's own id, without passing
+  through the `MemoryPolicy` gate. ADR-0239 §3 argues why — the write adds no claim
+  about the user, which is §2's own test, and the gate's five outcomes have no
+  operation for a filing word — and states the six obligations that stand in the
+  gate's place. **What is replaced is one write wide**: §2's observer bullet stays
+  true of every *belief* that producer proposes, which still goes through the gate
+  exactly as this ADR requires, and the observer stays "the paradigm case the gate
+  exists for" for that output. **Everything else here stands**: §1's scope
+  replacement, §2's one-producer-wide capture exemption and every other bullet of its
+  exhaustive list, §3's replacement safeguards, §4, and §5's remaining bullets.
+  Appended note per ADR-0070 §1; no text below it is rewritten.
 - **This ADR partially supersedes ADR-0005**, in the scope named in §1: its
   proposal → policy write path, insofar as that path covers the deterministic
   capture of an episode recording a turn that happened. Everything else ADR-0005
