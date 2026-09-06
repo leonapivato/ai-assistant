@@ -246,6 +246,22 @@ the fifth of five comparisons a grant must satisfy, so moving §4 alone would le
 > included, in a stable order. **No member is added, no argument widened and no return
 > changed by any later lane** without the ADR that decides it.
 
+> **Normative.** **`record`'s checks and its append are one operation, with no
+> interleaving point between them.** The duplicate-`id` check, the empty-set refusal and
+> the duplicate-live-set refusal are taken inside the same indivisible act as the append,
+> not read and then written. **The duplicate-live-set refusal is the one that fails
+> silently without this**: two engines over one data directory each read no live record
+> over a destination set and each append, the store then holds two, and the user's
+> revocation of the record they were shown leaves the other standing — so the revocation
+> clause above would be false of the *store* rather than of any one record, and a
+> destination the user withdrew would keep reading `USER_CHOSEN`. This is
+> `RecipientGrantStore.record`'s own obligation — "the duplicate-id check, the
+> duplicate-**subject** refusal … and the append are **one** operation, not a read
+> followed by a write" (ADR-0193 §1) — read one store over, for the reason that store
+> gives for the same refusal: "revoking one would leave the other standing and the user
+> would have revoked nothing". No caller-side lock discharges it, for the reason ADR-0074
+> §9 gives and §8 quotes.
+
 > **Normative.** **`export` exists because the data right does.** ADR-0004 §6 gives the
 > owner their data, and ADR-0193 §1 already applies that to authorisation records, live
 > and revoked alike: a revoked trust record is the evidence that the user once permitted a
@@ -1623,10 +1639,13 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > `UNCHOSEN` for an empty sequence, for a partial match, for a match spanning two records,
 > for a revoked record, and where the two sides differ in any field of a
 > `CanonicalDestination` or across protocols; `record` refuses a duplicate id, an empty
-> set, a duplicate live set and an `UNCHOSEN` record; `revoke` is prospective and
-> idempotent and rewrites no recorded decision; and `export` answers revoked records that
-> `live` omits, which is the data right ADR-0004 §6 gives and ADR-0193 §1 already applies
-> to authorisation records.
+> set, a duplicate live set and an `UNCHOSEN` record; **two concurrent `record` calls
+> over equal destination sets admit exactly one**, which is the interleaving the refusal
+> is stated over and which a sequential arm cannot reach, pinned as
+> `RecipientGrantStore`'s own suite pins its duplicate-subject refusal; `revoke` is
+> prospective and idempotent and rewrites no recorded decision; and `export` answers
+> revoked records that `live` omits, which is the data right ADR-0004 §6 gives and
+> ADR-0193 §1 already applies to authorisation records.
 
 ### 16. Deferred, by name, each with what fires it
 
