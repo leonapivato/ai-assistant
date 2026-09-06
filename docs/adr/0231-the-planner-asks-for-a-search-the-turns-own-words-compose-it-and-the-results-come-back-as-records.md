@@ -1,10 +1,11 @@
 # 231. The planner asks for a search, the turn's own words compose it, and the results come back as records
 
-- Status: Partially superseded by ADR-0235 (§9's second clause, in its second limb alone: a recorded `CONFIRM` on a `WEB_SEARCH` decision may be read from the trail and offered to a surface for the establishing act, as history and never as outstanding work; the limb's two siblings bind entire, so no lane resumes such a decision or treats it as outstanding work, and §9's first, third, fourth and fifth clauses, §19's entries and every other section of this ADR stand entire) and ADR-0238 (§3's argument-is-the-turn's-own-utterance clause, §4's first and second clauses, and §12's second and third clauses — the composer's one positional-only parameter becomes a `SearchSupply`, which at a destination whose recorded trust is `USER_CHOSEN` may carry memory records, this conversation's episodes and its own prior results, so a search result may reach a later search request and a second search in a conversation that has read one may be ruled `ALLOW`; §3's one-parameter, one-member, no-store-seam-dependency and `planning`/`ModelProvider` clauses stand entire, the utterance-only content property still holds at every destination whose trust reads `UNCHOSEN`, §12's first and fourth clauses stand, and §1, §2, §5–§11, §13–§21 are untouched)
+- Status: Partially superseded by ADR-0235 (§9's second clause, in its second limb alone: a recorded `CONFIRM` on a `WEB_SEARCH` decision may be read from the trail and offered to a surface for the establishing act, as history and never as outstanding work; the limb's two siblings bind entire, so no lane resumes such a decision or treats it as outstanding work, and §9's first, third, fourth and fifth clauses, §19's entries and every other section of this ADR stand entire) and ADR-0238 (§3's argument-is-the-turn's-own-utterance clause, §4's first and second clauses, §12's second and third clauses, and §13's closure of `SearchDisposition` at exactly fifteen members in that count alone (the enumeration becomes sixteen; its members, their values, its injective mapping, its no-message rule and its exclusion of `SearchRefusal.NO_RESULT` all stand) — the composer's one positional-only parameter becomes a `SearchSupply`, which at a destination whose recorded trust is `USER_CHOSEN` may carry memory records, this conversation's episodes and its own prior results, so a search result may reach a later search request and a second search in a conversation that has read one may be ruled `ALLOW`; §3's one-parameter, one-member, no-store-seam-dependency and `planning`/`ModelProvider` clauses stand entire, the utterance-only content property still holds at every destination whose trust reads `UNCHOSEN`, §12's first and fourth clauses stand, and §1, §2, §5–§11, §13–§21 are untouched)
 - Date: 2026-09-04
 - **Partially superseded: 2026-09-05 by ADR-0238 — §3's utterance-only clause,
-  §4's first and second clauses, and §12's second and third clauses. Those five,
-  and nothing else in this ADR.** The owner ruled milestone 31 onto `track:planning`'s
+  §4's first and second clauses, §12's second and third clauses, and §13's closure of
+  `SearchDisposition` at exactly fifteen members. Those six, and nothing else in this
+  ADR.** The owner ruled milestone 31 onto `track:planning`'s
   live record (#1908) on 2026-09-05 in terms naming this ADR: *"Removes two of 29's
   limits: the composer sees only the latest utterance (ADR-0231 §3), and a conversation
   that has read a result declines every later search (ADR-0231 §12). **This is a
@@ -36,6 +37,15 @@
   making the channel structurally absent. **§12's third clause** — the second search
   refused by the policy — is moved exactly as far as ADR-0238 §5's closed-loop
   condition reaches and no further.
+
+  **§13's enumeration becomes sixteen, in its count alone.** ADR-0238 §11 adds one member
+  recording that a servicing did not reach a query because the per-conversation budget
+  refused it — a cause §13's fifteen cannot express and that collapses with none of them.
+  Everything else §13 rules is relied upon rather than moved: the fifteen members and their
+  values, the injective mapping from each refusal vocabulary, `BINDING_FAILED` and
+  `RULING_UNAVAILABLE` carrying no message, the exclusion of `SearchRefusal.NO_RESULT`, the
+  one event under one key, and the clause that this record carries no query, address or
+  result.
 
   **§12's first and fourth clauses stand and are load-bearing.** A revision's request
   may still be composed over a result's content and no lane filters the fourth group;
