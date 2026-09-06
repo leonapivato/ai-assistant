@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -1697,9 +1697,10 @@ class _PauseOnFirstSearch(InMemoryMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
+        **axes: Any,  # ADR-0237 §1's axes, relayed not observed
     ) -> MemorySearchResult:
         """Delegate, then hold the first search's result until ``resume``."""
-        matches = await super().search(query, limit=limit, kinds=kinds, bands=bands)
+        matches = await super().search(query, limit=limit, kinds=kinds, bands=bands, **axes)
         if self._pending:
             self._pending = False
             # After the read, so the caller is left holding a snapshot the
@@ -1806,9 +1807,10 @@ class _ParksTheFirstSearch(_RecordingStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
+        **axes: Any,  # ADR-0237 §1's axes, relayed not observed
     ) -> MemorySearchResult:
         """Delegate, then hold the first search's result until ``released``."""
-        matches = await super().search(query, limit=limit, kinds=kinds, bands=bands)
+        matches = await super().search(query, limit=limit, kinds=kinds, bands=bands, **axes)
         if self._pending:
             self._pending = False
             self.parked.set()
@@ -2076,9 +2078,10 @@ class _ParksTheFirstDurableSearch(SqliteMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
+        **axes: Any,  # ADR-0237 §1's axes, relayed not observed
     ) -> MemorySearchResult:
         """Delegate, then hold the first search's result until ``released``."""
-        matches = await super().search(query, limit=limit, kinds=kinds, bands=bands)
+        matches = await super().search(query, limit=limit, kinds=kinds, bands=bands, **axes)
         if self._pending:
             self._pending = False
             self.parked.set()

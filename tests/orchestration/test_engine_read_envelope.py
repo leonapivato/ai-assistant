@@ -412,11 +412,12 @@ class _FailingQuery(FakeMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
+        **axes: Any,  # ADR-0237 §1's axes, relayed not observed
     ) -> MemorySearchResult:
         if query == _SIGHTED:
             msg = "fake: this band's read is unavailable"
             raise MemoryStoreError(msg)
-        return await super().search(query, limit=limit, kinds=kinds, bands=bands)
+        return await super().search(query, limit=limit, kinds=kinds, bands=bands, **axes)
 
 
 async def test_a_record_both_kinds_reached_renders_once_at_the_hops_position() -> None:

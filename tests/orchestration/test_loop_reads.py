@@ -217,9 +217,10 @@ class _Journal(FakeMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
+        **axes: Any,  # ADR-0237 §1's axes, relayed not observed
     ) -> MemorySearchResult:
         self.searches.append((query, limit))
-        return await super().search(query, limit=limit, kinds=kinds, bands=bands)
+        return await super().search(query, limit=limit, kinds=kinds, bands=bands, **axes)
 
     async def get_many(self, record_ids: Sequence[str]) -> dict[str, MemoryRecord]:
         self.keyed.append(tuple(record_ids))
@@ -255,12 +256,13 @@ class _FailSearchFrom(FakeMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
+        **axes: Any,  # ADR-0237 §1's axes, relayed not observed
     ) -> MemorySearchResult:
         self.calls += 1
         if self.calls >= self._nth:
             msg = "fake: this band's read is unavailable"
             raise MemoryStoreError(msg)
-        return await super().search(query, limit=limit, kinds=kinds, bands=bands)
+        return await super().search(query, limit=limit, kinds=kinds, bands=bands, **axes)
 
 
 class _DeletingPlanner:
@@ -392,8 +394,9 @@ class _SuspendAfterNthSearch(FakeMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
+        **axes: Any,  # ADR-0237 §1's axes, relayed not observed
     ) -> MemorySearchResult:
-        found = await super().search(query, limit=limit, kinds=kinds, bands=bands)
+        found = await super().search(query, limit=limit, kinds=kinds, bands=bands, **axes)
         self.calls += 1
         if self.calls == self._nth:
             self.held = self.suspend_next_operation()

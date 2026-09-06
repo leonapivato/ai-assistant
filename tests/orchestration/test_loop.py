@@ -15,7 +15,7 @@ from __future__ import annotations
 import itertools
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -832,6 +832,7 @@ class _JournallingStore(FakeMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
+        **axes: Any,  # ADR-0237 §1's axes, relayed not observed
     ) -> MemorySearchResult:
         """Record the call as asked for, then answer it as the fake does."""
         self._journal.append(
@@ -842,7 +843,7 @@ class _JournallingStore(FakeMemoryStore):
                 bands=None if bands is None else tuple(bands),
             )
         )
-        return await super().search(query, limit=limit, kinds=kinds, bands=bands)
+        return await super().search(query, limit=limit, kinds=kinds, bands=bands, **axes)
 
 
 class _JournallingProcessor(FakeFeedbackProcessor):
@@ -875,6 +876,7 @@ class _RefusingSearchStore(FakeMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
+        **axes: Any,  # ADR-0237 §1's axes, relayed not observed
     ) -> MemorySearchResult:
         """Refuse: this store must not be read."""
         msg = f"the resolution must issue no search here, and it searched for {query!r}"
@@ -1233,12 +1235,13 @@ class _FailingEpisodicStore(FakeMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
+        **axes: Any,  # ADR-0237 §1's axes, relayed not observed
     ) -> MemorySearchResult:
         """Fail an episodic read; answer any other as the fake does."""
         if kinds is not None and MemoryKind.EPISODIC in tuple(kinds):
             msg = "fake: the episodic index is unavailable"
             raise MemoryStoreError(msg)
-        return await super().search(query, limit=limit, kinds=kinds, bands=bands)
+        return await super().search(query, limit=limit, kinds=kinds, bands=bands, **axes)
 
 
 def _episode(episode_id: str, content: str) -> EpisodicMemory:

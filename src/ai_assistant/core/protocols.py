@@ -200,6 +200,7 @@ if TYPE_CHECKING:
         SpokenDeliveryReport,
         SpokenTurn,
         StepTransition,
+        TimeWindow,
         ToolCall,
         ToolCost,
         ToolDefinition,
@@ -207,6 +208,7 @@ if TYPE_CHECKING:
         ToolInvocation,
         ToolOutcome,
         ToolResult,
+        TopicLabel,
         TraceChunk,
         TracePosition,
         TranscriptArchiveSize,
@@ -905,12 +907,18 @@ class MemoryStore(Protocol):
     belief's window and inserting its replacement are two writes that must land
     together, never leaving the first without the second (ADR-0045 §8).
 
-    Two reads answer two different questions and must not disagree. :meth:`search`
-    is *retrieval*: it takes a query and ranks by relevance. :meth:`list_beliefs`
-    is *inspection*: no query, a specified total order, a page, and a filter on the
-    belief band (ADR-0073 §1). Both honour the same two read-time axes through the
-    same store-level predicate, so "what do you believe about me" and "what do you
-    retrieve" can never answer differently about a record's liveness.
+    Three reads answer three different questions and none may disagree with
+    another. :meth:`search` is *retrieval*: it takes a query and ranks by
+    relevance. :meth:`list_beliefs` is *inspection*: no query, a specified total
+    order, a page, and a filter on the belief band (ADR-0073 §1). :meth:`select` is
+    the *structured read*: no query either, the filter axes ``search`` carries plus
+    the four ADR-0237 §1 adds, a specified total order and no paging — a caller
+    retrieving by structure calls it, a caller with text calls ``search``, a caller
+    inspecting the profile calls ``list_beliefs``, and no lane folds one into
+    another on the strength of the overlap. All three honour the same two read-time
+    axes through the same store-level predicate, so "what do you believe about me",
+    "what do you retrieve" and "what do you hold about this person in this period"
+    can never answer differently about a record's liveness.
 
     Reads come in three shapes and none of them may disagree with another about a
     record's liveness. :meth:`get` and :meth:`get_many` answer the same question
@@ -929,10 +937,11 @@ class MemoryStore(Protocol):
     what ADR-0112 governs.
 
     Cancelling any method here is governed by this module's cancellation clause
-    (ADR-0060). How :meth:`add` and :meth:`write_atomic` observe the records they
-    are handed, how :meth:`get_many` observes its ``record_ids``, and how
-    :meth:`list_beliefs` observes its ``bands`` and ``kinds`` filters, is governed
-    by this module's input-observation clause (ADR-0065).
+    (ADR-0060), :meth:`select` included. How :meth:`add` and :meth:`write_atomic`
+    observe the records they are handed, how :meth:`get_many` observes its
+    ``record_ids``, and how :meth:`search`, :meth:`select` and :meth:`list_beliefs`
+    observe their ``Sequence`` filters, is governed by this module's
+    input-observation clause (ADR-0065).
     """
 
     async def add(self, record: MemoryRecord) -> str:
@@ -1130,13 +1139,17 @@ class MemoryStore(Protocol):
         """
         ...
 
-    async def search(
+    async def search(  # noqa: PLR0913 — ADR-0237 §1 fixes this signature; each axis is a keyword with a None default, and bundling them into a filter object would mint a core type the ADR does not name
         self,
         query: str,
         *,
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
+        occurred_within: TimeWindow | None = None,
+        participants: Sequence[NonBlankEncodableText] | None = None,
+        topics: Sequence[TopicLabel] | None = None,
+        about_person: Sequence[NonBlankEncodableText] | None = None,
     ) -> MemorySearchResult:
         """Return the records most relevant to ``query``, best first.
 
@@ -1260,6 +1273,71 @@ class MemoryStore(Protocol):
         band holds nothing more. No multi-band snapshot and no cross-call read
         consistency of any kind is offered (ADR-0113 §5).
 
+        **Four structured filters over values the records already carry**
+        (ADR-0237 §1): ``occurred_within``, ``participants``, ``topics`` and
+        ``about_person``. Each defaults to ``None``, and ``None`` means the axis is
+        not applied, so every existing caller is preserved unchanged. They are
+        eligibility axes and nothing else: this method's ``query`` stays required,
+        its order stays relevance, and its ``score`` stays populated. The
+        query-less structured read is :meth:`select`, a member of its own.
+
+        **Each of the four binds before the ranking cut** (ADR-0237 §1), joining
+        the predicates above. An implementation may not let a record failing any of
+        them consume the candidate budget the cut is taken from, and the records it
+        ranks are the records eligible on every one of those axes. A store that
+        cannot bind one of them before its cut does not conform — the implementing
+        lane stops and brings back an ADR rather than shipping the weaker form. The
+        skew on these axes is worse than on the band's and structurally so: a time
+        window over "last week" excludes, by construction, every record ever
+        written outside it, so a store that ranks first and drops afterwards
+        returns nothing at all on any store with more than a few weeks of history.
+
+        **No filter is an ordering term** (ADR-0237 §1). None of the four is an
+        addend, factor, weight or threshold in any comparison, and a call spanning
+        two values of an axis compares the records it selects to one another by
+        relevance and by nothing else — ADR-0113 §4's clause, binding here
+        unchanged and unnarrowed.
+
+        **Each filter reads the record's own stored value and nothing derived**
+        (ADR-0237 §1). No implementation infers a topic, a participant, a subject
+        or an instant from ``content``, from ``outcome``, from a rendered facet or
+        from any other span at read time: that is ADR-0213 §4's write-time rule and
+        ADR-0199 §2's read-time classifier prohibition holding on this read. A
+        filter is a comparison against a stored field or it is not this contract.
+
+        **A filter reaches a record if and only if the record carries a value on
+        that axis and the value matches** (ADR-0237 §6). A record carrying no value
+        on an axis is reached by no filter on it — whether the field is empty,
+        unset, or absent from the record's kind altogether. An absent value states
+        that **nothing was recorded** on that axis for that record: not that the
+        record lacks the property, and not that it has every such property. A
+        surface performing such a read owes the owner the disclosure that records
+        carrying no value on the filtered axes were not reached, and that the reach
+        of the read is the values *recorded* rather than the subject the owner has
+        in mind. There is deliberately **no way to ask for the owner's own records**
+        on the subject axis: ADR-0100 §3 rules an unset subject read as the
+        owner's and forbids naming the owner, so a caller wanting them omits
+        ``about_person``, which admits stated and unstated records alike.
+
+        **``occurred_within`` filters the instant of the exchange, not of the
+        event** (ADR-0237 §8). On an episode this system captured, ``occurred_at``
+        is the turn's own instant, stamped by capture, and not the instant of
+        whatever the exchange was about. No consumer reads a window match as
+        evidence about when the event discussed in a record happened, and a surface
+        answering a time-scoped question says which instant it filtered on wherever
+        the distinction could mislead. This contract adds no event-time axis.
+
+        **What ``capped`` certifies is a statement about records carrying the values
+        the call named, and about nothing else** (ADR-0237 §7). Where ``capped`` is
+        ``False`` and the result is short, the store holds no further record
+        carrying those values in that window and passing its read-time axes — it is
+        never a statement that no record concerns the subject, period, person or
+        topic the owner has in mind, and never a statement about what did or did
+        not happen. No consumer composes an assertion of absence from an empty or
+        short result: not to the owner, not into a record, and not into a plan. An
+        empty structured result is still ``capped=False`` under the fourth clause
+        above — a filter selecting nothing matches nothing by construction.
+
         Args:
             query: The search text.
             limit: Maximum number of records to return.
@@ -1277,7 +1355,58 @@ class MemoryStore(Protocol):
                 indistinguishable to the supersession law. Duplicates are set
                 semantics and change nothing. ``bands`` and ``kinds`` compose by
                 **conjunction**: a record is eligible when its band is selected *and*
-                its kind is.
+                its kind is — as does every axis below.
+            occurred_within: If given, restrict results to records whose
+                ``occurred_at`` falls inside this
+                :class:`~ai_assistant.core.types.TimeWindow` — the **half-open**
+                interval ``[start, end)``, so a record is eligible when
+                ``start <= occurred_at`` (or ``start`` is unset) and
+                ``occurred_at < end`` (or ``end`` is unset). ``None`` means the
+                axis is not applied. A record carrying no ``occurred_at`` — every
+                kind but the episodic one — is reached by no window. The type
+                refuses a window with both ends unset and one whose ``end`` is not
+                strictly after its ``start``; one window and never a sequence, so a
+                caller wanting two disjoint periods issues two calls and composes.
+            participants: If given, restrict results to records at least one of
+                whose ``participants`` entries matches at least one of these
+                values. ``None`` means every record — the axis is not applied — and
+                an **empty sequence selects nothing**; the convention is stated here
+                rather than left to be read off ``kinds`` or ``bands``, because
+                leaving it to be inherited is how one implementation comes to treat
+                ``()`` as "no filter", the opposite outcome (ADR-0113 §3).
+                Duplicates are set semantics and change nothing. Matching is
+                ADR-0101 §2's rule: two labels match exactly when
+                ``NFD(toCasefold(NFD(x)))`` is equal for both — Unicode canonical
+                caseless equality, definition D145 — and nothing else is compared.
+                No implementation trims, strips diacritics, removes punctuation,
+                tokenises, splits or truncates either label beyond that fold. A
+                blank or whitespace-only value is refused with ``ValueError``; the
+                :data:`~ai_assistant.core.types.NonBlankEncodableText` annotation
+                carries that refusal without stripping the value it accepts. This
+                axis and the others compose by **conjunction**; within it the values
+                compose by **disjunction**. No label resolves to a person: matching
+                is a pure function of two strings and creates no registry, alias
+                table or equivalence beyond the fold (ADR-0100 §6).
+            topics: If given, restrict results to records carrying at least one of
+                these labels. ``None`` means every record and an **empty sequence
+                selects nothing**, stated here for the same reason as above;
+                duplicates are set semantics. Matching is **equality of the stored
+                characters** and nothing else, which is the only relation
+                :data:`~ai_assistant.core.types.TopicLabel` has (ADR-0213 §3): no
+                fold is applied and none is needed, since the type already refuses
+                any value that does not equal its own ``str.casefold()``. No
+                hierarchy, prefix, synonym, stem or similarity is a topic relation.
+                Records carrying no topic are reached by no value here, which is
+                every episode this system captures today (ADR-0213 §6).
+            about_person: If given, restrict results to records whose
+                ``about_person`` matches at least one of these values, by the same
+                D145 rule and with the same blank refusal as ``participants`` — one
+                matching rule for both person axes, so which field a label happened
+                to be stored in cannot change the answer. ``None`` means every
+                record, and it is how a caller asks for the owner's own: a record
+                with ``about_person`` unset is matched by no value here (ADR-0101
+                §2), and no value spells "unstated". An **empty sequence selects
+                nothing**; duplicates are set semantics.
 
         Returns:
             A :class:`~ai_assistant.core.types.MemorySearchResult`: the matching
@@ -1286,6 +1415,226 @@ class MemoryStore(Protocol):
             ``list_beliefs``' clearing rule (ADR-0073 §2) — and ``capped``, under
             the four clauses above. Each record is a detached snapshot, as with
             every ``MemoryStore`` read.
+
+        Raises:
+            ValueError: If a ``participants`` or ``about_person`` value is blank or
+                whitespace-only (ADR-0237 §2). Such a value is never read as
+                "unstated" and never matches a record, so it is refused rather than
+                quietly ignored. The annotation states the same refusal, and an
+                implementation makes it whatever a caller passes: this is a
+                Protocol signature, not a validated model.
+        """
+        ...
+
+    async def select(  # noqa: PLR0913 — ADR-0237 §1 fixes this signature; the six axes are the read, and bundling them would mint a core type the ADR does not name
+        self,
+        *,
+        limit: int = 10,
+        kinds: Sequence[MemoryKind] | None = None,
+        bands: Sequence[BeliefBand] | None = None,
+        occurred_within: TimeWindow | None = None,
+        participants: Sequence[NonBlankEncodableText] | None = None,
+        topics: Sequence[TopicLabel] | None = None,
+        about_person: Sequence[NonBlankEncodableText] | None = None,
+    ) -> MemorySearchResult:
+        """Return the records the given criteria select, newest write first (ADR-0237 §4).
+
+        The **structured read**: six filter axes, a ``limit``, and **no query at
+        all**. It exists because a bounded time/person/topic lookup expressed as a
+        similarity search is a similarity search — the records it returns are the
+        ones nearest some text, and "which conversations involved Alex in March"
+        has no text to be near. :meth:`search` is retrieval and keeps its query;
+        :meth:`list_beliefs` is the unfiltered, paged inspection of live beliefs;
+        this is neither, and no lane may fold any of the three into another.
+
+        **A call applies at least one axis.** A call applying none is refused with
+        ``ValueError``, and no value of any axis means "everything" — which is what
+        keeps this from quietly becoming a second ``list_beliefs``.
+
+        **The order is total, stable and specified: ``provenance.last_updated``
+        descending, ties broken by ``id`` ascending** (ADR-0237 §5) — the order
+        ADR-0073 §1 already names for ``list_beliefs``, so the corpus has one
+        enumeration order and not two. It is keyed on the write stamp and not on
+        ``occurred_at`` for **totality**: only an episode carries ``occurred_at``,
+        so an order keyed on it would be undefined on exactly the mixed result a
+        conjunction of ``topics`` and ``about_person`` produces. The cost is named
+        rather than hidden: over a busy week, ``limit=10`` returns the ten most
+        recently *written* records of that week and not the ten most recent by
+        event time.
+
+        **The order is not a quantity and creates no place to put one.** No band,
+        confidence, currency, evidence-strength or importance is a term in it, and
+        no implementation may make one so (ADR-0112 §§1-2, binding unchanged).
+        Ordering by a store's own write stamp is not currency acting: what ADR-0112
+        refuses is a rank penalty on lapse, and a total order over a set with no
+        relevance ordering at all penalises nothing.
+
+        **``score`` is ``None`` on every returned record — cleared, not merely
+        absent** — because nothing was ranked. That is ADR-0073 §2's rule on the
+        second read with the same property, and the opposite of ``search``'s, whose
+        ``score`` stays populated. A *stored* record can already carry one, since
+        ``add`` accepts any record including one ``search`` returned.
+
+        **Every axis is a read-time eligibility predicate and binds before the
+        cut** (ADR-0237 §1), alongside ADR-0007 §2's retention deadline and both
+        ends of ADR-0045 §6's validity window, which this read honours exactly as
+        ``get``/``search``/``list_beliefs`` honour them. An implementation may not
+        let a record failing any of them consume the candidate budget the cut is
+        taken from. A store that cannot bind one of them before its cut does not
+        conform — the implementing lane stops and brings back an ADR rather than
+        shipping the weaker form.
+
+        **Each filter reads the record's own stored value and nothing derived.** No
+        implementation infers a topic, a participant, a subject or an instant from
+        ``content``, from ``outcome``, from a rendered facet or from any other span
+        at read time (ADR-0213 §4, ADR-0199 §2). A filter is a comparison against a
+        stored field or it is not this contract.
+
+        **A filter reaches a record if and only if the record carries a value on
+        that axis and the value matches** (ADR-0237 §6). A record carrying no value
+        on an axis is reached by no filter on it — whether the field is empty,
+        unset, or absent from the record's kind altogether. An absent value states
+        that **nothing was recorded** on that axis: not that the record lacks the
+        property, and not that it has every such property. A surface performing this
+        read owes the owner the disclosure that records carrying no value on the
+        filtered axes were not reached, and that the reach of the read is the values
+        *recorded* rather than the subject the owner has in mind. There is
+        deliberately **no way to ask for the owner's own records** on the subject
+        axis: ADR-0100 §3 rules an unset subject read as the owner's and forbids
+        naming the owner, so a caller wanting them omits ``about_person``.
+
+        **``occurred_within`` filters the instant of the exchange, not of the
+        event** (ADR-0237 §8). On an episode this system captured, ``occurred_at``
+        is the turn's own instant, stamped by capture, not the instant of whatever
+        the exchange was about. No consumer reads a window match as evidence about
+        when the event discussed in a record happened, and a surface answering a
+        time-scoped question says which instant it filtered on wherever the
+        distinction could mislead. This contract adds no event-time axis.
+
+        **``capped`` carries ADR-0128 §2's four clauses here in the same terms and
+        with the same words as on ``search``** (ADR-0237 §7). It reports the store's
+        own candidate ceiling and never the size of the eligible set; ``False`` on a
+        result shorter than ``limit`` certifies that the store holds no further
+        record carrying the values the call named and passing its read-time axes;
+        ``True`` is available only on a short result and is a refusal to certify;
+        and a read matching nothing by construction — a filter selecting nothing, a
+        non-positive ``limit`` — reports ``False``, never ``True``. An empty result
+        is not a capped one. This read *reports* on no ``search``: it issues its own
+        result with its own ``capped``, and a caller learns nothing from it about a
+        ``search`` it made.
+
+        **What that certification covers is records carrying the values the call
+        named, and nothing else.** It is not a statement that no record concerns the
+        subject, the period, the person or the topic the owner has in mind, and it
+        is never a statement about what did or did not happen. No consumer composes
+        an assertion of absence from an empty or short result — not to the owner,
+        not into a record, and not into a plan. A surface reporting on such a read
+        reports what it looked for and what it could not reach, never that the thing
+        did not occur.
+
+        **No paging, and ``limit`` is not refused.** There is no ``offset``: a
+        result holding ``limit`` records asserts nothing about whether the store
+        holds further eligible records below the cut. A non-positive ``limit``
+        matches nothing and returns an empty, uncapped result — ``list_beliefs``'
+        *refusal* of an out-of-range value is not borrowed here — and a ``limit``
+        larger than the eligible set returns the whole of it where no candidate
+        ceiling bound the read. An implementation binding ``limit`` into a query
+        language clamps at its own boundary: a ``limit`` no store can represent is
+        one that returns records, never one that raises.
+
+        Args:
+            limit: Maximum number of records to return; ``<= 0`` matches nothing
+                and returns an empty, uncapped result. Not refused and never
+                propagated as an error out of a storage layer that cannot
+                represent it.
+            kinds: If given, restrict results to these memory kinds. ``None`` means
+                every kind — but see the refusal above: ``None`` on *every* axis is
+                a call this read refuses rather than answers. An **empty sequence
+                selects nothing**, stated here rather than left to be read off
+                ``search`` or ``list_beliefs``, because leaving it to be inherited
+                is how one implementation comes to treat ``()`` as "no filter", the
+                opposite outcome (ADR-0113 §3). Duplicates are set semantics and
+                change nothing.
+            bands: If given, restrict results to these belief bands. ``None`` means
+                every band; an **empty sequence selects nothing**; duplicates are
+                set semantics. Keyed on
+                :class:`~ai_assistant.core.types.BeliefBand` and never on
+                ``MemorySource``, for ``list_beliefs``' reason: a source filter
+                would push ``band_of`` into every caller and let one ask for half a
+                band — ``OBSERVED`` without ``INFERRED`` — which ADR-0072 §4 keeps
+                indistinguishable to the supersession law. The band is an
+                eligibility axis and never an ordering one here either: this read
+                orders by the rule above and by nothing else.
+            occurred_within: If given, restrict results to records whose
+                ``occurred_at`` falls inside this
+                :class:`~ai_assistant.core.types.TimeWindow` — the **half-open**
+                interval ``[start, end)``, so a record is eligible when
+                ``start <= occurred_at`` (or ``start`` is unset) and
+                ``occurred_at < end`` (or ``end`` is unset). ``None`` means the
+                axis is not applied. A record carrying no ``occurred_at`` — every
+                kind but the episodic one — is reached by no window. The type
+                refuses a window with both ends unset and one whose ``end`` is not
+                strictly after its ``start``; one window and never a sequence, so a
+                caller wanting two disjoint periods issues two calls and composes.
+            participants: If given, restrict results to records at least one of
+                whose ``participants`` entries matches at least one of these
+                values. ``None`` means the axis is not applied and an **empty
+                sequence selects nothing**; duplicates are set semantics. Matching
+                is ADR-0101 §2's rule: two labels match exactly when
+                ``NFD(toCasefold(NFD(x)))`` is equal for both — Unicode canonical
+                caseless equality, definition D145 — and nothing else is compared.
+                No implementation trims, strips diacritics, removes punctuation,
+                tokenises, splits or truncates either label beyond that fold. A
+                blank or whitespace-only value is refused with ``ValueError``; the
+                :data:`~ai_assistant.core.types.NonBlankEncodableText` annotation
+                carries that refusal without stripping the value it accepts. No
+                label resolves to a person: matching is a pure function of two
+                strings and creates no registry, alias table or equivalence beyond
+                the fold (ADR-0100 §6).
+            topics: If given, restrict results to records carrying at least one of
+                these labels. ``None`` means the axis is not applied and an **empty
+                sequence selects nothing**; duplicates are set semantics. Matching
+                is **equality of the stored characters** and nothing else, the only
+                relation :data:`~ai_assistant.core.types.TopicLabel` has (ADR-0213
+                §3): no fold is applied and none is needed, since the type already
+                refuses any value that does not equal its own ``str.casefold()``.
+                No hierarchy, prefix, synonym, stem or similarity is a topic
+                relation. Records carrying no topic are reached by no value here,
+                which is every episode this system captures today (ADR-0213 §6).
+            about_person: If given, restrict results to records whose
+                ``about_person`` matches at least one of these values, by the same
+                D145 rule and with the same blank refusal as ``participants`` — one
+                matching rule for both person axes, so which field a label happened
+                to be stored in cannot change the answer. ``None`` means the axis
+                is not applied, and it is how a caller asks for the owner's own: a
+                record with ``about_person`` unset is matched by no value here
+                (ADR-0101 §2), and no value spells "unstated". An **empty sequence
+                selects nothing**; duplicates are set semantics.
+
+        Every axis composes with every other by **conjunction** — a record is
+        eligible when it is eligible on every axis the call applies — and within
+        one axis the values compose by **disjunction**: a record is eligible on
+        that axis when it matches at least one of the values given.
+
+        Returns:
+            A :class:`~ai_assistant.core.types.MemorySearchResult`: the eligible
+            records in the order above, each with ``score`` cleared to ``None``,
+            and ``capped`` under the clauses above. The container is
+            ``search``'s — its name is that method's history rather than a claim
+            about which read produced it, and a second type carrying the same pair
+            would oblige ADR-0128 §2's clauses to be stated twice. Each record is a
+            detached snapshot, as with every ``MemoryStore`` read.
+
+        Raises:
+            ValueError: If the call applies **no** axis — every one of the six
+                ``None`` (ADR-0237 §4) — or if a ``participants`` or
+                ``about_person`` value is blank or whitespace-only (§2). A blank is
+                never read as "unstated" and never matches a record, so it is
+                refused rather than quietly ignored. The annotations state the same
+                refusal, and an implementation makes it whatever a caller passes:
+                this is a Protocol signature, not a validated model.
+            MemoryStoreError: If the store cannot be read, or a stored record is
+                corrupt.
         """
         ...
 

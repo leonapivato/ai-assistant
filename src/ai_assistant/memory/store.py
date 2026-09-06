@@ -24,10 +24,12 @@ from ai_assistant.core.errors import (
     MemoryStoreStaleError,
 )
 from ai_assistant.core.types import (
+    EpisodicMemory,
     MemorySearchResult,
     MemoryWriteMode,
     RecordChunk,
     band_of,
+    caseless_key,
 )
 from ai_assistant.memory._walk import (
     check_walk_limit,
@@ -46,6 +48,8 @@ if TYPE_CHECKING:
         MemoryKind,
         MemoryRecord,
         MemoryWrite,
+        TimeWindow,
+        TopicLabel,
         WalkPosition,
     )
 
@@ -83,6 +87,121 @@ def _newest_revision_first(records: list[MemoryRecord]) -> list[MemoryRecord]:
     """
     by_id = sorted(records, key=lambda record: record.id)
     return sorted(by_id, key=lambda record: record.provenance.last_updated, reverse=True)
+
+
+def _selects_nothing(*axes: frozenset[object] | None) -> bool:
+    """Whether any applied sequence axis is **empty**, and so selects nothing.
+
+    ADR-0113 §3's convention, which ADR-0237 §2 restates for the three axes it
+    adds: ``None`` means the axis is not applied and an empty sequence selects
+    nothing. Answered here rather than by an empty ``in`` test per axis so that
+    every axis gets the same answer — leaving it to be inherited is how one
+    implementation comes to read ``()`` as "no filter", the opposite outcome.
+
+    A read this returns ``True`` for matches nothing **by construction**, so its
+    result is empty and ``capped`` is ``False`` and never ``True`` (ADR-0128 §2).
+
+    Args:
+        axes: The materialised axes, ``None`` where the axis is not applied.
+
+    Returns:
+        Whether at least one applied axis is empty.
+    """
+    return any(axis is not None and not axis for axis in axes)
+
+
+def _person_keys(argument: str, values: Sequence[str]) -> frozenset[str]:
+    """Fold one person-axis filter to ADR-0101 §2's comparison keys.
+
+    Duplicated across the two stores and the canonical fake rather than shared,
+    exactly as ``_check_page_bounds`` is: ``ai_assistant.testing`` may not import a
+    subsystem (golden rule 1). The **fold itself** is not duplicated — it is
+    :func:`~ai_assistant.core.types.caseless_key` in ``core``, because a fold that
+    drifted between three implementations would make one call answer differently
+    per backend, which is the divergence ADR-0237 §3 borrows an external standard
+    to prevent.
+
+    Duplicates collapse into the set, which is the set semantics ADR-0237 §2 gives
+    every sequence axis, and the caller's sequence is read exactly once.
+
+    Args:
+        argument: The parameter's name, for the refusal message.
+        values: The labels the call named.
+
+    Returns:
+        Their canonical caseless keys.
+
+    Raises:
+        ValueError: If any value is blank or whitespace-only (ADR-0237 §2). Never
+            read as "unstated" and never matching a record, so it is refused
+            rather than quietly ignored.
+    """
+    keys: set[str] = set()
+    for value in values:
+        if not value.strip():
+            msg = f"a {argument} value must not be blank (ADR-0237 §2)"
+            raise ValueError(msg)
+        keys.add(caseless_key(value))
+    return frozenset(keys)
+
+
+def _refuse_an_axis_less_select(axes: tuple[object | None, ...]) -> None:
+    """Refuse a ``select`` that applies no axis at all (ADR-0237 §4).
+
+    ``select`` is not a second ``list_beliefs``: no value of any axis means
+    "everything", so a call naming no criterion is a caller that reached for one
+    and gave none. Refusing it is what keeps the two reads from becoming
+    substitutes for one another.
+
+    Raises:
+        ValueError: If every axis is ``None``.
+    """
+    if all(axis is None for axis in axes):
+        msg = "select applies at least one axis; a call naming none is refused (ADR-0237 §4)"
+        raise ValueError(msg)
+
+
+def _admits(
+    record: MemoryRecord,
+    *,
+    window: TimeWindow | None,
+    participants: frozenset[str] | None,
+    topics: frozenset[str] | None,
+    subjects: frozenset[str] | None,
+) -> bool:
+    """Whether ``record`` is eligible on all four of ADR-0237 §1's axes.
+
+    Conjunction across the axes, disjunction within each (§2), and each axis reads
+    the record's **own stored value** and nothing derived from ``content`` or any
+    other span (§1). A record carrying no value on an axis is reached by no filter
+    on it — whether the field is empty, unset, or absent from its kind altogether
+    (§6) — so the ``occurred_at`` and ``participants`` tests fail closed on every
+    kind but the episodic one, and ``about_person``'s on every record that states
+    no subject (ADR-0101 §2).
+
+    Args:
+        record: The stored record, decoded.
+        window: The instant window, or ``None`` where the axis is not applied.
+        participants: Caseless keys, or ``None``.
+        topics: Labels compared by exact stored characters, or ``None``.
+        subjects: Caseless keys for ``about_person``, or ``None``.
+
+    Returns:
+        Whether every applied axis admits the record.
+    """
+    episode = record if isinstance(record, EpisodicMemory) else None
+    if window is not None and (episode is None or not window.contains(episode.occurred_at)):
+        return False
+    if participants is not None and not (
+        episode is not None
+        and any(caseless_key(person) in participants for person in episode.participants)
+    ):
+        return False
+    if topics is not None and not any(label in topics for label in record.topics):
+        return False
+    return subjects is None or (
+        record.about_person is not None and caseless_key(record.about_person) in subjects
+    )
 
 
 def _relevance(query_terms: set[str], content: str) -> float:
@@ -379,13 +498,17 @@ class InMemoryMemoryStore:
             and self._is_readable(record, now)
         }
 
-    async def search(
+    async def search(  # noqa: PLR0913 — ADR-0237 §1's signature, one keyword per axis
         self,
         query: str,
         *,
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
+        occurred_within: TimeWindow | None = None,
+        participants: Sequence[str] | None = None,
+        topics: Sequence[TopicLabel] | None = None,
+        about_person: Sequence[str] | None = None,
     ) -> MemorySearchResult:
         """Return the records most relevant to ``query``, best first.
 
@@ -417,24 +540,52 @@ class InMemoryMemoryStore:
             kinds: If given, restrict results to these memory kinds.
             bands: If given, restrict results to these belief bands; ``None`` is
                 every band and ``()`` none, conjunctive with ``kinds``.
+            occurred_within: If given, the half-open ``[start, end)`` window a
+                record's ``occurred_at`` must fall inside; a record carrying none
+                is reached by no window (ADR-0237 §§2, 6).
+            participants: If given, the person labels at least one of a record's
+                own must be canonically caseless-equal to (ADR-0101 §2's D145
+                fold); ``None`` is every record and ``()`` none.
+            topics: If given, the labels at least one of a record's own must equal
+                character for character (ADR-0213 §3); ``None`` is every record
+                and ``()`` none.
+            about_person: If given, the subject labels a record's own must be
+                caseless-equal to; a record stating no subject is matched by none
+                of them. ``None`` is every record and ``()`` none.
 
         Returns:
             A :class:`~ai_assistant.core.types.MemorySearchResult` holding the
             matching records, highest score first, each carrying its relevance
             ``score``, truncated to ``limit`` — and ``capped=False``.
 
+        Raises:
+            ValueError: If a ``participants`` or ``about_person`` value is blank
+                (ADR-0237 §2).
+
         Note:
-            ``kinds`` and ``bands`` are materialised on the coroutine's **first
-            executed line**, as in ``list_beliefs`` below and for the same reason:
-            this method never suspends, so ADR-0065's clause is vacuous here, but
-            the snapshot keeps the three implementations one shape and keeps the
-            discharge from resting on the absence of a suspension point a later
-            revision could add (#436).
+            Every ``Sequence`` filter is materialised on the coroutine's **first
+            executed lines**, as in ``select`` and ``list_beliefs`` below and for
+            the same reason: this method never suspends, so ADR-0065's clause is
+            vacuous here, but the snapshot keeps the three implementations one
+            shape and keeps the discharge from resting on the absence of a
+            suspension point a later revision could add (#436).
         """
         wanted = None if kinds is None else frozenset(str(kind) for kind in kinds)
         wanted_bands = None if bands is None else frozenset(bands)
+        wanted_people = None if participants is None else _person_keys("participants", participants)
+        wanted_topics = None if topics is None else frozenset(topics)
+        wanted_subjects = (
+            None if about_person is None else _person_keys("about_person", about_person)
+        )
         query_terms = {term for term in query.lower().split() if term}
-        if limit <= 0 or not query_terms:
+        # An empty sequence on any axis selects nothing (ADR-0113 §3, ADR-0237 §2),
+        # which is a read that matches nothing *by construction* and so is never
+        # a capped one (ADR-0128 §2).
+        if (
+            limit <= 0
+            or not query_terms
+            or _selects_nothing(wanted, wanted_bands, wanted_people, wanted_topics, wanted_subjects)
+        ):
             return MemorySearchResult(records=())
 
         now = self._now_utc()  # one reading for the whole search, not one per record
@@ -444,10 +595,112 @@ class InMemoryMemoryStore:
             if self._is_readable(record, now)
             and (wanted is None or record.kind in wanted)
             and (wanted_bands is None or band_of(record.provenance.source) in wanted_bands)
+            and _admits(
+                record,
+                window=occurred_within,
+                participants=wanted_people,
+                topics=wanted_topics,
+                subjects=wanted_subjects,
+            )
             and (score := _relevance(query_terms, record.content)) > 0.0
         ]
         scored.sort(key=lambda record: record.score or 0.0, reverse=True)
         return MemorySearchResult(records=tuple(scored[:limit]))
+
+    async def select(  # noqa: PLR0913 — ADR-0237 §1's signature, one keyword per axis
+        self,
+        *,
+        limit: int = 10,
+        kinds: Sequence[MemoryKind] | None = None,
+        bands: Sequence[BeliefBand] | None = None,
+        occurred_within: TimeWindow | None = None,
+        participants: Sequence[str] | None = None,
+        topics: Sequence[TopicLabel] | None = None,
+        about_person: Sequence[str] | None = None,
+    ) -> MemorySearchResult:
+        """Return the records the criteria select, newest write first (ADR-0237 §4).
+
+        The structured read: six axes, a ``limit`` and no query. Filters, orders,
+        then cuts — in that order, so every axis binds before ``limit``'s cut
+        (ADR-0237 §1), which here is free rather than earned: this store filters
+        every live record and truncates once at the end, so no candidate budget
+        exists for an ineligible record to consume. It is written down anyway,
+        because the reason it holds is a property of this implementation rather
+        than of the contract.
+
+        **``capped`` is therefore always ``False``** (ADR-0237 §7). This store has
+        no candidate ceiling: nothing but ``limit`` can shorten a result, so a
+        short result is always the whole eligible set and always certifiable.
+
+        The order is ``provenance.last_updated`` descending, ties by ``id``
+        ascending — the total order ``list_beliefs`` already returns — and
+        ``score`` is **cleared** on every record, because nothing was ranked
+        (ADR-0237 §5).
+
+        Every ``Sequence`` filter is materialised on the coroutine's **first
+        executed lines**, the same discharge ``search`` above takes.
+
+        Args:
+            limit: Maximum number of records to return; ``<= 0`` matches nothing
+                and is not refused.
+            kinds: Memory kinds to include; ``None`` is every kind, ``()`` none.
+            bands: Belief bands to include; ``None`` is every band, ``()`` none.
+            occurred_within: The half-open ``[start, end)`` window a record's
+                ``occurred_at`` must fall inside; a record carrying none is
+                reached by no window.
+            participants: Person labels compared by ADR-0101 §2's D145 fold
+                against each of a record's own; ``()`` selects nothing.
+            topics: Labels compared by exact stored characters; ``()`` selects
+                nothing.
+            about_person: Subject labels compared by the same fold; a record
+                stating no subject is matched by none. ``()`` selects nothing.
+
+        Returns:
+            A :class:`~ai_assistant.core.types.MemorySearchResult` holding the
+            eligible records in that order, cut to ``limit``, each with ``score``
+            cleared — and ``capped=False``.
+
+        Raises:
+            ValueError: If the call applies no axis at all, or a ``participants``
+                or ``about_person`` value is blank (ADR-0237 §§2, 4).
+            MemoryStoreError: If the injected clock's reading is not conforming.
+        """
+        wanted_kinds = None if kinds is None else frozenset(str(kind) for kind in kinds)
+        wanted_bands = None if bands is None else frozenset(bands)
+        wanted_people = None if participants is None else _person_keys("participants", participants)
+        wanted_topics = None if topics is None else frozenset(topics)
+        wanted_subjects = (
+            None if about_person is None else _person_keys("about_person", about_person)
+        )
+        _refuse_an_axis_less_select(
+            (kinds, bands, occurred_within, participants, topics, about_person)
+        )
+        if limit <= 0 or _selects_nothing(
+            wanted_kinds, wanted_bands, wanted_people, wanted_topics, wanted_subjects
+        ):
+            return MemorySearchResult(records=())
+
+        now = self._now_utc()  # one reading for the whole read, as ``search`` takes
+        matched = [
+            record
+            for record in self._records.values()
+            if self._is_readable(record, now)
+            and (wanted_kinds is None or record.kind in wanted_kinds)
+            and (wanted_bands is None or band_of(record.provenance.source) in wanted_bands)
+            and _admits(
+                record,
+                window=occurred_within,
+                participants=wanted_people,
+                topics=wanted_topics,
+                subjects=wanted_subjects,
+            )
+        ]
+        page = _newest_revision_first(matched)[:limit]
+        # Cleared, not merely absent: a record re-added after a search carries that
+        # query's relevance, and nothing was ranked here (ADR-0237 §5).
+        return MemorySearchResult(
+            records=tuple(record.model_copy(update={"score": None}, deep=True) for record in page)
+        )
 
     async def list_beliefs(
         self,
