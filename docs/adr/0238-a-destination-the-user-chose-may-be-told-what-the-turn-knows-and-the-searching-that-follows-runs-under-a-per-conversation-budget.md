@@ -226,7 +226,7 @@ the fifth of five comparisons a grant must satisfy, so moving §4 alone would le
 > ADR-0217 §1's refusal table exists to prevent.
 
 > **Normative.** `core/protocols.py` gains **one** `@runtime_checkable` Protocol,
-> **`DestinationTrustStore`**, with exactly **four** members and no more: **`record`**,
+> **`DestinationTrustStore`**, with exactly **five** members and no more: **`record`**,
 > taking a `DestinationTrustRecord` and appending it, refusing a duplicate `id`, an empty
 > destination set and a record duplicating a live record's destination set, by an
 > `InvalidDestinationTrustError` beside `InvalidRecipientGrantError`; **`trust_of`**,
@@ -452,8 +452,8 @@ recipient.
 > (§1); **every recorded external span this conversation has carried — on any earlier
 > turn, and on this turn up to the moment the request is built — was minted by a
 > `WEB_SEARCH` servicing at a destination of recorded trust `USER_CHOSEN`** (the two
-> halves are stated in the clause below); and the conversation's accumulated draw (§8)
-> leaves room in every bound of §8 for the call this request would make. A request
+> halves are stated in the clause below); and **this request holds a claim §8's store
+> granted for this call**. A request
 > failing any of the four is not closed-loop, and every clause this ADR supersedes binds
 > on it exactly as it does today.
 
@@ -481,6 +481,15 @@ recipient.
 > §1 stamps one bit on the captured episode, so neither can say *what* the external
 > content was. **No component recovers either half by inspecting an episode, a record's
 > content, a query or a reply**, and no component asks a model for either.
+
+> **Normative.** **The fourth condition is a claim already held, never capacity still
+> unspent.** `claim` charges the call it admits (§8), so by the time the request is built
+> the draw no longer has room for it — a condition reading "the draw leaves room for one
+> more call" would therefore be false for **every** admitted request, and false first for
+> the last call a conversation is allowed. The order is fixed for that reason: **claim,
+> then compose, then build the request, then bind, then rule, then send.** A servicing that
+> did not claim composes nothing, so no request lacking a claim ever reaches the fourth
+> condition at all.
 
 > **Normative.** **The whole condition reaches the ruling as one recorded fact on the
 > binding.** `EgressBinding` gains `closed_loop: bool`, **defaulting to `False`**: true
@@ -725,19 +734,24 @@ relaxation legible in the way §9 wanted.
 > recorded trust `USER_CHOSEN`.
 
 > **Normative.** `core/protocols.py` gains **one** further `@runtime_checkable` Protocol,
-> **`SearchBudgetStore`**, keyed by conversation, with exactly **four** members:
-> **`draw_of`**, answering a conversation's `ConversationSearchDraw`, and answering
-> `calls=0`, `elapsed=0` and `all_external_user_chosen=True` for a conversation it holds
-> nothing for; **`claim`**; **`settle`**; and **`observe`**, folding one turn's externality
-> footing into the stored flag by logical **and**. A fifth member is added by no lane
-> without the ADR that decides it.
+> **`SearchBudgetStore`**, keyed by conversation, with exactly **five** members:
+> **`draw_of`**, answering a conversation's `ConversationSearchDraw` **or `None` where it
+> holds no row for that conversation**; **`claim`**; **`settle`**; **`observe`**, folding
+> one turn's externality footing into the stored flag by logical **and**, and creating the
+> row where none exists; and **`forget`**, dropping a conversation's row entirely. A sixth
+> member is added by no lane without the ADR that decides it.
+
+> **Normative.** **`forget` is the lifecycle member, and it is idempotent.** It drops the
+> row for one conversation, answers the same whether a row was there or not, and is safe to
+> call again after a partial failure — which is what a sweep that may be interrupted and
+> re-run needs (ADR-0074 §7, §8).
 
 > **Normative.** **`claim` is one atomic step: admit, charge, and answer the deadline.**
 > Given a conversation and the two bounds, it refuses where the stored `calls` have reached
 > `search_calls_per_conversation` or the stored `elapsed` has reached
-> `search_elapsed_per_conversation`; otherwise it increments `calls` by one, adds to
-> `elapsed` the **deadline it is about to grant**, and answers that deadline — the lesser of
-> the transport's own timeout and the conversation's remaining time. **The read, the
+> `search_elapsed_per_conversation`; otherwise it increments `calls` by one and adds to
+> `elapsed` **the transport's own timeout**, which is the longest the admitted call can
+> take. **The read, the
 > comparison and the write are one indivisible step.** That is `RecipientGrantStore`'s
 > atomic count-with-append (ADR-0193 §1) applied to a counter, and it is why concurrent
 > turns, a failed turn and a process exit are answered by one clause rather than three:
@@ -759,11 +773,22 @@ relaxation legible in the way §9 wanted.
 > distinguishes them. Conservative admission is the honest reading, and it errs toward
 > searching less.
 
-> **Normative.** **The elapsed bound is enforced as a deadline and never as a hope.** The
-> value `claim` answers is the deadline that call is given, so a call cannot run past the
-> conversation's remaining time and the stored `elapsed` can never exceed the bound. No
-> implementation admits a call on accumulated time alone and then lets it run to the
-> transport's own timeout.
+> **Normative.** **The elapsed bound is a start-only bound with a stated overrun, and
+> `WebSearcher` is not widened to carry a deadline.** A call is admitted only while the
+> stored `elapsed` is **strictly below** the bound; once admitted it runs under the
+> transport's own timeout, which ADR-0231 §6 and ADR-0029 §4 already place inside the seam
+> and which `WebSearcher.search(call, /)` takes no parameter to override. **So the settled
+> total may exceed the bound by at most one transport timeout, and never by more**, because
+> the call that crossed it was the last one admitted. That is ADR-0228 §4's shape — a bound
+> checked at the start of an operation rather than enforced mid-flight — and the overrun is
+> stated rather than discovered.
+
+> **Normative.** **No lane closes the overrun by adding a timeout parameter to
+> `WebSearcher.search`, by wrapping the seam in a cancellation outside it, or by having
+> `orchestration` time the call and abandon it.** ADR-0029 §4 puts the timeout inside the
+> implementation and ADR-0231 §6 keeps it there; a caller-imposed cancellation would be a
+> second timeout in a second place, which is the shape this corpus has already refused.
+> Firing the overrun open is an ADR deciding how a deadline reaches that seam at all.
 
 > **Normative.** **The footing is monotone and is written by `orchestration`.** For every
 > turn it captures, `orchestration` calls `observe` with whether **every** recorded external
@@ -774,21 +799,32 @@ relaxation legible in the way §9 wanted.
 > axis, and it is what keeps a conversation closed after the tainting episode has fallen out
 > of the tail (ADR-0223 §6's un-tainting, which this ADR does not disturb).
 
-> **Normative.** **A conversation this store holds nothing for reads a true flag, and that
-> is correct rather than permissive.** Vacuous truth over zero observed turns is what a new
-> conversation deserves; a conversation that searched before this decision landed carries
-> its stamped episode in the very next turn's supply, so §5's **current-turn** half is false
-> for it before any `observe` has run, and its first captured turn writes the flag false for
-> good. No legacy conversation acquires the carve-out at any point.
+> **Normative.** **Absence of a row is not evidence of a clean history, and §5's recorded
+> half says so in terms.** That half is satisfied where `draw_of` answers a row whose
+> `all_external_user_chosen` is **true**, **or** where `draw_of` answers `None` **and** the
+> `ConversationStore` holds no recorded turn of that conversation before this one. It is
+> **not** satisfied by `None` alone. A conversation with no prior turn cannot have a history
+> to hide, which is why the first limb of the disjunction is vacuous truth rather than a
+> guess; a conversation that has turns and no row is one this decision has never observed,
+> and it fails.
+
+> **Normative.** **This is what closes a legacy conversation whose stamped episode is
+> gone.** A conversation that read a file before this decision landed may, by the time of
+> its next turn, have lost that episode — expired under ADR-0007 §2, deleted, or simply
+> fallen out of the tail (ADR-0223 §6's own un-tainting, which ADR-0231 §12 records) — and
+> `ConversationLifecycle.history` skips a turn whose episode does not resolve. Its current
+> turn's supply can therefore be clean. **The prior-turn test is what refuses it**, and no
+> later clean capture rescues it: `observe` folds by **and** onto a row that, once created,
+> records what this decision has actually seen.
 
 > **Normative.** **The store is local, durable and never written to a remote service**
 > (ADR-0004 §2), it holds a Tier 1 fact, it ships as a **triad**, and it holds **counters
 > and one flag and no content** — no query, no result, no destination, no record, no text.
 
 > **Normative.** **A conversation's row goes when the conversation goes.** The
-> capture/lifecycle stage in `orchestration` clears it in the same sequences it already
-> runs — ADR-0074 §8's deletion and §7's retention reclaim — because ADR-0074 §9 already
-> rules that "the **capture/lifecycle stage in `orchestration`** owns every cross-store
+> capture/lifecycle stage in `orchestration` calls **`forget`** in the same sequences it
+> already runs — ADR-0074 §8's deletion and §7's retention reclaim — because ADR-0074 §9
+> already rules that "the **capture/lifecycle stage in `orchestration`** owns every cross-store
 > sequence". This ADR adds a store to those sequences and changes neither, and
 > **`ConversationStore` gains no member, `Conversation` and `ConversationTurn` gain no
 > field, and `ConversationExport` does not change shape or version.**
@@ -1088,10 +1124,10 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > turn** searches not at all; and a store reopened after a process exit reads that same
 > one, with the unsettled claim standing at its full deadline.
 
-> **Normative.** **Arm 6c — the elapsed bound is a deadline.** With
-> `search_elapsed_per_conversation` at sixty seconds and fifty-nine already stored, the
-> admitted call is given a one-second deadline rather than the transport's own timeout, and
-> the stored `elapsed` never exceeds the bound.
+> **Normative.** **Arm 6c — the elapsed bound is start-only, with its overrun.** With
+> `search_elapsed_per_conversation` at sixty seconds and fifty-nine already stored, one
+> further call is admitted and the next is refused; the settled total may exceed sixty by up
+> to one transport timeout and by no more, and no call is cancelled from outside the seam.
 
 > **Normative.** **Arm 6d — a claimed call is never refunded.** A servicing whose ruling is
 > not `ALLOW`, one whose binding refused, and one whose provider answered
@@ -1101,6 +1137,22 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > **Normative.** **Arm 6e — the footing is monotone.** A conversation whose flag is false
 > stays false when a later turn's supply carries nothing external at all, including after
 > the tainting episode has fallen out of the tail.
+
+> **Normative.** **Arm 6f — absence is not a clean history.** A conversation with recorded
+> turns and no budget row is not closed-loop, **including where its stamped episode no
+> longer resolves and its current supply carries nothing external at all**; a conversation
+> with no recorded prior turn and no row is closed-loop on the first two conditions. Both
+> are asserted, because the first is the hole a `None`-means-true reading opens.
+
+> **Normative.** **Arm 6g — the last permitted call is usable.** With
+> `search_calls_per_conversation` set to one, the admitted servicing's own request is
+> closed-loop: the fourth condition reads the claim this request holds, not the capacity
+> left after charging it. The same is asserted for the last second of the elapsed bound.
+
+> **Normative.** **Arm 6h — `forget` clears the row.** A deleted conversation and a
+> reclaimed one each leave no row behind; `forget` answers the same on a second call and on
+> a conversation that never had a row; and a conversation whose row was forgotten and whose
+> turns are gone reads as a conversation with no recorded prior turn.
 
 > **Normative.** **Arm 7 — the spend interaction.** A deployment with a declared per-call
 > figure, a period ceiling and no `world_spend_unknown_allowance` is refused at
