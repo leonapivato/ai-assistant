@@ -2354,6 +2354,50 @@ class MemoryStoreContract:
         assert _ids(found) == {"asserted", "inferred"}, _AXIS_WRONG
 
     @pytest.mark.parametrize("read", _READS)
+    @pytest.mark.parametrize(
+        "malformed",
+        [
+            pytest.param("Renovation", id="uppercase"),
+            pytest.param("", id="empty"),
+            pytest.param("   ", id="blank"),
+            pytest.param(" renovation", id="leading-space"),
+            pytest.param("renovation ", id="trailing-space"),
+            pytest.param("home  renovation", id="double-space"),
+            pytest.param("home\trenovation", id="tab"),
+        ],
+    )
+    async def test_a_topics_value_not_in_the_canonical_form_is_refused(
+        self, store: MemoryStore, read: str, malformed: str
+    ) -> None:
+        """ADR-0237 §2's third refusal, on both reads and every implementation.
+
+        "A ``topics`` value not already in ``TopicLabel``'s canonical form is
+        refused by the type" — and an implementation has to *ask* the type, because
+        a Protocol signature is not a validated model: an ``Annotated`` alias in a
+        method's annotations runs no validator at a normal call, so an unenforced
+        annotation refuses nothing at all.
+
+        **Refused rather than left to match nothing**, which is the failure this
+        case exists for and the one an implementation falls into by writing
+        ``frozenset(topics)``. An unrefused ``"Renovation"`` returns an **empty
+        result** — the single answer ADR-0237 §7 spends four clauses insisting a
+        caller must never read as "nothing happened". A caller's typo would be
+        indistinguishable from a true absence, on the read whose entire contract is
+        about what an absence means. It would also leave this parameter alone among
+        the three sequence axes in answering a malformed value quietly, where a
+        blank ``participants`` value raises.
+
+        The forms are ADR-0213 §3's clauses one apiece rather than a token
+        uppercase: a store checking only ``value == value.casefold()`` passes the
+        first and fails the rest, and each of the others is a spelling a caller
+        composing a label from user text actually produces.
+        """
+        await store.add(_episode("labelled", _ANY, topics=("renovation",)))
+
+        with pytest.raises(ValueError, match="topic label"):
+            await _filtered(store, read, topics=[malformed])
+
+    @pytest.mark.parametrize("read", _READS)
     @pytest.mark.parametrize("axis", ["participants", "about_person"])
     async def test_a_blank_value_on_a_person_axis_is_refused(
         self, store: MemoryStore, read: str, axis: str
