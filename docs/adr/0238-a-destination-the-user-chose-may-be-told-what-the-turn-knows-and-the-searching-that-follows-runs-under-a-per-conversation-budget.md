@@ -737,8 +737,8 @@ relaxation legible in the way §9 wanted.
 > **`SearchBudgetStore`**, keyed by conversation, with exactly **five** members:
 > **`draw_of`**, answering a conversation's `ConversationSearchDraw` **or `None` where it
 > holds no row for that conversation**; **`claim`**; **`settle`**; **`observe`**, folding
-> one turn's externality footing into the stored flag by logical **and**, and creating the
-> row where none exists; and **`forget`**, dropping a conversation's row entirely. A sixth
+> the value its caller computed into the stored flag by logical **and**, creating the row
+> where none exists; and **`forget`**, dropping a conversation's row entirely. A sixth
 > member is added by no lane without the ADR that decides it.
 
 > **Normative.** **`forget` is the lifecycle member, and it is idempotent.** It drops the
@@ -750,19 +750,29 @@ relaxation legible in the way §9 wanted.
 > Given a conversation and the two bounds, it refuses where the stored `calls` have reached
 > `search_calls_per_conversation` or the stored `elapsed` has reached
 > `search_elapsed_per_conversation`; otherwise it increments `calls` by one and adds to
-> `elapsed` **the transport's own timeout**, which is the longest the admitted call can
-> take. **The read, the
+> `elapsed` **the transport's own timeout** as a provisional charge, which `settle` then
+> replaces. **The read, the
 > comparison and the write are one indivisible step.** That is `RecipientGrantStore`'s
 > atomic count-with-append (ADR-0193 §1) applied to a counter, and it is why concurrent
 > turns, a failed turn and a process exit are answered by one clause rather than three:
 > **two turns of one conversation, two servicings of one turn, and two engines over one
 > data directory can none of them be admitted against the same draw.**
 
-> **Normative.** **`settle` replaces a claim's charged deadline with the time the call
-> actually took**, which is never more than the deadline. It is the only write that lowers
-> `elapsed`, it lowers no `calls`, and **a claim that is never settled stands at its full
-> deadline** — the fail-closed direction, and the reason nothing is owed for a turn that
-> ends in an exception, a `PlanningError` on a later revision, a restart or a disconnection.
+> **Normative.** **`settle` replaces a claim's provisional charge with the interval that
+> claim actually occupied**, which may be smaller or larger than the charge. **The accounted
+> interval is the one `orchestration` can measure: its own await of the search servicing**,
+> from before the seam is entered to after it returns. `settle` lowers no `calls`, and **a
+> claim that is never settled stands at its full charge** — the fail-closed direction, and
+> the reason nothing is owed for a turn that ends in an exception, a `PlanningError` on a
+> later revision, a restart or a disconnection.
+
+> **Normative.** **The interval is `orchestration`'s await and not the provider exchange,
+> because the exchange's duration is a fact no contract reports.** `SearchOutcome` carries no
+> elapsed value and `WebSearcher` is not widened here to add one, so the only honest quantity
+> is the one the caller holds. It includes ADR-0192's ledger claim and completion writes,
+> which that ADR left unbounded when it superseded ADR-0029 §4's reach — **so no lane states
+> that a call's accounted time is bounded by the transport's timeout**, and §16 defers
+> bounding it with what fires that.
 
 > **Normative.** **A claimed call is consumed whatever the outcome, and there is no
 > refund.** A servicing that claims and then does not transmit — a binding that refused, a
@@ -778,10 +788,12 @@ relaxation legible in the way §9 wanted.
 > stored `elapsed` is **strictly below** the bound; once admitted it runs under the
 > transport's own timeout, which ADR-0231 §6 and ADR-0029 §4 already place inside the seam
 > and which `WebSearcher.search(call, /)` takes no parameter to override. **So the settled
-> total may exceed the bound by at most one transport timeout, and never by more**, because
-> the call that crossed it was the last one admitted. That is ADR-0228 §4's shape — a bound
-> checked at the start of an operation rather than enforced mid-flight — and the overrun is
-> stated rather than discovered.
+> total may exceed the bound by one admitted call's accounted interval**, because the call
+> that crossed it was the last one admitted. That is ADR-0228 §4's shape — a bound checked at
+> the start of an operation rather than enforced mid-flight. **The overrun is not bounded by
+> the transport timeout**: the accounted interval includes ADR-0192's unbounded ledger
+> writes, so what is claimed is that at most **one** call overruns, never that the overrun is
+> small.
 
 > **Normative.** **No lane closes the overrun by adding a timeout parameter to
 > `WebSearcher.search`, by wrapping the seam in a cancellation outside it, or by having
@@ -790,14 +802,28 @@ relaxation legible in the way §9 wanted.
 > second timeout in a second place, which is the shape this corpus has already refused.
 > Firing the overrun open is an ADR deciding how a deadline reaches that seam at all.
 
-> **Normative.** **The footing is monotone and is written by `orchestration`.** For every
-> turn it captures, `orchestration` calls `observe` with whether **every** recorded external
-> span that turn's final supply carried was minted by a `WEB_SEARCH` servicing at a
+> **Normative.** **The flag means two things at once, and `orchestration` computes both.**
+> It means *every turn this decision has observed was clean* **and** *this decision has
+> observed every turn this conversation has had*. For every turn it captures,
+> `orchestration` calls `observe` with the conjunction of: whether **every** recorded
+> external span that turn's final supply carried was minted by a `WEB_SEARCH` servicing at a
 > destination of recorded trust `USER_CHOSEN` — computed from records it holds as data it
-> fetched, at the same instant and by the same component as ADR-0223 §1's own value. **Once
-> false the flag never returns to true**, which is ADR-0106 §4's monotonicity read on this
-> axis, and it is what keeps a conversation closed after the tainting episode has fallen out
-> of the tail (ADR-0223 §6's un-tainting, which this ADR does not disturb).
+> fetched, at the same instant and by the same component as ADR-0223 §1's own value; **and**,
+> where the store holds no row for this conversation yet, whether the conversation had **no
+> recorded turn before this one**.
+
+> **Normative.** **So a row created for a conversation that already had turns is created
+> false**, and the refusal §5's recorded half makes for an unobserved legacy conversation
+> survives the row's creation. Without the second conjunct, one clean turn of a legacy
+> conversation whose tainting episode had expired would mint a `True` row and the prior-turn
+> test would never run again — the same hole a `None`-means-true reading opens, arriving one
+> turn later.
+
+> **Normative.** **Once false the flag never returns to true**, which is ADR-0106 §4's
+> monotonicity read on this axis, and it is what keeps a conversation closed after the
+> tainting episode has fallen out of the tail (ADR-0223 §6's un-tainting, which this ADR does
+> not disturb). `observe` folds by **and** and by no other operation; no lane adds a member,
+> a flag or a repair that raises it.
 
 > **Normative.** **Absence of a row is not evidence of a clean history, and §5's recorded
 > half says so in terms.** That half is satisfied where `draw_of` answers a row whose
@@ -1016,10 +1042,11 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > is the state every binding in this corpus carries today, so nothing decoded changes
 > behaviour.
 
-> **Normative.** **A conversation §8's store holds no row for reads a zero draw and a true
-> flag**, which §8 states is correct rather than permissive, and which §5's current-turn
-> half is what actually closes for a legacy conversation. No lane back-fills a row, infers
-> one, or reconstructs one from an episode, a log or a trail.
+> **Normative.** **A conversation §8's store holds no row for reads a zero draw and no flag
+> at all** — `draw_of` answers `None` — and §5's recorded half is then satisfied only where
+> that conversation has no recorded turn before this one. No lane back-fills a row, infers
+> one, reconstructs one from an episode, a log or a trail, or reads a missing row as a clean
+> history.
 
 > **Normative.** **A conversation in progress when the implementing lane lands behaves
 > exactly as it does under ADR-0231 today**: it is not closed-loop, so it searches under
@@ -1126,8 +1153,8 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 
 > **Normative.** **Arm 6c — the elapsed bound is start-only, with its overrun.** With
 > `search_elapsed_per_conversation` at sixty seconds and fifty-nine already stored, one
-> further call is admitted and the next is refused; the settled total may exceed sixty by up
-> to one transport timeout and by no more, and no call is cancelled from outside the seam.
+> further call is admitted and the next is refused, whatever the admitted call's settled
+> interval turns out to be, and no call is cancelled from outside the seam.
 
 > **Normative.** **Arm 6d — a claimed call is never refunded.** A servicing whose ruling is
 > not `ALLOW`, one whose binding refused, and one whose provider answered
@@ -1138,11 +1165,14 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > stays false when a later turn's supply carries nothing external at all, including after
 > the tainting episode has fallen out of the tail.
 
-> **Normative.** **Arm 6f — absence is not a clean history.** A conversation with recorded
-> turns and no budget row is not closed-loop, **including where its stamped episode no
-> longer resolves and its current supply carries nothing external at all**; a conversation
-> with no recorded prior turn and no row is closed-loop on the first two conditions. Both
-> are asserted, because the first is the hole a `None`-means-true reading opens.
+> **Normative.** **Arm 6f — absence is not a clean history, and creating a row does not
+> launder one.** A conversation with recorded turns and no budget row is not closed-loop,
+> **including where its stamped episode no longer resolves and its current supply carries
+> nothing external at all**; and after a clean turn of that conversation has been observed —
+> which creates its row — it is **still** not closed-loop, because the row was created false.
+> A conversation with no recorded prior turn and no row is closed-loop on the first two
+> conditions. All three are asserted, because the middle one is the hole that opens one turn
+> after the first is closed.
 
 > **Normative.** **Arm 6g — the last permitted call is usable.** With
 > `search_calls_per_conversation` set to one, the admitted servicing's own request is
@@ -1202,6 +1232,11 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 - **Moving `search_max_results`, or a second search per servicing.** ADR-0231 §19's entry
   is untouched: this ADR widens what one query is composed over and how many servicings a
   conversation may have, and moves neither ceiling.
+- **Bounding a search's accounted interval.** §8 accounts `orchestration`'s own await,
+  which includes ADR-0192's ledger claim and completion writes — unbounded since that ADR
+  superseded ADR-0029 §4's reach. Fired by an ADR bounding those writes, or by one deciding
+  how a deadline reaches `WebSearcher.search` at all. Not fired by a lane finding one
+  conversation's overrun large.
 - **The surfaces that offer §1's act.** ADR-0193 §13's assignment (§14).
 - **The two corpus findings this ADR reports rather than settles**: ADR-0223 §6's and
   ADR-0233 §9's disagreement about which clause of ADR-0181 §5 is the lineage floor
