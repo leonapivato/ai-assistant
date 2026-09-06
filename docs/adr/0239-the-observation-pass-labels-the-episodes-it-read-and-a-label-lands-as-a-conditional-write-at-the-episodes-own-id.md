@@ -281,9 +281,11 @@ about the axis, and §7 below states in terms that sharing a form shares nothing
 ### 3. The write: a conditional revision at the episode's own id, of two fields and nothing else
 
 > **Normative.** A labelling lands as a `write_atomic` element in
-> `MemoryWriteMode.IF_UNCHANGED`, whose `expected_revision` is the revision of the
-> episode **the pass's own read observed** (ADR-0219 §1, §2). It is a write at the
-> episode's own id. It is never an `add`, never an `UPSERT`, never an
+> `MemoryWriteMode.IF_UNCHANGED`, whose `expected_revision` is the revision carried by
+> **the very `EpisodicMemory` the producer was handed** — the record the read that
+> selected the batch returned (ADR-0219 §1, §2). **No implementation re-reads the
+> episode between that selection and the write**, and no other revision is expected. It
+> is a write at the episode's own id. It is never an `add`, never an `UPSERT`, never an
 > `INSERT_IF_ABSENT`, and never a supersession.
 
 > **Normative.** It changes `topics` and `participants` and **no other field**. No
@@ -299,11 +301,11 @@ about the axis, and §7 below states in terms that sharing a form shares nothing
 > **abandoned**: not retried, not re-read, not re-proposed and not written
 > unconditionally. The pass continues with the rest of its labellings.
 
-> **Normative.** **A labelling is written only where the destination episode's
-> placement reach is not wider than the reach of every episode of the batch the
-> producer was handed.** Where it is wider, the labelling is discarded and that episode
-> stays unlabelled. No labelling write changes a placement, narrows one, or is
-> permitted to make one narrower elsewhere.
+> **Normative.** **A labelling is written only where every episode of the batch the
+> producer was handed carries the same placement reach and the same placement setter as
+> the destination episode.** Where the batch is not uniform in both, **no labelling is
+> written for any episode of that page**. No labelling write changes a placement,
+> narrows one, widens one, or reads one for any other purpose.
 
 > **Normative.** The labelling write is **not** part of the batch that installs the
 > pass's proposals, and neither is a condition of the other. A refused or failed
@@ -416,35 +418,70 @@ re-read whole by the next pass". So an episode a later pass re-reads is one whos
 advance did not commit — and under the clause above, one no pass ever labelled. The
 other two re-readings are safe on the two clauses already stated: an unresolved turn has
 no episode to label, and two concurrent passes over one page are separated by
-`IF_UNCHANGED` and by the write-once test, whichever of them writes first. What the
-ordering costs is named rather than hidden: a labelling write that fails after a
+`IF_UNCHANGED` and by the write-once test, whichever of them writes first.
+
+**The overlap race is why the expected revision is pinned to the selecting read, and
+that is the load-bearing half.** ADR-0212 §5 permits two passes over one conversation to
+select the same page and advance to different positions, so ordering the write after an
+advance does not by itself stop this: pass A advances, labels an episode, the owner
+clears those labels, and pass B — which had already selected that page — writes model
+labels back over the correction, because by then the tuples are empty again and the
+revision B holds is the owner's. **The clause above closes it because B's expectation is
+not the owner's revision.** B's page can only contain that episode if B selected it
+before A's advance, so the record B was handed carries the revision the row held *then*,
+and A's own labelling write has moved it since. B's write is refused, its labelling is
+abandoned, and the owner's empty labels stand. Re-reading the episode after the producer
+returns would throw exactly that guarantee away, which is why the clause forbids it in
+terms rather than leaving the read site to an implementer.
+
+What the ordering costs is named rather than hidden: a labelling write that fails after a
 committed advance is never retried and that page is never re-read, so those episodes
 stay unlabelled for good. That is §8's horizon in miniature and it is the safe
 direction — a lost label, never a wrong one, and never a label over the owner's word.
 
-**Why a labelling declines to cross a narrowing rather than moving one.** A batch is
-not uniform in placement: capture writes reach `OWNER` setter `DERIVED` on an episode
-whose turn ran over withheld content and the default `Placement()` — reach `ANYONE` —
-on every other, so one page can hold both. A label proposed over such a batch is a
-derivation over all of it, and ADR-0217 §3 rules that "a producer deriving a record from
-records of this store writes the **narrowest** reach over every record it was supplied,
-never over the subset it cited, selected, ranked or judged relevant". Its ground is
-ADR-0204 §5's: an `OWNER` input discarded is "an `OWNER` input **laundered**". Without a
-rule, a model that resolves a reference in an `OWNER` episode could file an `ANYONE`
-episode under the label that reference produced, and the narrowing would have leaked
-into a record that stays as disclosable as it was.
+**Why a labelling declines a non-uniform page rather than moving a placement.** A batch
+is not uniform in placement: capture writes reach `OWNER` setter `DERIVED` on an episode
+whose turn ran over withheld content and the default `Placement()` on every other, and
+ADR-0217 §7's acts write reach `OWNER` or `ANYONE` with setter `OWNER_ACT` on a record
+already in the store — so one page can hold several. A label proposed over such a page
+is a derivation over all of it, and ADR-0217 §3 rules that "a producer deriving a record
+from records of this store writes the **narrowest** reach over every record it was
+supplied, never over the subset it cited, selected, ranked or judged relevant". Its
+ground is ADR-0204 §5's: an `OWNER` input discarded is "an `OWNER` input **laundered**".
+Without a rule, a model that resolves a reference inside a restricted episode could file
+a less restricted one under the label that reference produced, and the restriction would
+have leaked into a record that stays exactly as disclosable as it was.
 
-Two answers were available and the conservative one is taken. Writing the meet onto the
-destination — the shape §3's derivation clause describes for a derived *record* — would
-make a filing word change what may be said about an episode, silently narrowing records
-the owner never asked to narrow because they happened to be observed beside a withheld
-turn. §7 forbids exactly that: a label "carries no posture and no disclosure
-consequence". So this decision **declines the write** instead. Nothing is laundered
-because nothing is written, no placement moves, and the loss is a page's wider episodes
-going unlabelled in the minority of batches that are mixed — visible through §6's
-disclosure like every other unlabelled episode. Note what the clause is not: it is not a
-placement rule and it writes no placement, so ADR-0217 §3 and ADR-0204 §5 bind exactly
-as they did, and §14 records it as a stacked addition rather than a change to either.
+**The setter is part of the test and not an afterthought, because reach alone does not
+say who can lift the restriction.** Two episodes can share reach `OWNER` and differ
+entirely in what may become of it: ADR-0217 §7 rules that "Where the placement's setter
+is `DERIVED`, `unguard` writes **nothing** — §3's closing clause is not lifted by an
+act", while a placement the owner set with `OWNER_ACT` is exactly what `unguard` lifts to
+reach `ANYONE`. A rule comparing reach alone would let a label drawn from a `DERIVED`
+episode land on an `OWNER_ACT` one and reach `ANYONE` the moment the owner unguards it —
+the same laundering one act later, which is the shape ADR-0204 §5's closing prohibition
+and ADR-0217 §3's precedence exist to refuse. Comparing both fields closes that without
+any arithmetic of this ADR's own.
+
+**Uniformity rather than an ordering, deliberately.** The alternative is a rule that
+computes whether a destination is "restricted enough" against every input — a meet over
+reach, a total order over setters, and an answer for every pair a later ADR makes
+reachable (`PlacementReach` says in terms that new denotations "not totally ordered with
+these two" are admissible). That is placement arithmetic invented in an ADR about filing
+words, and each pair it gets wrong is a disclosure. Equality of reach and setter needs no
+order, is checkable by inspection, stays correct when a later ADR adds a denotation or a
+setter, and fails in the one safe direction. What it costs is a page's labels whole
+wherever its episodes' placements differ; §6's disclosure covers those episodes like
+every other unlabelled one.
+
+**And the write still moves nothing.** Writing the meet onto the destination — the shape
+§3's derivation clause describes for a derived *record* — would make a filing word change
+what may be said about an episode, silently restricting records the owner never asked to
+restrict because they happened to be observed beside a withheld turn. §7 forbids exactly
+that: a label "carries no posture and no disclosure consequence". So this decision
+**declines the write** instead. Nothing is laundered because nothing is written, no
+placement moves, and §14 records the clause as a stacked addition rather than a change to
+ADR-0217 or ADR-0204 — it reads two fields and writes neither.
 With it, a machine labelling happens at most once per episode and the owner's act is
 final over it, which is ADR-0213 §8's shape preserved rather than merely respected.
 
@@ -757,9 +794,15 @@ The lane briefed from this text owes, beyond the change itself:
   owner clears those labels, and the next pass re-reads the page: the owner's empty
   labels stand, because the ordering means the first pass wrote none. Pinned as the arm
   that holds ADR-0213 §9's finality.
-- **The mixed-placement batch arm.** A batch holding one reach-`OWNER` episode and
-  several reach-`ANYONE` ones labels the `OWNER` episode and none of the others, and no
-  episode's placement moves.
+- **The non-uniform placement arms, both of them.** A page holding a reach-`OWNER`
+  episode beside reach-`ANYONE` ones is labelled nowhere; and a page whose episodes share
+  reach `OWNER` but split between setters `DERIVED` and `OWNER_ACT` is labelled nowhere
+  either. No episode's placement moves in either arm.
+- **The overlap-race arm.** Two passes select one page; the first advances and labels;
+  the owner clears those labels; the second — holding the record it was handed at
+  selection — is refused by `IF_UNCHANGED` and writes nothing. Pinned as the arm that
+  holds ADR-0213 §9's finality against ADR-0212 §5's permitted concurrency, and it fails
+  only if an implementation re-reads the episode after the producer returns.
 - **The provider-down arm.** A `ModelError` leaves every episode of the batch exactly
   as capture wrote it, and the pass reports what it reports today.
 - **The owner arm.** An episode the owner relabelled between the pass's read and its
@@ -812,8 +855,18 @@ The lane briefed from this text owes, beyond the change itself:
   #1908's point (b) names it beside the who/what gap. It is a different field with a
   different producer and this ADR touches neither. **Fires** with the lane that needs an
   event time distinct from a recording time.
-- **The owner's relabel and merge surface.** ADR-0213 §9 defers it; this decision
-  inherits the deferral unchanged and narrows nothing about it. **Fires** as §9 says.
+- **The owner's relabel and merge surface, and the one obligation this decision adds to
+  it.** ADR-0213 §9 defers the surface and this decision inherits the deferral unchanged.
+  It adds one thing that lane owes: **a rule distinguishing an episode whose labels the
+  owner deliberately emptied from one no pass has yet reached.** §3's eligibility test is
+  the two empty tuples, and it cannot tell those apart. Every sequence in which that
+  matters *after* a pass has labelled is closed by §3's ordering and its pinned revision;
+  what is not closed is an owner emptying an episode's labels **before** any pass reaches
+  it, after which the next pass labels it. That act is unperformable today — §9 rules
+  that no lane implements the surface without an ADR deciding it — so the gap is
+  reachable only from the lane that would open it, and it is that lane's to close, with
+  the durable distinction and the eligibility rule it implies. **Fires** as §9 says, with
+  this obligation attached.
 
 ### 12. This ADR fires ADR-0213 §15's "topics on episodes", as its second case
 
