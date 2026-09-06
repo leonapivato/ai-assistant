@@ -1,6 +1,6 @@
 # 74. A conversation is a first-class entity; a turn is an episode
 
-- Status: Partially superseded by ADR-0076 (§9's `ConversationStore` obligation set and the reach of its stamped-conversation exclusion) and ADR-0084 (§9 item 5's premise that the façade is not a contract) and ADR-0086 (§5's refusal of a batch read on the memory store, and the entry repeating it in §10's declined list) and ADR-0205 (§9's enumeration of what a `ConversationTurn` carries and of what the `ConversationStore` owes) and ADR-0212 (§9's enumeration of what Conversation carries and what ConversationStore owes, and its rule that every conversation read is ordered by last activity descending) and ADR-0221 (§3's bullet "Not the message: `EpisodicMemory` carries an `outcome`, which is a property of a completed exchange", only as to the field role it assumes — `outcome` is no longer where the exchange's result is stated: the composed reply is written there and the result is written into a new `EpisodicMemory.disposition`; the bullet's argument that the unit of capture is the turn stands, and §4's stamps, §7's retention and §11's device-identity deferral are untouched)
+- Status: Partially superseded by ADR-0076 (§9's `ConversationStore` obligation set and the reach of its stamped-conversation exclusion) and ADR-0084 (§9 item 5's premise that the façade is not a contract) and ADR-0086 (§5's refusal of a batch read on the memory store, and the entry repeating it in §10's declined list) and ADR-0205 (§9's enumeration of what a `ConversationTurn` carries and of what the `ConversationStore` owes) and ADR-0212 (§9's enumeration of what Conversation carries and what ConversationStore owes, and its rule that every conversation read is ordered by last activity descending) and ADR-0221 (§3's bullet "Not the message: `EpisodicMemory` carries an `outcome`, which is a property of a completed exchange", only as to the field role it assumes — `outcome` is no longer where the exchange's result is stated: the composed reply is written there and the result is written into a new `EpisodicMemory.disposition`; the bullet's argument that the unit of capture is the turn stands, and §4's stamps, §7's retention and §11's device-identity deferral are untouched) and ADR-0238 (§9's enumeration of what the `ConversationStore` owes, which is short by four operations: read a conversation's search draw; claim a search call atomically against a call bound and an elapsed bound, answering a handle or refusing; settle that handle with the interval the call occupied; and fold, by logical `and`, whether every recorded external span a turn carried was minted by a `WEB_SEARCH` servicing at a destination of recorded trust `USER_CHOSEN` — a per-conversation search budget of two counters and one flag, held on the conversation record itself. §9's `core/types.py` enumeration, its per-conversation mutual-exclusion obligation, its two-store reasoning, its bounded-and-ordered read rule, §7's retention reclaim and §8's deletion protocol are untouched and are relied upon as written — no step is added to either sequence, and `Conversation`, `ConversationTurn` and `ConversationExport` gain no field and change no version)
 - Date: 2026-07-28
 - Partially superseded: 2026-08-01 by ADR-0086 — **§5's refusal of a batch read on
   `MemoryStore`, and the entry in §10 repeating it, no longer hold: `get_many` is
@@ -344,6 +344,72 @@
   ADR-0070 §1; no ratified text below is rewritten. The pair and this note land in the
   same change as ADR-0221 itself, which is the existence condition ADR-0082 §7 states.
   Refs #1845, #1221, #1314, #1866.
+
+- **Partially superseded: 2026-09-06 by ADR-0238 — §9's enumeration of what the
+  `ConversationStore` owes is short again, by four operations.** The owner ruled
+  milestone 31 onto `track:planning`'s live record (#1908) on 2026-09-05: a conversation
+  that has searched may search again, "within an enforced budget" of calls and time per
+  conversation.
+  [ADR-0238](0238-a-destination-the-user-chose-may-be-told-what-the-turn-knows-and-the-searching-that-follows-runs-under-a-per-conversation-budget.md)
+  §8 decides that budget, and §17 and §18 name this clause and apply ADR-0070 §1's test;
+  this note records the ruling declared there.
+
+  **Replaced — one enumeration in §9.** The list of what `ConversationStore` owes gains
+  four operations: read a conversation's `ConversationSearchDraw`, or `None` where the id
+  names nothing or names a stamped conversation; **claim** a search call in one
+  indivisible step against a call bound and an elapsed bound passed in by the caller,
+  incrementing the count, charging the whole remaining elapsed budget and answering a
+  handle, or refusing; **settle** that handle, replacing its provisional charge with the
+  interval the call actually occupied, in either direction and idempotently; and
+  **observe**, folding by logical `and` whether every recorded external span a turn
+  carried was minted by a `WEB_SEARCH` servicing at a destination of recorded trust
+  `USER_CHOSEN`. A reader holding only this ADR builds a store with nowhere to hold a
+  per-conversation budget and no way to charge one, which is ADR-0070 §1's test.
+
+  **This is the move ADR-0205 and ADR-0212 each already made on this same enumeration**,
+  and it is made the same way: operations that mint nothing the caller supplies, over row
+  state the caller cannot address directly.
+
+  **Why the budget is here rather than in a store of its own, which is the part §9 makes
+  true.** A durable per-conversation counter must be fenced when the conversation is
+  deleted and destroyed when its record is, and §8 already owns both acts. Held anywhere
+  else, that lifecycle has to be reproduced across two stores with no transaction between
+  them, and §7 makes the failing case unavoidable: a retention reclaim only learns a
+  conversation is eligible once `drop_if_eligible` has already dropped the record, so any
+  cleanup can only follow the destructive act and one process death strands the counter
+  where nothing can rediscover it — the defect ADR-0076 was written to close for this
+  ADR's own tombstones. **§9's own reasoning is what ADR-0238 §8 relies on**: the
+  serialisation obligation sits on the store rather than on a caller, because "two
+  engines — in one process or two — hold two locks and serialise nothing", and it is that
+  exclusion, extended to the four operations, that lets a claim be atomic against
+  concurrent turns of one conversation.
+
+  **Not replaced — everything else §9 decides, and it is relied upon rather than merely
+  left alone.** §9's `core/types.py` enumeration stands: `Conversation` and
+  `ConversationTurn` gain no field, so `ConversationExport` changes neither shape nor
+  version and ADR-0212 §8's `Literal[2]` and ADR-0014 §5's version rule are untouched —
+  the counters are the store's own row state, the position the turn index and
+  `ParkedBinding`'s uniqueness already hold. The index still holds no content: two
+  counters and one flag are no part of any exchange, and no query, result, destination or
+  text reaches this store. The store still mints the id, allocates the ordinal and derives
+  the episode id; the two-store sequence still belongs to a coordinator; both directions
+  of the episode-to-turn relation still stand; and §9 item 3's bounded-and-ordered rule is
+  untouched, none of the four operations being a listing. **§7's retention reclaim and
+  §8's deletion protocol are untouched in terms** — ADR-0238 adds no step, no call and no
+  ordering to either — because `stamp_deleted` fences the budget with the record it is
+  part of and `drop_if_eligible` destroys it with the record, which is exactly why the
+  counters were put here.
+
+  **The seven pairs on the `Status` line name different scopes** — ADR-0076's §9
+  obligation set, ADR-0084's §9 item 5 premise, ADR-0086's §5 refusal, ADR-0205's and
+  ADR-0212's §9 enumerations, ADR-0221's §3 bullet, and this one's — so they accumulate
+  under ADR-0070 §4. ADR-0205's, ADR-0212's and this scope all reach §9's obligation list
+  and name different members of it; where a reader judges them to overlap, ADR-0070 §4's
+  monotonic rule gives the overlap to the higher-numbered ADR, which is this one. No
+  amendment qualifier is on the line, so ADR-0082 §2's move does not arise. Appended note
+  per ADR-0070 §1; no ratified text below is rewritten. The pair and this note land in the
+  same change as ADR-0238 itself, which is the existence condition ADR-0082 §7 states.
+  Refs #1908, #2133.
 
 ## Context
 
