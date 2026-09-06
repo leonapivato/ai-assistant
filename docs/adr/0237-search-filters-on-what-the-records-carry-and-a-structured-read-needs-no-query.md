@@ -161,8 +161,8 @@ that on the subject axis it is the ratified sentence and not a widening of it.
 > ADR-0128 §1 already binds there. An implementation may not let a record failing
 > any of them consume the candidate budget the cut is taken from, and the records
 > it ranks are the records eligible on every one of those axes. A store that
-> cannot bind one of them before its cut does not conform — the implementing lane stops and brings back an
-> ADR rather than shipping the weaker form.
+> cannot bind one of them before its cut does not conform — the implementing lane
+> stops and brings back an ADR rather than shipping the weaker form.
 
 > **Normative.** No filter is an ordering term on either read. None of the four is
 > an addend, factor, weight or threshold in any comparison, and on `search` a call
@@ -458,7 +458,10 @@ and no lane may fold one into another on the strength of it.
 > **Normative.** `select` orders its records by `provenance.last_updated`
 > **descending**, ties broken by `id` **ascending** — the total, stable order
 > ADR-0073 §1 already names for `list_beliefs` — and returns the first `limit` of
-> that ordered, filtered sequence.
+> that ordered, filtered sequence, **or as much of it as the store's own candidate
+> ceiling allowed**, which §7 governs. The order of what comes back is that order
+> whether or not a ceiling bound the read; this clause fixes the ordering and
+> `limit`'s cut, and never promises a page a ceiling can shorten.
 
 > **Normative.** `select` returns `score` as `None` on every record —
 > **cleared**, not merely absent — because nothing was ranked. That is ADR-0073
@@ -573,13 +576,19 @@ proposal rule are that lane's, and this ADR designs none of them.
 > selecting nothing, a non-positive `limit`, and on `search` a blank query — yields
 > `capped` `False`, never `True`; and an empty result is not a capped one.
 
-> **Normative.** `select` inherits `search`'s `limit` behaviour exactly: a
-> non-positive `limit` matches nothing and returns an empty, uncapped result, and a
-> `limit` larger than the eligible set returns the whole of it and raises nothing.
-> Neither read *refuses* a `limit` — that is `list_beliefs`' rule (ADR-0073 §2) and
-> it is not borrowed here — and neither propagates an error from a value its
-> storage layer cannot represent: an implementation binding `limit` into a query
-> language clamps at its own boundary, and the contract's answer is unchanged.
+> **Normative.** `select` inherits `search`'s `limit` behaviour exactly. A
+> non-positive `limit` matches nothing and returns an empty, uncapped result. A
+> `limit` larger than the eligible set returns the whole of it **where no candidate
+> ceiling bound the read** — and where one did, returns what the ceiling allowed
+> with `capped` `True`, which is ADR-0128 §2's third and fourth clauses governing
+> here exactly as they govern `search`. No clause of this ADR promises a
+> completeness `capped` `True` withholds.
+
+> **Normative.** Neither read *refuses* a `limit` — that is `list_beliefs`' rule
+> (ADR-0073 §2) and it is not borrowed here — and neither propagates an error from
+> a value its storage layer cannot represent. An implementation binding `limit`
+> into a query language clamps at its own boundary; a `limit` no store can
+> represent is a `limit` that returns records, never one that raises.
 
 > **Normative.** The certification ADR-0128 §2's first clause gives — where
 > `capped` is `False` and the result is shorter than `limit`, the store holds no
@@ -756,10 +765,18 @@ fixture rather than interpret a wish:
 10. **`select`'s own `limit` boundaries**, asserted on this read and never inherited
     from `search`'s, since every existing limit case supplies a query and none of
     them executes this path. `limit=0` and `limit=-1` each return an empty,
-    uncapped result; `limit=2**63` returns the whole eligible set and raises
-    nothing — the case a store that binds `limit` straight into its query language
-    fails while passing every other fixture here.
-11. **The two reads are not each other.** One store, one fixture: `search` over a
+    uncapped result; `limit=2**63` returns records and **raises nothing** — the
+    case a store binding `limit` straight into its query language fails while
+    passing every other fixture here.
+11. **The ceiling, on the read with no ranking.** On an implementation that has a
+    candidate ceiling: a fixture where `ceiling < eligible count < limit` returns
+    at most the ceiling's worth with `capped` `True` and §5's order over what came
+    back, and the suite asserts that rather than the whole eligible set. On an
+    implementation with no ceiling the case is skipped rather than faked, exactly
+    as ADR-0128 §5 does with its own two. This is the pair §7's completeness clause
+    and §5's cut clause have to be read together to satisfy, and the fixture is
+    what stops them being read apart.
+12. **The two reads are not each other.** One store, one fixture: `search` over a
     query with a window returns the nearest-first records of that window with
     `score` populated; `select` over the same window returns §5's order with
     `score` `None`. Asserted together, because the pair is what §4 decided and a
