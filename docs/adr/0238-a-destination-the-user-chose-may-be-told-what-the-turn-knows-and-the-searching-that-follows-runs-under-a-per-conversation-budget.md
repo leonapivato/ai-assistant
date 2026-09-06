@@ -221,12 +221,28 @@ the fifth of five comparisons a grant must satisfy, so moving §4 alone would le
 > caller that constructs the record**, as `RecipientGrant`'s is (ADR-0193 §1), so that the
 > record is a complete value before it reaches any store and the store's refusal of a
 > duplicate is a comparison rather than an allocation; `destinations:
-> tuple[CanonicalDestination, ...]`, non-empty, the canonical destination set this record
-> is over; `trust: DestinationTrust`; `established_at: UtcInstant`, the instant of the
+> tuple[CanonicalDestination, ...]`, **non-empty, duplicate-free and in the one canonical
+> order**, the destination set this record is over; `trust: DestinationTrust`; `established_at: UtcInstant`, the instant of the
 > user's act; and `revoked_at: UtcInstant | None`, defaulting to `None`. It carries **no
 > tool, no account, no payload, no description and no content**: it is a fact about a
 > destination set and nothing else, which is what makes it readable for a destination no
 > grant covers.
+
+> **Normative.** **`destinations` takes ADR-0193 §1's canonical destination tuple, by the
+> same validator and not a second one.** It is refused at construction unless it is
+> non-empty, duplicate-free and in the total order `EgressBinding.canonical_destination_set`
+> already produces — the rule `RecipientGrant.destinations` carries today. **The reason is
+> this store's duplicate refusal, and it is that ADR's own reason**: pinning one spelling at
+> construction "is what lets three separate rules stated over *identity* … each be written
+> as tuple equality and each mean set equality", and stating the duplicate rule over
+> membership instead "was the other available repair and is the weaker one", because it
+> leaves the comparison free to drift back to tuple equality with no test noticing.
+> **Without it §1's revocation clause is false**: `(Alice, Bob)` and `(Bob, Alice)` are
+> unequal tuples over one logical set, both would be admitted as live, and revoking the
+> record the user was shown would leave the other standing with the destination still
+> reading `USER_CHOSEN` — the exact failure the duplicate refusal exists to prevent.
+> **`trust_of` is unaffected**, its rule being membership rather than order, so no clause
+> here re-canonicalises a caller's query sequence.
 
 > **Normative.** A `DestinationTrustRecord` whose `trust` is `UNCHOSEN` is **refused at
 > construction**. `UNCHOSEN` is what absence means (above), so a record asserting it
@@ -1589,7 +1605,11 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > `UNCHOSEN` for an empty sequence, for a partial match, for a match spanning two records,
 > for a revoked record, and where the two sides differ in any field of a
 > `CanonicalDestination` or across protocols; `record` refuses a duplicate id, an empty
-> set, a duplicate live set and an `UNCHOSEN` record; **two concurrent `record` calls
+> set, a duplicate live set and an `UNCHOSEN` record; **a `DestinationTrustRecord` is
+> refused at construction for an empty, a repeated-member or a non-canonically-ordered
+> destination tuple** — `(Bob, Alice)` where `(Alice, Bob)` is the canonical spelling — so
+> that the duplicate refusal cannot be defeated by reordering and a revocation cannot be
+> left standing behind a reordered twin; **two concurrent `record` calls
 > over equal destination sets admit exactly one**, which is the interleaving the refusal
 > is stated over and which a sequential arm cannot reach, pinned as
 > `RecipientGrantStore`'s own suite pins its duplicate-subject refusal; `revoke` is
@@ -1871,7 +1891,8 @@ before any lane implements against it (golden rule 5).
   the binding wants one value rather than three flags.
 
 **Revisit when** §11's audit shows what conversations actually draw — which decides the
-rolling window and the two defaults together — or when milestone 32's ADR needs a third
+rolling window and the call ceiling's default together, this decision adding one budget
+setting and no second one — or when milestone 32's ADR needs a third
 `DestinationTrust` member, or if an injection benchmark arm (#2096 item 9) is ever built,
 since it is the instrument that would tell anyone whether §4's trade was priced correctly.
 
