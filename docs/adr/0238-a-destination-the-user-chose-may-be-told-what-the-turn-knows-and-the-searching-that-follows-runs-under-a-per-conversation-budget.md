@@ -810,27 +810,37 @@ relaxation legible in the way §9 wanted.
 > chooses; a bound the milestone's exit is stated over may not be absent by omission, so
 > a deployment that configures nothing still searches under it.
 
-> **Normative.** **There is no per-conversation elapsed-time bound, and time is bounded
-> already.** An earlier revision of this decision carried a second `Settings` field, a
-> stored elapsed counter, a provisional charge and a `SearchClaim` handle settled after
-> each call. **All of it is deleted**, and nothing replaces it, because the quantity it
-> bounded is bounded on ground this corpus has already ratified: **ADR-0228 §4 gives each
-> conversational operation a per-turn planning budget** — "a duration, from the turn's
-> entry into the loop, within which an additional planner call may be **started**" —
-> and `converse` and `converse_streaming` declare **PT20S** while `converse_spoken`
-> declares **none** and does not iterate at all. A search servicing is reached only from a
-> planner call, so **a turn stops starting searches once its planning budget is reached**,
-> and a conversation's total search time is bounded by the product of the call ceiling
-> above and that per-turn budget.
+> **Normative.** **This decision bounds provider calls, and it does not bound elapsed
+> time.** An earlier revision carried a second `Settings` field, a stored elapsed counter, a
+> provisional charge and a `SearchClaim` handle settled after each call. **All of it is
+> deleted, and nothing replaces it.** The bound this ADR enforces is the call ceiling above,
+> and **no clause here states a per-conversation bound on wall-clock search time.**
 
-> **Normative.** **That product is stated as the bound it is, and not as a hard ceiling.**
-> ADR-0228 §4 is a gate on **starting** an iteration and says so — "a turn's total duration
-> may therefore exceed its budget by one planner call and one servicing" — so the product
-> is exceeded by at most one servicing per turn, for the same reason and to the same extent
-> that ADR-0228 §4's own budget is. **This ADR neither tightens that nor restates it as
-> exact**, and §16 defers a finer accounting with what fires it. **No lane reintroduces a
-> per-conversation elapsed counter, a claim handle, a settlement member or a deadline
-> parameter to reach a tighter figure** without the ADR that decides it.
+> **Normative.** **The reason it is stated as absent rather than derived is that no
+> derivation is available, and a draft of this section wrongly claimed one.** The claim was
+> that the call ceiling times ADR-0228 §4's per-turn planning budget bounds a conversation's
+> search time. **It does not.** ADR-0228 §4 gates only the **start** of an additional
+> planner call — "checked … **immediately before each additional planner call and at no
+> other point**" — and is "a gate on **starting** an iteration and never a cancellation of
+> one in flight", so a servicing admitted inside the budget runs to completion outside it
+> and its duration is charged to nothing. **Nor is there a per-call bound to substitute**:
+> `WebSearcher.search(call, /)` takes **no timeout and no deadline**, ADR-0231 states none
+> for that seam, and ADR-0029 §4's `timeout` is `ToolInvoker.invoke`'s — which does not
+> reach here, ADR-0231 §5 having ruled the search seam **not a registered tool**. With no
+> bound on one servicing, no product of two ratified quantities bounds a conversation's.
+
+> **Normative.** **What ADR-0228 §4 is cited for here, and for nothing else: when a turn
+> stops *starting* searches.** A search servicing is reached only from a planner call, so a
+> turn whose planning budget is reached starts no further search — `converse` and
+> `converse_streaming` declaring **PT20S**, `converse_spoken` declaring **none** and not
+> iterating at all. **That bounds a turn's search *count*, not its search *time***, and no
+> lane reads this paragraph as supplying a duration.
+
+> **Normative.** **No lane closes the gap inside this ADR's fence.** Reintroducing a
+> per-conversation elapsed counter, a claim handle or a settlement member is the apparatus
+> deleted above and is refused here; and putting a deadline on `WebSearcher.search` is a
+> `core/protocols.py` change, which golden rule 5 gives its own ratified ADR ahead of any
+> implementation. §16 defers the bound with exactly that trigger.
 
 > **Normative.** **The budget is state on the conversation record, and the store that
 > holds it is `ConversationStore`.** It is not a store of its own. A per-conversation
@@ -1103,11 +1113,15 @@ relaxation legible in the way §9 wanted.
 **A conversation and not a period, because the milestone says so and because the unit is
 the one the user can see.** #1908 states the bound as "calls, time and cost per
 conversation", and the conversation is the object a user starts, reads and abandons. **This
-decision meets that in three different ways rather than with three settings**: calls are
-bounded here per conversation; **time** is bounded by ADR-0228 §4's per-turn planning
-budget, whose product with the call ceiling is the per-conversation figure (above); and
-**cost** is declined in §9 in terms, ADR-0231 §15's `SpendGate` inside the seam being the
-money backstop. The honest cost is stated in Consequences: a long-lived conversation exhausts its budget and
+decision delivers two of those three, and says plainly that it does not deliver the
+third.** **Calls** are bounded here, per conversation, by the one `Settings` field §8 adds.
+**Cost** is bounded already and is not re-decided: ADR-0231 §15's `SpendGate` admits the
+transport call inside the seam over ADR-0236's declared figure, and §9 declines a
+per-conversation monetary bound in terms. **Time is not bounded by this ADR** — see above:
+the derivation a draft claimed does not hold, and no per-servicing bound exists to build one
+from. §16 defers it with what fires it. **Whether milestone 31's exit is satisfied by calls
+and cost without a time bound is not this ADR's to decide**, and this clause states the gap
+rather than papering over it. The honest cost is stated in Consequences: a long-lived conversation exhausts its budget and
 searches no more, and the remedy is a new conversation. The rolling-window variant is
 deferred in §16 with its trigger rather than smuggled in as a default.
 
@@ -1208,10 +1222,11 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > **Normative.** **An injected result cannot raise the budget.** The bound is a `Settings`
 > value read by `orchestration`; the draw is a durable counter §8's `admit_search`
 > increments atomically before a channel opens. **The comparison has no other input** — no
-> clock reading, no interval, no duration a provider could stretch, because the elapsed
-> bound this decision once carried is deleted and time is bounded by ADR-0228 §4's per-turn
-> planning budget instead (§8). No value a model produced, a request carried or a search
-> result contained reaches either side of the comparison.
+> clock reading, no interval and no duration a provider could stretch, the elapsed bound
+> this decision once carried being deleted (§8). **A provider that stalls therefore cannot
+> reach the budget at all** — it delays its own conversation and spends no extra call, which
+> is what a counter of calls buys that a counter of time did not. No value a model produced,
+> a request carried or a search result contained reaches either side of the comparison.
 > **No value produced by a model, carried in a request, contained in a search result, or
 > read from any record contributes to either side of the comparison**, and no component
 > raises, extends, resets, suspends or re-reads a bound on account of a turn's content.
@@ -1572,14 +1587,16 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
   Not fired by a lane finding a snippet thin.
 - **A third `DestinationTrust` member.** Fired by an ADR with a policy that reads it. Not
   fired by a lane wanting a finer scale, which is inspection by another name.
-- **A finer elapsed accounting than the product of §8's call ceiling and ADR-0228 §4's
-  per-turn planning budget.** §8 deletes the per-conversation elapsed bound and leans on
-  that budget, which is a gate on *starting* an iteration, so the product is exceeded by at
-  most one servicing per turn and is a loose figure rather than an exact one. **Fired by
-  §11's audit showing that product too loose in practice** — conversations whose wall-clock
-  search time is materially above it, or a deployment that needs a tighter guarantee than a
-  per-turn gate can give. Not fired by a lane finding the arithmetic inelegant, and not by a
-  lane wanting to reintroduce a claim handle or a settlement member for their own sake.
+- **A per-conversation bound on elapsed search time.** §8 deletes the one an earlier
+  revision carried and states that this decision bounds calls and not time; nothing in the
+  corpus bounds a single servicing's duration, so there is nothing to derive a
+  per-conversation figure from. **Fired by an ADR that first decides how a deadline reaches
+  `WebSearcher.search` at all** — a `core/protocols.py` change, and so its own ratified ADR
+  under golden rule 5 (ADR-0015) — after which a per-conversation bound over that quantity
+  becomes stateable. Also fired by the owner ruling that milestone 31's exit is not met by
+  calls and cost alone. **Not** fired by a lane reintroducing the deleted claim handle or
+  settlement member, which answers nothing this defers, and not by §11's audit showing a
+  conversation searching for a long time, which is the symptom rather than the trigger.
 - **A rolling window for §8's bound**, in place of the flat per-conversation figure.
   Fired by §11's audit showing conversations exhausting their budget while still useful.
   Not fired by a lane finding a bound tight.
@@ -1793,15 +1810,17 @@ before any lane implements against it (golden rule 5).
   alternative was a second store whose whole content was a lifecycle this one already has,
   and twelve review rounds established that reproducing that lifecycle across two stores is
   where the defects live.
-- **The budget counts calls and does not measure time, and a conversation's search time is
-  bounded only as a product.** `admit_search` spends one call and there is nothing to settle
+- **The budget counts calls and does not measure time, and search time is not bounded at
+  all.** `admit_search` spends one call and there is nothing to settle
   afterwards, so a turn that dies mid-search costs its conversation exactly the one call it
   was admitted for — no remainder is stranded and no unlucky conversation searches less than
-  its bound allows. What is given up is a direct bound on elapsed time: time is held by
-  ADR-0228 §4's per-turn planning budget instead, so the honest per-conversation figure is
-  the call ceiling times that budget, **exceeded by at most one servicing per turn** for
-  ADR-0228 §4's own stated reason. A deployment that wants a tighter figure than the product
-  gives has no setting for one, and §16 records what would fire an ADR that adds it.
+  its bound allows. **What is given up is any bound on elapsed search time, and it is given
+  up outright rather than traded for a looser one.** A conversation may spend its eight calls
+  over an arbitrarily long wall clock, because no contract bounds how long one servicing
+  runs: `WebSearcher.search` carries no deadline and ADR-0228 §4 gates only when a turn stops
+  *starting* searches. A deployment that needs a time guarantee has no setting for one, and
+  §16 records what fires the ADR that would add it — a decision about how a deadline reaches
+  that seam, which is a `core` Protocol change and so precedes any implementation.
 - **Searching is no longer serialised per conversation.** The earlier revision's provisional
   charge made a second admission impossible while a search was in flight; counting calls
   does not, so two turns of one conversation may search concurrently up to the ceiling. That
