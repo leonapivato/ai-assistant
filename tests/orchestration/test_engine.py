@@ -17,7 +17,7 @@ import inspect
 from datetime import UTC, datetime, timedelta
 from itertools import count
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import pytest
 from pydantic import SecretStr
@@ -462,6 +462,7 @@ class RaisingMemoryStore(FakeMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
+        **axes: Any,  # ADR-0237 §1's axes, relayed not observed
     ) -> MemorySearchResult:
         msg = "retrieval is down"
         raise MemoryStoreError(msg)
@@ -4283,10 +4284,11 @@ class RecordingSearchStore(FakeMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
+        **axes: Any,  # ADR-0237 §1's axes, relayed not observed
     ) -> MemorySearchResult:
         self.kinds.append(kinds)
         self.bands.append(bands)
-        return await super().search(query, limit=limit, kinds=kinds, bands=bands)
+        return await super().search(query, limit=limit, kinds=kinds, bands=bands, **axes)
 
 
 async def test_converse_runs_under_a_conversation_and_reports_the_one_it_ran_under() -> None:

@@ -477,6 +477,7 @@ class _FailingAfterHop(FakeMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
+        **axes: Any,  # ADR-0237 §1's axes, relayed not observed
     ) -> MemorySearchResult:
         self._searches += 1
         # The turn's own belief composition reads three bands before the servicing
@@ -484,7 +485,7 @@ class _FailingAfterHop(FakeMemoryStore):
         if self._searches > 3:
             msg = "the query is down"
             raise MemoryStoreError(msg)
-        return await super().search(query, limit=limit, kinds=kinds, bands=bands)
+        return await super().search(query, limit=limit, kinds=kinds, bands=bands, **axes)
 
 
 class _FailingLaterBand(FakeMemoryStore):
@@ -509,12 +510,13 @@ class _FailingLaterBand(FakeMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
+        **axes: Any,  # ADR-0237 §1's axes, relayed not observed
     ) -> MemorySearchResult:
         self._searches += 1
         if self._searches > 3 and self._returned:
             msg = "a later band is down"
             raise MemoryStoreError(msg)
-        found = await super().search(query, limit=limit, kinds=kinds, bands=bands)
+        found = await super().search(query, limit=limit, kinds=kinds, bands=bands, **axes)
         self._returned = self._returned or (self._searches > 3 and bool(found.records))
         return found
 

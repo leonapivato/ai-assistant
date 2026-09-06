@@ -48,6 +48,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     Embedding,
+    EpisodicMemory,
     MemoryRecord,
     MemorySearchResult,
     MemorySource,
@@ -56,6 +57,7 @@ from ai_assistant.core.types import (
     TraceKind,
     TraceRecordSet,
     band_of,
+    caseless_key,
 )
 from ai_assistant.memory import traces
 from ai_assistant.memory._transactions import transaction
@@ -73,7 +75,14 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import Embedder, TraceSink
-    from ai_assistant.core.types import BeliefBand, MemoryKind, MemoryWrite, WalkPosition
+    from ai_assistant.core.types import (
+        BeliefBand,
+        MemoryKind,
+        MemoryWrite,
+        TimeWindow,
+        TopicLabel,
+        WalkPosition,
+    )
 
 _ADAPTER: TypeAdapter[MemoryRecord] = TypeAdapter(MemoryRecord)
 # **There is no candidate over-fetch, because there is nothing left to over-fetch
@@ -279,6 +288,172 @@ def _to_micros(instant: datetime) -> int:
 type _PreparedWrite = tuple[MemoryRecord, MemoryWriteMode, int | None, Embedding]
 
 
+#: The three label axes ADR-0237 §1 adds that are matched by an equality, and the
+#: ``axis`` value each is stored under in ``record_labels``. Named here so the
+#: writer, the migration and the two reads cannot spell one of them differently.
+_TOPIC_AXIS = "topic"
+_PARTICIPANT_AXIS = "participant"
+_SUBJECT_AXIS = "subject"
+
+
+def _labels_of(record: MemoryRecord) -> list[tuple[str, str]]:
+    """The ``(axis, value)`` rows ``record`` contributes to the label index.
+
+    One derivation, used by the write path and by the migration alike (ADR-0237
+    §1's "the filters bind on the record's own stored value and on nothing
+    derived"): nothing here reads ``content``, ``outcome`` or any other span, and
+    nothing infers a label a producer did not write.
+
+    ``participant`` and ``subject`` values are folded to ADR-0101 §2's canonical
+    caseless key, because that is the comparison and SQLite cannot perform it;
+    ``topic`` values are the label's own characters, because equality of those is
+    the only relation :data:`~ai_assistant.core.types.TopicLabel` has (ADR-0213 §3)
+    and the type is already canonical.
+
+    Args:
+        record: The record about to be stored, or one decoded during a migration.
+
+    Returns:
+        Its rows, possibly empty. A record stating no subject, carrying no topic
+        and naming no participant contributes none — and is then reached by no
+        filter on any of those axes (ADR-0237 §6).
+    """
+    rows = [(_TOPIC_AXIS, label) for label in record.topics]
+    if isinstance(record, EpisodicMemory):
+        rows.extend((_PARTICIPANT_AXIS, caseless_key(person)) for person in record.participants)
+    if record.about_person is not None:
+        rows.append((_SUBJECT_AXIS, caseless_key(record.about_person)))
+    return rows
+
+
+def _person_keys(argument: str, values: Sequence[str]) -> frozenset[str]:
+    """Fold one person-axis filter to ADR-0101 §2's comparison keys.
+
+    The same shape ``InMemoryMemoryStore`` and ``FakeMemoryStore`` carry, and the
+    duplication is theirs: ``ai_assistant.testing`` may not import a subsystem
+    (golden rule 1). The **fold** is not duplicated — it is
+    :func:`~ai_assistant.core.types.caseless_key` in ``core``, so the key this
+    computes for a query is the key :func:`_labels_of` stored for a record.
+
+    Args:
+        argument: The parameter's name, for the refusal message.
+        values: The labels the call named.
+
+    Returns:
+        Their canonical caseless keys; duplicates collapse (ADR-0237 §2).
+
+    Raises:
+        ValueError: If any value is blank or whitespace-only (ADR-0237 §2).
+    """
+    keys: set[str] = set()
+    for value in values:
+        if not value.strip():
+            msg = f"a {argument} value must not be blank (ADR-0237 §2)"
+            raise ValueError(msg)
+        keys.add(caseless_key(value))
+    return frozenset(keys)
+
+
+def _selects_nothing(*axes: frozenset[object] | None) -> bool:
+    """Whether any applied sequence axis is **empty**, and so selects nothing.
+
+    ADR-0113 §3's convention, restated by ADR-0237 §2 for the axes it adds. A read
+    this returns ``True`` for matches nothing by construction, so its result is
+    empty and its ``capped`` is ``False`` and never ``True`` (ADR-0128 §2) — and it
+    is taken before the embedder is paid for a query whose answer is already known.
+    """
+    return any(axis is not None and not axis for axis in axes)
+
+
+def _refuse_an_axis_less_select(axes: tuple[object | None, ...]) -> None:
+    """Refuse a ``select`` that applies no axis at all (ADR-0237 §4).
+
+    No value of any axis means "everything", so a call naming no criterion is a
+    caller that reached for one and gave none. Refusing it is what keeps ``select``
+    from quietly becoming a second ``list_beliefs``.
+
+    Raises:
+        ValueError: If every axis is ``None``.
+    """
+    if all(axis is None for axis in axes):
+        msg = "select applies at least one axis; a call naming none is refused (ADR-0237 §4)"
+        raise ValueError(msg)
+
+
+def _window_micros(window: TimeWindow | None) -> tuple[int | None, int | None] | None:
+    """``window``'s ends as exact microsecond epochs, for the column comparison.
+
+    ``None`` where the axis is not applied. The conversion is
+    :func:`_to_micros`, the same one every stored instant goes through, so the
+    half-open comparison ``start <= occurred_at < end`` is exact integer arithmetic
+    against the value the column holds rather than a text comparison over ISO
+    spellings of variable precision.
+    """
+    if window is None:
+        return None
+    start = None if window.start is None else _to_micros(window.start)
+    end = None if window.end is None else _to_micros(window.end)
+    return (start, end)
+
+
+def _structured_restriction(  # noqa: PLR0913 — one parameter per axis it appends
+    eligible: list[str],
+    restriction: list[object],
+    *,
+    window: tuple[int | None, int | None] | None,
+    participants: frozenset[str] | None,
+    topics: frozenset[str] | None,
+    subjects: frozenset[str] | None,
+) -> None:
+    """Append ADR-0237 §1's four axes to a SQL restriction over ``records``.
+
+    Shared by :meth:`SqliteMemoryStore._search_sync` and
+    :meth:`SqliteMemoryStore._select_sync` so the two reads cannot come to apply
+    the same axis differently — the drift ADR-0237 §4 refuses one paragraph after
+    deciding to put the axes on two members.
+
+    Every applied label axis is non-empty by the time this runs: both callers
+    short-circuit an empty selection before reaching here, which is what lets the
+    ``IN`` lists always carry a placeholder. Only *placeholder counts* are
+    interpolated; every value is bound, so the assembled text carries no caller
+    data.
+
+    Args:
+        eligible: The predicate fragments, extended in place.
+        restriction: The bound values, extended in place and in the same order.
+        window: ``occurred_at``'s half-open bounds as µs epochs, or ``None``.
+        participants: Caseless keys, or ``None`` where the axis is not applied.
+        topics: Exact labels, or ``None``.
+        subjects: Caseless keys for ``about_person``, or ``None``.
+    """
+    if window is not None:
+        start, end = window
+        # ``IS NOT NULL`` first and unconditionally: a record of a kind carrying no
+        # ``occurred_at`` is reached by no window (ADR-0237 §6), and a bare
+        # ``occurred_at < ?`` would admit every one of them, since SQL's ``NULL``
+        # comparison is unknown rather than false only inside the ``WHERE``.
+        eligible.append("occurred_at IS NOT NULL")
+        if start is not None:
+            eligible.append("occurred_at >= ?")
+            restriction.append(start)
+        if end is not None:
+            eligible.append("occurred_at < ?")
+            restriction.append(end)
+    for axis, values in (
+        (_PARTICIPANT_AXIS, participants),
+        (_TOPIC_AXIS, topics),
+        (_SUBJECT_AXIS, subjects),
+    ):
+        if values is None:
+            continue
+        eligible.append(
+            f"rowid IN (SELECT record_rowid FROM record_labels "  # noqa: S608 — bound below
+            f"WHERE axis = ? AND value IN ({', '.join('?' * len(values))}))"
+        )
+        restriction.append(axis)
+        restriction.extend(sorted(values))
+
+
 @dataclass(frozen=True, slots=True)
 class _Retrieved:
     """One relevance read's records together with what only the read can count.
@@ -459,7 +634,7 @@ class SqliteMemoryStore:
                 "rowid INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, "
                 "kind TEXT NOT NULL, data TEXT NOT NULL, "
                 "expires_at INTEGER, valid_until INTEGER, valid_from INTEGER, "
-                "about_person TEXT, revision INTEGER NOT NULL DEFAULT 0)"
+                "about_person TEXT, revision INTEGER NOT NULL DEFAULT 0, occurred_at INTEGER)"
             )
             self._init_revision_issuer(conn)
             conn.execute(
@@ -474,6 +649,10 @@ class SqliteMemoryStore:
             )
             self._migrate_records(conn)
             self._migrate_walk_key(conn)
+            # After both rebuilds: each carries every original ``rowid`` forward, so
+            # the label rows this keys on stay valid, and building them before a
+            # rebuild would key them on a table about to be dropped.
+            self._migrate_labels(conn)
             self._verify_or_init_meta(conn)
             conn.execute(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS vec_records "
@@ -637,6 +816,17 @@ class SqliteMemoryStore:
             if "valid_from" not in info:
                 conn.execute("ALTER TABLE records ADD COLUMN valid_from INTEGER")
                 self._backfill_valid_from(conn)
+            if "occurred_at" not in info:
+                # ADR-0237 §1's window axis binds before the ranking cut, and the
+                # instant it compares lives in the blob as ISO text of *variable
+                # precision* — the same reason ``valid_from`` became a column.
+                # Backfilled rather than left ``NULL`` because ``NULL`` is read as
+                # *no instant*, which is correct for every kind but the episodic
+                # one and wrong for every episode already stored: an un-backfilled
+                # column would make every captured episode unreachable by every
+                # window, silently.
+                conn.execute("ALTER TABLE records ADD COLUMN occurred_at INTEGER")
+                self._backfill_occurred_at(conn)
             if "revision" not in info:
                 # ``NOT NULL DEFAULT 0`` so the migrated shape is byte for byte the
                 # created one, and because ``ADD COLUMN`` demands a non-null default
@@ -656,7 +846,7 @@ class SqliteMemoryStore:
             "rowid INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, "
             "kind TEXT NOT NULL, data TEXT NOT NULL, "
             "expires_at INTEGER, valid_until INTEGER, valid_from INTEGER, "
-            "about_person TEXT, revision INTEGER NOT NULL DEFAULT 0)"
+            "about_person TEXT, revision INTEGER NOT NULL DEFAULT 0, occurred_at INTEGER)"
         )
         # Stream the source rows through a dedicated read cursor rather than
         # ``fetchall()``, so migrating a large legacy store does not
@@ -672,14 +862,19 @@ class SqliteMemoryStore:
             # is ``NULL``, which reads as an *open* window, so a not-yet-live
             # record would become eligible for every pre-filtered read.
             valid_from = self._micros_from_json(data, "valid_from", nested="validity")
+            # Recovered from the blob for ADR-0237 §1's window axis, for the reason
+            # the two beside it are: an un-backfilled ``occurred_at`` is ``NULL``,
+            # ``NULL`` is read as *no instant*, and every already-stored episode
+            # would then be unreachable by every window.
+            occurred_at = self._micros_from_json(data, "occurred_at")
             # ``about_person`` is left NULL rather than read out of ``data``: a
             # table this old predates the field, so its blobs carry no subject to
             # recover, and ADR-0100 §8 forbids deriving one from anything else.
             conn.execute(
                 "INSERT INTO records_migrated"
-                "(rowid, id, kind, data, expires_at, valid_until, valid_from) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (rowid, id_, kind, data, expires, valid_until, valid_from),
+                "(rowid, id, kind, data, expires_at, valid_until, valid_from, occurred_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (rowid, id_, kind, data, expires, valid_until, valid_from, occurred_at),
             )
         conn.execute("DROP TABLE records")
         conn.execute("ALTER TABLE records_migrated RENAME TO records")
@@ -776,6 +971,132 @@ class SqliteMemoryStore:
                 (chunk[-1][0], _BACKFILL_CHUNK),
             ).fetchall()
 
+    def _backfill_occurred_at(self, conn: sqlite3.Connection) -> None:
+        """Fill a freshly-added ``occurred_at`` column from each record's blob.
+
+        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE``, like every other
+        migration here, so the ``ADD COLUMN`` and the values it needs commit
+        together or not at all — a half-backfilled column leaves every unvisited
+        episode reading as *no instant*, which is a record ADR-0237 §1 requires a
+        window filter to reach and this one would not.
+
+        **Chunked, each chunk read whole before anything is written, and the first
+        page unbounded**, for :meth:`_backfill_valid_from`'s reasons exactly: reads
+        and writes are on one table so a cursor may not straddle them, and a legacy
+        ``rowid`` can be negative, so seeding the cursor at ``0`` would skip every
+        row at or below it.
+
+        A record of a kind carrying no ``occurred_at`` takes ``NULL``, which is the
+        right value rather than a placeholder: only :class:`EpisodicMemory` carries
+        the field, and ADR-0237 §6 rules that a record carrying no value on an axis
+        is reached by no filter on it.
+        """
+        chunk = conn.execute(
+            "SELECT rowid, data FROM records ORDER BY rowid LIMIT ?", (_BACKFILL_CHUNK,)
+        ).fetchall()
+        while chunk:
+            for rowid, data in chunk:
+                conn.execute(
+                    "UPDATE records SET occurred_at = ? WHERE rowid = ?",
+                    (self._micros_from_json(data, "occurred_at"), rowid),
+                )
+            chunk = conn.execute(
+                "SELECT rowid, data FROM records WHERE rowid > ? ORDER BY rowid LIMIT ?",
+                (chunk[-1][0], _BACKFILL_CHUNK),
+            ).fetchall()
+
+    def _migrate_labels(self, conn: sqlite3.Connection) -> None:
+        """Create the label index the three label axes bind through, and fill it.
+
+        **A child table rather than three columns** (ADR-0237 §9 item 4 leaves the
+        mechanism here). ``topics`` and ``participants`` are *tuples* on a record,
+        so neither is a column at all; putting all three label axes in one table
+        gives them one lookup shape and one index, and keeps a filter over them
+        expressible as a ``rowid IN (SELECT ...)`` restriction the KNN can carry —
+        which is what §1's before-the-cut clause requires and what a post-fetch
+        comprehension over the blob could not give.
+
+        **The stored value is the comparison key, not the label.** ``participant``
+        and ``subject`` rows hold ADR-0101 §2's canonical caseless key, because
+        SQLite has no case folding and a fold applied in Python at read time could
+        not be pushed into the restriction. ``topic`` rows hold the label's own
+        characters, because :data:`~ai_assistant.core.types.TopicLabel` is already
+        canonical and equality of the stored characters is the only relation it has
+        (ADR-0213 §3). The blob stays the truth and this is a derived index, exactly
+        as the lifecycle columns are: every read decodes the record from ``data``.
+
+        The verbatim ``about_person`` column is **not** what the subject axis
+        queries and is left as it is (ADR-0100 §8 put it there and nothing has ever
+        read it): a column holding the label as written cannot answer a caseless
+        comparison, and rewriting it into a folded form would destroy the value the
+        blob and the column are supposed to agree on.
+
+        **Backfilled once, on the open that creates the table**, decoding each row
+        through :meth:`_decode` so that one function — :func:`_labels_of` — derives
+        the rows at write time and at migration time alike. Two derivations of one
+        index is how a migrated store and a freshly-written one come to disagree
+        about what a filter reaches. The chunking and the unbounded first page are
+        :meth:`_backfill_valid_from`'s, for its reasons.
+
+        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE`` and after both rebuilds, so
+        the ``rowid``s it keys on are the ones the store will keep — each rebuild
+        carries every original ``rowid`` forward explicitly — and the table, its
+        index and its rows commit together or not at all.
+        """
+        existing = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'record_labels'"
+        ).fetchone()
+        conn.execute(
+            # ``WITHOUT ROWID`` with the axis and value leading the key: the primary
+            # key *is* the lookup index a filter needs, and it collapses a record
+            # that names one person twice, or two people whose labels fold to one
+            # key, into a single row — the set semantics ADR-0237 §2 gives every
+            # sequence axis, held by the schema rather than by the writer.
+            "CREATE TABLE IF NOT EXISTS record_labels("
+            "record_rowid INTEGER NOT NULL, axis TEXT NOT NULL, value TEXT NOT NULL, "
+            "PRIMARY KEY (axis, value, record_rowid)) WITHOUT ROWID"
+        )
+        conn.execute(
+            # The reverse direction the primary key cannot serve: every write
+            # rewrites one record's rows and every delete drops them, both by
+            # ``record_rowid``, which the key above orders last.
+            "CREATE INDEX IF NOT EXISTS record_labels_by_record ON record_labels(record_rowid)"
+        )
+        if existing is not None:
+            return
+        chunk = conn.execute(
+            "SELECT rowid, data FROM records ORDER BY rowid LIMIT ?", (_BACKFILL_CHUNK,)
+        ).fetchall()
+        while chunk:
+            for rowid, data in chunk:
+                self._index_labels(conn, int(rowid), self._decode(str(data)))
+            chunk = conn.execute(
+                "SELECT rowid, data FROM records WHERE rowid > ? ORDER BY rowid LIMIT ?",
+                (chunk[-1][0], _BACKFILL_CHUNK),
+            ).fetchall()
+
+    @staticmethod
+    def _index_labels(conn: sqlite3.Connection, rowid: int, record: MemoryRecord) -> None:
+        """Replace ``rowid``'s label rows with the ones ``record`` carries.
+
+        Delete-then-insert rather than a diff: a write may have dropped a label as
+        easily as added one, and the row count per record is a handful. Runs inside
+        the caller's transaction, so the record, its vector and its labels commit
+        together — a record whose labels landed without it would be reachable by a
+        filter and by nothing else.
+
+        ``INSERT OR IGNORE`` because two of a record's own values can collapse to
+        one key: two participants differing only in case fold to the same string,
+        and the primary key holds the set semantics rather than the writer.
+        """
+        conn.execute("DELETE FROM record_labels WHERE record_rowid = ?", (rowid,))
+        rows = [(rowid, axis, value) for axis, value in _labels_of(record)]
+        if rows:
+            conn.executemany(
+                "INSERT OR IGNORE INTO record_labels(record_rowid, axis, value) VALUES (?, ?, ?)",
+                rows,
+            )
+
     def _migrate_walk_key(self, conn: sqlite3.Connection) -> None:
         """Adopt the never-reissued walk key over an existing table (ADR-0114 §1).
 
@@ -821,7 +1142,7 @@ class SqliteMemoryStore:
             "rowid INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, "
             "kind TEXT NOT NULL, data TEXT NOT NULL, "
             "expires_at INTEGER, valid_until INTEGER, valid_from INTEGER, "
-            "about_person TEXT, revision INTEGER NOT NULL DEFAULT 0)"
+            "about_person TEXT, revision INTEGER NOT NULL DEFAULT 0, occurred_at INTEGER)"
         )
         # Streamed through a dedicated read cursor rather than ``fetchall()``, as
         # the sibling rebuild is, so migrating a large store does not materialise
@@ -835,14 +1156,14 @@ class SqliteMemoryStore:
         # revision it read before the upgrade (ADR-0219 §1).
         read = conn.execute(
             "SELECT rowid, id, kind, data, expires_at, valid_until, valid_from, about_person, "
-            "revision FROM records"
+            "revision, occurred_at FROM records"
         )
         for source in read:
             conn.execute(
                 "INSERT INTO records_walkable"
                 "(rowid, id, kind, data, expires_at, valid_until, valid_from, about_person, "
-                "revision) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "revision, occurred_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 source,
             )
         conn.execute("DROP TABLE records")
@@ -1108,6 +1429,12 @@ class SqliteMemoryStore:
             if record.validity.valid_from is not None
             else None
         )
+        # ADR-0237 §1's window axis binds before the ranking cut and cannot reach
+        # into the blob to do it, so the instant is a column beside the three
+        # already there. ``NULL`` on every kind but the episodic one, which is the
+        # right value: a record carrying no ``occurred_at`` is reached by no window
+        # (§6), and ``NULL`` fails the ``IS NOT NULL`` the restriction leads with.
+        occurred_at = _to_micros(record.occurred_at) if isinstance(record, EpisodicMemory) else None
         row = conn.execute("SELECT rowid, kind FROM records WHERE id = ?", (record.id,)).fetchone()
         if row is not None and row[1] != record.kind:
             msg = (
@@ -1123,8 +1450,9 @@ class SqliteMemoryStore:
         if row is None:
             cursor = conn.execute(
                 "INSERT INTO records"
-                "(id, kind, data, expires_at, valid_until, valid_from, about_person, revision) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "(id, kind, data, expires_at, valid_until, valid_from, about_person, revision, "
+                "occurred_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.id,
                     record.kind,
@@ -1134,6 +1462,7 @@ class SqliteMemoryStore:
                     valid_from,
                     record.about_person,
                     revision,
+                    occurred_at,
                 ),
             )
             rowid = cursor.lastrowid
@@ -1141,7 +1470,7 @@ class SqliteMemoryStore:
             rowid = row[0]
             conn.execute(
                 "UPDATE records SET kind = ?, data = ?, expires_at = ?, valid_until = ?, "
-                "valid_from = ?, about_person = ?, revision = ? WHERE rowid = ?",
+                "valid_from = ?, about_person = ?, revision = ?, occurred_at = ? WHERE rowid = ?",
                 (
                     record.kind,
                     data,
@@ -1150,11 +1479,23 @@ class SqliteMemoryStore:
                     valid_from,
                     record.about_person,
                     revision,
+                    occurred_at,
                     rowid,
                 ),
             )
             conn.execute("DELETE FROM vec_records WHERE rowid = ?", (rowid,))
+        if rowid is None:  # pragma: no cover — sqlite3 sets lastrowid on every INSERT
+            # Narrowed rather than assumed: ``lastrowid`` is typed ``int | None``,
+            # and the two rows keyed on it — the vector and the label index — would
+            # otherwise be written at ``NULL`` and reachable by nothing.
+            msg = f"sqlite reported no rowid for the write of {record.id!r}"
+            raise MemoryStoreError(msg)
         conn.execute("INSERT INTO vec_records(rowid, embedding) VALUES (?, ?)", (rowid, blob))
+        # The label index is rewritten in the same transaction as the row and the
+        # vector: a record whose labels landed without it would be reachable by a
+        # filter and by nothing else, and one whose labels did not land would be
+        # reachable by no filter while every read that decodes the blob shows them.
+        self._index_labels(conn, rowid, record)
 
     async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
         """Apply every write in one SQLite transaction — all commit, or none do.
@@ -1464,13 +1805,17 @@ class SqliteMemoryStore:
                 )
         return rows
 
-    async def search(
+    async def search(  # noqa: PLR0913 — ADR-0237 §1's signature, one keyword per axis
         self,
         query: str,
         *,
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
+        occurred_within: TimeWindow | None = None,
+        participants: Sequence[str] | None = None,
+        topics: Sequence[TopicLabel] | None = None,
+        about_person: Sequence[str] | None = None,
     ) -> MemorySearchResult:
         """Return the records most relevant to ``query`` by vector similarity.
 
@@ -1495,6 +1840,35 @@ class SqliteMemoryStore:
                 *before* the vector search, like every other eligibility axis.
             bands: If given, restrict results to these belief bands; ``None`` is
                 every band and ``()`` none, conjunctive with ``kinds``.
+            occurred_within: If given, the half-open ``[start, end)`` window a
+                record's ``occurred_at`` must fall inside — bound as an exact
+                microsecond epoch against the column, *before* the vector search.
+                A record carrying no ``occurred_at`` is reached by no window.
+            participants: If given, the person labels a record must name one of,
+                compared by ADR-0101 §2's canonical caseless fold through the
+                label index; ``None`` is every record and ``()`` none.
+            topics: If given, the labels a record must carry one of, compared by
+                exact stored characters; ``None`` is every record and ``()`` none.
+            about_person: If given, the subject labels a record's own must fold
+                equal to; a record stating no subject is matched by none of them.
+
+        **The four structured axes bind before the KNN cut too** (ADR-0237 §1).
+        ``occurred_at`` is a column on ``records``, and the three label axes are a
+        ``rowid`` restriction over the ``record_labels`` index, so both join the
+        same ``v.rowid IN (SELECT ...)`` the other five axes already ride — no
+        ineligible row enters the candidate set and none spends a candidate slot.
+        The skew here is worse than the band's and structurally so: a window over
+        "last week" excludes every record ever written outside it, so a post-cut
+        filter would return nothing at all on any store with a few weeks of
+        history.
+
+        **The trace's metric keys do not change** (ADR-0119 §8). That clause
+        enumerates the per-predicate exclusion counts a ``RETRIEVAL`` trace
+        carries — retention, validity window, kind and band — and ADR-0237
+        supersedes and amends nothing; the new axes bind before the cut, so their
+        counts would be structural zeros like the four already here, and adding
+        keys would put every trace before this change and every trace after it in
+        different populations (ADR-0120 §7).
 
         **One ``RETRIEVAL`` trace per call, emitted here because nowhere else can
         see the numbers** (ADR-0119 §8). The per-predicate exclusion counts exist
@@ -1534,6 +1908,14 @@ class SqliteMemoryStore:
             its own trace disagree about what was asked for.
         """
         wanted = None if kinds is None else frozenset(str(kind) for kind in kinds)
+        # Materialised on the first executed lines with ``kinds`` and ``bands``,
+        # for their reason: ADR-0065 §3's second discharge, taken before the
+        # embedder's await and the lock's.
+        wanted_people = None if participants is None else _person_keys("participants", participants)
+        wanted_topics = None if topics is None else frozenset(topics)
+        wanted_subjects = (
+            None if about_person is None else _person_keys("about_person", about_person)
+        )
         # **One read of the caller's sequence, and both derivations off the copy.**
         # ``_sources_in(bands)`` followed by ``frozenset(bands)`` would be two reads
         # of a caller-owned mutable container. No ``await`` separates them, so on one
@@ -1554,18 +1936,31 @@ class SqliteMemoryStore:
             entry[traces.BANDS] = selected_bands
         retrieved = await self._traces.observing(
             traces.SEAM_SEARCH,
-            self._searched(query, limit, wanted, wanted_sources),
+            self._searched(
+                query,
+                limit,
+                wanted,
+                wanted_sources,
+                _window_micros(occurred_within),
+                wanted_people,
+                wanted_topics,
+                wanted_subjects,
+            ),
             _retrieval_reading,
             entry=entry,
         )
         return MemorySearchResult(records=tuple(retrieved.records), capped=retrieved.capped)
 
-    async def _searched(
+    async def _searched(  # noqa: PLR0913 — one parameter per already-materialised axis
         self,
         query: str,
         limit: int,
         wanted: frozenset[str] | None,
         wanted_sources: frozenset[str] | None,
+        window: tuple[int | None, int | None] | None,
+        wanted_people: frozenset[str] | None,
+        wanted_topics: frozenset[str] | None,
+        wanted_subjects: frozenset[str] | None,
     ) -> _Retrieved:
         """The read itself, returning its records **and** what only it can count.
 
@@ -1580,6 +1975,14 @@ class SqliteMemoryStore:
             wanted: The kind restriction, already materialised.
             wanted_sources: The band restriction as source names, already
                 materialised; ``None`` for every band.
+            window: ``occurred_at``'s half-open bounds as microsecond epochs,
+                already converted; ``None`` where the axis is not applied.
+            wanted_people: The ``participants`` restriction as canonical caseless
+                keys, already materialised; ``None`` where not applied.
+            wanted_topics: The ``topics`` restriction as exact labels, already
+                materialised; ``None`` where not applied.
+            wanted_subjects: The ``about_person`` restriction as canonical
+                caseless keys, already materialised; ``None`` where not applied.
 
         Returns:
             The records, whether the ceiling bound them, and the counts ADR-0119 §8
@@ -1593,12 +1996,21 @@ class SqliteMemoryStore:
         # An empty ``bands`` selects nothing (ADR-0113 §3), and so does a selection
         # no source maps into — the same answer by the same reasoning, and taken
         # before the embedder is paid for a query whose result is already known.
-        if wanted_sources is not None and not wanted_sources:
+        if _selects_nothing(wanted_sources, wanted_people, wanted_topics, wanted_subjects):
             return _Retrieved(records=[], capped=False, observed={})
         vector = await self._embed_one(query)
         async with self._lock:
             rows, capped, observed = await _run_to_completion(
-                self._search_sync, vector, limit, wanted, wanted_sources, self._now_micros()
+                self._search_sync,
+                vector,
+                limit,
+                wanted,
+                wanted_sources,
+                window,
+                wanted_people,
+                wanted_topics,
+                wanted_subjects,
+                self._now_micros(),
             )
         return _Retrieved(
             records=[
@@ -1609,12 +2021,16 @@ class SqliteMemoryStore:
             observed=observed,
         )
 
-    def _search_sync(
+    def _search_sync(  # noqa: PLR0913 — one parameter per already-materialised axis
         self,
         vector: Embedding,
         limit: int,
         wanted: frozenset[str] | None,
         wanted_sources: frozenset[str] | None,
+        window: tuple[int | None, int | None] | None,
+        wanted_people: frozenset[str] | None,
+        wanted_topics: frozenset[str] | None,
+        wanted_subjects: frozenset[str] | None,
         now: int,
     ) -> tuple[list[tuple[str, int, float]], bool, dict[str, int]]:
         """Run the KNN with every eligibility predicate bound into it.
@@ -1721,6 +2137,17 @@ class SqliteMemoryStore:
                 f"IN ({', '.join('?' * len(wanted_sources))})"
             )
             restriction.extend(sorted(wanted_sources))
+        # ADR-0237 §1's four axes join the same restriction, through the shared
+        # builder ``_select_sync`` also uses — two spellings of one axis set is the
+        # drift ADR-0237 §4 refuses.
+        _structured_restriction(
+            eligible,
+            restriction,
+            window=window,
+            participants=wanted_people,
+            topics=wanted_topics,
+            subjects=wanted_subjects,
+        )
         sql = (
             "SELECT r.data, r.revision, v.distance FROM vec_records v "  # noqa: S608 — bound above
             "JOIN records r ON r.rowid = v.rowid "
@@ -1765,6 +2192,168 @@ class SqliteMemoryStore:
                 traces.EXCLUDED_BAND: 0,
             },
         )
+
+    async def select(  # noqa: PLR0913 — ADR-0237 §1's signature, one keyword per axis
+        self,
+        *,
+        limit: int = 10,
+        kinds: Sequence[MemoryKind] | None = None,
+        bands: Sequence[BeliefBand] | None = None,
+        occurred_within: TimeWindow | None = None,
+        participants: Sequence[str] | None = None,
+        topics: Sequence[TopicLabel] | None = None,
+        about_person: Sequence[str] | None = None,
+    ) -> MemorySearchResult:
+        """Return the records the criteria select, newest write first (ADR-0237 §4).
+
+        The structured read: six axes, a ``limit`` and no query. **Nothing is
+        applied after the cut** — the axes and both read-time axes are applied to
+        the whole candidate set, the set is ordered, and only then is ``[:limit]``
+        taken (ADR-0237 §1) — which is ``list_beliefs``' shape and for its reason.
+
+        **Where each predicate runs, and why it is not all SQL.** ``kind``,
+        ``expires_at``, ``valid_until`` and ``occurred_at`` are exact integer
+        columns, and the three label axes are a ``rowid`` restriction over
+        ``record_labels``, so all six are pre-filtered in SQL. The band and the
+        ``valid_from`` end of the window live only inside each record's JSON blob,
+        whose stored form is ISO text of *variable precision*, so a SQL comparison
+        over them would order a sub-second instant before a whole-second one at the
+        same second; those two are decided on the decoded record — still before the
+        cut, which is what the contract requires. That is exactly ``list_beliefs``'
+        division and not a new one.
+
+        **This read has no candidate ceiling, so ``capped`` is always ``False``**
+        (ADR-0237 §7). There is no KNN here: the SQL fetches every row the column
+        predicates admit, and nothing but ``limit`` shortens the result — so a
+        short result is always the whole eligible set and is certified as such. The
+        fetch is bounded by the filters rather than by a page, which is why §4
+        refuses a call that names no criterion: an axis-less ``select`` would be
+        exactly the unbounded read ADR-0021 §4 declines to offer.
+
+        The clock is read **inside** the lock and that one reading drives both the
+        SQL pre-filter and every ``live_at`` check, so one read is judged against
+        one instant — matching :meth:`get` and :meth:`list_beliefs`.
+
+        Every ``Sequence`` filter is materialised on the coroutine's **first
+        executed lines**, before the lock await, and only the copies are read
+        thereafter: ADR-0065 §3's second discharge, as :meth:`search` and
+        :meth:`list_beliefs` take it.
+
+        Args:
+            limit: Maximum number of records to return; ``<= 0`` matches nothing
+                and is **not** refused — ``list_beliefs``' refusal of an
+                out-of-range value is not borrowed here (ADR-0237 §4), and a
+                ``limit`` this store cannot represent is one that returns records
+                rather than one that raises, because it never reaches a bind
+                parameter.
+            kinds: Memory kinds to include; ``None`` is every kind, ``()`` none.
+            bands: Belief bands to include; ``None`` is every band, ``()`` none.
+            occurred_within: The half-open ``[start, end)`` window a record's
+                ``occurred_at`` must fall inside, compared as exact microsecond
+                epochs; a record carrying none is reached by no window.
+            participants: Person labels compared by ADR-0101 §2's canonical
+                caseless fold through the label index; ``()`` selects nothing.
+            topics: Labels compared by exact stored characters; ``()`` selects
+                nothing.
+            about_person: Subject labels compared by the same fold; a record
+                stating no subject is matched by none. ``()`` selects nothing.
+
+        Returns:
+            A :class:`~ai_assistant.core.types.MemorySearchResult` holding the
+            eligible records ordered by ``provenance.last_updated`` descending,
+            ties by ``id`` ascending, cut to ``limit``, each a detached snapshot
+            with ``score`` cleared to ``None`` — and ``capped=False``.
+
+        Raises:
+            ValueError: If the call applies no axis at all, or a ``participants``
+                or ``about_person`` value is blank (ADR-0237 §§2, 4).
+            MemoryStoreError: If the store cannot be read, a stored record is
+                corrupt, or the injected clock's reading is not conforming.
+        """
+        wanted_kinds = None if kinds is None else frozenset(str(kind) for kind in kinds)
+        wanted_bands = None if bands is None else frozenset(bands)
+        wanted_people = None if participants is None else _person_keys("participants", participants)
+        wanted_topics = None if topics is None else frozenset(topics)
+        wanted_subjects = (
+            None if about_person is None else _person_keys("about_person", about_person)
+        )
+        window = _window_micros(occurred_within)
+        _refuse_an_axis_less_select(
+            (kinds, bands, occurred_within, participants, topics, about_person)
+        )
+        if limit <= 0 or _selects_nothing(
+            wanted_kinds, wanted_bands, wanted_people, wanted_topics, wanted_subjects
+        ):
+            return MemorySearchResult(records=())
+
+        async with self._lock:
+            now = self._now()
+            rows = await _run_to_completion(
+                self._select_sync,
+                wanted_kinds,
+                window,
+                wanted_people,
+                wanted_topics,
+                wanted_subjects,
+                _to_micros(now),
+            )
+        matched = [
+            record
+            for record in (self._decoded_at(data, revision) for data, revision in rows)
+            if record.validity.live_at(now)
+            and (wanted_bands is None or band_of(record.provenance.source) in wanted_bands)
+        ]
+        page = _newest_revision_first(matched)[:limit]
+        # Cleared, not merely absent: a record re-added after a search carries that
+        # query's relevance, and nothing was ranked here (ADR-0237 §5).
+        return MemorySearchResult(
+            records=tuple(record.model_copy(update={"score": None}) for record in page)
+        )
+
+    def _select_sync(  # noqa: PLR0913 — one parameter per already-materialised axis
+        self,
+        kinds: frozenset[str] | None,
+        window: tuple[int | None, int | None] | None,
+        participants: frozenset[str] | None,
+        topics: frozenset[str] | None,
+        subjects: frozenset[str] | None,
+        now: int,
+    ) -> list[tuple[str, int]]:
+        """Read every candidate row for one ``select``: the column predicates, uncut.
+
+        Every applied filter is non-empty when it is not ``None`` — the caller
+        short-circuits an empty selection — so each ``IN`` list always has at least
+        one placeholder. Only the *placeholders* are interpolated; every value is
+        bound, so the assembled text carries no caller data, which is the
+        construction :meth:`_list_beliefs_sync` and :meth:`_search_sync` use and
+        the reason the ``S608`` heuristic is suppressed rather than satisfied.
+
+        The four structured axes go through the same builder :meth:`_search_sync`
+        uses, so the two reads cannot come to apply one axis differently.
+        """
+        eligible = [
+            "(expires_at IS NULL OR expires_at > ?)",
+            "(valid_until IS NULL OR valid_until > ?)",
+        ]
+        params: list[object] = [now, now]
+        if kinds is not None:
+            eligible.append(f"kind IN ({', '.join('?' * len(kinds))})")
+            params.extend(sorted(kinds))
+        _structured_restriction(
+            eligible,
+            params,
+            window=window,
+            participants=participants,
+            topics=topics,
+            subjects=subjects,
+        )
+        sql = f"SELECT data, revision FROM records WHERE {' AND '.join(eligible)}"  # noqa: S608
+        try:
+            rows = self._conn.execute(sql, params).fetchall()
+        except sqlite3.Error as exc:
+            msg = f"failed to select records: {exc}"
+            raise MemoryStoreError(msg) from exc
+        return [(str(row[0]), int(row[1])) for row in rows]
 
     async def list_beliefs(
         self,
@@ -2025,6 +2614,7 @@ class SqliteMemoryStore:
                 return False
             rowid = row[0]
             conn.execute("DELETE FROM vec_records WHERE rowid = ?", (rowid,))
+            conn.execute("DELETE FROM record_labels WHERE record_rowid = ?", (rowid,))
             conn.execute("DELETE FROM records WHERE rowid = ?", (rowid,))
         return True
 
@@ -2044,6 +2634,10 @@ class SqliteMemoryStore:
         with self._transaction("clear the memory store") as conn:
             (count,) = conn.execute("SELECT COUNT(*) FROM records").fetchone()
             conn.execute("DELETE FROM vec_records")
+            # Discarded with the records, like the vectors: a label row naming a
+            # ``rowid`` no record holds would be matched by a filter and resolve to
+            # nothing, and ``AUTOINCREMENT`` reissues no key it could later name.
+            conn.execute("DELETE FROM record_labels")
             conn.execute("DELETE FROM records")
             # Discarded with the records rather than left to be detected later: a
             # position naming rows this call removed is exactly the cursor-disagrees
@@ -2106,6 +2700,9 @@ class SqliteMemoryStore:
                 # transaction rather than abandoning it on the shared connection.
                 return 0
             conn.executemany("DELETE FROM vec_records WHERE rowid = ?", [(r,) for r in rowids])
+            conn.executemany(
+                "DELETE FROM record_labels WHERE record_rowid = ?", [(r,) for r in rowids]
+            )
             conn.executemany("DELETE FROM records WHERE rowid = ?", [(r,) for r in rowids])
         return len(rowids)
 

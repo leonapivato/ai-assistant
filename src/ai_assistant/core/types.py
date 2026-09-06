@@ -2853,6 +2853,144 @@ class MemorySearchResult(BaseModel):
     capped: bool = False
 
 
+# --- memory: the window a structured read bounds (ADR-0237 §2) ---------------
+
+
+class TimeWindow(BaseModel):
+    """The half-open interval a structured memory read bounds an instant to (ADR-0237 §2).
+
+    ``[start, end)``: an instant is inside when ``start <= instant`` (or ``start``
+    is unset) **and** ``instant < end`` (or ``end`` is unset). It is the shape
+    :class:`Validity` already uses for the valid-time axis, reused here because
+    the three ambiguities a pair of loose keyword arguments leaves open — which
+    end is inclusive, what an inverted window does, what an unbounded one does —
+    are exactly what two stores would answer differently.
+
+    **Two refusals, both at construction.** A window whose ``end`` is not strictly
+    after its ``start`` is refused, as ``Validity``'s is and for its reason: it
+    describes an interval nothing can be inside. And a window with **both ends
+    unset** is refused, which is where this type parts company with ``Validity``.
+    The asymmetry is the difference between a stored value and a query:
+    ``Validity()`` means "live forever until something retires it", a fact about a
+    record, while ``TimeWindow()`` would mean "any instant" — a caller that
+    reached for a bound and named none. A caller wanting every record omits the
+    argument instead (ADR-0100 §1's reasoning about a blank label, read on a
+    query).
+
+    **One interval and never a sequence of them.** A caller wanting two disjoint
+    periods issues two calls and composes; a disjunction of intervals has no
+    consumer in sight and one interval is what "last week" is.
+
+    **It has one meaning at one site** — ``occurred_within`` on
+    :meth:`~ai_assistant.core.protocols.MemoryStore.search` and
+    :meth:`~ai_assistant.core.protocols.MemoryStore.select` — and ADR-0237 §11
+    fences the reuse: a lane needing an instant window on another read argues
+    there that the half-open, both-ends-refused shape is right there too. Nothing
+    here re-expresses ``Validity``.
+
+    Attributes:
+        start: Inclusive start of the window; ``None`` means unbounded in the
+            past. At most one end may be ``None``.
+        end: Exclusive end of the window; ``None`` means unbounded in the future.
+            At most one end may be ``None``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    start: UtcInstant | None = Field(
+        default=None,
+        description="Inclusive start of the window; None means unbounded in the past.",
+    )
+    end: UtcInstant | None = Field(
+        default=None,
+        description="Exclusive end of the window; None means unbounded in the future.",
+    )
+
+    @model_validator(mode="after")
+    def _window_is_bounded_and_ordered(self) -> TimeWindow:
+        """Refuse a window with no bound at all, and an inverted or empty one.
+
+        Both refusals are ADR-0237 §2's, and both are made unrepresentable here
+        rather than checked at each of the two reads that take one: a check on a
+        read is a check three implementations each have to remember, and the two
+        that forgot would silently answer "every record" and "no record".
+
+        Raises:
+            ValueError: If both ends are unset, or ``end`` is at or before
+                ``start``.
+        """
+        if self.start is None and self.end is None:
+            msg = "a TimeWindow states at least one end (ADR-0237 §2)"
+            raise ValueError(msg)
+        if self.start is not None and self.end is not None and self.end <= self.start:
+            msg = "end must be after start"
+            raise ValueError(msg)
+        return self
+
+    def contains(self, instant: datetime) -> bool:
+        """Whether ``instant`` falls inside this window.
+
+        ADR-0237 §2's half-open predicate, defined once here so both reads and
+        every ``MemoryStore`` implementation enforce the same ends instead of each
+        re-deriving them — the "one rule, one place" discipline ``Validity.live_at``
+        already keeps for the valid-time axis (ADR-0016 §2). It is a pure function
+        of the window and the instant handed in, so it is a semantic intrinsic to
+        the type rather than subsystem logic.
+
+        Args:
+            instant: The instant to test, tz-aware.
+
+        Returns:
+            ``True`` iff ``start <= instant < end``, treating an unset end as
+            unbounded.
+        """
+        if self.start is not None and instant < self.start:
+            return False
+        return self.end is None or instant < self.end
+
+
+def caseless_key(label: str) -> str:
+    """``label`` as ADR-0101 §2's subject comparison sees it: ``NFD(toCasefold(NFD(x)))``.
+
+    **Unicode canonical caseless equality, definition D145**, and the one relation
+    the corpus grants a person label. Two labels are canonically caseless-equal
+    exactly when this function returns the same string for both, so a comparison
+    is an equality of two keys and every implementation computes it identically —
+    which is the whole reason ADR-0101 §3 took an external standard rather than a
+    rule of its own devising.
+
+    **Nothing else is applied.** No trimming, no diacritic stripping, no
+    punctuation removal, no tokenising, splitting or truncation. ``"Marta"`` and
+    ``"marta"`` share a key; ``"Marta"`` and ``"Márta"`` do not; ``"Straße"`` and
+    ``"STRASSE"`` do, which is *full* case folding and not lowercasing; and
+    ``"Márta"`` and the same name written with a combining acute do, which is the
+    canonical equivalence the outer and inner ``NFD`` supply.
+
+    **The inner ``NFD`` is not redundant with the outer one.** Case folding is
+    defined over a decomposed form, and folding a composed string can leave a
+    result the outer normalisation has to fix; applying it on both sides of the
+    fold is what D145 specifies and what makes the composed and decomposed
+    spellings of one name a single key.
+
+    Defined in ``core`` rather than in each store because it is the *contract's*
+    comparison and not one implementation's: ADR-0237 §3 applies it to both the
+    ``about_person`` and the ``participants`` axis, on three implementations, and
+    a fold that drifted between them would make the same call answer differently
+    per backend. It is a pure function of the string handed in, so it is intrinsic
+    to the types this module defines rather than subsystem logic (ADR-0016 §2).
+
+    Args:
+        label: The label to fold, exactly as it was given. Never mutated and never
+            stripped: the value a caller passes reaches the comparison as it is.
+
+    Returns:
+        Its canonical caseless key. Equal keys mean canonically caseless-equal
+        labels and nothing more — no resolution, no aliasing, no identity
+        (ADR-0100 §6).
+    """
+    return unicodedata.normalize("NFD", unicodedata.normalize("NFD", label).casefold())
+
+
 # --- memory: one write inside an atomic batch (ADR-0046 §2) ------------------
 
 

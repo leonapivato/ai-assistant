@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -115,6 +115,7 @@ class _ScriptedStore(FakeMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
+        **axes: Any,  # ADR-0237 §1's axes, relayed not observed
     ) -> MemorySearchResult:
         self.calls.append((bands, limit))
         assert bands is not None, "the assembler always scopes its reads to one band"
@@ -361,9 +362,10 @@ async def test_the_kinds_filter_reaches_every_band_call() -> None:
             limit: int = 10,
             kinds: Sequence[MemoryKind] | None = None,
             bands: Sequence[BeliefBand] | None = None,
+            **axes: Any,  # ADR-0237 §1's axes, relayed not observed
         ) -> MemorySearchResult:
             seen.append(kinds)
-            return await super().search(query, limit=limit, kinds=kinds, bands=bands)
+            return await super().search(query, limit=limit, kinds=kinds, bands=bands, **axes)
 
     store = _KindRecordingStore({})
 
@@ -400,10 +402,11 @@ async def test_the_kinds_filter_is_observed_once_for_the_whole_composition() -> 
             limit: int = 10,
             kinds: Sequence[MemoryKind] | None = None,
             bands: Sequence[BeliefBand] | None = None,
+            **axes: Any,  # ADR-0237 §1's axes, relayed not observed
         ) -> MemorySearchResult:
             seen.append(tuple(kinds or ()))
             caller_kinds.append(MemoryKind.PREFERENCE)  # the caller grows its own list
-            return await super().search(query, limit=limit, kinds=kinds, bands=bands)
+            return await super().search(query, limit=limit, kinds=kinds, bands=bands, **axes)
 
     store = _MutatingStore({})
 
@@ -433,12 +436,13 @@ async def test_a_failing_band_read_propagates_rather_than_composing_a_partial_re
             limit: int = 10,
             kinds: Sequence[MemoryKind] | None = None,
             bands: Sequence[BeliefBand] | None = None,
+            **axes: Any,  # ADR-0237 §1's axes, relayed not observed
         ) -> MemorySearchResult:
             assert bands is not None
             if bands[0] is BeliefBand.DERIVED:
                 msg = "derived read is down"
                 raise MemoryStoreError(msg)
-            return await super().search(query, limit=limit, kinds=kinds, bands=bands)
+            return await super().search(query, limit=limit, kinds=kinds, bands=bands, **axes)
 
     store = _FailingStore({BeliefBand.ASSERTED: [[_record("a", BeliefBand.ASSERTED)]]})
 
@@ -759,12 +763,13 @@ async def test_the_page_observer_records_the_reads_that_preceded_a_failure() -> 
             limit: int = 10,
             kinds: Sequence[MemoryKind] | None = None,
             bands: Sequence[BeliefBand] | None = None,
+            **axes: Any,  # ADR-0237 §1's axes, relayed not observed
         ) -> MemorySearchResult:
             assert bands is not None
             if bands[0] is BeliefBand.ATTESTED:
                 msg = "attested read is down"
                 raise MemoryStoreError(msg)
-            return await super().search(query, limit=limit, kinds=kinds, bands=bands)
+            return await super().search(query, limit=limit, kinds=kinds, bands=bands, **axes)
 
     store = _FailingAttested({BeliefBand.ASSERTED: [[_record("a1", BeliefBand.ASSERTED)]]})
     pages: list[int] = []

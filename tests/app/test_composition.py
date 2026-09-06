@@ -20,7 +20,7 @@ from enum import StrEnum
 from inspect import get_annotations
 from pathlib import Path
 from types import ModuleType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -3325,6 +3325,7 @@ class _LimitSpy(FakeMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
+        **axes: Any,  # ADR-0237 §1's axes, relayed not observed
     ) -> MemorySearchResult:
         """Record ``limit``, then answer exactly as the canonical store would.
 
@@ -3338,7 +3339,7 @@ class _LimitSpy(FakeMemoryStore):
             Whatever :class:`~ai_assistant.testing.FakeMemoryStore` returns.
         """
         self.limits.append(limit)
-        return await super().search(query, limit=limit, kinds=kinds, bands=bands)
+        return await super().search(query, limit=limit, kinds=kinds, bands=bands, **axes)
 
 
 async def test_build_composition_reports_the_two_effective_search_limits(
