@@ -148,31 +148,49 @@ that on the subject axis it is the ratified sentence and not a widening of it.
 
 ### 1. Four filters over what the records already carry, and each binds before the ranking cut
 
-> **Normative.** `MemoryStore.search` gains four keyword-only filters over values
-> the records already carry: `occurred_within`, `participants`, `topics` and
+> **Normative.** `MemoryStore` gains four keyword-only filter axes over values the
+> records already carry: `occurred_within`, `participants`, `topics` and
 > `about_person`. Each defaults to `None`, and `None` means the axis is not
-> applied. No other `MemoryStore` member changes, and `MemorySearchResult` gains
-> no field.
+> applied. **Two** reads carry them: `search`, whose `query` stays required and
+> whose order stays relevance; and `select` (§4), the structured read that carries
+> no query at all. `MemorySearchResult` gains no field, and no **existing**
+> `MemoryStore` member other than `search` changes.
 
-> **Normative.** Each of the four is a **read-time eligibility predicate** and
-> binds **before the ranking cut**, joining the predicates ADR-0128 §1 already
-> binds there. An implementation may not let a record failing any of them consume
-> the candidate budget the cut is taken from, and the records it ranks are the
-> records eligible on every one of those axes. A store that cannot bind one of them
-> before its cut does not conform — the implementing lane stops and brings back an
+> **Normative.** On both reads each of the four is a **read-time eligibility
+> predicate** and binds **before the ranking cut**, joining the predicates
+> ADR-0128 §1 already binds there. An implementation may not let a record failing
+> any of them consume the candidate budget the cut is taken from, and the records
+> it ranks are the records eligible on every one of those axes. A store that
+> cannot bind one of them before its cut does not conform — the implementing lane stops and brings back an
 > ADR rather than shipping the weaker form.
 
-> **Normative.** No filter is an ordering term. None of the four is an addend,
-> factor, weight or threshold in any comparison of ranked records, and a call
+> **Normative.** No filter is an ordering term on either read. None of the four is
+> an addend, factor, weight or threshold in any comparison, and on `search` a call
 > spanning two values of an axis compares the records it selects to one another by
-> relevance and by nothing else, exactly as ADR-0113 §4 rules for the band.
+> relevance and by nothing else — ADR-0113 §4's clause, which binds on `search`
+> unchanged and unnarrowed after this decision. `select` ranks nothing at all and
+> §5 states the order it returns instead.
 
-The signature this decides, stated once so the shapes are not read out of prose:
+The two signatures this decides, stated once so the shapes are not read out of
+prose:
 
 ```python
 async def search(
     self,
-    query: str | None = None,
+    query: str,
+    *,
+    limit: int = 10,
+    kinds: Sequence[MemoryKind] | None = None,
+    bands: Sequence[BeliefBand] | None = None,
+    occurred_within: TimeWindow | None = None,
+    participants: Sequence[NonBlankEncodableText] | None = None,
+    topics: Sequence[TopicLabel] | None = None,
+    about_person: Sequence[NonBlankEncodableText] | None = None,
+) -> MemorySearchResult: ...
+
+
+async def select(
+    self,
     *,
     limit: int = 10,
     kinds: Sequence[MemoryKind] | None = None,
@@ -191,7 +209,8 @@ section exists to fix. What each docstring must state is settled by the clauses 
 §§1–8 and by nothing outside them (ADR-0089 §3).
 
 **Every existing caller is preserved unchanged**, because every new argument is
-keyword-only with a `None` default and `query` keeps its position. That is not a
+keyword-only with a `None` default, `query` keeps its position and its type, and
+`select` is a member nobody calls yet. That is not a
 convenience: ADR-0128 §5 names five call sites (`orchestration/loop.py`,
 `orchestration/retrieval.py`, `memory/ingest.py`, `tools/builtin.py`,
 `testing/writer.py`), and a contract change that obliged five consumers to decide
@@ -346,80 +365,114 @@ one axis over: a wider topic rule is ADR-0213 §15's reservation, and "health"
 reaching "healthcare" is named there as the first owner surprise it would fix and
 the supersession it would cost.
 
-### 4. A structured read carries no similarity query
+### 4. The structured read is its own member, and `search` keeps its query
 
-> **Normative.** `query` becomes `str | None`, defaulting to `None`. `None` means
-> **no similarity constraint**: the filters alone select, and the read is
-> well-formed with any combination of the six filter axes, including none of them.
+> **Normative.** `MemoryStore` gains `select`: a read carrying the six filter axes
+> — `kinds` and `bands` as `search` has them, and §1's four — a `limit`, and **no
+> query**. It returns a `MemorySearchResult` under §7's clauses, in §5's order,
+> with `score` cleared on every record.
 
-> **Normative.** `None` and `""` are different values with different meanings and
-> no implementation may coerce either into the other. A blank or whitespace-only
-> `query` matches nothing by construction, exactly as it does today and as
-> ADR-0128 §2's fourth clause presumes; `None` is the absence of the constraint.
+> **Normative.** `search` is otherwise unchanged in shape. Its `query` stays
+> **required** and `str`; a blank or whitespace-only query still matches nothing by
+> construction; its order stays relevance, best first; and `score` stays populated
+> on every record it returns. Nothing in this ADR gives `search` a mode in which it
+> ranks by anything other than relevance.
 
-> **Normative.** A caller composing a query from text that may be empty states
-> which it means. A surface that would pass `None` where it holds an empty user
-> utterance is asking for every record the filters admit, and owes the owner the
-> same disclosure §7 puts on any structured read.
+> **Normative.** A `select` call applies **at least one** of its six axes. A call
+> applying none is refused with `ValueError`, and no value of any axis means
+> "everything".
 
-**This is the milestone's third requirement and it cannot be met by a query.** The
-owner's sharpening is explicit — "bounded time/person/topic lookup **without** a
-similarity query" — and the reason is the same one that puts the filters before
-the cut. A structured lookup expressed as a similarity search with filters is a
-similarity search: the records it returns are the ones nearest some text, and
-"which conversations involved Alex in March" has no text to be near. Under the
-milestone's own exit the distractors are *the same topic*, so any text the caller
-could invent is nearer to the distractors than to the answer as often as not.
+> **Normative.** `select` carries no `offset` and offers no paging. `limit` cuts,
+> and a result holding `limit` records asserts nothing about whether the store holds
+> further eligible records below the cut — ADR-0128 §1's second clause, on this
+> read.
 
-**The optional argument rather than a second member**, and the alternative is a
-real one: ADR-0073 §1 says of `list_beliefs` that it "carries **no query text** and
-is not a retrieval — nothing is ranked and no relevance is computed — so it is an
-enumeration with a stable order and a page rather than a filter on `search`". That
-sentence was written when `search` had no filters and the choice was between a
-filter parameter and a method; it is not this case. Here the filters exist on
-`search` regardless, because the milestone's own first slice is *a time window
-plus the existing text query*, and a second member would carry the same six axes a
-second time. Two copies of one filter set is two copies that drift, two docstrings
-stating one contract, and a conformance suite that has to assert every axis twice
-to catch the drift. One member, one filter set, and a stated rule for what happens
-when the ranking input is absent, is the smaller surface and the one whose
-divergence is impossible rather than merely discouraged.
+**A bounded structured lookup without a similarity query is the milestone's third
+requirement and it cannot be met by a query.** The owner's sharpening is explicit —
+"bounded time/person/topic lookup **without** a similarity query" — and the reason
+is the same one that puts the filters before the cut. A structured lookup expressed
+as a similarity search is a similarity search: the records it returns are the ones
+nearest some text, and "which conversations involved Alex in March" has no text to
+be near. Under the milestone's own exit the distractors are *the same topic*, so
+any text a caller could invent is nearer to the distractors than to the answer as
+often as not.
 
-**What this does not do is turn `search` into an enumeration by the back door.**
-ADR-0113 §3's prose — "an empty query with a band selected is still nothing rather
-than 'the whole band'" — stays true word for word, because a blank query still
-matches nothing. What creates the query-less read is this ADR's own argument, made
-in its own text, with its own order rule in §5 and its own `score` rule beside it;
-it is not read off a filter parameter whose ADR never asked the question. That
-distinction is exactly what ADR-0113 §3 was protecting.
+**It is a second member rather than an optional `query` on `search`, and the corpus
+decides that twice over.** ADR-0113 §4's first normative clause is unconditional
+over a `search` call — "Within the result of one call the order is relevance alone,
+whichever bands are selected" — so a `search` that ordered by anything else, in any
+mode, would make that sentence false for a reader holding only ADR-0113. That is
+ADR-0082 §1's test failing and an amendment owed on a clause this decision has no
+need to touch, on the axis ADR-0112 §2 is most careful about. And ADR-0073 §1 had
+already answered the shape question in as many words: a read that "carries **no
+query text** and is not a retrieval — nothing is ranked and no relevance is
+computed — so it is an enumeration with a stable order and a page rather than a
+filter on `search`". Two ratified sections point the same way, and the reading that
+put the query-less read inside `search` was this ADR's own convenience rather than
+the corpus's position.
+
+**`search` still gains the four filters, because the milestone's first slice needs
+them there.** "A time-window filter over episodes **plus** the existing text query"
+is a filtered *relevance* read: the caller has text and wants the nearest records
+within a period. That is `search` with `occurred_within`, and it is why the axes are
+not confined to the new member.
+
+**The name is `select`, and the two rejected names are rejected for reasons.**
+`find` is a synonym for `search` and would leave a caller guessing which of two
+members answers "find me the records about X". `list_records` borrows
+`list_beliefs`' verb, which the corpus uses for a *paged inspection* of live
+beliefs (ADR-0073 §1, §3), and this is neither paged nor an inspection. `recall` is
+the engine's verb (ADR-0085 §3), and a seam that borrows the layer above's
+vocabulary makes two surfaces look like one — ADR-0101 §1's own argument for
+`delete_about`. `select` names what the operation does, promises no ordering by
+relevance, and claims no completeness.
+
+**One axis set on two members is a real cost and it is the smaller one.** The
+alternative was one member with an optional query, and what it bought — a single
+statement of the axes — it paid for with an amendment to ADR-0113 §4 and a `search`
+carrying two orders and two `score` regimes selected by whether one argument is
+`None`. The corpus already carries this cost in the same shape and made the same
+choice: `kinds` and `bands` sit on `search` and on `list_beliefs` both, defined once
+in ADR-0073 §1 and restated by ADR-0113 §3 rather than merged into one method. The
+drift the duplication invites is closed the way ADR-0128 §5 closes its own: §2 and
+§3 define the axes once, for both reads, and §9 requires the conformance suite to
+run one parametrised body against both members rather than two bodies that can
+disagree.
+
+**`MemorySearchResult` is reused rather than twinned.** Its name is `search`'s
+history, not a claim about which member produced it; its two fields are exactly what
+`select` has to return; and a second type carrying the same pair would oblige
+ADR-0128 §2's four `capped` clauses to be stated twice, which is the drift this
+section has just refused one paragraph above. §7 binds those clauses on both reads.
 
 **`list_beliefs` is untouched.** It keeps its offset paging, its refusal of an
-out-of-range `limit`, its live-beliefs-only reach and its own order. A caller
-inspecting the profile still calls it; a caller retrieving by structure calls
-`search`. Nothing about this ADR makes one a substitute for the other, and no lane
-may fold either into the other on the strength of it.
+out-of-range `limit`, its live-beliefs-only reach and its own order, and it stays
+the unfiltered enumeration — which is why `select` refuses a call that names no
+criterion rather than quietly becoming a second one. A caller inspecting the profile
+calls `list_beliefs`; a caller retrieving by structure calls `select`; a caller with
+text calls `search`. Nothing here makes any of the three a substitute for another,
+and no lane may fold one into another on the strength of it.
 
-### 5. The order when there is no relevance, and `score` is cleared
+### 5. `select`'s order, and its cleared `score`
 
-> **Normative.** Where `query` is `None`, the records are ordered by
-> `provenance.last_updated` **descending**, ties broken by `id` **ascending** —
-> the total, stable order ADR-0073 §1 already names for `list_beliefs` — and the
-> page is the first `limit` of that ordered, filtered sequence. Where `query` is
-> given, the order is relevance, best first, exactly as it is today.
+> **Normative.** `select` orders its records by `provenance.last_updated`
+> **descending**, ties broken by `id` **ascending** — the total, stable order
+> ADR-0073 §1 already names for `list_beliefs` — and returns the first `limit` of
+> that ordered, filtered sequence.
 
-> **Normative.** Where `query` is `None`, `score` is `None` on every returned
-> record — **cleared**, not merely absent — because nothing was ranked (ADR-0073
-> §2's rule, on the read that has the same property). Where `query` is given,
-> `score` stays populated as ADR-0128 requires.
+> **Normative.** `select` returns `score` as `None` on every record —
+> **cleared**, not merely absent — because nothing was ranked. That is ADR-0073
+> §2's rule, on the second read that has the same property, and it is the opposite
+> of `search`'s, which stays populated exactly as ADR-0128 requires.
 
 > **Normative.** The order is not a quantity and creates no place to put one. No
 > band, confidence, currency, evidence-strength or importance is a term in it, and
-> no implementation may make one so. ADR-0112 §1–§2 bind unchanged: `search` is
-> granted no weighting authority over any quantity by this ADR.
+> no implementation may make one so. ADR-0112 §1–§2 bind unchanged: neither read
+> is granted weighting authority over any quantity by this ADR.
 
 **Some total order has to be named or two stores answer the same call
 differently**, which is ADR-0073 §1's argument for `list_beliefs`' order and
-`AuditTrail.recent`'s before it, applied to a second read that has no relevance to
+`AuditTrail.recent`'s before it, applied to a third read that has no relevance to
 fall back on. Naming *that* order rather than a new one means the corpus has one
 enumeration order and not two.
 
@@ -434,7 +487,7 @@ recently *written* of the week's records and not the ten most recent by event
 time. §7's clauses are what keep that honest, and §11 defers an event-time order
 with the condition that fires it.
 
-**Ordering a query-less read by a write stamp is not currency acting.**
+**Ordering `select` by a write stamp is not currency acting.**
 ADR-0112 §1 forbids currency and evidence-strength as terms in "any ordering,
 score, weight or cut applied to retrieved records", and names the two places
 currency does act — standing (ADR-0110 §8) and presentation (ADR-0103 §9,
@@ -513,11 +566,20 @@ proposal rule are that lane's, and this ADR designs none of them.
 
 ### 7. What an empty result asserts, and what `capped` says under a filter
 
-> **Normative.** ADR-0128 §2's four clauses bind unchanged over the new axes.
-> `capped` reports the store's own candidate ceiling and never the size of the
-> eligible set; a filter selecting nothing yields `capped` `False`, never `True`,
-> because such a read matches nothing by construction; and an empty result is not a
-> capped one.
+> **Normative.** ADR-0128 §2's four clauses bind unchanged over the new axes on
+> `search`, and bind on `select`'s result in the same terms and with the same
+> words. `capped` reports the store's own candidate ceiling and never the size of
+> the eligible set; a read that matches nothing by construction — a filter
+> selecting nothing, a non-positive `limit`, and on `search` a blank query — yields
+> `capped` `False`, never `True`; and an empty result is not a capped one.
+
+> **Normative.** `select` inherits `search`'s `limit` behaviour exactly: a
+> non-positive `limit` matches nothing and returns an empty, uncapped result, and a
+> `limit` larger than the eligible set returns the whole of it and raises nothing.
+> Neither read *refuses* a `limit` — that is `list_beliefs`' rule (ADR-0073 §2) and
+> it is not borrowed here — and neither propagates an error from a value its
+> storage layer cannot represent: an implementation binding `limit` into a query
+> language clamps at its own boundary, and the contract's answer is unchanged.
 
 > **Normative.** The certification ADR-0128 §2's first clause gives — where
 > `capped` is `False` and the result is shorter than `limit`, the store holds no
@@ -598,24 +660,30 @@ landed alone with its tests to follow.
 > returning nothing and does not test §1 — ADR-0128 §5's clause, restated because
 > it is the clause an implementation passes in name and fails in substance.
 
-> **Normative.** The suite pins, on every implementation: the `None`/empty/
-> duplicate convention on each sequence axis; conjunction across axes and
-> disjunction within one; both ends of the half-open window and both refusals
-> `TimeWindow` makes; the caseless fold on both person axes, including a pair
-> differing only in case and a pair differing by a diacritic (which must **not**
-> match); exact-character matching on `topics`; that a record carrying no value on
-> an axis is reached by no filter on it; that a query-less read clears `score` and
-> returns §5's order; and that a blank `query` still matches nothing while `None`
-> does not.
+> **Normative.** Every axis case is written **once** and run against **both**
+> reads, parametrised over the member rather than duplicated per member. Two
+> bodies asserting one axis set is the drift §4 refuses, and a suite that
+> reproduced it would be the instrument that failed to catch it.
 
-1. **The contract** — `TimeWindow` in `core/types.py`, and `MemoryStore.search`'s
-   signature and docstring in `core/protocols.py`, carrying §§1–8's semantics. The
-   docstring's `Args` block gains the four axes and states the conventions rather
-   than pointing at a sibling, which is ADR-0113 §3's own instruction.
+> **Normative.** The suite pins, on both reads and on every implementation: the
+> `None`/empty/duplicate convention on each sequence axis; conjunction across axes
+> and disjunction within one; both ends of the half-open window and both refusals
+> `TimeWindow` makes; §3's fold on both person axes; exact-character matching on
+> `topics`; and that a record carrying no value on an axis is reached by no filter
+> on it. It pins on `select` in addition: §5's order and cleared `score`, the
+> refusal of a call applying no axis, and §10's `limit` cases — which are **not**
+> inherited from `search`'s existing ones, because every one of those supplies a
+> query and none of them executes this read's path.
+
+1. **The contract** — `TimeWindow` in `core/types.py`, and in
+   `core/protocols.py` both `MemoryStore.search`'s extended signature and the new
+   `MemoryStore.select`, each with a docstring carrying §§1–8's semantics. Each
+   `Args` block states the conventions rather than pointing at its sibling, which
+   is ADR-0113 §3's own instruction and the reason it gives for it.
 2. **The shared conformance suite** — `tests/memory/memory_store_contract.py`,
    with the clauses above beside ADR-0128 §5's existing crowding cases. The
-   standing clauses bind unchanged: cancellation (ADR-0060) and input observation
-   (ADR-0065 §3).
+   standing clauses bind unchanged on the new member too: cancellation (ADR-0060)
+   and input observation (ADR-0065 §3).
 3. **The canonical fake** — `FakeMemoryStore` in `ai_assistant.testing`, passing
    the extended suite. As ADR-0128 §5 records, it has no KNN and therefore no
    ceiling, so the case that bites lives in the SQL store's own tests.
@@ -627,9 +695,11 @@ landed alone with its tests to follow.
    `InMemoryMemoryStore` is implemented in the same change.
 5. **No caller changes.** Every existing call site is preserved by the defaults;
    the lane adds none and rewrites none.
-6. **No version moves.** `search` is not on the promoted `AssistantEngine` surface
-   and `TimeWindow` crosses neither `wire/` nor `service/`, so under ADR-0124 §9
-   no frame a conforming peer may send changes and `PROTOCOL_VERSION` stays.
+6. **No version moves.** Neither `search` nor `select` is on the promoted
+   `AssistantEngine` surface — `select` adds a `MemoryStore` member, not an engine
+   one — and `TimeWindow` crosses neither `wire/` nor `service/`, so under
+   ADR-0124 §9 no frame a conforming peer may send changes and `PROTOCOL_VERSION`
+   stays.
    `EXPORT_VERSION` likewise: no stored record gains a field. The lane verifies
    both against the tree of its day rather than against this sentence.
 
@@ -657,8 +727,8 @@ fixture rather than interpret a wish:
    identically-worded conversation from the month before. This is the one arm
    today's captured data supports without any new producer.
 3. **A caption is never the reason.** A record whose text is engineered to sit
-   near unrelated questions is not returned by a structured read whose filters it
-   fails, at any similarity. Run with `query=None` and again with a query the
+   near unrelated questions is not returned by a read whose filters it fails, at
+   any similarity. Run it on `select`, and again on `search` with a query the
    caption matches: the second is the arm that matters, because it is the one where
    similarity would have won.
 4. **Wording shares nothing.** A question whose words appear nowhere in the stored
@@ -667,20 +737,33 @@ fixture rather than interpret a wish:
    with `capped` `False`, and the suite asserts that the result is empty **and**
    that no unlabelled record leaked into it — the two failures §6 sits between.
 6. **Ambiguous.** Two records match the same person and window; both are returned,
-   in §5's order where the read is query-less, and neither is preferred by any
-   quantity.
+   in §5's order on `select`, and neither is preferred by any quantity.
 7. **Unpopulated axes.** Over a store of captured episodes as they are written
    today, a `topics` or `participants` filter returns nothing, and the test asserts
    that as the *specified* behaviour rather than as a bug — the arm that will be
    inverted, deliberately, by the producer lane.
-8. **Case and diacritic.** `"Marta"` and `"marta"` match each other on both person
-   axes; `"Marta"` and `"Márta"` do not. The second is what pins that the fold is
-   D145's and not a normalisation of someone's devising.
-9. **Both refusals.** `TimeWindow()` and `TimeWindow(start=t, end=t)` each raise
-   `ValueError`; an empty sequence on any axis returns an empty, uncapped result.
-10. **The blank/`None` split.** `search("")` matches nothing; `search()` with a
-    window returns the window's records. One test, because it is the pair a reader
-    of §4 will most want to see asserted.
+8. **The fold is D145's and not a lowercase comparison.** Four pairs on **both**
+   person axes, because a `.lower()` implementation passes the obvious two and
+   fails the rest. `"Marta"`/`"marta"` match; `"Marta"`/`"Márta"` do **not**;
+   `"Straße"`/`"STRASSE"` **do**, which is full case folding and not lowercasing;
+   and `"Márta"` against the same name written with a combining acute
+   (`"Ma\u0301rta"`) **do**, which is the canonical equivalence the outer and inner
+   `NFD` supply. The last two are what pin the rule; the first two alone do not.
+9. **Both refusals, and the two calls that name nothing.** `TimeWindow()` and
+   `TimeWindow(start=t, end=t)` each raise `ValueError`; `select()` applying no
+   axis raises `ValueError`; an empty sequence on any axis returns an empty,
+   uncapped result on both reads.
+10. **`select`'s own `limit` boundaries**, asserted on this read and never inherited
+    from `search`'s, since every existing limit case supplies a query and none of
+    them executes this path. `limit=0` and `limit=-1` each return an empty,
+    uncapped result; `limit=2**63` returns the whole eligible set and raises
+    nothing — the case a store that binds `limit` straight into its query language
+    fails while passing every other fixture here.
+11. **The two reads are not each other.** One store, one fixture: `search` over a
+    query with a window returns the nearest-first records of that window with
+    `score` populated; `select` over the same window returns §5's order with
+    `score` `None`. Asserted together, because the pair is what §4 decided and a
+    reader of §5 will want to see it held.
 
 ### 11. Deferred, by name, each with what fires it
 
@@ -688,7 +771,7 @@ fixture rather than interpret a wish:
   when it was said (§8). **Fires** with the first producer that records such an
   instant — #1874's "ADR A" is the named candidate — and it owes the field before
   it owes the filter.
-- **An order keyed on event time.** §5 orders a query-less read by
+- **An order keyed on event time.** §5 orders `select` by
   `provenance.last_updated` for totality. **Fires** with the axis above, since an
   order over a field one kind carries needs either a kind-scoped read or a total
   fallback, and neither is worth deciding before the field exists.
@@ -754,23 +837,42 @@ binding before the cut, now joined by four more that also do. That is ADR-0082
 earlier ADR wrote … is recorded in the ADR that makes it, and nowhere else" — and
 it is the same treatment ADR-0077 §9 and ADR-0079 §3 gave their own additions.
 
-**ADR-0128 §2 is untouched in every particular.** `MemorySearchResult` gains no
-field, no other `MemoryStore` member changes, `search` still neither raises nor
-refuses on a capped read, no parameter selects a refusing or completeness-requiring
-mode, and no second member reports on a `search` that has returned. §2's fourth
-clause already contemplates "a filter selecting nothing", so an empty sequence on a
-new axis lands in a case it decided rather than one it did not foresee. §7 above
-states what the certification covers; it narrows nothing about when `capped` is
-`False`.
+**ADR-0128 §2 is untouched in every particular, and the new member is the place to
+show that rather than to assume it.** Its first clause fixes what *that* change did
+— "No other `MemoryStore` member changes, `list_beliefs` is untouched, no other
+`core` type is added, and the result carries no field beyond those two" — with the
+same self-scoping subject as §1's third clause, and it stays true of ADR-0128: that
+decision changed no other member and added no other type. This one adds `select`
+and `TimeWindow`, changes no existing member but `search`, leaves `list_beliefs`
+untouched in name, signature and meaning, and adds no field to
+`MemorySearchResult`. §2's second clause is the one that has to be read carefully,
+because it names a second member: "no second `MemoryStore` member **reports on a
+`search` that has already returned**". `select` reports on no `search`. It is a
+read of its own, issuing its own result with its own `capped` under §7, and a
+caller learns nothing from it about a `search` it made — which is the under-service
+back channel that clause forbids, and exactly what this member is not. `search`
+still neither raises nor refuses because a read was capped, and no parameter on
+either read selects a refusing or completeness-requiring mode. §2's fourth clause
+already contemplates "a filter selecting nothing", so an empty sequence on a new
+axis lands in a case it decided rather than one it did not foresee. §7 above states
+what the certification covers; it narrows nothing about when `capped` is `False`.
 
-**ADR-0113 §3's normative clause is the convention this ADR follows, not one it
-changes.** The `None`/empty/duplicate rule and conjunction are restated for four
-more axes exactly as written. The unmarked prose beside it — "an empty query with a
-band selected is still nothing rather than 'the whole band'" — stays literally true,
-because `""` still matches nothing; what §4 adds is a *different value*, `None`,
-with a meaning ADR-0113 never gave it, argued in this ADR's own text. Under
-ADR-0089 §3 that prose supplies no obligation in any case, and this ADR does not
-lean on that: the sentence is true after this decision as before it.
+**ADR-0113 §3 and §4 are the two clauses a first draft of this ADR did make false,
+and the surface was changed rather than the clauses.** §3's convention — the
+`None`/empty/duplicate rule and conjunction — is restated for four more axes
+exactly as written, and its unmarked prose beside it ("an empty query with a band
+selected is still nothing rather than 'the whole band'") stays literally true,
+because `search` keeps a required `query` and a blank one still matches nothing.
+§4's first normative clause — "Within the result of one call the order is relevance
+alone, whichever bands are selected" — is the one that decided §4 of this ADR. An
+earlier draft gave `search` an optional `query` ordering a query-less call by
+`provenance.last_updated`, which would have made that sentence false for a reader
+holding only ADR-0113 and owed an amendment on it. The architecture lens raised it
+as a blocker on round 1 and it was right. Putting the query-less read on its own
+member is what makes the clause true rather than merely narrow: after this decision
+every `search` call still orders by relevance alone, and `select` is a member
+ADR-0113 never spoke about. ADR-0112 §1–§2 are untouched for the same reason, and
+§5 argues separately why a total order over an unranked set is not currency acting.
 
 **ADR-0100 §6 and ADR-0101 §2–§3 are used at their stated scope.** ADR-0101 §10
 records that ADR-0100 §6's reservation is lifted "only as far as comparison and
@@ -793,10 +895,11 @@ other fields.
 > whole of what it obliges, and unmarked text is read to determine what a marked
 > clause means and never supplies an obligation.
 
-It decides `core/protocols.py` and `core/types.py` surface, so it owes **both**
-required lenses — adversarial and architecture — under ADR-0015 §1, and it merges
-as its own PR, ratified before anything implements against it (golden rule 5,
-ADR-0015 §5). The implementation lane is briefed from the merged text.
+It decides `core/protocols.py` and `core/types.py` surface — a changed member, a
+new one and a new type — so it owes **both** required lenses, adversarial and
+architecture, under ADR-0015 §1, and it merges as its own PR, ratified before
+anything implements against it (golden rule 5, ADR-0015 §5). The implementation
+lane is briefed from the merged text.
 
 ## Consequences
 
@@ -814,10 +917,11 @@ never the reason it was selected.
 implementation that is a storage question ADR-0213 §15 correctly says fires with
 this read: `topics` is a tuple on a row, and a filter over it that binds pre-cut is
 a column, a child table or an index, not a post-fetch comprehension. The suite
-grows by four axes' worth of crowding fixtures, which are the expensive kind. And
-`search` now has two orders and two `score` regimes selected by whether one
-argument is `None` — a genuine cost, taken because the alternative is two members
-carrying one filter set.
+grows by four axes' worth of crowding fixtures, which are the expensive kind, and
+runs each of them twice over. And `MemoryStore` now has three reads whose filter
+axes overlap — `search`, `select` and `list_beliefs` — which is a surface a caller
+has to choose within; §4 states the three-way test in one sentence so that the
+choice is written down rather than inferred.
 
 **What is inert on the day it merges.** Three of the four axes reach no captured
 episode, because capture writes none of those values and ADR-0213 §6 forbids any
@@ -835,26 +939,28 @@ the lane stops and brings back an ADR.
 
 ## Alternatives considered
 
-**A second `MemoryStore` member for the query-less read.** ADR-0073 §1's own words
-argue for it — a read with no query text "is an enumeration with a stable order and
-a page rather than a filter on `search`". Declined in §4: that sentence was written
-when the alternative was a filter parameter on a method that had no filters, and
-here `search` carries the filters regardless, because the milestone's first slice
-is a window *and* a text query. A second member would state one filter set twice,
-and two statements of one contract drift — which is ADR-0073 §1's own reason for
-refusing to let `bands`' convention be read off a sibling method, and ADR-0113 §3's
-for restating it. The cost of the choice is stated in the Consequences rather than
-argued away.
+**An optional `query` on `search` instead of a second member**, so that one method
+carried the axes once and `query=None` meant "no similarity constraint". This ADR's
+first draft took it, and it was wrong twice over. It would have made ADR-0113 §4's
+"the order is relevance alone, whichever bands are selected" false of a `search`
+call and owed an amendment on it; and it would have set `None` and `""` beside each
+other on one argument with opposite meanings, so that a surface composing
+`query=user_text or None` would silently ask for everything the filters admit
+instead of nothing. §4 records the change and the clause that forced it. What the
+optional argument bought — one statement of the axes — is paid for instead by §9's
+requirement that the suite parametrise over the member rather than duplicate the
+body.
 
-**Refusing a blank `query` outright**, so that `None` and `""` could not be
-confused. It is ADR-0101 §1's shape, and it would be cleaner. Declined because
-ADR-0128 §2's fourth clause decides the blank-query case explicitly — "It reports
-`False`, never `True`, where `search` matches nothing by construction: a blank
-query, a non-positive `limit`, or a filter selecting nothing" — so making a blank
-query unconstructable would make a reader holding only ADR-0128 act differently,
-which is ADR-0082 §1's test failing and an amendment owed on a clause this ADR has
-no need to touch. §4's explicit clauses are the cheaper answer to a caller-side
-hygiene problem.
+**Refusing a blank `query` outright**, considered while the optional-`query` shape
+was still on the table, so that `None` and `""` could not be confused. It is
+ADR-0101 §1's shape and it would have been cleaner than the pair. Declined then
+because ADR-0128 §2's fourth clause decides the blank-query case explicitly — "It
+reports `False`, never `True`, where `search` matches nothing by construction: a
+blank query, a non-positive `limit`, or a filter selecting nothing" — so making a
+blank query unconstructable would make a reader holding only ADR-0128 act
+differently, which is ADR-0082 §1's test failing on a clause this ADR has no need
+to touch. Moot under §4's surface, and recorded because the reasoning is what keeps
+a later lane from reaching for it.
 
 **A sentinel selecting records with no stated subject**, so that "about the owner"
 could be asked for directly — for instance admitting `None` as a member of the
@@ -882,10 +988,16 @@ same person label?" in one method, selected by which field the label sits in, an
 ADR-0100 §6 itself names `participants` as the honest precedent for what
 `about_person` is.
 
-**A relevance order for the query-less read, computed from the filters.** Declined
-without much hesitation: there is no query, so any such quantity would be invented
-by the store, and ADR-0112 §2 grants `search` no weighting authority over any
-quantity. A named total order is the whole of what §5 needs.
+**A relevance order for `select`, computed from the filters.** Declined without
+much hesitation: there is no query, so any such quantity would be invented by the
+store, and ADR-0112 §2 grants no read weighting authority over any quantity. A
+named total order is the whole of what §5 needs.
+
+**Giving `select` an `offset` and making it a paged read**, on `list_beliefs`'
+shape. Declined in §4: no consumer pages a retrieval into a turn's supply, `limit`
+is the bound that matters there, and offset paging over a mutating store may skip
+or repeat a record — accepted for an inspection surface (ADR-0073 §2) and not worth
+inheriting for a read nobody pages. It is additive if a consumer ever needs it.
 
 **Filtering on `disposition` or `capture`** — plausible-looking axes on the same
 records. Declined because ADR-0221 §14 rules for both that "no read returning
