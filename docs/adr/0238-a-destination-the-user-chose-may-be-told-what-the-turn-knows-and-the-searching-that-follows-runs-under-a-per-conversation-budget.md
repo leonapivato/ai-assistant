@@ -19,11 +19,6 @@
   eighth-check clause in its seventh limb alone, each for a closed-loop request.**
   Those three, and nothing else — §5's rule that a grant reaches the recipient and never
   the payload is left standing deliberately, and §1 below is built so that it can be.
-- **Partially supersedes** [ADR-0074](0074-conversation-is-an-entity-and-every-turn-is-an-episode.md)
-  — **§9's enumeration of what a `ConversationTurn` carries and of what the
-  `ConversationStore` owes.** That enumeration, in the same scope ADR-0205 and
-  ADR-0212 already moved it, and nothing else: the row gains one member and `append`
-  takes its value, and **no member is added to the store**.
 
 ## Context
 
@@ -83,10 +78,15 @@ theoretical, and so nobody reads the supersessions as taking effect on merge.
   `async def compose(self, utterance: NonBlankEncodableText, /) -> QueryOutcome`, one
   positional-only parameter, one member. Its docstring carries §3's safety claim in
   full.
-- `ConversationTurn` in `core/types.py` carries `conversation_id`, `ordinal`,
-  `episode_id`, `occurred_at`, `parked` and `delivery`. `ConversationStore` carries
-  `record_delivery`, the one member that writes a fact arriving after the turn was
-  recorded.
+- `EgressBinding` in `core/types.py` already carries two facts of the class §5 adds a
+  third to — `planned_with_external_content` (ADR-0181 §3) and `coverage` (ADR-0233 §4) —
+  each written by the component that composed the arguments, each mirrored on
+  `CarriedProvenance`, and each compared through `EgressBinder.rebind` and
+  `PermissionDecision.authorises`.
+- `ConversationExport` carries `schema_version: Literal[2]`, `conversations` and `turns`,
+  so a field on `Conversation` or on `ConversationTurn` would change a portable document's
+  shape and move that literal (ADR-0212 §8, ADR-0014 §5). §8 puts this decision's counters
+  in their own store instead, and neither type is touched.
 - `MemoryRecord` is a discriminated union over the four record kinds, every one of
   which carries `placement` on `MemoryBase` (ADR-0217 §1).
 - **Nothing in `planning/` or `orchestration/` imports `secret_store`**, and
@@ -94,9 +94,11 @@ theoretical, and so nobody reads the supersessions as taking effect on merge.
   ``Secrets`` face or constructs a transport**". The credential is the seam's, at the
   position ADR-0148 §7 puts it. §12's credential clause is therefore a statement about
   the tree and not an aspiration.
-- `PROTOCOL_VERSION` stands at **31** in `wire/envelope.py`. `ConversationTurn` is
-  named in no module of `wire/`, and no member of the promoted `AssistantEngine`
-  surface returns one; §13 is why this decision does not move the number.
+- `PROTOCOL_VERSION` stands at **31** in `wire/envelope.py`, and
+  `AssistantEngine.recent_decisions` and `export_decisions` return
+  `tuple[PermissionDecision, ...]` across the wire (`wire/client.py`). A
+  `PermissionDecision` carries an `EgressBinding`, so §5's field **does** cross and §13
+  moves the number.
 - `web_search_cost_per_call` and `web_search_cost_currency` exist (ADR-0236 §1), and
   `WebSearchEgress` reports no figure on a completed search, so `consumed_call` writes
   `unknown_cost()` — the fact #2126 records and §10 decides.
@@ -207,8 +209,10 @@ the fifth of five comparisons a grant must satisfy, so moving §4 alone would le
 > a destination whose record is revoked reads `UNCHOSEN` from that moment.
 
 > **Normative.** `core/types.py` gains **`DestinationTrustRecord`**, a frozen model
-> refusing unknown fields, with exactly five fields: `id: Identifier`, minted by the
-> store's injected id factory and supplied by no caller; `destinations:
+> refusing unknown fields, with exactly five fields: `id: Identifier`, **minted by the
+> caller that constructs the record**, as `RecipientGrant`'s is (ADR-0193 §1), so that the
+> record is a complete value before it reaches any store and the store's refusal of a
+> duplicate is a comparison rather than an allocation; `destinations:
 > tuple[CanonicalDestination, ...]`, non-empty, the canonical destination set this record
 > is over; `trust: DestinationTrust`; `established_at: UtcInstant`, the instant of the
 > user's act; and `revoked_at: UtcInstant | None`, defaulting to `None`. It carries **no
@@ -230,8 +234,16 @@ the fifth of five comparisons a grant must satisfy, so moving §4 alone would le
 > **`revoke`**, taking a record `id` and the instant of the user's act, prospective and
 > idempotent, refusing an unknown id by the same error; and **`live`**, answering the
 > records that are not revoked, ordered, for the surface that lets a user see and revoke
-> what they granted. **No member is added, no argument widened and no return changed by
-> any later lane** without the ADR that decides it.
+> what they granted; and **`export`**, answering **every** stored record, revoked ones
+> included, in a stable order. **No member is added, no argument widened and no return
+> changed by any later lane** without the ADR that decides it.
+
+> **Normative.** **`export` exists because the data right does.** ADR-0004 §6 gives the
+> owner their data, and ADR-0193 §1 already applies that to authorisation records, live
+> and revoked alike: a revoked trust record is the evidence that the user once permitted a
+> destination and then withdrew it, which is exactly what an audit of one's own decisions
+> is for. `live` is the operating read and `export` is the right; neither stands in for the
+> other, and the user-facing layout of an export stays the surface lanes' (§14).
 
 > **Normative.** **`trust_of` answers `USER_CHOSEN` only where every member of the
 > sequence it was given is a member of some one live record's `destinations`**, compared
@@ -327,8 +339,8 @@ exists and is live, or it does not.
 > reaches it", and "**a second turn re-searches** … because nothing was retained". So the
 > third population above is **within one turn** — the refinement ADR-0228 §2's revision
 > makes real, where a second servicing of the same turn composes over the first's
-> results — and **no later turn reaches a result's content by any route**. `TurnSearchRecord`
-> (§8) carries three quantities and no result, and no lane reads this ADR as deciding
+> results — and **no later turn reaches a result's content by any route**. §8's store
+> holds two counters and one flag and no result, and no lane reads this ADR as deciding
 > retention, an archive admission or a store write for a minted record.
 
 > **Normative.** **What a later turn has instead is the captured episode**, stamped and
@@ -447,8 +459,8 @@ recipient.
 
 > **Normative.** **The third condition ranges over the conversation's recorded turns
 > *and* over the current turn**, and the current turn is evaluated live rather than from
-> a record that does not exist yet. Its two halves are: every recorded turn's
-> `TurnSearchRecord.external_all_user_chosen` (§8) is true; **and** every recorded
+> a record that does not exist yet. Its two halves are: the conversation's stored
+> `all_external_user_chosen` flag (§8) is true; **and** every recorded
 > external span in the turn's pre-servicing supply and in every record this servicing has
 > already contributed was minted by a `WEB_SEARCH` servicing at a destination of recorded
 > trust `USER_CHOSEN`. The second half is computed by `orchestration` at the moment the
@@ -471,13 +483,29 @@ recipient.
 > content, a query or a reply**, and no component asks a model for either.
 
 > **Normative.** **The whole condition reaches the ruling as one recorded fact on the
-> binding.** `EgressBinding` gains `closed_loop: bool`, **required with no default**: true
+> binding.** `EgressBinding` gains `closed_loop: bool`, **defaulting to `False`**: true
 > exactly where all four conditions above hold for this request, and false otherwise —
 > so false for every request that is not a `WEB_SEARCH`, and false on every binding this
-> corpus builds today. `CarriedProvenance` gains the same field, required with no
-> default, and the seam writes the binding's value from the carrier's unchanged. This is
-> ADR-0181 §3's carriage and ADR-0233 §4's shape, and it is stated over the same two
-> types for the same reason.
+> corpus builds today. `CarriedProvenance` gains the same field with the same default, and
+> the seam writes the binding's value from the carrier's unchanged. This is ADR-0181 §3's
+> carriage and ADR-0233 §4's shape, stated over the same two types for the same reason.
+
+> **Normative.** **The default is `False` rather than "required with no default", and that
+> is a decision rather than a convenience.** It keeps **ADR-0152 §7's transcription count
+> untouched**: `rebind` re-derives a binding for a resumed confirmation and "takes from
+> `approved` **exactly one** thing", already narrowed twice (ADR-0181 §3, ADR-0233 §4), and
+> a fourth transcription would supersede that clause a third time. With the default,
+> `rebind` transcribes nothing new and constructs `False` — **the correct value for every
+> request that can resume**, because a `CONFIRM` on a `WEB_SEARCH` decision "resolves in no
+> turn" (ADR-0231 §9, whose limbs bind entire under ADR-0235 §3), so no closed-loop request
+> is ever resumed.
+
+> **Normative.** **The default is safe in the direction a default is usually unsafe.**
+> `False` is the **restrictive** value, so a composition site that fails to compute it
+> yields a request that is not closed-loop and rules exactly as `origin/main` rules today.
+> The failure mode of the omission is that this milestone does not work, which is loud. It
+> is not a floor bypassed by a missing field, which is what ADR-0233 §4's "required with no
+> default" guards for a three-valued fact whose safe member is not its first.
 
 > **Normative.** **`closed_loop` is written by `orchestration`, at the moment the request
 > is built, and by nothing else.** It is computed from the conversation's recorded turns,
@@ -688,61 +716,89 @@ relaxation legible in the way §9 wanted.
 > chooses; a bound the milestone's exit is stated over may not be absent by omission, so
 > a deployment that configures nothing still searches under both.
 
-> **Normative.** `core/types.py` gains **`TurnSearchRecord`**, a frozen model refusing
-> unknown fields, with exactly three fields: `calls: int`, non-negative, the provider
-> calls this turn's servicings made; `elapsed: timedelta`, non-negative and finite, the
-> wall-clock time those calls occupied; and `external_all_user_chosen: bool`, true where
-> every recorded external span this turn's final supply carried was minted by a
-> `WEB_SEARCH` servicing to a destination of recorded trust `USER_CHOSEN`, and false
-> otherwise — vacuously true for a turn whose final supply carried no external span.
+> **Normative.** `core/types.py` gains **`ConversationSearchDraw`**, a frozen model
+> refusing unknown fields, with exactly three fields: `calls: int`, non-negative, the
+> provider calls this conversation has claimed; `elapsed: timedelta`, non-negative and
+> finite, the time those calls were allowed; and `all_external_user_chosen: bool`,
+> defaulting to `True`, false once any turn of this conversation has carried a recorded
+> external span that was **not** minted by a `WEB_SEARCH` servicing at a destination of
+> recorded trust `USER_CHOSEN`.
 
-> **Normative.** `ConversationTurn` gains exactly one member, **`search`**, a
-> `TurnSearchRecord | None` defaulting to `None`, and **it is state about the turn and
-> not content of it** — three quantities are not the exchange, so `ConversationStore`'s
-> "This store holds no content" binds unchanged. This is `delivery`'s placement and
-> `delivery`'s justification (ADR-0205 §3), and it is here for the same reason: the
-> record graph is frozen (ADR-0068) and `MemoryStore` offers no update, so the index row
-> is what can carry a per-turn fact at all.
+> **Normative.** `core/protocols.py` gains **one** further `@runtime_checkable` Protocol,
+> **`SearchBudgetStore`**, keyed by conversation, with exactly **four** members:
+> **`draw_of`**, answering a conversation's `ConversationSearchDraw`, and answering
+> `calls=0`, `elapsed=0` and `all_external_user_chosen=True` for a conversation it holds
+> nothing for; **`claim`**; **`settle`**; and **`observe`**, folding one turn's externality
+> footing into the stored flag by logical **and**. A fifth member is added by no lane
+> without the ADR that decides it.
 
-> **Normative.** **The value is written by `append`, in the same write that records the
-> turn, and by no second member.** `ConversationStore` gains **no** new member: the fact is
-> known inside the turn, unlike `delivery`, so `append` takes it and the row lands with it
-> or not at all. That removes the window a two-write shape would have, and it is why §17
-> records this ADR against ADR-0074 §9's enumeration of what the store owes as well as of
-> what the row carries.
+> **Normative.** **`claim` is one atomic step: admit, charge, and answer the deadline.**
+> Given a conversation and the two bounds, it refuses where the stored `calls` have reached
+> `search_calls_per_conversation` or the stored `elapsed` has reached
+> `search_elapsed_per_conversation`; otherwise it increments `calls` by one, adds to
+> `elapsed` the **deadline it is about to grant**, and answers that deadline — the lesser of
+> the transport's own timeout and the conversation's remaining time. **The read, the
+> comparison and the write are one indivisible step.** That is `RecipientGrantStore`'s
+> atomic count-with-append (ADR-0193 §1) applied to a counter, and it is why concurrent
+> turns, a failed turn and a process exit are answered by one clause rather than three:
+> **two turns of one conversation, two servicings of one turn, and two engines over one
+> data directory can none of them be admitted against the same draw.**
 
-> **Normative.** **The conversation's accumulated draw is the fold of `search` over its
-> recorded turns *plus the current turn's own draw so far*, computed by `orchestration`.**
-> The current turn's draw is the calls this turn's servicings have already completed and
-> the time they occupied, held by `orchestration` for the life of the turn and consumed at
-> admission rather than at capture. **A servicing counts its call against the bound before
-> the channel is opened, and a second servicing of the same turn sees the first's call.** A
-> recorded turn carrying no `search` contributes **zero** to `calls` and to `elapsed`, and
-> **false** to §5's third condition. Nothing else contributes to any of the three.
+> **Normative.** **`settle` replaces a claim's charged deadline with the time the call
+> actually took**, which is never more than the deadline. It is the only write that lowers
+> `elapsed`, it lowers no `calls`, and **a claim that is never settled stands at its full
+> deadline** — the fail-closed direction, and the reason nothing is owed for a turn that
+> ends in an exception, a `PlanningError` on a later revision, a restart or a disconnection.
 
-> **Normative.** **Admission and consumption are one step per call**, not a read followed
-> by an unrelated write: no two servicings of one turn, and no two calls of one servicing,
-> are admitted against the same draw. **A call admitted and then not made returns its
-> draw**; a call whose channel was opened is consumed whatever the outcome, because the
-> query left.
+> **Normative.** **A claimed call is consumed whatever the outcome, and there is no
+> refund.** A servicing that claims and then does not transmit — a binding that refused, a
+> ruling that was not `ALLOW`, a provider that rejected before or after receiving the query
+> — still spends its `calls` increment. **`SearchOutcome` carries no transmission fact** and
+> `WebSearcher` is not widened here to add one, so a refund rule would oblige the servicer
+> to tell two `SearchRefusal.PROVIDER_REFUSED` outcomes apart when nothing in the contract
+> distinguishes them. Conservative admission is the honest reading, and it errs toward
+> searching less.
 
-> **Normative.** **The residue is a turn interrupted between a call and its `append`, and
-> it is bounded and stated rather than closed.** A process that exits after a search has
-> left and before the turn's row lands loses that turn's draw from the fold — and loses
-> that turn's episode and its `external_all_user_chosen` with it, so the turn contributes
-> nothing to the budget, nothing to the taint and nothing to §5's condition, and the
-> conversation resumes as though it had not happened. The loss is bounded by one turn,
-> which ADR-0228 §3 bounds at two servicings, so at most two calls per interruption.
-> **Nothing an injected result can do causes an interruption**, which is why this residue is
-> accepted rather than bought out with a durable write per call.
+> **Normative.** **The elapsed bound is enforced as a deadline and never as a hope.** The
+> value `claim` answers is the deadline that call is given, so a call cannot run past the
+> conversation's remaining time and the stored `elapsed` can never exceed the bound. No
+> implementation admits a call on accumulated time alone and then lets it run to the
+> transport's own timeout.
 
-> **Normative.** **The bounds are checked before a query is composed**, at the servicing
-> site §2 names, over the fold above and the `Settings` values. Where either bound is
-> already met or would be exceeded by one more call, **no supply is constructed, no query
-> is composed, no ruling is sought, no credential is read and no channel is opened**, and
-> §11's audit records it. This is ADR-0231 §11's no-slot clause in a second place and by
-> the same posture: the servicing does not yield, the turn composes from what it has, the
-> user is asked nothing and nothing is parked.
+> **Normative.** **The footing is monotone and is written by `orchestration`.** For every
+> turn it captures, `orchestration` calls `observe` with whether **every** recorded external
+> span that turn's final supply carried was minted by a `WEB_SEARCH` servicing at a
+> destination of recorded trust `USER_CHOSEN` — computed from records it holds as data it
+> fetched, at the same instant and by the same component as ADR-0223 §1's own value. **Once
+> false the flag never returns to true**, which is ADR-0106 §4's monotonicity read on this
+> axis, and it is what keeps a conversation closed after the tainting episode has fallen out
+> of the tail (ADR-0223 §6's un-tainting, which this ADR does not disturb).
+
+> **Normative.** **A conversation this store holds nothing for reads a true flag, and that
+> is correct rather than permissive.** Vacuous truth over zero observed turns is what a new
+> conversation deserves; a conversation that searched before this decision landed carries
+> its stamped episode in the very next turn's supply, so §5's **current-turn** half is false
+> for it before any `observe` has run, and its first captured turn writes the flag false for
+> good. No legacy conversation acquires the carve-out at any point.
+
+> **Normative.** **The store is local, durable and never written to a remote service**
+> (ADR-0004 §2), it holds a Tier 1 fact, it ships as a **triad**, and it holds **counters
+> and one flag and no content** — no query, no result, no destination, no record, no text.
+
+> **Normative.** **A conversation's row goes when the conversation goes.** The
+> capture/lifecycle stage in `orchestration` clears it in the same sequences it already
+> runs — ADR-0074 §8's deletion and §7's retention reclaim — because ADR-0074 §9 already
+> rules that "the **capture/lifecycle stage in `orchestration`** owns every cross-store
+> sequence". This ADR adds a store to those sequences and changes neither, and
+> **`ConversationStore` gains no member, `Conversation` and `ConversationTurn` gain no
+> field, and `ConversationExport` does not change shape or version.**
+
+> **Normative.** **`claim` is called before a query is composed**, at the servicing site §2
+> names. Where it refuses, **no supply is constructed, no query is composed, no ruling is
+> sought, no credential is read and no channel is opened**, and §11's audit records it. This
+> is ADR-0231 §11's no-slot clause in a second place and by the same posture: the servicing
+> does not yield, the turn composes from what it has, the user is asked nothing and nothing
+> is parked.
 
 > **Normative.** **This ADR adds no monetary bound**, no `SpendGate`, no ledger row, no
 > ceiling and no `Settings` field for one, and ADR-0194's mechanism is neither coupled
@@ -847,8 +903,9 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 ### 12. The negative arm, stated as obligations
 
 > **Normative.** **An injected result cannot raise the budget.** Both bounds are
-> `Settings` values read by `orchestration`; the accumulated draw is a fold over
-> `TurnSearchRecord`s `orchestration` itself wrote from facts it held as data it fetched.
+> `Settings` values read by `orchestration`; the draw is a durable counter §8's store
+> increments atomically before a channel opens, and it is never lowered by any write but
+> `settle`, which only ever replaces a granted deadline with a smaller elapsed.
 > **No value produced by a model, carried in a request, contained in a search result, or
 > read from any record contributes to either side of the comparison**, and no component
 > raises, extends, resets, suspends or re-reads a bound on account of a turn's content.
@@ -886,29 +943,36 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 
 > **Normative.** The `core` surface this decision adds is exactly this and no more. In
 > `core/types.py`: `DestinationTrust`, `DestinationTrustRecord`, `SearchSupply` and
-> `TurnSearchRecord` as new types; one member on `ConversationTurn` (`search`); and one
-> member on each of `EgressBinding` and `CarriedProvenance` (`closed_loop`, required with
-> no default). In `core/protocols.py`: one new `@runtime_checkable` Protocol,
-> `DestinationTrustStore` with its four members; the changed parameter type on
-> `QueryComposer.compose`; and the value `ConversationStore.append` now takes. In
-> `core/errors.py`: `InvalidDestinationTrustError`. In `core.config.Settings`: the two
-> fields §8 names and the cross-field refusal §10 states. **No other member of any `core`
-> type or Protocol changes its type, its default or its meaning** — `ActionPolicy` gains
-> no member, no argument and no widened return; `AuditTrail` gains none; `Provenance` gains
-> no field, so ADR-0098 §5's deferral of a per-span externality fact is neither taken nor
-> narrowed; and `CarriedProvenance.spans`, its key and value types, its detachment
-> validator and its serializer all stand.
+> `ConversationSearchDraw` as new types, and one member on each of `EgressBinding` and
+> `CarriedProvenance` (`closed_loop`, defaulting to `False`). In `core/protocols.py`: two
+> new `@runtime_checkable` Protocols, `DestinationTrustStore` with its five members and
+> `SearchBudgetStore` with its four, and the changed parameter type on
+> `QueryComposer.compose`. In `core/errors.py`: `InvalidDestinationTrustError`. In
+> `core.config.Settings`: the two fields §8 names and the cross-field refusal §10 states.
+> **No other member of any `core` type or Protocol changes its type, its default or its
+> meaning** — `ActionPolicy`, `AuditTrail`, `ConversationStore`, `MemoryStore` and
+> `WebSearcher` each gain no member, no argument and no widened return; `Conversation`,
+> `ConversationTurn` and `ConversationExport` gain no field and change no version;
+> `Provenance` gains no field, so ADR-0098 §5's deferral of a per-span externality fact is
+> neither taken nor narrowed; and `CarriedProvenance.spans`, its key and value types, its
+> detachment validator and its serializer all stand.
 
-> **Normative.** **`PROTOCOL_VERSION` does not move for this decision**, and the test is
-> ADR-0178 §6's, applied rather than assumed. `ConfirmationEgress` gains **no** member: it
-> is the projection a surface renders, `closed_loop` is an authorisation-route fact rather
-> than a fact about what would leave, and ADR-0233 §8's floor — the one thing a surface
-> owes about a model-composed span — turns on `coverage` and not on this. `EgressBinding`
-> and `CarriedProvenance` are carried by no module of `wire/`; `ConversationTurn` is
-> returned by no member of the promoted `AssistantEngine` surface; and the trust store is
-> hub-internal. **A lane that finds any of those four statements false moves the number in
-> the same change, with the `wire/envelope.py` log entry naming this ADR**, rather than
-> reading this clause as permission not to.
+> **Normative.** **`PROTOCOL_VERSION` moves 31 → 32**, and `wire/envelope.py`'s log gains
+> an entry naming this ADR and this reason: `AssistantEngine.recent_decisions` and
+> `export_decisions` return `tuple[PermissionDecision, ...]`, a `PermissionDecision`
+> carries an `EgressBinding`, and `EgressBinding` gains a member — which is ADR-0178 §6's
+> rule and ADR-0233's own ground for moving it. The field's `False` default is why a peer
+> one version behind still decodes what it is sent; the move is owed because the shape
+> changed, not because anything breaks.
+
+> **Normative.** **`ConfirmationEgress` gains no member and `ConversationExport` changes
+> neither shape nor version.** `closed_loop` is an authorisation-route fact rather than a
+> fact about what would leave, and ADR-0233 §8's floor — the one thing a surface owes about
+> a model-composed span — turns on `coverage` and not on this; §8's counters live in their
+> own store precisely so that `Conversation` and `ConversationTurn` stay as they are, which
+> leaves `ConversationExport.schema_version` at **2** and ADR-0212 §8 and ADR-0014 §5
+> untouched. **A lane that finds either statement false moves the corresponding version in
+> the same change** rather than reading this clause as permission not to.
 
 > **Normative.** **A stored `PermissionDecision` whose `egress_binding` predates this
 > decision decodes with `closed_loop` false**, on ADR-0181 §12's own reading of a
@@ -916,10 +980,10 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > is the state every binding in this corpus carries today, so nothing decoded changes
 > behaviour.
 
-> **Normative.** **A `ConversationTurn` decoded from a row written before this decision
-> carries `search` as `None`**, which §8's fold reads as a zero draw and §5's third
-> condition reads as false. No lane back-fills the field, infers it, or reconstructs it
-> from an episode, a log or a trail.
+> **Normative.** **A conversation §8's store holds no row for reads a zero draw and a true
+> flag**, which §8 states is correct rather than permissive, and which §5's current-turn
+> half is what actually closes for a legacy conversation. No lane back-fills a row, infers
+> one, or reconstructs one from an episode, a log or a trail.
 
 > **Normative.** **A conversation in progress when the implementing lane lands behaves
 > exactly as it does under ADR-0231 today**: it is not closed-loop, so it searches under
@@ -929,11 +993,21 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 
 ### 14. What the implementing lane owes
 
-> **Normative.** The trust store's Protocol ships as a **triad** — the Protocol, a shared
+> **Normative.** **Both** new Protocols ship as **triads** — the Protocol, a shared
 > conformance suite asserting its obligations, and a canonical fake in
 > `ai_assistant.testing` — in one change, never deferred (`CONTRIBUTING.md` → "Adding a
 > Protocol"). The `QueryComposer` conformance suite's one-positional-parameter check is
 > kept and is restated over the new parameter type.
+
+> **Normative.** **`SearchBudgetStore`'s conformance suite asserts the atomicity `claim`
+> claims**, in the shape `RecipientGrantStore`'s ceiling test already takes: concurrent
+> claims against a bound of one yield exactly one admission, and an implementation that
+> reads, compares and writes as three awaits fails it. An implementation that cannot be
+> opened twice states so and skips, as the ledger contracts already do.
+
+> **Normative.** **The `PROTOCOL_VERSION` move (§13) rides the `core` change**, with its
+> `wire/envelope.py` log entry, because the field lands there and a version behind the
+> shape is the defect that log exists to prevent.
 
 > **Normative.** **The lane implements no surface for §1's establishing act**, and
 > ADR-0193 §13's assignment binds unchanged: which surfaces offer it, what the wire
@@ -1006,13 +1080,27 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > `search` record is not closed-loop, contributes a zero draw, and behaves as ADR-0231
 > §12 rules.
 
-> **Normative.** **Arm 6b — the budget is consumed at admission.** With
-> `search_calls_per_conversation` set to one and a conversation whose recorded draw is
-> zero, two servicings of one turn yield one call and not two; with it set to eight and a
-> recorded draw of seven, the same pair yields one call and not two. A turn interrupted
-> after a call and before its `append` leaves the conversation with that turn absent
-> entirely — no draw, no episode, no `external_all_user_chosen` — which is the residue §8
-> states, asserted rather than assumed.
+> **Normative.** **Arm 6b — the budget is consumed at admission, in four shapes.** With
+> `search_calls_per_conversation` set to one and a stored draw of zero: two servicings of
+> **one turn** yield one call and not two; two **concurrent turns** of one conversation
+> yield one call and not two; a turn that searches and then fails on a later revision
+> (`PlanningError`, so capture is never reached) leaves the draw at one, so the **next
+> turn** searches not at all; and a store reopened after a process exit reads that same
+> one, with the unsettled claim standing at its full deadline.
+
+> **Normative.** **Arm 6c — the elapsed bound is a deadline.** With
+> `search_elapsed_per_conversation` at sixty seconds and fifty-nine already stored, the
+> admitted call is given a one-second deadline rather than the transport's own timeout, and
+> the stored `elapsed` never exceeds the bound.
+
+> **Normative.** **Arm 6d — a claimed call is never refunded.** A servicing whose ruling is
+> not `ALLOW`, one whose binding refused, and one whose provider answered
+> `SearchRefusal.PROVIDER_REFUSED` each spend their `calls` increment, and no path lowers
+> `calls`.
+
+> **Normative.** **Arm 6e — the footing is monotone.** A conversation whose flag is false
+> stays false when a later turn's supply carries nothing external at all, including after
+> the tainting episode has fallen out of the tail.
 
 > **Normative.** **Arm 7 — the spend interaction.** A deployment with a declared per-call
 > figure, a period ceiling and no `world_spend_unknown_allowance` is refused at
@@ -1024,13 +1112,21 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > suite for the trust store asserts that its recording member is reached by no component
 > holding a `ModelProvider`.
 
+> **Normative.** **Arm 8b — an ordinary confirmation still resumes.** A parked
+> `send_email` confirmation resumes through `rebind` unchanged: the re-derived binding
+> carries `closed_loop` false by default, transcribes nothing new from `approved`, and
+> equals the parked binding — so ADR-0152 §7's comparison passes exactly as it does today,
+> for a decision recorded before this change and for one recorded after it.
+
 > **Normative.** **Arm 9 — the trust store's own conformance.** `trust_of` answers
 > `USER_CHOSEN` only where every member of the sequence is in one live record's set;
 > `UNCHOSEN` for an empty sequence, for a partial match, for a match spanning two records,
 > for a revoked record, and where the two sides differ in any field of a
 > `CanonicalDestination` or across protocols; `record` refuses a duplicate id, an empty
 > set, a duplicate live set and an `UNCHOSEN` record; `revoke` is prospective and
-> idempotent and rewrites no recorded decision.
+> idempotent and rewrites no recorded decision; and `export` answers revoked records that
+> `live` omits, which is the data right ADR-0004 §6 gives and ADR-0193 §1 already applies
+> to authorisation records.
 
 ### 16. Deferred, by name, each with what fires it
 
@@ -1063,14 +1159,20 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 
 ### 17. Scope, and what this records against earlier ADRs
 
-> **Normative.** This ADR partially supersedes **six** ratified ADRs and amends none.
-> ADR-0231 in five scopes, ADR-0233 in two, ADR-0155 in one, ADR-0181 in one, ADR-0193 in
-> **three** — §3's fifth comparison, §4's first clause and §6's eighth-check clause in one
-> limb — and ADR-0074 in one, each named on that ADR's `Status` line and in its appended
-> dated note under ADR-0082 §1 and §2. **No other ADR's text moves**, and in particular
-> ADR-0223, ADR-0217, ADR-0204, ADR-0146, ADR-0098, ADR-0148, ADR-0152, ADR-0154,
-> ADR-0178, ADR-0184, ADR-0194, ADR-0226, ADR-0228, ADR-0230, ADR-0235 and ADR-0236 are
-> relied upon as written.
+> **Normative.** This ADR partially supersedes **five** ratified ADRs and amends none.
+> ADR-0231 in five scopes, ADR-0233 in two, ADR-0155 in one, ADR-0181 in one and ADR-0193
+> in **three** — §3's fifth comparison, §4's first clause and §6's eighth-check clause in
+> one limb — each named on that ADR's `Status` line and in its appended dated note under
+> ADR-0082 §1 and §2. **No other ADR's text moves**, and in particular ADR-0014, ADR-0074,
+> ADR-0098, ADR-0106, ADR-0146, ADR-0148, ADR-0152, ADR-0154, ADR-0178, ADR-0184,
+> ADR-0194, ADR-0204, ADR-0205, ADR-0212, ADR-0217, ADR-0223, ADR-0226, ADR-0228,
+> ADR-0230, ADR-0235 and ADR-0236 are relied upon as written.
+
+> **Normative.** **Four near misses are named, because each was a supersession an earlier
+> draft of this ADR would have owed and each is avoided by a decision rather than by luck.**
+> ADR-0152 §7's transcription count, by §5's default. ADR-0212 §8's and ADR-0014 §5's
+> export version, and ADR-0074 §9's enumeration, by §8's own store. A lane that reverses any
+> of those three decisions owes the record that decision avoids, and says so.
 
 > **Normative.** **ADR-0231 §16 is relied upon and is not moved.** Nothing here retains a
 > minted record, admits one to a store, an archive or a later turn, or leaves a hook for
@@ -1086,8 +1188,8 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > **Normative.** On ADR-0231, ADR-0155 and ADR-0193, whose `Status` lines already lead
 > with `Partially superseded by`, this ADR's pair is **appended** to the existing pairs on
 > the same line under ADR-0070 §4's accumulation rule, and no existing pair is dropped or
-> rewritten. On ADR-0233, ADR-0181 and ADR-0074 the record takes the form each line's
-> current shape requires. **No ratified sentence of any of the six is rewritten**, and no
+> rewritten. On ADR-0233 and ADR-0181 the line takes the leading token and `Accepted` is
+> dropped, as `docs/adr/template.md` requires. **No ratified sentence of any of the six is rewritten**, and no
 > body text outside the header is touched.
 
 ### 18. This ADR classified under ADR-0070 §1 and ADR-0082 §1
@@ -1117,9 +1219,11 @@ differently, or read one of its clauses more widely than it now holds?
   would then stop the search anyway. Supersession. The other seven limbs, the
   `OriginUnrecordedBinding` arm, the ordering rule, the revocation rule and the digest
   recomputation are untouched.
-- **ADR-0074 §9's enumeration** — yes; a reader would hold `ConversationTurn` to carry six
-  members and `ConversationStore` to owe the listed operations. Supersession, in the scope
-  ADR-0205 and ADR-0212 already moved it.
+- **ADR-0074 §9's enumeration, ADR-0212 §8's `Literal[2]`, ADR-0014 §5's version rule and
+  ADR-0152 §7's transcription count** — **no**, on all four, and each is a near miss §17
+  names. `ConversationTurn` and `Conversation` gain nothing, so the export's shape and
+  version stand; and `rebind` transcribes nothing new, so §7's count stands. A reader of
+  any of the four acts identically.
 - **ADR-0223 §6** — **no.** Its clause requires the floor to apply for a stamped-episode
   cause exactly as for any other, and forbids an episode-shaped carve-out. §5's condition
   is cause-blind, so a reader of ADR-0223 acts identically. No record owed, and §16 files
@@ -1175,15 +1279,18 @@ before any lane implements against it (golden rule 5).
   mechanism is inert, and a user who performs only the first gets the old behaviour with no
   explanation — which is ADR-0231 §19's "telling the user a search was refused" deferral,
   inherited and now costing more.
-- **`ConversationTurn` is carrying its second per-turn fact beside `delivery`.** A third
-  would be the point at which the row stops being an index entry, and the next lane
-  proposing one should be asked what the row is for.
-- **A conversation's search budget is lost with an interrupted turn, and a result's
-  content is lost with the turn that read it.** The first is §8's stated residue, bounded
-  at two calls per interruption. The second is ADR-0231 §16 standing: refinement over raw
-  results is a within-turn capability, and a later turn works from the captured episode.
-  Both are places where the honest mechanism is narrower than the milestone's sentence
-  sounds, and both are stated rather than engineered around.
+- **Two new stores, and two triads for one implementing lane.** Destination trust and the
+  search budget are each small and each genuinely new, but a lane owing two Protocols, two
+  conformance suites and two canonical fakes beside a composer change and a binding field is
+  a large lane, and the batch that briefs it should expect that.
+- **A conversation's budget is spent optimistically and settles down, never up.** A turn
+  that dies after claiming leaves its full deadline charged, so an unlucky conversation
+  searches slightly less than its bound would allow. That is the fail-closed direction and
+  it is the price of not writing twice per call.
+- **A result's content is lost with the turn that read it.** ADR-0231 §16 stands:
+  refinement over raw results is a within-turn capability, and a later turn works from the
+  captured episode. The honest mechanism is narrower than the milestone's sentence sounds,
+  and it is stated rather than engineered around.
 - **`EgressBinding` now carries three facts about a call's origin and coverage.**
   `planned_with_external_content`, `coverage` and `closed_loop` are each required, each
   written by the component that composed the arguments, and each compared through `rebind`

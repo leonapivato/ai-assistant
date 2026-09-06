@@ -1,43 +1,7 @@
 # 74. A conversation is a first-class entity; a turn is an episode
 
-- Status: Partially superseded by ADR-0076 (§9's `ConversationStore` obligation set and the reach of its stamped-conversation exclusion) and ADR-0084 (§9 item 5's premise that the façade is not a contract) and ADR-0086 (§5's refusal of a batch read on the memory store, and the entry repeating it in §10's declined list) and ADR-0205 (§9's enumeration of what a `ConversationTurn` carries and of what the `ConversationStore` owes) and ADR-0212 (§9's enumeration of what Conversation carries and what ConversationStore owes, and its rule that every conversation read is ordered by last activity descending) and ADR-0221 (§3's bullet "Not the message: `EpisodicMemory` carries an `outcome`, which is a property of a completed exchange", only as to the field role it assumes — `outcome` is no longer where the exchange's result is stated: the composed reply is written there and the result is written into a new `EpisodicMemory.disposition`; the bullet's argument that the unit of capture is the turn stands, and §4's stamps, §7's retention and §11's device-identity deferral are untouched) and ADR-0238 (§9's enumeration of what a `ConversationTurn` carries and of what the `ConversationStore` owes: the row gains a `search` member carrying one turn's provider calls, the wall-clock time those calls occupied and whether every recorded external span that turn's final supply carried was minted at a destination whose recorded trust is `USER_CHOSEN`, written by the `append` that records the turn rather than by any new member, so the store's member list is unchanged — state about the turn and not content of it, in the same scope ADR-0205 and ADR-0212 already moved this enumeration)
+- Status: Partially superseded by ADR-0076 (§9's `ConversationStore` obligation set and the reach of its stamped-conversation exclusion) and ADR-0084 (§9 item 5's premise that the façade is not a contract) and ADR-0086 (§5's refusal of a batch read on the memory store, and the entry repeating it in §10's declined list) and ADR-0205 (§9's enumeration of what a `ConversationTurn` carries and of what the `ConversationStore` owes) and ADR-0212 (§9's enumeration of what Conversation carries and what ConversationStore owes, and its rule that every conversation read is ordered by last activity descending) and ADR-0221 (§3's bullet "Not the message: `EpisodicMemory` carries an `outcome`, which is a property of a completed exchange", only as to the field role it assumes — `outcome` is no longer where the exchange's result is stated: the composed reply is written there and the result is written into a new `EpisodicMemory.disposition`; the bullet's argument that the unit of capture is the turn stands, and §4's stamps, §7's retention and §11's device-identity deferral are untouched)
 - Date: 2026-07-28
-- **Partially superseded: 2026-09-05 by ADR-0238 — §9's enumeration of what a
-  `ConversationTurn` carries and of what the `ConversationStore` owes, and nothing else
-  in this ADR.** This is the scope ADR-0205 and ADR-0212 each moved before, for the same
-  structural reason: ADR-0068 froze the record graph and `MemoryStore` offers no update,
-  so the index row is what can carry a per-turn fact at all.
-
-  **The member, and why it is not content.** ADR-0238 §8 gives the row a `search`
-  member holding three quantities — the provider calls that turn's servicings made, the
-  wall-clock time they occupied, and whether every recorded external span the turn's
-  final supply carried was minted by a `WEB_SEARCH` servicing at a destination the user
-  chose. Three quantities are not the exchange, so this store's *"This store holds no
-  content"* binds unchanged; it is `delivery`'s placement and `delivery`'s
-  justification (ADR-0205 §3), applied to a fact the loop knows inside the turn rather
-  than one that arrives after it.
-
-  **Written by `append`, and no member is added.** Unlike `delivery`, this fact is known
-  inside the turn, so it rides the write that records the turn and the row lands with it
-  or not at all — which is why the store's obligations move (its `append` takes one more
-  value) while its member list does not. A turn interrupted before that write leaves the
-  conversation with the turn absent entirely, contributing no draw, no episode and no
-  externality, which ADR-0238 §8 states as its bounded residue.
-
-  **What the fold is for.** A conversation's accumulated search draw is the fold of that
-  member over its recorded turns, which is what makes ADR-0238 §8's per-conversation
-  budget survive a restart, and the third quantity is what makes ADR-0238 §5's
-  closed-loop condition decidable at all — `planned_with_external_content` and ADR-0223
-  §1's stamp are each one bit and neither can say what an earlier turn's external
-  content was. **A row written before this decision carries the member absent**, which
-  the fold reads as a zero draw and the condition reads as false, so no existing
-  conversation acquires anything by decode.
-
-  **Nothing else moves.** §1's minted id, §2's two activity facts, §3's ordinal
-  allocation and derived episode id, §7's retention, §8's tombstone and two-store
-  sequence, §10's declined duplication and §11's device-identity deferral are untouched,
-  and the store's mutation exclusion binds on the new member exactly as it binds on
-  `record_delivery`. Refs #1908, PR for ADR-0238.
 - Partially superseded: 2026-08-01 by ADR-0086 — **§5's refusal of a batch read on
   `MemoryStore`, and the entry in §10 repeating it, no longer hold: `get_many` is
   on the contract.**
