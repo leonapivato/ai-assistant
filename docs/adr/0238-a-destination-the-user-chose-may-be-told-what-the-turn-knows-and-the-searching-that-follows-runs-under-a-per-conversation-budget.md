@@ -764,10 +764,19 @@ relaxation legible in the way §9 wanted.
 
 > **Normative.** **`initial_footing` is used only where `claim` creates the row, and is
 > ignored where one exists** — the stored flag is authoritative and monotone, and no
-> argument raises it. `orchestration` supplies the same value it would supply to `observe`:
-> whether this conversation had **no recorded turn before this one**. So a legacy
+> argument raises it. `orchestration` supplies the **history-only** component and that
+> alone: whether this conversation had **no recorded turn before this one**. So a legacy
 > conversation's row is created `False` by the very call that charges its first search, and
 > §5's recorded half refuses that search rather than the one after it.
+
+> **Normative.** **`initial_footing` is *not* the value `observe` receives, and no lane
+> reads the two as one argument.** `observe` takes the **conjunction** of that history fact
+> with the completed turn's **own** external-origin result (below); `claim` takes the
+> history fact by itself, because the turn's own result does not exist when `claim` runs —
+> **claim precedes composition, servicing and capture** (§5's fixed order). So a turn
+> admitted on a true footing whose own supply then proves dirty is closed by `observe` and
+> never by `claim`, and a lane that passes the conjunction to `claim` would be passing a
+> value it cannot yet compute.
 
 > **Normative.** **The claim, the charge and the row's creation are one indivisible step.**
 > No implementation reads, decides, creates and charges as separate awaits, and none creates
@@ -878,6 +887,30 @@ relaxation legible in the way §9 wanted.
 > fetched, at the same instant and by the same component as ADR-0223 §1's own value; **and**,
 > where the store holds no row for this conversation yet, whether the conversation had **no
 > recorded turn before this one**.
+
+> **Normative.** **A current-turn half that reads false is folded in at once — before the
+> claim is settled — and is not left to capture.** §5's second half is computed when the
+> request is built; where it is **false**, `orchestration` calls `observe` with `False` for
+> that conversation **before it settles the claim it holds**, and a turn that is then
+> refused, that raises, or that never reaches a request still folds the false it computed.
+> **Capture's fold remains and is unchanged**; this one is earlier, not instead.
+
+> **Normative.** **Without that ordering the flag is stale for exactly as long as a dirty
+> turn is in flight, and `settle` releases the draw inside that window.** A turn that reads
+> a local file before its search (ADR-0231 §11's ordinary order) binds `closed_loop` false
+> on its own request, but the stored flag stays true until that turn is captured; once its
+> `settle` returns the unused remainder, a **second servicing of the same conversation** may
+> claim, read the stale-true flag, find its own supply clean, and be ruled closed-loop —
+> although the conversation had already carried the file. **The early fold is what makes
+> §5's third condition true of the conversation and not merely of the turns already
+> captured.**
+
+> **Normative.** **The early fold is safe to repeat and safe to run early, and a half that
+> reads *true* is never folded here.** `observe` folds by **and** (below), so an early
+> `False` and capture's later conjunction agree and neither can undo the other. Reporting a
+> turn **clean** stays capture's alone, because only capture sees the turn's **final**
+> supply; an early true would report a turn clean before it had finished carrying things,
+> which is the direction this section fails closed in everywhere else.
 
 > **Normative.** **So a row created for a conversation that already had turns is created
 > false**, and the refusal §5's recorded half makes for an unobserved legacy conversation
@@ -1258,6 +1291,16 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > A conversation with no recorded prior turn and no row is closed-loop on the first two
 > conditions. All three are asserted, because the middle one is the hole that opens one turn
 > after the first is closed.
+
+> **Normative.** **Arm 6f2 — a dirty turn closes the conversation before the next
+> servicing, not at capture.** With `search_calls_per_conversation` above one, a
+> conversation whose destination reads `USER_CHOSEN` and whose row is true: turn A services
+> a local-file read before its `WEB_SEARCH`, so A's own request binds `closed_loop` false;
+> **A's claim is settled and A is not yet captured**, and a second servicing of that
+> conversation is then admitted with a supply carrying nothing external of its own. It is
+> **not** closed-loop, because the false half A computed was folded in before A's claim was
+> settled. The same conversation asserts the fold once more at A's capture, and the stored
+> flag is false after each.
 
 > **Normative.** **Arm 6g — the last permitted call is usable.** With
 > `search_calls_per_conversation` set to one, the admitted servicing's own request is
