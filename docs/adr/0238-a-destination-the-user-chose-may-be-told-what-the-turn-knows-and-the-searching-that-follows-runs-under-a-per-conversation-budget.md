@@ -1595,6 +1595,18 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > closed-loop: the fourth condition reads the claim this request holds, not the capacity
 > left after charging it. The same is asserted for the last second of the elapsed bound.
 
+> **Normative.** **Arm 6g2 — a zero bound refuses every search, and each bound is
+> asserted on its own.** With `search_calls_per_conversation` set to **zero**, a fresh
+> conversation whose stored draw is zero is refused at admission — `claim_search` answers
+> `None`, because the stored `calls` have already **reached** the bound — and the same is
+> asserted for `search_elapsed_per_conversation` at **zero**, each with the other bound
+> set permissively so that neither arm can pass on the other's refusal. Nothing composes,
+> no supply is built, no request reaches the seam, and the disposition §11 adds is
+> recorded. **The arm exists because zero is a legal setting whose stated meaning is that
+> no search is serviced in any conversation (§8), and because the idiomatic spelling of a
+> reached-the-bound comparison — a truthiness guard on the bound — admits at zero**, both
+> settings being falsy: the arms at one call and at sixty seconds cannot catch it.
+
 > **Normative.** **Arm 6h — the budget goes with the record, and no step is added to make
 > it.** A deleted conversation and a reclaimed one each leave nothing behind: after
 > `stamp_deleted` all four members answer as §8 states, and after `drop_if_eligible` has
