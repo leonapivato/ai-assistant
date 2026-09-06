@@ -22,7 +22,7 @@
   the payload is left standing deliberately, and §1 below is built so that it can be.
 - **Partially supersedes** [ADR-0074](0074-conversation-is-an-entity-and-every-turn-is-an-episode.md)
   — **§9's enumeration of what the `ConversationStore` owes, which §8 below widens by
-  four operations carrying a per-conversation search budget.** That enumeration, and
+  three operations carrying a per-conversation search budget.** That enumeration, and
   nothing else — §9's `core/types.py` enumeration, its per-conversation exclusion
   obligation, its bounded-and-ordered read rule, its two-store reasoning, §7's retention
   reclaim and §8's deletion protocol are relied upon as written, and §8 below adds no step
@@ -1255,7 +1255,7 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > new members on `ConversationStore`** (§8), which is the one existing Protocol this
 > decision widens; and the changed parameter type on
 > `QueryComposer.compose`. In `core/errors.py`: `InvalidDestinationTrustError`. In
-> `core.config.Settings`: the two fields §8 names and the cross-field refusal §10 states.
+> `core.config.Settings`: the one field §8 names and the cross-field refusal §10 states.
 > **No other member of any `core` type or Protocol changes its type, its default or its
 > meaning** — `ActionPolicy`, `AuditTrail`, `MemoryStore` and
 > `WebSearcher` each gain no member, no argument and no widened return; **no existing
@@ -1641,7 +1641,7 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > "ADR-0212 (§9's enumeration of what Conversation carries and what ConversationStore
 > owes …)", so this pair **accumulates** under ADR-0070 §4 beside them and displaces
 > neither. **What moves is the obligation list alone**: a reader holding ADR-0074 would
-> build a `ConversationStore` owing eleven things and find four missing. **ADR-0074 §7's
+> build a `ConversationStore` owing eleven things and find three missing. **ADR-0074 §7's
 > retention reclaim, §8's deletion protocol, §9's exclusion obligation, its two-store
 > reasoning and its `core/types.py` enumeration are relied upon as written and are not
 > moved** — §8 adds no step to either sequence and no field to either type, which is the
@@ -1675,7 +1675,7 @@ per-turn quantity anyone should read as one (ADR-0226 §8).
 > **Normative.** Additions this ADR makes that contradict no sentence an earlier ADR
 > wrote are **stacked additions** under ADR-0082 §1 and are recorded here and nowhere
 > else: §1's trust store and its establishing act, which no ADR forbids and ADR-0235's
-> act does not contain; §8's two `Settings` fields; §10's cross-field refusal; and §11's
+> act does not contain; §8's one `Settings` field; §10's cross-field refusal; and §11's
 > two counts and one `SearchDisposition` member.
 
 > **Normative.** On ADR-0231, ADR-0155, ADR-0193 and ADR-0074, whose `Status` lines already
@@ -1787,7 +1787,7 @@ before any lane implements against it (golden rule 5).
   canonical fake already exist and are extended in the same change. That is a smaller lane
   than an earlier revision's two triads, and it is the second time this decision has got
   smaller by taking something out.
-- **`ConversationStore` is a large Protocol and this makes it larger.** Four more members on
+- **`ConversationStore` is a large Protocol and this makes it larger.** Three more members on
   a contract that already carries seventeen is a real cost, and a reader looking for "what
   does a conversation store owe" now has more to hold. It is paid deliberately: the
   alternative was a second store whose whole content was a lifecycle this one already has,
