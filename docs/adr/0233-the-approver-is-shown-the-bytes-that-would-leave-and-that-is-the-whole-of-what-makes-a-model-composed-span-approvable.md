@@ -1,7 +1,37 @@
 # 233. The approver is shown the bytes that would leave, and that is the whole of what makes a model-composed span approvable
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0238 (§9's first clause in its exclusivity alone — its "only where all four hold" admits a second exception, which ADR-0238 §7 states over a search query composed for a destination whose recorded trust is `USER_CHOSEN` — and §9's second clause for that one class; the four conditions themselves are neither weakened, reordered nor made disjunctive, §8's floor binds unchanged wherever those four are the route, and §9's third, fourth and fifth clauses and every other section of this ADR stand entire)
 - Date: 2026-09-04
+- **Partially superseded: 2026-09-05 by ADR-0238 — §9's first clause in its
+  exclusivity alone, and §9's second clause for one class. Those two scopes, and
+  nothing else in this ADR.** The owner ruled milestone 31 on 2026-09-05 (#1908),
+  requiring a search composed over conversation context and memory to reach a
+  destination the user chose *"without repeated permission requests"*. ADR-0238 is
+  that decision.
+
+  **The first clause moves only in the word "only".** It reads that such a call *"may
+  carry covered content **only** where all four hold"*, and that exclusivity is what a
+  second exception breaches — ADR-0238 §7 states three conditions of its own, under
+  which ADR-0155 §3's third clause does not apply to a search query. **The four
+  conditions are untouched**: they are not weakened, reordered, reinterpreted or made
+  disjunctive, and they remain the whole of what makes a model-composed span
+  approvable **by confirmation**. §9's own reason for stating them together — that *"a
+  later ADR removing any one of them removes the ground this relaxation stands on"* —
+  is why ADR-0238 states a separate exception rather than widening one of them.
+
+  **The second clause moves for that class and for nothing else.** *"No standing
+  authorisation, standing policy, standing recipient grant, configuration, connected
+  account, tool declaration or approved payload description covers such a call,
+  ever"* continues to bind on every model-composed covered span outside ADR-0238 §7's
+  three conditions. Within them the standing route is a recorded act of the user about
+  that destination and that payload class — not a configuration, an account or a
+  declaration, none of which ADR-0238 makes into an authorisation of anything.
+
+  **§8's floor is neither satisfied nor waived.** ADR-0238 §7's route reaches an
+  `ALLOW` without a `Confirmation`, so §8 has no confirmation to bind there; it binds
+  unchanged wherever §9's four conditions are the route, which is every other
+  model-composed span in this corpus. §9's third, fourth and fifth clauses, §1–§7 and
+  §10–§16 stand entire. Refs #1908, PR for ADR-0238.
 - **Partially supersedes** [ADR-0155](0155-residency-governs-the-assistants-own-store-and-that-store-is-never-externalised.md)
   — **§3's third clause, to the extent §9 below states; and §4's marked clause, to the
   extent §6 below discharges it. Those two, and nothing else in ADR-0155.**
