@@ -66,6 +66,11 @@ _SYNC_METHODS = {
     "stamp_deleted": "_stamp_deleted_sync",
     "drop_if_eligible": "_drop_if_eligible_sync",
     "record_observed": "_record_observed_sync",
+    # ADR-0238 §8's three, each its own lock site and so its own place ADR-0054's
+    # bug can reappear.
+    "admit_search": "_admit_search_sync",
+    "observe_search": "_observe_search_sync",
+    "search_draw": "_search_draw_sync",
     "get": "_get_sync",
     "turns": "_turns_sync",
     "turns_after": "_turns_after_sync",
@@ -2292,5 +2297,86 @@ async def test_a_row_carrying_a_negative_counter_is_a_store_fault(tmp_path: Path
 
         with pytest.raises(ConversationStoreError, match="corrupt search draw"):
             await store.search_draw(conversation.id)
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        pytest.param(2, id="a truthy integer that is not one"),
+        pytest.param(-1, id="a negative integer"),
+        pytest.param("false", id="the string a hand-edit writes"),
+    ],
+)
+async def test_a_row_carrying_a_flag_this_store_never_wrote_is_a_store_fault(
+    tmp_path: Path, stored: object
+) -> None:
+    """The fail-**open** direction closed on the one field ADR-0238 §8 makes monotone.
+
+    SQLite's type affinity is not a constraint: an ``INTEGER`` column accepts whatever
+    a writer binds, so a hand-built or damaged row can hold any of these — and ``bool``
+    maps **every one of them** to ``True``, including the string ``"false"``. A
+    conversation whose history this decision never saw would then read as *clean*,
+    which is precisely the state §13's decoded ``False`` exists to prevent, and it
+    would do so silently: ``search_draw``'s documented behaviour for a corrupt row is
+    an error, not a footing.
+
+    Refused rather than coerced, and refused for the truthy values as well as the
+    falsy ones: a store that accepted ``2`` as ``True`` would be reading a value nobody
+    wrote as the answer to a question about what nobody observed.
+
+    **What is *not* here is the class affinity already handles**, and the distinction
+    is worth stating so a later lane does not read the check as wider than it is: an
+    ``INTEGER`` column losslessly converts a value that *is* an integer in another
+    spelling, so ``"0"`` and ``1.0`` arrive as ``0`` and ``1`` and are correct rather
+    than corrupt. What affinity does **not** convert is a value with no integer
+    reading — which is why the string below is the one string in this list.
+    """
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        conversation = await store.start()
+        raw = sqlite3.connect(path, isolation_level=None)
+        try:
+            raw.execute(
+                "UPDATE conversations SET all_external_user_chosen = ? WHERE id = ?",
+                (stored, conversation.id),
+            )
+        finally:
+            raw.close()
+
+        with pytest.raises(ConversationStoreError, match="corrupt search draw"):
+            await store.search_draw(conversation.id)
+        with pytest.raises(ConversationStoreError, match="corrupt search draw"):
+            await store.admit_search(conversation.id, max_calls=5)
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("stored", [0, 1])
+async def test_the_two_values_this_store_writes_decode(tmp_path: Path, stored: int) -> None:
+    """The other side of the refusal above: both legitimate values still read.
+
+    Stated because the parametrisation above would pass against an implementation that
+    refused *every* stored flag — which would be a store nobody could read.
+    """
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        conversation = await store.start()
+        raw = sqlite3.connect(path, isolation_level=None)
+        try:
+            raw.execute(
+                "UPDATE conversations SET all_external_user_chosen = ? WHERE id = ?",
+                (stored, conversation.id),
+            )
+        finally:
+            raw.close()
+
+        draw = await store.search_draw(conversation.id)
+
+        assert draw is not None
+        assert draw.all_external_user_chosen is bool(stored)
     finally:
         store.close()

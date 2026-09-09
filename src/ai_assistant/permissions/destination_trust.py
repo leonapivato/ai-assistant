@@ -621,7 +621,20 @@ class SqliteDestinationTrustStore:
         somebody has to catch correctly at every call site, where answering
         ``UNCHOSEN`` fails closed by construction.
         """
-        if not destinations:
+        # **Snapshotted before the first await, and read only from the snapshot after
+        # it** — ADR-0065's coherent input-observation clause, which this member is the
+        # one place in this store that is not vacuously subject to. Every other
+        # caller-owned argument here is a ``DestinationTrustRecord`` or a ``str``, both
+        # immutable all the way down; a ``Sequence`` is not, and a caller holding the
+        # list it passed can empty it while this call is suspended on the lock. Read
+        # twice, the emptiness check would pass on the sequence the caller handed over
+        # and the coverage check would then run ``all(...)`` over **no members** —
+        # vacuously true — so an emptied query would answer ``USER_CHOSEN`` for any
+        # store holding a live record. ADR-0238 §1 refuses exactly that answer, ruling
+        # the trust ``UNCHOSEN`` for an empty sequence — so it would be reached with no
+        # input state warranting it.
+        wanted = tuple(destinations)
+        if not wanted:
             return DestinationTrust.UNCHOSEN
         try:
             async with self._lock:
@@ -632,7 +645,6 @@ class SqliteDestinationTrustStore:
             # ADR-0060's clause is that a cancellation leaves this seam unchanged, and
             # reporting it as ``UNCHOSEN`` would convert one into an answer.
             return DestinationTrust.UNCHOSEN
-        wanted = tuple(destinations)
         for held in live:
             covered = set(held.destinations)
             if all(destination in covered for destination in wanted):
