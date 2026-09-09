@@ -38,12 +38,16 @@ from test_loop_search import (
     _grant,
     _loop,
     _search,
+    _search_and_query,
     _serviced,
     _servicer,
     _stamped_episode,
 )
 
 from ai_assistant import orchestration
+from ai_assistant.core.config import Settings
+from ai_assistant.core.errors import ConnectionStoreError, ConversationStoreError
+from ai_assistant.core.logging import configure_logging
 from ai_assistant.core.types import (
     CarriedProvenance,
     DestinationTrust,
@@ -60,6 +64,7 @@ from ai_assistant.orchestration.reads import SearchDisposition
 from ai_assistant.permissions.policy import ThresholdActionPolicy
 from ai_assistant.testing import (
     FakeAuditTrail,
+    FakeConversationStore,
     FakeDestinationTrustStore,
     FakeMemoryStore,
     FakePlanner,
@@ -375,9 +380,14 @@ async def test_a_turn_whose_supply_holds_a_foreign_external_record_is_not_closed
     assert binding.planned_with_external_content is True
     assert binding.closed_loop is False, "one foreign external span is the whole of it"
     assert _serviced(captured, 0)["disposition"] == SearchDisposition.RULING_CONFIRM.value
-    assert _serviced(captured, 0)["supplied"] == 0, (
-        "and §2 offered the composer no record either, the one in view being one it excludes"
-    )
+    # **The record was supplied to the composer all the same**, and that is ADR-0238 §2
+    # rather than an oversight: a record the turn's retrieval selected is one of §2's
+    # three admissible populations whatever its origin stamp says, and "whether that
+    # episode prevents closed-loop authorisation is a separate decision" under §5. So the
+    # query is composed over it and then **not sent** — which is the honest shape of this
+    # decision, and is what keeps §2's closing paragraph ("what a later turn has instead
+    # is the captured episode … that is what resolves *find more about that*") true.
+    assert _serviced(captured, 0)["supplied"] == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -796,3 +806,258 @@ async def test_an_ordinary_egress_binding_of_a_closed_loop_conversation_is_not_c
     draw = await footing.conversations.search_draw(footing.conversation_id)
     assert draw is not None
     assert draw.all_external_user_chosen is True, "and the conversation really is closed-loop"
+
+
+# --------------------------------------------------------------------------- #
+# §7 — a covered span reaches no standing route without the closed loop        #
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_covered_query_is_not_sent_when_the_trust_went_while_it_composed() -> None:
+    """ADR-0238 §7's three conditions, and the one case that makes the third load-bearing.
+
+    §7 admits a covered span "where **all three** hold: the span is the ``query`` of a
+    ``QueryOutcome`` a ``QueryComposer`` returned over a ``SearchSupply`` §2 admits; the
+    request carrying it is closed-loop (§5); and the ruling on it is an ``ALLOW`` under
+    §6. **Where any of the three fails, the clause forbids the span exactly as written.**"
+
+    The case that separates the third from the other two is a supply carrying a record
+    that is **not** external: the composition is covered (``MODEL_ON_EVERY_PATH``), but
+    ``planned_with_external_content`` is ``False``, so ADR-0181 §5's floor never fires
+    and ADR-0233 §9's second clause — "no standing recipient grant covers such a call,
+    **ever**" — is the only thing standing between the query and the wire. Revoke the
+    trust while the composition is in flight and the third condition fails: the span is
+    covered, the request is not closed-loop, and **nothing is sent**.
+    """
+    footing = await _chosen_footing()
+    searcher = FakeWebSearcher(results=(_RESULT,))
+    trail = _trail()
+    servicer = _servicer(
+        composer=_FoldingComposer(FakeQueryComposer(), footing, act="revoke"),
+        searcher=_CostedSearcher(searcher),
+        trail=trail,
+        granted=True,
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        await _loop(
+            planner=FakePlanner(now=_clock, read_request=_search()),
+            search=servicer,
+            footing=footing,
+        ).respond(
+            _ASK,
+            narrow=_bounded(),
+            history=(_belief("belief-clean", "we were talking about Porto"),),
+        )
+
+    (binding,) = await _bindings(trail)
+    assert binding.coverage is SpanCoverage.MODEL_ON_EVERY_PATH, "the span is covered"
+    assert binding.planned_with_external_content is False, (
+        "and nothing external is in view, so ADR-0181 §5's floor is silent"
+    )
+    assert binding.closed_loop is False, "the trust went while the composition was in flight"
+    assert searcher.searched == [], "so §7's third condition fails and nothing is sent"
+    assert _serviced(captured, 0)["disposition"] == SearchDisposition.RULING_CONFIRM.value
+    assert _serviced(captured, 0)["supplied"] == 1, "the record really did reach the composer"
+
+
+# --------------------------------------------------------------------------- #
+# §2 — a stamped episode is admitted to the supply and refused the closed loop  #
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_stamped_episode_reaches_the_composer_and_still_closes_the_loop() -> None:
+    """ADR-0238 §2's first population, which is the milestone's own cross-turn answer.
+
+    §2: "**What a later turn has instead is the captured episode**, stamped and retrieved
+    exactly as ADR-0221, ADR-0223 and retrieval already deliver it … **That** is what
+    resolves *find more about that* across turns, and it is the first two populations
+    doing the work rather than the third."
+
+    So the episode is **supplied**, its content reaches the query, and the request it
+    produces is **not** closed-loop — because §5's third condition is a separate question
+    from §2's enumeration, and answering them with one predicate would delete the
+    milestone's exit sentence in the name of enforcing it.
+    """
+    episode = _stamped_episode("episode-we-looked-that-up")
+    footing = await _chosen_footing()
+    trail = _trail()
+    servicer = _servicer(
+        composer=FakeQueryComposer(),
+        searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))),
+        trail=trail,
+        granted=True,
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        await _loop(
+            planner=FakePlanner(now=_clock, read_request=_search()),
+            search=servicer,
+            footing=footing,
+        ).respond(_ASK, narrow=_bounded(), history=(episode,))
+
+    assert _serviced(captured, 0)["supplied"] == 1, "§2 admits the episode to the supply"
+    assert _serviced(captured, 0)["withheld"] == 0, "§3's filter withheld nothing"
+    (binding,) = await _bindings(trail)
+    assert binding.closed_loop is False, "and §5's third condition refuses it all the same"
+
+
+# --------------------------------------------------------------------------- #
+# §8's early fold fires before the next read of the same servicing              #
+# --------------------------------------------------------------------------- #
+
+
+class _SamplingStore(FakeMemoryStore):
+    """A store that samples the conversation's footing when the sighted query runs.
+
+    ADR-0238 §8 narrows its window "from the whole of a turn to a single store write" by
+    folding at **admission**. That is a claim about an instant, and the only way to
+    observe an instant is to look from inside the read that follows it — which is what
+    this does: the sighted query is serviced last (ADR-0240 §5), so a fold that had
+    waited for the servicing to return would not have committed by the time it runs.
+    """
+
+    def __init__(self, footing: Any, **knobs: Any) -> None:
+        super().__init__(**knobs)
+        self._footing = footing
+        self.sampled: list[bool] = []
+
+    async def search(self, query: str, **knobs: Any) -> Any:
+        """Sample the stored footing, then read exactly as the fake would."""
+        draw = await self._footing.conversations.search_draw(self._footing.conversation_id)
+        assert draw is not None
+        self.sampled.append(draw.all_external_user_chosen)
+        return await super().search(query, **knobs)
+
+
+async def test_the_fold_commits_before_the_next_read_of_the_same_servicing() -> None:
+    """ADR-0238 §8's admission trigger, observed at the instant it is about.
+
+    "Folding at admission puts the false on the record **as early as the fact exists**,
+    which narrows that window from the whole of a turn to a single store write." A fold
+    taken once, after the whole servicing returns, leaves the window open across every
+    read that follows the admission — a hop, a structured read, a sighted query — and a
+    concurrent turn reading the flag in that interval is ruled closed-loop on a
+    conversation that has already carried the disqualifying span.
+
+    Driven with a servicing that searches at an **``UNCHOSEN``** destination and then
+    performs a sighted query: the minted record is a recorded external span this decision
+    did not mint at a chosen destination, so admitting it lowers the flag, and the sighted
+    query's own store read is where that is observed.
+    """
+    footing = await _admitted()
+    store = _SamplingStore(footing, now=_clock)
+    await store.add(_belief("belief-1", "something about Porto"))
+
+    await _loop(
+        planner=FakePlanner(now=_clock, read_request=_search_and_query("porto")),
+        memory=store,
+        search=_servicer(
+            searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))), granted=True
+        ),
+        footing=footing,
+    ).respond(_ASK, narrow=_bounded())
+
+    assert store.sampled, "the sighted query ran, so there was an instant to sample"
+    assert store.sampled[-1] is False, (
+        "the fold had committed before the read that followed the admission"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# §11's counts survive a fault the searcher raised after the ruling             #
+# --------------------------------------------------------------------------- #
+
+
+class _FaultingSearcher:
+    """A searcher that performs the send and then raises, as ADR-0231 §13's residue does."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    @property
+    def name(self) -> str:
+        """Delegate unchanged."""
+        name: str = self._inner.name
+        return name
+
+    async def request(self, query: Any, /) -> Any:
+        """Delegate unchanged."""
+        return await self._inner.request(query)
+
+    async def search(self, call: Any, /) -> Any:
+        """Raise the fault ADR-0226 §5's degradation is the ratified answer to."""
+        raise ConnectionStoreError("conn-0001 could not be read")
+
+
+async def test_a_fault_after_the_ruling_keeps_the_counts_of_the_stages_that_ran() -> None:
+    """ADR-0238 §11's counts on a servicing ADR-0226 §5 degraded.
+
+    The admission is durable and is **never refunded** (§8: "an admitted call is consumed
+    whatever the outcome"), and the composer's call was paid for — so a record reporting
+    that this servicing admitted no call and composed over nothing would be false of it,
+    and false in the direction that hides spend. §13's disposition is empty here, which is
+    the residue issue #2112 records; the counts are not, and they are what an operator has
+    left to read.
+    """
+    footing = await _chosen_footing()
+
+    with structlog.testing.capture_logs() as captured:
+        await _loop(
+            planner=FakePlanner(now=_clock, read_request=_search()),
+            search=_servicer(
+                searcher=_FaultingSearcher(_CostedSearcher(FakeWebSearcher(results=(_RESULT,)))),
+                granted=True,
+            ),
+            footing=footing,
+        ).respond(_ASK, narrow=_bounded(), history=(_belief("belief-1", "something about Porto"),))
+
+    serviced = _serviced(captured, 0)
+    assert serviced["failed"] is True, "ADR-0226 §5's all-or-nothing degradation"
+    assert serviced["calls"] == 1, "the admission was taken and is never refunded"
+    assert serviced["supplied"] == 1, "and the composer's call was paid for over one record"
+    draw = await footing.conversations.search_draw(footing.conversation_id)
+    assert draw is not None
+    assert draw.calls == 1, "the durable counter agrees with the record"
+
+
+# --------------------------------------------------------------------------- #
+# §11 / ADR-0004 §5 — the degraded fold names a class and no identifier         #
+# --------------------------------------------------------------------------- #
+
+
+class _RefusingFold(FakeConversationStore):
+    """A conversation store whose fold raises, so the degradation line can be read."""
+
+    async def observe_search(self, conversation_id: str, /, **knobs: Any) -> None:
+        """Refuse, naming the conversation — the value the log must not carry out."""
+        msg = f"the row for {conversation_id!r} could not be written"
+        raise ConversationStoreError(msg)
+
+
+async def test_a_refused_fold_logs_a_class_and_carries_no_identifier(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ADR-0004 §5 and ADR-0238 §11, over the **rendered** line rather than the fields.
+
+    A structured event's fields are redacted; a *traceback* is rendered after that, with
+    this frame's locals — and this frame's locals are a ``SearchFooting``, which holds the
+    conversation's id and the deployment's destination set. §11 spends a clause keeping
+    identifiers out of the audit event, and a degradation line is not the place to put
+    them back.
+
+    Asserted over what an operator would actually see, which is what makes it a statement
+    about the renderer and not about the call.
+    """
+    configure_logging(Settings())
+    footing = await _chosen_footing()
+    footing.conversations = _RefusingFold(now=_clock, new_id=lambda: footing.conversation_id)
+    capsys.readouterr()
+
+    await footing.admitted((_stamped_episode("episode-tainted"),))
+
+    written = capsys.readouterr().out
+    assert "search_footing_fold_degraded" in written, "the operator is told the fold degraded"
+    assert "ConversationStoreError" in written, "and which class it was"
+    assert footing.conversation_id not in written, "no conversation identifier"
+    assert "Traceback" not in written, "and no traceback, so no frame locals"

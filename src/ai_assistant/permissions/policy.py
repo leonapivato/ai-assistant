@@ -39,6 +39,7 @@ from ai_assistant.core.types import (
     PermissionRuling,
     Reversibility,
     RiskLevel,
+    SpanCoverage,
 )
 
 if TYPE_CHECKING:
@@ -494,6 +495,20 @@ class ThresholdActionPolicy:
           conditions", and it reads the one fact ``orchestration`` wrote onto the
           binding — the same trust boundary this corpus already accepts for
           ``planned_with_external_content`` itself;
+        * its binding carries no covered content, **or it carries ``closed_loop``**
+          (ADR-0233 §9, ADR-0238 §7). ADR-0233 §9's second clause is absolute about
+          the class: "**no** standing authorisation, standing policy, standing
+          recipient grant, configuration, connected account, tool declaration or
+          approved payload description covers such a call, **ever**" — its four
+          conditions are what makes a model-composed span approvable *by
+          confirmation*, and route (b) is not a confirmation. **ADR-0238 §7 opens the
+          one exception this corpus admits**, and it opens it over three conditions
+          together: the span is the ``query`` of a ``QueryOutcome`` a ``QueryComposer``
+          returned over a ``SearchSupply`` §2 admits, the request carrying it is
+          closed-loop, and the ruling on it is an ``ALLOW`` under §6. "Where any of the
+          three fails, the clause forbids the span exactly as written" — so the limb
+          here is stated over ``closed_loop``, which is the only one of the three this
+          policy can read and the one whose falsity settles it;
         * the outcome is ``CONFIRM``. A ``DENY`` is not something a grant
           converts, and an ``ALLOW`` needs no grant;
         * and the **only** clause that fired is :data:`_DISCLOSURE_FLOOR`. That
@@ -521,6 +536,7 @@ class ThresholdActionPolicy:
             self._grants is not None
             and binding is not None
             and (not external or binding.closed_loop)
+            and (binding.coverage is SpanCoverage.NOT_COVERED or binding.closed_loop)
             and outcome is PermissionOutcome.CONFIRM
             and fired == [_DISCLOSURE_FLOOR]
         )

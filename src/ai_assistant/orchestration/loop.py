@@ -1035,7 +1035,7 @@ class LearningLoop:
             await footing.observe(responded.turn.memories)
         return responded
 
-    async def _turn(  # noqa: PLR0913 — the utterance, the tail, whether reading it degraded, the supply filter, the operation's planning budget, this turn's audit record and its ADR-0238 footing; every one is a distinct fact about the turn, and collapsing any pair would put a flag where a value belongs
+    async def _turn(  # noqa: PLR0913, PLR0915 — the utterance, the tail, whether reading it degraded, the supply filter, the operation's planning budget, this turn's audit record and its ADR-0238 footing; every one is a distinct fact about the turn, and collapsing any pair would put a flag where a value belongs
         self,
         utterance: str,
         *,
@@ -1343,6 +1343,15 @@ class LearningLoop:
             # included, runs over what it returned.
             context, memories = _narrowed(narrow, context, memories, retrieved_ids)
         if footing is not None:
+            # ADR-0238 §2's first two admissible populations, recorded by the one
+            # component that knows which stage each record came from: the episodes of
+            # this conversation and the `MemoryRecord` values this turn's retrieval and
+            # episodic supplement selected. Written **once**, from the supply the planner
+            # is assembled over, and deliberately not extended as servicings append their
+            # fourth groups — a fetched file, a hop record and a search result minted at
+            # an `UNCHOSEN` destination each reach the turn through a servicing, and §2
+            # excludes every one of them by name.
+            footing.selected.update(record.id for record in memories)
             # ADR-0238 §8's **early** fold, on the turn's pre-servicing supply and
             # before the first planner call. "The moment ``orchestration`` admits to a
             # turn a recorded external span that was **not** minted by a ``WEB_SEARCH``

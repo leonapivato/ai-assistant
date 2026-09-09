@@ -131,6 +131,7 @@ from ai_assistant.orchestration import (
 )
 from ai_assistant.orchestration import traces as operation_traces
 from ai_assistant.orchestration.origin import NOTHING_EXTERNAL
+from ai_assistant.orchestration.reads import _SearchCounts
 from ai_assistant.orchestration.traces import OperationTraces
 from ai_assistant.permissions import SqliteAuditTrail, SqliteRecipientGrantStore
 from ai_assistant.planning import (
@@ -394,6 +395,7 @@ async def _search_servicer(now: Clock) -> None:
         external=False,
         footing=footing,
         in_view=(),
+        counts=_SearchCounts(),
     )
 
 

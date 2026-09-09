@@ -118,6 +118,7 @@ from ai_assistant.orchestration.reads import (
     SearchServicer,
     TurnReadAudit,
     _Reads,
+    _SearchCounts,
     _serviced_search,
     _Union,
     service_read_request,
@@ -946,7 +947,14 @@ async def test_with_no_slot_remaining_nothing_is_composed_and_nothing_is_ruled_o
 
     found = await _servicer(
         composer=composer, searcher=_CostedSearcher(inner), trail=trail, granted=True
-    ).service(_ASK, remaining=0, external=False, footing=await _admitted(), in_view=())
+    ).service(
+        _ASK,
+        remaining=0,
+        external=False,
+        footing=await _admitted(),
+        in_view=(),
+        counts=_SearchCounts(),
+    )
 
     assert found.disposition is SearchDisposition.NO_BUDGET
     assert found.records == ()
@@ -982,6 +990,7 @@ async def test_the_budget_admits_the_records_that_fit_and_no_more() -> None:
         reads=_Reads(),
         truncated=truncated,
         footing=await _admitted(),
+        counts=_SearchCounts(),
     )
 
     assert searched.disposition is None, "the search yielded, so §13's field stays empty"
