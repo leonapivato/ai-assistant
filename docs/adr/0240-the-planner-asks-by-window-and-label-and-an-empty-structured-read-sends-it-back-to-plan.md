@@ -459,9 +459,11 @@ because ADR-0226 §1 forbids a later lane from *"widening an admitted kind's mea
 carry a read the ADR that admitted it did not describe"* — an axis this ADR left out
 could not be added to this kind afterwards without superseding §1. So it is described at
 admission and it is **inert until ADR-0239 §11's deferral fires**; §9's gate keeps it out
-of the prompt meanwhile, because no record in any supply carries a value on it, and §13
-asserts that inertness as the *specified* behaviour rather than leaving it to be
-discovered. The milestone's own exit is served by `participants`, which ADR-0239 §1's
+of the prompt meanwhile, because that gate is keyed on the **episodic** records of the
+sequence the loop passed and no producer writes a subject on one — a retrieved *belief*
+carrying `about_person` opens nothing, which is §9's second clause and the reason it is
+stated. §13 asserts both the inertness and the mixed-supply case as the *specified*
+behaviour rather than leaving either to be discovered. The milestone's own exit is served by `participants`, which ADR-0239 §1's
 producer does write.
 
 **Episodes, because that is the population the envelope cannot otherwise reach and the
@@ -905,16 +907,24 @@ read that also applied a label axis, both facts hold and both are given.
 > answerable and there is no condition to state.
 
 > **Normative.** **The `participants`, `topics` and `about_person` axes are described
-> to the planner only where at least one record of the sequence the loop passed on that
-> call carries a value on that axis.** Where none does, the prompt states neither the
-> axis nor its spelling, and a turn on which no axis is described states no
+> to the planner only where at least one **episodic** record of the sequence the loop
+> passed on that call carries a value on that axis.** Where none does, the prompt states
+> neither the axis nor its spelling, and a turn on which no axis is described states no
 > `STRUCTURED_READ` member at all.
 
+> **Normative.** **A belief's value opens no axis**, and the ground is that §4 confines
+> this read to episodes: a subject or a topic carried by a retrieved belief is a value
+> this kind's read can never match, so an invitation resting on one would offer an axis
+> whose every ask returns nothing. The gate is keyed on the population the read reaches
+> and not on the supply the prompt happens to hold.
+
 > **Normative.** **Where an axis is offered, the values that opened it are rendered.**
-> A record of the sequence the loop passed that carries a value on an offered axis has
-> that value rendered to the planner, as a quoted span under ADR-0098 §2 exactly as the
-> record's other spans already are, so the planner can copy the stored spelling byte for
-> byte. No axis is described to the planner whose values the same call leaves unrendered.
+> An **episodic** record of the sequence the loop passed that carries a value on an
+> offered axis has that value rendered to the planner, as a quoted span under ADR-0098 §2
+> exactly as the record's other spans already are, so the planner can copy the stored
+> spelling byte for byte. No axis is described to the planner whose values the same call
+> leaves unrendered. This clause governs the axes §9 offers and states nothing about how
+> a belief's own fields are rendered, which is untouched.
 
 > **Normative.** **The condition governs the invitation and never the ask.** A
 > `STRUCTURED_READ` naming a label no record of the supply carried is a valid emission,
@@ -945,7 +955,18 @@ copy** — which is ADR-0226 §3's namer rule in its strongest form, **data**, r
 without an ordinal or a table. As ADR-0239's producer fills episodes, the gate opens on
 its own, on the turns where it can be answered, with no ADR and no configuration.
 
-**What it costs is named.** A question about a person no shown record mentions gets no
+**Keyed on episodes, because the supply is wider than the read.** Both lenses raised
+this on round 6 and both were right about the fact: `Planner.plan`'s `memories` carries
+retrieved beliefs as well as episodes, and beliefs **do** carry `topics` and
+`about_person` today — ADR-0237 §6 says so in terms, and the observer and the
+consolidation stage fill them. A gate reading the whole sequence would therefore open the
+subject axis off a semantic belief while every episode carries `about_person` `None`, and
+the ask that followed would search episodes, return nothing, and be entitled under §6 to
+spend the turn's revision on an absence nobody could have filled. Keying the gate on the
+episodic records is what makes §9's own sentence true — the axis is offered where the
+turn **can name something the read can find**.
+
+**What it costs is named.** A question about a person no shown episode mentions gets no
 person axis, so the planner asks by window or by text instead. That is a real
 limitation, it falls hardest on exactly the store this milestone starts from — one whose
 episodes are unlabelled — and it shrinks as the producer runs. §14 defers the
@@ -1173,8 +1194,11 @@ revision's guidance reflects the supply the revision is planning over.
    episodes written as capture and ADR-0239's labeller write them, a `STRUCTURED_READ`
    applying `about_person` returns nothing, the audit records the empty outcome, and the
    test asserts that as the decision working rather than as a defect — ADR-0237 §10 item
-   7's shape, for the axis ADR-0239 §11 defers. Asserted beside a call whose supply
-   carries no `about_person` at all, where §9's gate leaves the axis out of the prompt.
+   7's shape, for the axis ADR-0239 §11 defers. Two more arms on the gate: a call whose
+   supply carries no `about_person` at all leaves the axis out of the prompt, and a call
+   whose supply carries a **semantic belief** with `about_person` set while every episode
+   carries none **also** leaves it out — the mixed supply §9's second clause exists for,
+   and the arm a gate reading the whole sequence fails.
 6. **A caption is never the reason.** An episode whose text is engineered to sit near
    unrelated questions is not returned by a structured read whose filters it fails, at
    any similarity — run on the query-less arm, and again on the `search` arm with a
@@ -1523,8 +1547,8 @@ ADR-0227 §§3 and 4.
 > of what it obliges, and unmarked text is read to determine what a marked clause means
 > and never supplies an obligation.
 
-What binds is **seventy-three marked clauses**: §1's three, §2's six, §3's six, §4's
-four, §5's ten, §6's five, §7's seven, §8's nine, §9's four, §10's seven, §11's six,
+What binds is **seventy-four marked clauses**: §1's three, §2's six, §3's six, §4's
+four, §5's ten, §6's five, §7's seven, §8's nine, §9's five, §10's seven, §11's six,
 §12's four, §13's one, and this section's one. §14's list, §15's classification and every argument in
 this document are deliberately unmarked: they are deferral, attestation and argument,
 which ADR-0089 §1 classifies as non-normative however load-bearing.
