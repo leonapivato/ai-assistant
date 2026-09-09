@@ -905,7 +905,32 @@ review found an earlier draft doing.
 > the right route on the **first** refusal, where the decision is unanswered and its binding
 > carries `planned_with_external_content` `False`. No lane reads the clause above as removing
 > that line or as making one of the two listings the only route; what is fixed is that the
-> statement rendered for `TRUST_MISSING` names the listing that always has the id.
+> statement rendered for `TRUST_MISSING` names `assistant decisions`, which is the listing that
+> can hold an eligible id when the other cannot.
+
+> **Normative.** **The statement promises no eligible decision, because there is a reachable
+> deployment on which none exists.** Where a deployment's **first** search is planned over
+> external content — a retrieved record marked as resting on recorded external content is
+> enough, and ADR-0181 §1 keeps that class wider than a prior search — the trail's only
+> decision is the one recording that refusal, and §1's third condition above forbids the act on
+> it. So the statement names `assistant decisions` **and what makes a decision a subject of the
+> act**: a decision about a request this system planned from the user's own words rather than
+> from material it had already fetched, stated in ADR-0181 §6's plain terms and naming no
+> source and no kind of source. It says where to look and what to look for and asserts nothing
+> about what is there; a statement promising an available id would be false on exactly that
+> deployment, and no lane restores one.
+
+> **Normative.** **No surface reads a store to find out whether an eligible decision exists,
+> and none invents a route where none does.** The discrimination is the user's to make at the
+> listing, and ADR-0186 §7 is what makes it possible: every row renders the call's origin in
+> its three states, each distinct from the other two, so the fact §1's third condition turns on
+> is on the row. A user who acts on an ineligible id is told by `assistant trust-destinations`
+> which of the three conditions failed and that nothing was recorded (§5); a user with no
+> eligible decision has nothing to perform yet and has been told what would produce one. That
+> is the whole of the recourse this ADR mints — §14 defers the filtered read that would shorten
+> it, and **a real user failing to find an eligible decision in `assistant decisions` is that
+> deferral's stated trigger** rather than a gap closed here with an engine member. §15 owes the
+> arm.
 
 > **Normative.** **None of the eight statements carries** a destination, a host, an origin, a
 > provider name, a connection reference, an account identity, a query or any fragment of one,
@@ -1262,7 +1287,13 @@ this one.
 > act succeeds on a decision whose confirmation has already been **answered**, which is the
 > ordering trap §1 exists to close; **the recovery journey §9 names — grant, then a follow-up
 > refusal, then `grantable_decisions` observed *empty*, then the earlier resolved decision
-> found through `recent_decisions` and the trust act performed on it**; an arm that
+> found through `recent_decisions` and the trust act performed on it**; **an arm on the
+> deployment §9's promise clause names — a trail whose *only* decision carries
+> `planned_with_external_content` `True`, so no listed row is an eligible subject — asserting
+> that the act on that id raises `UntrustableDestinationError` naming §1's third condition,
+> that no store was written, and that the statement rendered for `TRUST_MISSING` named what
+> makes a decision eligible and promised no available id**, which arm 2c does not reach because
+> it seeds an earlier eligible decision; an arm that
 > `DuplicateDestinationTrustError` is raised and rendered as *already chosen* on a second act
 > over one live set; an arm that `revoke_destination_trust` answers `False` for an unknown and
 > for an already-revoked id and writes nothing; an arm that the mapping table in §8 is
