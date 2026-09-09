@@ -2034,15 +2034,35 @@ class SqliteConversationStore:
         """Rebuild one draw row through its own model.
 
         Decoded rather than read positionally into a tuple, for
-        :meth:`_decode_conversation`'s reason: a row that no longer satisfies the
-        model is a store fault to report, and a negative counter reaching a caller as
-        an ordinary integer would make the ceiling comparison meaningless.
+        :meth:`_decode_conversation`'s reason: a row that no longer satisfies the model
+        is a store fault to report, and a negative counter reaching a caller as an
+        ordinary integer would make the ceiling comparison meaningless.
+
+        **The flag is checked against the two values this store writes, before it is
+        converted** — and a bare ``bool(row[1])`` would be the one line here that hides
+        a corruption instead of reporting it. SQLite's type affinity is not a
+        constraint: an ``INTEGER`` column accepts whatever a writer binds, so a
+        hand-built or damaged row can hold ``2``, ``-1`` or the *string* ``"false"``,
+        and ``bool`` maps all three to ``True``. That is the fail-**open** direction on
+        the one field ADR-0238 §8 makes monotone — a conversation whose history this
+        decision never saw would read as clean, which is the state §13's decoded
+        ``False`` exists to prevent. Refusing here keeps the corruption a fault the
+        caller is told about rather than a footing it acts on.
 
         Raises:
-            ConversationStoreError: If the row does not validate.
+            ConversationStoreError: If the row does not validate, or the stored flag is
+                not one of the two values this store writes.
         """
+        stored = row[1]
+        if type(stored) is not int or stored not in (0, 1):
+            msg = (
+                f"the conversation store holds a corrupt search draw: "
+                f"all_external_user_chosen is {describe_untrusted(stored)}, which is not one "
+                f"of the two values this store writes"
+            )
+            raise ConversationStoreError(msg)
         try:
-            return ConversationSearchDraw(calls=row[0], all_external_user_chosen=bool(row[1]))
+            return ConversationSearchDraw(calls=row[0], all_external_user_chosen=bool(stored))
         except (ValidationError, TypeError) as exc:
             msg = f"the conversation store holds a corrupt search draw: {describe_untrusted(exc)}"
             raise ConversationStoreError(msg) from exc

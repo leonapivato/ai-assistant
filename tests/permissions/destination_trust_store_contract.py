@@ -52,7 +52,7 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
 #: The instant every record here is established at. Fixed, because nothing in this
 #: contract reads a clock: ``established_at`` and ``revoked_at`` are the caller's, so
@@ -114,6 +114,32 @@ async def _refuses(store: DestinationTrustStore, record: DestinationTrustRecord)
         await store.record(record)
 
     assert len(await store.export()) == before
+
+
+class _EmptiesAfterTheFirstRead(list[CanonicalDestination]):
+    """A ``Sequence`` that reports its members once and nothing afterwards.
+
+    ``recipient_grant_contract.py``'s ``_Deceptive`` one contract over, and for its
+    reason: a rule about *what a caller may hand over* is only tested by a value that
+    behaves differently the second time it is read. A real caller reaches this state
+    without any subclass at all — it passes a ``list`` and clears it while the store's
+    read is suspended — but a value that changes on its own makes the case
+    deterministic instead of racing a lock, and works against an implementation with no
+    suspension hook.
+
+    Every member is yielded on the first iteration and the list empties itself, so a
+    second read sees an empty sequence. Only ``__iter__`` is overridden: ``__bool__``
+    and ``__len__`` stay ``list``'s, which is what lets the emptiness check pass before
+    the coverage check finds nothing left.
+    """
+
+    def __iter__(self) -> Iterator[CanonicalDestination]:
+        """Yield the members once, then empty."""
+        members = list.__iter__(self)
+        try:
+            yield from list(members)
+        finally:
+            self.clear()
 
 
 class DestinationTrustStoreContract:
@@ -495,6 +521,134 @@ class DestinationTrustStoreContract:
         assert first == second
         assert first is not second
         assert first.destinations[0] is not second.destinations[0]
+
+    # --- ADR-0065: one call sees one argument -------------------------------
+
+    async def test_a_query_that_changes_under_the_call_is_observed_once(
+        self, store: DestinationTrustStore
+    ) -> None:
+        """ADR-0065's coherent input-observation clause, on the one mutable argument.
+
+        ``trust_of`` is the only member of this seam that takes a ``Sequence``, and a
+        caller still holds the list it passed. **Read twice, the two reads decide
+        different halves of the answer**: the emptiness check would pass on the
+        sequence handed over and the coverage check would then run ``all(...)`` over
+        **no members** — vacuously true — so an emptied query would answer
+        ``USER_CHOSEN`` for any store holding a live record. Neither input state
+        warrants that: not the sequence that arrived, which names a destination nobody
+        chose, and not the empty one, which ADR-0238 §1 refuses in terms.
+
+        So an implementation snapshots before its first await and reads only the
+        snapshot afterwards, and this is the case that says so. The subject is a
+        sequence that empties itself rather than a suspended mutation, because that is
+        deterministic and reaches an implementation with no suspension hook.
+        """
+        await store.record(trust_record(ALICE, record_id="t-1"))
+        changing = _EmptiesAfterTheFirstRead([member(CAROL)])
+
+        answer = await store.trust_of(changing)
+
+        assert answer is DestinationTrust.UNCHOSEN
+
+    async def test_a_query_read_once_still_answers_from_its_members(
+        self, store: DestinationTrustStore
+    ) -> None:
+        """The other half: snapshotting must not turn every query into ``UNCHOSEN``.
+
+        Stated because the case above would pass against an implementation that had
+        simply stopped reading its argument at all. The same self-emptying sequence,
+        over a destination the store *does* hold, has to answer ``USER_CHOSEN`` — which
+        it can only do from the one read it is allowed.
+        """
+        await store.record(trust_record(ALICE, record_id="t-1"))
+        changing = _EmptiesAfterTheFirstRead([member(ALICE)])
+
+        assert await store.trust_of(changing) is DestinationTrust.USER_CHOSEN
+
+    # --- ADR-0060: a cancelled call leaves the store whole ------------------
+
+    async def test_a_cancelled_read_leaves_the_store_usable(
+        self, store: DestinationTrustStore
+    ) -> None:
+        """ADR-0060: a cancellation is delivered onward and changes nothing here.
+
+        What a suite can decide without an implementation's own suspension hook: the
+        call is cancelled, the ``CancelledError`` reaches the awaiting task rather than
+        being converted into an answer, and **the store is still usable afterwards** —
+        which is the observable consequence of the clause a durable store keeps by
+        holding its connection until the worker physically finishes. An implementation
+        that released a connection lock early would leave a second caller using the
+        same connection concurrently, and the read below is what meets that.
+        """
+        await store.record(trust_record(ALICE, record_id="t-1"))
+        call = asyncio.ensure_future(store.trust_of([member(ALICE)]))
+        # Cancelled **before the task's first step**, which is what makes the case
+        # deterministic across implementations: a fake whose resource is uncontended
+        # never suspends, so a cancellation delivered after a ``sleep(0)`` would race a
+        # call that had already finished. What is under test here is the *aftermath* —
+        # the blocked-worker interleaving a durable store owes is driven against that
+        # store's own connection in ``tests/permissions/test_destination_trust.py``,
+        # where the harness to park a worker exists.
+        call.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await call
+
+        assert await store.trust_of([member(ALICE)]) is DestinationTrust.USER_CHOSEN
+        assert [held.id for held in await store.live()] == ["t-1"]
+
+    async def test_a_cancelled_write_leaves_the_store_usable(
+        self, store: DestinationTrustStore
+    ) -> None:
+        """The same clause on the write path, where the resource is held longest.
+
+        A cancelled ``record`` either appended or did not; **what this pins is that the
+        store answers afterwards either way**, and that a second write can still be
+        made. A store whose cancelled worker was still using the connection would fail
+        the next call rather than serve it.
+        """
+        call = asyncio.ensure_future(store.record(trust_record(ALICE, record_id="t-1")))
+        call.cancel()  # before its first step — see the read case for why
+        with pytest.raises(asyncio.CancelledError):
+            await call
+
+        await store.record(trust_record(BOB, record_id="t-2"))
+
+        assert "t-2" in {held.id for held in await store.export()}
+
+    # --- §1: the refusal across two handles ---------------------------------
+
+    @pytest.mark.optional_obligation
+    async def test_two_handles_recording_one_destination_set_at_once_admit_one(
+        self, store: DestinationTrustStore
+    ) -> None:
+        """§1's duplicate refusal is owed **across processes**, not within one object.
+
+        The clause names the case in terms: "two engines over one data directory each
+        read no live record over a destination set and each append, the store then
+        holds two, and the user's revocation of the record they were shown leaves the
+        other standing". An in-process ``asyncio.Lock`` cannot discharge that — two
+        engines hold two locks and serialise nothing — so the refusal has to be taken
+        against the *file*, which is what ``BEGIN IMMEDIATE`` buys and what a single
+        handle's concurrency case cannot see.
+
+        A loser may answer with the refusal or with a store fault — a second writer
+        meeting a held write lock is a legitimate answer, and no busy timeout is set
+        (#564) — so what is asserted is the invariant rather than the shape of its
+        answer: exactly one record admitted.
+        """
+        if not self.concurrently_openable():
+            pytest.skip("this implementation cannot be opened twice over one history")
+        second = self.reopened(store)
+
+        outcomes = await asyncio.gather(
+            store.record(trust_record(ALICE, record_id="t-1")),
+            second.record(trust_record(ALICE, record_id="t-2")),
+            return_exceptions=True,
+        )
+
+        assert sum(1 for outcome in outcomes if isinstance(outcome, str)) == 1
+        assert len(await store.live()) == 1
 
     # --- §1: durability, and the model's distance from the fact ------------
 

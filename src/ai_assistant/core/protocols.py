@@ -6661,12 +6661,22 @@ class DestinationTrustStore(Protocol):
     rather than an allocation.
 
     Cancelling any method here is governed by this module's cancellation clause
-    (ADR-0060). Its input-observation clause (ADR-0065) is **vacuous**, as it is for
-    :class:`RecipientGrantStore` and for the same reason: the one caller-owned
-    argument to a write is a
-    :class:`~ai_assistant.core.types.DestinationTrustRecord`, immutable all the way
-    down. What a caller *can* still do is write past the frozen model through
-    ``__dict__``, which is what :meth:`record`'s detachment obligation closes.
+    (ADR-0060). Its input-observation clause (ADR-0065) is **vacuous on the write
+    path** — as it is for :class:`RecipientGrantStore` and for the same reason: the
+    caller-owned arguments there are a
+    :class:`~ai_assistant.core.types.DestinationTrustRecord` and a ``str``, immutable
+    all the way down. What a caller *can* still do is write past the frozen model
+    through ``__dict__``, which is what :meth:`record`'s detachment obligation closes.
+
+    **It is not vacuous on** :meth:`trust_of`, **which is the one member here that
+    takes a mutable argument.** A ``Sequence`` the caller still holds can change while
+    this call is suspended, and reading it twice is not merely untidy: the emptiness
+    check would pass on the sequence handed over and the coverage check would then run
+    over **no members**, which is vacuously true — so an emptied query would answer
+    ``USER_CHOSEN`` for any store holding a live record, the exact answer §1 refuses
+    for an empty sequence. **An implementation therefore snapshots the sequence before
+    its first await and reads only the snapshot afterwards**, so that one call sees one
+    argument.
     """
 
     async def record(self, record: DestinationTrustRecord) -> str:
@@ -6760,6 +6770,10 @@ class DestinationTrustStore(Protocol):
         Args:
             destinations: The canonical destination set to ask about, as a request's
                 binding derived it. Order is immaterial; membership is the rule.
+                **Observed once** (ADR-0065): an implementation snapshots it before its
+                first await, so a caller mutating the sequence it passed cannot make
+                one call answer over two different arguments — see the class docstring
+                for what that would otherwise cost.
 
         Returns:
             :attr:`~ai_assistant.core.types.DestinationTrust.USER_CHOSEN` or

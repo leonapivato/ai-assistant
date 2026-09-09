@@ -7,8 +7,10 @@ definitions, the owner-only mode, and the one mutation this table admits.
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import stat
+import threading
 from typing import TYPE_CHECKING
 
 import pytest
@@ -20,8 +22,9 @@ from destination_trust_store_contract import (
 from recipient_builders import ALICE, member
 
 from ai_assistant.core.errors import InvalidDestinationTrustError
-from ai_assistant.core.types import DestinationTrust
+from ai_assistant.core.types import DestinationTrust, DestinationTrustRecord
 from ai_assistant.permissions.destination_trust import SqliteDestinationTrustStore
+from ai_assistant.testing.cancellation import ThreadSuspension
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -210,3 +213,69 @@ async def test_a_naive_revocation_instant_is_refused(path: Path) -> None:
 
     with pytest.raises(InvalidDestinationTrustError):
         await store.revoke("t-1", datetime.datetime(2026, 9, 9, 12, 0))  # noqa: DTZ001
+
+
+# --- ADR-0060 §3: the resource outlives the cancelled coroutine ---------------
+
+
+async def test_a_cancelled_write_holds_the_connection_until_its_worker_finishes(
+    path: Path,
+) -> None:
+    """ADR-0060 §3's clause, driven where ADR-0054's bug actually lived.
+
+    ``_run_to_completion`` absorbs the cancellation and keeps waiting on the worker's
+    physical completion signal, so ``async with self._lock`` is held for the whole life
+    of the thread. Without that, the cancellation unwinds the ``async with`` **while
+    the worker is still using the connection**, and a second caller then uses the same
+    ``sqlite3`` connection concurrently — which SQLite refuses, and which no assertion
+    about this store's answers would catch.
+
+    The worker is **parked** rather than left to race: a transaction finishes in
+    microseconds, so whether the second caller arrives while the first still holds the
+    connection would otherwise be a race between a commit and an event-loop tick, and
+    an invariant exercised only sometimes is not evidence about it. The case is
+    ``tests/memory/test_sqlite_conversation_store.py``'s harness in miniature, kept
+    here rather than in the shared suite because parking a worker needs a hook into
+    *this* implementation's private sync method.
+    """
+    store = SqliteDestinationTrustStore(path=path)
+    suspension = ThreadSuspension()
+    original = store._record_sync
+    armed = threading.Event()
+
+    def blocking(snapshot: DestinationTrustRecord) -> None:
+        if not armed.is_set():  # the first worker only; later ones run free
+            armed.set()
+            suspension.hold()
+        original(snapshot)
+
+    store._record_sync = blocking  # type: ignore[method-assign]
+    try:
+        first = asyncio.ensure_future(store.record(trust_record(ALICE, record_id="t-1")))
+        await suspension.reached()
+        first.cancel()
+        second = asyncio.ensure_future(
+            store.record(trust_record("bob@example.com", record_id="t-2"))
+        )
+        await asyncio.sleep(0)
+
+        # The second call has not started: the cancelled one still holds the lock,
+        # because its worker has not physically finished.
+        assert not second.done()
+        suspension.release()
+
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert await second == "t-2"
+    finally:
+        suspension.release()
+        store.close()
+
+    reopened = SqliteDestinationTrustStore(path=path)
+    try:
+        # Both writes reached the file: the cancelled one's worker ran to completion,
+        # which is what "the cancellation is absorbed and the work finishes" means. The
+        # caller's task still cancelled; what was prevented is connection reuse.
+        assert {held.id for held in await reopened.export()} == {"t-1", "t-2"}
+    finally:
+        reopened.close()

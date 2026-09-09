@@ -681,6 +681,65 @@ class _UnobservedOp(_ReadOp):
         return store.conversations_with_unobserved_turns()
 
 
+class _AdmitSearchOp(_PairedOp):
+    """``admit_search`` — ADR-0238 §8's compare-increment-answer, its own lock site.
+
+    A mutation, and the one whose lock is load-bearing beyond ADR-0060: the read, the
+    comparison and the write are one indivisible step, so a cancellation that released
+    the resource before its worker physically finished would let a second admission use
+    the same connection concurrently — the failure ADR-0060 §3 is stated over, on the
+    member ADR-0074 §9's exclusion is extended to.
+    """
+
+    name = "admit_search"
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Admit against the left conversation — the call that is cancelled."""
+        return store.admit_search(self.left, max_calls=5)
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Admit against the right one concurrently."""
+        return store.admit_search(self.right, max_calls=5)
+
+    async def verify(self, store: ConversationStore) -> None:
+        """The right one's admission landed, and the store is still usable."""
+        assert (await _draw_of(store, self.right)).calls == 1
+        assert await store.admit_search(self.right, max_calls=5) is not None
+
+
+class _ObserveSearchOp(_PairedOp):
+    """``observe_search`` — ADR-0238 §8's fold, its own lock site."""
+
+    name = "observe_search"
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Fold the left conversation — the call that is cancelled."""
+        return store.observe_search(self.left, all_external_user_chosen=False)
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Fold the right one concurrently."""
+        return store.observe_search(self.right, all_external_user_chosen=False)
+
+    async def verify(self, store: ConversationStore) -> None:
+        """The right one's fold landed, and the store is still usable."""
+        assert not (await _draw_of(store, self.right)).all_external_user_chosen
+        await store.observe_search(self.right, all_external_user_chosen=False)
+
+
+class _SearchDrawOp(_ReadOp):
+    """``search_draw`` — ADR-0238 §8's read, its own lock site (#492's clause)."""
+
+    name = "search_draw"
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Read the left conversation's draw — the call that is cancelled."""
+        return store.search_draw(self.left)
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Read the right one's concurrently."""
+        return store.search_draw(self.right)
+
+
 #: Every locked ``ConversationStore`` operation ADR-0060's case is run against:
 #: each is a distinct ``async with self._lock`` site. The mutations came first
 #: (#370's granularity, discharged here by #487); the eight reads are the same
@@ -693,6 +752,15 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _StampDeletedOp,
     _DropIfEligibleOp,
     _RecordObservedOp,
+    # ADR-0238 §8's three, on the same terms: each is a distinct lock site, and the
+    # two writes are the ones a lane replacing a completion shield with a bare
+    # ``to_thread`` would break invisibly — the cancellation would release the
+    # connection lock while the worker was still using it, which is the failure
+    # ADR-0060 describes and which every other assertion about these members would
+    # go on passing through.
+    _AdmitSearchOp,
+    _ObserveSearchOp,
+    _SearchDrawOp,
     _GetOp,
     _TurnsOp,
     _TurnsAfterOp,
@@ -2683,11 +2751,24 @@ class ConversationStoreContract:
         first, second = pair
         conversation = await first.start()
 
-        first_outcome = await first.admit_search(conversation.id, max_calls=1)
-        second_outcome = await second.admit_search(conversation.id, max_calls=1)
+        # **Started together rather than one after the other**, which is the whole
+        # point: an implementation whose read and write are separate transactions
+        # protected by an *instance* lock passes a sequential pair and the same-handle
+        # concurrency case above, and still lets two handles both read zero and both
+        # admit against a ceiling of one. A refusal here may arrive as ``None`` or as a
+        # store fault — a second writer meeting a held write lock is a legitimate
+        # answer, and this store sets no busy timeout (#564) — so what is asserted is
+        # the invariant rather than the shape of the loser's answer: **at most one
+        # admission**, and one call's spend on the record.
+        outcomes = await asyncio.gather(
+            first.admit_search(conversation.id, max_calls=1),
+            second.admit_search(conversation.id, max_calls=1),
+            return_exceptions=True,
+        )
 
-        assert first_outcome is not None
-        assert second_outcome is None
+        admitted = [outcome for outcome in outcomes if isinstance(outcome, ConversationSearchDraw)]
+        assert len(admitted) == 1
+        assert (await _draw_of(first, conversation.id)).calls == 1
 
     async def test_the_three_members_read_no_settings_field_and_hold_no_policy(
         self, store: ConversationStore

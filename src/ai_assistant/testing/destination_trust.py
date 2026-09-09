@@ -235,10 +235,16 @@ class FakeDestinationTrustStore:
         A fake that raised here would certify a consumer against a branch the
         contract says does not exist.
         """
+        # Snapshotted **before** the resource is entered, for the durable store's own
+        # reason: a ``Sequence`` is the one caller-owned argument on this seam that is
+        # not immutable, and a caller that emptied its list while the call was
+        # suspended would otherwise make the coverage check's ``all(...)`` vacuously
+        # true — answering ``USER_CHOSEN`` for the empty sequence ADR-0238 §1 refuses.
+        # The fake must not be the looser of the two (ADR-0026 §7).
+        wanted = tuple(destinations)
         async with self._resource.held():
-            if not destinations or not self._trust_readable:
+            if not wanted or not self._trust_readable:
                 return DestinationTrust.UNCHOSEN
-            wanted = tuple(destinations)
             for held in self._records:
                 if held.revoked_at is not None:
                     continue
