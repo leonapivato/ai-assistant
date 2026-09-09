@@ -49,9 +49,10 @@
   ratified ahead of any implementation** (ADR-0015 §5). It is reviewed while still
   `Proposed`, so a finding can still change the decision, and flipped to `Accepted` on
   merge. This PR is docs-only.
-- Refs: #2167 (the milestone-31 obligation this answers), #2112 (ruled in §8), #1908
-  (milestone 31's live record), ADR-0029 §4, ADR-0060, ADR-0118, ADR-0192, ADR-0194,
-  ADR-0226 §5, ADR-0228 §4 and §10, ADR-0231, ADR-0238.
+- Refs: #2167 (the milestone-31 obligation this answers), #2112 (ruled in §8), #2181
+  (deferred in §13, filed by this lane), #1908 (milestone 31's live record), ADR-0029 §4,
+  ADR-0060, ADR-0118, ADR-0192, ADR-0194, ADR-0226 §5, ADR-0228 §4 and §10, ADR-0231,
+  ADR-0238.
 
 ## Context
 
@@ -213,11 +214,27 @@ is written on that footing.
 > reason: expiry is delivered at an await point, so an implementation reading "expired"
 > as "do not call" would be making a promise the event loop does not keep.
 
-> **Normative.** **The bound is one window over the whole of `search` as its caller
-> observes it** — the revalidation, the spend admission, the ledger claim, the credential
-> read, the channel and the transcription — and not over the send alone. A bound that
-> excludes the stages before the send is a bound with a hole exactly where a store or a
-> gate can stop answering, which is ADR-0118 §4's second clause one seam over.
+> **Normative.** **The bound covers this seam's own work and not the send alone** — the
+> revalidation, ADR-0194 §3's spend admission, the credential read, the channel, the
+> response read and the transcription. A bound over the send alone is a bound with a hole
+> exactly where a gate can stop answering, which is ADR-0118 §4's second clause one seam
+> over, and §3's admission clause already places that stage inside the deadline.
+
+> **Normative.** **It is not placed over either ledger append, and this ADR does not move
+> that.** ADR-0192 §3 pins the claim and the completion as *"unbounded by this seam"* and
+> gives the reason a bound there would be a fiction — the audit store this corpus ships
+> absorbs a cancellation until its worker physically finishes (ADR-0054), so cancelling
+> the append returns nobody sooner — and §7 of that ADR already records the consequence
+> against ADR-0029 §4 over both windows. **No lane closes that gap by wrapping either
+> append in this ADR's deadline**; each stays a retained, shielded await.
+
+> **Normative.** **The guarantee is therefore stated in the weaker, true form, and this
+> ADR claims no total for a `search` frame.** What the bound buys is that the seam stops
+> waiting on the stages it owns; it does not stop a provider working, does not interrupt
+> a callable that declines to be cancelled, and does not bound a store that has stopped
+> answering. ADR-0192's *"This ADR claims **no** total for `invoke`'s frame either"* is
+> the same sentence one seam over, and a reader who takes §1 for a wall-clock ceiling on
+> `search` has read it too strongly.
 
 > **Normative.** **The parameter is a duration and nothing else, and no lane widens it.**
 > It is not a deadline instant, not a clock, not a budget object, not a policy and not a
@@ -348,11 +365,19 @@ code change.
 > §17's raises-for-no-source-reason posture binds unchanged and `core/errors.py` gains no
 > class.
 
-> **Normative.** **`SearchRefusal.TRANSPORT_FAILED` stops covering an expiry**, and its
-> statement narrows to what it can honestly assert: a refused connection, a TLS failure,
-> a channel closed mid-response and a refused redirect — conditions in which **this
-> system's own reach failed and nothing was disclosed**. No implementation returns
+> **Normative.** **`SearchRefusal.TRANSPORT_FAILED` stops covering an expiry of this
+> seam's own deadline, and that is the whole of what moves.** Its other conditions — a
+> refused connection, a TLS failure, a channel closed mid-response, a refused redirect —
+> keep the member, keep the meaning ADR-0231 §5 and ADR-0191 §1 gave them and keep the
+> `ToolOutcome` a completion records for them today. No implementation returns
 > `TRANSPORT_FAILED` for a deadline, and no lane collapses the two back together.
+
+> **Normative.** **This ADR asserts nothing about whether any of those conditions
+> disclosed anything.** A channel closed mid-response may well have carried the whole
+> query, and a refused redirect certainly did; whether their completion row is honest is
+> a question about a member this ADR is not otherwise moving, and §13 records it as its
+> own defect rather than answering it here. **No lane cites §4 as having established that
+> a `TRANSPORT_FAILED` search disclosed nothing.**
 
 > **Normative.** `SearchDisposition` gains **`DEADLINE_EXPIRED`**, valued
 > `deadline_expired`, carried across from the refusal one for one, so the mapping from
@@ -368,8 +393,12 @@ decisive.** An operator reading a population of `turn_read_request` events canno
 slow": the first is an outage, the second is a bound to size or a provider to change.
 That is ADR-0231 §13's own standard — *"Collapsing them would make the one field useless
 at exactly the moment someone reads it."* But the argument that would hold even with no
-audit at all is §5's: the two conditions differ in **what the system may assert about
-whether it disclosed anything**, and one member cannot carry two answers to that.
+audit at all is §5's, and it is narrower than an appeal to disclosure: **ADR-0029 §4's
+`FAILED`-or-`INDETERMINATE` rule attaches to a deadline expiry or a cancellation and to
+nothing else**, and the seam is the only party that can establish that its own deadline
+expired. While one member carries both an expiry and a refused connection, no mapping
+from it can apply §4's rule to the first without applying it to the second, which §4 does
+not reach. The split is what makes the classification computable at all.
 
 ### 5. The completion row on an expiry says `INDETERMINATE`, and today it says `FAILED`
 
@@ -411,9 +440,11 @@ unavailable. ADR-0014 §4 refuses that guess in terms, ADR-0029 §4 restates it 
 deadline, and `ToolDefinition.interrupted_outcome` was written to compute the answer;
 `consumed_call` already reads it on the cancellation path. The asymmetry is the bug: a
 cancellation from outside completes `INDETERMINATE` and an expired deadline completes
-`FAILED`, for the same call, over the same ignorance. With one member covering both a
-refused connection and an expiry, no mapping could have been right — the refused
-connection genuinely is `FAILED`, and that is what §4's split buys.
+`FAILED`, for the same call, over the same ignorance — and §4's split is what makes the
+two agree, because ADR-0029 §4's rule can only be applied to a condition the seam can
+establish is an expiry. What a `TRANSPORT_FAILED` completion should record for its
+remaining conditions is a separate question this ADR leaves exactly where it found it
+(§4, §13).
 
 ### 6. The call is spent, and nothing is refunded
 
@@ -529,13 +560,21 @@ it in the same act costs one member and avoids a second contract round.
 > §4's `DEADLINE_EXPIRED`. No implementation collapses any two, derives one from another,
 > or reports one under another's member.
 
-> **Normative.** **No bound has any input the other two have.** The call comparison reads
-> a durable counter and a `Settings` integer and **no clock**; the spend admission reads a
-> declared `ToolCost` and configured amounts and **no clock and no counter**; the deadline
-> reads the duration §3's field carries and the loop's own time, and **no counter and no
-> amount**. ADR-0238 §12's *"The comparison has no other input — no clock reading, no
-> interval and no duration a provider could stretch"* binds verbatim, and this ADR's
-> deadline is a **separate** comparison rather than a second input to that one.
+> **Normative.** **Each mechanism keeps exactly the inputs its own ADR gives it, and
+> this ADR takes none of them away.** The call comparison reads a durable counter and a
+> `Settings` integer (ADR-0238 §8, §12). The spend admission reads the pinned declaration,
+> the configured amounts, the ledger's rows and reservations, and **the injected clock
+> and `Settings.timezone` that select a calendar period** (ADR-0194 §1, §3) — every one of
+> which is ratified and none of which is forbidden here. The deadline reads the duration
+> §3's field carries and the event loop's own time.
+
+> **Normative.** **What no mechanism reads is another's quantity.** No elapsed measurement
+> of a search, and no figure derived from one, reaches the call comparison or the spend
+> admission; no conversation draw reaches the spend admission or the deadline; and no
+> configured or declared amount reaches the deadline. ADR-0238 §12's *"The comparison has
+> no other input — no clock reading, no interval and no duration a provider could
+> stretch"* binds verbatim **over the call comparison it was written about**, and this
+> ADR's deadline is a **separate** comparison rather than a second input to it.
 
 > **Normative.** **No value a model produced, a request carried, a search result
 > contained or a record held reaches any side of any of the three.** For the deadline
@@ -614,7 +653,9 @@ It owes, and nothing beyond it:
 - **`core/protocols.py`** — §1's parameter on `WebSearcher.search`, with the contract text
   it needs: that the bound is required and declared, that a non-`timedelta` or
   non-positive value raises `ValueError` before anything is read, that an expiry returns
-  `SearchRefusal.DEADLINE_EXPIRED`, and that a cancellation from outside is unchanged (§7).
+  `SearchRefusal.DEADLINE_EXPIRED`, that the bound reaches this seam's own work and **not**
+  the two ledger appends (§1, ADR-0192 §3), and that a cancellation from outside is
+  unchanged (§7).
 - **`core/types.py`** — §4's `SearchRefusal.DEADLINE_EXPIRED`, and the narrowing of
   `TRANSPORT_FAILED`'s stated scope so its docstring no longer names an expired deadline.
 - **`core/config.py`** — §3's `search_call_deadline`, with its named default, its stated
@@ -658,12 +699,14 @@ It owes, and nothing beyond it:
 > scenarios (#2178) and are named as such.
 
 > **Normative.** **Arm 1 — the pre-registered stalled search.** A stub origin that
-> connects and never answers, with `search_call_deadline` at 5 seconds: the search
-> completes within that bound plus a stated slack, the outcome's refusal is
-> `DEADLINE_EXPIRED` and **not** `TRANSPORT_FAILED`, the audit's `disposition` is
-> `deadline_expired`, and the turn's reply carries §10's interruption account. The bound
-> is a real duration and the stall is a real one, because a fake clock would assert
-> nothing about the property the acceptance sentence names.
+> connects and never answers, with `search_call_deadline` at 5 seconds and a ledger that
+> answers promptly: the search completes within that bound plus a stated slack, the
+> outcome's refusal is `DEADLINE_EXPIRED` and **not** `TRANSPORT_FAILED`, the audit's
+> `disposition` is `deadline_expired`, and the turn's reply carries §10's interruption
+> account. The bound is a real duration and the stall is a real one, because a fake clock
+> would assert nothing about the property the acceptance sentence names. **The ledger is
+> named as prompt because §1's third clause says the bound does not reach it**, so an arm
+> that stalled the store instead would be asserting a guarantee this ADR does not make.
 
 > **Normative.** **Arm 2 — the pre-registered accounting arm.** On the same fault: the
 > conversation's draw counts the call **once**, the ledger claim completes with
@@ -714,9 +757,21 @@ It owes, and nothing beyond it:
 > disposition — asserted as **one** member for both, so a later lane splitting it is
 > moving a decision.
 
-> **Normative.** **Arm 9 — the refused connection keeps its class.** A destination that
-> refuses the connection outright still returns `TRANSPORT_FAILED` and still completes
-> `FAILED`, so §4's narrowing is shown to have moved one condition and not two.
+> **Normative.** **Arm 9 — `TRANSPORT_FAILED`'s other conditions are untouched.** A
+> destination that refuses the connection outright, and one that closes the channel
+> mid-response, each still return `TRANSPORT_FAILED` and each still complete exactly as
+> they do today — so §4 is shown to have moved one condition out of that member and to
+> have changed nothing about the ones that stay, including the ones §13 records as an
+> open question.
+
+> **Normative.** **Arm 10 — the ledger is outside the bound, and the arm asserts the
+> negative.** With the claim append held on a barrier and `search_call_deadline` set
+> **shorter** than the barrier is held for: `search` has **not** returned, no
+> `DEADLINE_EXPIRED` is minted, no channel is opened and no diagnostic is emitted; and
+> the same with the completion append held after the callable has run. Releasing each
+> barrier lets the call proceed normally. This is ADR-0192's own pinned shape, restated
+> at this seam because §1's parameter is exactly the deadline a later lane would
+> "helpfully" wrap an append in.
 
 ### 13. Deferred, by name, each with what fires it
 
@@ -734,6 +789,20 @@ It owes, and nothing beyond it:
   parameter. Fired by an ADR that prices the operations, or by the first operation whose
   latency tolerance the shipped figure plainly misfits. Not fired by a lane finding thirty
   seconds long.
+- **An honest completion outcome for a transport failure that may have followed the
+  send.** §4 moves only the expiry out of `TRANSPORT_FAILED` and asserts nothing about
+  what the member's remaining conditions disclosed. A channel closed mid-response and a
+  refused redirect each mean the query probably left, yet the completion row records the
+  classification the tree records today, and ADR-0029 §4's interrupted-outcome rule does
+  not reach either because neither is a deadline or a cancellation. **Fired by an ADR
+  that decides how this corpus classifies a post-send failure at the designated egress
+  seam** — a question wider than search, since `send_email` has the same shape — and
+  filed by this lane as **#2181**. Not fired by a lane finding the member coarse.
+- **A bounded ledger append**, which is what would make §1 a wall-clock ceiling on a
+  `search` frame. ADR-0192 §3 pins both appends unbounded with the reason a bound there
+  would be a fiction, and §7 of that ADR already records the consequence against
+  ADR-0029 §4. Fired by an ADR that gives the audit store a cancellation-cooperative
+  write — an ADR-0054 change — and by nothing this seam can decide.
 - **A transport-level bound** — a connect timeout, a read timeout or a socket timeout in
   `tools/egress.py`. §2's second clause leaves ADR-0231 §5's posture standing. Fired by an
   ADR that decides what a partial read means for §10's transcription; not fired by a lane
@@ -842,9 +911,9 @@ ADR-0148** — relied upon as written.
 > of what it obliges, and unmarked text is read to determine what a marked clause means
 > and never supplies an obligation.
 
-What binds is **fifty-six marked clauses**: §1's five, §2's two, §3's five, §4's four,
-§5's four, §6's three, §7's four, §8's four, §9's four, §10's five, §11's four, §12's
-eleven, and this section's one. §13's list, §14's classification and every argument in
+What binds is **sixty-one marked clauses**: §1's seven, §2's two, §3's five, §4's five,
+§5's four, §6's three, §7's four, §8's four, §9's five, §10's five, §11's four, §12's
+twelve, and this section's one. §13's list, §14's classification and every argument in
 this document are deliberately unmarked: they are deferral, attestation and argument,
 which ADR-0089 §1 classifies as non-normative however load-bearing.
 
@@ -860,7 +929,9 @@ PR". Nothing implements against it until it has merged (ADR-0015 §5, golden rul
 
 - **A stalled provider stops being able to hold a turn open.** The bound existed; what did
   not exist was any route from a deployment to it, any statement of it at the contract, or
-  any way for a second `WebSearcher` to be held to it. All three arrive together.
+  any way for a second `WebSearcher` to be held to it. All three arrive together. **A
+  stalled audit store still can**, and §1 says so rather than implying otherwise: that is
+  ADR-0192 §3's ratified trade and this ADR does not reopen it.
 - **The audit can tell four conditions apart that were previously two.** An outage, a slow
   provider, a fault at the send and a completed-but-empty search each get their own value
   in the one event an operator reads over a population.
@@ -902,10 +973,11 @@ window it is running in, and the ADR-0029 §4 arrangement this seam is modelled 
 exactly one.
 
 **Leaving an expiry as `TRANSPORT_FAILED` and distinguishing it in the log line instead.**
-Refused in §4 and §5. It would leave `_result_of` unable to classify the completion row —
-one member cannot map to `FAILED` for a refused connection and `INDETERMINATE` for an
-expiry — so the ledger would go on asserting something it cannot know. The audit argument
-alone would not have been enough; the ledger argument is.
+Refused in §4 and §5. It would leave `_result_of` unable to classify the completion row:
+ADR-0029 §4's rule is stated over a deadline expiry and a cancellation, so a mapping from
+one member covering both an expiry and a refused connection cannot apply it to the first
+without applying it to conditions §4 does not reach. The audit argument alone would not
+have been enough; the ledger argument is.
 
 **Raising a named error class on expiry, as ADR-0118 §5 does for the embedder.** Refused:
 ADR-0231 §17's raise-for-no-source-reason posture is what makes a non-yield *"a value the
