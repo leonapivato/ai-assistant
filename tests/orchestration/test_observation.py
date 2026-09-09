@@ -11,6 +11,13 @@ Two of the canonical fakes are subclassed rather than wrapped —
 is still the canonical fake's own behaviour, with a call log and the one scripted
 refusal no fake can be asked to produce on its own.
 
+Two doubles are hand-rolled, both for one reason: the behaviour under test is a
+stage's reaction to a collaborator that does **not** conform, and a canonical fake
+must stay the thing a conforming implementation is compared against.
+:class:`_ForeignLabelling` is the second — it labels an episode it was never
+handed, which ADR-0239 §1 forbids a producer and which
+``FakeObserver`` therefore drops on its own.
+
 The one hand-rolled double is :class:`_RacingWriter`, which delegates every call to
 the canonical :class:`FakeMemoryWriter` and raises
 :class:`UnresolvedEvidenceError` for named proposals. It has to be scripted:
@@ -188,6 +195,32 @@ class _FailingWriter:
         so the script this double carries applies to :meth:`ingest` alone.
         """
         return await self._inner.ingest_reading(reading)
+
+
+class _ForeignLabelling:
+    """An ``Observer`` that labels an episode it was never handed (ADR-0239 §1).
+
+    Non-conforming on purpose, and it has to be: §1 rules that a producer proposes
+    a labelling for an episode of the batch it was given and for no other, so the
+    canonical fake drops such an entry itself and a consumer driving it can never
+    see what the *stage* does with one. This is ``_RacingWriter``'s trade at a
+    different seam — delegate everything real to the canonical fake, and script the
+    single thing no conforming collaborator produces.
+
+    The foreign entry is put **first**, so a stage that indexed the batch without a
+    guard would fail on its first iteration and never reach the valid labelling
+    behind it.
+    """
+
+    def __init__(self, inner: FakeObserver, *, foreign: EpisodeLabelling) -> None:
+        """Wrap a real producer, prefixing one labelling from outside the batch."""
+        self._inner = inner
+        self._foreign = foreign
+
+    async def observe(self, episodes: Sequence[EpisodicMemory]) -> ObservationOutcome:
+        """Really observe, then add the entry a conforming producer would not."""
+        outcome = await self._inner.observe(episodes)
+        return outcome.model_copy(update={"labellings": (self._foreign, *outcome.labellings)})
 
 
 class _FailingObserver:
@@ -2845,6 +2878,57 @@ async def test_a_page_sharing_a_reach_but_split_between_setters_is_labelled_nowh
         assert (await _stored(harness, episode_id)).topics == ()
 
 
+@pytest.mark.parametrize(
+    ("destination", "beside"),
+    [
+        pytest.param(
+            Placement(),
+            Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=AT),
+            id="an-unlabelled-OWNER-episode-beside-an-ANYONE-destination",
+        ),
+        pytest.param(
+            Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.OWNER_ACT, set_at=AT),
+            Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=AT),
+            id="an-unlabelled-DERIVED-episode-beside-an-OWNER_ACT-destination",
+        ),
+    ],
+)
+async def test_an_unlabelled_episode_of_the_page_still_decides_the_uniformity(
+    destination: Placement, beside: Placement
+) -> None:
+    """§3's test ranges over the batch the producer was **supplied**, not what it named.
+
+    This is the arm the two cases above cannot reach: there every episode carries a
+    labelling, so an implementation comparing only the placements of the episodes
+    it is about to write would decline for the same reason and pass. Here exactly
+    one episode is labelled and the differing one is silent — and it is silent in
+    the direction that matters, because a label proposed over a page is a
+    derivation over **all** of it (ADR-0217 §3). Writing the destination anyway
+    would file a wider record under a word drawn from a narrower one that the model
+    read and simply did not name, which is ADR-0204 §5's laundering with the
+    evidence of it removed.
+    """
+    memory = _WatchedMemory(now=lambda: AT)
+    harness = Harness(memory=memory)
+    conversation = await harness.conversations.start()
+    episodes = []
+    for placement in (destination, beside):
+        turn = await harness.conversations.append(conversation.id, occurred_at=AT)
+        await harness.memory.add(_episode_placed(turn.episode_id, placement=placement))
+        episodes.append(turn.episode_id)
+    harness.swap_observer(
+        FakeObserver(labellings=[EpisodeLabelling(episode_id=episodes[0], topics=("health",))])
+    )
+
+    report = await harness.stage.observe(conversation.id)
+
+    assert memory.labelling_writes == []
+    assert (await _stored(harness, episodes[0])).topics == ()
+    assert (await _stored(harness, episodes[1])).placement == beside
+    assert report.proposals
+    assert await harness.watermark(conversation.id) == 2
+
+
 async def test_a_uniformly_placed_page_is_labelled_and_its_placement_does_not_move() -> None:
     """The other side of the same clause: uniform is written, and writes no placement.
 
@@ -2879,23 +2963,38 @@ async def test_a_labelling_naming_an_episode_outside_the_page_writes_nothing() -
 
     §3's write is at the episode's own id, and the stage builds it from the stored
     record it already holds — so an id it is handed but did not select resolves to
-    nothing to write from, and no read is made to find one. The canonical fake
-    cannot produce this (it drops such an entry itself, ADR-0239 §1), so the
-    stimulus is a conforming outcome over a *different* conversation's episode.
+    nothing to write from, and no read is made to find one.
+
+    **The stimulus has to be a non-conforming producer**, and that is why
+    :class:`_ForeignLabelling` exists: ADR-0239 §1 forbids a producer to name
+    anything outside its batch, so the canonical fake drops such an entry itself
+    and a stage driven by it would never see one. Scripting it here is what makes
+    the stage's *guarded* lookup observable — an unguarded one would raise, and a
+    raise on this line would take the watermark advance below it with it, turning a
+    filing word into a coverage loss. So the case asserts all three: the foreign
+    episode is untouched, the valid labelling beside it still lands, and the walk
+    still moves.
     """
     memory = _WatchedMemory(now=lambda: AT)
     harness = Harness(memory=memory)
     watched = await harness.conversation_with(2)
     elsewhere = await harness.conversation_with(1)
     foreign = (await harness.conversations.turns(elsewhere))[0].episode_id
+    episodes = [turn.episode_id for turn in await harness.conversations.turns(watched)]
     harness.swap_observer(
-        FakeObserver(labellings=[EpisodeLabelling(episode_id=foreign, topics=("health",))])
+        _ForeignLabelling(
+            FakeObserver(labellings=[EpisodeLabelling(episode_id=episodes[1], topics=("health",))]),
+            foreign=EpisodeLabelling(episode_id=foreign, topics=("elsewhere",)),
+        )
     )
 
-    await harness.stage.observe(watched)
+    report = await harness.stage.observe(watched)
 
-    assert memory.labelling_writes == []
+    assert [write.record.id for write in memory.labelling_writes] == [episodes[1]]
     assert (await _stored(harness, foreign)).topics == ()
+    assert (await _stored(harness, episodes[1])).topics == ("health",)
+    assert report.proposals
+    assert await harness.watermark(watched) == 2
 
 
 async def test_a_pass_whose_producer_labels_nothing_writes_nothing() -> None:
