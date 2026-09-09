@@ -831,8 +831,11 @@ class StructuredFacts:
             episodic record carries the ``occurred_at`` a window filters on, and
             ADR-0237 §6's obligation is about records carrying *no* value on the axes
             the read filtered.
-        empty: Whether the turn's **last** structured read was empty in ADR-0240 §6's
-            sense. Keyed on the last read where the other two range over the turn,
+        empty: Whether the turn's **last structured read** was empty in ADR-0240 §6's
+            sense — the last read of *this kind*, not the last servicing: a later
+            servicing that performed no structured read, or whose read §5 blocked,
+            establishes nothing and leaves this fact where the last read that ran put
+            it. Keyed on the last read where the other two range over the turn,
             because it is a fact about *the answer being composed*: a turn that
             broadened and found records has an answer and needs no note about the path
             it took there.
@@ -882,6 +885,13 @@ class ServicedCarriers:
             reach, one the supply's shape blocked, one whose records were merely
             deduplicated out, and a servicing that failed all leave it ``None`` (§5,
             §6).
+        structured_ran: Whether this servicing's ``STRUCTURED_READ`` ask reached the
+            store at all — ``False`` where the request carried none, where §5's
+            separator condition blocked it and where the budget left no slot. It is
+            what makes ADR-0240 §8's emptiness fact a statement about **the turn's last
+            structured read** rather than about its last servicing: a later servicing
+            that performed no structured read establishes nothing about the store, so
+            it neither sets that fact nor clears one an earlier read established.
         label_filtered: ADR-0240 §8's **reach** fact for this servicing: whether its
             structured read applied a ``participants``, ``topics`` or ``about_person``
             axis, **whether or not that read returned records**. A read that returned
@@ -896,6 +906,7 @@ class ServicedCarriers:
 
     hop_reached: tuple[str, ...] = ()
     empty_read: ReadAsk | None = None
+    structured_ran: bool = False
     label_filtered: bool = False
     window_filtered: bool = False
 
@@ -1616,6 +1627,12 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
                 if identifier in union.held
             ),
             empty_read=empty_read,
+            # ADR-0240 §8 keys the emptiness fact on the turn's last **structured
+            # read**, not on its last servicing, so the loop needs to know whether this
+            # servicing performed one at all — a servicing whose request carried none,
+            # or whose read §5 blocked, establishes nothing and must not clear a fact an
+            # earlier read established.
+            structured_ran=_ran(outcome),
             # ADR-0240 §8: computed from the ask rather than from the yield, which
             # is what §8's "whether that read returned records or none" asks for —
             # and never where no store call was made, because a read that never ran

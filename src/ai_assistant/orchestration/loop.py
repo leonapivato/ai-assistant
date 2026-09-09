@@ -141,7 +141,8 @@ class RespondedTurn:
             :attr:`hop_reached` and :attr:`stopped_while_asking` are. The reach and
             temporal facts range over the **turn** because ADR-0228 §7 keeps every
             servicing's records in one growing fourth group; the emptiness fact is the
-            **last** read's. Its default is a turn with no structured read at all, on
+            **last structured read's** — a servicing that performed no structured read
+            neither sets it nor clears it. Its default is a turn with no structured read at all, on
             which the assembled prompt is byte-identical to what it is without this
             decision.
         hop_reached: ADR-0227 §3's carrier. The **distinct** ids of the records this
@@ -1431,7 +1432,16 @@ class LearningLoop:
             structured = StructuredFacts(
                 reach=structured.reach or carried.label_filtered,
                 temporal=structured.temporal or carried.window_filtered,
-                empty=carried.empty_read is not None,
+                # **Replaced only by a servicing that actually performed a structured
+                # read**, because §8 keys this on the turn's last *structured read* and
+                # not on its last servicing. A revision asking for a sighted query
+                # alone, or one whose structured read §5 blocked, establishes nothing
+                # about the store — so it neither sets this fact nor clears one an
+                # earlier read established, and a turn ending on such a servicing is
+                # still a turn whose last structured read came back empty.
+                empty=(
+                    carried.empty_read is not None if carried.structured_ran else structured.empty
+                ),
             )
             # §2's remaining conditions, in one place (:func:`_stop_reason`). The
             # clock is read **here**, immediately before the call the budget gates,
