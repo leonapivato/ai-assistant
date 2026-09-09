@@ -7,6 +7,7 @@ these tests are mostly about what the types *refuse*.
 from __future__ import annotations
 
 import copy
+import json
 import pickle
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
@@ -1241,6 +1242,69 @@ def test_export_round_trips_through_json() -> None:
     assert step.failure is not None
     assert step.failure.kind is ToolFailureKind.UNAVAILABLE
     assert step.failure.message == "down"
+
+
+def test_an_export_round_trips_one_ask_of_every_kind_the_enumeration_admits() -> None:
+    """A document carrying every admitted ``ReadKind`` survives JSON and comes back equal.
+
+    ``schema_version`` moved for each of the three kinds added since ADR-0226 —
+    ``LOCAL_FILE`` (ADR-0230 §1), ``WEB_SEARCH`` (ADR-0231 §1) and ``STRUCTURED_READ``
+    (ADR-0240 §1) — but the case above round-trips only the two the envelope opened
+    with, so a serialisation regression specific to ``"web_search"`` or to a
+    ``StructuredAsk``'s window and label axes passed every assertion this module made
+    (#2105). The *construction* half of the widest emission is pinned by
+    ``test_a_request_may_carry_one_ask_of_every_kind_the_enumeration_admits``; this is
+    the persistence half, which is the one a document outliving the code that wrote it
+    depends on.
+
+    **The kind strings are read off the parsed document rather than off the restored
+    model**, because the serialised spelling is what a later reader matches on — the
+    ground the pinning of ``ReadKind``'s values already rests on — and a producer
+    emitting ``"WEB_SEARCH"`` where ``ReadKind`` spells ``"web_search"`` would still
+    validate against a reader permissive about either. Asserted against ``ReadKind``
+    rather than a written-out list, so a sixth member fails here until an export
+    carries it.
+    """
+    window = TimeWindow(start=_WHEN, end=datetime(2026, 4, 1, tzinfo=UTC))
+    structure = StructuredAsk(window=window, participants=("alex",), topics=("home maintenance",))
+    plan = ActionPlan(
+        id="p1",
+        goal_id="g1",
+        steps=(PlanStep(id="s1", intent="mail", capability="send_email"),),
+        created_at=_WHEN,
+        read_request=ReadRequest(
+            asks=(
+                _query(),
+                _hop("M2", "M5"),
+                ReadAsk(kind=ReadKind.LOCAL_FILE, entry="F1"),
+                ReadAsk(kind=ReadKind.WEB_SEARCH),
+                ReadAsk(kind=ReadKind.STRUCTURED_READ, structure=structure, query="the lease"),
+            )
+        ),
+    )
+    export = PlanExport(exported_at=_WHEN, goals=(_goal(),), plans=(plan,))
+
+    document = export.model_dump_json()
+    restored = TypeAdapter(PlanExport).validate_json(document)
+
+    assert restored == export
+    assert restored.model_dump_json() == document
+    written = json.loads(document)["plans"][0]["read_request"]["asks"]
+    assert {ask["kind"] for ask in written} == {member.value for member in ReadKind}
+
+    request = restored.plans[0].read_request
+    assert request is not None
+    by_kind = {ask.kind: ask for ask in request.asks}
+    assert by_kind[ReadKind.SIGHTED_QUERY].query == "which lender did you recommend?"
+    assert by_kind[ReadKind.CITATION_HOP].labels == ("M2", "M5")
+    assert by_kind[ReadKind.LOCAL_FILE].entry == "F1"
+    bare = by_kind[ReadKind.WEB_SEARCH]
+    assert (bare.query, bare.labels, bare.entry, bare.structure) == (None, (), None, None)
+    structured = by_kind[ReadKind.STRUCTURED_READ]
+    assert structured.query == "the lease"
+    assert structured.structure is not None
+    assert structured.structure.window == window
+    assert structured.structure.applied() == ("window", "participants", "topics")
 
 
 # --- ADR-0068: the planning record graph is frozen all the way down -----
