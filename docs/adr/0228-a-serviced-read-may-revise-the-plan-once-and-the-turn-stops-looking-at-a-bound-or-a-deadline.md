@@ -201,7 +201,8 @@
   given nothing, and the assembled prompt is byte-identical to what it is today"*, and it is
   false of a turn on which at least one search servicing did not reach a result: ADR-0242 §6
   gives the composing stage a **second** carrier on exactly those turns, one member of a
-  closed seven-member vocabulary naming the class of act that would have enabled the search.
+  closed vocabulary ADR-0242 §8 fixes, naming the class of act that would have enabled the
+  search.
   A reader holding only this ADR would write the byte-identity assertion and find it failing
   for a reason the corpus did not explain, which is ADR-0070 §1's test met.
 
