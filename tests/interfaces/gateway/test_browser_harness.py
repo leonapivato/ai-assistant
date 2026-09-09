@@ -4,7 +4,10 @@ Every case in ``test_browser_page.py`` and ``test_browser_playback.py`` needs a
 browser that launched and a context that opened, so two of the harness's own
 decisions are unreachable from inside the layer: what a launch refusal *means*
 (ADR-0216 §6 — an absent build skips, anything else fails), and what a drive that
-never opens leaves behind.
+never opens leaves behind. A third subject joined them with issue #2139: the wait
+the second of those is asserted through, which no case that drives a page exercises
+either, because a gateway torn down by a passing drive is released long before
+anything asks.
 
 **No browser is taken here, and that is the point rather than a shortcut.** A
 module that requested ``gateway_browser`` in order to test what happens when
@@ -22,7 +25,10 @@ therefore does not count it. It is beside the layer, not in it.
 
 from __future__ import annotations
 
+import asyncio
 import socket
+import threading
+import time
 from typing import TYPE_CHECKING, Any, cast
 
 import browser_drive
@@ -84,12 +90,33 @@ class _BadlyClosingBrowser:
         return self.context
 
 
+#: How long :func:`_becomes_free` keeps asking. Read the way ``test_gateway_ports.py``
+#: reads its own ``_PATIENCE``: long enough that a loaded machine cannot fail a case
+#: that is going to pass, and bounded so that a gateway which never lets go fails its
+#: case rather than hanging the run.
+#:
+#: It is generous because it is never actually spent by a passing run -- a released
+#: port answers the very first probe -- so the only run that waits it out is one that
+#: was going to fail anyway, and there are two such cases.
+_RELEASE_PATIENCE = 5.0
+
+#: How long to wait between probes. Short enough that the wait costs a failing case
+#: nothing it would notice, and long enough that the loop is not a spin.
+_PROBE_INTERVAL = 0.02
+
+
 def _is_free(port: int) -> bool:
-    """Report whether nothing is listening on ``port`` any more.
+    """Report whether nothing is listening on ``port`` at this instant.
 
     Binding is the question rather than connecting: a listening socket refuses a
     second ``bind`` even with ``SO_REUSEADDR``, so a bind that succeeds is a port the
     gateway really let go of.
+
+    Args:
+        port: The port to probe.
+
+    Returns:
+        Whether the bind succeeded.
     """
     try:
         with socket.socket() as probe:
@@ -97,6 +124,43 @@ def _is_free(port: int) -> bool:
     except OSError:
         return False
     return True
+
+
+async def _becomes_free(port: int, *, within: float = _RELEASE_PATIENCE) -> bool:
+    """Report whether ``port`` is free, waiting a bounded interval for it to become so.
+
+    :func:`_is_free` asks the right question at the wrong moment. What the two cases
+    below assert is that the harness *released* the gateway's listening socket -- not
+    that the kernel had finished releasing it by the time the next syscall ran, which
+    is a different and stronger claim, and one no reader of those cases is making. On
+    a loaded runner the two come apart: issue #2139 records both cases failing
+    together on CI, on a docs-only pull request whose diff cannot reach the gateway,
+    on a tree that had passed the same two cases locally, after five green runs of
+    `main`. Sampling once turns that gap into a red gate.
+
+    So the property is asked over an interval rather than at an instant, and the
+    interval is bounded rather than open: a gateway that really strands its socket --
+    the regression these cases exist for -- still fails, ``within`` seconds later than
+    it used to. That delay is the whole price, and only a failing run pays it: a port
+    that was released answers the first probe, before anything sleeps, so a passing
+    case costs the one ``bind`` it always cost.
+
+    Args:
+        port: The port to probe.
+        within: How long to keep probing for, in seconds. A parameter rather than a
+            constant read straight off the module, so that the case pinning the busy
+            answer need not hold a port for the shipped window to state it.
+
+    Returns:
+        Whether some probe inside the window found the port free.
+    """
+    deadline = time.monotonic() + within
+    while True:
+        if _is_free(port):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(_PROBE_INTERVAL)
 
 
 @pytest.mark.integration
@@ -120,7 +184,9 @@ async def test_a_drive_whose_context_never_opens_leaves_no_gateway_listening(
             pytest.fail("the drive must not be entered when its context was refused")
 
     assert raised.value is browser.refusal
-    assert _is_free(port), f"the gateway is still listening on {port}"
+    assert await _becomes_free(port), (
+        f"the gateway is still listening on {port} after {_RELEASE_PATIENCE:g}s"
+    )
 
 
 @pytest.mark.integration
@@ -144,7 +210,68 @@ async def test_a_context_that_will_not_close_still_releases_the_gateway(
             pytest.fail("the drive must not be entered when its probe was refused")
 
     assert browser.context.close_attempted
-    assert _is_free(port), f"the gateway is still listening on {port}"
+    assert await _becomes_free(port), (
+        f"the gateway is still listening on {port} after {_RELEASE_PATIENCE:g}s"
+    )
+
+
+# --- The wait the two cases above lean on (#2139) ---
+
+
+@pytest.mark.integration
+async def test_a_port_released_after_the_first_probe_is_reported_free() -> None:
+    """The wait is what answers, which is the whole of issue #2139's fix.
+
+    The port is *held* when the assertion begins, so the single sample the two cases
+    above used to take would report it busy and fail them. The case therefore fails
+    against the version this replaced and passes against this one, rather than
+    passing against both -- which is the only way a regression pin on a wait can be
+    written, since a wait that never waits is indistinguishable from one that does on
+    a port that was free all along.
+    """
+    port = gateway_ports.free_port()
+    holder = socket.socket()
+    holder.bind(("127.0.0.1", port))
+    holder.listen(1)
+    # A timer rather than a sleep in the case: what is under test is that the helper
+    # keeps asking while somebody else's socket is still up, and a release the case
+    # performed itself before asking would be the free-port arm below wearing a
+    # disguise.
+    releasing = threading.Timer(0.1, holder.close)
+    releasing.start()
+    try:
+        assert not _is_free(port), "the case did not start from a held port"
+        assert await _becomes_free(port)
+    finally:
+        releasing.cancel()
+        holder.close()
+
+
+@pytest.mark.integration
+async def test_a_port_held_for_the_whole_window_is_reported_busy() -> None:
+    """The bound is a bound: a gateway that never let go still fails its case.
+
+    The half that keeps the wait honest. A helper that answered ``True`` on a timeout
+    would turn both cases above green against exactly the stranded socket they were
+    written to catch, and nothing else in this module would notice.
+    """
+    port = gateway_ports.free_port()
+    with socket.socket() as holder:
+        holder.bind(("127.0.0.1", port))
+        holder.listen(1)
+        assert not await _becomes_free(port, within=0.05)
+
+
+@pytest.mark.integration
+async def test_a_port_that_is_already_free_is_answered_without_waiting() -> None:
+    """The passing path still costs one ``bind``.
+
+    Stated over a window of no length at all, because that is the only window in
+    which "answered before anything slept" is the only way to answer at all: a probe
+    ordered before the deadline check reports a free port free, and one ordered after
+    it cannot.
+    """
+    assert await _becomes_free(gateway_ports.free_port(), within=0.0)
 
 
 def test_an_absent_browser_build_skips_naming_the_command_that_installs_it() -> None:
