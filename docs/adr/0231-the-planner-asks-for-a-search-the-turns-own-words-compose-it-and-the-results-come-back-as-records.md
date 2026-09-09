@@ -1,6 +1,6 @@
 # 231. The planner asks for a search, the turn's own words compose it, and the results come back as records
 
-- Status: Partially superseded by ADR-0235 (§9's second clause, in its second limb alone: a recorded `CONFIRM` on a `WEB_SEARCH` decision may be read from the trail and offered to a surface for the establishing act, as history and never as outstanding work; the limb's two siblings bind entire, so no lane resumes such a decision or treats it as outstanding work, and §9's first, third, fourth and fifth clauses, §19's entries and every other section of this ADR stand entire) and ADR-0238 (§3's argument-is-the-turn's-own-utterance clause, §4's first and second clauses, §12's second and third clauses, and §13's closure of `SearchDisposition` at exactly fifteen members in that count alone (the enumeration becomes sixteen; its members, their values, its injective mapping, its no-message rule and its exclusion of `SearchRefusal.NO_RESULT` all stand) — the composer's one positional-only parameter becomes a `SearchSupply`, which at a destination whose recorded trust is `USER_CHOSEN` may carry memory records, this conversation's episodes and its own prior results, so a search result may reach a later search request and a second search in a conversation that has read one may be ruled `ALLOW`; §3's one-parameter, one-member, no-store-seam-dependency and `planning`/`ModelProvider` clauses stand entire, the utterance-only content property still holds at every destination whose trust reads `UNCHOSEN`, §12's first and fourth clauses stand, and §1, §2, §5–§11, §13–§21 are untouched) and ADR-0241 (two scopes of §17 and nothing else in this ADR: the exact-signature declaration of `search`, which gains one keyword-only `timeout: timedelta` while `call` stays positional-only, `request`'s signature is untouched and the three-member closure and the no-store-no-supply-no-policy clause bind verbatim; and the closure of `SearchRefusal` at exactly six members in that count alone (the enumeration becomes seven; the six members, their values, the added-to-and-never-renamed rule and the raises-for-no-source-reason posture all stand). §5's four-field count is not moved, being scoped to what this ADR itself adds, and §13's disposition count is not recorded against again — the dated note below says why)
+- Status: Partially superseded by ADR-0235 (§9's second clause, in its second limb alone: a recorded `CONFIRM` on a `WEB_SEARCH` decision may be read from the trail and offered to a surface for the establishing act, as history and never as outstanding work; the limb's two siblings bind entire, so no lane resumes such a decision or treats it as outstanding work, and §9's first, third, fourth and fifth clauses, §19's entries and every other section of this ADR stand entire) and ADR-0238 (§3's argument-is-the-turn's-own-utterance clause, §4's first and second clauses, §12's second and third clauses, and §13's closure of `SearchDisposition` at exactly fifteen members in that count alone (the enumeration becomes sixteen; its members, their values, its injective mapping, its no-message rule and its exclusion of `SearchRefusal.NO_RESULT` all stand) — the composer's one positional-only parameter becomes a `SearchSupply`, which at a destination whose recorded trust is `USER_CHOSEN` may carry memory records, this conversation's episodes and its own prior results, so a search result may reach a later search request and a second search in a conversation that has read one may be ruled `ALLOW`; §3's one-parameter, one-member, no-store-seam-dependency and `planning`/`ModelProvider` clauses stand entire, the utterance-only content property still holds at every destination whose trust reads `UNCHOSEN`, §12's first and fourth clauses stand, and §1, §2, §5–§11, §13–§21 are untouched) and ADR-0241 (two scopes of §17 and nothing else in this ADR: the exact-signature declaration of `search`, which gains one keyword-only `timeout: timedelta` while `call` stays positional-only, `request`'s signature is untouched and the three-member closure and the no-store-no-supply-no-policy clause bind verbatim; and the closure of `SearchRefusal` at exactly six members in that count alone (the enumeration becomes seven; the six members, their values, the added-to-and-never-renamed rule and the raises-for-no-source-reason posture all stand). §5's four-field count is not moved, being scoped to what this ADR itself adds, and §13's disposition count is not recorded against again — the dated note below says why) and ADR-0242 (§9's third clause, and nothing else in this ADR: on a turn in which at least one search servicing did not reach a result the composing stage is given one member of a closed vocabulary and composes an answer that says so, so the assembled prompt on such a turn is no longer byte-identical to one where the planner asked for nothing; §9's first, second, fourth and fifth clauses bind entire — a search is still serviced only on a recorded ALLOW, the servicer still asks nothing and parks nothing, no lane weakens a declaration to reach an ALLOW, and the one route to an ALLOW is still the standing recipient grant §9 names — and §13's audit, §19's deferrals and every other section stand entire)
 - Date: 2026-09-04
 - **Partially superseded: 2026-09-09 by ADR-0241 — two scopes of §17, and nothing
   else in this ADR.** The owner amended milestone 31 on `track:planning`'s live record
@@ -309,6 +309,38 @@
   This ADR's `Status` line carries the leading `Partially superseded by` token, so under
   ADR-0082 §2 no amendment qualifier is written on it and this note is the whole record.
   Appended note per ADR-0070 §1; no text below is rewritten. Refs #2133, #1908.
+- **Partially superseded: 2026-09-09 by [ADR-0242](0242-the-act-that-trusts-a-destination-has-its-own-surface-and-a-search-that-did-not-happen-is-explained-in-the-reply.md) — §9's third clause, and
+  nothing else in this ADR.** That clause reads *"The composing stage is told nothing new,
+  and the assembled prompt on a turn whose search was refused is byte-identical to what it
+  would be had the planner asked for nothing. ADR-0228 §10's carrier is stated over a turn
+  that stopped at the bound or the budget and is neither widened, re-used nor read as covering
+  this case."* ADR-0242 §6 gives the composing stage a second carrier — one member of a
+  closed seven-member vocabulary, on a turn in which at least one search servicing did not
+  reach a result — so a reader holding only this ADR would assert a byte-identity that no
+  longer holds. That is ADR-0070 §1's test on the supersession side, and §3's partial form is
+  the sanctioned tool.
+
+  **The owner's 2026-09-09 amendment on #1908 is what fires it**, adopted as #2168:
+  *"Reachable setup for destination trust and recipient authorisation, plus **explanations of
+  refused or exhausted searches**."* ADR-0242 §6 records why the argument this clause rested
+  on does not survive that amendment: this ADR wrote it about a mechanism that could never
+  fire — `app/composition.py`'s *"until a surface offers the establishing act the store is
+  empty, so every ruling is the one it was before"* — and a silent turn is indistinguishable
+  from a searching one once searching is the normal case.
+
+  **§9's other four clauses bind entire and are relied upon**, and ADR-0242 restates each as
+  an obligation of its own: a `WEB_SEARCH` request is serviced only on a recorded `ALLOW`; the
+  servicer asks the user nothing and parks nothing; no lane makes a search reachable by
+  weakening its declaration; and the one route to an `ALLOW` is ADR-0193's standing recipient
+  grant. **§13 is untouched** — ADR-0242 §11 writes nothing to `turn_read_request`, adds no
+  event key and adds no `SearchDisposition` member, and its second vocabulary is a
+  `core/types.py` enumeration for a user rather than a stage name for an operator. §19's
+  deferrals, including the durable record of the query that left, are inherited whole.
+
+  This ADR's `Status` line carries the leading `Partially superseded by` token, so ADR-0242's
+  pair is **appended** to the existing pairs under ADR-0070 §4's accumulation rule and no
+  existing pair is dropped or rewritten. Appended note per ADR-0070 §1; no text below is
+  rewritten. Refs #2178, #2168, #1908.
 
 ## Context
 

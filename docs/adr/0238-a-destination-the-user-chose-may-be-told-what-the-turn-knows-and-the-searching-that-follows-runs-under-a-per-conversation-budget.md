@@ -1,6 +1,6 @@
 # 238. A destination the user chose may be told what the turn knows, and the searching that follows runs under a per-conversation budget
 
-- Status: Partially superseded by ADR-0241 (§13's `core`-surface clause in one limb — `WebSearcher` gains one argument, `timeout: timedelta`, on `search`; `ActionPolicy`, `AuditTrail` and `MemoryStore` are untouched, `WebSearcher` gains no member and no widened return, and every other clause of §13 binds entire — and §11's closure of `SearchDisposition` at exactly sixteen members in that count alone, including its no-seventeenth sentence (the enumeration becomes eighteen: one member for a deadline expiry and one for a fault the searcher itself raised, #2112; its members, their values, the injectivity of every mapping into it, its no-message rule, its exclusion of `SearchRefusal.NO_RESULT` and its audit clauses all stand). Those two scopes, and nothing else in this ADR)
+- Status: Partially superseded by ADR-0241 (§13's `core`-surface clause in one limb — `WebSearcher` gains one argument, `timeout: timedelta`, on `search`; `ActionPolicy`, `AuditTrail` and `MemoryStore` are untouched, `WebSearcher` gains no member and no widened return, and every other clause of §13 binds entire — and §11's closure of `SearchDisposition` at exactly sixteen members in that count alone, including its no-seventeenth sentence (the enumeration becomes eighteen: one member for a deadline expiry and one for a fault the searcher itself raised, #2112; its members, their values, the injectivity of every mapping into it, its no-message rule, its exclusion of `SearchRefusal.NO_RESULT` and its audit clauses all stand). Those two scopes, and nothing else in this ADR) and ADR-0242 (§1's `record` refusal clause, in the type of the refusal alone: the ground on which a record duplicates a live record's destination set raises `DuplicateDestinationTrustError`, a subclass, because it is the one ground on which the user's recourse is no act at all; the duplicate-`id` and empty-set grounds keep raising `InvalidDestinationTrustError` unchanged, the base class still catches all three, and no check is moved and no atomicity weakened; everything else of §1 stands entire — the two-member vocabulary, the fail-closed absence, the set-by-a-user-act-and-nothing-else clause, the record's five fields, the canonical-destination validator, the `UNCHOSEN` construction refusal, the five-member store surface with its no-member-added clause, `record`'s atomicity, `export`'s data right and `trust_of`'s comparison-not-inference rule — as do §§2-18, and §14's surface assignment is discharged rather than superseded)
 - Date: 2026-09-05
 - **Partially superseded and amended: 2026-09-09 by ADR-0241** — two scopes superseded,
   one amended, and nothing else in this ADR. §16 defers *"a per-conversation bound on
@@ -90,6 +90,40 @@
   obligation, its bounded-and-ordered read rule, its two-store reasoning, §7's retention
   reclaim and §8's deletion protocol are relied upon as written, and §8 below adds no step
   to either sequence.
+- **Partially superseded: 2026-09-09 by [ADR-0242](0242-the-act-that-trusts-a-destination-has-its-own-surface-and-a-search-that-did-not-happen-is-explained-in-the-reply.md) — §1's
+  `record` refusal clause, in the type of the refusal alone.** That clause has `record` refuse
+  *"a duplicate `id`, an empty destination set and a record duplicating a live record's
+  destination set, by an `InvalidDestinationTrustError` beside `InvalidRecipientGrantError`"*.
+  ADR-0242 §2 gives the third ground a subclass, `DuplicateDestinationTrustError`, because it
+  is the one ground on which the user's recourse is **no act at all** — what they asked for is
+  already true — and a surface reading this ADR alone could not tell that case from the others.
+  A reader holding only this ADR builds one class for three grounds, which is ADR-0070 §1's
+  test met. **It is the same call ADR-0235 §4 made on ADR-0193 §1's *"one class rather than
+  several"* limb, for the same reason and with the same guarantee**: the base class keeps every
+  ground, so a caller wanting one handler still writes one `except
+  InvalidDestinationTrustError`, no check is moved, and no atomicity is weakened. What moved is
+  the refusal's type and nothing else.
+
+  **Everything else in §1 stands entire and ADR-0242 relies on it throughout** — the
+  two-member vocabulary, the fail-closed absence, *"set by a recorded act of the user and by
+  nothing else"* with its bar on every model, the record's five fields, ADR-0193 §1's
+  canonical destination validator, the `UNCHOSEN` construction refusal, the five-member store
+  surface with its *"No member is added, no argument widened and no return changed by any
+  later lane"* clause, `record`'s atomicity, `export`'s data right, and `trust_of`'s
+  comparison-not-inference rule. §§2-18 are untouched.
+
+  **§14's surface assignment is discharged rather than superseded, and §16's deferral of "The
+  surfaces that offer §1's act" is *fired*.** §14 obliges *the lane implementing this ADR* to
+  implement no surface and reserves the question to the ADRs that govern the surfaces
+  (ADR-0193 §13); that stays true of that lane, and ADR-0242 is such an ADR — it decides the
+  command-line surface in its own ratified text, leaves ADR-0177 §1's browser enumeration
+  unwidened and defers the browser to a lane that widens it in its own text. Discharging a
+  reservation is not amending it, and ADR-0235 §9 discharged ADR-0193 §13 the same way for the
+  sibling act with no record on that ADR's line. ADR-0242 §16 and §17 show the working.
+
+  This ADR's `Status` line read `Accepted`, so it takes the leading `Partially superseded by`
+  token and `Accepted` is dropped, as `docs/adr/template.md` requires. Appended note per
+  ADR-0070 §1; no text below is rewritten. Refs #2178, #2168, #1908.
 
 ## Context
 

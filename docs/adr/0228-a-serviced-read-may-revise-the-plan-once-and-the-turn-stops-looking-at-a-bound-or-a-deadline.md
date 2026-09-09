@@ -1,6 +1,6 @@
 # 228. A serviced read may revise the plan once, and the turn stops looking at a bound or a deadline
 
-- Status: Partially superseded by ADR-0240 (three scopes. §2's condition (e): a serviced structured read that was reached with budget remaining and whose completed store call returned no record at all satisfies (e), so a revision fires on it under the other six conditions unchanged; (a), (b), (c), (d), (f) and (g), §2's all-of-them rule, its closing clause and its prohibition on an implementation widening a request or substituting a read of its own all stand, and §2's other clauses are untouched; §12's no-signal clause and §1's nothing-else clause, in the single respect that the second planner call receives a defaulted parameter holding the asks whose read returned nothing, with every other signal those clauses forbid — an iteration index, a "last look" instruction, a count of the turn's calls, a budget or deadline signal — still forbidden and §1's enumeration of what is not re-run binding verbatim; §§3-11 and 13-15 are untouched)
+- Status: Partially superseded by ADR-0240 (three scopes. §2's condition (e): a serviced structured read that was reached with budget remaining and whose completed store call returned no record at all satisfies (e), so a revision fires on it under the other six conditions unchanged; (a), (b), (c), (d), (f) and (g), §2's all-of-them rule, its closing clause and its prohibition on an implementation widening a request or substituting a read of its own all stand, and §2's other clauses are untouched; §12's no-signal clause and §1's nothing-else clause, in the single respect that the second planner call receives a defaulted parameter holding the asks whose read returned nothing, with every other signal those clauses forbid — an iteration index, a "last look" instruction, a count of the turn's calls, a budget or deadline signal — still forbidden and §1's enumeration of what is not re-run binding verbatim; §§3-11 and 13-15 are untouched) and ADR-0242 (§10's first clause, in its second sentence alone: "On every other turn it is given nothing, and the assembled prompt is byte-identical to what it is today" is false of a turn on which at least one search servicing did not reach a result, which §6 of the superseding ADR gives the composing stage a second carrier for; §10's first sentence binds entire, so a turn that stopped at the bound or the budget with a read_request standing is still given that fact and still composes an answer that says so, and §10's remaining four clauses bind entire and are the pattern §7 of the superseding ADR follows — the carrier travels inside ai_assistant.orchestration as data, adds no member to a Protocol, is never inferred at the render site, and reaches no step account; §§1-9 and §§11-15 are untouched)
 - Date: 2026-09-03
 - **Partially supersedes five ADRs, in eight narrowly stated scopes** — five of
   ADR-0226, one of ADR-0158, one of ADR-0014 and one of ADR-0204 — and §15 shows the
@@ -196,6 +196,38 @@
   the qualifier is written is superseded in fact by this note rather than rewritten
   (ADR-0070 §1). ADR-0240's own amendment of §11 is recorded here for the same reason.
   Appended note per ADR-0070 §1; no text below is rewritten. Refs #2133, #1908.
+- **Partially superseded: 2026-09-09 by [ADR-0242](0242-the-act-that-trusts-a-destination-has-its-own-surface-and-a-search-that-did-not-happen-is-explained-in-the-reply.md) — §10's first
+  clause, in its second sentence alone.** That sentence reads *"On every other turn it is
+  given nothing, and the assembled prompt is byte-identical to what it is today"*, and it is
+  false of a turn on which at least one search servicing did not reach a result: ADR-0242 §6
+  gives the composing stage a **second** carrier on exactly those turns, one member of a
+  closed seven-member vocabulary naming the class of act that would have enabled the search.
+  A reader holding only this ADR would write the byte-identity assertion and find it failing
+  for a reason the corpus did not explain, which is ADR-0070 §1's test met.
+
+  **§10's first sentence binds entire.** A turn that stopped at §3's bound or §4's budget with
+  its last plan still carrying a `read_request` is still given that bare fact and still
+  composes an answer that says so, and ADR-0242 takes nothing from it: `stopped_while_asking`
+  keeps its meaning, its shape and its own prompt fragment, and the two carriers **coexist on
+  one turn**, each rendered separately and neither derived from, suppressing, or substituting
+  for the other.
+
+  **§10's remaining four clauses bind entire, and are the pattern ADR-0242 §7 follows rather
+  than the thing it moves**: the new carrier likewise travels *"inside
+  `ai_assistant.orchestration`, from the component that knows it to the render site, as
+  data"*, adds no member to a Protocol, is *"never inferred at the render site — not from the
+  plan, not from the supply's length, not from the audit"*, and is rendered through no step
+  account, so ADR-0170 §5a's closed vocabularies gain no member. **What ADR-0242 departs from
+  is §10's unmarked reason for a *bare* fact** — *"One fact and not two, because the user
+  cannot act on the difference"* — and it departs from it only where that premise is false:
+  a missing recipient grant, a missing trust record, a spent conversation allowance and a
+  spend ceiling have four different acts behind them. ADR-0242 §7 records the departure and
+  keeps every bar §10 places on quantities, names and content.
+
+  This ADR's `Status` line carries the leading `Partially superseded by` token, so ADR-0242's
+  pair is **appended** beside ADR-0240's under ADR-0070 §4's accumulation rule and that pair
+  is neither dropped nor rewritten. Appended note per ADR-0070 §1; no text below is rewritten.
+  Refs #2178, #2168, #1908.
 
 ## Context
 
