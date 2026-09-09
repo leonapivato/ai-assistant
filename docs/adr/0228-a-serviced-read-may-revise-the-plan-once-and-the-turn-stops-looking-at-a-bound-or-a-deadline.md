@@ -1,6 +1,6 @@
 # 228. A serviced read may revise the plan once, and the turn stops looking at a bound or a deadline
 
-- Status: Accepted, §11's two-kinds statement amended by ADR-0230
+- Status: Partially superseded by ADR-0240 (§2's condition (e) alone: a serviced structured read that was reached with budget remaining and whose completed store call returned no record at all satisfies (e), so a revision fires on it under the other six conditions unchanged; (a), (b), (c), (d), (f) and (g), §2's all-of-them rule, its closing clause and its prohibition on an implementation widening a request or substituting a read of its own all stand, and §§1 and 3-15 are untouched)
 - Date: 2026-09-03
 - **Partially supersedes five ADRs, in eight narrowly stated scopes** — five of
   ADR-0226, one of ADR-0158, one of ADR-0014 and one of ADR-0204 — and §15 shows the
@@ -110,6 +110,73 @@
   This ADR's `Status` line carries no leading `Partially superseded by` token, so under
   ADR-0082 §2 the qualifier is written on that line beside this note. Appended note per
   ADR-0070 §1; no text below is rewritten. Refs #1996, #1908.
+- **Partially superseded: 2026-09-08 by
+  [ADR-0240](0240-the-planner-asks-by-window-and-label-and-an-empty-structured-read-sends-it-back-to-plan.md)
+  — §2's condition (e), in one scope and no other — and §11's two-kinds statement amended
+  by the same ADR.** ADR-0240 §1 admits a fifth `ReadKind`, `STRUCTURED_READ`: a read the
+  planner composes from a period and the labels a record carries, serviced through the
+  `MemoryStore` reads ADR-0237 ratified.
+
+  **The supersession.** (e) reads *"The servicing returned **at least one record the
+  supply did not already hold**, counted after ADR-0226 §7's deduplication."* ADR-0240 §6
+  fires a revision where a structured read that was reached with budget remaining, and
+  whose store call completed, returned **no record at all** — the state ADR-0237 §7
+  certifies as *no record carries those labels in that window*. A reader holding only
+  this ADR refuses that second call, which is a change to what was decided rather than a
+  stale phrase, so ADR-0070 §1 makes the amendment form unavailable and §3's partial
+  supersession the sanctioned tool. **The scope is (e) and nothing else in §2.**
+  Conditions (a), (b), (c), (d), (f) and (g) bind verbatim and all of them must still
+  hold; §2's opening clause that each condition is a fact the turn already has in hand
+  and none is a judgement is satisfied, because "the store call ran and returned nothing"
+  is mechanical; §2's closing clause binds unchanged, and its prohibition on an
+  implementation that *"retries a failed servicing, widens a request, re-asks the planner
+  on a different prompt, or substitutes a read of its own for one the planner did not ask
+  for"* is **load-bearing** in ADR-0240 §6 — it is why the broadening is the planner's
+  and never the loop's. **(e)'s own reason is honoured rather than waived**: it exists so
+  that a planner is not *"asked the same question twice at the price of a model round
+  trip"*, and ADR-0240 §7 gives the second call an input the first did not have — a
+  defaulted `Planner.plan` parameter naming the kinds whose read came back empty, itself
+  a Protocol change flagged under golden rule 5.
+
+  **What is untouched, and what ADR-0240 rests on.** §1's whole account of a revision as
+  a second plan authored at the `Planner.plan` seam, with the same goal, the same context
+  and the same three groups. **§3 entire** — the bound of two planner calls, its
+  non-configurability, and its rule that a second plan's request is serviced — which is
+  the bound on an empty-read revision as on any other, and which ADR-0240 §6 states in
+  terms rather than raising. §4's per-operation planning budget and its clock rule, which
+  gate this fire condition exactly as they gate the others, so an operation declaring
+  none — `converse_spoken` — takes no such revision. §5's persistence of every plan the
+  turn produced. §6's version rules. §7's monotonicity, its one fourth group and its
+  budget per servicing, which are what make a second structured read's deduplication
+  well-defined. §8's per-call label space. §9's per-emission accounting, which covers the
+  second servicing and to which ADR-0240 §10 adds two fields under ADR-0226 §9's
+  raises-rather-than-replaces provision. **§10's carrier is untouched**: ADR-0240 §8 is a
+  second bare fact carried the same way — inside `orchestration`, no `core` field, no
+  Protocol member, no count and no copied text — rather than a change to §10's. §§12–15
+  are untouched.
+
+  **The amendment.** §11's *"Both kinds a revision may emit are the two that ADR
+  admits, both terminate in the owner's own `MemoryStore`"* stopped being true when
+  ADR-0230 §1 admitted a third and ADR-0231 §1 a fourth, and ADR-0240 §1 undercounts it
+  again, so ADR-0082 §1's test is met. **§11's rulings are untouched and are obeyed:**
+  *"This ADR adds **no kind** to ADR-0226 §2's enumeration"* stays a true statement about
+  this ADR; its prohibition on a lane *"reading this ADR as preparing for"* an outward
+  kind is honoured, because a `STRUCTURED_READ` is inward and ADR-0240 cites this ADR
+  toward nothing but the condition it moves; its no-filtering clause and its class clause
+  on a planner-composed query bind on the new kind unchanged; and its steered-loop
+  argument is **strengthened rather than moved**, since the new kind terminates in the
+  owner's own `MemoryStore` exactly as the two kinds §11 was written over do.
+
+  **And the `Status` line is re-rendered rather than added to.** It now carries the
+  leading `Partially superseded by` token, so under ADR-0082 §2 no amendment qualifier is
+  written on it: the qualifier *"§11's two-kinds statement amended by ADR-0230"* comes
+  **off** the line, and the record it carried stands whole and unchanged in the
+  `Amended: 2026-09-03 by ADR-0230` note above, which is untouched. That is ADR-0080 §8's
+  operation as ADR-0082 §2 generalises it, and nothing is lost by the move — the note
+  above states the ADR-0230 amendment in full, and its own closing sentence about where
+  the qualifier is written is superseded in fact by this note rather than rewritten
+  (ADR-0070 §1). ADR-0240's own amendment of §11 is recorded here for the same reason.
+  Appended note per ADR-0070 §1; no text below is rewritten. Refs #2133, #1908.
 
 ## Context
 

@@ -238,6 +238,31 @@
 - **Marked under ADR-0089**: every obligation is a marked clause and unmarked text
   supplies none. §21 records the count.
 - Refs #1996, #1908, #1844, #1548, #1158, #1154, #75, #1907.
+- Amended: 2026-09-08 by ADR-0240 — **§11's servicing-order sentence, and that alone.**
+  §11 reads *"**The servicing order is: local file, then web search, then citation hop,
+  then sighted query.**"*
+  [ADR-0240](0240-the-planner-asks-by-window-and-label-and-an-empty-structured-read-sends-it-back-to-plan.md)
+  §1 admits a fifth kind and its §5 places that kind between the citation hop and the
+  sighted query, so a reader holding only this ADR would read that sentence more widely
+  than it now holds and ADR-0082 §1's test is met. **§11's decision is applied and not
+  replaced.** It fixes the order *"here rather than derived per deployment"* by sorting
+  the kinds by their caps, and ADR-0240 §5 sorts one more kind by the same rule — a
+  structured read has no cap of its own, so it is placed by the clause of ADR-0226 §6
+  that names the sighted query as the read which fills what remains, which is the same
+  sentence §11 applies. §11's one-servicing-site clause, its channel scoping, its
+  one-budget clause, its never-larger-than-the-budget clause, its
+  compose-bind-rule-record-send ordering, its origin-fact clause and its revision clause
+  all bind unchanged and are load-bearing in ADR-0240 §5.
+
+  **Nothing else of this ADR is reached.** ADR-0240 admits a kind whose servicing
+  terminates in the owner's own `MemoryStore`: it composes no request, opens no channel,
+  seeks no ruling and mints no record, so §§1–10 and §§12–21 are untouched and §13's
+  audit is extended by ADR-0240 §10 against ADR-0226 §9's raises-rather-than-replaces
+  provision rather than against this ADR.
+
+  This ADR's `Status` line carries the leading `Partially superseded by` token, so under
+  ADR-0082 §2 no amendment qualifier is written on it and this note is the whole record.
+  Appended note per ADR-0070 §1; no text below is rewritten. Refs #2133, #1908.
 
 ## Context
 

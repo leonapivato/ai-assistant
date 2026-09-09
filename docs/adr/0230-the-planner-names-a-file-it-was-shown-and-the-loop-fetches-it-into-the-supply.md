@@ -90,6 +90,33 @@
   record. ADR-0232 moves §6's account of what bounds an extraction's cost and touches
   no clause this note reaches. Appended note per ADR-0070 §1; no text below is
   rewritten. Refs #1996, #1908.
+- Amended: 2026-09-08 by ADR-0240 — **§7's servicing-order sentence, and that alone.**
+  §7 reads *"**The servicing order is: local file, then citation hop, then sighted
+  query.**"* ADR-0231 §11 amended it once, adding a fourth position;
+  [ADR-0240](0240-the-planner-asks-by-window-and-label-and-an-empty-structured-read-sends-it-back-to-plan.md)
+  §1 admits a fifth kind and its §5 places that kind between the citation hop and the
+  sighted query, so the sentence is over-wide in a further respect and ADR-0082 §1's test
+  is met again. **§7's decision is not replaced but applied**: it orders by cap —
+  *"the capped read ahead of the uncapped one"*, which is ADR-0226 §6's rule — and a
+  structured read has no cap of its own, so ADR-0240 §5 places it by the second half of
+  ADR-0226 §6's own sentence, which names the sighted query as the read that fills what
+  remains. Every other clause of §7 binds unchanged and is load-bearing there: one
+  servicing site, ADR-0226 §5 entire, the one budget of ten counted after deduplication,
+  the fourth group with no fifth, the single evaluation over the turn's final supply, and
+  a revision admitted on ADR-0228 §2's conditions — which ADR-0240 moves in one of them
+  and records against that ADR rather than this one.
+
+  **Nothing else of this ADR is reached.** §1's one-file cap, §2's ordinal scheme, §4's
+  fetch contract, §5's externality decision, §6's eligibility and bounds, §9's audit
+  fields, §10's turn-scoped persistence, §11's no-grant-seam ruling and §12's version
+  rules are untouched: ADR-0240 admits a kind that reads the owner's own `MemoryStore`,
+  fetches nothing, mints nothing and reaches no filesystem. §9's own
+  raises-rather-than-replaces provision is ADR-0226's, and the two fields ADR-0240 §10
+  adds are recorded against ADR-0226 for the same reason this ADR's one field was.
+
+  This ADR's `Status` line carries the leading `Partially superseded by` token, so under
+  ADR-0082 §2 no amendment qualifier is written on it and this note is the whole record.
+  Appended note per ADR-0070 §1; no text below is rewritten. Refs #2133, #1908.
 
 ## Context
 
