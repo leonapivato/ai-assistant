@@ -657,6 +657,18 @@ async def test_no_identifier_the_hop_carried_reaches_a_prompt_a_log_or_the_audit
         # because no `STRUCTURED_READ` ask was emitted, and the outcome is the
         # `not_asked` member, which is what a completed servicing carrying no such ask
         # reports. The pin stays closed over both because neither can carry a value.
+        # ADR-0238 §11's **three** added fields, and each is an ``int``. How many
+        # records were supplied to the composer, how many ADR-0238 §3's filter withheld
+        # from that supply, and this conversation's ``calls`` as ``admit_search`` left
+        # them. **Counts only** (§11): no record id, no conversation id, no destination,
+        # no query text, no fragment or length of one, no title, no snippet and no
+        # provider message — and, by §11's own last clause, **not the destination's
+        # recorded trust either**, which is a durable fact about a configured account
+        # and not something a per-turn log reports. The pin stays closed over all three
+        # because none of them can carry a value that is not a number.
+        "supplied",
+        "withheld",
+        "calls",
         "structured_axes",
         "structured",
         "truncated_kinds",

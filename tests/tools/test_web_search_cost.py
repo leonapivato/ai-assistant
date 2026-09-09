@@ -473,16 +473,33 @@ async def test_a_configured_registration_leaves_the_module_constant_alone() -> N
 # --------------------------------------------------------------------------- #
 
 
-def test_the_search_disposition_enumeration_is_still_the_fifteen() -> None:
+def test_the_search_disposition_enumeration_carries_no_member_for_a_cost() -> None:
     """§8 item 10's mechanical half, which is ADR-0236 §5's "no sixteenth member".
 
     "``SearchDisposition`` has fifteen members. This is §5 asserted, and it fails a
     lane that reached for a sixteenth on the way past." Named one for one rather than
     counted, so a member swapped for another fails as loudly as a member added.
+
+    **The sixteenth arrived, and it is not this ADR's.** ADR-0236 §5's clause is stated
+    over *itself* — "``SearchDisposition`` is unchanged … and **this ADR adds none**" —
+    and its last clause says in terms that "a later ADR opening §13 for a fault at the
+    send is free to revisit this section's answer on its own grounds". ADR-0238 §11 is
+    such an ADR, ratified after this one, and it adds exactly one member for a servicing
+    ``admit_search`` refused. So what this case pins is what it was always *about*: that
+    no member of this enumeration reports a **cost** ground, which is ADR-0236 §5's
+    actual decision and the thing the `RULING_CONFIRM` collapse rests on. The counting
+    half moved to ``tests/orchestration/test_loop_search.py``, where ADR-0238 §11's own
+    closure is asserted beside its mapping.
     """
     assert [member.name for member in SearchDisposition] == [
         "NOT_CONFIGURED",
         "NO_BUDGET",
+        # ADR-0238 §11's sixteenth, in the position the servicing reaches it: after the
+        # read budget and before a query is composed. It names a stage — the admission —
+        # and no cost, so the collapse ADR-0236 §5 decided is untouched by it: a
+        # `CONFIRM` whose grounds include the cost floor is still `RULING_CONFIRM`,
+        # exactly as one produced by the disclosure floor alone is.
+        "NOT_ADMITTED",
         "COMPOSER_DECLINED",
         "COMPOSER_UNAVAILABLE",
         "COMPOSER_MALFORMED",

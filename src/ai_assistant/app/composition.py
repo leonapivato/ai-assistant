@@ -31,7 +31,12 @@ from ai_assistant.context import (
 )
 from ai_assistant.core.config import EmbedderKind
 from ai_assistant.core.errors import ConfigurationError, ModelError
-from ai_assistant.core.types import DELIVERY_RESERVE_BYTES, SecretScope
+from ai_assistant.core.types import (
+    DELIVERY_RESERVE_BYTES,
+    CanonicalDestination,
+    DestinationProtocol,
+    SecretScope,
+)
 from ai_assistant.evaluation import MeasureReader, SqliteTraceStore
 from ai_assistant.learning import ModelBackedObserver, RuleBasedFeedbackProcessor
 from ai_assistant.memory import (
@@ -79,6 +84,7 @@ from ai_assistant.orchestration import (
     RecipientGrantOperations,
     RecoveryScan,
     RoutingStage,
+    SearchFooting,
     SearchServicer,
     StepExecutor,
     StepRunner,
@@ -109,8 +115,9 @@ from ai_assistant.tools import (
     egress_registrations,
 )
 from ai_assistant.tools.connection_store import SqliteConnectionStore
+from ai_assistant.tools.destinations import DestinationCanonicalisationError
 from ai_assistant.tools.egress import StreamOutboundTransport
-from ai_assistant.tools.egress_binder import EgressBindingSeam
+from ai_assistant.tools.egress_binder import EgressBindingSeam, canonical_destination
 from ai_assistant.tools.provisioning import KeyringConnectionProvisioner
 
 if TYPE_CHECKING:
@@ -311,6 +318,45 @@ class Composition:
     trace_sink: TraceSink
     retrieval_search_limit: int
     conflict_search_limit: int
+
+
+def _search_destinations(origin: str | None) -> tuple[CanonicalDestination, ...]:
+    """The canonical destination set a search of this deployment would bind to.
+
+    ADR-0238 §2 obliges the search servicing site to read a destination's recorded
+    trust **before** the supply is built, and at that instant no request and so no
+    binding exists — ``WebSearcher`` has no destination member and ADR-0238 §13 gives
+    it none. So the set is derived here, from the one value the searcher's own
+    transport is built from, through
+    :func:`~ai_assistant.tools.egress_binder.canonical_destination`: **the same
+    canonicaliser and the same protocol mapping** ``EgressBindingSeam`` derives a span's
+    occurrence with, so the two cannot state one rule twice.
+
+    ``tools/web_search.py`` declares the ``origin`` argument
+    ``x-egress-destination: "https"``, so a search binding's spans carry exactly this
+    one destination and
+    :attr:`~ai_assistant.core.types.EgressBinding.canonical_destination_set` answers
+    exactly this tuple — asserted against a binding the real seam derived, in
+    ``tests/app/test_search_destinations.py``, rather than left as a claim.
+
+    Args:
+        origin: ``Settings.web_search_origin``, or ``None`` where this deployment
+            connected no search account.
+
+    Returns:
+        The one-member set, or an empty one. **Empty is not a special case**: ADR-0238
+        §1 answers ``UNCHOSEN`` for an empty sequence, so a deployment with no account
+        composes over the utterance alone and closes no loop — which is also what an
+        origin this seam asserts no canonical form for gets, because the searcher's own
+        ``bind`` would refuse that call anyway and a composition root that raised here
+        would take the whole process down for a search it was never going to make.
+    """
+    if origin is None:
+        return ()
+    try:
+        return (canonical_destination(DestinationProtocol.HTTPS, origin),)
+    except DestinationCanonicalisationError:
+        return ()
 
 
 def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
@@ -1311,6 +1357,26 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # path is the only producer of a `UserConfirmation`) is structural rather
         # than wiring, and a structural test holds it.
         writes = MemoryWriteStage(writer=writer, deferrals=deferrals)
+        # **The canonical destination set a search of this deployment would bind to**
+        # (ADR-0238 §2, §5). ADR-0238 §2 obliges the servicing site to read the
+        # destination's recorded trust *before* the supply is built, and at that instant
+        # no request and so no binding exists — `WebSearcher` has no destination member
+        # and ADR-0238 §13 gives it none. So the set is derived here, from the one value
+        # the searcher's own transport is built from, through
+        # `ai_assistant.tools.destinations.canonicalise`: **the same pure, total function
+        # `EgressBindingSeam` derives a span's destination with**, applied to the same
+        # input, so the two cannot state one rule twice.
+        #
+        # `web_search.py` declares the `origin` argument `x-egress-destination: "https"`,
+        # so a search binding's spans carry exactly this one destination and
+        # `EgressBinding.canonical_destination_set` answers exactly this tuple —
+        # asserted against a binding the real seam derived, in
+        # `tests/app/test_search_destination_set.py`, rather than left as a claim.
+        #
+        # **Empty where this deployment connected no search account**, which is not a
+        # special case: ADR-0238 §1 answers `UNCHOSEN` for an empty sequence, and a
+        # deployment with no account holds no `SearchServicer` and services no search.
+        search_destinations = _search_destinations(settings.web_search_origin)
         loop = LearningLoop(
             context=context,
             memory=memory,
@@ -1378,6 +1444,34 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # policy is withheld both, which is what leaves `decide` a genuine
             # function of its argument, and they are the same `_utcnow` and `_uuid`
             # every other seam this root wires reads.
+            # **ADR-0238's footing, built per turn from the conversation the turn runs
+            # under** (§8, §14). It is wired **unconditionally**, not only where a
+            # search account is connected, because §8's early fold is owed by every
+            # turn — "it fires whether or not that turn ever builds a ``WEB_SEARCH``
+            # request" — and a conversation whose footing was never lowered would report
+            # a history this decision never observed as clean.
+            #
+            # **The same `ConversationStore` instance the capture stage holds**, and
+            # never a second handle over the same rows: ADR-0238 §8 puts the counter and
+            # the flag on the conversation record precisely so that one object's own
+            # per-conversation exclusion makes the increment atomic, and ADR-0074 §9
+            # records why a second holder would serialise nothing.
+            #
+            # **This is the one place the trust store is wired into** (§14). It is
+            # handed to this factory and to nothing else; no other subsystem holds the
+            # reference, and no lane adds a second caller.
+            footing=lambda conversation_id: SearchFooting(
+                conversation_id=conversation_id,
+                conversations=conversations,
+                trust=destination_trust,
+                destinations=search_destinations,
+                # **The bound is passed in rather than read by the store** (ADR-0238
+                # §8): "every judgement about what a bound is stays in
+                # `orchestration`", so the three members read no `Settings` field, hold
+                # no policy and consult no clock. `Settings` refuses a value outside
+                # 0 to 64 at load, and `0` means no search is serviced in any conversation.
+                max_calls=settings.search_calls_per_conversation,
+            ),
             search=(
                 None
                 if search is None

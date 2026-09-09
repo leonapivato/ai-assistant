@@ -67,6 +67,7 @@ from ai_assistant.core.errors import EgressBindingError
 from ai_assistant.core.types import (
     BoundAccount,
     BoundEgressCall,
+    CanonicalDestination,
     CarriedProvenance,
     DestinationProtocol,
     DiscloserProvenance,
@@ -114,6 +115,38 @@ _CANONICALISERS: Final[Mapping[DestinationProtocol, SeamProtocol]] = {
 }
 
 _PARAMETERS: Final = TypeAdapter[Mapping[str, "FrozenJson"]](FrozenJsonMapping)
+
+
+def canonical_destination(protocol: DestinationProtocol, supplied: str) -> CanonicalDestination:
+    """The set member a span carrying ``supplied`` under ``protocol`` would yield.
+
+    **One implementation of ADR-0148 §2's rule, reached by two callers.**
+    :meth:`EgressBindingSeam._occurrence` computes a span's occurrence from exactly
+    this canonicaliser and exactly this protocol mapping, and
+    :attr:`~ai_assistant.core.types.EgressBinding.canonical_destination_set` then
+    deduplicates the occurrences into members of this shape. A caller that needs the
+    member **before** a binding exists — ADR-0238 §2 obliges the search servicing site
+    to read a destination's recorded trust before the request that would carry it is
+    built — calls this rather than restating the derivation, so the two cannot drift.
+
+    **Pure and total in ADR-0148 §2's fifth-clause sense**: it reads no clock, no
+    store, no configuration and no network, so two derivations of one input agree.
+
+    Args:
+        protocol: The protocol the destination is named under.
+        supplied: The destination as a call's arguments would carry it.
+
+    Returns:
+        The canonical destination set member, carrying the protocol and the canonical
+        form and no account (ADR-0150 §3's first shape).
+
+    Raises:
+        DestinationCanonicalisationError: If this seam asserts no canonical form for
+            the supplied one — the same refusal :meth:`EgressBindingSeam.bind` converts
+            into its own :class:`~ai_assistant.core.errors.EgressBindingError`.
+    """
+    destination = canonicalise_destination(_CANONICALISERS[protocol], supplied)
+    return CanonicalDestination(protocol=protocol, canonical=destination.canonical)
 
 
 @dataclass(frozen=True, slots=True)
@@ -477,6 +510,7 @@ class EgressBindingSeam:
             carried.spans,
             carried.planned_with_external_content,
             carried.coverage,
+            carried.closed_loop,
         )
         self._refuse_unlocated_provenance(binding, carried.spans)
         return self._returned(binding, checked, arguments)
@@ -539,6 +573,13 @@ class EgressBindingSeam:
             # refuse the very call the user was shown and approved. This is the
             # third of the three things ADR-0152 §7's count now admits.
             was.coverage,
+            # ADR-0238 §5: **not** transcribed, and that is the decision rather than an
+            # omission. The member defaults to ``False``, and ``False`` is the correct
+            # value for every request that can resume: a ``CONFIRM`` on a ``WEB_SEARCH``
+            # decision "resolves in no turn" (ADR-0231 §9), so no closed-loop request is
+            # ever resumed — which is what keeps ADR-0152 §7's transcription count at
+            # exactly the three above rather than making this a fourth.
+            False,
         )
         if binding != was:
             msg = (
@@ -690,6 +731,7 @@ class EgressBindingSeam:
         provenance: Mapping[EgressSpanLocator, DiscloserProvenance],
         planned_with_external_content: bool,
         coverage: SpanCoverage,
+        closed_loop: bool,
         /,
     ) -> EgressBinding:
         """Derive the whole binding from the declaration and the arguments.
@@ -698,15 +740,23 @@ class EgressBindingSeam:
         would otherwise reach — and every value it reads is a detached copy
         (ADR-0152 §1, §5).
 
-        **Three of the binding's members are carried rather than derived**, and each
+        **Four of the binding's members are carried rather than derived**, and each
         arrives here already resolved by the member that called this: each span's
         ``provenance`` (ADR-0146 §2, ADR-0152 §7), the call's
-        ``planned_with_external_content`` (ADR-0181 §3, §4) and its ``coverage``
-        (ADR-0233 §4, §5). Nothing here computes, infers, defaults or amends any of
-        them — in particular, no origin is recovered by reading an argument's value,
-        its field or its shape, which is ADR-0146 §2's forbidden inference on the
-        first axis, ADR-0181 §4's second clause on the second and ADR-0233 §5's
-        second clause on the third.
+        ``planned_with_external_content`` (ADR-0181 §3, §4), its ``coverage``
+        (ADR-0233 §4, §5) and its ``closed_loop`` (ADR-0238 §5). Nothing here computes,
+        infers, defaults or amends any of them — in particular, no origin is recovered
+        by reading an argument's value, its field or its shape, which is ADR-0146 §2's
+        forbidden inference on the first axis, ADR-0181 §4's second clause on the
+        second, ADR-0233 §5's second clause on the third and ADR-0238 §5's
+        written-by-``orchestration``-and-by-nothing-else clause on the fourth.
+
+        **``closed_loop`` is written from the carrier's value unchanged** — ADR-0238 §5:
+        "the seam writes the binding's value from the carrier's unchanged" — and this
+        seam has nothing it could recompute it from: the four conditions are stated over
+        a conversation's recorded turns, the current turn's supply, a trust store and a
+        budget fold, and this object holds none of them. A lane that finds itself
+        computing the fact here has breached §5's last clause.
 
         **A ``PATH_WITHOUT_MODEL`` coverage is refused by the construction below**,
         which is ADR-0233 §6's refusal reaching this seam without a check of its
@@ -735,6 +785,7 @@ class EgressBindingSeam:
                 transport_endpoint=registration.transport_endpoint,
                 planned_with_external_content=planned_with_external_content,
                 coverage=coverage,
+                closed_loop=closed_loop,
             )
         except ValidationError as exc:
             msg = (

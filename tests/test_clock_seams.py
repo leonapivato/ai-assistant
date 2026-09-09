@@ -123,6 +123,7 @@ from ai_assistant.orchestration import (
     ObservationStage,
     QuestionStage,
     RecipientGrantOperations,
+    SearchFooting,
     SearchServicer,
     StepExecutor,
     StepRunner,
@@ -150,6 +151,7 @@ from ai_assistant.testing import (
     FakeContextProvider,
     FakeConversationStore,
     FakeDeferralStore,
+    FakeDestinationTrustStore,
     FakeEgressBinder,
     FakeEmbedder,
     FakeFeedbackProcessor,
@@ -366,6 +368,18 @@ async def _search_servicer(now: Clock) -> None:
     binder.register_egress(
         FAKE_WEB_SEARCH, reference="search-account", identity="search@example.com"
     )
+    # ADR-0238 §8: ``admit_search`` gates every servicing and creates nothing, so the
+    # conversation is begun first — the ordering ``Engine._pass`` establishes before the
+    # turn's work — or the stamp this case is about is never reached.
+    conversations = FakeConversationStore(new_id=lambda: "c-1")
+    await conversations.start()
+    footing = SearchFooting(
+        conversation_id="c-1",
+        conversations=conversations,
+        trust=FakeDestinationTrustStore(),
+        destinations=(),
+        max_calls=8,
+    )
     await SearchServicer(
         composer=FakeQueryComposer(),
         searcher=FakeWebSearcher(),
@@ -374,7 +388,13 @@ async def _search_servicer(now: Clock) -> None:
         trail=FakeAuditTrail(),
         now=now,
         id_factory=lambda: "d-1",
-    ).service("what is that bell tower in Porto", remaining=10, external=False)
+    ).service(
+        "what is that bell tower in Porto",
+        remaining=10,
+        external=False,
+        footing=footing,
+        in_view=(),
+    )
 
 
 async def _clock_source(now: Clock) -> None:
