@@ -1,6 +1,6 @@
 # 235. The establishing act rides an answer to a confirmation, live or recorded, and a refused search reaches the user as history and not as work
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0242 (§8's first clause, and nothing else in this ADR: the message that a search was refused is no longer the `grantable_decisions` listing alone — §6 of the superseding ADR puts a statement that a lookup did not happen in the reply, composed by the model from a closed-vocabulary member, and its §9 puts a statement of the act that would enable it beside the reply on the surface; §8's second clause binds entire, so this is not a notification and no lane mints one, and §8's third clause binds entire, so neither the reply nor the statement beside it says that the turn would have answered differently, that a reply was incomplete, that a search would have succeeded, or that anything is owed; §§1-7 and §§9-14 are untouched, and §9's browser deferral and voice withholding are inherited rather than moved)
 - Date: 2026-09-04
 - Decides: the establishing surface ADR-0193 §13 defers — which surfaces offer the
   act, where the act's `answer` comes from on each population it rides, what a
@@ -36,6 +36,42 @@
 - Does **not** widen [ADR-0177](0177-the-browsers-control-surface-is-thirty-operations-and-a-credential-is-entered-only-on-a-loopback-origin.md)
   §1's operation enumeration (§9), does not designate a boundary, adds no condition
   to ADR-0017 §3's list, relaxes none, and attests that none is satisfied.
+- **Partially superseded: 2026-09-09 by [ADR-0242](0242-the-act-that-trusts-a-destination-has-its-own-surface-and-a-search-that-did-not-happen-is-explained-in-the-reply.md) — §8's first
+  clause, and nothing else in this ADR.** That clause reads *"The message that a search was
+  refused is `grantable_decisions`' listing and the act offered beside it, on the surfaces §9
+  admits, and is **nowhere else** … No lane puts the message in a reply, appends it to one,
+  degrades one for it, or reads ADR-0228 §10's carrier as covering it."* ADR-0242 §6 puts a
+  statement that a lookup did not happen **in the reply**, and ADR-0242 §9 puts a statement of
+  the act that would enable it **beside the reply, on the surface**. A reader holding only
+  this ADR refuses both, which is ADR-0070 §1's test on the supersession side.
+
+  **The owner's 2026-09-09 amendment on #1908 is what fires it**, adopted as #2168:
+  *"…plus **explanations of refused or exhausted searches**."* ADR-0242 §6 records that §8's
+  pull-not-push argument was made over a mechanism that could not fire, and that the one
+  failure a pull cannot address — a user who does not know to look does not look — is the one
+  milestone 31 makes routine.
+
+  **§8's second clause binds entire**: this is a reply and not a notification, and no lane
+  mints a `Notification`, a notification kind, a delivery or a poll result for a search that
+  did not happen. **§8's third clause binds entire**: the listing still states what the
+  recorded decisions say and no more, and ADR-0242 §9 bars the reply and the statement beside
+  it from saying that the turn would have answered differently, that a reply was incomplete,
+  that a search would have succeeded, or that anything is owed. **The listing is not
+  replaced** — it stays exactly where §9 put it, and it is where the act is performed.
+
+  **Nothing else of this ADR moves, and three parts of it are load-bearing in ADR-0242
+  rather than superseded.** §4's carrier shape is the precedent for `TurnOutcome`
+  gaining `search_not_serviced`; §7's two-vocabulary rule is extended to a third
+  vocabulary rather than altered; and §9's browser deferral, its voice withholding and its
+  reason for fixing command names in an ADR rather than in a lane are each inherited whole.
+  ADR-0242 adds no member to `RecipientGrantStore`, `RecipientGrants` or
+  `RecipientGrantResolution`, changes no argument or return of §4's five engine members, and
+  gives `assistant remember-recipients` one additional fixed line in its own next-step
+  rendering and nothing more.
+
+  This ADR's `Status` line read `Accepted`, so it takes the leading `Partially superseded by`
+  token and `Accepted` is dropped, as `docs/adr/template.md` requires. Appended note per
+  ADR-0070 §1; no text below is rewritten. Refs #2178, #2168, #1908.
 
 ## Context
 
