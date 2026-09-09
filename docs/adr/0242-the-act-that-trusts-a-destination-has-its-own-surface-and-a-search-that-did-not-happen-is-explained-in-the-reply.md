@@ -950,7 +950,7 @@ review found an earlier draft doing.
 
 **Minting the member here rather than leaving it to ADR-0241 is the smaller coupling of the
 two available.** The alternative was for ADR-0241 to add a `SearchNotServiced` member in its
-own text, which would make a vocabulary this ADR closes at seven open to an ADR that is
+own text, which would make a vocabulary this ADR closes at eight open to an ADR that is
 deciding a different question — and would leave the two ADRs racing to define the same
 enumeration. What ADR-0241 needs from this one is a member to map to and a sentence for it;
 what this one needs from ADR-0241 is the disposition and nothing else. Neither ADR blocks the
@@ -1089,11 +1089,11 @@ other, and neither can land a half of the pair that does not compile.
 > widen §5's read-to-ruling window — which ADR-0238 §14 makes the reviewing lane's own check
 > rather than something taken on trust.
 
-> **Normative.** The seven prompt fragments and the seven surface statements are **written
-> out, one per member, as literals**, and neither is assembled from a member's value, its name,
-> a format string over the enumeration, or a mapping a later member would silently join. A
-> member added without its two texts is a member with no rendering, and §8's closure at seven
-> is what makes that a review question rather than a runtime one.
+> **Normative.** The **eight** prompt fragments and the **eight** surface statements are
+> **written out, one per member, as literals**, and neither is assembled from a member's value,
+> its name, a format string over the enumeration, or a mapping a later member would silently
+> join. A member added without its two texts is a member with no rendering, and §8's closure at
+> eight is what makes that a review question rather than a runtime one.
 
 > **Normative.** The lane **files an issue rather than growing** for anything it finds outside
 > this fence, and `CONTRIBUTING.md` → "Triage every finding" is the rule. In particular a
@@ -1270,7 +1270,7 @@ other, and neither can land a half of the pair that does not compile.
 > **Normative.** **No arm asserts that a model produced particular words.** What is asserted
 > of the reply is that the fixed fragment reached the assembled prompt and that the prompt on
 > a turn carrying no member is byte-identical to today's, which is ADR-0228 §10's own testable
-> shape. The seven **surface** statements are asserted over their rendered bytes, because
+> shape. The eight **surface** statements are asserted over their rendered bytes, because
 > those are the system's own words.
 
 **What only live QA can show, stated so that nobody reads the arms as the whole exit.** That
