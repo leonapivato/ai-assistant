@@ -1950,8 +1950,12 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
             )
             unresolved += missed
             # ADR-0238 §8's early fold, **immediately** after the one kind that is
-            # always ``EXTERNAL`` (ADR-0230 §5) admits its record, and before any other
-            # read of this servicing suspends. This is the admission §8's trigger names.
+            # always `EXTERNAL` (ADR-0230 §5) admits its record. **Redundant on the order
+            # ADR-0231 §11 fixes** — the search is serviced next and folds before its own
+            # admission, so the file is already observed by the time any later read
+            # suspends — and stated anyway, as the forward-compatibility guard §11 states
+            # in terms for the lane that reorders the kinds, which is exactly the ground
+            # `NO_BUDGET`'s unreachable branch is written on one member up.
             await observed()
         # ADR-0231 §11: **second**, after the one-record local file and ahead of the
         # hop and the query. ADR-0226 §6's decision is applied and not moved — the

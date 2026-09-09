@@ -17,6 +17,8 @@ assert one property in two places rather than the same property at two levels.
 
 from __future__ import annotations
 
+import asyncio
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
@@ -35,6 +37,8 @@ from test_loop_search import (
     _bounded,
     _clock,
     _CostedSearcher,
+    _file_and_query,
+    _file_only,
     _grant,
     _loop,
     _search,
@@ -53,6 +57,7 @@ from ai_assistant.core.types import (
     DestinationTrust,
     DestinationTrustRecord,
     MemorySource,
+    PermissionOutcome,
     Placement,
     PlacementReach,
     PlacementSetter,
@@ -60,13 +65,16 @@ from ai_assistant.core.types import (
     SemanticMemory,
     SpanCoverage,
 )
-from ai_assistant.orchestration.reads import SearchDisposition
+from ai_assistant.orchestration.reads import SearchDisposition, SearchFooting
 from ai_assistant.permissions.policy import ThresholdActionPolicy
+from ai_assistant.planning.composer import ModelBackedQueryComposer
 from ai_assistant.testing import (
     FakeAuditTrail,
     FakeConversationStore,
     FakeDestinationTrustStore,
+    FakeFetcher,
     FakeMemoryStore,
+    FakeModelProvider,
     FakePlanner,
     FakeQueryComposer,
     FakeRecipientGrantResolution,
@@ -1061,3 +1069,213 @@ async def test_a_refused_fold_logs_a_class_and_carries_no_identifier(
     assert "ConversationStoreError" in written, "and which class it was"
     assert footing.conversation_id not in written, "no conversation identifier"
     assert "Traceback" not in written, "and no traceback, so no frame locals"
+
+
+# --------------------------------------------------------------------------- #
+# Arm 1a over the production composer — the query really does differ            #
+# --------------------------------------------------------------------------- #
+
+#: A root with one entry whose text is distinctive enough that finding it in a prompt or
+#: a query is a reading rather than a coincidence.
+_FILE_ROOT: Final = {"quarterly-review.md": "the margin held at 41 percent"}
+
+#: What the scripted model writes for the two compositions of one refining turn. The
+#: second is what a model that *read the first result* would write, and asserting it
+#: reaches the searcher byte for byte is ADR-0231 §11's own clause read on this axis.
+_FIRST_QUERY: Final = "porto bell tower"
+_REFINED_QUERY: Final = "clerigos tower porto height"
+
+
+async def test_the_production_composer_refines_over_the_first_result() -> None:
+    """§15 Arm 1a, over the **production composer seam** as §15 requires.
+
+    "Each arm below is a test the implementing lane owes, over the production policy, the
+    production composer seam and the production servicing path, **and not over a double
+    standing in for one of them**." A ``FakeQueryComposer`` answers the same query
+    whatever it is handed, so a case over one can assert that the *count* of supplied
+    records rose and nothing about whether they were read.
+
+    So this drives :class:`~ai_assistant.planning.composer.ModelBackedQueryComposer` over
+    a scripted provider and asserts the three things Arm 1a actually states: the second
+    servicing's supply carries the first's minted records — read off the **messages the
+    provider received** — the query differs, and the user is asked nothing.
+    """
+    model = FakeModelProvider.scripted(
+        json.dumps({"query": _FIRST_QUERY}), json.dumps({"query": _REFINED_QUERY})
+    )
+    searcher = FakeWebSearcher(results=(_RESULT,))
+    trail = _trail()
+    servicer = _servicer(
+        composer=ModelBackedQueryComposer(model, max_chars=200),
+        searcher=_CostedSearcher(searcher),
+        trail=trail,
+        granted=True,
+    )
+
+    await _loop(planner=_revising(), search=servicer, footing=await _chosen_footing()).respond(
+        _ASK, narrow=_bounded(), operation=_REVISING
+    )
+
+    assert model.call_count == 2, "one composition per servicing (ADR-0231 §15)"
+    second_prompt = "\n".join(message.content for message in model.last_messages)
+    assert _DISTINCTIVE in second_prompt, (
+        "the first servicing's minted record reached the second composition — §2's third "
+        "population, doing the work the milestone is named for"
+    )
+    assert searcher.requested == [_FIRST_QUERY, _REFINED_QUERY], (
+        "two distinct queries, each the composer's own output byte for byte (ADR-0231 §11)"
+    )
+    first, second = await _bindings(trail)
+    assert first.planned_with_external_content is False, "nothing external was in view yet"
+    assert second.planned_with_external_content is True, "the first's minted record is"
+    assert (first.closed_loop, second.closed_loop) == (True, True), (
+        "both hold §5's four conditions — the first vacuously on the third, the second "
+        "because the only external span in view is one it minted at a chosen destination"
+    )
+    assert [decision.ruling.outcome for decision in await trail.recent()] == [
+        PermissionOutcome.ALLOW,
+        PermissionOutcome.ALLOW,
+    ], "the user was asked nothing, on either servicing"
+
+
+# --------------------------------------------------------------------------- #
+# Arm 6f2(i) — a local file closes the conversation at admission                #
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_local_file_lowers_the_flag_before_the_next_read_of_its_servicing() -> None:
+    """§15 Arm 6f2's local-file shape, at the instant §8's trigger names.
+
+    "Turn A services a local-file read and then a ``WEB_SEARCH``, so A's own request binds
+    ``closed_loop`` false" — and §8's early fold is what puts the ``False`` on the
+    **record** at that moment rather than at capture, because a second servicing of the
+    conversation admitted before A is captured would otherwise read a stale-true flag.
+
+    ADR-0230 §5 makes a fetched file's record always ``EXTERNAL``, and ADR-0231 §11
+    services the file **first**, so this is the ordinary case rather than a contrived one:
+    the fold must commit before the sighted query that follows it in the same servicing.
+    """
+    footing = await _chosen_footing()
+    store = _SamplingStore(footing, now=_clock)
+    await store.add(_belief("belief-1", "something about Porto"))
+
+    await _loop(
+        planner=FakePlanner(now=_clock, read_request=_file_and_query("F1", "porto")),
+        memory=store,
+        fetcher=FakeFetcher(_FILE_ROOT, read_at=_NOW),
+        search=None,
+        footing=footing,
+    ).respond(_ASK, narrow=_bounded())
+
+    assert store.sampled, "the sighted query ran, so there was an instant to sample"
+    assert store.sampled[-1] is False, (
+        "the file's admission had already been folded when the next read of the same "
+        "servicing began — §8's window is a store write and not a servicing"
+    )
+    draw = await footing.conversations.search_draw(footing.conversation_id)
+    assert draw is not None
+    assert draw.all_external_user_chosen is False
+
+
+# --------------------------------------------------------------------------- #
+# Arm 6f2(iii) — the residual, asserted as the property §8 states               #
+# --------------------------------------------------------------------------- #
+
+
+class _BlockingFold(FakeConversationStore):
+    """A conversation store whose ``observe_search`` can be held open.
+
+    §15 Arm 6f2(iii) requires the window to be asserted "as the boundary §8 states and
+    not as an ordering" — B's recorded-half read landing **while A's admission fold is
+    still in flight** — and says in terms that the arm must block inside
+    ``observe_search`` "rather than sequencing the two calls and hoping".
+    """
+
+    def __init__(self, **knobs: Any) -> None:
+        super().__init__(**knobs)
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.holding = True
+
+    async def observe_search(self, conversation_id: str, /, **knobs: Any) -> None:
+        """Hold the first fold open, then commit it."""
+        if self.holding:
+            self.holding = False
+            self.entered.set()
+            await self.release.wait()
+        await super().observe_search(conversation_id, **knobs)
+
+
+async def test_a_read_inside_the_fold_window_still_sees_the_unlowered_flag() -> None:
+    """§15 Arm 6f2(iii), stated as the residual §8 names rather than argued away.
+
+    "**B does read the not-yet-lowered flag**, which is the residual §8 names and this arm
+    records so that it is a ratified property and not a surprise found later." §8 is
+    explicit about why nothing closes it: "``admit_search`` does not consult the flag …
+    the boundary is this and no more: **every request whose recorded-half read returns
+    after the fold has committed sees the false**", and closing the remainder "means
+    serialising servicings of one conversation, which is a new obligation on
+    ``orchestration`` across concurrent turns that nothing in this corpus provides today".
+
+    So this asserts **both** ends: a turn whose build-time read lands inside the window is
+    ruled closed-loop, and the next turn — whose read begins after the fold commits — is
+    not. A one-turn arm cannot catch either.
+    """
+    conversations = _BlockingFold(now=_clock, new_id=lambda: "c-1")
+    await conversations.start()
+    trust = FakeDestinationTrustStore([_CHOSEN])
+
+    def footing_for() -> Any:
+        return SearchFooting(
+            conversation_id="c-1",
+            conversations=conversations,
+            trust=trust,
+            destinations=SEARCH_DESTINATIONS,
+            max_calls=8,
+        )
+
+    dirty = asyncio.create_task(
+        _loop(
+            planner=FakePlanner(now=_clock, read_request=_file_only("F1")),
+            fetcher=FakeFetcher(_FILE_ROOT, read_at=_NOW),
+            search=None,
+            footing=footing_for(),
+        ).respond(_ASK, narrow=_bounded())
+    )
+    await conversations.entered.wait()
+
+    trail = _trail()
+    inside = _servicer(
+        searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))), trail=trail, granted=True
+    )
+    await _loop(
+        planner=FakePlanner(now=_clock, read_request=_search()),
+        search=inside,
+        footing=footing_for(),
+    ).respond(_ASK, narrow=_bounded())
+
+    (during,) = await _bindings(trail)
+    assert during.closed_loop is True, (
+        "the read landed while the fold was in flight, which is §8's stated residual"
+    )
+
+    conversations.release.set()
+    await dirty
+
+    after_trail = _trail()
+    after = _servicer(
+        searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))),
+        trail=after_trail,
+        granted=True,
+    )
+    await _loop(
+        planner=FakePlanner(now=_clock, read_request=_search()),
+        search=after,
+        footing=footing_for(),
+    ).respond(_ASK, narrow=_bounded())
+
+    (later,) = await _bindings(after_trail)
+    assert later.closed_loop is False, (
+        "and every read landing after the fold commits sees the false — the boundary §8 "
+        "states, which is over the read's instant and not over the admission's"
+    )

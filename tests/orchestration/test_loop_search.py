@@ -265,6 +265,26 @@ def ActionPlanFor(*, read_request: ReadRequest | None = None) -> ActionPlan:  # 
     )
 
 
+def _file_only(entry: str) -> ReadRequest:
+    """A ``LOCAL_FILE`` ask and nothing else — a turn that reads a file and never searches."""
+    return ReadRequest(asks=(ReadAsk(kind=ReadKind.LOCAL_FILE, entry=entry),))
+
+
+def _file_and_query(entry: str, text: str) -> ReadRequest:
+    """A ``LOCAL_FILE`` ask and a sighted query, the query first in ``asks``.
+
+    ADR-0231 §11 fixes the servicing order as the file **first** and the sighted query
+    last, so a request whose tuple is in the other order is the one that catches an
+    implementation following the tuple.
+    """
+    return ReadRequest(
+        asks=(
+            ReadAsk(kind=ReadKind.SIGHTED_QUERY, query=text),
+            ReadAsk(kind=ReadKind.LOCAL_FILE, entry=entry),
+        )
+    )
+
+
 def _search_and_query(text: str) -> ReadRequest:
     """A search **and** a sighted query, with the query listed first.
 
@@ -470,6 +490,7 @@ def _loop(
     search: SearchServicer | None = None,
     memory: FakeMemoryStore | None = None,
     footing: SearchFooting | None = None,
+    fetcher: Any = None,
 ) -> _Turns:
     """A loop over canonical fakes, with the servicer a case supplies (or none).
 
@@ -490,6 +511,7 @@ def _loop(
             planner=planner if planner is not None else FakePlanner(now=_clock),
             registry=FakeToolRegistry(),
             feedback=FakeFeedbackProcessor(),
+            fetcher=fetcher,
             search=search,
             footing=lambda _: held,
             retrieval_limit=30,
