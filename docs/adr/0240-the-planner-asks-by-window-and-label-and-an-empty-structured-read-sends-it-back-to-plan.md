@@ -889,11 +889,18 @@ alternative, which is a store-side discovery read ADR-0237 §11 has already refu
 > per ask is. It is empty where no such ask was emitted.
 
 > **Normative.** The record gains **one field naming the structured read's outcome**, a
-> member of a closed enumeration distinguishing exactly four states: **no
-> `STRUCTURED_READ` was asked**; the ask was **not reached**, because fewer than one
-> slot of the budget remained (§5); the read **ran and returned nothing**, which is
-> §6's empty read; and the read **returned records**. Nothing else is a member, and no
-> implementation collapses the second and third.
+> member of a closed enumeration distinguishing exactly five states: **no
+> `STRUCTURED_READ` was asked**; the ask was **not reached for want of a separator**,
+> because every record of the supply was `EPISODIC` when the read was reached (§5); the
+> ask was **not reached for want of a slot**, because fewer than one slot of the budget
+> remained (§5); the read **ran and returned nothing**, which is §6's empty read; and the
+> read **returned records**. Nothing else is a member, and no implementation collapses
+> any two of them.
+
+> **Normative.** **Where both of §5's conditions hold, the separator outcome is the one
+> recorded.** A supply with no separator blocks the read whatever the budget holds, where
+> a spent budget is a fact about one turn's other asks, so the record names the condition
+> that would still have blocked it.
 
 > **Normative.** **That field is recorded over a servicing that completed and is absent
 > otherwise.** Where the servicing failed, was partial, or was declined under ADR-0226
@@ -920,11 +927,23 @@ alternative, which is a store-side discovery read ADR-0237 §11 has already refu
 > quantity, and no lane calls any of them precision or recall, for ADR-0226 §8's
 > unchanged reason.
 
+**Five members and not four, and the fifth is the one round 3 found missing.** A draft
+enumerated four, and §5's separator condition then produced a state none of them
+described: on an episode-only supply with the whole budget free, a structured ask beside a
+sighted query is skipped, the query returns a belief, and the servicing **completes** — so
+the absence rule below does not reach it either, and §5's own instruction to record the
+skip was unsatisfiable. Both lenses raised it as a `blocker` and both were right. The two
+not-reached states are separate members rather than one because they have different causes
+and different fixes, which is ADR-0230 §9's own reason for keeping an unresolved label and
+a refusal apart: a deployment blocked for want of a separator learns that its belief
+composition is coming back empty, and one blocked for want of a slot learns that its
+earlier kinds are filling the budget.
+
 **The outcome field is stated over a completed servicing because that is the only
-servicing it can be true of, and an earlier draft made it mandatory in all four states.**
+servicing it can be true of, and an earlier draft made it mandatory in every state.**
 Both lenses raised that as a finding on round 1 and both were right: a structured ask
-whose store call raises was asked, was not budget-blocked, and produced neither an empty
-result nor records, so none of the four values is honest, and a declined ask is the same
+whose store call raises was asked, was not blocked by either condition, and produced
+neither an empty result nor records, so no value is honest, and a declined ask is the same
 gap one condition over. ADR-0226 §9 already scopes its counts the same way — *"Every
 count above is taken over a servicing that completed"* — so the field joins that regime
 rather than inventing a fifth member for a state the record already reports twice. The
@@ -1085,15 +1104,20 @@ revision's guidance reflects the supply the revision is planning over.
    fixture with one slot left, which does make the call. What it is written against is
    an implementation that reads a not-reached read as an empty one, putting an ask into
    `empty_reads` that established nothing.
-8. **The separator condition, asserted through the production renderer.** On a turn
-   whose belief composition is empty and whose supply is entirely `EPISODIC` when the
-   structured read is reached, no store call is made, the audit records it, and the
-   assembled prompt carries no episode of another conversation under the recent-turns
-   heading — asserted over `planning/planner.py`'s rendered prompt rather than over the
-   supply alone, because the heading is the thing at risk. Asserted again with one belief
-   in the supply, where the read **is** made; and again on a servicing whose `LOCAL_FILE`
-   fetch minted an attested record first, where the read is also made because that record
-   is the separator.
+8. **The separator condition, asserted through the production renderer and in the
+   audit.** On a turn whose belief composition is empty and whose supply is entirely
+   `EPISODIC` when the structured read is reached, no store call is made, the audit
+   records **the separator outcome by name**, and the assembled prompt carries no episode
+   of another conversation under the recent-turns heading — asserted over
+   `planning/planner.py`'s rendered prompt rather than over the supply alone, because the
+   heading is the thing at risk. Four more arms. With one belief in the supply the read
+   **is** made. On a servicing whose `LOCAL_FILE` fetch minted an attested record first
+   the read is also made, because that record is the separator. On a request carrying a
+   structured read **and** a sighted query over an episode-only supply with the whole
+   budget free, the structured read is skipped with the separator outcome recorded, the
+   query is serviced normally, and the servicing **completes** — the arm §10's fifth
+   member exists for. And where the supply is episode-only **and** the budget is spent,
+   the separator outcome is the one recorded, not the slot one.
 9. **The servicing order and the truncation.** A request carrying a file, a search, a
    hop, a structured read and a query yields a fourth group in that order; a structured
    read reached with fewer slots than the whole budget and filling every one of them is
@@ -1373,8 +1397,8 @@ ADR-0227 §§3 and 4.
 > of what it obliges, and unmarked text is read to determine what a marked clause means
 > and never supplies an obligation.
 
-What binds is **sixty-nine marked clauses**: §1's three, §2's six, §3's five, §4's four,
-§5's ten, §6's five, §7's seven, §8's eight, §9's three, §10's six, §11's six, §12's
+What binds is **seventy marked clauses**: §1's three, §2's six, §3's five, §4's four,
+§5's ten, §6's five, §7's seven, §8's eight, §9's three, §10's seven, §11's six, §12's
 four, §13's one, and this section's one. §14's list, §15's classification and every argument in
 this document are deliberately unmarked: they are deferral, attestation and argument,
 which ADR-0089 §1 classifies as non-normative however load-bearing.
