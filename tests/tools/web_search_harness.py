@@ -592,8 +592,9 @@ async def built(  # noqa: PLR0913 — one knob per double a case arranges, and e
         max_results: ``Settings.search_max_results``.
         max_result_chars: ``Settings.search_max_result_chars``.
         max_response_bytes: ``Settings.search_max_response_bytes``.
-        cost_per_call: ``Settings.web_search_cost_per_call`` (ADR-0236 §1); ``None``
-            with ``cost_currency`` leaves the registered declaration ``UNKNOWN``.
+        cost_per_call: ``Settings.web_search_cost_per_call`` (ADR-0236 §1); supplied
+            together with ``cost_currency`` or not at all, and with neither the
+            registered declaration keeps its ``UNKNOWN`` cost.
         cost_currency: ``Settings.web_search_cost_currency``.
         refusal: Arms the canonical transport to refuse every open with this, after
             recording the attempt.
