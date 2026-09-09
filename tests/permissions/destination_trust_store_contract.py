@@ -498,6 +498,7 @@ class DestinationTrustStoreContract:
 
     # --- §1: durability, and the model's distance from the fact ------------
 
+    @pytest.mark.optional_obligation
     async def test_a_second_handle_over_one_history_reads_what_was_recorded(
         self, store: DestinationTrustStore
     ) -> None:

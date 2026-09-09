@@ -1914,6 +1914,20 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 # build-failure cleanup list above and not here, so a build that
                 # *failed* closed it and one that *succeeded* never did (#1903).
                 _as_async(recipient_grants.close),
+                # And the destination-trust store beside it: a Tier 1 store like the
+                # rest, joining the same ordered shutdown (ADR-0083 ruling 4, ADR-0042
+                # §2, ADR-0238 §1). Registering it on the build-failure cleanup list
+                # alone would close it when the build *failed* and never when it
+                # succeeded, which is #1903 exactly — and here it would leave a `-wal`
+                # holding the user's recorded destination choices behind.
+                #
+                # **Nothing constrains its position** among the stores: no store reads
+                # it and it reads none. In particular it is *not* the recipient-grant
+                # store's neighbour in any ordering sense — ADR-0238 §1 keeps the two
+                # acts separate and "no component reads the existence, breadth, age or
+                # liveness of a grant as evidence of trust", so neither store's close
+                # can make the other fail closed.
+                _as_async(destination_trust.close),
                 _as_async(plans.close),
                 _as_async(conversations.close),
                 # The transcript archive joins the same ordered shutdown as every
