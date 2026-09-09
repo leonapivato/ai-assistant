@@ -260,10 +260,13 @@ figure today and §13 defers the second; what §1 buys is that deferring it cost
 this golden rule 5's business rather than an implementation detail.** ADR-0118 §9 states
 the test — *"whether a caller of `Embedder` must now assume something it could not assume
 before"* — and answered no. Here it comes out yes in both directions. A caller must now
-**supply** a bound, and may now **assume** that its wait is finite and that an expiry
-comes back as a classified `SearchOutcome` rather than as a hang or an exception. Neither
-is derivable from ADR-0231's text, and a contract whose callers must read a composition
-root to learn whether they can be hung is not stating what it promises.
+**supply** a bound, and may now **assume** that the seam stops waiting on the stages it
+owns and that an expiry comes back as a classified `SearchOutcome` rather than as a hang
+or an exception. That is the guarantee in §1's weaker, true form and not a finite total
+for the frame — a stalled ledger append still blocks, by ADR-0192 §3's own trade. Neither
+half is derivable from ADR-0231's text, and a contract whose callers must read a
+composition root to learn whether the seam bounds anything at all is not stating what it
+promises.
 
 ### 2. Why the seam and not a decorator, when ADR-0118 chose the decorator
 
@@ -485,7 +488,18 @@ cited.
 > catching an exception type.** ADR-0029 §4's two clauses bind at this seam: a
 > `TimeoutError` an upstream library raises for its own reasons is not this seam's expiry,
 > and a `CancelledError` an inner callable invents when nothing was cancelled is a fault
-> and not a teardown. The seam is the only party that knows the difference.
+> and not a teardown. The seam is the only party that knows the difference, and it
+> establishes it from **its own deadline having fired and its own task having been
+> cancelled** rather than from what was caught.
+
+> **Normative.** **So the two misclassifications are named, each with the answer.** An
+> upstream `TimeoutError` raised inside the bound is the transport's own failure and
+> returns `SearchRefusal.TRANSPORT_FAILED`, exactly as it does today — **never**
+> `DEADLINE_EXPIRED`. A `CancelledError` raised where no cancellation was requested is a
+> fault the searcher raised, so it reaches ADR-0226 §5's degradation and §8's
+> `SEARCH_FAILED` — **never** a teardown that ends the turn, and never an outcome. That
+> is ADR-0029 §4's *"a tool that raised"* limb at this seam; which mechanism establishes
+> the provenance is the implementing lane's, and that one must exist is this clause's.
 
 > **Normative.** **A cancellation still completes the claim before it re-raises**, with
 > `interrupted_outcome` and an `UNKNOWN` cost, and releases the channel — which is what
@@ -576,12 +590,21 @@ it in the same act costs one member and avoids a second contract round.
 > stretch"* binds verbatim **over the call comparison it was written about**, and this
 > ADR's deadline is a **separate** comparison rather than a second input to it.
 
-> **Normative.** **No value a model produced, a request carried, a search result
-> contained or a record held reaches any side of any of the three.** For the deadline
-> that is a consequence of §3: the duration is a `Settings` value read by `orchestration`
-> and passed at the call, and no component raises, extends, resets, suspends or re-reads
-> it on account of a turn's content. A deployment changes it in `Settings` and by no other
-> route.
+> **Normative.** **No value a model produced, and no value a search result carried,
+> reaches any side of any of the three.** ADR-0238 §12's fuller prohibition — no value
+> *"produced by a model, carried in a request, contained in a search result, or read from
+> any record"* — binds verbatim **over the call comparison it was written about**, and
+> this ADR states the same for the deadline: the duration is §3's `Settings` value read by
+> `orchestration` and passed at the call, and no component raises, extends, resets,
+> suspends or re-reads it on account of a turn's content. A deployment changes it in
+> `Settings` and by no other route.
+
+> **Normative.** **The spend admission keeps its own ratified inputs, and no clause here
+> narrows them.** It reads the `ToolCost` on the revalidated, detached copy of the
+> request — checked equal to the searcher's own registered declaration before it is read
+> (ADR-0029 §2, ADR-0194 §3, §11) — and the ledger's recorded rows and reservations. Those
+> are values a request carried and values records hold, they are what ADR-0194 §2 and §3
+> require, and the clause above is stated so that it cannot be read as forbidding them.
 
 > **Normative.** **A per-conversation bound on elapsed search time is not decided here.**
 > ADR-0238 §8's deletion of the elapsed counter, the provisional charge and the
@@ -726,11 +749,30 @@ It owes, and nothing beyond it:
 > Driven through `FakeWebSearcher.suspend_next` in the suite and through the production
 > searcher in its own test.
 
-> **Normative.** **Arm 4 — the pre-registered two-turn arm.** A conversation whose first
-> turn searched and returned records and whose second turn stalls: the second turn's reply
-> **still answers from the first turn's records** and **also** states the interruption.
-> Both halves are asserted, because the acceptance sentence is a conjunction and either
-> half alone would pass a weaker test.
+> **Normative.** **Arm 4 — the pre-registered two-turn arm, read against ADR-0231 §16.**
+> A conversation whose first turn searched and answered and whose second turn's search
+> expires: the second turn's reply **still answers from what the conversation actually
+> retains** — the tail carrying turn one's stored reply (ADR-0222 §1) and its captured
+> episode (ADR-0221, ADR-0223), which is what `Planner.plan`'s `memories` carries as its
+> first group (ADR-0074 §5) — and **also** states the interruption. Both halves are
+> asserted, because the acceptance sentence is a conjunction and either half alone would
+> pass a weaker test.
+
+> **Normative.** **Arm 4 asserts no retained minted record, and the scenario's own words
+> must not be implemented as one.** #2178's pre-registered wording — *"the reply still
+> answers from turn one's records"* — reads as retention, and retention is exactly what
+> ADR-0231 §16 forbids and ADR-0238 §17 relies on: a minted record is supply for one turn,
+> resolves in no store, and *"a second turn re-searches … because nothing was retained"*.
+> **No lane satisfies this arm by keeping turn one's minted records alive**, and a lane
+> that finds the episode does not carry what the reply needs reports that as the
+> scenario's finding rather than closing it with a store.
+
+> **Normative.** **Arm 4b — the within-turn arm, which is where retained results do
+> exist.** On one turn of a `USER_CHOSEN` conversation, a first servicing mints records
+> and a plan revision's second servicing expires: the reply answers from the first
+> servicing's records — ADR-0238 §2's third population, within a turn — and states the
+> interruption. This is the arm that shows the supply is monotone under an expiry
+> (ADR-0228 §7), which the cross-turn arm cannot show.
 
 > **Normative.** **Arm 5 — the pre-registered three-bounds arm.** Three servicings of one
 > deployment, each crossing exactly one bound, produce three distinct dispositions —
@@ -764,6 +806,15 @@ It owes, and nothing beyond it:
 > have changed nothing about the ones that stay, including the ones §13 records as an
 > open question.
 
+> **Normative.** **Arm 11 — the two provenance misclassifications, over the production
+> searcher.** With the bound set long and the transport made to raise Python's
+> `TimeoutError` of its own accord, the outcome is `TRANSPORT_FAILED` and **not**
+> `DEADLINE_EXPIRED`; and with the transport made to raise `CancelledError` while nothing
+> has been cancelled, the turn degrades with `SEARCH_FAILED` and **does not** end as a
+> teardown. Both are asserted because an implementation that keeps a broad
+> `except TimeoutError` and merely renames its refusal member passes every other arm here
+> while reporting a deadline that never expired.
+
 > **Normative.** **Arm 10 — the ledger is outside the bound, and the arm asserts the
 > negative.** With the claim append held on a barrier and `search_call_deadline` set
 > **shorter** than the barrier is held for: `search` has **not** returned, no
@@ -776,8 +827,11 @@ It owes, and nothing beyond it:
 ### 13. Deferred, by name, each with what fires it
 
 - **A per-conversation bound on elapsed search time.** ADR-0238 §16 defers it and this ADR
-  supplies the quantity it had none of: a servicing's duration is now bounded by §3's
-  figure, so a per-conversation bound over that quantity is stateable. **Fired by the ADR
+  supplies the quantity it had none of: **a servicing's search work** — everything §1's
+  window covers — is now bounded by §3's figure, so a per-conversation bound over that
+  quantity is stateable. It is not a bound on a servicing's total wall-clock duration, the
+  two ledger appends being outside the window by ADR-0192 §3 (§1), and a later ADR states
+  its bound over the quantity §1 actually bounds. **Fired by the ADR
   that decides where such a counter lives and how it survives a deletion** — which is
   ADR-0238 §8's own analysis, unchanged — **or by the owner ruling that milestone 31's
   exit is not met by calls, cost and a per-call deadline.** **Not** fired by reintroducing
@@ -911,9 +965,9 @@ ADR-0148** — relied upon as written.
 > of what it obliges, and unmarked text is read to determine what a marked clause means
 > and never supplies an obligation.
 
-What binds is **sixty-one marked clauses**: §1's seven, §2's two, §3's five, §4's five,
-§5's four, §6's three, §7's four, §8's four, §9's five, §10's five, §11's four, §12's
-twelve, and this section's one. §13's list, §14's classification and every argument in
+What binds is **sixty-six marked clauses**: §1's seven, §2's two, §3's five, §4's five,
+§5's four, §6's three, §7's five, §8's four, §9's six, §10's five, §11's four, §12's
+fifteen, and this section's one. §13's list, §14's classification and every argument in
 this document are deliberately unmarked: they are deferral, attestation and argument,
 which ADR-0089 §1 classifies as non-normative however load-bearing.
 
