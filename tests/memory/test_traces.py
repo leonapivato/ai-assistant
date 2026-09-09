@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import structlog
@@ -508,6 +508,84 @@ async def test_a_faulting_read_traces_its_limit_and_nothing_it_never_reached(
     assert trace.metrics == {traces.LIMIT: 7}
     assert trace.records == {}
     assert trace.elapsed is not None, "the read ran, so its duration was observed"
+
+
+@pytest.mark.parametrize(
+    ("axes", "refused", "fault"),
+    [
+        pytest.param(
+            {"participants": [" "]}, "participants", "ValueError", id="participants-blank"
+        ),
+        pytest.param(
+            {"about_person": ["\udccc"]},
+            "about_person",
+            "ValueError",
+            id="about_person-unencodable",
+        ),
+        # The topic axis leaves the refusal to the annotation rather than re-raising
+        # it — ADR-0237 §2's asymmetry, "refused by the type" against the person
+        # axes' "refused with ``ValueError``" — so what reaches the trace is
+        # pydantic's own subclass of it. §3's fault-class conversion is total and
+        # has a value for either.
+        pytest.param(
+            {"topics": ["Renovation"]}, "topic label", "ValidationError", id="topics-not-canonical"
+        ),
+    ],
+)
+async def test_a_refused_filter_value_still_emits_the_reads_trace(
+    make_store: Callable[..., SqliteMemoryStore],
+    sink: FakeTraceSink,
+    axes: dict[str, Any],
+    refused: str,
+    fault: str,
+) -> None:
+    """A refusal is a fault, and §8 makes no exception for the ones caught early.
+
+    §8 is normative that ``memory``'s relevance read "emits one ``RETRIEVAL`` trace
+    per ``search``", and its fault-path paragraph adds that "a faulting operation
+    still emits its trace". A value ADR-0237 §2 refuses is one more way for a
+    ``search`` to fault, so a refusal taken *before* the traced region would leave
+    a raising ``search`` recorded nowhere — indistinguishable from a call that was
+    never made, on the read whose telemetry #824 exists to watch.
+
+    What the trace may carry is bounded from the other side: the ``limit``, the
+    elapsed time, the ``FAULT`` outcome and the fault class, and **no label
+    contents** — ADR-0119 §2 forbids a string in a trace derived from data, and the
+    refused value is caller data.
+    """
+    store = make_store()
+    await store.add(_semantic("live", "the weekly planning meeting"))
+
+    with pytest.raises(ValueError, match=refused):
+        await store.search("weekly planning meeting", limit=3, **axes)
+
+    trace = _only(sink, TraceKind.RETRIEVAL)
+    assert trace.outcome is TraceOutcome.FAULT
+    assert trace.fault_class == fault
+    assert trace.metrics == {traces.LIMIT: 3}, (
+        "the read reached its limit and nothing else, so §3 leaves every other key absent"
+    )
+    assert trace.records == {}
+    assert trace.elapsed is not None, "the read ran, so its duration was observed"
+
+
+async def test_a_blank_query_does_not_swallow_a_refused_filter_value(
+    make_store: Callable[..., SqliteMemoryStore], sink: FakeTraceSink
+) -> None:
+    """ADR-0237 §2's refusal is unconditional, so no short circuit may absorb it.
+
+    The fold that refuses runs on :meth:`_searched`'s first executed lines, ahead of
+    the blank-query and non-positive-``limit`` short circuits. Were it placed after
+    them, the same malformed value would raise on one call and return an empty
+    result on another — and the empty one is the single answer ADR-0237 §7 spends
+    four clauses insisting a caller must never read as "nothing happened".
+    """
+    store = make_store()
+
+    with pytest.raises(ValueError, match="topic label"):
+        await store.search("   ", limit=0, topics=["Renovation"])
+
+    assert _only(sink, TraceKind.RETRIEVAL).outcome is TraceOutcome.FAULT
 
 
 async def test_a_read_serving_an_operation_carries_that_operations_correlation(

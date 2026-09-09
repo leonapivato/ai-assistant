@@ -1962,6 +1962,11 @@ class SqliteMemoryStore:
                 answering.
             MemoryStoreError: If the embedder fails or returns a wrong-sized
                 query vector, or a stored record is corrupt.
+            ValueError: If a ``participants`` or ``about_person`` value is blank or
+                has no UTF-8 encoding, or a ``topics`` value is not in
+                ``TopicLabel``'s canonical form (ADR-0237 §2). The refusal is taken
+                inside the traced region, so it emits its ``RETRIEVAL`` trace like
+                any other fault (ADR-0119 §8).
 
         Note:
             ``kinds`` and ``bands`` are materialised on the coroutine's **first
@@ -1976,14 +1981,20 @@ class SqliteMemoryStore:
             its own trace disagree about what was asked for.
         """
         wanted = None if kinds is None else frozenset(str(kind) for kind in kinds)
-        # Materialised on the first executed lines with ``kinds`` and ``bands``,
-        # for their reason: ADR-0065 §3's second discharge, taken before the
-        # embedder's await and the lock's.
-        wanted_people = None if participants is None else _person_keys("participants", participants)
-        wanted_topics = None if topics is None else _topic_keys(topics)
-        wanted_subjects = (
-            None if about_person is None else _person_keys("about_person", about_person)
-        )
+        # **Copied on the first executed lines, folded to keys inside the traced
+        # region.** The copy is ADR-0065 §3's second discharge, taken with ``kinds``
+        # and ``bands`` and for their reason — before the embedder's await and the
+        # lock's, so a caller mutating the sequence it passed cannot change what
+        # this read applies. The *refusal* a malformed value earns is deliberately
+        # not taken here: ADR-0119 §8 requires one ``RETRIEVAL`` trace per
+        # ``search`` and says in terms that "a faulting operation still emits its
+        # trace", so a refusal raised before :meth:`_traces.observing` starts would
+        # emit none and a ``search`` that raised would be indistinguishable from
+        # one that was never called — on the read whose telemetry #824 watches.
+        # :meth:`_searched` folds them on *its* first executed lines instead.
+        named_people = None if participants is None else tuple(participants)
+        named_topics = None if topics is None else tuple(topics)
+        named_subjects = None if about_person is None else tuple(about_person)
         # **One read of the caller's sequence, and both derivations off the copy.**
         # ``_sources_in(bands)`` followed by ``frozenset(bands)`` would be two reads
         # of a caller-owned mutable container. No ``await`` separates them, so on one
@@ -2010,9 +2021,9 @@ class SqliteMemoryStore:
                 wanted,
                 wanted_sources,
                 _window_micros(occurred_within),
-                wanted_people,
-                wanted_topics,
-                wanted_subjects,
+                named_people,
+                named_topics,
+                named_subjects,
             ),
             _retrieval_reading,
             entry=entry,
@@ -2026,16 +2037,30 @@ class SqliteMemoryStore:
         wanted: frozenset[str] | None,
         wanted_sources: frozenset[str] | None,
         window: tuple[int | None, int | None] | None,
-        wanted_people: frozenset[str] | None,
-        wanted_topics: frozenset[str] | None,
-        wanted_subjects: frozenset[str] | None,
+        named_people: tuple[str, ...] | None,
+        named_topics: tuple[str, ...] | None,
+        named_subjects: tuple[str, ...] | None,
     ) -> _Retrieved:
         """The read itself, returning its records **and** what only it can count.
 
-        Split out of :meth:`search` so the whole read — the short circuits, the
-        embedding, the filtered pass and the decode — sits inside the traced
-        region. Decoding in particular: a corrupt row raises ``MemoryStoreError``
-        there, and a decode left outside would have that read recorded as ``OK``.
+        Split out of :meth:`search` so the whole read — the label refusals, the
+        short circuits, the embedding, the filtered pass and the decode — sits
+        inside the traced region. Decoding in particular: a corrupt row raises
+        ``MemoryStoreError`` there, and a decode left outside would have that read
+        recorded as ``OK``.
+
+        **The three label axes are folded to their comparison keys here, on this
+        coroutine's first executed lines, because that is inside the traced
+        region.** ADR-0119 §8 requires one ``RETRIEVAL`` trace per ``search`` and
+        rules that "a faulting operation still emits its trace"; a value the
+        declared type refuses (ADR-0237 §2) is one more way for the read to fault,
+        and folding in :meth:`search` would raise before
+        :meth:`_traces.observing` was ever entered — leaving a raising ``search``
+        with no trace at all. The fold precedes the short circuits deliberately:
+        the refusal ADR-0237 §2 states is unconditional, so a blank query or a
+        non-positive ``limit`` may not swallow it. What the trace records is
+        unchanged either way — its ``limit``, its elapsed time, its ``FAULT``
+        outcome and its fault class, and no label contents (ADR-0119 §2).
 
         Args:
             query: The search text.
@@ -2045,12 +2070,12 @@ class SqliteMemoryStore:
                 materialised; ``None`` for every band.
             window: ``occurred_at``'s half-open bounds as microsecond epochs,
                 already converted; ``None`` where the axis is not applied.
-            wanted_people: The ``participants`` restriction as canonical caseless
-                keys, already materialised; ``None`` where not applied.
-            wanted_topics: The ``topics`` restriction as exact labels, already
-                materialised; ``None`` where not applied.
-            wanted_subjects: The ``about_person`` restriction as canonical
-                caseless keys, already materialised; ``None`` where not applied.
+            named_people: The ``participants`` restriction as the caller named it,
+                already copied; ``None`` where not applied.
+            named_topics: The ``topics`` restriction as the caller named it,
+                already copied; ``None`` where not applied.
+            named_subjects: The ``about_person`` restriction as the caller named
+                it, already copied; ``None`` where not applied.
 
         Returns:
             The records, whether the ceiling bound them, and the counts ADR-0119 §8
@@ -2058,7 +2083,18 @@ class SqliteMemoryStore:
             which is the honest answer: the read never fetched a candidate, and §3
             forbids a zero standing in. It reports ``capped=False`` — a read that
             matches nothing by construction is not a capped one (ADR-0128 §2).
+
+        Raises:
+            ValueError: If a ``participants`` or ``about_person`` value is blank or
+                has no UTF-8 encoding, or a ``topics`` value is not in
+                ``TopicLabel``'s canonical form (ADR-0237 §2). Raised inside the
+                traced region on purpose — see above.
         """
+        wanted_people = None if named_people is None else _person_keys("participants", named_people)
+        wanted_topics = None if named_topics is None else _topic_keys(named_topics)
+        wanted_subjects = (
+            None if named_subjects is None else _person_keys("about_person", named_subjects)
+        )
         if limit <= 0 or not query.strip():
             return _Retrieved(records=[], capped=False, observed={})
         # An empty ``bands`` selects nothing (ADR-0113 §3), and so does a selection
