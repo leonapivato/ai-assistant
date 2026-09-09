@@ -336,6 +336,58 @@
   under ADR-0082 §2 no amendment qualifier is written on it and this note is the whole
   record. Appended note per ADR-0070 §1; no text below is rewritten. Refs #1996,
   #1908.
+- Amended: 2026-09-08 by ADR-0240 — **§2's membership sentence and §6's cross-kind
+  precedence sentence, in one respect each: the enumeration gains a fifth member, and a
+  read this ADR did not admit is serviced between the citation hop and the sighted
+  query.** §2 reads *"The enumeration's two members are `SIGHTED_QUERY` and
+  `CITATION_HOP`"* — already amended by ADR-0230 §1 and ADR-0231 §1 — and §6 reads
+  *"**The citation hop is serviced first, and the sighted query fills what remains.**"*
+  [ADR-0240](0240-the-planner-asks-by-window-and-label-and-an-empty-structured-read-sends-it-back-to-plan.md)
+  §1 adds `STRUCTURED_READ` — a read the planner composes from a period and the labels a
+  record carries, mapped onto the `MemoryStore` reads ADR-0237 ratified — and its §5
+  services it fourth of five, so a reader holding only this ADR would read both sentences
+  more widely than they now hold. That is ADR-0082 §1's test met on each, and the record
+  is owed.
+
+  **Neither ruling is replaced, and §1 is the licence the addition is taken under.** §1's
+  clause — *"A later kind is an **additive entry to this enumeration**, not a second
+  seam. An ADR admitting one adds a member and states that kind's namer, its servicing,
+  its share of §6's budget and its audit fields; it does not introduce a second request
+  object, a second servicing site, a second budget or a second audit"* — is what ADR-0240
+  does, and §4's rule that the vocabulary *"is **added to** and never renamed"* is
+  honoured. §1's own prohibition on widening an admitted kind's meaning is what ADR-0240
+  §1 gives as its first reason for a fifth member rather than a window on the sighted
+  query. §2's statement of what each of its two kinds is, its at-most-one-ask-of-each-kind
+  rule and its closure against un-ADR'd additions bind entire. So does §6's **decision**:
+  the capped read ahead of the uncapped one is the rule ADR-0240 §5 reaches its position
+  by, and the second half of the same sentence — the sighted query as the read that
+  *fills what remains* — is what decides which of two uncapped reads goes last.
+
+  **§9 is not amended and does not move.** ADR-0240 §10 adds two fields per servicing —
+  the axes a structured ask applied, and that ask's outcome as a closed enumeration — and
+  §9's own last clause provides for exactly that: *"These are the fields milestone 2
+  **raises rather than replaces** … it does not rename them, drop them, or start a second
+  audit beside this one."* No field is renamed or dropped, every meaning is kept, one
+  event key and one emission per turn stand, and §9's no-copy rule binds the new kind
+  without qualification — no window, no instant, no person label, no topic label and no
+  query reaches the record. No sentence of §9 becomes false or over-wide, so under
+  ADR-0082 §1 there is nothing to record against it.
+
+  **§12's structured-read deferral is discharged rather than contradicted.** §12 defers
+  *"Structured read keys and hybrid search"* — *"A kind carrying a time window,
+  participants, topics or the person a record is about, mapped onto `MemoryStore.search`
+  filters"* — and fires it *"by `track:memory` ratifying the store read each maps to"*.
+  ADR-0237 is that ratification and it has merged. Firing a deferral is the deferral
+  working, so no record is owed for it; the hybrid-search half is **not** taken and
+  ADR-0240 §14 defers it again by name. §3's namer rule and no-identifier rule, §5's
+  channel scoping and degradation posture, §6's budget of ten and second-budget rule,
+  §7's fourth group, whole-union deduplication, discards-nothing-by-class clause and
+  constructed-once rule, and §8's trigger all bind as ratified and are load-bearing in
+  ADR-0240.
+
+  This ADR's `Status` line carries the leading `Partially superseded by` token, so under
+  ADR-0082 §2 no amendment qualifier is written on it and this note is the whole record.
+  Appended note per ADR-0070 §1; no text below is rewritten. Refs #2133, #1908.
 
 ## Context
 
