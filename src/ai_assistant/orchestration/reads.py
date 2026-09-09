@@ -92,9 +92,11 @@ from ai_assistant.core.errors import AssistantError, MemoryStoreError
 from ai_assistant.core.types import (
     ActionRequest,
     CarriedProvenance,
+    DestinationTrust,
     MemoryKind,
     PermissionDecision,
     PermissionOutcome,
+    PlacementReach,
     QueryRefusal,
     ReadKind,
     SearchRefusal,
@@ -104,6 +106,7 @@ from ai_assistant.core.types import (
     rests_on_recorded_external_content,
 )
 from ai_assistant.orchestration.conversations import BELIEF_KINDS
+from ai_assistant.orchestration.origin import SelectionOrigin
 from ai_assistant.orchestration.retrieval import assemble_by_band
 
 if TYPE_CHECKING:
@@ -113,6 +116,8 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import (
         ActionPolicy,
         AuditTrail,
+        ConversationStore,
+        DestinationTrustStore,
         EgressBinder,
         Fetcher,
         MemoryStore,
@@ -121,6 +126,8 @@ if TYPE_CHECKING:
     )
     from ai_assistant.core.types import (
         BoundEgressCall,
+        CanonicalDestination,
+        ConversationSearchDraw,
         FetchRefusal,
         MemoryRecord,
         ReadAsk,
@@ -268,8 +275,11 @@ class StopReason(StrEnum):
 class SearchDisposition(StrEnum):
     """Why a ``WEB_SEARCH`` ask did not yield records (ADR-0231 §13).
 
-    **A closed enumeration of exactly fifteen members, each valued by its
-    lower-cased name**, and never free text — the shape :class:`TriggerOutcome`,
+    **A closed enumeration of exactly sixteen members, each valued by its
+    lower-cased name** — ADR-0231 §13's fifteen and ADR-0238 §11's
+    :attr:`NOT_ADMITTED`, which supersedes that closure "in that clause's count
+    alone" and leaves every other clause of it standing — and never free text: the
+    shape :class:`TriggerOutcome`,
     :class:`Servicing` and :class:`StopReason` already have in this module, and
     the reason :class:`~ai_assistant.orchestration.origin.SelectionOrigin` is not
     in ``core`` either. **It lives here and not in ``core``** (§13): it crosses no
@@ -322,6 +332,33 @@ class SearchDisposition(StrEnum):
     is serviced second, only the one-record local file precedes it, and at least
     nine of the ten slots therefore always remain — so an operator reading zero
     here is reading the servicing order and not a fault (§11, §18 item 7)."""
+
+    NOT_ADMITTED = "not_admitted"
+    """``ConversationStore.admit_search`` refused this servicing (ADR-0238 §8, §11).
+
+    **The sixteenth member, and this decision adds exactly one** (ADR-0238 §11):
+    "recording that a servicing did not reach a query because ``admit_search``
+    refused". It collapses with no existing member — every other one names a stage
+    the servicing *reached*, and a refused admission reaches none of them: §8 states
+    that where it refuses, "no supply is constructed, no query is composed, no ruling
+    is sought, no credential is read and no channel is opened".
+
+    **Three grounds behind one member, and the site cannot tell them apart.**
+    ``admit_search`` answers ``None`` where the stored ``calls`` have reached the
+    bound, where the id names nothing, and where the conversation is stamped deleted
+    (ADR-0238 §8) — and it answers the same value for each, deliberately, because a
+    user deleting a conversation should not turn a running turn into an error.
+    ADR-0242 §8 records the same limit in terms for the vocabulary it reads this into.
+
+    **The zero bound is this member too, and the split is ADR-0242's and not this
+    one's.** ADR-0242 §8 renders a refusal under a bound of ``0`` as
+    ``SearchNotServiced.SEARCH_DISABLED`` and one under a positive bound as
+    ``NOT_ADMITTED``, discriminated by "the deployment's **own configuration** — a
+    ``Settings`` value the servicing site already holds". That discrimination is at
+    the *rendering* level: the mapping table in that section names one
+    ``SearchDisposition`` for both rows, and §8 closes this enumeration at eighteen
+    with ADR-0231's fifteen, this member and ADR-0241's two. So no second member is
+    minted here."""
 
     COMPOSER_DECLINED = "composer_declined"
     """:attr:`~ai_assistant.core.types.QueryRefusal.DECLINED`, carried across."""
@@ -554,6 +591,15 @@ class ServicedRead:
             A **member of a closed enumeration and never free text**, so there is
             nowhere in this record for a path, a name, an excerpt or a library's
             message to sit.
+        supplied: ADR-0238 §11's first count: how many records this servicing supplied
+            to the composer. Zero where the destination read ``UNCHOSEN``, where no
+            ``WEB_SEARCH`` ask was made, and where the servicing was not admitted.
+        withheld: ADR-0238 §11's second count: how many records §3's filter — which is
+            ``Placement.reach`` and no other axis — kept out of that supply.
+        calls: ADR-0238 §11's third count: this conversation's ``calls`` as
+            ``admit_search`` left them, and zero where no admission was granted.
+            **A count and never an identifier** (§11): the conversation it is about is
+            not in this record, and neither is the bound it was compared against.
         disposition: ADR-0231 §13's one added field: the
             :class:`SearchDisposition` a ``WEB_SEARCH`` ask resolved to, where it
             resolved to one, and ``None`` where the search yielded records or where
@@ -613,6 +659,9 @@ class ServicedRead:
     labels_unresolved: int = 0
     refusal: FetchRefusal | None = None
     disposition: SearchDisposition | None = None
+    supplied: int = 0
+    withheld: int = 0
+    calls: int = 0
     structured_axes: tuple[StructuredAxis, ...] = ()
     structured: StructuredOutcome | None = None
     truncated_kinds: tuple[ReadKind, ...] = ()
@@ -784,10 +833,25 @@ class _Searched:
             yielded records and where it reached the provider and returned none —
             the two cases §13 leaves the field empty for, once this class is only
             constructed for a servicing that carried the ask at all.
+        supplied: ADR-0238 §11's first count: how many records were supplied to the
+            composer. Zero on a destination reading ``UNCHOSEN`` and on every servicing
+            that composed nothing — a count of what this servicing *did*, never of what
+            it might have done.
+        withheld: ADR-0238 §11's second count: how many records §3's filter kept out of
+            the supply, which is ``Placement.reach`` and no other axis. **Counts only**
+            (§11), so there is nowhere here for a record id, a kind or a reach value to
+            sit — an operator reads a rate over a population from it, not a per-turn
+            quantity (ADR-0226 §8).
+        calls: ADR-0238 §11's third count: this conversation's ``calls`` as the
+            admission left them. Zero where no admission was granted, which is the
+            honest reading of a servicing that spent nothing.
     """
 
     records: tuple[MemoryRecord, ...]
     disposition: SearchDisposition | None
+    supplied: int = 0
+    withheld: int = 0
+    calls: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -912,6 +976,209 @@ class ServicedCarriers:
     window_filtered: bool = False
 
 
+@dataclass(slots=True)
+class SearchFooting:
+    """One conversation's ADR-0238 footing, for the turn being serviced.
+
+    **The three facts §5's condition is decided from that live outside this turn** —
+    the destination's recorded trust, the conversation's stored footing flag, and its
+    call allowance — held beside the one fact that lives inside it: which of this
+    turn's records were minted by a ``WEB_SEARCH`` servicing at a destination of
+    recorded trust ``USER_CHOSEN``. It is **per turn** rather than per process, because
+    that last set is, and because the conversation it is about is the turn's.
+
+    **It is a value the loop threads, not a seam.** It names no capability, is
+    registered nowhere and adds no route: ADR-0238 §14 rules that the lane "wires the
+    trust store into the one servicing site and into nothing else, holds no reference
+    to it in any other subsystem, and adds no second caller", and this object is what
+    makes that one site reachable from the one place a turn is run.
+
+    **Every store call it makes is one of the four ADR-0238 admits**, and it makes no
+    other: :meth:`~ai_assistant.core.protocols.DestinationTrustStore.trust_of`, and
+    ``ConversationStore``'s :meth:`admit_search`, :meth:`search_draw` and
+    :meth:`observe_search`. It reads no ``Settings`` — §8 puts the bound in the
+    caller's hands and this object *is* where the caller's judgement about it is
+    carried — holds no clock, and mints nothing.
+
+    Attributes:
+        conversation_id: The conversation this turn runs under.
+        conversations: The durable conversation index, the **same** instance the
+            capture stage holds. ADR-0238 §8 puts the counter and the flag on the
+            conversation record precisely so that one object's own per-conversation
+            exclusion is what makes the increment atomic; a second store over the same
+            rows would serialise nothing (ADR-0074 §9).
+        trust: What the user recorded about destinations (ADR-0238 §1). Consulted
+            twice per servicing and never cached across the composition, for the
+            reason §5 states.
+        destinations: The canonical destination set a search of this deployment would
+            bind to, or **empty** where it connected no search account — which is not
+            a special case, because ADR-0238 §1 answers ``UNCHOSEN`` for an empty
+            sequence and a deployment with no account services no search anyway.
+        max_calls: ``Settings.search_calls_per_conversation``, passed to
+            ``admit_search`` rather than read by it (ADR-0238 §8: "every judgement
+            about what a bound is stays in ``orchestration``").
+    """
+
+    conversation_id: str
+    conversations: ConversationStore
+    trust: DestinationTrustStore
+    destinations: tuple[CanonicalDestination, ...]
+    max_calls: int
+    #: The ids of records **this turn's** ``WEB_SEARCH`` servicings minted at a
+    #: destination of recorded trust ``USER_CHOSEN`` — ADR-0238 §2's third admissible
+    #: population, and the one class of recorded external span §5's third condition
+    #: tolerates. It is a per-turn set because ADR-0231 §16 makes a minted id resolve
+    #: in no store and no later turn reach it: what a later turn has instead is the
+    #: captured episode, which is **not** in this set and is exactly why a
+    #: conversation that searched yesterday is not laundered clean today.
+    minted_user_chosen: set[str] = field(default_factory=set)
+    #: Whether this turn has already folded ``False`` onto the record. §8's early fold
+    #: "writes ``False`` and nothing else, it is idempotent, and repeating it costs
+    #: nothing" — so repeating it is *correct*, and this guard buys a bounded number of
+    #: store writes rather than a property.
+    _lowered: bool = False
+
+    def clean(self, record: MemoryRecord, /) -> bool:
+        """Whether ``record`` is one ADR-0238 §5's third condition tolerates.
+
+        True where the record carries no recorded external span at all, and where the
+        span it carries was minted by one of *this turn's* ``WEB_SEARCH`` servicings at
+        a destination of recorded trust ``USER_CHOSEN``. **Blind to why a record is
+        external** (§5): it is stated over what was minted and where it went, never
+        over the cause of a stamp, which is what ADR-0223 §6 requires of any clause
+        reaching ADR-0181 §5's floor and why no episode-shaped carve-out appears here.
+
+        **It reads a recorded fact and never content** (§5, §12): the predicate is
+        ``rests_on_recorded_external_content`` over the record's own provenance and
+        membership of a set this component built from acts it performed. No model
+        output, no query, no reply and no record's text contributes.
+
+        Args:
+            record: One record in view of this turn.
+
+        Returns:
+            Whether it leaves the conversation's footing intact.
+        """
+        return (
+            not rests_on_recorded_external_content(record.provenance)
+            or record.id in self.minted_user_chosen
+        )
+
+    async def trusted(self) -> DestinationTrust:
+        """What the store records about this deployment's search destination (§1).
+
+        Consulted **before** the supply is built, because ADR-0238 §2 and §3 make it
+        the fact that decides whether records may enter a ``SearchSupply`` at all —
+        and §5 is explicit that "that earlier answer decides only *what may be composed
+        over*, and no clause reads it as deciding what may be sent". The answer that
+        decides the second closed-loop condition is a **separate** call taken at build
+        time; see :meth:`~SearchServicer.service`.
+
+        Returns:
+            The recorded trust, ``UNCHOSEN`` where nothing is recorded. Never raises:
+            ADR-0238 §1 rules the trust ``UNCHOSEN`` "where a record cannot be read",
+            so the one read a policy path depends on fails *closed* by answering.
+        """
+        return await self.trust.trust_of(self.destinations)
+
+    async def admit(self) -> ConversationSearchDraw | None:
+        """Spend one call of this conversation's allowance, or refuse (§8).
+
+        **One atomic step** the store owes — compare, increment, answer — and there is
+        nothing outstanding afterwards to settle, release or reconcile. The draw it
+        answers is deliberately **not** carried forward into §5's third condition: §5
+        forbids that in terms, and :meth:`footing` is what the request is built from.
+
+        Returns:
+            The draw as it stands after the increment, or ``None`` where the bound was
+            reached, the id names nothing, or the conversation is stamped deleted.
+        """
+        return await self.conversations.admit_search(self.conversation_id, max_calls=self.max_calls)
+
+    async def footing(self) -> bool:
+        """§5's **recorded** half, read at the moment the request is built.
+
+        "One read and no disjunction": satisfied where ``search_draw`` answers a draw
+        whose ``all_external_user_chosen`` is true, and by nothing else. ``None`` — an
+        id that names nothing, or a conversation stamped deleted — fails it, which is
+        the fail-closed direction and the reason §8 could delete an earlier revision's
+        second limb.
+
+        **Read here and not earlier**, and no value read earlier in the servicing is
+        reused: a read taken at admission would be separated from the binding by the
+        composition itself, and a fold that committed in between would be ignored by a
+        request built after it. The flag is monotone, so reading it as late as possible
+        is strictly the fail-closed direction.
+
+        Returns:
+            Whether the conversation's stored footing is intact.
+        """
+        draw = await self.conversations.search_draw(self.conversation_id)
+        return draw is not None and draw.all_external_user_chosen
+
+    async def admitted(self, records: Sequence[MemoryRecord], /) -> None:
+        """§8's **early** fold: lower the flag as soon as a dirty span is admitted.
+
+        The trigger is the admission — "the same fact §5's current-turn half is stated
+        over" — and it fires **whether or not that turn ever builds a ``WEB_SEARCH``
+        request**. Folding here rather than at capture puts the ``False`` on the record
+        as early as the fact exists, which narrows the window §8 states from the whole
+        of a turn to a single store write.
+
+        **Only ``False`` is ever written early.** Reporting a turn *clean* stays
+        capture's alone, because only capture sees the turn's final supply; an early
+        true would report a turn clean before it had finished carrying things.
+
+        **A store fault is swallowed**, exactly as ADR-0238 §8 has the store answer
+        rather than raise at the two lifecycle edges: a conversation the user deleted
+        mid-turn must not turn a running turn into an error, and the fold's failure
+        leaves a flag that is *higher* than the truth for this conversation — which is
+        the residue §8 names, bounded by the build-time read that follows it.
+
+        Args:
+            records: The records just admitted to this turn.
+        """
+        if self._lowered or all(self.clean(record) for record in records):
+            return
+        self._lowered = True
+        await self._fold(all_external_user_chosen=False)
+
+    async def observe(self, records: Sequence[MemoryRecord], /) -> None:
+        """§8's capture fold, over the turn's **final** supply.
+
+        "For every turn it captures, ``orchestration`` calls ``observe_search`` with
+        whether **every** recorded external span that turn's final supply carried was
+        minted by a ``WEB_SEARCH`` servicing at a destination of recorded trust
+        ``USER_CHOSEN``" — computed here from records this component holds as data it
+        fetched, by the same predicate and at the same instant as ADR-0223 §1's own
+        value. **Capture's fold remains and is unchanged; the early one is earlier, not
+        instead**, and the two agree because ``observe_search`` folds by **and**.
+
+        Args:
+            records: The turn's final supply.
+        """
+        await self._fold(all_external_user_chosen=all(self.clean(record) for record in records))
+
+    async def _fold(self, *, all_external_user_chosen: bool) -> None:
+        """Fold one observation onto the record, or degrade (§8).
+
+        Raises nothing a turn can see. ``observe_search`` itself "does nothing and
+        raises nothing" for an id that names nothing and for a conversation stamped
+        deleted, so what this catches is a store *fault* — and a turn whose answer the
+        user already has is not failed for a footing write, which is the posture
+        ``ConversationLifecycle.capture`` takes for the record itself.
+
+        Args:
+            all_external_user_chosen: The value to fold in by logical **and**.
+        """
+        try:
+            await self.conversations.observe_search(
+                self.conversation_id, all_external_user_chosen=all_external_user_chosen
+            )
+        except AssistantError:
+            _log.warning("search_footing_fold_degraded", exc_info=True)
+
+
 class SearchServicer:
     """The five contracts one ``WEB_SEARCH`` servicing is answered against (§5, §6).
 
@@ -975,8 +1242,14 @@ class SearchServicer:
         self._now = checked_clock(now, owner="SearchServicer")
         self._id_factory = id_factory
 
-    async def service(  # noqa: PLR0911 — one exit per stage ADR-0231 §9 names as a decline; §13 requires the member to name the stage that produced it, so collapsing any pair would report one stage's outcome as another's
-        self, utterance: str, *, remaining: int, external: bool
+    async def service(  # noqa: C901, PLR0911 — one exit per stage ADR-0231 §9 names as a decline (§13 requires the member to name the stage that produced it, so collapsing any pair would report one stage's outcome as another's), and one parameter per thing ADR-0238 §5's four conditions are decided from
+        self,
+        utterance: str,
+        *,
+        remaining: int,
+        external: bool,
+        footing: SearchFooting,
+        in_view: Sequence[MemoryRecord],
     ) -> _Searched:
         """Compose, bind, rule, record and send — in that order and no other (§11).
 
@@ -1028,11 +1301,20 @@ class SearchServicer:
                 servicing has already contributed (§11). It is written onto the
                 carrier before ``bind`` and is discarded, never merged, if any
                 producer emitted one.
+            footing: This conversation's ADR-0238 footing. Every store call this
+                method makes about the budget or the destination's trust goes through
+                it, and none is made anywhere else.
+            in_view: The turn's pre-servicing supply and every record this servicing
+                has already contributed — **the same data, the same site and the same
+                instant** ``external`` above is computed over (ADR-0238 §5). It is
+                what ADR-0238 §2's supply is drawn from and what §5's current-turn
+                half is decided over.
 
         Returns:
-            The minted records and §13's disposition. The records are empty on
-            every non-yield, and the disposition is ``None`` exactly where the
-            search yielded or reached the provider and returned nothing.
+            The minted records, §13's disposition and ADR-0238 §11's three counts. The
+            records are empty on every non-yield, and the disposition is ``None``
+            exactly where the search yielded or reached the provider and returned
+            nothing.
         """
         if remaining < 1:
             # §11: "Where fewer than one slot remains when the search is reached,
@@ -1043,31 +1325,42 @@ class SearchServicer:
             # precedes it — and stated anyway, as the forward-compatibility guard
             # §11 states in terms for the lane that reorders the kinds.
             return _Searched((), SearchDisposition.NO_BUDGET)
-        # ADR-0238 §2 gives `QueryComposer.compose` one positional `SearchSupply`
-        # where it took the utterance. **This is a signature adaptation and not a
-        # behaviour change**: `records` defaults to the empty tuple, which §2 fixes as
-        # exactly the population a destination of recorded trust `UNCHOSEN` gets — and
-        # no destination on this tree carries `USER_CHOSEN`, because the fact §1
-        # records is set by a user act and no surface offers one yet (§14). So this
-        # composes what `origin/main` composes, byte for byte, and ADR-0231 §3's
-        # utterance-only property holds here exactly as ratified. Choosing *which*
-        # supply a servicing builds — the trust read, the records, the budget and the
-        # closed-loop fold — is the consumer lane's, and this is the whole of what the
-        # contract lane touches in this subsystem.
-        composed = await self._composer.compose(SearchSupply(utterance=utterance))
+        # ADR-0238 §8: **admission first**, before a supply is constructed, a query
+        # composed, a ruling sought, a credential read or a channel opened. It is one
+        # atomic step of the conversation record — compare, increment, answer — and it
+        # spends the call it admits, so there is nothing outstanding afterwards and no
+        # path lowers the draw. §11's sixteenth disposition is what records the refusal.
+        admitted = await footing.admit()
+        if admitted is None:
+            return _Searched((), SearchDisposition.NOT_ADMITTED)
+        calls = admitted.calls
+        # ADR-0238 §2: **which** supply this servicing builds is decided here, from the
+        # destination's recorded trust and from the records this component holds. The
+        # answer decides only what may be composed over — §5 is explicit that "no clause
+        # reads it as deciding what may be sent" — so it is read again below, at the
+        # instant the request is built, and this value reaches no binding.
+        supply, withheld = _search_supply(
+            utterance,
+            in_view,
+            trusted=await footing.trusted() is DestinationTrust.USER_CHOSEN,
+            footing=footing,
+        )
+        composed = await self._composer.compose(supply)
         refusal = composed.refusal
         if refusal is not None:
             # §11: "where the composition returned a `QueryRefusal` there is **no
             # request at all** — no ruling is sought, no channel is opened, and
             # §13's disposition names the refusal". The mapping is total over the
             # vocabulary and injective, so no two causes are collapsed.
-            return _Searched((), QUERY_DISPOSITIONS[refusal])
+            return _Searched((), QUERY_DISPOSITIONS[refusal], len(supply.records), withheld, calls)
         query = composed.query
         if query is None:  # pragma: no cover — `QueryOutcome` admits no such value
             # `QueryOutcome`'s own validator refuses an outcome carrying neither a
             # query nor a refusal, so this is unconstructable for a conforming
             # value and is written for the type checker rather than for a caller.
-            return _Searched((), SearchDisposition.COMPOSER_MALFORMED)
+            return _Searched(
+                (), SearchDisposition.COMPOSER_MALFORMED, len(supply.records), withheld, calls
+            )
         proposal = await self._searcher.request(query)
         if proposal is None:
             # §17: `request` "returns the `ActionRequest` for a composed query, or
@@ -1075,10 +1368,40 @@ class SearchServicer:
             # same provisioning fact a servicer holding no searcher at all reports,
             # under the same member — §13 admits one member for two outcomes of one
             # stage an operator would act on identically.
-            return _Searched((), SearchDisposition.NOT_CONFIGURED)
-        bound = await self._bound(proposal, external=external)
+            return _Searched(
+                (), SearchDisposition.NOT_CONFIGURED, len(supply.records), withheld, calls
+            )
+        # ADR-0238 §5: **the last two values obtained before the request is built**,
+        # with nothing awaited between them and the `EgressBinding`'s construction —
+        # which is the whole of what makes §8's boundary true, the store being unable to
+        # enforce it because `admit_search` does not consult the flag.
+        #
+        # The current-turn half is already in hand and is not a fact another actor can
+        # change under this servicing: it is computed from records this component holds
+        # as data it fetched, at the same instant and over the same data as `external`.
+        # The other two are read **now** — not before `admit_search`, not to decide
+        # whether to search at all, and **not the draw `admit_search` itself answered**
+        # — because the flag is monotone and a fold that commits during the composition
+        # must be seen by a request built after it.
+        current_turn = all(footing.clean(record) for record in in_view)
+        recorded_footing = await footing.footing()
+        trust = await footing.trusted()
+        bound = await self._bound(
+            proposal,
+            external=external,
+            coverage=SelectionOrigin.over(supply.records).coverage,
+            # All four of §5's conditions, and the fourth is the admission this
+            # servicing already holds rather than capacity still unspent: `admit_search`
+            # spent the call it admitted, so a condition reading "the draw leaves room
+            # for one more" would be false for **every** admitted request.
+            closed_loop=(
+                current_turn and recorded_footing and trust is DestinationTrust.USER_CHOSEN
+            ),
+        )
         if bound is None:
-            return _Searched((), SearchDisposition.BINDING_FAILED)
+            return _Searched(
+                (), SearchDisposition.BINDING_FAILED, len(supply.records), withheld, calls
+            )
         # ADR-0152 §1: the request is built from what the seam returned and never
         # from objects held across the call, with no `await` between the two — the
         # runner's own rule at a second call site. `step_id` and `execution_id` are
@@ -1089,7 +1412,9 @@ class SearchServicer:
         )
         recorded = await self._ruled(request)
         if recorded is None:
-            return _Searched((), SearchDisposition.RULING_UNAVAILABLE)
+            return _Searched(
+                (), SearchDisposition.RULING_UNAVAILABLE, len(supply.records), withheld, calls
+            )
         outcome = recorded.ruling.outcome
         if outcome is not PermissionOutcome.ALLOW:
             # §9: the one route to an `ALLOW` is ADR-0193's standing recipient
@@ -1113,6 +1438,9 @@ class SearchServicer:
                 SearchDisposition.RULING_DENY
                 if outcome is PermissionOutcome.DENY
                 else SearchDisposition.RULING_CONFIRM,
+                len(supply.records),
+                withheld,
+                calls,
             )
         # ADR-0021 §1's `authorises` runs inside `ToolCall`'s own validator, so an
         # unauthorised search is unconstructable at the type level — which is
@@ -1126,28 +1454,51 @@ class SearchServicer:
             # `NO_RESULT` maps to **none** — a search that reached the provider and
             # yielded nothing is a completed servicing whose returned count is
             # zero, which ADR-0226 §9 already records.
-            return _Searched((), SEARCH_DISPOSITIONS.get(search_refusal))
-        return _Searched(result.records, None)
+            return _Searched(
+                (), SEARCH_DISPOSITIONS.get(search_refusal), len(supply.records), withheld, calls
+            )
+        # ADR-0238 §2's third admissible population, recorded for **this turn** alone:
+        # a record minted at a destination the user chose is one a later servicing of
+        # this same turn may compose over, and one §5's third condition tolerates in
+        # view. ADR-0231 §16 makes the id resolve in no store and no later turn reach
+        # it, so this set dies with the turn and a captured episode is never in it.
+        if trust is DestinationTrust.USER_CHOSEN:
+            footing.minted_user_chosen.update(record.id for record in result.records)
+        return _Searched(result.records, None, len(supply.records), withheld, calls)
 
-    async def _bound(self, proposal: ActionRequest, *, external: bool) -> BoundEgressCall | None:
+    async def _bound(
+        self,
+        proposal: ActionRequest,
+        *,
+        external: bool,
+        coverage: SpanCoverage,
+        closed_loop: bool,
+    ) -> BoundEgressCall | None:
         """Derive this request's binding, or answer that there is none (§6).
 
         **Both origin facts are stamped here, before the request reaches the seam**,
         and neither is derived from the other (ADR-0233 §4's fifth clause).
         ``planned_with_external_content`` is the caller's ``external``, computed
-        over the selections §11 names. ``coverage`` is
-        :attr:`~ai_assistant.core.types.SpanCoverage.NOT_COVERED`, and it is
-        **computed rather than defaulted**: ADR-0233 §5 puts the value on "the
-        component that composed the call's arguments, from the membership and path
-        character of what it supplied to the operations that produced them", and
+        over the selections §11 names. ``coverage`` is the caller's
+        too, and it is **computed rather than defaulted**: ADR-0233 §5 puts the value
+        on "the component that composed the call's arguments, from the membership and
+        path character of what it supplied to the operations that produced them", and
         what this package supplied to the composer's model call is the turn's own
-        utterance and nothing else. §4 states the consequence in terms — "the
-        composer is supplied no covered content, and its output is therefore not
-        covered content either. Neither §3's second clause … nor its third … has a
-        subject" — which is exactly the state ADR-0233 §4 gives a call covered by
-        nothing. It is **not** the step path's ``MODEL_ON_EVERY_PATH``: that value
-        is what a *supply* drawn from this system's stores makes of arguments, and
-        no store value is in view when this query is written.
+        utterance **and whatever records ADR-0238 §2 admitted to the supply**. So it is
+        ``NOT_COVERED`` for a supply carrying no record — ADR-0231 §4's state,
+        unchanged, and what a destination reading ``UNCHOSEN`` gets, where "the composer
+        is supplied no covered content, and its output is therefore not covered content
+        either" — and ``MODEL_ON_EVERY_PATH`` for one carrying any, which is exactly the
+        class ADR-0238 §7's second exception to ADR-0155 §3's third clause admits: every
+        covered path of a composer's output continues back through the composer's own
+        model call, so ADR-0155 §3's **second** clause has no subject here either
+        (ADR-0238 §7's second clause, in terms).
+
+        **``closed_loop`` is the caller's third carried fact** (ADR-0238 §5), written by
+        ``orchestration`` at the moment the request is built and by nothing else. It is
+        discarded, never merged, if any producer emitted one; no model output
+        contributes to it; and nothing downstream infers, defaults, repairs or
+        recomputes it.
 
         The ``spans`` mapping is empty, which is ADR-0152 §5's named residue at a
         second call site rather than an omission: nothing in this tree records a
@@ -1165,6 +1516,10 @@ class SearchServicer:
                 searcher's own declaration and its ``parameters`` are exactly the
                 origin and the query.
             external: ADR-0181 §4's fact for this request.
+            coverage: ADR-0233 §4's fact for this request, over what was supplied to
+                the composer's model call.
+            closed_loop: ADR-0238 §5's fact for this request — all four conditions,
+                each evaluated at its own instant by the caller.
 
         Returns:
             The derived binding beside the detached call, or ``None`` where the
@@ -1177,7 +1532,8 @@ class SearchServicer:
                 provenance=CarriedProvenance(
                     spans={},
                     planned_with_external_content=external,
-                    coverage=SpanCoverage.NOT_COVERED,
+                    coverage=coverage,
+                    closed_loop=closed_loop,
                 ),
             )
         except AssistantError:
@@ -1291,6 +1647,7 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
     search: SearchServicer | None,
     utterance: str,
     audit: TurnReadAudit,
+    footing: SearchFooting | None = None,
 ) -> ServicedCarriers:
     """Service one emission, once, into the fourth group (ADR-0226 §§2, 6, 7).
 
@@ -1491,6 +1848,13 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
             :attr:`ServicedRead.records` is what the caller appends to the fourth
             group. A turn that services twice appends two, in servicing order
             (ADR-0228 §9).
+        footing: This conversation's ADR-0238 footing — the destination's recorded
+            trust, the conversation's stored flag and its call allowance, beside what
+            **this turn** has minted at a chosen destination. It is **per turn** and
+            the caller builds it, because the conversation a turn runs under is the
+            caller's fact and this function is handed one turn's work. ``None``
+            services no search at all, which is fail-closed: see
+            :func:`_serviced_search`.
 
     Returns:
         :class:`ServicedCarriers`: ADR-0227 §3's hop carrier, ADR-0240 §7's empty-read
@@ -1528,8 +1892,10 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
     # Assigned before the `try`, because ADR-0231 §13's field rides on the failing
     # record too and a fault raised *by* the search leaves the call that would have
     # assigned it unreturned — where the honest value is the empty one §5's
-    # degradation carries (issue #2112).
-    disposition: SearchDisposition | None = None
+    # degradation carries (issue #2112). **ADR-0238 §11's three counts ride the same
+    # way and for the same reason**: they describe a servicing that happened, so a
+    # servicing that raised before it happened reports them zero rather than absent.
+    searched = _Searched((), None)
     try:
         if named is not None:
             # ADR-0230 §7: **first**, ahead of the hop, because this kind is capped
@@ -1552,7 +1918,7 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
         # composed from the utterance alone — which is why the ask is passed whole
         # and the absence of one is answered where every other absence this kind has
         # is (:func:`_serviced_search`).
-        disposition = await _serviced_search(
+        searched = await _serviced_search(
             search,
             _ask_of(request, ReadKind.WEB_SEARCH),
             utterance,
@@ -1560,6 +1926,7 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
             supply=supply,
             reads=reads,
             truncated=truncated,
+            footing=footing,
         )
         if hop is not None:
             reach = await _hop_records(store, hop, supply=supply, reads=reads)
@@ -1611,7 +1978,15 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
             deduplicated=union.deduplicated,
             labels_unresolved=unresolved,
             refusal=refusal,
-            disposition=disposition,
+            disposition=searched.disposition,
+            # ADR-0238 §11's three, per turn and per servicing: how many records were
+            # supplied to the composer, how many §3's filter withheld, and this
+            # conversation's `calls` as the admission left them. **Counts only** — no
+            # record id, no conversation id, no destination, no query text and no
+            # fragment of one is anywhere in this record.
+            supplied=searched.supplied,
+            withheld=searched.withheld,
+            calls=searched.calls,
             structured_axes=axes,
             # ADR-0240 §10: `None` until the branch above assigns one, and assigned
             # eagerly to `NOT_ASKED` where the request carried no such ask — so this
@@ -1697,7 +2072,10 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
             or ServicedRead(
                 kinds=tuple(ask.kind for ask in request.asks),
                 refusal=refusal,
-                disposition=disposition,
+                disposition=searched.disposition,
+                supplied=searched.supplied,
+                withheld=searched.withheld,
+                calls=searched.calls,
                 # **The axes ride on the failing record and the outcome does not**
                 # (ADR-0240 §10), and the asymmetry is the point: "an ask that was
                 # emitted is an ask whichever way the servicing went, and suppressing
@@ -1712,7 +2090,69 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
     return carried
 
 
-async def _serviced_search(  # noqa: PLR0913 — the seam, the ask, the composer's one input, and the three things ADR-0231 §11 states this kind's budget clause over; §7 admits one servicing site and this is that site's fourth kind
+def _search_supply(
+    utterance: str,
+    in_view: Sequence[MemoryRecord],
+    *,
+    trusted: bool,
+    footing: SearchFooting,
+) -> tuple[SearchSupply, int]:
+    """Build ADR-0238 §2's supply for this servicing, and count what §3 withheld.
+
+    **One type, two admissible populations, and a recorded fact decides which**
+    (ADR-0238 §2). Where the destination the servicing would bind to reads
+    ``UNCHOSEN`` the supply carries the utterance and an empty ``records``, so
+    ADR-0231 §3's utterance-only property holds for that destination exactly as
+    ratified — and never by a judgement about the turn, the words or the records.
+
+    **What may enter is closed to three populations** (§2): episodes of this
+    conversation that ``orchestration`` selected into the turn's supply; the
+    ``MemoryRecord`` values the turn's retrieval and episodic supplement selected; and
+    records **this turn's own** ``WEB_SEARCH`` servicings minted at a destination of
+    recorded trust ``USER_CHOSEN``. The first two are what ``in_view`` holds; the third
+    is what :attr:`SearchFooting.minted_user_chosen` records. **Nothing of any other
+    origin enters** — "no record minted at an ``UNCHOSEN`` destination, by a fetch, by a
+    file read, by a reader or by any tool" — and every one of those is a record carrying
+    a recorded external span this turn did not mint at a chosen destination, which is
+    exactly what :meth:`SearchFooting.clean` answers ``False`` for. So the exclusion is
+    stated over one recorded fact rather than over a list of origins a later kind could
+    be added outside.
+
+    **§3's filter is ``Placement.reach`` and no other axis**, read exactly as ADR-0217
+    §1 defines it, with no field, member, tag or band added. It is applied here so the
+    count §11 owes can be taken; the *refusal* is on the type, so a lane that skipped
+    this would build no supply at all rather than a permissive one.
+
+    **No component decides exclusion by inspecting content** (§3), and nothing here
+    reads a record's text, resembles it against anything, or asks a model about it.
+
+    Args:
+        utterance: The turn's own words, unrewritten.
+        in_view: The turn's pre-servicing supply and every record this servicing has
+            already contributed.
+        trusted: Whether the destination this servicing would bind to reads
+            ``USER_CHOSEN`` — the read §2 obliges, taken before the supply is built and
+            deciding only what may be composed over.
+        footing: This conversation's footing, for the one predicate above.
+
+    Returns:
+        The supply, and how many records §3's filter kept out of it.
+    """
+    if not trusted:
+        return SearchSupply(utterance=utterance), 0
+    admissible = [record for record in in_view if footing.clean(record)]
+    return (
+        SearchSupply(
+            utterance=utterance,
+            records=tuple(
+                record for record in admissible if record.placement.reach is PlacementReach.ANYONE
+            ),
+        ),
+        sum(1 for record in admissible if record.placement.reach is not PlacementReach.ANYONE),
+    )
+
+
+async def _serviced_search(  # noqa: PLR0913 — the seam, the ask, the composer's one input, the three things ADR-0231 §11 states this kind's budget clause over, and ADR-0238's footing; §7 admits one servicing site and this is that site's fourth kind
     search: SearchServicer | None,
     ask: ReadAsk | None,
     utterance: str,
@@ -1721,7 +2161,8 @@ async def _serviced_search(  # noqa: PLR0913 — the seam, the ask, the composer
     supply: Sequence[MemoryRecord],
     reads: _Reads,
     truncated: list[ReadKind],
-) -> SearchDisposition | None:
+    footing: SearchFooting | None,
+) -> _Searched:
     """Service one ``WEB_SEARCH`` ask into the fourth group (ADR-0231 §9, §11).
 
     **This kind's whole budget clause is here**, because §11 states it over this
@@ -1783,11 +2224,20 @@ async def _serviced_search(  # noqa: PLR0913 — the seam, the ask, the composer
             slots always remain against a cap of three, so that can only happen for
             a lane that reorders the kinds or raises the file's cap — which is why
             §11 states the clause as a rule rather than as an impossibility.
+        footing: This conversation's ADR-0238 footing, or ``None`` where the caller
+            passed none. **``None`` services no search at all**, and that is
+            fail-closed rather than a fallback: ADR-0238 §8 makes ``admit_search``
+            the gate every search passes, so a path with no conversation to admit
+            against has no admission and composes nothing. No production composition
+            reaches it — ``app/composition.py`` wires the footing unconditionally —
+            and the alternative, searching without spending a call, is the one thing
+            §8 exists to make impossible.
 
     Returns:
-        §13's disposition, or ``None`` in each of the cases §13 leaves the field
-        empty: where no ``WEB_SEARCH`` ask was made, where the search yielded
-        records, and where it reached the provider and returned none.
+        The minted records, §13's disposition and ADR-0238 §11's three counts. The
+        disposition is ``None`` in each of the cases §13 leaves the field empty: where
+        no ``WEB_SEARCH`` ask was made, where the search yielded records, and where it
+        reached the provider and returned none.
 
     Raises:
         _ServicingFailedError: If the searcher raised a fault of its own. Carried to
@@ -1798,17 +2248,32 @@ async def _serviced_search(  # noqa: PLR0913 — the seam, the ask, the composer
         # §13's second absence: "nothing where … no ``WEB_SEARCH`` ask was made".
         # Answered before the deployment is consulted, so a turn nobody asked a
         # search of reads the same on a wired deployment and an unwired one.
-        return None
+        return _Searched((), None)
     if search is None:
-        return SearchDisposition.NOT_CONFIGURED
+        return _Searched((), SearchDisposition.NOT_CONFIGURED)
+    if footing is None:
+        return _Searched((), SearchDisposition.NOT_ADMITTED)
+    # ADR-0238 §5's own words for what this holds: "the turn's pre-servicing supply and
+    # every record this servicing has already contributed", read once here so that
+    # ADR-0181 §4's fact, ADR-0238 §2's supply and §5's current-turn half are computed
+    # from **one** value at **one** instant rather than from three reads that could
+    # disagree.
+    in_view = (*supply, *union.admitted)
+    # ADR-0238 §8's **early** fold, before the admission and therefore before anything
+    # is composed: the trigger is the admission of a disqualifying span to this turn,
+    # and by the servicing order ADR-0231 §11 fixes the local file has already been
+    # admitted by the time this kind is reached. Folding here rather than after the
+    # request is built is what narrows §8's window to a single store write.
+    await footing.admitted(in_view)
     try:
         found = await search.service(
             utterance,
             remaining=union.remaining,
             external=any(
-                rests_on_recorded_external_content(record.provenance)
-                for record in (*supply, *union.admitted)
+                rests_on_recorded_external_content(record.provenance) for record in in_view
             ),
+            footing=footing,
+            in_view=in_view,
         )
     except AssistantError as exc:
         # ADR-0226 §5, and the reason :class:`_ServicingFailedError` exists.
@@ -1832,7 +2297,7 @@ async def _serviced_search(  # noqa: PLR0913 — the seam, the ask, the composer
     reads.note(len(found.records))
     if union.admit(found.records):
         truncated.append(ReadKind.WEB_SEARCH)
-    return found.disposition
+    return found
 
 
 async def _serviced_file(
@@ -2395,6 +2860,15 @@ def emit_read_audit(
                 "labels_unresolved": read.labels_unresolved,
                 "refusal": None if read.refusal is None else read.refusal.value,
                 "disposition": None if read.disposition is None else read.disposition.value,
+                # ADR-0238 §11's three, on the one event and under the one key: no
+                # second audit, no second event key and no new emission point. Counts
+                # only, and the destination's recorded trust is deliberately **not**
+                # here — "a durable fact about a configured account, readable from the
+                # store that holds it, and a per-turn log is not where a deployment's
+                # standing configuration is reported".
+                "supplied": read.supplied,
+                "withheld": read.withheld,
+                "calls": read.calls,
                 "structured_axes": tuple(axis.value for axis in read.structured_axes),
                 "structured": None if read.structured is None else read.structured.value,
                 "truncated_kinds": tuple(kind.value for kind in read.truncated_kinds),

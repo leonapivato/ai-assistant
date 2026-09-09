@@ -209,7 +209,10 @@ class ThresholdActionPolicy:
     * ``reversibility`` at or above ``deny_at_reversibility`` — ``DENY``.
     * an ``egress_binding`` carrying ``planned_with_external_content`` —
       ``CONFIRM``. Not configurable, and the one clause reading the *request*
-      rather than the declaration (ADR-0181 §5).
+      rather than the declaration (ADR-0181 §5). **The clause still fires on a
+      closed-loop request** (ADR-0238 §5, §6): what ADR-0238 moves is whether route
+      (b) is *reachable* for such a request, not whether this row applies, so the
+      outcome is still a ``CONFIRM`` in the absence of a covering grant.
     * nothing applies — ``ALLOW``.
 
     **The thresholds cannot configure it out of conformance.** Each clause is a
@@ -474,11 +477,23 @@ class ThresholdActionPolicy:
         * the request is an egress call, so its ``egress_binding`` is not
           ``None``. A request carrying none names no account and no destination
           set, and no grant can cover it;
-        * its binding does not carry ``planned_with_external_content``. §4's bar
-          is the ``ActionPolicy`` contract's and is applied **here** rather than
-          on the seam, so ``covering`` never has to read the fact and the two
-          statements cannot drift apart. A call carrying it keeps its
-          confirmation whatever grants exist;
+        * its binding does not carry ``planned_with_external_content``, **or it
+          carries ``closed_loop``** (ADR-0238 §6). §4's bar is the ``ActionPolicy``
+          contract's and is applied **here** rather than on the seam, so ``covering``
+          never has to read the fact and the two statements cannot drift apart. A
+          call carrying the taint keeps its confirmation whatever grants exist —
+          **unless** it is one ADR-0238 §5 makes closed-loop, which is the one
+          exception this corpus admits and which that section states over four
+          conditions checked per request from recorded values: the kind is
+          ``WEB_SEARCH``, the destination's recorded trust is ``USER_CHOSEN``, every
+          recorded external span the conversation has carried was minted by a
+          ``WEB_SEARCH`` servicing at such a destination, and the request holds an
+          admission against the conversation's call budget. **This policy re-derives
+          none of them** (§5): "no ``ActionPolicy`` acquires a store handle, a trail
+          read, a grant seam or a conversation identity in order to check the four
+          conditions", and it reads the one fact ``orchestration`` wrote onto the
+          binding — the same trust boundary this corpus already accepts for
+          ``planned_with_external_content`` itself;
         * the outcome is ``CONFIRM``. A ``DENY`` is not something a grant
           converts, and an ``ALLOW`` needs no grant;
         * and the **only** clause that fired is :data:`_DISCLOSURE_FLOOR`. That
@@ -491,7 +506,12 @@ class ThresholdActionPolicy:
             fired: Every clause of the table that applies to its declaration.
             outcome: The most restrictive outcome those clauses reach.
             external: Whether the binding records that the call was planned over
-                external content.
+                external content. Read beside the binding's own ``closed_loop``,
+                because ADR-0238 §6 supersedes ADR-0181 §5's second clause and
+                ADR-0193 §4's first clause **for a closed-loop request alone**, and
+                for no other request of any kind: an email, a fetch, a tool call and
+                a search to an ``UNCHOSEN`` destination in the very same conversation
+                each keep the floor exactly as written (ADR-0238 §5's last clause).
 
         Returns:
             Whether to perform the one lookup.
@@ -500,7 +520,7 @@ class ThresholdActionPolicy:
         return (
             self._grants is not None
             and binding is not None
-            and not external
+            and (not external or binding.closed_loop)
             and outcome is PermissionOutcome.CONFIRM
             and fired == [_DISCLOSURE_FLOOR]
         )

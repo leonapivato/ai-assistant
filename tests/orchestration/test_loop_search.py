@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import itertools
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Final
@@ -53,6 +54,7 @@ from test_engine import (
     CAPABILITY,
     EGRESS_SCHEMA,
     PATIENT,
+    SEARCH_DESTINATIONS,
     Harness,
     OneStepPlanner,
     bound_binder,
@@ -78,6 +80,8 @@ from ai_assistant.core.types import (
     CostBasis,
     CurrentContext,
     DestinationProtocol,
+    DestinationTrust,
+    DestinationTrustRecord,
     Disposition,
     EgressBinding,
     EpisodicMemory,
@@ -110,6 +114,7 @@ from ai_assistant.orchestration.reads import (
     READ_BUDGET,
     SEARCH_DISPOSITIONS,
     SearchDisposition,
+    SearchFooting,
     SearchServicer,
     TurnReadAudit,
     _Reads,
@@ -122,7 +127,9 @@ from ai_assistant.planning.composer import ModelBackedQueryComposer
 from ai_assistant.testing import (
     FakeAuditTrail,
     FakeContextProvider,
+    FakeConversationStore,
     FakeDeferralStore,
+    FakeDestinationTrustStore,
     FakeEgressBinder,
     FakeFeedbackProcessor,
     FakeMemoryPolicy,
@@ -373,12 +380,89 @@ def _servicer(  # noqa: PLR0913 — one knob per contract ADR-0231 §6 names; th
     )
 
 
+def _footing(
+    *,
+    conversations: FakeConversationStore | None = None,
+    trust: FakeDestinationTrustStore | None = None,
+    conversation_id: str = "c-1",
+    max_calls: int = 8,
+    trusted: bool = False,
+) -> SearchFooting:
+    """This conversation's ADR-0238 footing, chosen or not.
+
+    ``trusted`` is the one knob that decides §5's second condition: with it the store
+    holds a live record over the searcher's own origin and ``trust_of`` answers
+    ``USER_CHOSEN``; without it the store is empty, which is `origin/main`'s state and
+    ADR-0238's own exit note for the tree its lanes merge into.
+    """
+    chosen = DestinationTrustRecord(
+        id="t-1",
+        destinations=SEARCH_DESTINATIONS,
+        trust=DestinationTrust.USER_CHOSEN,
+        established_at=_NOW - timedelta(days=1),
+    )
+    store = FakeDestinationTrustStore([chosen] if trusted else []) if trust is None else trust
+    return SearchFooting(
+        conversation_id=conversation_id,
+        conversations=(
+            FakeConversationStore(now=_clock, new_id=lambda: conversation_id)
+            if conversations is None
+            else conversations
+        ),
+        trust=store,
+        destinations=SEARCH_DESTINATIONS,
+        max_calls=max_calls,
+    )
+
+
+async def _admitted(**knobs: Any) -> SearchFooting:
+    """A footing over a conversation that has been **begun** (ADR-0074 §2).
+
+    ``admit_search`` creates nothing (ADR-0238 §8), so a footing whose conversation was
+    never started refuses every servicing — correctly, and uselessly for a case about a
+    later stage. Every case that drives ``service_read_request`` directly takes its
+    footing from here, which is the state ``Engine._pass`` has already established by
+    the time the loop is entered.
+    """
+    footing = _footing(**knobs)
+    await footing.conversations.start()
+    return footing
+
+
+@dataclass
+class _Turns:
+    """A loop beside the conversation its turns run under.
+
+    ``Engine._pass`` calls ``ConversationLifecycle.begin`` before the turn's work "so
+    the id exists whatever the turn does", and ADR-0238 §8 rests the whole budget on
+    that ordering: ``admit_search`` **creates nothing**, so a turn whose conversation was
+    never started is refused at admission exactly as one whose conversation was deleted
+    is. This wrapper is that ordering, so every case below drives the servicing site the
+    way a production turn reaches it rather than against a conversation that does not
+    exist.
+    """
+
+    loop: LearningLoop
+    footing: SearchFooting
+    started: bool = False
+
+    async def respond(self, utterance: str, **kwargs: Any) -> RespondedTurn:
+        """Begin the conversation once, then run one turn of it."""
+        if not self.started:
+            self.started = True
+            await self.footing.conversations.start()
+        return await self.loop.respond(
+            utterance, conversation_id=self.footing.conversation_id, **kwargs
+        )
+
+
 def _loop(
     *,
     planner: Any = None,
     search: SearchServicer | None = None,
     memory: FakeMemoryStore | None = None,
-) -> LearningLoop:
+    footing: SearchFooting | None = None,
+) -> _Turns:
     """A loop over canonical fakes, with the servicer a case supplies (or none).
 
     The episodic supplement is **off**, for ``test_loop_fetch.py``'s reason: a case's
@@ -386,21 +470,26 @@ def _loop(
     reading rather than a subtraction.
     """
     store = memory if memory is not None else FakeMemoryStore(now=_clock)
-    return LearningLoop(
-        context=FakeContextProvider(),
-        memory=store,
-        writes=MemoryWriteStage(
-            writer=FakeMemoryWriter(store=store, policy=FakeMemoryPolicy(), now=_clock),
-            deferrals=FakeDeferralStore(now=_clock),
+    held = _footing() if footing is None else footing
+    return _Turns(
+        loop=LearningLoop(
+            context=FakeContextProvider(),
+            memory=store,
+            writes=MemoryWriteStage(
+                writer=FakeMemoryWriter(store=store, policy=FakeMemoryPolicy(), now=_clock),
+                deferrals=FakeDeferralStore(now=_clock),
+            ),
+            planner=planner if planner is not None else FakePlanner(now=_clock),
+            registry=FakeToolRegistry(),
+            feedback=FakeFeedbackProcessor(),
+            search=search,
+            footing=lambda _: held,
+            retrieval_limit=30,
+            episodic_limit=0,
+            now=_clock,
+            id_factory=lambda: "goal-1",
         ),
-        planner=planner if planner is not None else FakePlanner(now=_clock),
-        registry=FakeToolRegistry(),
-        feedback=FakeFeedbackProcessor(),
-        search=search,
-        retrieval_limit=30,
-        episodic_limit=0,
-        now=_clock,
-        id_factory=lambda: "goal-1",
+        footing=held,
     )
 
 
@@ -670,6 +759,7 @@ async def test_the_composers_model_is_shown_the_utterance_and_no_supply_span() -
         search=_servicer(composer=ModelBackedQueryComposer(model), granted=True),
         utterance=_ASK,
         audit=audit,
+        footing=await _admitted(),
     )
 
     assert model.call_count == 1
@@ -706,6 +796,7 @@ async def test_the_searcher_receives_the_composers_output_byte_for_byte() -> Non
         search=_servicer(composer=composer, searcher=_CostedSearcher(inner), granted=True),
         utterance=_ASK,
         audit=TurnReadAudit(),
+        footing=await _admitted(),
     )
 
     assert composer.utterances == [_ASK], "the composer saw the turn's own words"
@@ -741,6 +832,7 @@ async def test_a_refused_composition_reaches_the_searcher_not_at_all() -> None:
         ),
         utterance=_ASK,
         audit=audit,
+        footing=await _admitted(),
     )
 
     assert inner.requested == [], "no request was proposed"
@@ -769,6 +861,7 @@ async def test_no_span_of_the_supply_reaches_any_value_the_searcher_received() -
         search=_servicer(searcher=_CostedSearcher(inner), granted=True),
         utterance=_ASK,
         audit=TurnReadAudit(),
+        footing=await _admitted(),
     )
 
     assert inner.requested != [], "the searcher was reached at all"
@@ -846,7 +939,7 @@ async def test_with_no_slot_remaining_nothing_is_composed_and_nothing_is_ruled_o
 
     found = await _servicer(
         composer=composer, searcher=_CostedSearcher(inner), trail=trail, granted=True
-    ).service(_ASK, remaining=0, external=False)
+    ).service(_ASK, remaining=0, external=False, footing=await _admitted(), in_view=())
 
     assert found.disposition is SearchDisposition.NO_BUDGET
     assert found.records == ()
@@ -873,7 +966,7 @@ async def test_the_budget_admits_the_records_that_fit_and_no_more() -> None:
     union = _Union(held=set(), budget=2)
     truncated: list[ReadKind] = []
 
-    disposition = await _serviced_search(
+    searched = await _serviced_search(
         _servicer(searcher=_CostedSearcher(FakeWebSearcher(results=results)), granted=True),
         ReadAsk(kind=ReadKind.WEB_SEARCH),
         _ASK,
@@ -881,9 +974,10 @@ async def test_the_budget_admits_the_records_that_fit_and_no_more() -> None:
         supply=(),
         reads=_Reads(),
         truncated=truncated,
+        footing=await _admitted(),
     )
 
-    assert disposition is None, "the search yielded, so §13's field stays empty"
+    assert searched.disposition is None, "the search yielded, so §13's field stays empty"
     assert [record.content for record in union.admitted] == list(results[:2]), (
         "exactly the slots that remain, in the order §10 minted them"
     )
@@ -902,10 +996,16 @@ def test_the_three_vocabularies_are_closed_at_the_sizes_adr_0231_fixes() -> None
     "``QueryRefusal`` holds exactly its four members, ``SearchRefusal`` exactly its
     six, and ``SearchDisposition`` exactly its fifteen." Over the enums rather than
     over a list of names, so a member added without an arm below fails here first.
+
+    **Sixteen, since ADR-0238 §11**, which supersedes §13's closure "in that clause's
+    count alone": the fifteen it names, their values, their injective mapping, the
+    no-message rule and its exclusion of ``NO_RESULT`` all stand entire, and one member
+    is added for a servicing ``admit_search`` refused. ADR-0241 §8 closes the
+    enumeration at **eighteen** and the two it adds are that lane's, not this one's.
     """
     assert len(QueryRefusal) == 4
     assert len(SearchRefusal) == 6
-    assert len(SearchDisposition) == 15
+    assert len(SearchDisposition) == 16
     assert all(member.value == member.name.lower() for member in SearchDisposition), (
         "each valued by its lower-cased name, as every closed vocabulary here is"
     )
@@ -936,7 +1036,11 @@ def test_every_refusal_maps_to_a_distinct_disposition_and_no_result_maps_to_none
         SearchDisposition.RULING_CONFIRM,
         SearchDisposition.RULING_DENY,
         SearchDisposition.RULING_UNAVAILABLE,
-    }, "and the six members no refusal vocabulary supplies are the servicer's own stages"
+        # ADR-0238 §11's sixteenth, and it is the servicer's own stage exactly as the
+        # six above are: no refusal vocabulary supplies it, because the stage it names
+        # runs **before** a composer or a searcher is reached at all.
+        SearchDisposition.NOT_ADMITTED,
+    }, "and the seven members no refusal vocabulary supplies are the servicer's own stages"
 
 
 # --------------------------------------------------------------------------- #
@@ -1371,6 +1475,7 @@ async def test_the_disposition_rides_on_a_failing_record_too() -> None:
         search=_servicer(granted=False),
         utterance=_ASK,
         audit=audit,
+        footing=await _admitted(),
     )
 
     [entry] = audit.servicings
@@ -1749,6 +1854,7 @@ async def test_the_degradation_line_carries_the_class_and_no_tier_1_value(
         ),
         utterance=utterance,
         audit=TurnReadAudit(),
+        footing=await _admitted(),
     )
 
     written = capsys.readouterr().out

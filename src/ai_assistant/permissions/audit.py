@@ -3234,7 +3234,8 @@ def _check_standing_shape(decision: PermissionDecision) -> None:
         InvalidAuthorisationError: If a **resolving** ``ALLOW`` carries an
             ``authorised_subject``; or if a route-(b) egress decision's binding
             records no origin, records that the call was planned over external
-            content, or carries no ``authorised_subject`` to check.
+            content **without recording that it was closed-loop** (ADR-0238 §6), or
+            carries no ``authorised_subject`` to check.
     """
     ruling = decision.ruling
     if decision.resolves is not None:
@@ -3256,7 +3257,26 @@ def _check_standing_shape(decision: PermissionDecision) -> None:
             f"covers such a call (ADR-0193 §2, §6)"
         )
         raise InvalidAuthorisationError(msg)
-    if binding.planned_with_external_content:
+    if binding.planned_with_external_content and not binding.closed_loop:
+        # ADR-0238 §6 supersedes ADR-0193 §6's eighth-check clause **in one limb, for a
+        # closed-loop request alone**: the seventh limb becomes "whose
+        # ``planned_with_external_content`` is ``False``, **or** whose ``closed_loop``
+        # is ``True``". The other seven are untouched — the outstanding-grant read, both
+        # ends of liveness, tool equality, account equality, destination-set containment
+        # and the recomputed ``subject_digest`` — and each is still taken over the record
+        # the store returned rather than over the decision's account of it.
+        #
+        # **What this validates is the fact on the binding and not the conditions behind
+        # it** (§6). This trail holds no conversation store, no trust store and no
+        # supply; ADR-0193 §6's "nothing is taken on trust" is stated over the *grant*,
+        # which it can and does re-read, and the four conditions are ``orchestration``'s
+        # to compute at the one site §5 names — exactly as
+        # ``planned_with_external_content`` is, which the trail has never revalidated
+        # either.
+        #
+        # **The ``OriginUnrecordedBinding`` arm above stays refused by name** (§6): such
+        # a binding carries no ``closed_loop``, so it never reaches this line and no
+        # lane reads an unrecorded origin as a closed loop.
         msg = (
             f"decision {decision.id!r} rests on a standing authorisation but records a "
             f"call planned over external content; route (a) — a decision of the user "

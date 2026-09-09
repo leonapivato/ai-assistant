@@ -7835,6 +7835,13 @@ class Engine:
             history_degraded=history.degraded,
             narrow=supply,
             operation=operation,
+            # ADR-0238 §8: the conversation this turn's budget and footing are the
+            # record of. It is passed and never derived — this pass already began the
+            # conversation above, so the id exists whatever the turn does — and the loop
+            # does one thing with it: build the footing the servicing site reads. No
+            # other stage of this method acquires a conversation identity it did not
+            # already hold (ADR-0181 §5's third clause, ADR-0097 §7).
+            conversation_id=conversation.id,
         )
         turn = responded.turn
         hop_reached = responded.hop_reached

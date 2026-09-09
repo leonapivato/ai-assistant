@@ -50,9 +50,11 @@ from ai_assistant.core.types import (
     Attestation,
     BeliefBand,
     BeliefSummary,
+    CanonicalDestination,
     ContinuationToken,
     CostBasis,
     DataTier,
+    DestinationProtocol,
     Disposition,
     EgressBinding,
     EpisodicMemory,
@@ -107,6 +109,7 @@ from ai_assistant.orchestration import (
     QuestionStage,
     RecipientGrantOperations,
     RoutingStage,
+    SearchFooting,
     SearchServicer,
     StepExecutor,
     StepRunner,
@@ -125,12 +128,14 @@ from ai_assistant.orchestration.loop import LearningLoop
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.speech import DEFAULT_MAX_SPOKEN_AUDIO_BYTES
 from ai_assistant.testing import (
+    DEFAULT_SEARCH_ORIGIN,
     FakeActionPolicy,
     FakeAuditTrail,
     FakeConnectionProvisioner,
     FakeContextProvider,
     FakeConversationStore,
     FakeDeferralStore,
+    FakeDestinationTrustStore,
     FakeEgressBinder,
     FakeFeedbackProcessor,
     FakeMemoryPolicy,
@@ -510,6 +515,19 @@ class _Default:
 _DEFAULT: Final = _Default()
 
 
+#: The canonical destination set a search of this harness's deployment binds to
+#: (ADR-0238 §2, §5). ``tools/web_search.py`` declares the ``origin`` argument
+#: ``x-egress-destination: "https"``, so a search binding's spans carry exactly this one
+#: destination and ``EgressBinding.canonical_destination_set`` answers exactly this
+#: tuple — which ``tests/app/test_search_destinations.py`` asserts against a binding the
+#: real seam derived rather than leaving as a claim here.
+SEARCH_DESTINATIONS: Final = (
+    CanonicalDestination(
+        protocol=DestinationProtocol.HTTPS, canonical=f"{DEFAULT_SEARCH_ORIGIN}:443"
+    ),
+)
+
+
 class Harness:
     """A wired :class:`Engine` and the fakes behind it, for assertions."""
 
@@ -524,6 +542,15 @@ class Harness:
         recipient_grants: RecipientGrantStore | None = None,
         memory: FakeMemoryStore | None = None,
         conversation_store: FakeConversationStore | None = None,
+        # ADR-0238's two knobs, so an engine-level case can drive the closed-loop
+        # condition end to end — which is the only level it *can* be driven at: §5's
+        # third condition is stated over a conversation's recorded turns, and no
+        # loop-level case has one. `destination_trust` empty is `origin/main`'s state
+        # and ADR-0238's own exit note (no destination reads `USER_CHOSEN`, so nothing
+        # is closed-loop); `search_calls` is `Settings.search_calls_per_conversation`,
+        # passed to `admit_search` rather than read by it.
+        destination_trust: FakeDestinationTrustStore | None = None,
+        search_calls: int = 8,
         closers: Sequence[object] = (),
         loop_id_factory: Callable[[], str] | None = None,
         feedback: object | None = None,
@@ -619,6 +646,9 @@ class Harness:
         # composition root does. Two unrelated fakes would be a composition nothing
         # builds: capture would write into one store and ``forget`` would destroy from
         # another, so every cascade case would pass vacuously.
+        self.destination_trust = (
+            FakeDestinationTrustStore() if destination_trust is None else destination_trust
+        )
         self.archive = FakeTranscriptArchive(now=lambda: AT)
         self.conversations = ConversationLifecycle(
             conversations=self.conversation_store,
@@ -743,6 +773,17 @@ class Harness:
             registry=self.invoker,
             fetcher=fetcher,  # type: ignore[arg-type]  # the harness's own heterogeneous knobs
             search=search,
+            # ADR-0238 §14: the trust store wired into the one servicing path and into
+            # nothing else, over the **same** `ConversationStore` the capture stage
+            # holds — the composition root's own discipline, because §8 rests the
+            # increment's atomicity on that one object's per-conversation exclusion.
+            footing=lambda conversation_id: SearchFooting(
+                conversation_id=conversation_id,
+                conversations=self.conversation_store,
+                trust=self.destination_trust,
+                destinations=SEARCH_DESTINATIONS,
+                max_calls=search_calls,
+            ),
         )
         runner = StepRunner(
             plans=self.plans,
