@@ -1,6 +1,6 @@
 # 242. The act that trusts a destination has its own surface, and a search that did not happen is explained in the reply
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-09-09
 - **Partially supersedes** [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
   — **§9's third clause, and nothing else in that ADR.** That clause reads *"The composing
@@ -13,8 +13,8 @@
   recorded `ALLOW`; the servicer still asks the user nothing and parks nothing; no lane
   makes a search reachable by weakening its declaration; and the one route to an `ALLOW` is
   still ADR-0193's standing recipient grant. §13's audit, §19's deferrals and every other
-  section stand entire, and the sixteen-member enumeration ADR-0238 §11 left is not widened
-  here.
+  section stand entire, and the `SearchDisposition` enumeration ADR-0241 §8 leaves closed at
+  eighteen is not widened here.
 - **Partially supersedes** [ADR-0235](0235-the-establishing-act-rides-an-answer-to-a-confirmation-live-or-recorded-and-a-refused-search-reaches-the-user-as-history-and-not-as-work.md)
   — **§8's first clause, and nothing else in that ADR.** That clause reads *"The message
   that a search was refused is `grantable_decisions`' listing and the act offered beside it,
@@ -102,9 +102,11 @@ offered the act without saying when it is needed would be a control nobody finds
   type of the exception** and `_render_recipient_grant_outcome` reads it **from the carrier on
   `TurnOutcome`**; neither parses a message and neither reads a store back. That pair is the
   precedent this ADR follows twice.
-- **`SearchDisposition` has fifteen members** (`orchestration/reads.py`), values equal to
-  their lower-cased names, and ADR-0238 §11 adds the sixteenth for a servicing `admit_search`
-  refused. It lives in `orchestration` because it crosses no subsystem boundary, and the
+- **`SearchDisposition` has fifteen members in the tree** (`orchestration/reads.py`), values
+  equal to their lower-cased names. **Three more are ratified and unlanded**: ADR-0238 §11's
+  sixteenth, for a servicing `admit_search` refused, and ADR-0241 §§4 and 8's
+  `DEADLINE_EXPIRED` and `SEARCH_FAILED`, which close that enumeration at **eighteen** — *"these
+  two and no others"*. §8 below maps all eighteen. It lives in `orchestration` because it crosses no subsystem boundary, and the
   audit writes it as `servicings[].disposition` under the one event key `turn_read_request`.
 - **One carrier reaches the composing stage today and it is a bare `bool`.**
   `Composer.compose` takes `stopped_while_asking: bool = False`, ADR-0228 §10's fact,
@@ -180,9 +182,9 @@ It decides no fact about a destination — ADR-0238 §1 owns the vocabulary, the
 store and the rule that a model never touches any of them. It decides no budget, no ceiling
 and no monetary policy — ADR-0238 §8, §9 and §10 own those and #2116 stays where §9 put it.
 It decides nothing about **how a search comes to be interrupted**: ADR-0241 (lane L1-ADR of
-this batch, running in parallel) decides that a declared bound reaches `WebSearcher.search`
-and that an expiry is its own `SearchDisposition` member; §10 below states the seam in terms
-and takes neither half of it. It adds no member to `DestinationTrustStore`, `AuditTrail`,
+this batch, ratified and merged 2026-09-09) decides that a declared bound reaches
+`WebSearcher.search`, that an expiry is its own `SearchDisposition` member, and how an
+interrupted call is accounted; §10 below states the seam in terms and takes none of it. It adds no member to `DestinationTrustStore`, `AuditTrail`,
 `RecipientGrantStore`, `ActionPolicy` or `EgressBinder`. It adds no `Settings` field. And it
 does not decide what the *browser* does, which is ADR-0177's, deferred by name in §6 with the
 trigger that fires it.
@@ -757,10 +759,12 @@ gains nothing the user could not already have deduced from having asked the ques
 > | `RULING_CONFIRM`, binding carried `planned_with_external_content` `False` | `AUTHORISATION_AWAITED` |
 > | `RULING_CONFIRM`, binding carried `planned_with_external_content` `True`, `trust_of` answered `UNCHOSEN` | `TRUST_MISSING` |
 > | `RULING_CONFIRM`, binding carried `planned_with_external_content` `True`, `trust_of` answered `USER_CHOSEN` | `UNAVAILABLE` |
-> | `NOT_CONFIGURED`, `NO_BUDGET`, `COMPOSER_DECLINED`, `COMPOSER_UNAVAILABLE`, `COMPOSER_MALFORMED`, `COMPOSER_TOO_LONG`, `BINDING_FAILED`, `RULING_UNAVAILABLE`, `TRANSPORT_FAILED`, `PROVIDER_REFUSED`, `RESPONSE_TOO_LARGE`, `UNATTESTED` | `UNAVAILABLE` |
+> | `DEADLINE_EXPIRED` (ADR-0241 §4) | `INTERRUPTED` |
+> | `NOT_CONFIGURED`, `NO_BUDGET`, `COMPOSER_DECLINED`, `COMPOSER_UNAVAILABLE`, `COMPOSER_MALFORMED`, `COMPOSER_TOO_LONG`, `BINDING_FAILED`, `RULING_UNAVAILABLE`, `TRANSPORT_FAILED`, `PROVIDER_REFUSED`, `RESPONSE_TOO_LARGE`, `UNATTESTED`, `SEARCH_FAILED` (ADR-0241 §8) | `UNAVAILABLE` |
 >
-> That is all sixteen members ADR-0238 §11 leaves the enumeration closed at, and `INTERRUPTED`
-> is reached by no disposition in this table (§10).
+> That is all **eighteen** members ADR-0241 §8 leaves the enumeration closed at — ADR-0231
+> §13's fifteen, ADR-0238 §11's sixteenth, and ADR-0241's two — and every one of them is
+> mapped.
 
 > **Normative.** A `SearchDisposition` member minted by a **later** ADR maps to `UNAVAILABLE`
 > unless that ADR's own text maps it elsewhere. The default is the least-claiming member —
@@ -929,32 +933,38 @@ review found an earlier draft doing.
 
 ### 10. The seam with ADR-0241, stated in terms
 
-> **Normative.** **ADR-0241 decides when a search is interrupted; this ADR decides what the
-> user is told when one was.** ADR-0241 (lane L1-ADR of batch #2178, running in parallel)
-> decides how a declared bound reaches `WebSearcher.search`, that an expiry is reported as its
-> own `SearchRefusal`/`SearchDisposition` member rather than `TRANSPORT_FAILED`, and how an
-> interrupted call is accounted. **This ADR takes none of that** and no lane cites it toward a
-> deadline, a `WebSearcher` argument, a cancellation posture or an accounting rule.
+> **Normative.** **ADR-0241 decides when a search is interrupted and when the searcher
+> failed; this ADR decides what the user is told in each case.** ADR-0241 — ratified and
+> merged on 2026-09-09, and the base this ADR now sits on — decides how a declared bound
+> reaches `WebSearcher.search`, that an expiry is reported as `DEADLINE_EXPIRED` rather than
+> `TRANSPORT_FAILED`, that a fault raised out of the seam after the ruling is `SEARCH_FAILED`,
+> and how an interrupted call is accounted. **This ADR takes none of that** and no lane cites
+> it toward a deadline, a `WebSearcher` argument, a cancellation posture or an accounting rule.
 
-> **Normative.** `INTERRUPTED` is minted here with its rendering (§8, §9) and **no
-> `SearchDisposition` member maps to it under this ADR**. The member ADR-0241 mints maps to
-> `INTERRUPTED` by **ADR-0241's own text or by the lane implementing it in the same change**,
-> which is §8's default rule applied deliberately: until that mapping exists the member is
-> unreachable, and until then an interrupted search reaches the user as `UNAVAILABLE` — the
-> least-claiming member — rather than as a wrong reason.
+> **Normative.** **Both of ADR-0241's members are mapped here, by name, in §8's table** —
+> `DEADLINE_EXPIRED` to `INTERRUPTED` and `SEARCH_FAILED` to `UNAVAILABLE` — rather than left
+> to §8's default or to a later lane. That is the seam this section fixed while ADR-0241 was
+> unlanded, discharged now that its text is ratified: it names the members, so this ADR maps
+> them, and neither ADR carries a clause the other has to complete. **`SEARCH_FAILED` is
+> `UNAVAILABLE` and not `INTERRUPTED`** because ADR-0241 §8 makes it *"the searcher itself
+> raised a fault after the ruling"* — a store, ledger or authorisation fault the user has no
+> act for — while an expiry is a search that was begun and stopped, which is what
+> `INTERRUPTED`'s statement says.
 
-> **Normative.** The implementing lane of **this** ADR implements no producer for
-> `INTERRUPTED`, no timeout, no deadline and no cancellation, and tests it only as an arm over
-> a member it constructs directly (§15). A lane that found itself needing to decide when a
-> search is late has left this ADR's fence.
+> **Normative.** The implementing lane of **this** ADR implements no producer for either
+> member, no timeout, no deadline and no cancellation: `DEADLINE_EXPIRED` and `SEARCH_FAILED`
+> are ADR-0241's implementing lane's to emit, and this lane's arms construct the dispositions
+> directly (§15). A lane that found itself needing to decide when a search is late has left
+> this ADR's fence.
 
-**Minting the member here rather than leaving it to ADR-0241 is the smaller coupling of the
-two available.** The alternative was for ADR-0241 to add a `SearchNotServiced` member in its
-own text, which would make a vocabulary this ADR closes at eight open to an ADR that is
-deciding a different question — and would leave the two ADRs racing to define the same
-enumeration. What ADR-0241 needs from this one is a member to map to and a sentence for it;
-what this one needs from ADR-0241 is the disposition and nothing else. Neither ADR blocks the
-other, and neither can land a half of the pair that does not compile.
+**The two ADRs were written in parallel and neither had to complete the other, which is what
+the seam bought.** ADR-0241 needed a member to map to and a sentence for it; this one needed
+the disposition names and nothing else. The alternative — ADR-0241 adding a
+`SearchNotServiced` member in its own text — would have opened a vocabulary this ADR closes
+at eight to an ADR deciding a different question, and left the two racing to define one
+enumeration. As it fell out ADR-0241 merged first, so §8's table names its members outright
+and §8's default rule stands unused, waiting for the nineteenth disposition rather than for
+this one.
 
 ### 11. The audit, `PROTOCOL_VERSION`, and the versions that do not move
 
@@ -1256,7 +1266,7 @@ other, and neither can land a half of the pair that does not compile.
 > `DuplicateDestinationTrustError` is raised and rendered as *already chosen* on a second act
 > over one live set; an arm that `revoke_destination_trust` answers `False` for an unknown and
 > for an already-revoked id and writes nothing; an arm that the mapping table in §8 is
-> **total over all sixteen `SearchDisposition` members**, failing if a member is added without
+> **total over all eighteen `SearchDisposition` members**, failing if a member is added without
 > a mapping; an arm that a turn whose only search returned `SearchRefusal.NO_RESULT` carries
 > **no** member and one that a turn whose search recorded `UNATTESTED` carries `UNAVAILABLE`
 > and renders a statement that **does not say no request was made**; **an arm in which trust
@@ -1291,8 +1301,15 @@ of those is measured, and the milestone's QA pass is where the rest are.
 > ADR-0042, ADR-0060, ADR-0065, ADR-0070, ADR-0074, ADR-0084, ADR-0085, ADR-0089, ADR-0097,
 > ADR-0124, ADR-0146, ADR-0148, ADR-0150, ADR-0152, ADR-0154, ADR-0155, ADR-0170, ADR-0177,
 > ADR-0178, ADR-0181, ADR-0184, ADR-0186, ADR-0193, ADR-0194, ADR-0197, ADR-0198, ADR-0199,
-> ADR-0203, ADR-0207, ADR-0217, ADR-0226, ADR-0227, ADR-0230, ADR-0233, ADR-0236 and ADR-0240
-> are relied upon as written.
+> ADR-0203, ADR-0207, ADR-0217, ADR-0226, ADR-0227, ADR-0230, ADR-0233, ADR-0236, ADR-0240 and
+> ADR-0241 are relied upon as written.
+
+> **Normative.** **ADR-0241 is relied upon in full and no pair is written on its line.** §10
+> maps its two `SearchDisposition` members by name and takes no clause of it: its deadline, its
+> `WebSearcher` argument, its accounting of an interrupted call and its closure of that
+> enumeration at eighteen are all used as given, and this ADR widens, narrows and reopens none
+> of them. Mapping a member into a second vocabulary is a stacked addition under ADR-0082 §1,
+> not a change to the ADR that minted it, so ADR-0070 §1's test returns *no record owed*.
 
 > **Normative.** **ADR-0193 §13's assignment is discharged and not superseded, and no pair is
 > written on that ADR's line.** §13's rule is that the surfaces are decided by the ADRs that
@@ -1354,8 +1371,8 @@ of those is measured, and the milestone's QA pass is where the rest are.
 > draft of this ADR would have owed and each is avoided by a decision rather than by luck.**
 > ADR-0170 §4's `reply_degraded` shape, by §6 declining to set it; ADR-0193 §1's exact store
 > surface and ADR-0238 §1's five-member store surface, by §4's `bool` return declining to want
-> a member `revoke` does not have; and ADR-0231 §13's sixteen-member closure, by §8 building a
-> second vocabulary rather than adding to that one. A lane that reverses any of the three owes
+> a member `revoke` does not have; and the `SearchDisposition` closure ADR-0241 §8 now holds at
+> eighteen, by §8 building a second vocabulary rather than adding to that one. A lane that reverses any of the three owes
 > the record it avoids, and says so.
 
 ### 17. This ADR classified under ADR-0070 §1 and ADR-0082 §1
@@ -1403,9 +1420,9 @@ ADR-0235 §4 did the same and recorded none either.
 > what it obliges, and unmarked text is read to determine what a marked clause means and never
 > supplies an obligation.
 
-What binds is **one hundred and sixteen marked clauses**: §1's eight, §2's nine, §3's seven,
+What binds is **one hundred and seventeen marked clauses**: §1's eight, §2's nine, §3's seven,
 §4's eight, §5's nine, §6's five, §7's six, §8's eleven, §9's thirteen, §10's three, §11's
-eight, §12's seven, §13's eight, §15's four, §16's nine, and this section's one. §14's deferrals,
+eight, §12's seven, §13's eight, §15's four, §16's ten, and this section's one. §14's deferrals,
 §17's classification, and every argument, table caption and worked comparison in this
 document are deliberately unmarked: they are deferral, attestation and argument, which
 ADR-0089 §1 classifies as non-normative however load-bearing.
@@ -1418,10 +1435,12 @@ It is drafted, reviewed and revised as `Proposed`, its status flipped only once 
 reviews return clean on one tree, and the route is `CONTRIBUTING.md` → "Finishing an ADR PR".
 Nothing implements against it until it has merged (ADR-0015 §5, golden rule 5).
 
-**It lands beside a sibling it does not depend on.** ADR-0241 decides the search deadline in
-the same batch and §10 states the seam; neither ADR reads the other's text and neither blocks
-it. Where ADR-0241 merges first, this lane's base moves across `docs/adr/**` and the round
-that move owes is spent rather than argued about (ADR-0027 §2, ADR-0209).
+**It landed beside a sibling it did not depend on.** ADR-0241 decided the search deadline in
+the same batch and §10 states the seam. ADR-0241 merged first, this lane's base moved across
+`docs/adr/**`, the round that move owed was spent rather than argued about (ADR-0027 §2,
+ADR-0209), and §8's table names ADR-0241's two `SearchDisposition` members outright as a
+result. Neither ADR ever read the other's text, and neither left a clause the other had to
+complete.
 
 ## Consequences
 
@@ -1449,7 +1468,7 @@ that move owes is spent rather than argued about (ADR-0027 §2, ADR-0209).
 - **`SearchDisposition` and `SearchNotServiced` are two vocabularies over one event**, and
   they will drift if a later lane treats either as derivable from the other. §8's
   non-injectivity is deliberate and §11 keeps the second out of the audit, but the maintenance
-  cost is real: a seventeenth disposition needs a mapping entry, and §15's totality arm is what
+  cost is real: a nineteenth disposition needs a mapping entry, and §15's totality arm is what
   makes forgetting one a test failure rather than a silent `UNAVAILABLE`.
 - **`DestinationTrustStore.live` joins the unbounded reads #1551 asks about.** §4's listing
   has no `limit` for a good reason and no bound for the same reason the grant stores have
