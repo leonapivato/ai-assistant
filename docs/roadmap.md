@@ -484,18 +484,109 @@ what it found, are on #1844 rather than here.
   whose Protocol triad is `track:memory`'s), and lexical or hybrid search over
   beliefs (ADR-0006 §5, open since; ADR-0225 §7 built the predicate for
   transcripts). The boundary is that this track adds kinds to the envelope and
-  each is inert until `track:memory` has ratified the store read it maps to.
+  the store read each maps to is `track:memory`'s to ratify: the filter axes are
+  ADR-0237's, the episode labels they read are ADR-0239's, and the envelope kind
+  that carries them is ADR-0240's.
   *Exit: a question whose answer shares no wording with the stored record is
   found by structure; and a caption engineered to match unrelated questions is
   never the reason its record is retrieved (#1874's representative inputs).*
+- **31 — contextual search without babysitting** *(working title).* The
+  assistant formulates searches from the conversation's context and from what it
+  knows about the user, refines them once it has seen results, and keeps going
+  inside an enforced budget. It reverses two of milestone 29's limits rather than
+  relaxing them — the composer that sees only the latest utterance (ADR-0231 §3)
+  and the conversation that declines every later search once it has read one
+  (ADR-0231 §12) — and the ground of the reversal is **destination trust**: the
+  provider is a destination the user chose, recorded once at connection, so
+  task-relevant context reaching it is disclosure to a trusted party bounded by
+  budget and audit. The bounds are that searches go only to the configured,
+  authorised provider; that credentials stay out structurally; that *excluded*
+  information is a record-level fact the user sets on memory records rather than
+  a content filter (ADR-0146 §2); that the call allowance, the monetary spend
+  controls and a bound on elapsed search time stay distinct from one another
+  (#2167); and that a search result authorises nothing else. It fires
+  ADR-0231 §19's memory-enriched-query and second-search deferrals, owes a
+  principled same-kind carve-out to ADR-0181 §5 rather than an exception, and
+  takes the open search-cost work on ADR-0236's base (#2126, #2116) so that
+  repeated searching runs under a real budget. Reachable setup for destination
+  trust and for recipient authorisation, and an account of a refused or exhausted
+  search, are #2168.
+  *Exit: "find more about that, taking my preferences into account" resolves the
+  reference, uses relevant context, performs useful follow-up searches and
+  answers without repeated permission requests; and an injected result can
+  neither raise the budget nor carry an excluded record into a query. A stalled
+  search is terminated within its declared bound and a cancellation leaves an
+  accurate outcome and accounting (#2167); the missing-authority,
+  revoked-authority and exhausted-allowance cases are demonstrable from the
+  supported user surface (#2168).*
+- **32 — autonomous web research** *(working title).* The assistant opens
+  results, reads the pages, follows relevant links, compares sources and
+  investigates the gaps before it answers. The new boundary is that permission to
+  send contextual queries to a trusted provider does not authorise sending
+  private information to every site that provider returns — a site is a
+  destination nobody chose, the second value of 31's destination-trust fact. The
+  control is #2096 §1's bounded fetch: the model picks a recorded address and
+  never writes one, byte for byte from where it was recorded, no credential, GET
+  only, no body, with redirects following the same rule or stopping —
+  token-bearing URLs are the reason. Two bounds are structural rather than
+  deny-listed: a non-public address (loopback, the tailnet, a metadata endpoint —
+  the hub sits beside the gateway) is refused after resolution, and a
+  model-authored URL is never fetched. Following a link is the model's judgment
+  over a source, so #2096's action-class tiering and its provenance briefing land
+  here. The bounded read/decide loop, the planner-visible outcomes it keeps
+  distinct — success, empty, duplicate, refusal, failure and truncation, none of
+  which authorises a retry by itself — and the progress judgment that stops
+  unproductive repetition while preserving capacity for composition and
+  verification are #2169 and #2170, shipped with the fetch rather than left as
+  later hardening.
+  *Exit: "compare these options using their current documentation" reads the
+  underlying pages, investigates something discovered along the way and produces
+  a supported comparison; at budget exhaustion it gives a useful partial answer;
+  and no fetch goes to an address nobody recorded. The investigation takes more
+  decision rounds than the two-call bound permits, and an inaccessible source
+  produces a justified alternative or an honest stop (#2169).*
+- **33 — research followed by an authorised workflow** *(working title).*
+  Dependent action steps, engine-carried values that keep their provenance,
+  re-planning after execution, and approval of a bounded flow — #2096's plan
+  graph, its re-plan transition and its flow confirmation, with the
+  recipient-grant surface riding beside them. The broader plan-graph machinery
+  belongs here and does not precede 31 or 32. It is delivered in bounded batches:
+  dependent execution with its approval model, designed before a consequential
+  flow runs (#2171); then adaptive recovery, durable resumption, steering and
+  verification (#2172, #2173). An effect is verified only to the strength the
+  integration supports, so completed, partial, failed and unknown outcomes stay
+  distinct and a provider's acceptance is never described as delivery to a
+  recipient.
+  *Exit: "research the options, prepare a recommendation, and send the approved
+  version to Alex" completes with authorisation covering the actual disclosure,
+  and an expanded scope or a changed recipient requires renewed approval. A
+  restart during approval, an effect whose response is lost before it reaches the
+  client, an expired or unanswerable park, a recipient corrected before dispatch
+  and a cancellation during the workflow are each exercised: completed effects
+  are preserved, uncertain effects are not retried blindly, and authority is
+  renewed when scope changes (#2171, #2172, #2173).*
+
+**Across 31 to 33** the four measurements are taken together — task completion,
+unnecessary interruptions, unauthorised outcomes, and cost and latency — with
+#1478's live arm (once per model change, never in the gate) as the path, extended
+as each capability lands, and a deterministic scenario corpus beside it for the
+interruption and unauthorised-outcome figures. #2096 is the design umbrella these
+three correct as each decision is made. Before one of these milestones is ruled,
+each of its adopted obligations has one explicit disposition — demonstrated,
+still open, or changed by a recorded owner ruling — and moving one to the backlog
+is not a discharge.
 
 **Sequencing.** 27 → 28 → 29 → 30 by design: 29's steered-loop risk needs 28's
-bound, and 30 lands on an envelope milestone 27 has proven. Two openings sit
-outside that line and both wait on the owner's word — milestone 29's local-files
-rung, which may open beside 28, and the archive's feed-back mechanism
-(ADR-0225 §12), which is an envelope kind ("address", user-named) additive to
-milestone 27's shape.
-Which of them has been ruled is on #1908.
+bound, and 30 lands on an envelope milestone 27 has proven. 31 → 32 → 33 by
+design as well: 32's link-following needs 31's destination-trust fact and #2096's
+tiering, and 33's flows land on research that 32 has proven. 30 and 31 run beside
+each other rather than in line — 31 consumes 30's retrieval surface but opens
+beside it. Milestone 32's deeper loop ratifies its revision, stopping and outcome
+contracts before it is implemented, and that includes an explicit change to
+ADR-0228's fixed two-planner-call bound wherever one is required. One opening
+sits outside the line and waits on the owner's word: the archive's feed-back
+mechanism (ADR-0225 §12), an envelope kind ("address", user-named) additive to
+milestone 27's shape. Whether it has been ruled is on #1908.
 
 **Deferred — stated, not scheduled:**
 
@@ -511,11 +602,14 @@ Which of them has been ruled is on #1908.
   carry. It is a planner defect this track should absorb, not a milestone.
 
 **Concurrency.** The boundaries are with two tracks. `track:memory` owns the
-store contracts and event episodes (#1874), so milestone 30's kinds stay inert
-until the store read each maps to is ratified there; `track:world` owns egress
-and the readers, so milestone 29's fetch is serviced under that track's seam
-rather than beside it. What this track owns is what the planner may ask for and
-what the loop does with what comes back. A lane here never edits a subsystem
+store contracts and event episodes (#1874), so milestone 30's kinds ride behind
+the store read ratified there (ADR-0237) and the episode labels ADR-0239
+decides; `track:world` owns egress and the readers, so the outward fetch and
+search of milestones 29, 31 and 32 are serviced under that track's seam rather
+than beside it. Permissions, tools and the interfaces that consume the authorised
+operations are sequenced through their own subsystem ownership rules. What this
+track owns is what the planner may ask for and what the loop does with what comes
+back. A lane here never edits a subsystem
 another track has a lane open in (#1226 §3, Concurrency above); which lanes that
 sequencing has bound is on #1908, #1231 and #1427. Clones and review quota are
 one pool, under Concurrency above.
