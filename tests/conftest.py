@@ -286,6 +286,13 @@ LAUNCH_ARGUMENTS = (
 #: reader to find the command themselves.
 _BROWSER_INSTALL = "uv run playwright install chromium"
 
+#: What installs the ~35 system libraries an *installed* build needs in order to
+#: launch (issue #2143). Named in the failure message for the same reason
+#: `_BROWSER_INSTALL` is named in the skip message, and with more urgency: this step
+#: needs root, so `just setup` does not and cannot run it, and a fresh clone that
+#: followed every documented setup step still meets this failure.
+_BROWSER_DEPENDENCIES = "uv run playwright install-deps chromium"
+
 
 #: The only way to distribute this suite, and every other way is refused below.
 #:
@@ -348,6 +355,28 @@ def pytest_configure(config: pytest.Config) -> None:
 _MISSING_BUILD = "Executable doesn't exist"
 
 
+#: The substrings a launch refusal carries when the build is present and the system
+#: libraries beneath it are not. Matched rather than read off a code for exactly the
+#: reason `_MISSING_BUILD` is: Playwright raises one `Error` class for every launch
+#: failure and puts the only distinguishing evidence in the message.
+#:
+#: Two of them, because Playwright reaches this one condition by two routes and words
+#: each differently. Before spawning anything it validates the build's shared-library
+#: dependencies and raises its own "Host system is missing dependencies to run
+#: browsers." Where that validation does not run -- a `DEPENDENCIES_VALIDATED` marker
+#: in the build directory suppresses it for 30 days, and
+#: `PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS` suppresses it outright -- the browser
+#: is spawned, the dynamic loader kills it before `main`, and Playwright reports
+#: "Failed to launch the browser process." quoting the loader's own `error while
+#: loading shared libraries` line out of the browser's stderr. Issue #2143 observed
+#: the second; matching only it would leave the first, which is the ordinary path,
+#: saying `npx playwright install-deps` and nothing about this repository.
+_MISSING_LIBRARIES = (
+    "error while loading shared libraries",
+    "Host system is missing dependencies",
+)
+
+
 def classify_launch_refusal(refusal: BrowserError) -> NoReturn:
     """Answer a Playwright launch refusal the way ADR-0216 §6 requires.
 
@@ -360,16 +389,40 @@ def classify_launch_refusal(refusal: BrowserError) -> NoReturn:
 
     It never returns: an absent build skips the layer, and anything else is re-raised.
 
+    **A present-but-unlaunchable build is still a failure** (issue #2143). §6's skip
+    condition is not widened by anything here and reads exactly as before: a build
+    that is installed and will not start goes to a reader as a red test, because a
+    skip there would let the layer certify a page it never executed. What changed is
+    only what that reader is told. A missing shared library is not the developer's
+    change and is not fixable from inside the repository -- ``just setup`` installs
+    the browser but cannot install the libraries under it, that step needing root --
+    so the refusal is re-raised carrying the command that does, chained to the
+    original so nothing Playwright said is lost.
+
     Args:
         refusal: What ``chromium.launch`` raised.
 
     Raises:
-        BrowserError: The refusal itself, where the build is present and will not
-            start -- a missing system library, a sandbox refusal. §6 skips for an
-            absent build and for nothing else, so that is reported as the failure it
-            is rather than quietly turned into a pass.
+        BrowserError: The refusal, where the build is present and will not start.
+            §6 skips for an absent build and for nothing else, so this is reported as
+            the failure it is rather than quietly turned into a pass. Where the cause
+            is a missing system library it is re-raised as a new ``BrowserError``
+            naming ``uv run playwright install-deps chromium``, chained from the
+            original; every other refusal is re-raised unchanged, as the object
+            Playwright handed us.
     """
-    if _MISSING_BUILD not in str(refusal):
+    reported = str(refusal)
+    if _MISSING_BUILD not in reported:
+        if any(marker in reported for marker in _MISSING_LIBRARIES):
+            raise BrowserError(
+                f"{reported}\n\n"
+                "The browser build ADR-0216 §5 pins is installed and cannot start: the "
+                "system libraries it links against are missing from this machine. "
+                f"`{_BROWSER_DEPENDENCIES}` installs them. That step needs root, so "
+                "`just setup` does not run it and a clone that ran every documented "
+                "setup step still lands here. This is not a skip: ADR-0216 §6 skips "
+                "for an absent build and for nothing else."
+            ) from refusal
         raise refusal
     pytest.skip(
         "the browser ADR-0216 §5 pins is not installed in this clone; "
