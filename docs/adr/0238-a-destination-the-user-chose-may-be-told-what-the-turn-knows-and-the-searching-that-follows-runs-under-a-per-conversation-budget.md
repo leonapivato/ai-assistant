@@ -1,6 +1,6 @@
 # 238. A destination the user chose may be told what the turn knows, and the searching that follows runs under a per-conversation budget
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-05
 - **Partially supersedes** [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
   — **§3's utterance-only clause, §4's first and second clauses, §12's second and
