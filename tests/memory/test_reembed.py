@@ -862,6 +862,67 @@ async def test_a_work_store_whose_cursor_does_not_account_for_its_rows_is_discar
     assert len(_read(store, "SELECT rowid FROM records")) == 4
 
 
+async def test_a_work_store_from_an_older_schema_is_discarded_rather_than_resumed(
+    tmp_path: Path,
+) -> None:
+    """An upgrade between two attempts, which is the one route needing no damage.
+
+    ``_prepare_work`` builds a work store by constructing a
+    :class:`SqliteMemoryStore` on it and never rebuilds it on a resume, so the file
+    carries the schema of the build that made it. The live store is read here
+    through plain connections and is never opened by the store class, so an upgrade
+    does not touch it and :func:`_fingerprint` does not move — the work file stays
+    inheritable by every other condition while the copy has gained a column and a
+    table it has no place for.
+
+    Simulated by taking the two ADR-0237 added back off a half-built work store,
+    which is what a file left by the previous build holds. Read as resumable it
+    raises ``MemoryStoreError`` on its first insert and raises it identically on
+    every retry: the permanent stall #738 names, reached without any damage. The
+    answer is ADR-0104 §2's for every unusable work store — discard and restart —
+    so all four records are re-embedded rather than the two left behind.
+    """
+    store = tmp_path / "memory.db"
+    await _seed(store, [_record(str(index), f"memory {index}") for index in range(4)])
+
+    broken = _CountingEmbedder(fail_after=2)
+    with pytest.raises(MemoryStoreError, match="embedder failed"):
+        await Reembedder(store=store, embedder=broken, batch_size=2).run()
+
+    work = tmp_path / f"memory.db{WORK_SUFFIX}"
+    before = reembed_module._fingerprint(store)
+    conn = sqlite3.connect(str(work))
+    try:
+        conn.execute("ALTER TABLE records DROP COLUMN occurred_at")
+        conn.execute("DROP TABLE record_labels")
+        conn.commit()
+    finally:
+        conn.close()
+    # The shape under test, asserted rather than assumed: a work store every other
+    # condition would inherit — rows, a cursor accounting for them, the same target
+    # — that this build cannot write into.
+    assert _read(work, "SELECT count(*) FROM records") == [(2,)]
+    assert _meta(work)["reembed_cursor"] == "2"
+    assert "occurred_at" not in {row[1] for row in _read(work, "PRAGMA table_info(records)")}
+    assert reembed_module._fingerprint(store) == before, (
+        "the live store is untouched between the attempts, so nothing but the work "
+        "store's own schema can make this run discard it"
+    )
+
+    reembedder = Reembedder(store=store, embedder=_CountingEmbedder(), batch_size=2)
+    assert reembedder.plan().resumable == 0
+    outcome = await reembedder.run()
+
+    assert outcome.resumed == 0
+    assert outcome.embedded == 4
+    assert outcome.swapped
+    assert len(_read(store, "SELECT rowid FROM records")) == 4
+    assert _read(store, "SELECT count(*) FROM record_labels") == [(0,)], (
+        "the swapped store carries the current schema — the table the discarded work "
+        "file had lost is back, holding the no labels these records carry"
+    )
+
+
 async def test_a_cursor_lost_after_the_plan_restarts_and_says_so(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

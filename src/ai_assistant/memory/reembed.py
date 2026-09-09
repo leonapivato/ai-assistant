@@ -138,6 +138,25 @@ _SOURCE_COLUMNS: Final = "rowid, id, kind, data, revision"
 #: nothing, so §1's never-reissued clause is satisfied by construction.
 _LEGACY_SOURCE_COLUMNS: Final = "rowid, id, kind, data, NULL"
 
+#: The columns :func:`_insert` writes and :func:`_verify` reads back, in one place
+#: so the two cannot come to disagree about what a rebuilt row carries.
+_DESTINATION_COLUMNS: Final = (
+    "rowid, id, kind, data, expires_at, valid_until, valid_from, about_person, revision, "
+    "occurred_at"
+)
+
+#: The named columns of :data:`_DESTINATION_COLUMNS` — ``rowid`` is implicit and is
+#: never reported by ``PRAGMA table_info`` — and the tables a copy writes into.
+#: :meth:`Reembedder._inheritable` requires both of a work store before it will
+#: continue one, so that a work file left by an *older* build is discarded rather
+#: than resumed into (§2's rule, applied to one more way to be unusable).
+_DESTINATION_FIELDS: Final = frozenset(
+    name.strip() for name in _DESTINATION_COLUMNS.split(",") if name.strip() != "rowid"
+)
+_DESTINATION_TABLES: Final = frozenset(
+    {"records", "vec_records", "record_labels", "revision_issuer", "meta"}
+)
+
 #: Where the stamp sits in a source row read through either of the two above.
 _REVISION_IN_ROW: Final = 4
 
@@ -256,6 +275,38 @@ def _fingerprint(store: Path) -> str:
         raise MemoryStoreError(msg) from exc
     counter = header[_CHANGE_COUNTER_START:_CHANGE_COUNTER_END].hex()
     return f"{info.st_dev}:{info.st_ino}:{info.st_size}:{info.st_mtime_ns}:{counter}"
+
+
+def _schema_is_current(work: sqlite3.Connection) -> bool:
+    """Whether a work store can receive the rows this build's copy writes.
+
+    A work file older than the schema is missing a column :func:`_insert` names or
+    a table it writes into, and every insert against it fails. Answering *before*
+    the copy starts turns that into one more discard-and-restart (ADR-0104 §2)
+    rather than a run that dies on its first chunk and dies the same way on every
+    retry.
+
+    Read off the file rather than compared against a recorded version number: the
+    work store's schema is whatever :class:`SqliteMemoryStore` produced on the
+    build that created it, no version is stamped in its ``meta``, and a check that
+    asks the file directly stays true when the schema next changes.
+
+    Args:
+        work: An open connection to the work store.
+
+    Returns:
+        ``True`` when every column and table a copy needs is present. Any failure
+        to read the schema at all answers ``False`` — unreadable is unusable, which
+        is the exit every sibling condition takes.
+    """
+    try:
+        columns = {str(row[1]) for row in work.execute("PRAGMA table_info(records)")}
+        tables = {
+            str(row[0]) for row in work.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    except sqlite3.Error:
+        return False
+    return columns >= _DESTINATION_FIELDS and tables >= _DESTINATION_TABLES
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -599,11 +650,26 @@ class Reembedder:
         """The rows and cursor of a work store this run may continue from (ADR-0104 §2).
 
         ``None`` whenever the work store is absent or unreadable, was built for a
-        different target, was started from a live store that has since changed, or
-        records a cursor that does not account for the rows it holds. §2 names the
-        first of those conditions and discards rather than adapts on each; the last
-        is the same answer applied to the same kind of state, and the whole of what
-        this method decides is **usable or not**.
+        different target, was started from a live store that has since changed,
+        **carries a schema this build no longer writes**, or records a cursor that
+        does not account for the rows it holds. §2 names the first of those
+        conditions and discards rather than adapts on each; the rest are the same
+        answer applied to the same kind of state, and the whole of what this method
+        decides is **usable or not**.
+
+        **The schema condition is the one an upgrade produces rather than damage.**
+        A work store is built by constructing a :class:`SqliteMemoryStore` on it
+        (:meth:`_prepare_work`), so it carries whatever the schema was on the build
+        that created it — and a resumed run never rebuilds it. The live store is
+        read through plain connections here and is not opened by the store class at
+        all, so :func:`_fingerprint` does not move when the code is upgraded under a
+        half-built copy: a run interrupted before an upgrade is still *inheritable*
+        by every other test after it, and the copy then inserts columns and index
+        rows the older work file has no place for. That fails, and it fails
+        identically on every retry for as long as the file survives — the
+        permanent, opaque stall #738 names, reached by a route no damage was needed
+        for. Every schema addition this module has taken has had the property; it is
+        checked here once rather than per column.
 
         §2 commits each chunk's rows and the cursor naming the last source ``rowid``
         copied in one transaction, "so the recorded cursor can never claim progress
@@ -631,7 +697,7 @@ class Reembedder:
                 self._embedder.model_id,
                 str(self._embedder.dimensions),
             )
-            if not (continuable and same_target):
+            if not (continuable and same_target and _schema_is_current(conn)):
                 return None
             # Parsed here rather than trusted at resume time: an unreadable cursor
             # is one more way to be unusable, and it takes the same exit.
@@ -1240,10 +1306,7 @@ def _verify(
     if meta.get("dimensions") != str(embedder.dimensions):
         _fail(f"it is {meta.get('dimensions')}-dimensional, expected {embedder.dimensions}")
 
-    destination = (
-        "rowid, id, kind, data, expires_at, valid_until, valid_from, about_person, revision, "
-        "occurred_at"
-    )
+    destination = _DESTINATION_COLUMNS
     highest = 0
     labels: set[tuple[int, str, str]] = set()
     for left, right in zip_longest(_rows(source, columns), _rows(work, destination)):
