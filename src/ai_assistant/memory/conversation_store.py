@@ -2038,31 +2038,51 @@ class SqliteConversationStore:
         is a store fault to report, and a negative counter reaching a caller as an
         ordinary integer would make the ceiling comparison meaningless.
 
-        **The flag is checked against the two values this store writes, before it is
-        converted** — and a bare ``bool(row[1])`` would be the one line here that hides
-        a corruption instead of reporting it. SQLite's type affinity is not a
-        constraint: an ``INTEGER`` column accepts whatever a writer binds, so a
-        hand-built or damaged row can hold ``2``, ``-1`` or the *string* ``"false"``,
-        and ``bool`` maps all three to ``True``. That is the fail-**open** direction on
-        the one field ADR-0238 §8 makes monotone — a conversation whose history this
-        decision never saw would read as clean, which is the state §13's decoded
-        ``False`` exists to prevent. Refusing here keeps the corruption a fault the
-        caller is told about rather than a footing it acts on.
+        **Both columns are checked against what this store writes, before either is
+        converted, and neither check may be left to the model.** SQLite's type affinity
+        is not a constraint: an ``INTEGER`` column accepts whatever a writer binds, so a
+        hand-built or damaged row can hold a value of any type at all. Each column fails
+        differently and each failure is silent.
+
+        * **The flag.** A bare ``bool(row[1])`` maps ``2``, ``-1`` and the *string*
+          ``"false"`` all to ``True`` — the fail-**open** direction on the one field
+          ADR-0238 §8 makes monotone, so a conversation whose history this decision
+          never saw would read as clean. That is the state §13's decoded ``False``
+          exists to prevent.
+        * **The counter.** Pydantic is the looser reader here, and the gap is not the
+          obvious one. It accepts ``"1_0"`` as **10** — Python's numeric underscores —
+          while SQLite reads the same stored text as **1** for arithmetic, taking the
+          leading numeric prefix. A caller would be told the draw is 10, an admission
+          against a bound of 12 would be granted and answer 11, and the row would go to
+          **2**: an admission that *lowered* the recorded draw, which ADR-0238 §8
+          forbids in terms ("no path lowers ``calls``") and which buys the conversation
+          further admissions it never earned. No range check catches it, because 10 is
+          in range; only the **type** does.
+
+        Refusing both keeps a corruption a fault the caller is told about rather than a
+        footing or a budget it acts on.
 
         Raises:
-            ConversationStoreError: If the row does not validate, or the stored flag is
-                not one of the two values this store writes.
+            ConversationStoreError: If either column holds a value this store does not
+                write, or the pair does not satisfy the model.
         """
-        stored = row[1]
-        if type(stored) is not int or stored not in (0, 1):
+        spent, footing = row[0], row[1]
+        if type(spent) is not int or spent < 0:
+            msg = (
+                f"the conversation store holds a corrupt search draw: search_calls is "
+                f"{describe_untrusted(spent)}, which is not a non-negative integer this "
+                f"store wrote"
+            )
+            raise ConversationStoreError(msg)
+        if type(footing) is not int or footing not in (0, 1):
             msg = (
                 f"the conversation store holds a corrupt search draw: "
-                f"all_external_user_chosen is {describe_untrusted(stored)}, which is not one "
+                f"all_external_user_chosen is {describe_untrusted(footing)}, which is not one "
                 f"of the two values this store writes"
             )
             raise ConversationStoreError(msg)
         try:
-            return ConversationSearchDraw(calls=row[0], all_external_user_chosen=bool(stored))
+            return ConversationSearchDraw(calls=spent, all_external_user_chosen=bool(footing))
         except (ValidationError, TypeError) as exc:
             msg = f"the conversation store holds a corrupt search draw: {describe_untrusted(exc)}"
             raise ConversationStoreError(msg) from exc
@@ -2111,16 +2131,22 @@ class SqliteConversationStore:
             draw = self._decode_draw(rows[0])
             if draw.calls >= max_calls:
                 return None
-            # The increment is expressed over the column rather than over the value
-            # just read, so the write cannot depend on a number that was decoded
-            # outside the transaction — and the `deleted_at IS NULL` limb is repeated
-            # here rather than trusted from the read above, for `drop_if_eligible`'s
-            # own reason: what a statement is allowed to change is the statement's to
-            # state.
+            # **The written value is the decoded one, not `search_calls + 1`.** The
+            # read above happens inside this transaction, so there is no staleness to
+            # guard against — and column arithmetic would put SQLite's own coercion
+            # between the value this store validated and the value it stores. Those two
+            # disagree: `'1_0' + 1` is `2` in SQL and `11` after a decode that read the
+            # underscore, so an admission would *lower* a draw ADR-0238 §8 says no path
+            # lowers. `_decode_draw` refuses that row before this line is reached, and
+            # binding the checked number is what keeps the two readings from being able
+            # to differ at all.
+            #
+            # The `deleted_at IS NULL` limb is repeated here rather than trusted from
+            # the read above, for `drop_if_eligible`'s own reason: what a statement is
+            # allowed to change is the statement's to state.
             conn.execute(
-                "UPDATE conversations SET search_calls = search_calls + 1 "
-                "WHERE id = ? AND deleted_at IS NULL",
-                (conversation_id,),
+                "UPDATE conversations SET search_calls = ? WHERE id = ? AND deleted_at IS NULL",
+                (draw.calls + 1, conversation_id),
             )
             return draw.model_copy(update={"calls": draw.calls + 1})
 
@@ -2151,7 +2177,36 @@ class SqliteConversationStore:
             )
 
     def _observe_search_sync(self, conversation_id: str, observed: bool) -> None:
+        """Read, check and fold, as one transaction.
+
+        **The stored footing is decoded before it is folded**, and that read is not
+        redundant with the fold's own ``AND``. SQL's ``AND`` is a *coercion*: a corrupt
+        ``2`` folded against a clean observation evaluates ``2 AND 1`` and writes ``1``,
+        so a fold would quietly turn a value this store never wrote into a **valid clean
+        flag** — repairing a corruption into the one state ADR-0238 §8's monotonicity
+        makes unrecoverable, and doing it on the path least likely to be looked at.
+        Every *reading* path already refuses such a row; without this the write path was
+        the way round them.
+
+        The fold itself stays SQL's ``AND`` over the checked value, so monotonicity is
+        still by construction rather than by a comparison this method makes.
+
+        **A missing row is still a silent no-op**, which is §8's clause and not an
+        oversight: an unknown id, a stamped conversation and a dropped record each leave
+        nothing to fold, and each is reached by a servicing that may have been in flight
+        when the deletion landed.
+        """
         with self._transaction("fold a conversation's search footing") as conn:
+            rows = self._fetch(
+                conn,
+                "read a conversation's search draw",
+                "SELECT search_calls, all_external_user_chosen FROM conversations "
+                "WHERE id = ? AND deleted_at IS NULL",
+                (conversation_id,),
+            )
+            if not rows:
+                return
+            self._decode_draw(rows[0])
             conn.execute(
                 "UPDATE conversations SET all_external_user_chosen = "
                 "(all_external_user_chosen AND ?) WHERE id = ? AND deleted_at IS NULL",
