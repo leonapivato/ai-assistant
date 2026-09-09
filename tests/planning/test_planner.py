@@ -3524,6 +3524,22 @@ async def _prompts_over(
             {"start": "2026-03-01T00:00:00+00:00", "participants": None},
             id="null_label_axis",
         ),
+        # **A number is not an instant, and neither is a numeric string** — the arm
+        # ``UtcInstant``'s own annotation cannot hold, because pydantic reads both as a
+        # Unix timestamp and answers an instant in **1970** rather than refusing. Left
+        # to the field, ``{"start": 20260301, "participants": [...]}`` becomes a read
+        # over decades of episodes: a window the planner never composed, which is
+        # exactly the substitution ADR-0240 §3's whole-ask drop exists to prevent. Both
+        # endpoints and both spellings, beside a valid label axis, so an implementation
+        # that dropped :func:`_iso_instant` and went back to the field's own coercion
+        # fails here rather than passing on the axis that still parses.
+        pytest.param({"start": 20260301, "participants": ["alex"]}, id="numeric_start"),
+        pytest.param({"end": 20260401, "participants": ["alex"]}, id="numeric_end"),
+        pytest.param({"start": "20260301", "participants": ["alex"]}, id="numeric_string_start"),
+        pytest.param({"end": "20260401", "participants": ["alex"]}, id="numeric_string_end"),
+        # A bare date carries no offset, so it is not the instant §3 asks the planner to
+        # write — refused rather than read as midnight in a zone nobody named.
+        pytest.param({"start": "2026-03-01", "participants": ["alex"]}, id="date_without_offset"),
     ],
 )
 async def test_a_malformed_structured_member_costs_the_ask_and_never_the_plan(
