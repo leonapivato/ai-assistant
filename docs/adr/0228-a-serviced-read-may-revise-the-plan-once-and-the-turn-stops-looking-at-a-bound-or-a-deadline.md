@@ -135,8 +135,8 @@
   and never the loop's. **(e)'s own reason is honoured rather than waived**: it exists so
   that a planner is not *"asked the same question twice at the price of a model round
   trip"*, and ADR-0240 §7 gives the second call an input the first did not have — a
-  defaulted `Planner.plan` parameter naming the kinds whose read came back empty, itself
-  a Protocol change flagged under golden rule 5.
+  defaulted `Planner.plan` parameter carrying, byte for byte, the asks whose read came
+  back empty, itself a Protocol change flagged under golden rule 5.
 
   **What is untouched, and what ADR-0240 rests on.** §1's whole account of a revision as
   a second plan authored at the `Planner.plan` seam, with the same goal, the same context
@@ -150,9 +150,9 @@
   budget per servicing, which are what make a second structured read's deduplication
   well-defined. §8's per-call label space. §9's per-emission accounting, which covers the
   second servicing and to which ADR-0240 §10 adds two fields under ADR-0226 §9's
-  raises-rather-than-replaces provision. **§10's carrier is untouched**: ADR-0240 §8 is a
-  second bare fact carried the same way — inside `orchestration`, no `core` field, no
-  Protocol member, no count and no copied text — rather than a change to §10's. §§12–15
+  raises-rather-than-replaces provision. **§10's carrier is untouched**: ADR-0240 §8 carries two
+  more bare facts the same way — inside `orchestration`, no `core` field, no Protocol
+  member, no count and no copied text — rather than changing §10's. §§12–15
   are untouched.
 
   **The amendment.** §11's *"Both kinds a revision may emit are the two that ADR

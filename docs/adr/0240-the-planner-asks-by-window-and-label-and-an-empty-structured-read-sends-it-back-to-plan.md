@@ -525,6 +525,18 @@ the budget happened to be rather than of what the planner asked for"*. It would 
 starve the read the milestone's exit is about on exactly the turns where the store is
 richest.
 
+**A budget-starved structured read does not suppress the turn's revision, and the
+arithmetic is worth stating because it looks as though it might.** ADR-0226 §6 counts the
+budget of ten **after** deduplication — *"ten records that were not already in the turn's
+supply"* — so a servicing that leaves the structured read no slot is by construction a
+servicing that admitted ten records the supply did not hold. ADR-0228 §2(e)'s original
+novelty branch is therefore satisfied on exactly those turns, and where the other six
+conditions hold the turn revises anyway. What §6 withholds from such a turn is not the
+revision but the **empty-read fact**: the structured read established nothing, so §7's
+carrier is empty and the second plan is composed over the ten new records rather than
+over an absence. §13's seventh test is written to assert that pair rather than a
+suppression.
+
 **The not-reached case is stated as a clause because it is the one an implementation
 gets silently wrong.** A structured read that made no call has returned nothing in the
 ordinary English sense and nothing at all in ADR-0237 §7's: the certification an empty
@@ -607,23 +619,35 @@ this ADR asserts.
 ### 7. The planner is told what came back empty, and that crosses the seam
 
 > **Normative.** `Planner.plan` gains one keyword parameter, `empty_reads:
-> Sequence[ReadKind] = ()`, additive and defaulted. `Planner.plan`'s other parameters,
+> Sequence[ReadAsk] = ()`, additive and defaulted. `Planner.plan`'s other parameters,
 > its return type and every other Protocol are unchanged by this clause.
 
-> **Normative.** **It carries the kinds of this turn's already-serviced asks that were
-> empty reads in §6's sense, and nothing else.** Under this ADR the only member that
-> ever appears in it is `STRUCTURED_READ`; no lane adds another without the ADR that
-> decides it. On a turn's **first** planner call it is always `()`, and `()` means **no
-> read of this turn came back empty** — which is the semantically correct answer for
-> the first call, for a turn that asked for nothing, for a servicing that failed or was
-> declined, and for a `Planner` that knows nothing of this parameter.
+> **Normative.** **It carries the asks of this turn's already-serviced reads that were
+> empty in §6's sense — each the frozen `ReadAsk` the planner itself emitted, carried
+> back byte for byte — and nothing else.** Under this ADR the only kind that ever
+> appears in it is `STRUCTURED_READ`; no lane adds another without the ADR that decides
+> it. On a turn's **first** planner call it is always `()`, and `()` means **no read of
+> this turn came back empty** — which is the semantically correct answer for the first
+> call, for a turn that asked for nothing, for a servicing that failed or was declined,
+> and for a `Planner` that knows nothing of this parameter.
 
-> **Normative.** **It carries no value, no count and no text.** No window, no instant,
-> no label, no query, no record, no identifier and no count of any of them crosses on
-> it. ADR-0226 §9's counts-and-no-copy reasoning binds this carrier for its own reason:
-> nothing bounds what a planner may put in an ask, so a carrier that echoed one back
-> would return the planner's own composition to it as though it were a fact of the
-> system.
+> **Normative.** **Nothing the store said crosses on it.** No record, no count, no
+> identifier, no instant of the read, no `capped` value and no value of any kind that
+> the store returned or computed. The only content it carries is the planner's own
+> prior composition, and the only thing it says about the read is that it returned
+> nothing.
+
+> **Normative.** **The ask is carried back unaltered and is never edited on the way.**
+> No implementation widens a window, drops an axis, rewrites a label or composes a
+> suggested ask to put in its place. What the second call receives is what the first
+> call emitted, and the ask the second call makes is its own composition (§6).
+
+> **Normative.** **This carrier and §10's audit record are governed separately, and
+> neither is read as licence for the other.** The audit is a Tier 2 log event and
+> carries no value on any axis (§10); this carrier is an in-process argument handed to
+> the author of the value it carries. No lane logs an ask because this section carries
+> one, and no lane withholds an ask from this parameter because §10 withholds it from
+> the log.
 
 > **Normative.** **A read the budget did not reach is not in it** (§5), a servicing
 > that failed or was partial is not in it (ADR-0226 §5 leaves the supply as planning
@@ -645,39 +669,84 @@ same reasoning ADR-0226 §3 gives for deriving labels from `memories` rather tha
 a table. A fact `planning` must read is a fact on the `Planner` seam, and ADR-0230 §3
 has already taken exactly this shape for exactly this reason.
 
-**A sequence of kinds rather than a flag, because the shape has to survive the next
-kind.** ADR-0226 §9's audit speaks in kinds and ADR-0228 §9 accounts per emission; a
-boolean would have to be renamed or twinned the first time a second kind establishes an
-absence, and ADR-0226 §4's *"added to and never renamed"* discipline is the corpus's own
-view of that trade. The narrowing to one member is stated as a clause so that the shape
-being general is not read as a licence.
+**The ask itself and not merely its kind, because ADR-0228 §1's restraint makes the two
+calls' inputs otherwise identical.** §1 gives the second call the same goal, the same
+`CurrentContext` and the same three groups, and an empty read grows the fourth by
+nothing; `ModelBackedPlanner` builds a fresh conversation on each call and retains no
+prior response. So a planner told only *that* a structured read was empty is a planner
+holding exactly the inputs that produced the ask, and the likeliest composition over
+those inputs is the ask it just made. A mechanism whose second call re-issues the first
+call's read has spent a model round trip to learn nothing, which is the outcome
+ADR-0228 §2(e) exists to prevent and which §6's supersession would otherwise have
+reinstated by a different route. **Carrying the ask back is the minimum that makes
+"broadening" a composition rather than a coin flip**, and the architecture lens raised
+it as a `major` on round 1 against a draft that carried the kind alone.
+
+**And it discloses nothing, which is why the smaller carrier bought no protection.** The
+ask is the planner's own output; it is already durable on the frozen `ActionPlan` the
+planning store keeps (ADR-0226 §4); and handing it back to its author reveals it to
+nobody who did not compose it. What ADR-0226 §9's no-copy reasoning actually protects is
+a **Tier 2 log event** that a deployment retains, ships and reads — *"nothing bounds what
+a planner may put in a query"* — and §10 keeps every value out of that record exactly as
+that section requires. Conflating the two would have made the log's discipline into a
+prohibition on the planner reading its own composition, which no clause of the corpus
+states.
+
+**A sequence rather than a flag, because the shape has to survive the next kind.**
+ADR-0226 §9's audit speaks in kinds and ADR-0228 §9 accounts per emission; a boolean
+would have to be renamed or twinned the first time a second kind establishes an absence,
+and ADR-0226 §4's *"added to and never renamed"* discipline is the corpus's own view of
+that trade. The narrowing to one kind is stated as a clause so that the shape being
+general is not read as a licence.
 
 **What it costs is one more thing in the planner's prompt, and the cost is bounded by
-what it may say.** The rendering is the implementing lane's, but the clause above fixes
-its content: it can say only *the structured read you asked for reached the store and
-found nothing*, in whatever words the prompt uses. It cannot say what was asked, how
-much was found before, or how long the turn has left — so a planner cannot learn the
-turn's budget from it, and a reply cannot be shaped by it except through a second ask.
+what it may say.** The rendering is the implementing lane's, but the clauses above fix
+its content: it can say what this turn already asked and that the store returned nothing
+for it, and it cannot say how many records anything held, how much of the budget is
+gone, or how long the turn has left — so a planner cannot learn the turn's budget or the
+store's shape from it, and a reply cannot be shaped by it except through a second ask.
 
 ### 8. The reply says what the read did not reach
 
-> **Normative.** **On a turn whose last structured read was empty in §6's sense, the
-> composing stage is given the bare fact that a structured read reached only records
-> carrying the values it named and found none.** On every other turn it is given
-> nothing, and the assembled prompt is byte-identical to what it is today.
+> **Normative.** **Two facts, and they are separate.** The **reach** fact is that a
+> structured read reached only records carrying a recorded value on the axes it
+> filtered. The **emptiness** fact is that such a read returned nothing. Each is given
+> to the composing stage on its own condition below, both are given where both hold,
+> and neither is inferred from the other.
 
-> **Normative.** The fact carries **no window, no instant, no label, no query, no count
-> and no kind name**. It is carried **inside `ai_assistant.orchestration`**, from the
-> component that knows it to the render site, as data; it adds **no field to a `core`
-> type**, no member to a Protocol, and it is never inferred at the render site — not
-> from the plan, not from the supply's length, not from the audit. This is ADR-0228
-> §10's rule and ADR-0227 §3's, applied to a third fact for its own reason.
+> **Normative.** **The reach fact is given on every turn whose last structured read
+> applied a `participants`, `topics` or `about_person` axis, whether that read returned
+> records or none.** A read that returned records excluded every unlabelled record just
+> as an empty one did, so the obligation does not turn on the yield.
 
-> **Normative.** **This discharges ADR-0237 §6's third clause and ADR-0239 §6's third
-> clause for this consumer**, and no lane reads either as discharged by anything else.
-> What the reply states is the reach of the read — that records carrying no value on
-> the axes it filtered were not reached — and it never states that the thing did not
-> happen. ADR-0237 §7's no-assertion-of-absence clause binds the composed reply
+> **Normative.** **A window-only structured read owes no reach fact**, and the ground is
+> a property of the records rather than a convenience: this kind reads episodes (§4),
+> every episodic record carries the `occurred_at` a window filters on, and ADR-0237 §6's
+> obligation is about *records carrying no value on the axes the read filtered*. Where
+> that population is empty by the record type's own shape, there is nothing the read did
+> not reach for want of a value. A lane that finds an episodic record without that
+> instant stops and says so rather than rendering a fact it cannot support.
+
+> **Normative.** **The emptiness fact is given on a turn whose last structured read was
+> empty in §6's sense**, and on no other turn.
+
+> **Normative.** **On a turn given neither fact the composing stage receives nothing,
+> and the assembled prompt is byte-identical to what it is today.**
+
+> **Normative.** Neither fact carries **a window, an instant, a label, a query, a count
+> or a kind name**. Both are carried **inside `ai_assistant.orchestration`**, from the
+> component that knows them to the render site, as data; they add **no field to a `core`
+> type**, no member to a Protocol, and neither is inferred at the render site — not from
+> the plan, not from the supply's length, not from the audit. This is ADR-0228 §10's
+> rule and ADR-0227 §3's, applied to two more facts for their own reason.
+
+> **Normative.** **The reach fact is what discharges ADR-0237 §6's third clause and
+> ADR-0239 §6's third clause for this consumer**, and no lane reads either as discharged
+> by anything else or as discharged only where a read came back empty. What the reply
+> states is the reach of the read — that records carrying no value on the axes it
+> filtered were not reached, and that the reach is the values that were **recorded**
+> rather than the subject the owner has in mind — and it never states that the thing did
+> not happen. ADR-0237 §7's no-assertion-of-absence clause binds the composed reply
 > entirely.
 
 > **Normative.** No lane renders this fact through the step account. ADR-0170 §5a's
@@ -692,12 +761,22 @@ that filtered by person and found none has almost certainly not established that
 owner never spoke to that person. Saying so is the difference between an assistant that
 is honest about its own index and one that reports an absence in the world.
 
-**On the last structured read and not on every one, because the fact is about the
-answer.** A turn that broadened and found records on its second read has an answer to
-compose; a note about the first read's emptiness would describe the system's search
-path rather than the user's question, which is the reporting §10's audit exists for.
-Where the turn *ended* on an empty read, the reply is composed over a supply that
-gained nothing from the ask, and the fact is what keeps that legible.
+**Two facts and not one, and an earlier draft had only the second.** That draft gave the
+composing stage the emptiness fact alone and claimed ADR-0237 §6 discharged by it; both
+lenses raised the same `blocker` on round 1 and both were right. §6's clause is stated
+over *"A surface performing a structured read"* without qualification, and the case it
+most obviously reaches is the successful one: a person-filtered read that returns the
+one labelled episode has excluded every unlabelled episode about that person, and a
+reply presenting it as *the* conversations with Alex is exactly the over-claim §6 exists
+to prevent. The emptiness fact could not carry that, because on such a turn the read was
+not empty. So the reach fact is the discharge and emptiness is a fact beside it.
+
+**On the *last* structured read, because the fact is about the answer being composed.**
+A turn that broadened and found records composes over what the second read returned, and
+that read's reach is what the reply must be honest about; the first read's emptiness is
+a fact about the system's search path, which is what §10's audit records. Where the turn
+*ended* on an empty read, the reply is composed over a supply that gained nothing from
+the ask, and both facts hold together.
 
 ### 9. The prompt offers a who or what axis only where the turn can name one
 
@@ -752,6 +831,10 @@ alternative, which is a store-side discovery read ADR-0237 §11 has already refu
 > **Normative.** The record gains **one field naming the axes the ask applied**: which
 > of the window, the participants axis, the topics axis, the subject axis and the query
 > the ask carried. Each is a member of a **closed enumeration** and never free text.
+> **It is recorded wherever a `STRUCTURED_READ` ask was emitted** — serviced, declined
+> under ADR-0226 §5, or lost with a servicing that failed — because it describes the
+> **ask**, which is a fact of the plan, exactly as the kind ADR-0226 §9 already records
+> per ask is. It is empty where no such ask was emitted.
 
 > **Normative.** The record gains **one field naming the structured read's outcome**, a
 > member of a closed enumeration distinguishing exactly four states: **no
@@ -759,6 +842,14 @@ alternative, which is a store-side discovery read ADR-0237 §11 has already refu
 > slot of the budget remained (§5); the read **ran and returned nothing**, which is
 > §6's empty read; and the read **returned records**. Nothing else is a member, and no
 > implementation collapses the second and third.
+
+> **Normative.** **That field is recorded over a servicing that completed and is absent
+> otherwise.** Where the servicing failed, was partial, or was declined under ADR-0226
+> §5's channel scoping, the field carries **nothing** — the shape ADR-0230 §9 gave its
+> own refusal field — and what happened is read from ADR-0226 §9's existing declined and
+> failure fields beside every count it makes zero. No implementation records a
+> completed-servicing outcome for a servicing that did not complete, and none reads an
+> absent value as any of the four.
 
 > **Normative.** **No value on any axis appears anywhere in this event.** No instant,
 > no window, no person label, no topic label, no query, no record, no excerpt and no
@@ -776,6 +867,18 @@ alternative, which is a store-side discovery read ADR-0237 §11 has already refu
 > this one event. Every figure is computed over a population and never as a per-turn
 > quantity, and no lane calls any of them precision or recall, for ADR-0226 §8's
 > unchanged reason.
+
+**The outcome field is stated over a completed servicing because that is the only
+servicing it can be true of, and an earlier draft made it mandatory in all four states.**
+Both lenses raised that as a finding on round 1 and both were right: a structured ask
+whose store call raises was asked, was not budget-blocked, and produced neither an empty
+result nor records, so none of the four values is honest, and a declined ask is the same
+gap one condition over. ADR-0226 §9 already scopes its counts the same way — *"Every
+count above is taken over a servicing that completed"* — so the field joins that regime
+rather than inventing a fifth member for a state the record already reports twice. The
+axes field is not scoped that way, and the asymmetry is the point: an ask that was
+emitted is an ask whichever way the servicing went, and suppressing its shape on a failed
+turn would hide the emissions an operator most wants to see.
 
 **Two fields and not one, because they answer different questions and neither is
 derivable from the other.** The outcome answers *did the read work*, and it is the field
@@ -898,8 +1001,8 @@ revision's guidance reflects the supply the revision is planning over.
 3. **Missing, and what the turn does about it.** A structured read naming a value no
    record carries returns nothing; the audit records the empty outcome; ADR-0228 §2's
    other six conditions holding, the turn makes a second planner call; the second call
-   receives `empty_reads` naming `STRUCTURED_READ`; and the plan it returns is the
-   planner's own. Asserted end to end, and asserted again with (a) failing — an
+   receives `empty_reads` carrying **the very ask the first plan emitted**, byte for
+   byte, and nothing the store returned; and the plan it returns is the planner's own. Asserted end to end, and asserted again with (a) failing — an
    operation declaring no planning budget — where no second call is made.
 4. **Ambiguous.** Two episodes match the same person and window; both reach the fourth
    group, in ADR-0237 §5's order on the query-less arm, and neither is preferred by any
@@ -908,15 +1011,22 @@ revision's guidance reflects the supply the revision is planning over.
    unrelated questions is not returned by a structured read whose filters it fails, at
    any similarity — run on the query-less arm, and again on the `search` arm with a
    query the caption matches, which is the arm where similarity would otherwise win.
-6. **Deduplication is not emptiness.** A structured read whose every record was already
-   in the supply fires **no** revision, records the outcome as having returned records,
-   and puts nothing in `empty_reads`. This is the case §6 turns on and the one a
-   servicer reading the union's admissions rather than the store's result gets wrong.
-7. **The budget is not emptiness.** A servicing in which the earlier kinds consume the
-   whole budget reaches the structured read with no slot, makes **no store call**,
-   records the not-reached outcome, fires no revision, and puts nothing in
-   `empty_reads`. Asserted beside a run of the same fixture with one slot left, which
-   does make the call.
+6. **Deduplication is not emptiness.** A servicing whose only ask is a structured read,
+   and whose every returned record was already in the supply, fires **no** revision —
+   nothing satisfies either branch of ADR-0228 §2(e) — records the outcome as having
+   returned records, and puts nothing in `empty_reads`. This is the case §6 turns on and
+   the one a servicer reading the union's admissions rather than the store's own result
+   gets wrong.
+7. **The budget is not emptiness, and it does not suppress the revision either.** A
+   servicing in which the earlier kinds admit ten records the supply did not hold
+   reaches the structured read with no slot and makes **no store call**; the audit
+   records the not-reached outcome; `empty_reads` is **empty** on the second planner
+   call; and — because ADR-0226 §6 counts the budget after deduplication, so those ten
+   satisfy ADR-0228 §2(e)'s novelty branch — the turn **does** revise where the other
+   six conditions hold. Asserted as that pair, and asserted beside a run of the same
+   fixture with one slot left, which does make the call. What it is written against is
+   an implementation that reads a not-reached read as an empty one, putting an ask into
+   `empty_reads` that established nothing.
 8. **The servicing order and the truncation.** A request carrying a file, a search, a
    hop, a structured read and a query yields a fourth group in that order; a structured
    read reached with fewer slots than the whole budget and filling every one of them is
@@ -940,17 +1050,26 @@ revision's guidance reflects the supply the revision is planning over.
     On a call whose supply carries one labelled record, the axis is stated. And a
     `STRUCTURED_READ` naming a label nothing in the supply carried is serviced normally,
     which is the clause that keeps the gate off the ask.
-12. **The reply says what it did not reach.** A turn ending on an empty structured read
-    composes a reply stating the reach of the read, asserted **through
-    `orchestration/composing.py`'s production renderer**; a turn that broadened and
-    found records states nothing of the kind; and on a turn with no structured read the
-    assembled prompt is byte-identical to what it is today.
-13. **The carrier copies nothing.** A turn whose structured ask named a distinctive
-    person label and a distinctive topic emits an audit event and makes a second planner
-    call in which that label, that topic, the window's instants and the query appear
-    **nowhere** — not in `empty_reads`, not in the audit event, not in the composing
-    stage's fact. Asserted over the emitted event's own fields and over the assembled
-    second prompt, not over the redaction net.
+12. **The reply says what it did not reach, on a successful read as well as an empty
+    one.** Four arms, each asserted **through `orchestration/composing.py`'s production
+    renderer** over records shaped as the production capture site writes them (ADR-0226's
+    ADR-0227 amendment). Over a store holding one episode labelled with the asked person
+    and a second, unlabelled episode that is in fact about that person, a person-filtered
+    read returns the first and the reply **states the reach** — that records carrying no
+    value on that axis were not reached — rather than presenting the one as the whole.
+    A turn ending on an empty structured read states the reach **and** the emptiness. A
+    turn whose structured read applied the window alone, and a turn with no structured
+    read at all, are given neither fact, and on the second the assembled prompt is
+    byte-identical to what it is today.
+13. **The two carriers carry different things, and the audit carries no value.** A turn
+    whose structured ask named a distinctive person label, a distinctive topic and a
+    distinctive query emits an audit event in which **none of those three, and neither
+    of the window's instants, appears anywhere** — the event carries the axes as
+    enumeration members and the outcome, and nothing else — while `empty_reads` on the
+    second planner call carries that ask **whole**, equal to the one the first plan
+    emitted. The composing stage's two facts carry neither. Asserted over the emitted
+    event's own fields, over the parameter's own value and over the assembled second
+    prompt, not over the redaction net.
 14. **The channel scoping holds.** A turn on `converse_spoken` whose planner emits a
     `STRUCTURED_READ` performs no store call for it, reaches the composing stage with
     the three groups ADR-0203 §1 narrowed, records the emission as declined, and makes
@@ -981,9 +1100,10 @@ revision's guidance reflects the supply the revision is planning over.
 - **A kind or band axis on the ask** (§4). **Fires** with an ADR that decides how a
   store's partitioning vocabulary is rendered to a planner at all — which is a namer
   question this ADR does not open.
-- **Widening `empty_reads` to another kind** (§7). **Fires** with an ADR that shows what
-  a second kind's empty result certifies about the store and what a planner would do
-  differently on it.
+- **Admitting a second kind's ask to `empty_reads`** (§7). **Fires** with an ADR that
+  shows what that kind's empty result certifies about the store and what a planner would
+  do differently on it. **Not** fired by a lane finding the parameter's type general
+  enough to allow it.
 - **Hybrid or lexical search** (ADR-0006 §5, ADR-0226 §12). A different retrieval
   mechanism rather than a filter over stored values, and a later milestone-30 lane's.
   **Fires** with the ADR that decides it.
@@ -1166,9 +1286,9 @@ ADR-0227 §§3 and 4.
 > of what it obliges, and unmarked text is read to determine what a marked clause means
 > and never supplies an obligation.
 
-What binds is **fifty-nine marked clauses**: §1's three, §2's six, §3's five, §4's four, §5's
-eight, §6's five, §7's five, §8's four, §9's three, §10's five, §11's six, §12's three,
-§13's one, and this section's one. §14's list, §15's classification and every argument in
+What binds is **sixty-six marked clauses**: §1's three, §2's six, §3's five, §4's four,
+§5's eight, §6's five, §7's seven, §8's eight, §9's three, §10's six, §11's six, §12's
+three, §13's one, and this section's one. §14's list, §15's classification and every argument in
 this document are deliberately unmarked: they are deferral, attestation and argument,
 which ADR-0089 §1 classifies as non-normative however load-bearing.
 
@@ -1198,8 +1318,10 @@ against it until it has merged (ADR-0015 §5, golden rule 5).
   corpus moves, and the servicing site, the budget, the fourth group, the audit and the
   channel scoping are all inherited whole.
 - **`Planner.plan` widens for the second time**, and every implementation must declare
-  the new keyword. That is the honest cost of a planner that learns something from its
-  own read, and it is the same cost ADR-0230 §3 paid for the listing.
+  the new keyword. What crosses on it is the planner's own prior ask and the fact that
+  it returned nothing — the minimum that makes a second composition different from the
+  first — and that is the honest cost of a planner that learns something from its own
+  read. It is the same cost ADR-0230 §3 paid for the listing.
 - **Three of the four axes reach nothing on the day this merges**, exactly as ADR-0237
   §6 records for the store side: capture writes no labels and ADR-0239's producer is its
   own lane. §9's conditional guidance is what keeps that from becoming a stream of
