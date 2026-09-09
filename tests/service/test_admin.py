@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import errno
 import json
+import sqlite3
 import stat
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
@@ -331,6 +332,49 @@ def test_an_admin_timeout_is_short_because_both_ends_are_on_this_machine() -> No
 # --- the record grows without end, and the surface over it must not ----------
 
 
+#: How far past the frame ceiling the long record below is driven. The ceiling
+#: fixes a minimum record length exactly; this is the margin on top of it, so the
+#: record is *past* the bound rather than a rounding away from it — the rows cost
+#: one shared commit either way.
+_PAST_THE_CEILING: Final[int] = 2
+
+
+def _long_record_identity(index: int) -> str:
+    """One device of the long record, named so that no two rows collide."""
+    return f"n{index:012d}"
+
+
+def _grow_the_record(path: Path, *, upto: int) -> None:
+    """Grow an enrolment record to ``upto`` rows by copying the row it already holds.
+
+    Every added row is the one :meth:`EnrolmentStore.enrol` wrote, re-inserted under
+    a fresh identity, so what the listing reads back is the shape the enrolment act
+    stores rather than a shape this test made up — the stamp format and the verifier
+    come from the act itself. The schema is the store's own; only the column list is
+    named here.
+
+    **One commit, not ``upto`` of them.** Each enrolment act is its own durable
+    transaction, which is right for an act an owner performs and is milliseconds of
+    fsync a row when nine thousand of them are a fixture: those commits were the
+    whole of the 47.7 s this test used to cost (#2191). What the caller pins is what
+    a *listing* does over a long record — how the record got long is not the
+    property, and the enrolment act's own promises are pinned in
+    ``test_enrolment.py``.
+
+    Args:
+        path: The record's database file, already created by :class:`EnrolmentStore`.
+        upto: How many rows the record holds when this returns.
+    """
+    with contextlib.closing(sqlite3.connect(path, isolation_level=None)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.executemany(
+            "INSERT INTO enrolments (overlay_identity, verifier, enrolled_at, revoked_at) "
+            "SELECT ?, verifier, enrolled_at, revoked_at FROM enrolments ORDER BY id LIMIT 1",
+            [(_long_record_identity(index),) for index in range(1, upto)],
+        )
+        conn.execute("COMMIT")
+
+
 async def test_a_listing_stays_inside_one_frame_however_long_the_record_is(
     tmp_path: Path,
 ) -> None:
@@ -342,18 +386,28 @@ async def test_a_listing_stays_inside_one_frame_however_long_the_record_is(
     uses to *check* the record would fail as a closed connection, which is both the
     least legible failure available and the one the record's own growth guarantees.
 
-    Driven past the frame ceiling rather than near it: at ~139 bytes a row, one
-    mebibyte is a few thousand, so ten thousand acts is comfortably over.
+    Driven past the frame ceiling rather than near it, and by a length **derived**
+    from the ceiling rather than guessed at: one enrolment is performed, the row it
+    renders as is measured through the listing itself, and the record is grown past
+    the length at which listing it whole could not fit in :data:`ADMIN_FRAME_BYTES`.
+    A live row is the smallest a row renders as — a revoked one carries a second
+    instant where this one carries ``null`` — so a record derived from it is long
+    enough whatever the rows in it turn out to be. The last assertion re-derives the
+    ceiling from the reply's own rows, so a row that grew or shrank cannot leave the
+    record under the ceiling and this test quietly vacuous.
     """
     store = EnrolmentStore(tmp_path / ENROLMENTS_FILENAME)
     verifier = verifier_for("x" * 43)
-    for index in range(10_000):
-        store.enrol(f"n{index:012d}", verifier=verifier, now=_MOMENT)
+    store.enrol(_long_record_identity(0), verifier=verifier, now=_MOMENT)
     registry = DeviceRegistry(store, hub_identity=_HUB_ID)
     listener = AdminListener(registry, data_dir=tmp_path, now=_clock)
     await listener.start()
     await listener.begin_serving()
     try:
+        one_row = await _act(listener, {"act": "list"})
+        row_bytes = len(json.dumps(one_row["devices"][0]).encode())
+        record_length = _PAST_THE_CEILING * (ADMIN_FRAME_BYTES // row_bytes + 1)
+        _grow_the_record(store.path, upto=record_length)
         listed = await _act(listener, {"act": "list"})
     finally:
         await listener.stop_accepting()
@@ -363,7 +417,9 @@ async def test_a_listing_stays_inside_one_frame_however_long_the_record_is(
     assert listed["ok"]
     assert len(json.dumps(listed).encode()) < ADMIN_FRAME_BYTES
     assert len(listed["devices"]) == LISTING_LIMIT
-    assert listed["omitted"] == 10_000 - LISTING_LIMIT
+    assert listed["omitted"] == record_length - LISTING_LIMIT
+    rendered = len(json.dumps(listed["devices"]).encode())
+    assert record_length * (rendered // LISTING_LIMIT) > ADMIN_FRAME_BYTES
 
 
 async def test_a_listing_says_what_it_did_not_show(tmp_path: Path) -> None:
