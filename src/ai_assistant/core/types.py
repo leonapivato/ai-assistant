@@ -6795,6 +6795,107 @@ class QueryOutcome(BaseModel):
         return self
 
 
+# --- planning: what one composition may be composed over (ADR-0238 §2) -------
+# The value `QueryComposer.compose` takes. ADR-0231 §3 gave that seam one
+# positional argument and made the utterance-only property decidable *from the
+# signature*; ADR-0238 §2 keeps the one argument and moves the property onto the
+# value, so a caller holding an excluded record still has nothing to pass.
+
+
+def _reachable_by_anyone(
+    value: tuple[MemoryRecord, ...],
+) -> tuple[MemoryRecord, ...]:
+    """Refuse any record whose ``placement.reach`` is not ``ANYONE`` (ADR-0238 §2, §3).
+
+    **The refusal is on the type, and that is the whole of what replaces the absent
+    parameter.** ADR-0231 §3's safety claim rested on ADR-0093 §10's argument — "a
+    caller able to widen the read is a caller able to defeat the bound" — so the
+    property was decidable from the declaration. Widening what the one argument
+    carries does not weaken that argument; it **relocates** it, from the absence of a
+    parameter to the validator on the value. No producer, decode, test double or
+    later lane can construct a supply carrying an excluded record.
+
+    **The fact is ADR-0217 §1's placement and there is no new axis** (§3). It is read
+    exactly as ADR-0217 defines it, per record, and **regardless of why that record
+    was selected** — which is what makes ADR-0238 §12's negative arm true: no
+    selection an injected result influenced can place one here.
+
+    Raises:
+        ValueError: If any member's reach is not :attr:`PlacementReach.ANYONE`.
+    """
+    excluded = sum(1 for record in value if record.placement.reach is not PlacementReach.ANYONE)
+    if excluded:
+        msg = (
+            f"a search supply carries only records placed for ANYONE; {excluded} of "
+            f"{len(value)} is not (ADR-0238 §2, §3, on ADR-0217 §1's reach)"
+        )
+        raise ValueError(msg)
+    return value
+
+
+class SearchSupply(BaseModel):
+    """What one composition may be composed over (ADR-0238 §2).
+
+    :meth:`~ai_assistant.core.protocols.QueryComposer.compose`'s one positional
+    argument. **Exactly two fields**, and a lane adds no third: ADR-0238 §2 states
+    the members exactly, and one adding another is changing that decision rather than
+    implementing it.
+
+    **One validating value rather than three parameters** (§2). Three parameters
+    would put the bound back in the caller's hands — a supply site that passed the
+    right records would be conforming and one that passed the wrong ones would be a
+    defect nobody could see from the signature. One value moves the whole question to
+    a place a reviewer reads once. That is :class:`Placement`'s discipline
+    (ADR-0217 §1's refused-at-construction table) and :class:`QueryOutcome`'s
+    (ADR-0231 §3's exactly-one validator).
+
+    **It is deliberately *not* the unforgeable composed-query value ADR-0231 §19
+    defers** (§2): this type is constructible by any caller, and what it guarantees
+    is what it *contains*, never who built it.
+
+    **One type, two admissible populations, and a recorded fact decides which.** A
+    supply carrying a non-empty ``records`` is constructed only for a destination
+    whose recorded trust is :attr:`DestinationTrust.USER_CHOSEN`; where the
+    destination reads ``UNCHOSEN`` the supply carries the utterance and an empty
+    ``records``, and ADR-0231 §3's utterance-only property holds for that destination
+    exactly as ratified. Which one applies is decided by a recorded fact and **never
+    by a judgement** (§2). That clause binds the *construction site*, which ADR-0238
+    §2 fixes at exactly one — ``service_read_request`` in ``orchestration/reads.py``
+    — and is not a property this type can hold: what the type holds is the exclusion
+    below.
+
+    **What may enter ``records`` is closed to three populations** (§2): episodes of
+    this conversation that `orchestration` selected into the turn's supply;
+    ``MemoryRecord`` values the turn's retrieval and episodic supplement selected; and
+    records **this turn's own** ``WEB_SEARCH`` servicings minted at a destination of
+    recorded trust ``USER_CHOSEN``. The third is **within one turn** — ADR-0231 §16
+    binds entire, a minted record "resolves in no store" and "no later turn reaches
+    it" — so what a later turn has instead is the captured episode, which is the
+    first two populations doing the work.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    utterance: NonBlankEncodableText = Field(
+        description=(
+            "The unrewritten user text for the turn being planned, as `orchestration` "
+            "already holds it (ADR-0238 §2). Non-blank and UTF-8-encodable — "
+            "ADR-0231 §3's argument, unchanged in everything but where it sits."
+        )
+    )
+    records: Annotated[tuple[MemoryRecord, ...], AfterValidator(_reachable_by_anyone)] = Field(
+        default=(),
+        description=(
+            "The records this composition may be composed over, empty by default "
+            "(ADR-0238 §2). **Every member is placed for "
+            ":attr:`PlacementReach.ANYONE`**, refused at construction otherwise "
+            "(:func:`_reachable_by_anyone`). The default is the empty tuple because "
+            "that is the value ADR-0231 §3's ratified population carries, so a caller "
+            "that supplies nothing composes exactly as this corpus composes today."
+        ),
+    )
+
+
 # --- tools: what one web search produced (ADR-0231 §10, §17) -----------------
 # The `WebSearcher` seam's return value and its refusal vocabulary. `core`'s
 # because they cross that seam (ADR-0231 §13); the mapping from a refusal to the
@@ -8308,6 +8409,80 @@ class ConversationExport(BaseModel):
             raise ValueError(msg)
 
         return self
+
+
+# --- the conversation's search budget: one counter, one flag (ADR-0238 §8) ---
+# **Row state, not presented model state.** `Conversation`, `ConversationTurn` and
+# `ConversationExport` gain no field and change no version — the counter and the
+# flag hold the position the turn index and `ParkedBinding`'s uniqueness already
+# hold, and `ConversationStore.search_draw` is the read that presents them. So
+# `ConversationExport.schema_version` stays at 2 and ADR-0212 §8 and ADR-0014 §5 are
+# untouched (ADR-0238 §8, §13). A lane that finds a *user-facing* need for the draw
+# moves that version in the same change, with the records that entails, rather than
+# reading this as permission not to.
+
+
+class ConversationSearchDraw(BaseModel):
+    """What one conversation has spent, and whether it is still closed (ADR-0238 §8).
+
+    A **read model** — what
+    :meth:`~ai_assistant.core.protocols.ConversationStore.search_draw` answers — and
+    **no member of that store takes one as an argument**. Exactly two fields, and a
+    lane adds no third without the ADR that decides it.
+
+    **The budget lives on the conversation record, and that is a decision with a
+    worked alternative behind it** (§8). A per-conversation durable counter has a
+    lifecycle: it must be fenced when the conversation is deleted and destroyed when
+    the record is, and **that lifecycle already exists, ratified, on exactly one
+    object** — ``stamp_deleted`` fences and ``drop_if_eligible`` destroys (ADR-0074
+    §8). An earlier revision gave the budget a store of its own and every protocol
+    for telling it about a deletion failed in a different place: the retention
+    reclaim only learns a conversation is eligible *after* ``drop_if_eligible`` has
+    destroyed the record, so a cleanup can only be ordered after the destructive act
+    and one process death strands the counter; and a reconciliation walk rests on a
+    cross-store read that **aliases a tombstoned conversation with a dropped one**.
+    Moving the counter removed the question instead of answering it.
+
+    **The pair is one counter and one flag and no content** — no query, no result, no
+    destination, no record, no text. Tier 1, local, durable, never written to a
+    remote service (ADR-0004 §2), and living under the retention, deletion and export
+    rules the conversation record already has rather than under new ones.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    calls: int = Field(
+        ge=0,
+        description=(
+            "The provider calls this conversation has spent (ADR-0238 §8). "
+            "Non-negative. Incremented by "
+            ":meth:`~ai_assistant.core.protocols.ConversationStore.admit_search` "
+            "**before** the call, so an admitted call is consumed whatever the "
+            "outcome and **no path lowers it** — a servicing that is admitted and "
+            "then does not transmit still spends its increment, because "
+            ":class:`SearchOutcome` carries no transmission fact and a refund rule "
+            "would oblige the servicer to tell two ``PROVIDER_REFUSED`` outcomes "
+            "apart when nothing in the contract distinguishes them."
+        ),
+    )
+    all_external_user_chosen: bool = Field(
+        description=(
+            "Whether **every** recorded external span this conversation has carried "
+            "was minted by a ``WEB_SEARCH`` servicing at a destination of recorded "
+            "trust :attr:`DestinationTrust.USER_CHOSEN` (ADR-0238 §8). **Required "
+            "with no default**: the value at creation is ``True`` and only "
+            ":meth:`~ai_assistant.core.protocols.ConversationStore.start` creates it "
+            "— a conversation ``start`` mints has no turns at all, so the sentence is "
+            "vacuously true of it — while a record written **before** this decision "
+            "decodes ``False``, which is ADR-0181 §12's reading of a pre-existing row "
+            "and the fail-closed direction. A default here would make those two "
+            "states one. "
+            ":meth:`~ai_assistant.core.protocols.ConversationStore.observe_search` "
+            "folds by logical **and**, so **once false it never returns to true** "
+            "(ADR-0106 §4's monotonicity on this axis) and no later clean turn raises "
+            "it."
+        )
+    )
 
 
 # --- severity scales: ordered by declaration, not by value (ADR-0016 §2) -----
@@ -10606,6 +10781,42 @@ class EgressBinding(_OriginRecordedBindingBase):
             "§7's count now admits."
         )
     )
+    closed_loop: bool = Field(
+        default=False,
+        description=(
+            "Whether this request is **closed-loop** (ADR-0238 §5): its kind is "
+            "``WEB_SEARCH``, the destination its binding carries has recorded trust "
+            ":attr:`DestinationTrust.USER_CHOSEN`, every recorded external span this "
+            "conversation has carried — on any earlier turn, and on this turn up to "
+            "the moment the request is built — was minted by a ``WEB_SEARCH`` "
+            "servicing at such a destination, and this request holds an admission "
+            ":meth:`~ai_assistant.core.protocols.ConversationStore.admit_search` "
+            "granted for this call. A request failing any of the four is not "
+            "closed-loop, and every clause ADR-0238 supersedes binds on it exactly "
+            "as it does today. **Written by `orchestration` alone**, at the moment "
+            "the request is built, from values it holds as data it fetched; "
+            "**discarded, never merged**, if any producer emitted one; and no model "
+            "output, request content or search result contributes to it (§12). "
+            "**Defaulting to ``False``, and that is a decision rather than a "
+            "convenience** (§5): it keeps ADR-0152 §7's transcription count "
+            "untouched — ``rebind`` takes from ``approved`` exactly one thing, "
+            "already narrowed twice, and a fourth transcription would supersede that "
+            "clause a third time — and ``False`` is the correct value for every "
+            "request that can resume, because a ``CONFIRM`` on a ``WEB_SEARCH`` "
+            "decision resolves in no turn (ADR-0231 §9). **The default is safe in "
+            "the direction a default is usually unsafe**: ``False`` is the "
+            "*restrictive* value, so a composition site that fails to compute it "
+            "yields a request that is not closed-loop and rules exactly as "
+            "``origin/main`` rules today, and the failure mode of the omission is "
+            "that milestone 31 does not work, which is loud. It is **not** a floor "
+            "bypassed by a missing field, which is what ADR-0233 §4's "
+            "required-with-no-default guards for a three-valued fact whose safe "
+            "member is not its first."
+            " Taken from :attr:`CarriedProvenance.closed_loop` unchanged, which is "
+            "ADR-0181 §3's carriage and ADR-0233 §4's shape stated over the same two "
+            "types for the same reason."
+        ),
+    )
 
     @model_validator(mode="after")
     def _refuses_a_path_without_a_model_call(self) -> Self:
@@ -11423,6 +11634,41 @@ class CarriedProvenance(BaseModel):
             "**not** a claim that any argument, destination or span was influenced "
             "by external content, nor that any was not (ADR-0098 §5, ADR-0106 §1)."
         )
+    )
+    closed_loop: bool = Field(
+        default=False,
+        description=(
+            "Whether this request is **closed-loop** (ADR-0238 §5): its kind is "
+            "``WEB_SEARCH``, the destination its binding carries has recorded trust "
+            ":attr:`DestinationTrust.USER_CHOSEN`, every recorded external span this "
+            "conversation has carried — on any earlier turn, and on this turn up to "
+            "the moment the request is built — was minted by a ``WEB_SEARCH`` "
+            "servicing at such a destination, and this request holds an admission "
+            ":meth:`~ai_assistant.core.protocols.ConversationStore.admit_search` "
+            "granted for this call. A request failing any of the four is not "
+            "closed-loop, and every clause ADR-0238 supersedes binds on it exactly "
+            "as it does today. **Written by `orchestration` alone**, at the moment "
+            "the request is built, from values it holds as data it fetched; "
+            "**discarded, never merged**, if any producer emitted one; and no model "
+            "output, request content or search result contributes to it (§12). "
+            "**Defaulting to ``False``, and that is a decision rather than a "
+            "convenience** (§5): it keeps ADR-0152 §7's transcription count "
+            "untouched — ``rebind`` takes from ``approved`` exactly one thing, "
+            "already narrowed twice, and a fourth transcription would supersede that "
+            "clause a third time — and ``False`` is the correct value for every "
+            "request that can resume, because a ``CONFIRM`` on a ``WEB_SEARCH`` "
+            "decision resolves in no turn (ADR-0231 §9). **The default is safe in "
+            "the direction a default is usually unsafe**: ``False`` is the "
+            "*restrictive* value, so a composition site that fails to compute it "
+            "yields a request that is not closed-loop and rules exactly as "
+            "``origin/main`` rules today, and the failure mode of the omission is "
+            "that milestone 31 does not work, which is loud. It is **not** a floor "
+            "bypassed by a missing field, which is what ADR-0233 §4's "
+            "required-with-no-default guards for a three-valued fact whose safe "
+            "member is not its first."
+            " The seam writes :attr:`EgressBinding.closed_loop` from this value "
+            "unchanged."
+        ),
     )
 
 
@@ -12471,6 +12717,14 @@ def _canonical_destination_tuple(
 ) -> tuple[CanonicalDestination, ...]:
     """Require ADR-0193 §1's non-empty, duplicate-free, canonically ordered set.
 
+    **Two records take this rule, through this one function.**
+    :attr:`RecipientGrant.destinations` is the first;
+    :attr:`DestinationTrustRecord.destinations` is the second, and ADR-0238 §1 says
+    in terms that it takes "ADR-0193 §1's canonical destination tuple, **by the same
+    validator and not a second one**". The messages below therefore name the *set*
+    rather than either record: a second copy of this function, or a second wording of
+    its rule, would be exactly the drift the paragraph after this one is about.
+
     The order is not this ADR's invention: it is the total order
     :attr:`EgressBinding.canonical_destination_set` already produces — account
     members first, then selected recipients by ``protocol`` and then by
@@ -12502,11 +12756,11 @@ def _canonical_destination_tuple(
             order but the canonical one.
     """
     if not value:
-        msg = "a recipient grant names at least one canonical destination (ADR-0193 §1)"
+        msg = "a recorded act names at least one canonical destination (ADR-0193 §1)"
         raise ValueError(msg)
     if tuple(sorted(value, key=_destination_order)) != value:
         msg = (
-            "a recipient grant's destinations are held in the one canonical order "
+            "a recorded act's destinations are held in the one canonical order "
             "EgressBinding.canonical_destination_set produces — account members first, "
             "then selected recipients by protocol and then by canonical form "
             "(ADR-0193 §1)"
@@ -12514,7 +12768,7 @@ def _canonical_destination_tuple(
         raise ValueError(msg)
     if any(earlier == later for earlier, later in pairwise(value)):
         msg = (
-            "a recipient grant names each canonical destination once; a duplicate is a "
+            "a recorded act names each canonical destination once; a duplicate is a "
             "second spelling of one authorisation (ADR-0193 §1)"
         )
         raise ValueError(msg)
@@ -13060,6 +13314,174 @@ class RecipientGrantOutcome(BaseModel):
                 "a recipient-grant outcome carries exactly one of established and "
                 f"not_established, got established={self.established!r}, "
                 f"not_established={self.not_established!r} (ADR-0235 §4)"
+            )
+            raise ValueError(msg)
+        return self
+
+
+# --- destination trust: what the user said about a destination (ADR-0238 §1) --
+# The **mirror** of the source side #2096 records. That note keeps one fact per
+# *source* — who may write here — and this is the same rule read on the other axis:
+# who the user picked to be told about. One rule, two milestones — milestone 31's
+# provider and milestone 32's returned site are two values of it rather than two
+# boundaries.
+
+
+class DestinationTrust(StrEnum):
+    """Whether the user picked this destination by name (ADR-0238 §1).
+
+    **Closed at exactly two members**, and the vocabulary is *added to and never
+    renamed*: no implementation and no later ADR adds a third without the ADR that
+    decides it. That is :class:`DestinationProtocol`'s discipline (ADR-0150) applied
+    to the fact rather than to the protocol.
+
+    **Two values and not three, unlike the source side** (§1). The source set is
+    three-valued because policy there needs two boundaries — a value may fill an
+    unbounded blank alone, only inside a confirmed flow, or only under a per-call
+    confirmation. The destination side needs one boundary, because the question is
+    binary at every seam this corpus has: either the user picked this party or
+    nobody did. A third member would be a guess about a mechanism no ADR has
+    designed, and the enumeration is extended by ADR precisely so that a later
+    milestone may add one *when it has a policy that reads it*.
+
+    **Never inferred, and absence is not an inference** (§1). Reading a total
+    function over a partial store is not inference in ADR-0098 §1's sense; inference
+    is deciding a fact by inspecting content. Nothing here inspects anything: a
+    record either exists and is live, or it does not.
+    """
+
+    USER_CHOSEN = "user_chosen"
+    """The user picked this destination by name and said it may be told about them.
+
+    Set by a **recorded act of the user and by nothing else** (§1). No
+    configuration sets it, no connected account sets it, no operator setting sets
+    it, no tool declaration sets it, no :class:`RecipientGrant` sets it, and **no
+    model output ever sets it, raises it, or is consulted about it**."""
+
+    UNCHOSEN = "unchosen"
+    """Every other destination, which is what absence means (§1).
+
+    The fail-closed direction, and it covers **more than "no record"**: no record
+    exists, a record was revoked, or a record cannot be read. Stated as ADR-0146 §2
+    states its own — "a span for which no origin was recorded is
+    **system-selected**" — and for the same reason: the permissive default is what
+    makes an unimplemented path work, and is therefore precisely the state in which
+    the rule would be false.
+
+    **What may be done to an `UNCHOSEN` destination is not decided here.** ADR-0238
+    defines the member; milestone 32's bounded fetch is what reads it (§16)."""
+
+
+class DestinationTrustRecord(BaseModel):
+    """One recorded user act about one canonical destination set (ADR-0238 §1).
+
+    The record a :class:`~ai_assistant.core.protocols.DestinationTrustStore` appends.
+    It says *the user picked these parties by name and told this system it may be
+    told about them* — and it says nothing else.
+
+    **It is not a field on a** :class:`RecipientGrant`, **and two reasons each
+    suffice** (§1). A destination nobody chose has no grant to carry a field —
+    milestone 32's subject is a site a provider returned, for which no grant exists
+    or ever will — so a grant-carried field could not express the value that
+    milestone reads. And ADR-0193 §5 is correct and is left standing: "a grant
+    states nothing about the payload and authorises no content", so deriving a
+    payload permission from a recipient grant would be the shape ADR-0097 §7 refuses
+    and ADR-0155 §3 quotes against itself — "the floor satisfied by a consent the
+    user gave about something else entirely".
+
+    **The two acts are separate and neither implies the other** (§1). A
+    ``RecipientGrant`` authorises *whether this system may talk to this party*; this
+    record authorises *what class of payload this system may compose for it*. A
+    grant established before this decision, or after it without the second act,
+    leaves its destination reading :attr:`DestinationTrust.UNCHOSEN`, and no
+    component reads the existence, breadth, age or liveness of a grant as evidence
+    of trust.
+
+    **It carries no tool, no account, no payload, no description and no content.**
+    It is a fact about a destination set and nothing else, which is what makes it
+    readable for a destination no grant covers — the property milestone 32 needs and
+    a grant-shaped record could not have.
+
+    **Prospective and revocable**, on ADR-0193 §9's shape (§1): a revocation takes
+    effect for every later request and rewrites no recorded decision, and a
+    destination whose record is revoked reads ``UNCHOSEN`` from that moment.
+
+    **Frozen and boundary-crossing** (ADR-0068). ``frozen=True`` refuses
+    ``record.destinations = …`` and does *not* refuse
+    ``record.__dict__["destinations"] = …``, which is why the store's obligation is
+    a detached, validated snapshot on both the read and the write path rather than a
+    reliance on this config — :class:`RecipientGrant`'s own note, one store over.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: DurableIdentifier = Field(
+        description=(
+            "This record's own id, **minted by the caller that constructs the "
+            "record**, as :attr:`RecipientGrant.id` is (ADR-0193 §1) — so the record "
+            "is a complete value before it reaches any store and the store's refusal "
+            "of a duplicate is a comparison rather than an allocation (ADR-0238 §1). "
+            "ADR-0238 §1 spells the annotation ``Identifier``; "
+            ":data:`DurableIdentifier` **is** that alias, spelled the way this file "
+            "spells an id a record keeps."
+        )
+    )
+    destinations: Annotated[
+        tuple[CanonicalDestination, ...], AfterValidator(_canonical_destination_tuple)
+    ] = Field(
+        description=(
+            "The canonical destination set this record is over. Non-empty, "
+            "duplicate-free, and in the one canonical order "
+            ":attr:`EgressBinding.canonical_destination_set` produces — ADR-0193 §1's "
+            "rule, **by the same validator and not a second one** (ADR-0238 §1). "
+            "**Without it §1's revocation clause is false**: ``(Alice, Bob)`` and "
+            "``(Bob, Alice)`` are unequal tuples over one logical set, both would be "
+            "admitted as live, and revoking the record the user was shown would leave "
+            "the other standing with the destination still reading ``USER_CHOSEN``. "
+            ":meth:`~ai_assistant.core.protocols.DestinationTrustStore.trust_of` is "
+            "unaffected, its rule being membership rather than order."
+        )
+    )
+    trust: DestinationTrust = Field(
+        description=(
+            "What the user said. Only :attr:`DestinationTrust.USER_CHOSEN` is "
+            "recordable: a record asserting ``UNCHOSEN`` is refused at construction "
+            "below (ADR-0238 §1)."
+        )
+    )
+    established_at: UtcInstant = Field(
+        description=(
+            "The instant of the user's act; timezone-aware, stored as UTC. Naive is "
+            "refused for :attr:`RecipientGrant.decided_at`'s reason — the store is "
+            "durable *and* ordered."
+        )
+    )
+    revoked_at: UtcInstant | None = Field(
+        default=None,
+        description=(
+            "When the user withdrew this record, or ``None`` while it stands. "
+            "Revocation is **prospective**: it takes effect for every later read and "
+            "rewrites no recorded decision (ADR-0238 §1, on ADR-0193 §9's shape)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _an_unchosen_record_is_a_second_spelling_of_nothing(self) -> DestinationTrustRecord:
+        """Refuse a record whose ``trust`` is ``UNCHOSEN`` (ADR-0238 §1).
+
+        ``UNCHOSEN`` is what *absence* means, so a record asserting it would be a
+        second spelling of nothing — and two spellings of one state is the shape
+        ADR-0217 §1's refusal table exists to prevent. Refused here rather than in
+        the store, so no producer, decode, test double or later lane can build one.
+
+        Raises:
+            ValueError: If ``trust`` is not :attr:`DestinationTrust.USER_CHOSEN`.
+        """
+        if self.trust is not DestinationTrust.USER_CHOSEN:
+            msg = (
+                "a destination trust record states what the user chose; UNCHOSEN is what "
+                "absence already means, so a record asserting it is a second spelling of "
+                "nothing (ADR-0238 §1)"
             )
             raise ValueError(msg)
         return self

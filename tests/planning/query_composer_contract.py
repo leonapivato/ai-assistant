@@ -61,7 +61,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from ai_assistant.core.protocols import QueryComposer
-from ai_assistant.core.types import QueryRefusal
+from ai_assistant.core.types import QueryRefusal, SearchSupply, encodable_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -131,6 +131,17 @@ class GatedComposition:
     composer: QueryComposer
     utterance: str
     arm: Callable[[], SuspendedCall]
+
+
+def supply_of(utterance: str) -> SearchSupply:
+    """One :class:`SearchSupply` over ``utterance`` and no records (ADR-0238 §2).
+
+    Written out here rather than passed as a bare string, because ``compose``'s one
+    positional argument **is** this value now. Records are empty: what a composer does
+    with a non-empty ``records`` is the consumer lane's, and every clause this file
+    asserts is about the utterance half.
+    """
+    return SearchSupply(utterance=encodable_text(utterance))
 
 
 class QueryComposerContract:
@@ -224,8 +235,8 @@ class QueryComposerContract:
         composed = self.composing("porto tallest building")
         refused = self.refusing(QueryRefusal.DECLINED)
 
-        first = await composed.composer.compose(composed.utterance)
-        second = await refused.composer.compose(refused.utterance)
+        first = await composed.composer.compose(supply_of(composed.utterance))
+        second = await refused.composer.compose(supply_of(refused.utterance))
 
         assert (first.query is None) != (first.refusal is None)
         assert (second.query is None) != (second.refusal is None)
@@ -236,7 +247,7 @@ class QueryComposerContract:
         """§17's clause, over a composition the harness chose and the bound it set."""
         subject = self.composing("porto tallest building")
 
-        outcome = await subject.composer.compose(subject.utterance)
+        outcome = await subject.composer.compose(supply_of(subject.utterance))
 
         assert outcome.query is not None
         assert outcome.query.strip()
@@ -252,7 +263,7 @@ class QueryComposerContract:
         at_the_bound = "q" * self.bound()
         subject = self.composing(at_the_bound)
 
-        outcome = await subject.composer.compose(subject.utterance)
+        outcome = await subject.composer.compose(supply_of(subject.utterance))
 
         assert outcome.query == at_the_bound
 
@@ -268,7 +279,7 @@ class QueryComposerContract:
         """
         subject = self.composing("q" * (self.bound() + 1))
 
-        outcome = await subject.composer.compose(subject.utterance)
+        outcome = await subject.composer.compose(supply_of(subject.utterance))
 
         assert outcome.refusal is QueryRefusal.TOO_LONG
         assert outcome.query is None, _TRUNCATED.format(outcome=outcome)
@@ -285,7 +296,7 @@ class QueryComposerContract:
         at_the_bound = "\U0001f600" * self.bound()
         subject = self.composing(at_the_bound)
 
-        outcome = await subject.composer.compose(subject.utterance)
+        outcome = await subject.composer.compose(supply_of(subject.utterance))
 
         assert outcome.query == at_the_bound
 
@@ -304,7 +315,7 @@ class QueryComposerContract:
         """
         subject = self.refusing(refusal)
 
-        outcome = await subject.composer.compose(subject.utterance)
+        outcome = await subject.composer.compose(supply_of(subject.utterance))
 
         assert outcome.refusal is refusal
         assert outcome.query is None
@@ -320,7 +331,7 @@ class QueryComposerContract:
         """
         subject = self.gated()
         gate = subject.arm()
-        call = asyncio.ensure_future(subject.composer.compose(subject.utterance))
+        call = asyncio.ensure_future(subject.composer.compose(supply_of(subject.utterance)))
         await gate.reached()
 
         call.cancel()

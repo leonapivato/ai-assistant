@@ -27,6 +27,7 @@ from query_composer_contract import (
     QueryComposerContract,
     ScriptedComposition,
     ScriptedRefusal,
+    supply_of,
 )
 
 from ai_assistant.core.types import QueryOutcome, QueryRefusal
@@ -71,7 +72,7 @@ async def test_an_unscripted_utterance_gets_the_default_composition() -> None:
     """The ordinary case: a consumer that does not care what the query says."""
     composer = FakeQueryComposer()
 
-    outcome = await composer.compose("anything at all")
+    outcome = await composer.compose(supply_of("anything at all"))
 
     assert outcome.query == DEFAULT_COMPOSED_QUERY
 
@@ -80,8 +81,8 @@ async def test_a_scripted_utterance_gets_its_own_composition() -> None:
     """What a consumer needs to assert that *this* query reached a searcher."""
     composer = FakeQueryComposer({"where is porto": "porto portugal"})
 
-    assert (await composer.compose("where is porto")).query == "porto portugal"
-    assert (await composer.compose("something else")).query == DEFAULT_COMPOSED_QUERY
+    assert (await composer.compose(supply_of("where is porto"))).query == "porto portugal"
+    assert (await composer.compose(supply_of("something else"))).query == DEFAULT_COMPOSED_QUERY
 
 
 async def test_a_scripted_refusal_wins_over_a_scripted_composition() -> None:
@@ -96,7 +97,7 @@ async def test_a_scripted_refusal_wins_over_a_scripted_composition() -> None:
         refusals={UTTERANCE: QueryRefusal.DECLINED},
     )
 
-    outcome = await composer.compose(UTTERANCE)
+    outcome = await composer.compose(supply_of(UTTERANCE))
 
     assert outcome.refusal is QueryRefusal.DECLINED
     assert outcome.query is None
@@ -111,8 +112,8 @@ async def test_every_utterance_it_was_handed_is_recorded_in_call_order() -> None
     """
     composer = FakeQueryComposer(refusals={"second": QueryRefusal.UNAVAILABLE})
 
-    await composer.compose("first")
-    await composer.compose("second")
+    await composer.compose(supply_of("first"))
+    await composer.compose(supply_of("second"))
 
     assert composer.utterances == ["first", "second"]
 
@@ -121,7 +122,7 @@ async def test_a_scripted_composition_over_the_bound_is_refused_not_truncated() 
     """The fake enforces its own bound, exactly as a configured composer does (§3)."""
     composer = FakeQueryComposer({UTTERANCE: "q" * (_BOUND + 1)}, max_chars=_BOUND)
 
-    outcome = await composer.compose(UTTERANCE)
+    outcome = await composer.compose(supply_of(UTTERANCE))
 
     assert outcome.refusal is QueryRefusal.TOO_LONG
     assert outcome.query is None
@@ -211,7 +212,7 @@ async def test_no_accepted_configuration_can_make_compose_raise() -> None:
     )
 
     for utterance in (UTTERANCE, "over", "declined", "unscripted"):
-        outcome = await composer.compose(utterance)
+        outcome = await composer.compose(supply_of(utterance))
         assert (outcome.query is None) != (outcome.refusal is None)
 
 

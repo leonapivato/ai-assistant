@@ -48,6 +48,7 @@ from ai_assistant.core.types import (
     FIRST_TURN_ORDINAL,
     Conversation,
     ConversationExport,
+    ConversationSearchDraw,
     ConversationTurn,
     SpokenDeliveryState,
     describe_untrusted,
@@ -122,6 +123,31 @@ def _check_page_bound(name: str, value: object, *, floor: int = 0) -> None:
     """
     if type(value) is not int or not floor <= value < _PAGE_BOUND:
         msg = f"{name} must be an int in [{floor}, 2**63), got {describe_untrusted(value)}"
+        raise ValueError(msg)
+
+
+def _check_call_ceiling(value: object) -> None:
+    """Refuse a search-call ceiling that is not an exact non-negative ``int``.
+
+    ADR-0238 §8 gives ``search_calls_per_conversation`` the domain 0 to 64, but the
+    *contract* obliges only that a ceiling be a non-negative integer: ``Settings``
+    owns the upper bound and a store that restated it would refuse a figure a later
+    decision widened. **The type is part of the domain**, for
+    :func:`_check_page_bound`'s reason read one axis over — ``calls >= float("nan")``
+    is false for every count, so a store handed one admits without limit while every
+    message still names a ceiling — and ``bool`` is refused with the rest, being an
+    ``int`` subclass that is nobody's ceiling. Zero is admitted and is meaningful: it
+    services no search in any conversation.
+
+    Raises:
+        ValueError: If ``value`` is not an ``int`` or is negative.
+    """
+    if type(value) is not int or value < 0:
+        msg = (
+            f"max_calls must be a non-negative int, got {describe_untrusted(value)}; zero is "
+            f"meaningful (no search is serviced in any conversation) and a negative names no "
+            f"ceiling (ADR-0238 §8)"
+        )
         raise ValueError(msg)
 
 
@@ -230,6 +256,14 @@ class FakeConversationStore:
         self._tail_limit = tail_limit
         self._purge_batch = purge_batch
         self._conversations: dict[str, Conversation] = {}
+        #: ADR-0238 §8's counter and flag, keyed by conversation and living exactly
+        #: as long as the record does: created by :meth:`start`, fenced by
+        #: :meth:`stamp_deleted` (which leaves it in place behind a tombstone every
+        #: presenting read hides) and destroyed by :meth:`drop_if_eligible` in the
+        #: same act that removes the conversation. No sweep, no reconciliation and no
+        #: lifecycle member of its own — a fake that needed one would be modelling a
+        #: design §8 rejected.
+        self._draws: dict[str, ConversationSearchDraw] = {}
         self._turns: dict[str, list[ConversationTurn]] = {}
         self._by_episode: dict[str, ConversationTurn] = {}
         self._by_binding: dict[ParkedBinding, ConversationTurn] = {}
@@ -438,6 +472,15 @@ class FakeConversationStore:
                 if conversation.id in self._conversations:
                     continue
                 self._conversations[conversation.id] = conversation
+                # ADR-0238 §8: the flag's value at creation is `True`, and **only**
+                # `start` creates it. A conversation `start` mints has no turns at
+                # all, so "every recorded external span this conversation has carried
+                # was minted by a WEB_SEARCH servicing at a USER_CHOSEN destination"
+                # is vacuously true of it — this is the one instant at which `True`
+                # cannot be wrong, which is why no other member creates a row.
+                self._draws[conversation.id] = ConversationSearchDraw(
+                    calls=0, all_external_user_chosen=True
+                )
                 self._turns[conversation.id] = []
                 return conversation
         msg = (
@@ -823,8 +866,88 @@ class FakeConversationStore:
                 self._by_episode.pop(turn.episode_id, None)
                 if turn.parked is not None:
                     self._by_binding.pop(turn.parked, None)
+            # The budget goes with the record, in this one call (ADR-0238 §8, §15's
+            # Arm 6h2): there is nothing left to clean afterwards, so a process that
+            # dies here strands nothing and no sweep is owed.
+            self._draws.pop(conversation_id, None)
             del self._conversations[conversation_id]
             return True
+
+    async def search_draw(self, conversation_id: str, /) -> ConversationSearchDraw | None:
+        """The conversation's draw, or ``None`` if it is unknown or stamped (ADR-0238 §8).
+
+        Read inside the modelled resource, like every other read, and as **one**
+        indivisible read of the counter and the flag.
+        """
+        async with self._resource.held():
+            return self._draw_of(conversation_id)
+
+    def _draw_of(self, conversation_id: str) -> ConversationSearchDraw | None:
+        """The draw for a conversation that is present and unstamped, else ``None``.
+
+        :meth:`get`'s own rule — ``None`` when the id names nothing **or** names a
+        conversation stamped deleted — read over the budget, so a stamped
+        conversation's draw is fenced by the stamp exactly as the record is.
+        """
+        conversation = self._conversations.get(conversation_id)
+        if conversation is None or conversation.deleted_at is not None:
+            return None
+        return self._draws.get(conversation_id)
+
+    async def admit_search(
+        self, conversation_id: str, /, *, max_calls: int
+    ) -> ConversationSearchDraw | None:
+        """Compare, increment and answer, as one step (ADR-0238 §8).
+
+        Under the same per-conversation exclusion an append takes, which is the whole
+        of what makes two concurrent turns, two servicings of one turn, and two
+        engines over one data directory unable to be admitted against the same draw.
+        The comparison is ``>=`` against ``max_calls`` and not a truthiness guard on
+        it: **zero is a legal bound whose meaning is that no search is serviced**, and
+        ``0`` is falsy (ADR-0238 §15's Arm 6g2).
+
+        **It creates nothing**: an unknown id and a stamped conversation each answer
+        ``None``, and answer rather than raise because this is reached by a servicing
+        that may already have been in flight when the deletion landed.
+
+        Raises:
+            ValueError: If ``max_calls`` is not a non-negative ``int``. The type is
+                checked, not merely the value: ``calls >= float("nan")`` is false for
+                every count, so a store handed one admits without limit while every
+                message still names a ceiling. ``bool`` is an ``int`` and is nobody's
+                ceiling, so it is refused with the rest.
+        """
+        _check_call_ceiling(max_calls)
+        async with self._exclusive(conversation_id):
+            draw = self._draw_of(conversation_id)
+            if draw is None or draw.calls >= max_calls:
+                return None
+            spent = draw.model_copy(update={"calls": draw.calls + 1})
+            self._draws[conversation_id] = spent
+            return spent
+
+    async def observe_search(
+        self, conversation_id: str, /, *, all_external_user_chosen: bool
+    ) -> None:
+        """Fold the caller's value into the stored flag by ``and`` (ADR-0238 §8).
+
+        Monotone: once false it never returns to true, so a later clean turn cannot
+        raise it and a conversation stays closed after the tainting episode has fallen
+        out of the tail. It **does nothing and raises nothing** for an unknown id, for
+        a stamped conversation, and after the record has been dropped — there is
+        nothing for a late fold to resurrect, because the budget is a property of the
+        record.
+        """
+        async with self._exclusive(conversation_id):
+            draw = self._draw_of(conversation_id)
+            if draw is None:
+                return
+            self._draws[conversation_id] = draw.model_copy(
+                update={
+                    "all_external_user_chosen": draw.all_external_user_chosen
+                    and all_external_user_chosen
+                }
+            )
 
     async def export(self) -> ConversationExport:
         """Return the store's own snapshot: unstamped conversations and their turns.

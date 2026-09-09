@@ -3651,6 +3651,44 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- How much searching one conversation may do (ADR-0238 §8) ---------
+    # **The one field ADR-0238 adds, and it bounds provider calls per conversation.**
+    # Not time: §8 deletes an earlier revision's elapsed counter, claim handle and
+    # settlement member outright and states that "no clause here states a
+    # per-conversation bound on wall-clock search time". Nothing in the corpus bounds
+    # a single servicing's duration — `WebSearcher.search` takes no timeout and no
+    # deadline, and ADR-0029 §4's `timeout` is `ToolInvoker.invoke`'s, which does not
+    # reach a seam ADR-0231 §5 ruled not a registered tool — so there is nothing to
+    # derive a per-conversation figure from. §16 defers the bound with its trigger.
+    #
+    # **It ships with a value rather than meaning "unbounded" when unset.**
+    # ADR-0194 §1's "unset means unbounded" governs a *monetary* ceiling an operator
+    # chooses; a bound the milestone's exit is stated over may not be absent by
+    # omission, so a deployment that configures nothing still searches under it.
+    #
+    # **Zero is legal and its meaning is stated**: no search is serviced in any
+    # conversation, because `admit_search` refuses where the stored `calls` have
+    # already *reached* the bound. ADR-0238 §15's Arm 6g2 exists because the
+    # idiomatic spelling of a reached-the-bound comparison — a truthiness guard on
+    # the bound — admits at zero, `0` being falsy, and an arm at one call cannot
+    # catch it.
+    #
+    # **The store reads none of this.** The bound is passed in to `admit_search`
+    # rather than read by the store, so the three members ADR-0238 §8 adds to
+    # `ConversationStore` read no `Settings` field, consult no clock and hold no
+    # policy: every judgement about what a bound is stays in `orchestration`.
+    search_calls_per_conversation: _IntegerSetting = Field(
+        default=8,
+        ge=0,
+        le=64,
+        description=(
+            "The most provider calls one conversation's web searches may make "
+            "(ADR-0238 §8). From 0 to 64 inclusive, where **0 means no search is "
+            "serviced in any conversation**. A conversation that reaches it searches "
+            "no more, and the remedy is a new conversation."
+        ),
+    )
+
     # --- The registered search account (ADR-0231 §5, §17) -----------------
     # **Which connected account the web search is registered against, and the one
     # origin it names.** Both, or neither: a deployment that names both gets a
@@ -4282,6 +4320,56 @@ class Settings(BaseSettings):
             "account is connected; a per-call figure for a searcher no deployment builds "
             "is a value nothing reads (ADR-0236 §2), so set web_search_connection and "
             "web_search_origin as well or unset both cost fields"
+        )
+        raise ValueError(msg)
+
+    @model_validator(mode="after")
+    def _a_priced_search_under_a_ceiling_needs_the_unknown_allowance(self) -> Settings:
+        """Require the allowance where a priced search meets a period ceiling (ADR-0238 §10).
+
+        **The trap #2126 records is real and it is fatal to milestone 31.** On a
+        deployment with a declared per-call figure, a grant, a period ceiling and no
+        allowance, the first search of a period completes, records an ``UNKNOWN``
+        incurred cost — ``WebSearchEgress`` reports no figure and ``consumed_call``
+        writes ``unknown_cost()``, which ADR-0238 §10 ratifies **by design** rather
+        than repairs — makes the period's accounted total indeterminate, and every
+        later search that period is refused ``SpendUndeterminedError``. One search per
+        period is not "continues within an enforced budget"; it is a different
+        milestone's behaviour arriving by accident.
+
+        **The refusal is what stops an operator discovering the interaction from the
+        audit two weeks later**, which is why it is a load-time refusal rather than a
+        runtime degradation. The issue names two ways to close it and ADR-0238 takes
+        the second: the first would restate a *declared estimate* as a *reported*
+        figure, which crosses the boundary ADR-0194 §2 draws on purpose and its own
+        no-stand-in rule refuses. The allowance is the mechanism ADR-0194 already
+        provides for a reported ``UNKNOWN``, used as designed — so nothing here
+        changes what a search declares, what the gate admits, or how ADR-0194 §2
+        treats an indeterminate total.
+
+        **This is ``web_search_cost_per_call``'s own cross-field shape** (ADR-0236
+        §2), applied to the pair that actually determines whether a priced search is
+        *repeatable*. It fires on either period ceiling, because each binds
+        independently and either one alone makes the period's total decide a refusal.
+
+        Raises:
+            ValueError: If a per-call figure and a period ceiling are configured and
+                ``world_spend_unknown_allowance`` is not.
+        """
+        if self.web_search_cost_per_call is None:
+            return self
+        ceilings = (self.world_spend_month_ceiling, self.world_spend_day_ceiling)
+        if all(ceiling is None for ceiling in ceilings):
+            return self
+        if self.world_spend_unknown_allowance is not None:
+            return self
+        msg = (
+            "web_search_cost_per_call is set beside an ADR-0194 period ceiling and "
+            "world_spend_unknown_allowance is not; a completed web search reports an "
+            "UNKNOWN incurred cost by design (ADR-0238 §10), so the first search of a "
+            "period would make that period's total indeterminate and every later one "
+            "would be refused SpendUndeterminedError — set "
+            "world_spend_unknown_allowance, or unset the ceiling or the per-call figure"
         )
         raise ValueError(msg)
 

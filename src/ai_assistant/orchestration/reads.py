@@ -98,6 +98,7 @@ from ai_assistant.core.types import (
     QueryRefusal,
     ReadKind,
     SearchRefusal,
+    SearchSupply,
     SpanCoverage,
     ToolCall,
     rests_on_recorded_external_content,
@@ -1042,7 +1043,18 @@ class SearchServicer:
             # precedes it — and stated anyway, as the forward-compatibility guard
             # §11 states in terms for the lane that reorders the kinds.
             return _Searched((), SearchDisposition.NO_BUDGET)
-        composed = await self._composer.compose(utterance)
+        # ADR-0238 §2 gives `QueryComposer.compose` one positional `SearchSupply`
+        # where it took the utterance. **This is a signature adaptation and not a
+        # behaviour change**: `records` defaults to the empty tuple, which §2 fixes as
+        # exactly the population a destination of recorded trust `UNCHOSEN` gets — and
+        # no destination on this tree carries `USER_CHOSEN`, because the fact §1
+        # records is set by a user act and no surface offers one yet (§14). So this
+        # composes what `origin/main` composes, byte for byte, and ADR-0231 §3's
+        # utterance-only property holds here exactly as ratified. Choosing *which*
+        # supply a servicing builds — the trust read, the records, the budget and the
+        # closed-loop fold — is the consumer lane's, and this is the whole of what the
+        # contract lane touches in this subsystem.
+        composed = await self._composer.compose(SearchSupply(utterance=utterance))
         refusal = composed.refusal
         if refusal is not None:
             # §11: "where the composition returned a `QueryRefusal` there is **no
