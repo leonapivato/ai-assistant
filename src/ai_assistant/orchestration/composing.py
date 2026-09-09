@@ -409,9 +409,19 @@ are speaking about, in a short clause and without naming dates you were not give
 
 #: ADR-0240 §8's **emptiness** fact, as one clause of this system's own text.
 #:
-#: **Given on a turn whose last structured read was empty in §6's sense**, and on no
-#: other turn: a turn that broadened and found records has an answer and needs no note
-#: about the path it took there, which ADR-0240 §10's audit records instead.
+#: **Given on a turn whose last *structured read* was empty in §6's sense**, and on no
+#: other turn: a turn whose structured read found records has an answer and needs no
+#: note about the path it took there, which ADR-0240 §10's audit records instead.
+#:
+#: **It says which lookup was empty and never that it was the turn's last one**, which
+#: is §8's scope read exactly. A turn may go on to service a sighted query after an
+#: empty structured read — that is the shape ADR-0228 §2(e)'s revision makes ordinary —
+#: and text claiming "the last thing you looked up came back with nothing" would
+#: misattribute the absence to a lookup that in fact returned records, and instruct the
+#: model to say it could not find what it had. Both lenses raised that on round 2 and
+#: both were right. What identifies the empty lookup is the *shape* of the search — a
+#: period, a person, a filing word — which is a description of the mechanism and not a
+#: kind name, a window, an instant, a label, a query or a count (§8).
 #:
 #: **It is a different fact from :data:`_STOPPED_ASKING_PROMPT` and both may be given.**
 #: That one says the turn stopped while still asking; this one says a specific
@@ -423,11 +433,14 @@ are speaking about, in a short clause and without naming dates you were not give
 #: says that no record carries those labels in that window, and nothing at all about
 #: whether the thing happened.
 _STRUCTURED_EMPTY_PROMPT: Final = """\
-The last thing you looked up for this answer came back with nothing in it. That means \
-this system holds no record matching what was asked for — not that the thing did not \
-happen, was not said, or does not exist. Say that you could not find it and say what \
-you can answer from what you do have; do not conclude from the absence, and do not \
-offer the absence as a finding."""
+One of the things you looked up for this answer was a search by period, or by who a \
+conversation involved and what it was filed under, and it came back with nothing in \
+it. **Do not read that as the whole of what you found here** — other lookups on this \
+turn may well have returned something, and what they returned stands. What the empty \
+one means is that this system holds no record matching what that search asked for: \
+not that the thing did not happen, was not said, or does not exist. Where your answer \
+turns on what that search was for, say you could not find it and answer from what you \
+do have; do not conclude from the absence, and do not offer the absence as a finding."""
 
 
 @dataclass(frozen=True, slots=True)
