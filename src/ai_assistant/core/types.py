@@ -5980,24 +5980,25 @@ class FetchOutcome(BaseModel):
 
 
 class ReadKind(StrEnum):
-    """What a planner's read request asks to have read (ADR-0226 §2, ADR-0231 §1).
+    """What a planner's read request asks to have read (ADR-0226 §2, ADR-0240 §1).
 
-    A **closed** enumeration with exactly four members. ADR-0226 §1 rules that no
-    implementation, setting or later lane adds a fifth without the ADR that
-    decides it, and that no lane widens an admitted kind's meaning to carry a read
-    the ADR that admitted it did not describe. §4 adds that the vocabulary is
-    **added to and never renamed**: no later ADR removes a member, renames one,
-    gives one a second spelling, or replaces this enum with a differently-named one
-    for the same question.
+    A **closed** enumeration. ADR-0226 §1 rules that no implementation, setting or
+    later lane adds a member without the ADR that decides it, and that no lane
+    widens an admitted kind's meaning to carry a read the ADR that admitted it did
+    not describe. §4 adds that the vocabulary is **added to and never renamed**: no
+    later ADR removes a member, renames one, gives one a second spelling, or
+    replaces this enum with a differently-named one for the same question. The
+    count is deliberately not written out here: it has moved three times, and a
+    figure in prose is a claim that goes stale silently.
 
-    **The third and fourth members are additive entries** under ADR-0226 §1's own
-    licence — ADR-0230 §1's and ADR-0231 §1's — and each is an entry rather than a
-    second seam: neither adds a second request object, a second servicing site, a
-    second budget or a second audit. ADR-0226 §2's membership sentence — "The
-    enumeration's two members are ``SIGHTED_QUERY`` and ``CITATION_HOP``" — is what
-    those two ADRs amend, in that one respect each; §2's statement of what each
-    named kind *is*, its at-most-one-ask-of-each-kind rule and its closure against
-    un-ADR'd additions all bind entire.
+    **The third, fourth and fifth members are additive entries** under ADR-0226
+    §1's own licence — ADR-0230 §1's, ADR-0231 §1's and ADR-0240 §1's — and each is
+    an entry rather than a second seam: none adds a second request object, a second
+    servicing site, a second budget or a second audit. ADR-0226 §2's membership
+    sentence — "The enumeration's two members are ``SIGHTED_QUERY`` and
+    ``CITATION_HOP``" — is what those three ADRs amend, in that one respect each;
+    §2's statement of what each named kind *is*, its at-most-one-ask-of-each-kind
+    rule and its closure against un-ADR'd additions all bind entire.
 
     The pattern is ADR-0221 §5's, for its reason: a vocabulary that grows by
     implementation grows without anyone deciding what the new member means.
@@ -6044,6 +6045,27 @@ class ReadKind(StrEnum):
     further page of results, or retries a refused or failed request inside the
     turn; there is no pagination, no depth and no traversal of any kind."""
 
+    STRUCTURED_READ = "structured_read"
+    """A read of the owner's own episodes **by structure** — a period, and the
+    people and topics a record carries — composed by the planner from the
+    conversation and from the records it was shown (ADR-0240 §1, §2). Its argument
+    is a :class:`StructuredAsk`, and it **may** carry a ``query`` beside it: an ask
+    with one is serviced by ``MemoryStore.search``, one without by
+    ``MemoryStore.select``, and the presence of the query is the whole of what
+    decides which (§4).
+
+    **It reads episodes and no other kind** (§4). The servicer names
+    ``MemoryKind.EPISODIC`` on every call it makes for such an ask, and the ask
+    carries no kind axis and no band axis: those are the store's partitioning
+    vocabulary rather than values a planner names. Beliefs stay reachable exactly
+    as they are — by the retrieval stage and by a ``SIGHTED_QUERY`` — and this kind
+    neither narrows nor widens either.
+
+    **One ask is one read, which is this kind's bound** (§1). No implementation
+    issues two store calls for one ask, splits an ask across axes into several
+    calls, re-issues a call with a different window, or repairs, widens or narrows
+    the ask it was given; there is no pagination and no traversal of any kind."""
+
 
 #: ADR-0226 §6's cap on how many labels one ``CITATION_HOP`` ask may name.
 #:
@@ -6055,16 +6077,181 @@ class ReadKind(StrEnum):
 MAX_HOP_LABELS: Final = 2
 
 
+class StructuredAsk(BaseModel):
+    """The four axes a ``STRUCTURED_READ`` names a period and a label set with (ADR-0240 §2).
+
+    A value object rather than four fields on :class:`ReadAsk`, and the reason is
+    ADR-0237 §2's own read one level up: that section put the window in a type
+    because "the three ambiguities … are exactly what two stores would implement
+    differently" and a value object "puts them in one validated place". "At least
+    one axis applied" is a condition over the four *together*, and this model is
+    where it is stated once. It also keeps ``ReadAsk`` legible — one field per
+    kind's argument, which is ADR-0230 §1's rule for ``entry`` applied rather than
+    bent.
+
+    **The axes reach ``MemoryStore`` unchanged** (§2). ``None`` for ``None``, and
+    the values given otherwise, so no implementation translates between this
+    model's convention and the store's, and no lane reads ``()`` here as "not
+    applied" or as "selects nothing".
+
+    **An empty sequence is refused here where ADR-0237 admits it on the store**, and
+    the asymmetry is the one ADR-0237 §2 already drew for the window. On the store
+    an ``()`` means *select nothing*, "which is a coherent thing for a caller to
+    compute and an incoherent thing for a planner to ask for" — an ask occupying
+    the one slot its kind has while asking for a result that is empty by
+    construction. Refusing it here also removes the convention mismatch outright:
+    there is exactly one spelling of "not applied" on this path, and it is ``None``.
+
+    **At least one axis, because a query-only structured read is a
+    ``SIGHTED_QUERY`` wearing another kind's name** (§2). ADR-0237 §4 makes the same
+    requirement of ``select`` for the same reason — no value of any axis means
+    "everything" — and requiring a *structural* axis rather than merely any axis is
+    what keeps the two kinds distinct at the type rather than by convention.
+
+    **``TimeWindow`` is used exactly as ADR-0237 §2 defines it and is not
+    re-expressed**: the half-open ``[start, end)`` reading, the unset ends, the
+    refusal of a window with both ends unset and the refusal of one whose ``end`` is
+    not strictly after its ``start`` are that ADR's and are inherited whole. This
+    model adds no second window type, no second window on one ask, and no sequence
+    of windows (ADR-0240 §14).
+
+    **No axis is an identifier** (§3). A person label resolves to nothing (ADR-0237
+    §3, ADR-0239 §4), a topic label resolves to nothing (ADR-0213 §3), and a window
+    names an interval rather than a record — so ADR-0226 §3's no-identifier rule is
+    not approached by any value this model can carry.
+
+    Attributes:
+        window: The period the read is bounded to, or ``None`` where the axis is not
+            applied. ADR-0237 §2's half-open ``[start, end)`` interval, written by
+            the planner in absolute UTC instants: no implementation converts a
+            relative phrase into one, infers one from the utterance, supplies a
+            default, extends one or clamps one to a retention horizon (ADR-0240 §3).
+        participants: Who the records must have involved, or ``None`` where the axis
+            is not applied. Disjunction within the axis (ADR-0237 §2), matched by
+            ADR-0101 §2's canonical caseless fold, and carried byte for byte from
+            the planner to the store — nothing here trims, casefolds, normalises or
+            truncates a value (ADR-0240 §3).
+        topics: What the records must be about, or ``None`` where the axis is not
+            applied. :data:`TopicLabel`'s canonical form, refused rather than
+            normalised (ADR-0213 §3), so a planner inventing a spelling loses its
+            whole ask rather than reaching a repaired one.
+        about_person: Whom the records must be about, or ``None`` where the axis is
+            not applied. **Inert until ADR-0239 §11's deferral fires** and stated
+            here anyway, because ADR-0226 §1 forbids a later lane widening an
+            admitted kind's meaning: an axis left out could not be added to this
+            kind afterwards without superseding that clause (ADR-0240 §4).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    window: TimeWindow | None = Field(
+        default=None,
+        description="The period this read is bounded to, or None (ADR-0237 §2, ADR-0240 §2).",
+    )
+    participants: tuple[NonBlankEncodableText, ...] | None = Field(
+        default=None,
+        description=(
+            "Who the records must have involved, or None where the axis is not "
+            "applied; never empty (ADR-0240 §2)."
+        ),
+    )
+    topics: tuple[TopicLabel, ...] | None = Field(
+        default=None,
+        description=(
+            "What the records must be about, or None where the axis is not applied; "
+            "never empty (ADR-0240 §2)."
+        ),
+    )
+    about_person: tuple[NonBlankEncodableText, ...] | None = Field(
+        default=None,
+        description=(
+            "Whom the records must be about, or None where the axis is not applied; "
+            "never empty (ADR-0240 §2, §4)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _at_least_one_axis_and_no_empty_sequence(self) -> StructuredAsk:
+        """Refuse an ask applying nothing, and an empty sequence on any axis.
+
+        Both are ADR-0240 §2's, and both are made unrepresentable here rather than
+        checked at the servicing seam: a check there is a check every later call
+        site has to remember, and the one that forgot would issue a store call
+        selecting nothing or selecting everything.
+
+        Raises:
+            ValueError: If a sequence axis is present and empty, or if no axis at
+                all is applied.
+        """
+        for axis, value in (
+            ("participants", self.participants),
+            ("topics", self.topics),
+            ("about_person", self.about_person),
+        ):
+            if value is not None and not value:
+                msg = (
+                    f"a structured ask's {axis} is None where the axis is not applied, "
+                    "never empty (ADR-0240 §2)"
+                )
+                raise ValueError(msg)
+        if not self.applied():
+            msg = "a structured ask applies at least one of its four axes (ADR-0240 §2)"
+            raise ValueError(msg)
+        return self
+
+    def applied(self) -> tuple[str, ...]:
+        """Which of the four axes this ask applies, in this model's own field order.
+
+        A method rather than four reads at each call site, because two consumers
+        already ask the question — the validator above, and ADR-0240 §10's audit
+        field naming the axes an ask carried — and a second derivation is a second
+        place for "applied" to come to mean something else. It is a pure function of
+        the values held, so it is intrinsic to the type rather than subsystem logic
+        (ADR-0016 §2).
+
+        Returns:
+            The names of the axes whose value is not ``None``, window first.
+        """
+        return tuple(
+            name
+            for name, value in (
+                ("window", self.window),
+                ("participants", self.participants),
+                ("topics", self.topics),
+                ("about_person", self.about_person),
+            )
+            if value is not None
+        )
+
+
 class ReadAsk(BaseModel):
     """One kind's part of a planner's read request (ADR-0226 §4, ADR-0231 §1).
 
-    A discriminated quadruple rather than four models: a ``SIGHTED_QUERY`` ask
+    A discriminated union rather than one model per kind: a ``SIGHTED_QUERY`` ask
     carries a non-blank ``query`` and nothing else, a ``CITATION_HOP`` ask carries
     one or two ``labels`` and nothing else, a ``LOCAL_FILE`` ask carries one
-    non-blank ``entry`` and nothing else, and a ``WEB_SEARCH`` ask carries **none
-    of the three**. **Each of those conditions is enforced here rather than by a
-    caller** (§4) — an emission that fails any of them is not a request ADR-0226
-    admits, and the planner that emitted it is not owed a partial reading of it.
+    non-blank ``entry`` and nothing else, a ``WEB_SEARCH`` ask carries **none of
+    the four**, and a ``STRUCTURED_READ`` ask carries a ``structure``, no
+    ``labels``, no ``entry`` and **optionally** a ``query`` (ADR-0240 §2). **Each of
+    those conditions is enforced here rather than by a caller** (§4) — an emission
+    that fails any of them is not a request ADR-0226 admits, and the planner that
+    emitted it is not owed a partial reading of it.
+
+    **``query``'s meaning widens by exactly one kind and by nothing else** (ADR-0240
+    §2). It stays the query the planner composed, non-blank, carried byte for byte,
+    **required** on a ``SIGHTED_QUERY`` and **refused** on a ``CITATION_HOP``, a
+    ``LOCAL_FILE`` and a ``WEB_SEARCH``. On a ``STRUCTURED_READ`` it is *optional*,
+    and its presence is what makes the difference between the two ``MemoryStore``
+    members that kind is serviced by (§4).
+
+    **``structure`` is a field of its own and ``query`` is reused, and that is one
+    rule reaching two answers** (ADR-0240 §2). ADR-0230 §1 gave ``entry`` its own
+    field because a hop's label and a file's label "name different sequences" — two
+    namespaces in one field. A query is not a namespace: it is a text the planner
+    composed, passed to ``MemoryStore.search`` byte for byte, with one meaning at
+    both sites, so a second field carrying the same value under a second name would
+    be drift rather than disambiguation. The four *axes*, by contrast, are a
+    condition over each other and go in one validated place.
 
     **The empty arm is a safety mechanism and not a gap** (ADR-0231 §1). A
     ``WEB_SEARCH`` ask "states its kind and nothing else", and this model gains
@@ -6096,9 +6283,11 @@ class ReadAsk(BaseModel):
 
     Attributes:
         kind: Which of ADR-0226 §2's two reads this ask is for.
-        query: The query the planner composed, for a ``SIGHTED_QUERY`` and for
-            nothing else. Non-blank, and carried byte for byte — the loop passes it
-            to ``assemble_by_band`` as handed.
+        query: The query the planner composed. Non-blank, and carried byte for byte.
+            **Required** on a ``SIGHTED_QUERY``, where the loop passes it to
+            ``assemble_by_band`` as handed; **optional** on a ``STRUCTURED_READ``,
+            where its presence sends the ask to ``MemoryStore.search`` rather than
+            to ``MemoryStore.select`` (ADR-0240 §2, §4); refused on every other kind.
         labels: The labels the planner was shown, for a ``CITATION_HOP`` and for
             nothing else. One or two of them (:data:`MAX_HOP_LABELS`), in the order
             the ask names them, which ADR-0226 §6 makes the order they are followed
@@ -6107,6 +6296,10 @@ class ReadAsk(BaseModel):
             nothing else. Non-blank, and carried byte for byte — the loop parses
             its ordinal and indexes the very sequence it passed on this call
             (ADR-0230 §2).
+        structure: The four axes this read filters on, for a ``STRUCTURED_READ`` and
+            for nothing else (ADR-0240 §2). Its own model states what a valid axis
+            set is; what this model states is that the kind carries one, that no
+            other kind does, and that a ``query`` may ride beside it.
 
     Note:
         A ``WEB_SEARCH`` ask has no attribute of its own, which is ADR-0231 §1's
@@ -6134,6 +6327,13 @@ class ReadAsk(BaseModel):
             "other; non-blank (ADR-0230 §1)."
         ),
     )
+    structure: StructuredAsk | None = Field(
+        default=None,
+        description=(
+            "The four axes this read filters on, for a STRUCTURED_READ ask and no "
+            "other (ADR-0240 §2)."
+        ),
+    )
 
     @model_validator(mode="after")
     def _the_ask_carries_exactly_its_kind_s_argument(self) -> ReadAsk:
@@ -6144,18 +6344,20 @@ class ReadAsk(BaseModel):
         choice ADR-0226 gives nobody. An ask carrying none asks for nothing while
         occupying the one slot its kind has.
 
-        **Four arms since ADR-0231 §1**, and each kind's refusal of the others is
+        **Five arms since ADR-0240 §2**, and each kind's refusal of the others is
         stated as its own clause rather than folded into the neighbours: a
-        ``SIGHTED_QUERY`` and a ``CITATION_HOP`` ask carry no ``entry``, a
-        ``LOCAL_FILE`` ask carries a non-blank one, no ``query`` and no ``labels``,
-        and a ``WEB_SEARCH`` ask carries none of the three.
+        ``SIGHTED_QUERY`` and a ``CITATION_HOP`` ask carry no ``entry`` and no
+        ``structure``, a ``LOCAL_FILE`` ask carries a non-blank ``entry`` and none
+        of the other three arguments, a ``WEB_SEARCH`` ask carries none of the four,
+        and a ``STRUCTURED_READ`` ask carries a ``structure``, no ``labels``, no
+        ``entry`` and optionally a ``query``.
 
-        **The fourth arm is written out rather than left to the fall-through**, and
-        that is the point of it. The dispatch below is a chain of identity tests
-        with ``_only_labels`` at the end, so a member added without an arm would be
-        read as a ``CITATION_HOP`` and refused for naming no label — a message
-        about the wrong kind, and an emission ADR-0231 §1 admits rejected by a
-        default nobody chose.
+        **Every arm is written out rather than left to the fall-through**, and that
+        is the point of it. The dispatch below is a chain of identity tests with
+        ``_only_labels`` at the end, so a member added without an arm would be read
+        as a ``CITATION_HOP`` and refused for naming no label — a message about the
+        wrong kind, and an emission the admitting ADR allows rejected by a default
+        nobody chose.
         """
         if self.kind is ReadKind.WEB_SEARCH:
             self._nothing_at_all()
@@ -6163,6 +6365,8 @@ class ReadAsk(BaseModel):
             self._only_an_entry()
         elif self.kind is ReadKind.SIGHTED_QUERY:
             self._only_a_query()
+        elif self.kind is ReadKind.STRUCTURED_READ:
+            self._a_structure_and_maybe_a_query()
         else:
             self._only_labels()
         return self
@@ -6175,14 +6379,14 @@ class ReadAsk(BaseModel):
         without the ADR that decides it. A ``WEB_SEARCH`` ask states its kind and
         nothing else."
 
-        **Every one of the three is refused separately**, because each would be a
+        **Every one of the four is refused separately**, because each would be a
         different mistake with a different fix: a ``query`` is a planner composing
-        what §3 gives the composer, ``labels`` and an ``entry`` are arguments of
-        other kinds arriving under this one's name. A single "carries no argument"
-        message would name none of them.
+        what §3 gives the composer, and ``labels``, an ``entry`` and a ``structure``
+        are arguments of other kinds arriving under this one's name. A single
+        "carries no argument" message would name none of them.
 
         Raises:
-            ValueError: If a query, labels or an entry ride on the ask.
+            ValueError: If a query, labels, an entry or a structure ride on the ask.
         """
         if self.query is not None:
             msg = "a web_search ask must not carry a query"
@@ -6192,6 +6396,9 @@ class ReadAsk(BaseModel):
             raise ValueError(msg)
         if self.entry is not None:
             msg = "a web_search ask must not carry an entry"
+            raise ValueError(msg)
+        if self.structure is not None:
+            msg = "a web_search ask must not carry a structure"
             raise ValueError(msg)
 
     def _only_an_entry(self) -> None:
@@ -6204,8 +6411,8 @@ class ReadAsk(BaseModel):
         refusal would name neither.
 
         Raises:
-            ValueError: If the entry is absent or blank, or a query or labels ride
-                beside it.
+            ValueError: If the entry is absent or blank, or a query, labels or a
+                structure ride beside it.
         """
         if self.entry is None or not self.entry.strip():
             msg = "a local_file ask must carry a non-blank entry"
@@ -6216,12 +6423,21 @@ class ReadAsk(BaseModel):
         if self.labels:
             msg = "a local_file ask must not carry labels"
             raise ValueError(msg)
+        if self.structure is not None:
+            msg = "a local_file ask must not carry a structure"
+            raise ValueError(msg)
 
     def _only_a_query(self) -> None:
         """A ``SIGHTED_QUERY`` ask carries a query and nothing else (ADR-0226 §4).
 
+        **The query is required here and optional one arm down**, which is ADR-0240
+        §2's widening stated where it bites: "a query alone is a ``SIGHTED_QUERY``
+        and not this kind", so the two arms differ in exactly that and in the
+        ``structure`` this one refuses.
+
         Raises:
-            ValueError: If the query is absent, or labels or an entry ride beside it.
+            ValueError: If the query is absent, or labels, an entry or a structure
+                ride beside it.
         """
         if self.query is None:
             msg = "a sighted_query ask must carry a query"
@@ -6232,13 +6448,43 @@ class ReadAsk(BaseModel):
         if self.entry is not None:
             msg = "a sighted_query ask must not carry an entry"
             raise ValueError(msg)
+        if self.structure is not None:
+            msg = "a sighted_query ask must not carry a structure"
+            raise ValueError(msg)
+
+    def _a_structure_and_maybe_a_query(self) -> None:
+        """A ``STRUCTURED_READ`` ask carries a structure and may carry a query (ADR-0240 §2).
+
+        **The one arm on which ``query`` is optional**, which is the whole of
+        ADR-0240 §2's widening of that field: an ask carrying one is serviced by
+        ``MemoryStore.search`` and one carrying none by ``MemoryStore.select``, and
+        both are emissions this corpus admits. ``labels`` and ``entry`` are other
+        kinds' arguments and are refused here as they are everywhere else.
+
+        Nothing here inspects the structure's own axes: :class:`StructuredAsk`
+        refuses an empty sequence and an ask applying no axis at construction, so an
+        instance that reaches this arm has already satisfied both.
+
+        Raises:
+            ValueError: If the structure is absent, or labels or an entry ride
+                beside it.
+        """
+        if self.structure is None:
+            msg = "a structured_read ask must carry a structure"
+            raise ValueError(msg)
+        if self.labels:
+            msg = "a structured_read ask must not carry labels"
+            raise ValueError(msg)
+        if self.entry is not None:
+            msg = "a structured_read ask must not carry an entry"
+            raise ValueError(msg)
 
     def _only_labels(self) -> None:
         """A ``CITATION_HOP`` ask carries one or two labels and nothing else (§4, §6).
 
         Raises:
             ValueError: If no label is named, more than :data:`MAX_HOP_LABELS` are,
-                or a query or an entry rides beside them.
+                or a query, an entry or a structure rides beside them.
         """
         if not self.labels:
             msg = "a citation_hop ask must name at least one label"
@@ -6254,6 +6500,9 @@ class ReadAsk(BaseModel):
             raise ValueError(msg)
         if self.entry is not None:
             msg = "a citation_hop ask must not carry an entry"
+            raise ValueError(msg)
+        if self.structure is not None:
+            msg = "a citation_hop ask must not carry a structure"
             raise ValueError(msg)
 
 
@@ -7271,13 +7520,17 @@ class PlanExport(BaseModel):
     internally consistent — every ``goal_id``/``plan_id`` referenced by an
     included record resolves within the same export.
 
-    **``schema_version`` is 6 because ``ActionPlan``'s ``read_request`` changed
-    shape again** (ADR-0231 §16): ``ReadKind`` gained ``WEB_SEARCH`` and ``ReadAsk``
-    gained the arm that admits it, so a plan carrying such an ask is a plan an
-    earlier reading of this document refuses. It was 5 for the same field's previous
-    move — ``ReadAsk`` gaining ``entry`` and ``ReadKind`` gaining ``LOCAL_FILE``
-    (ADR-0230 §12) — 4 because ``ActionPlan`` gained ``supersedes`` (ADR-0228 §5,
-    §6) and 3 because that model gained ``read_request`` (ADR-0226 §4). This
+    **``schema_version`` is 7 because ``ActionPlan``'s ``read_request`` changed
+    shape again** (ADR-0240 §11): ``ReadKind`` gained ``STRUCTURED_READ``, ``ReadAsk``
+    gained ``structure`` and the arm that admits it, and ``StructuredAsk`` is a model
+    an earlier reading of this document has no field for — so a plan carrying such an
+    ask is a plan that reading refuses, and this move is obliged by **both** halves of
+    the pair the two entries below split between them. It was 6 because ``ReadKind``
+    gained ``WEB_SEARCH`` and ``ReadAsk`` gained the arm that admits it (ADR-0231
+    §16), 5 for the same field's previous move — ``ReadAsk`` gaining ``entry`` and
+    ``ReadKind`` gaining ``LOCAL_FILE`` (ADR-0230 §12) — 4 because ``ActionPlan``
+    gained ``supersedes`` (ADR-0228 §5, §6) and 3 because that model gained
+    ``read_request`` (ADR-0226 §4). This
     document carries ``tuple[ActionPlan, ...]``, so a member of it changing shape
     is exactly what the version exists to announce (ADR-0039 §10, ADR-0014 §5) —
     the same reading that moved it to 2 for ``StepExecution`` and moved
@@ -7287,13 +7540,21 @@ class PlanExport(BaseModel):
     concrete: a reader validating an older-shaped document against the new
     contract, or the reverse, rejects it.
 
-    **An added enum member is a shape change on the same footing**, and this move is
-    the first of these to rest on one alone. ``ReadAsk`` gains no field for
-    ``WEB_SEARCH`` (ADR-0231 §1), so what an older reader refuses is not a defaulted
-    ``null`` it has no field for but the string ``"web_search"`` its own ``ReadKind``
-    does not admit — a narrower population than the previous move's, since it is
-    every document carrying such an ask rather than every document carrying a request
-    at all, and a refusal just as total on it.
+    **An added enum member is a shape change on the same footing**, and the move to
+    6 was the first of these to rest on one alone: ``ReadAsk`` gained no field for
+    ``WEB_SEARCH`` (ADR-0231 §1), so what an older reader refused was not a defaulted
+    ``null`` it had no field for but the string ``"web_search"`` its own ``ReadKind``
+    did not admit — a narrower population than the move to 5, since it was every
+    document carrying such an ask rather than every document carrying a request at
+    all, and a refusal just as total on it.
+
+    **This move rests on both grounds at once**, which is why it is not read off
+    either entry alone. ``ReadAsk`` gains ``structure`` — defaulted ``None``, emitted
+    by ``model_dump()`` on **every** ask a document carries, and refused by an older
+    reader's ``extra="forbid"`` — and ``ReadKind`` gains ``STRUCTURED_READ``, which an
+    older reader's closed enumeration refuses outright. The first reaches every
+    document carrying a request at all; the second reaches every document carrying
+    such an ask. Either would oblige the move on its own.
 
     **The reference closure covers ``supersedes``** (ADR-0228 §5). ADR-0014 §5 rules
     that every ``goal_id``/``plan_id`` referenced by an included record resolves
@@ -7314,13 +7575,13 @@ class PlanExport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[6] = Field(
-        default=6,
+    schema_version: Literal[7] = Field(
+        default=7,
         description=(
-            "Shape of this export, pinned to exactly 6 (ADR-0039 §10, ADR-0231 §16): an "
+            "Shape of this export, pinned to exactly 7 (ADR-0039 §10, ADR-0240 §11): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[6]`` "
-            "refuses every other value — a v1, v2, v3, v4 or v5 document does not "
+            "the document rather than a producer's unchecked claim. ``Literal[7]`` "
+            "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."
         ),

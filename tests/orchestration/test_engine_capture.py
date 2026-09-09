@@ -727,6 +727,15 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
     — text this system\'s own planner wrote, on models that admit no ``SecretStr``
     and hold no store. The carrier check below is what keeps that true rather than
     merely stated.
+
+    **``StructuredAsk`` and ``TimeWindow`` joined it with ADR-0240 §2**, because
+    ``ReadAsk`` gained ``structure``. The same judgement, made again rather than
+    inherited: between them they carry two ``datetime`` values and three tuples of
+    label text the planner composed from the records it was shown — no store, no
+    handle, no token, no field admitting a ``SecretStr``, and nothing a caller
+    supplies. ``TimeWindow`` is the type ADR-0237 §2 minted for ``MemoryStore``'s own
+    filter axis and reaches this graph unchanged (ADR-0240 §2's no-second-window-type
+    clause), so what is new here is a path to it and not a second shape of it.
     """
     reachable = _reachable_from_the_composing_stage()
 
@@ -758,6 +767,8 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
         "StepExecution",
         "StepFailure",
         "StepOutcome",
+        "StructuredAsk",
+        "TimeWindow",
         "TurnResult",
         "Validity",
     }, (

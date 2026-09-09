@@ -140,7 +140,7 @@ class _AskingPlanner(NoStepPlanner):
         self._request = request
         self.calls: list[tuple[MemoryRecord, ...]] = []
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -148,6 +148,7 @@ class _AskingPlanner(NoStepPlanner):
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         self.calls.append(tuple(memories))
         plan = await super().plan(
@@ -167,7 +168,7 @@ class _AskingOneStepPlanner(OneStepPlanner):
         super().__init__()
         self._request = request
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -175,6 +176,7 @@ class _AskingOneStepPlanner(OneStepPlanner):
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         plan = await super().plan(
             goal, context=context, memories=memories, capabilities=capabilities
@@ -647,6 +649,16 @@ async def test_no_identifier_the_hop_carried_reaches_a_prompt_a_log_or_the_audit
         # provider message — which is why §9's no-copy rule admits it beside the
         # counts, and why this assertion still holds over the whole record.
         "disposition",
+        # ADR-0240 §10's **two** added fields, on the same terms as the two above.
+        # `structured_axes` is a tuple of closed-enumeration members — the classes of
+        # the axes an ask applied, and never an instant, a person label, a topic label
+        # or a query — and `structured` is one member of a second closed enumeration or
+        # absent. Both are recorded on this servicing: the axes tuple is **empty**
+        # because no `STRUCTURED_READ` ask was emitted, and the outcome is the
+        # `not_asked` member, which is what a completed servicing carrying no such ask
+        # reports. The pin stays closed over both because neither can carry a value.
+        "structured_axes",
+        "structured",
         "truncated_kinds",
         "failed",
         "failed_after_read_returned",

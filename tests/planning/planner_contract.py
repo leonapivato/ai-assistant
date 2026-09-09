@@ -637,10 +637,21 @@ class PlannerContract:
         lane happened to edit.
 
         Nothing here fixes the parameter set for its own sake: what it refuses is a
-        *widening*, and the names below are exactly the ones ADR-0014 §6, ADR-0211 §1
-        and ADR-0230 §3 already push in.
+        *widening*, and the names below are exactly the ones ADR-0014 §6, ADR-0211 §1,
+        ADR-0230 §3 and ADR-0240 §7 already push in.
+
+        **``empty_reads`` joined that set with ADR-0240 §7 and is not the widening
+        this refuses.** §17's clause is about a planner being told something from *the
+        far side of the seam* — whether a search account is connected, which sources
+        are reachable, how full the budget is. What §7 pushes in is the planner's
+        **own prior ask** handed back to it, carrying nothing the store said: no
+        record, no count, no identifier and no ``capped`` value. A planner reading it
+        learns what it already emitted and that nothing came back for it, and §7's own
+        clause bounds the rest — it "cannot say how many records anything held, how
+        much of the budget is gone, or how long the turn has left", so ADR-0226 §8's
+        fire rate is measuring the same judgement on every deployment.
         """
-        pushed = {"goal", "context", "memories", "capabilities", "files"}
+        pushed = {"goal", "context", "memories", "capabilities", "files", "empty_reads"}
         taken = set(inspect.signature(planner.plan).parameters)
 
         assert taken <= pushed, (

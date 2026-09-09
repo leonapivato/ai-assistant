@@ -30,6 +30,7 @@ from ai_assistant.core.types import (
     Idempotency,
     Message,
     PlanStep,
+    ReadAsk,
     Role,
     StepStatus,
 )
@@ -81,7 +82,7 @@ class _GatedProvider:
 class _TwoStepPlanner(OneStepPlanner):
     """A planner producing two steps, so one of them is never driven (#242)."""
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -89,6 +90,7 @@ class _TwoStepPlanner(OneStepPlanner):
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         first = await super().plan(
             goal, context=context, memories=memories, capabilities=capabilities
@@ -138,7 +140,7 @@ async def test_a_turn_whose_plan_had_no_step_still_owes_an_answer() -> None:
 class _NoStep(OneStepPlanner):
     """A planner producing an empty plan — a **decline**, since ADR-0176 §1."""
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -146,6 +148,7 @@ class _NoStep(OneStepPlanner):
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         built = await super().plan(
             goal, context=context, memories=memories, capabilities=capabilities

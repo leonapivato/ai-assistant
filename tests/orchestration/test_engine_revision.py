@@ -73,7 +73,7 @@ class _DependentPlanner:
         self._request = _hop("M1") if request is None else request
         self.calls: list[tuple[MemoryRecord, ...]] = []
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -81,6 +81,7 @@ class _DependentPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         """Plan the step where the supply carries the address, and ask for it where not."""
         ordinal = len(self.calls) + 1
@@ -123,7 +124,7 @@ class _AlwaysAsking:
         self._capability = capability
         self.calls: list[tuple[MemoryRecord, ...]] = []
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -131,6 +132,7 @@ class _AlwaysAsking:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         """Plan one step and ask for one more read, on every call."""
         ordinal = len(self.calls) + 1
@@ -306,7 +308,7 @@ async def test_every_plan_is_persisted_and_the_chain_is_legible() -> None:
     assert revision.id != first.id
 
     export = await harness.plans.export()
-    assert export.schema_version == 6
+    assert export.schema_version == 7
     assert {plan.id for plan in export.plans} == {first.id, revision.id}
 
 

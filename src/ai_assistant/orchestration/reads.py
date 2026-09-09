@@ -92,6 +92,7 @@ from ai_assistant.core.errors import AssistantError, MemoryStoreError
 from ai_assistant.core.types import (
     ActionRequest,
     CarriedProvenance,
+    MemoryKind,
     PermissionDecision,
     PermissionOutcome,
     QueryRefusal,
@@ -125,6 +126,7 @@ if TYPE_CHECKING:
         ReadRequest,
         SourceListing,
         SourceListingEntry,
+        StructuredAsk,
     )
 
 _log = structlog.get_logger(__name__)
@@ -145,6 +147,22 @@ READ_BUDGET: Final = 10
 #: reached, serviced and declined alike — because "an instrument that only records
 #: its positives cannot measure a fire rate".
 READ_AUDIT_EVENT: Final = "turn_read_request"
+
+#: ADR-0240 §4's population: a ``STRUCTURED_READ`` is serviced over episodic records
+#: and over no other kind.
+#:
+#: Episodes because that is the population the envelope cannot otherwise reach and the
+#: one milestone 30 is about: the sighted query's kind selection is ``BELIEF_KINDS``,
+#: so no read on this envelope has ever reached an episode, and "which conversation was
+#: that" is a question about episodes. Fixing the kind here rather than admitting a kind
+#: axis also keeps ADR-0237 §5's own caveat off this path — ``select``'s order is keyed
+#: on the write stamp for totality over a mixed result, and a read confined to episodes
+#: never produces that pair.
+#:
+#: **The ask carries no kind axis and no band axis** (§4): those are the store's
+#: partitioning vocabulary, and a planner writing one would be steering *how* the store
+#: is read rather than naming what it wants.
+_STRUCTURED_KINDS: Final[tuple[MemoryKind, ...]] = (MemoryKind.EPISODIC,)
 
 #: §3's label form, as the ADR spells it: "the ASCII string ``M`` followed by *n* in
 #: decimal with no padding".
@@ -409,6 +427,86 @@ SEARCH_DISPOSITIONS: Final[Mapping[SearchRefusal, SearchDisposition]] = MappingP
 )
 
 
+class StructuredAxis(StrEnum):
+    """Which axes one ``STRUCTURED_READ`` ask applied (ADR-0240 §10).
+
+    **A closed enumeration and never free text.** §10 records *what was tried* and
+    not what was asked for: a person label is a name, ADR-0004 §5 puts a name at
+    Tier 1, and a Tier 2 event carrying one is a leak on a value this system did not
+    mint. So this vocabulary names the **class** of each axis and there is nowhere in
+    it for an instant, a label, a query or a count of a label's characters to sit —
+    the line ADR-0230 §9 drew for a path, sharpened one axis over.
+
+    The query is a member beside the four filter axes because it is the thing that
+    decides which of ADR-0237's two reads serviced the ask (§4), so an operator
+    reading this field can tell a ``search`` from a ``select`` without a second one.
+    """
+
+    WINDOW = "window"
+    """The ask bounded the exchange's instant to a :class:`~ai_assistant.core.types.TimeWindow`."""
+
+    PARTICIPANTS = "participants"
+    """The ask filtered on who the episode involved."""
+
+    TOPICS = "topics"
+    """The ask filtered on what the episode was about."""
+
+    ABOUT_PERSON = "about_person"
+    """The ask filtered on whom the record is about — inert until ADR-0239 §11's
+    deferral fires, and recorded anyway so that an operator can see it being asked
+    for (ADR-0240 §4)."""
+
+    QUERY = "query"
+    """The ask carried a query, so it was serviced by ``MemoryStore.search`` rather
+    than by ``MemoryStore.select`` (ADR-0240 §4)."""
+
+
+class StructuredOutcome(StrEnum):
+    """What became of a servicing's ``STRUCTURED_READ`` ask (ADR-0240 §10).
+
+    **Five members, and no implementation collapses any two of them.** The two
+    not-reached states are separate because they have different causes and different
+    fixes — ADR-0230 §9's own reason for keeping an unresolved label and a refusal
+    apart: "a deployment blocked for want of a separator learns that its belief
+    composition is coming back empty, and one blocked for want of a slot learns that
+    its earlier kinds are filling the budget".
+
+    **Recorded over a servicing that completed and absent otherwise** (§10). Where
+    the servicing failed, was partial, or was declined under ADR-0226 §5's channel
+    scoping, :attr:`ServicedRead.structured` carries ``None`` — the shape ADR-0230 §9
+    gave its own refusal field — and what happened is read from ADR-0226 §9's
+    existing declined and failure fields beside every count it makes zero. No
+    implementation records a completed-servicing outcome for a servicing that did not
+    complete, and none reads an absent value as any of the five.
+    """
+
+    NOT_ASKED = "not_asked"
+    """This servicing's request carried no ``STRUCTURED_READ`` ask."""
+
+    NO_SEPARATOR = "no_separator"
+    """The ask was not reached because every record of the supply was ``EPISODIC``
+    when the read was reached, so its own episodes would have formed the leading run
+    (ADR-0240 §5, ADR-0158 §4). **Recorded in preference to** :attr:`NO_SLOT` where
+    both conditions hold: a supply with no separator blocks the read whatever the
+    budget holds, where a spent budget is a fact about one turn's other asks."""
+
+    NO_SLOT = "no_slot"
+    """The ask was not reached because fewer than one slot of ADR-0226 §6's budget
+    remained when the structured read came up (ADR-0240 §5). **A read the budget
+    prevented is not a read that found nothing**: no store call was made, so nothing
+    was certified and ADR-0240 §6's empty-read fact does not arise."""
+
+    RETURNED_NOTHING = "returned_nothing"
+    """The store call ran and returned **no record at all** — ADR-0240 §6's *empty
+    structured read*, and the state that satisfies ADR-0228 §2(e)'s second branch. A
+    read whose records were all deduplicated out is **not** this: the store returned
+    records, and :attr:`RETURNED_RECORDS` is what that is."""
+
+    RETURNED_RECORDS = "returned_records"
+    """The store call ran and returned at least one record, whatever the union then
+    did with them (ADR-0240 §6, §13 item 7)."""
+
+
 @dataclass(frozen=True, slots=True)
 class ServicedRead:
     """What one servicing carried into the turn, and what §9 records of it.
@@ -477,6 +575,22 @@ class ServicedRead:
             all-or-nothing degradation is the ratified answer to such a fault, and
             it is a record an operator can read; what it is not is a *ninth cause*
             beside the eight §13 enumerates.
+        structured_axes: ADR-0240 §10's first added field: which axes this
+            servicing's ``STRUCTURED_READ`` ask applied, in
+            :class:`~ai_assistant.core.types.StructuredAsk`'s own field order with
+            the query last. **Recorded wherever such an ask was emitted** — serviced
+            or lost with a servicing that failed — because it describes the *ask*,
+            which is a fact of the plan, exactly as :attr:`kinds` is; empty where no
+            such ask was emitted. Members of a **closed enumeration and never free
+            text**, so there is nowhere here for an instant, a person label, a topic
+            label or a query to sit.
+        structured: ADR-0240 §10's second added field: which of five states this
+            servicing's ``STRUCTURED_READ`` ask reached, or ``None`` where the
+            servicing did not complete. The two answer different questions and
+            neither is derivable from the other — the outcome answers *did the read
+            work*, the axes answer *what was tried* — and neither can be read off the
+            per-servicing counts, which are stated over the whole servicing rather
+            than per ask.
         truncated_kinds: Which kinds the budget cut short, in servicing order.
             Empty where it cut neither.
         failed: Whether the servicing failed. Where it did, every count above is
@@ -498,6 +612,8 @@ class ServicedRead:
     labels_unresolved: int = 0
     refusal: FetchRefusal | None = None
     disposition: SearchDisposition | None = None
+    structured_axes: tuple[StructuredAxis, ...] = ()
+    structured: StructuredOutcome | None = None
     truncated_kinds: tuple[ReadKind, ...] = ()
     failed: bool = False
     failed_after_read_returned: bool = False
@@ -671,6 +787,117 @@ class _Searched:
 
     records: tuple[MemoryRecord, ...]
     disposition: SearchDisposition | None
+
+
+@dataclass(frozen=True, slots=True)
+class StructuredFacts:
+    """ADR-0240 §8's three facts, on their way from the servicer to the render site.
+
+    **Three facts and they are separate.** Each is given on its own condition, any two
+    or three are given together where their conditions hold together, and **none is
+    inferred from another**. They travel as one value rather than as three parameters
+    because they are computed at one place and read at one place, and a triple that
+    could come apart between them is a triple one edit can put out of step.
+
+    **Carried inside ``ai_assistant.orchestration``**, from the component that knows
+    them to the render site, as data (§8). They add **no field to a ``core`` type**, no
+    member to a Protocol, and none is inferred at the render site — not from the plan,
+    not from the supply's length, not from the audit. That is ADR-0228 §10's rule and
+    ADR-0227 §3's, applied to three more facts for their own reason.
+
+    **No fact carries a window, an instant, a label, a query, a count or a kind
+    name.** The temporal fact says *which instant the filter was on*, which is a
+    property of the field rather than a value read off the ask, so this value is three
+    booleans and has nowhere for anything else to sit.
+
+    **The default instance is the answer for a turn with no structured read at all**,
+    on which the composing stage receives nothing and the assembled prompt is
+    byte-identical to what it is without this decision.
+
+    Attributes:
+        reach: Whether any structured read the turn performed applied a
+            ``participants``, ``topics`` or ``about_person`` axis — the fact that such
+            a read reached only records carrying a recorded value on the axes it
+            filtered. It is what discharges ADR-0237 §6's third clause and ADR-0239
+            §6's third clause for this consumer, and no lane reads either as
+            discharged by anything else or as discharged only where a read came back
+            empty. **Given whether or not the read returned records**: a read that
+            returned records excluded every unlabelled record just as an empty one
+            did.
+        temporal: Whether any structured read the turn performed applied a window —
+            the fact that such a read filtered on the instant of the *exchange* rather
+            than of the event (ADR-0237 §8). A **window-only** read owes no
+            :attr:`reach` fact and does owe this one: this kind reads episodes, every
+            episodic record carries the ``occurred_at`` a window filters on, and
+            ADR-0237 §6's obligation is about records carrying *no* value on the axes
+            the read filtered.
+        empty: Whether the turn's **last** structured read was empty in ADR-0240 §6's
+            sense. Keyed on the last read where the other two range over the turn,
+            because it is a fact about *the answer being composed*: a turn that
+            broadened and found records has an answer and needs no note about the path
+            it took there.
+    """
+
+    reach: bool = False
+    temporal: bool = False
+    empty: bool = False
+
+    def __bool__(self) -> bool:
+        """Whether this turn is given any of the three facts at all.
+
+        The render site's own question — ADR-0240 §8's clause that "on a turn given
+        none of the three facts the composing stage receives nothing, and the
+        assembled prompt is byte-identical to what it is today" — asked once here
+        rather than re-spelled as a three-way disjunction wherever it is needed.
+
+        Returns:
+            Whether any of the three facts holds.
+        """
+        return self.reach or self.temporal or self.empty
+
+
+@dataclass(frozen=True, slots=True)
+class ServicedCarriers:
+    """What one servicing hands back that ADR-0226 §9's record deliberately does not.
+
+    Four facts, of two classes, returned rather than written onto
+    :class:`TurnReadAudit` for one reason stated twice: that record "copies no text"
+    and carries "no identifier but the correlation id" (ADR-0226 §9), and ADR-0240
+    §10 keeps every value on every axis out of it. :attr:`hop_reached` carries record
+    identifiers and :attr:`empty_read` carries the planner's own composed ask, so
+    neither belongs on a Tier 2 log surface whose whole discipline is that they are
+    not there.
+
+    **The default instance is the honest answer for a servicing that established
+    nothing** — one that did not fire, was declined, failed, or was partial — which
+    is the same all-or-nothing posture ADR-0226 §5 gives the supply.
+
+    Attributes:
+        hop_reached: ADR-0227 §3's carrier — the **distinct** ids of the records this
+            servicing's citation hop reached that the supply holds after it, in
+            ADR-0229 §3's order.
+        empty_read: ADR-0240 §7's carrier — the ``STRUCTURED_READ`` ask this
+            servicing performed that returned **no record at all**, carried back byte
+            for byte as the planner emitted it, or ``None``. A read the budget did not
+            reach, one the supply's shape blocked, one whose records were merely
+            deduplicated out, and a servicing that failed all leave it ``None`` (§5,
+            §6).
+        label_filtered: ADR-0240 §8's **reach** fact for this servicing: whether its
+            structured read applied a ``participants``, ``topics`` or ``about_person``
+            axis, **whether or not that read returned records**. A read that returned
+            records excluded every unlabelled record just as an empty one did, so the
+            obligation does not turn on the yield.
+        window_filtered: ADR-0240 §8's **temporal** fact for this servicing: whether
+            its structured read applied a window, again whatever it returned. A
+            window-only read owes no reach fact and does owe this one — every
+            episodic record carries the ``occurred_at`` a window filters on, so there
+            is nothing such a read failed to reach for want of a value.
+    """
+
+    hop_reached: tuple[str, ...] = ()
+    empty_read: ReadAsk | None = None
+    label_filtered: bool = False
+    window_filtered: bool = False
 
 
 class SearchServicer:
@@ -1041,12 +1268,13 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
     search: SearchServicer | None,
     utterance: str,
     audit: TurnReadAudit,
-) -> tuple[str, ...]:
+) -> ServicedCarriers:
     """Service one emission, once, into the fourth group (ADR-0226 §§2, 6, 7).
 
     **The local file is serviced first, then the web search, then the citation hop,
-    then the sighted query** (ADR-0231 §11, amending ADR-0230 §7's own amendment of
-    ADR-0226 §6's cross-kind precedence sentence in one further respect). §6's
+    then the structured read, then the sighted query** (ADR-0240 §5, amending
+    ADR-0231 §11's own amendment of ADR-0230 §7's amendment of ADR-0226 §6's
+    cross-kind precedence sentence in one further respect). §6's
     decision is applied and not moved — the capped read ahead
     of the uncapped one — and ADR-0230 §1 caps the fetch hardest of the four: one
     label, one file, one record, always. "Where the fetch takes its slot the hop is
@@ -1159,6 +1387,42 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
     conversation-tail split and takes no view of what the renderer will do with what
     it names.
 
+    **The structured read sits between the hop and the query, and ADR-0226 §6's own
+    rule is what puts it there** (ADR-0240 §5). This kind has no cap of its own — its
+    ``limit`` is what is left — so the capped-ahead-of-uncapped half of §6 cannot
+    place it by a number; what places it is the second half of the same sentence, that
+    "the sighted query fills what remains" and there can only be one residual read.
+    Between two reads that take what remains, the one the planner bounded by naming a
+    period and a person is the more selective by construction. Putting the query first
+    would reduce this kind to the case where the belief layer returned nothing, which
+    is the inversion ADR-0231 §11 refused for the search and ADR-0230 §7 for the file.
+
+    **Two conditions can stop it before any store call, and both are tested before the
+    read rather than after it** (ADR-0240 §5). Where every record of the supply as it
+    stands at that moment — the pre-servicing supply and everything this servicing has
+    already admitted alike — is ``EPISODIC``, the ask is not serviced at all: this
+    kind returns episodes on every servicing, and ADR-0158 §4's separator rule is what
+    keeps a run of them from rendering under ``planning``'s recent-turns heading, "a
+    fabricated claim about continuity, produced silently". Where fewer than one slot
+    of the budget remains, no store call is made either. Testing before the read is
+    what keeps ADR-0226 §7's "the servicer discards no record on the ground of its
+    class" untouched — a read that was never made returns no record to discard — and
+    it is ADR-0158 §4's own construction, "the check is made before the read rather
+    than after it, because dropping the result is the decision either way".
+
+    **A structured read that ran and returned nothing is a fact, and three
+    neighbouring states are not it** (ADR-0240 §6). The empty-read carrier is computed
+    from **the store call's own result** and never from the union's admissions: a read
+    whose records were all deduplicated out returned records, and a planner told
+    otherwise would broaden away from records already in front of it. A read the budget
+    prevented, one the separator condition blocked and a servicing that failed
+    establish nothing either, and none of them reaches the carrier.
+
+    **#2147 is not this ADR's to answer and is not answered here** (ADR-0240 §5, §14).
+    The separator condition is taken for the ``STRUCTURED_READ`` alone; the same hole
+    is open for a ``CITATION_HOP`` whose evidence is episodes, and closing it across
+    every kind is ADR-0226 §7's question rather than one to decide inside this branch.
+
     Args:
         store: The store this turn already reads. The same object the retrieval
             stage read, so the hop resolves against the store the labelled records
@@ -1206,20 +1470,29 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
             (ADR-0228 §9).
 
     Returns:
-        ADR-0227 §3's carrier: the distinct ids of the records this turn's citation
-        hop reached that the supply holds after this servicing, in ADR-0229 §3's
-        order — the expansion sequence under ADR-0227 §4's first-occurrence
-        deduplication. Empty where nothing was serviced, where the servicing failed,
-        and where the hop reached nothing.
+        :class:`ServicedCarriers`: ADR-0227 §3's hop carrier, ADR-0240 §7's empty-read
+        carrier and ADR-0240 §8's two facts about what the structured read filtered
+        on. The default instance — every field empty or ``False`` — is what a
+        servicing that failed or was partial carries out, on §5's all-or-nothing
+        posture.
     """
     reads = _Reads()
     union = _Union(held={record.id for record in supply}, budget=READ_BUDGET)
     completed: ServicedRead | None = None
-    reached: tuple[str, ...] = ()
+    carried = ServicedCarriers()
+    empty_read: ReadAsk | None = None
     resolved_by_hop: tuple[MemoryRecord, ...] = ()
     hop = _ask_of(request, ReadKind.CITATION_HOP)
     query = _ask_of(request, ReadKind.SIGHTED_QUERY)
     local_file = _ask_of(request, ReadKind.LOCAL_FILE)
+    structured = _ask_of(request, ReadKind.STRUCTURED_READ)
+    # `ReadAsk`'s validator makes a `STRUCTURED_READ` ask's `structure` non-``None``
+    # (ADR-0240 §2), read here as the guarantee it is rather than restated as a
+    # branch. The axes are computed from the ask and not from the read, because §10
+    # records them "wherever a ``STRUCTURED_READ`` ask was emitted" — including on
+    # the servicing that then failed, which is the record an operator most wants.
+    axes = () if structured is None else _axes_of(structured)
+    outcome = StructuredOutcome.NOT_ASKED if structured is None else None
     # `ReadAsk`'s validator makes a `SIGHTED_QUERY` ask's query non-``None`` (§4),
     # so this reads the guarantee rather than restating it as a policy: there is no
     # branch here for an ask the model refuses to construct. A `LOCAL_FILE` ask's
@@ -1239,35 +1512,10 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
             # ADR-0230 §7: **first**, ahead of the hop, because this kind is capped
             # at one record and the hop at two labels — "at one slot, the cheapest
             # precedence position this corpus has ever had to argue for".
-            entry = resolve_entry(named, listing)
-            if entry is None or fetcher is None or listing is None:
-                # ADR-0230 §2: a label outside the shown set — malformed, out of
-                # range, or named on a turn that showed no listing at all — "resolves
-                # to nothing … discarded silently, and recorded in §9's audit as an
-                # unresolved label". §9 puts it in **this** count and not beside the
-                # refusal: it "never reached the fetcher", and the two facts have
-                # different causes and different fixes.
-                unresolved += 1
-            else:
-                # The entry handed back is the one this fetcher minted, carried
-                # unaltered from the listing this loop holds (ADR-0230 §2, §4). No
-                # path is composed, no name is joined to a root, and no entry is
-                # assembled here.
-                outcome = await fetcher.fetch(listing, entry)
-                refusal = outcome.refusal
-                if outcome.record is not None:
-                    # §9's second failure field is stated over **reads** rather than
-                    # over asks, and a fetch that returned a record is a read this
-                    # servicing performed that returned one. So a hop raising after
-                    # the file came back is recorded as the partial servicing it was.
-                    reads.note(1)
-                    # One slot of ADR-0226 §6's ten, counted after deduplication and
-                    # drawn through the same union as every other kind — "not a
-                    # share, not a second budget". The budget cannot cut it: the
-                    # fetch is first and admits one record into ten empty slots, so
-                    # `LOCAL_FILE` never appears in `truncated_kinds`, which is §1's
-                    # cap of one showing up in the audit rather than a case elided.
-                    union.admit((outcome.record,))
+            refusal, missed = await _serviced_file(
+                named, fetcher, listing, union=union, reads=reads
+            )
+            unresolved += missed
         # ADR-0231 §11: **second**, after the one-record local file and ahead of the
         # hop and the query. ADR-0226 §6's decision is applied and not moved — the
         # capped read ahead of the uncapped one — and sorting the four kinds by their
@@ -1308,23 +1556,30 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
             # budget and moves no field of §9's record.
             if union.admit(reach.evidence):
                 truncated.append(ReadKind.CITATION_HOP)
-        if statement is not None:
-            allowed = union.remaining
-            found = (
-                []
-                if allowed <= 0
-                else await assemble_by_band(
-                    store, statement, limit=allowed, kinds=BELIEF_KINDS, on_page=reads.note
-                )
+        if structured is not None and structured.structure is not None:
+            # ADR-0240 §5: **fourth**, after the hop and ahead of the query — the
+            # position ADR-0226 §6's own rule reaches for a kind with no cap of its
+            # own, since the sighted query is the read that "fills what remains" and
+            # there can only be one of those.
+            outcome, empty = await _serviced_structured(
+                store,
+                structured.structure,
+                structured.query,
+                union=union,
+                supply=supply,
+                reads=reads,
+                truncated=truncated,
             )
-            union.admit(found)
-            # The query is asked for exactly the slots the hop left, so the budget
-            # cannot stop a record it returned — what it does is shorten the ask.
-            # A query given the whole budget was not truncated by it, however much
-            # more the store might have held; a query given less and filling every
-            # slot of it is the case §6 says the audit records.
-            if allowed < READ_BUDGET and len(found) == allowed:
-                truncated.append(ReadKind.SIGHTED_QUERY)
+            # ADR-0240 §7: the ask **the planner emitted**, byte for byte, and only
+            # where the read ran and returned nothing. The other four outcomes
+            # establish nothing about the store, so none of them reaches this
+            # carrier.
+            empty_read = structured if empty else None
+        if statement is not None:
+            # ADR-0226 §6: **last**, because it is the read that "fills what
+            # remains" — the one uncapped kind, and the position ADR-0240 §5 sorts
+            # the structured read just above.
+            await _serviced_query(store, statement, union=union, reads=reads, truncated=truncated)
         completed = ServicedRead(
             kinds=tuple(ask.kind for ask in request.asks),
             records=tuple(union.admitted),
@@ -1334,6 +1589,13 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
             labels_unresolved=unresolved,
             refusal=refusal,
             disposition=disposition,
+            structured_axes=axes,
+            # ADR-0240 §10: `None` until the branch above assigns one, and assigned
+            # eagerly to `NOT_ASKED` where the request carried no such ask — so this
+            # is a member on every completed servicing and `None` on no completed
+            # one, which is what makes the absent value mean "the servicing did not
+            # complete" and nothing else.
+            structured=outcome,
             truncated_kinds=tuple(truncated),
         )
         # ADR-0227 §3's carrier, computed on the success path alone and over
@@ -1347,10 +1609,26 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
         # one label naming what another cites, so the expansion can name one record
         # more than once — `E, B, E` deduplicates to `E, B`, which §3 rules the
         # required result rather than a case to repair.
-        reached = tuple(
-            identifier
-            for identifier in dict.fromkeys(record.id for record in resolved_by_hop)
-            if identifier in union.held
+        carried = ServicedCarriers(
+            hop_reached=tuple(
+                identifier
+                for identifier in dict.fromkeys(record.id for record in resolved_by_hop)
+                if identifier in union.held
+            ),
+            empty_read=empty_read,
+            # ADR-0240 §8: computed from the ask rather than from the yield, which
+            # is what §8's "whether that read returned records or none" asks for —
+            # and never where no store call was made, because a read that never ran
+            # reached nothing and filtered nothing. Both are built here rather than
+            # in the branch above so that §5's all-or-nothing posture reaches them:
+            # a servicing that raised after the structured read carries none of
+            # these facts out, exactly as it carries no records out.
+            label_filtered=_ran(outcome)
+            and bool(
+                {StructuredAxis.PARTICIPANTS, StructuredAxis.TOPICS, StructuredAxis.ABOUT_PERSON}
+                & set(axes)
+            ),
+            window_filtered=_ran(outcome) and StructuredAxis.WINDOW in axes,
         )
     except MemoryStoreError as store_fault:
         # §5's whole posture, and the archive's for the same reason ADR-0225 §2
@@ -1391,11 +1669,18 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
                 kinds=tuple(ask.kind for ask in request.asks),
                 refusal=refusal,
                 disposition=disposition,
+                # **The axes ride on the failing record and the outcome does not**
+                # (ADR-0240 §10), and the asymmetry is the point: "an ask that was
+                # emitted is an ask whichever way the servicing went, and suppressing
+                # its shape on a failed turn would hide the emissions an operator most
+                # wants to see", while no completed-servicing outcome is honest of a
+                # servicing that did not complete.
+                structured_axes=axes,
                 failed=True,
                 failed_after_read_returned=reads.returned_any,
             ),
         )
-    return reached
+    return carried
 
 
 async def _serviced_search(  # noqa: PLR0913 — the seam, the ask, the composer's one input, and the three things ADR-0231 §11 states this kind's budget clause over; §7 admits one servicing site and this is that site's fourth kind
@@ -1519,6 +1804,268 @@ async def _serviced_search(  # noqa: PLR0913 — the seam, the ask, the composer
     if union.admit(found.records):
         truncated.append(ReadKind.WEB_SEARCH)
     return found.disposition
+
+
+async def _serviced_file(
+    named: str,
+    fetcher: Fetcher | None,
+    listing: SourceListing | None,
+    *,
+    union: _Union,
+    reads: _Reads,
+) -> tuple[FetchRefusal | None, int]:
+    """Service one ``LOCAL_FILE`` ask into the union (ADR-0230 §2, §7).
+
+    **A label outside the shown set resolves to nothing** — malformed, out of range,
+    or named on a turn that showed no listing at all — "discarded silently, and
+    recorded in §9's audit as an unresolved label". ADR-0226 §9 puts that in the
+    unresolved count and **not** beside the refusal: it "never reached the fetcher",
+    and the two facts have different causes and different fixes.
+
+    **The entry handed to the fetcher is the one that fetcher minted**, carried
+    unaltered from the listing this loop holds (§2, §4). No path is composed, no name
+    is joined to a root, and no entry is assembled here.
+
+    Args:
+        named: The label the planner wrote, verbatim.
+        fetcher: The seam, or ``None`` where no root is configured.
+        listing: The listing this turn showed, or ``None``. It is both the label space
+            and the authority the fetch is verified against.
+        union: The turn's union. The fetch is first and admits one record into ten
+            empty slots, so the budget cannot cut it and ``LOCAL_FILE`` never appears
+            in ``truncated_kinds`` — §1's cap of one showing up in the audit rather
+            than a case elided.
+        reads: ADR-0226 §9's second failure field's observer. A fetch that returned a
+            record is a read this servicing performed that returned one, so a hop
+            raising after the file came back is recorded as the partial servicing it
+            was.
+
+    Returns:
+        The class the fetch resolved to, or ``None``; and ``1`` where the label
+        resolved to nothing, ``0`` otherwise.
+    """
+    entry = resolve_entry(named, listing)
+    if entry is None or fetcher is None or listing is None:
+        return None, 1
+    outcome = await fetcher.fetch(listing, entry)
+    if outcome.record is not None:
+        reads.note(1)
+        # One slot of ADR-0226 §6's ten, counted after deduplication and drawn
+        # through the same union as every other kind — "not a share, not a second
+        # budget".
+        union.admit((outcome.record,))
+    return outcome.refusal, 0
+
+
+async def _serviced_query(
+    store: MemoryStore,
+    statement: str,
+    *,
+    union: _Union,
+    reads: _Reads,
+    truncated: list[ReadKind],
+) -> None:
+    """Service one ``SIGHTED_QUERY`` ask into the union (ADR-0226 §2, §6).
+
+    ``assemble_by_band`` "with the band precedence, per-band composition and kind
+    selection of the retrieval stage's own read unchanged" (§2), over
+    :data:`~ai_assistant.orchestration.conversations.BELIEF_KINDS` — so this kind
+    reaches semantic, preference and procedural records and **no episode**, which is
+    the fact ADR-0240 §1 rests its fifth member on.
+
+    The query is asked for exactly the slots the earlier kinds left, so the budget
+    cannot stop a record it returned — what it does is shorten the ask. A query given
+    the whole budget was not truncated by it, however much more the store might have
+    held; a query given less and filling every slot of it is the case §6 says the audit
+    records.
+
+    Args:
+        store: The store this turn already reads.
+        statement: The query the planner composed, passed as handed.
+        union: The turn's union. Its ``remaining`` is this read's ``limit``.
+        reads: ADR-0226 §9's second failure field's observer, threaded in as the page
+            observer because one query is several store calls behind one call.
+        truncated: The servicing's truncation list, appended to in servicing order.
+
+    Raises:
+        MemoryStoreError: Propagated from any band's read, to ADR-0226 §5's one
+            degradation site.
+    """
+    allowed = union.remaining
+    found = (
+        []
+        if allowed <= 0
+        else await assemble_by_band(
+            store, statement, limit=allowed, kinds=BELIEF_KINDS, on_page=reads.note
+        )
+    )
+    union.admit(found)
+    if allowed < READ_BUDGET and len(found) == allowed:
+        truncated.append(ReadKind.SIGHTED_QUERY)
+
+
+def _axes_of(ask: ReadAsk) -> tuple[StructuredAxis, ...]:
+    """Which axes one ``STRUCTURED_READ`` ask applied, as ADR-0240 §10's classes.
+
+    The four filter axes come from :meth:`~ai_assistant.core.types.StructuredAsk.applied`
+    — the type's own answer to "which of these is not ``None``", so this function does
+    not become a second derivation of it — and the query is appended last, because it
+    is the member that says which of ADR-0237's two reads serviced the ask rather than
+    a filter over stored values.
+
+    **No value crosses.** What comes back are enumeration members; no instant, no
+    label and no query text is read off the ask here or anywhere the result goes.
+
+    Args:
+        ask: The ``STRUCTURED_READ`` ask. Its ``structure`` is non-``None`` by
+            ``ReadAsk``'s own validator, and a call for an ask carrying none records
+            the query alone rather than raising — this function reports a shape and
+            is not a second enforcement point for a condition ``core`` already keeps.
+
+    Returns:
+        The axes applied, window first and the query last. Empty only where the ask
+        carried neither a structure nor a query, which ``ReadAsk`` refuses.
+    """
+    applied = () if ask.structure is None else ask.structure.applied()
+    axes = [StructuredAxis(name) for name in applied]
+    if ask.query is not None:
+        axes.append(StructuredAxis.QUERY)
+    return tuple(axes)
+
+
+def _ran(outcome: StructuredOutcome | None) -> bool:
+    """Whether a structured read actually reached the store (ADR-0240 §5, §8).
+
+    ADR-0240 §8's two facts are about what a read **filtered on**, and a read the
+    budget did not reach or the supply's shape blocked filtered on nothing: "a read the
+    budget prevented is not a read that found nothing, and no implementation, carrier or
+    audit field conflates them". Written once here because both facts ask it.
+
+    Args:
+        outcome: The state the ask reached, or ``None`` where the servicing had not
+            got that far.
+
+    Returns:
+        Whether a store call was made for the ask.
+    """
+    return outcome in {StructuredOutcome.RETURNED_NOTHING, StructuredOutcome.RETURNED_RECORDS}
+
+
+async def _serviced_structured(  # noqa: PLR0913 — the store, the ask's two halves, and the three things ADR-0240 §5 states this kind's budget and separator clauses over; §7 admits one servicing site and this is that site's fifth kind
+    store: MemoryStore,
+    structure: StructuredAsk,
+    query: str | None,
+    *,
+    union: _Union,
+    supply: Sequence[MemoryRecord],
+    reads: _Reads,
+    truncated: list[ReadKind],
+) -> tuple[StructuredOutcome, bool]:
+    """Service one ``STRUCTURED_READ`` ask into the union (ADR-0240 §4, §5, §6).
+
+    **Two conditions are tested before any store call, and the separator wins where
+    both hold** (§5, §10). A supply whose every record is ``EPISODIC`` when the read is
+    reached blocks it whatever the budget holds — the records this kind returns are
+    episodes by design, and without something non-``EPISODIC`` before them
+    ``planning``'s leading-run split would render them under the recent-turns heading
+    (ADR-0158 §4). A budget with no slot left blocks it too. Neither is a read that
+    found nothing, and §6's empty-read fact arises from neither.
+
+    **The supply the separator is tested over is the supply as it stands at this
+    moment** — the pre-servicing supply *and* everything this servicing has already
+    admitted — which is why a ``LOCAL_FILE`` fetch that minted an attested belief, or a
+    ``WEB_SEARCH`` that minted records, is its own separator and this read is then made
+    (§5).
+
+    **The query decides which of ADR-0237's two reads answers the ask, and nothing
+    else does** (§4). An ask carrying one goes to ``search`` with the query passed as
+    handed; an ask carrying none goes to ``select``. The four axes are passed from the
+    ``StructuredAsk`` unchanged — ``None`` for ``None``, values otherwise — so nothing
+    here translates between the ask's convention and the store's, and nothing trims,
+    casefolds, normalises or truncates a value on any axis.
+
+    **``kinds`` names ``EPISODIC`` on every call and the ask carries no kind axis**
+    (§4). Beliefs stay reachable exactly as they are, by the retrieval stage and by a
+    ``SIGHTED_QUERY``; ``kinds`` and ``bands`` are the store's partitioning vocabulary
+    and are not values a planner names.
+
+    **Emptiness is read off the store call's own result** (§6). Not off what the union
+    admitted, and not off ``ServicedRead.new``: a read whose every record the
+    deduplication removed returned records, and a planner told otherwise "would broaden
+    away from records already in front of it". This is the one place a plausible
+    implementation gets the deduplication case wrong, and the return value below is
+    what keeps it out of ADR-0240 §7's carrier.
+
+    Args:
+        store: The store this turn already reads.
+        structure: The ask's four axes, already validated by
+            :class:`~ai_assistant.core.types.StructuredAsk` — at least one applied, and
+            no empty sequence on any of them.
+        query: The query the ask carried, or ``None``. Its presence is the whole of
+            what chooses between the two store members.
+        union: The turn's union under construction. Its ``remaining`` is this read's
+            ``limit`` — ADR-0226 §6's one budget, "not a share, not a second budget".
+        supply: The three groups the loop passed the planner on this call, which is
+            half of what §5's separator condition is tested over.
+        reads: ADR-0226 §9's second failure field's observer.
+        truncated: The servicing's truncation list, appended to in servicing order.
+
+    Returns:
+        The state this ask reached, and whether the store call returned no record at
+        all — §6's *empty structured read*, which is ``False`` on every path that made
+        no store call.
+
+    Raises:
+        MemoryStoreError: Propagated from the store, to ADR-0226 §5's one degradation
+            site. This kind adds no error class and no second net.
+    """
+    if all(MemoryKind(record.kind) is MemoryKind.EPISODIC for record in (*supply, *union.admitted)):
+        # ADR-0240 §5, taking ADR-0158 §4's rule for this kind: the test is made
+        # **before** the read, so nothing is discarded and ADR-0226 §7's
+        # discards-nothing-by-class clause is not approached. §10 records this in
+        # preference to the slot outcome where both hold.
+        return StructuredOutcome.NO_SEPARATOR, False
+    limit = union.remaining
+    if limit <= 0:
+        return StructuredOutcome.NO_SLOT, False
+    # The four axes are passed from the ask unchanged — `None` for `None`, and the
+    # values given otherwise (ADR-0240 §2) — written out at both call sites rather
+    # than unpacked from a mapping, so `mypy` checks each against ADR-0237 §1's own
+    # annotation instead of taking an untyped `**` on trust.
+    result = (
+        await store.select(
+            limit=limit,
+            kinds=_STRUCTURED_KINDS,
+            occurred_within=structure.window,
+            participants=structure.participants,
+            topics=structure.topics,
+            about_person=structure.about_person,
+        )
+        if query is None
+        else await store.search(
+            query,
+            limit=limit,
+            kinds=_STRUCTURED_KINDS,
+            occurred_within=structure.window,
+            participants=structure.participants,
+            topics=structure.topics,
+            about_person=structure.about_person,
+        )
+    )
+    found = result.records
+    reads.note(len(found))
+    union.admit(found)
+    # The read is asked for exactly the slots the earlier kinds left, so the budget
+    # cannot stop a record it returned — what it does is shorten the ask. A read given
+    # the whole budget was not truncated by it, however much more the store might have
+    # held; one given less and filling every slot of it is the case ADR-0240 §5 says
+    # the audit records. This is ADR-0226 §6's own rule for the sighted query, applied
+    # unchanged.
+    if limit < READ_BUDGET and len(found) == limit:
+        truncated.append(ReadKind.STRUCTURED_READ)
+    if not found:
+        return StructuredOutcome.RETURNED_NOTHING, True
+    return StructuredOutcome.RETURNED_RECORDS, False
 
 
 def resolve_label(label: str, supply: Sequence[MemoryRecord]) -> MemoryRecord | None:
@@ -1724,6 +2271,30 @@ def emit_read_audit(
     reading of a trigger — the disposition is what tells the two apart, and no figure
     for this kind is reported without saying which it is.
 
+    **And no value on any axis, in any form** (ADR-0240 §10). No instant, no window,
+    no person label, no topic label, no query, no record, no excerpt and no count of a
+    label's characters appears anywhere in this event on account of a
+    ``STRUCTURED_READ``. The two fields this kind adds are again **classes**:
+    ``structured_axes`` is a tuple of :class:`StructuredAxis` members and
+    ``structured`` a :class:`StructuredOutcome` member or absent. ADR-0004 §5's rule is
+    why — "a person label is a name, chosen by whoever wrote it, and a Tier 2 event
+    carrying one is a Tier 1 leak on a value this system did not mint" — and the ask
+    stays durable on the frozen ``ActionPlan`` (ADR-0226 §4), which this record neither
+    copies nor points at.
+
+    **Two fields and not one, because they answer different questions and neither is
+    derivable from the other** (ADR-0240 §10). The outcome answers *did the read work*,
+    and it is what a deployment reads to see whether ADR-0240 §6's revision is firing
+    and whether it is firing on budget-starved reads it should not be. The axes answer
+    *what was tried*, and they are what makes ADR-0239's producer measurable from this
+    end: before that lane lands, ADR-0240 §9's gate means the who and what axes are
+    described on few turns and used on fewer; after it, the same field says whether the
+    planner started using them. Neither number can be read off the other, and neither
+    off the existing per-servicing counts, which are stated over the whole servicing
+    rather than per ask. **The empty rate per axis set** is the figure the pair newly
+    supports, computed over a population of turns and never as a per-turn quantity, and
+    it is not a precision or a recall (ADR-0226 §8).
+
     **What the refusal rate is read from, and what it is not.** With the class beside
     the kinds, the refusal rate **per kind** is readable over a population of turns
     from this one event, exactly as the fire rate and the novelty rate are — computed
@@ -1795,6 +2366,8 @@ def emit_read_audit(
                 "labels_unresolved": read.labels_unresolved,
                 "refusal": None if read.refusal is None else read.refusal.value,
                 "disposition": None if read.disposition is None else read.disposition.value,
+                "structured_axes": tuple(axis.value for axis in read.structured_axes),
+                "structured": None if read.structured is None else read.structured.value,
                 "truncated_kinds": tuple(kind.value for kind in read.truncated_kinds),
                 "failed": read.failed,
                 "failed_after_read_returned": read.failed_after_read_returned,

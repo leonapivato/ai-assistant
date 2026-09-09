@@ -90,6 +90,7 @@ from ai_assistant.core.types import (
     QueuedQuestion,
     QueueOutcome,
     QuietWindow,
+    ReadAsk,
     ReplyChunk,
     Retirement,
     Reversibility,
@@ -292,7 +293,7 @@ def confirmable(tool_id: str = "smtp") -> ToolDefinition:
 class _OneStepPlanner:
     """Plans one step for the goal it is given (so ``plan.goal_id`` matches)."""
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -300,6 +301,7 @@ class _OneStepPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         step = PlanStep(
             id="step-1", intent="send the note", capability=CAPABILITY, parameters=PARAMETERS
@@ -4395,7 +4397,7 @@ def _conversation_engine(
 class _NoStepPlanner:
     """A planner that ends a turn at an empty plan, so no tool is needed."""
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -4403,6 +4405,7 @@ class _NoStepPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(), created_at=AT)
 

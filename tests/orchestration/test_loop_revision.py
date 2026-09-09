@@ -44,6 +44,7 @@ from ai_assistant.core.types import (
     ActionPlan,
     MemorySource,
     PlanStep,
+    ReadAsk,
     ReadKind,
     ReadRequest,
     Role,
@@ -153,7 +154,7 @@ class _Script:
             return default
         return script[ordinal] if ordinal < len(script) else script[-1]
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -161,6 +162,7 @@ class _Script:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         """Answer this call from the script, recording what it was handed."""
         ordinal = len(self.calls)

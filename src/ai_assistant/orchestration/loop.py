@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from types import MappingProxyType
@@ -68,6 +68,7 @@ from ai_assistant.orchestration.reads import (
     ServicedRead,
     Servicing,
     StopReason,
+    StructuredFacts,
     TriggerOutcome,
     TurnReadAudit,
     service_read_request,
@@ -86,7 +87,7 @@ if TYPE_CHECKING:
         Planner,
         ToolRegistry,
     )
-    from ai_assistant.core.types import ActionPlan, FeedbackEvent, SourceListing
+    from ai_assistant.core.types import ActionPlan, FeedbackEvent, ReadAsk, SourceListing
     from ai_assistant.orchestration.writes import MemoryWriteStage, WriteOutcome
 
 _log = structlog.get_logger(__name__)
@@ -134,6 +135,15 @@ class RespondedTurn:
             what a planner puts in a query, and the turn's timing is a fact about the
             system rather than about the user's question". ``False`` on every other
             turn, where the assembled prompt is byte-identical to what it is today.
+        structured: ADR-0240 §8's three facts about what this turn's structured reads
+            filtered on and what the last of them returned — supplied by the servicer
+            that knows them and never inferred at the render site, exactly as
+            :attr:`hop_reached` and :attr:`stopped_while_asking` are. The reach and
+            temporal facts range over the **turn** because ADR-0228 §7 keeps every
+            servicing's records in one growing fourth group; the emptiness fact is the
+            **last** read's. Its default is a turn with no structured read at all, on
+            which the assembled prompt is byte-identical to what it is without this
+            decision.
         hop_reached: ADR-0227 §3's carrier. The **distinct** ids of the records this
             turn's citation hop reached that :attr:`turn`'s supply holds, in
             ADR-0229 §3's order: the **expansion sequence** — labels in the order the
@@ -154,6 +164,7 @@ class RespondedTurn:
     hop_reached: tuple[str, ...] = ()
     plans: tuple[ActionPlan, ...] = ()
     stopped_while_asking: bool = False
+    structured: StructuredFacts = field(default_factory=StructuredFacts)
 
 
 #: ADR-0228 §3's bound: **at most two** calls to ``Planner.plan`` on one turn, so a
@@ -503,13 +514,15 @@ def _stop_reason(
     *,
     plans: Sequence[ActionPlan],
     serviced: ServicedRead,
+    empty_structured_read: bool,
     planning_budget: timedelta | None,
     elapsed: Callable[[], timedelta],
 ) -> StopReason | None:
     """Which of ADR-0228 §2's conditions stops the turn after a servicing, or ``None``.
 
-    The four conditions that can only be judged once a servicing has run — (a), (d),
-    (e), (f) and (g) — stated in one place so that the loop reads as the sequence §2
+    The conditions that can only be judged once a servicing has run — (a), (d), (e),
+    (f) and (g), with (e) read as ADR-0240 §6 partially supersedes it — stated in one
+    place so that the loop reads as the sequence §2
     describes rather than as a stack of guards. ``None`` means all of them hold and a
     revision is admissible; a value is both the answer *no* and ADR-0228 §9's reason
     for it. Conditions (b) and (c) are decided before a servicing runs and so are the
@@ -528,6 +541,14 @@ def _stop_reason(
             how many planner calls the turn has made, which is §2(f)'s subject.
         serviced: What the servicing just performed carried — §2(d)'s failure and
             §2(e)'s count of records the supply did not already hold.
+        empty_structured_read: Whether that servicing performed an **empty structured
+            read** — ADR-0240 §6's second branch of §2(e): a ``STRUCTURED_READ`` ask
+            that was serviced, was reached with at least one slot of the budget
+            remaining, whose store call completed, and whose store call returned no
+            record at all. A read the budget did not reach, one the supply's shape
+            blocked, one whose records were merely deduplicated out and a servicing
+            that failed are none of them this, and the servicer is what tells them
+            apart.
         planning_budget: The operation's declared budget, or ``None`` where it
             declared none (§2(a)).
         elapsed: How long the turn has run, measured from its entry into the loop
@@ -551,11 +572,20 @@ def _stop_reason(
         # lane that adds an operation and forgets to price it gets the turn the
         # system already has, not a second model call nobody budgeted.
         return StopReason.NOT_ITERATED
-    if serviced.failed or serviced.new == 0:
+    if serviced.failed or (serviced.new == 0 and not empty_structured_read):
         # §2(d) and §2(e). A failed or partial servicing left the supply as planning
         # saw it (ADR-0226 §5), and a servicing whose every record was deduplicated
         # out left it byte-identical — either way a second call would be handed the
         # first call's own input, at the price of a model round trip.
+        #
+        # **ADR-0240 §6 partially supersedes (e) in one scope and this is it**: a
+        # servicing that performed an empty structured read satisfies (e) too, and the
+        # second call is *not* handed the first call's own input, because ADR-0240 §7
+        # gives it the ask that came back empty. The other six conditions bind
+        # unchanged and all of them must still hold — which is why this reading sits
+        # inside (d)'s guard rather than beside it: a servicing that failed
+        # established nothing, so its empty-read fact is `False` by construction and
+        # the conjunction is belt and braces rather than a second rule.
         return StopReason.NOT_ITERATED
     if elapsed() >= planning_budget:
         # §2(g), against the injected clock. **Strictly less** is what admits a call:
@@ -1245,6 +1275,17 @@ class LearningLoop:
         # servicing failed carries out of here, and "an empty set renders no reply
         # line anywhere".
         hop_reached: tuple[str, ...] = ()
+        # ADR-0240 §7's carrier, empty until a servicing performs an empty structured
+        # read — which is what a turn's **first** call always receives, and what every
+        # turn that did not fire, whose servicing was declined and whose servicing
+        # failed carries into its second call too.
+        empty_reads: tuple[ReadAsk, ...] = ()
+        # ADR-0240 §8's three facts, each on its own condition. The first two are
+        # **accumulated over the turn** because ADR-0228 §7 keeps every servicing's
+        # records in one growing fourth group; the third is replaced by each servicing
+        # because it is a fact about the answer being composed rather than about the
+        # path taken to it.
+        structured = StructuredFacts()
         if not bounded_audience:
             # ADR-0203 §1: between retrieval and planning, and applied to the
             # context as well as to the records — a facet no ADR has placed is
@@ -1275,7 +1316,18 @@ class LearningLoop:
         files = _shown(listing)
         plans: tuple[ActionPlan, ...] = ()
         plan = _stamped(
-            await self._planned(goal, context=context, memories=memories, files=files, audit=audit)
+            await self._planned(
+                goal,
+                context=context,
+                memories=memories,
+                files=files,
+                # ADR-0240 §7: **always ``()`` on a turn's first call**, and passed
+                # explicitly rather than defaulted — the loop passes this parameter on
+                # every call, exactly as it passes `files`, which is what makes the
+                # widening the compatibility break §7 flags it as.
+                empty_reads=(),
+                audit=audit,
+            )
         )
         plans += (plan,)
         while True:
@@ -1330,7 +1382,7 @@ class LearningLoop:
             # query are serviced by. `listing` is the very object `files` was
             # projected from, which is what makes `F`*n* name, at the fetch, the
             # entry the planner was shown at position *n* (§2, §4).
-            reached = await service_read_request(
+            carried = await service_read_request(
                 self._memory,
                 request,
                 supply=memories,
@@ -1363,13 +1415,35 @@ class LearningLoop:
             # still renders its reply in the prompt the turn finally assembles.
             # `dict.fromkeys` keeps the first arrival's place, exactly as the
             # servicer's own deduplication does.
-            hop_reached = tuple(dict.fromkeys(hop_reached + reached))
+            hop_reached = tuple(dict.fromkeys(hop_reached + carried.hop_reached))
+            # ADR-0240 §7: the asks of *this turn's* reads that came back empty, in
+            # servicing order. A turn makes at most two planner calls (ADR-0228 §3),
+            # so only the first servicing's can ever be read — accumulated rather
+            # than replaced anyway, because §7 states the carrier over the turn's
+            # reads and a sequence that quietly dropped one would be a different
+            # promise from the one the contract makes.
+            empty_reads += () if carried.empty_read is None else (carried.empty_read,)
+            # ADR-0240 §8. The reach and the temporal facts are ORed across the
+            # turn's servicings — §8's own clause for the first is "whether or not a
+            # later read of the same turn did", and the second rests on the same
+            # ground, ADR-0228 §7's monotonicity — while the emptiness fact is
+            # **replaced**, because §8 keys it on the turn's *last* structured read.
+            structured = StructuredFacts(
+                reach=structured.reach or carried.label_filtered,
+                temporal=structured.temporal or carried.window_filtered,
+                empty=carried.empty_read is not None,
+            )
             # §2's remaining conditions, in one place (:func:`_stop_reason`). The
             # clock is read **here**, immediately before the call the budget gates,
             # and at no other point (§4).
             stop = _stop_reason(
                 plans=plans,
                 serviced=serviced,
+                # ADR-0240 §6's second branch of §2(e), taken from the servicer's own
+                # answer rather than re-derived here: which of five states the read
+                # reached is a fact only the servicer holds, and a loop reading it off
+                # `serviced.new` would read a deduplicated-away read as an empty one.
+                empty_structured_read=carried.empty_read is not None,
                 planning_budget=None if operation is None else operation.planning_budget,
                 elapsed=lambda: self._now_utc() - started,
             )
@@ -1389,7 +1463,12 @@ class LearningLoop:
                 # ADR-0230 §3: the **same** sequence as the first call was handed,
                 # not a second read — so `F3` names the same entry on both calls.
                 await self._planned(
-                    goal, context=context, memories=memories, files=files, audit=audit
+                    goal,
+                    context=context,
+                    memories=memories,
+                    files=files,
+                    empty_reads=empty_reads,
+                    audit=audit,
                 ),
                 supersedes=plan.id,
             )
@@ -1423,15 +1502,23 @@ class LearningLoop:
                 audit.stop in {StopReason.BOUND_REACHED, StopReason.BUDGET_REACHED}
                 and plan.read_request is not None
             ),
+            # ADR-0240 §8's three facts, carried inside `orchestration` from the
+            # component that knows them to the render site, as data. They add no field
+            # to a `core` type, no member to a Protocol, and none is inferred at the
+            # render site — not from the plan, not from the supply's length, not from
+            # the audit. This is ADR-0228 §10's rule and ADR-0227 §3's, applied to
+            # three more facts for their own reason.
+            structured=structured,
         )
 
-    async def _planned(
+    async def _planned(  # noqa: PLR0913 — the goal plus one keyword per thing the loop assembled for this call; ADR-0230 §3 and ADR-0240 §7 each add one, and the audit record rides beside them
         self,
         goal: Goal,
         *,
         context: CurrentContext,
         memories: Sequence[MemoryRecord],
         files: Sequence[ShownFile],
+        empty_reads: Sequence[ReadAsk],
         audit: TurnReadAudit,
     ) -> ActionPlan:
         """Read the capability vocabulary, then plan over it (ADR-0211 §3).
@@ -1467,6 +1554,12 @@ class LearningLoop:
                 parameter on this side would let a call site forget it silently.
                 ``()`` where no fetcher is wired, which means no file is nameable on
                 this turn.
+            empty_reads: The asks of this turn's already-serviced reads that came back
+                empty (ADR-0240 §7). ``()`` on a turn's first call and on any second
+                call whose servicing established no emptiness — **required and
+                undefaulted here**, unlike on the contract and for ``files``' own
+                reason: §7 has the loop pass it on every call, and a defaulted
+                parameter on this side would let a call site forget it silently.
             audit: This turn's record, whose ``planner_calls`` this method advances.
                 **Counted here and nowhere else**, between the vocabulary read and the
                 call, which is what makes the field say what ADR-0228 §9 asks of it:
@@ -1496,6 +1589,7 @@ class LearningLoop:
             memories=memories,
             capabilities=capabilities,
             files=files,
+            empty_reads=empty_reads,
         )
 
     async def learn(self, event: FeedbackEvent) -> tuple[WriteOutcome, ...]:

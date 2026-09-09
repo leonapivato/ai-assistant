@@ -3243,16 +3243,28 @@ async def test_an_asked_for_search_is_read_back_as_a_web_search_ask() -> None:
     assert ask.entry is None
 
 
-async def test_a_search_may_be_asked_for_beside_every_other_kind() -> None:
-    """ADR-0226 §2's at-most-one-of-each rule, at its widest emission (ADR-0231 §1).
+async def test_one_envelope_may_ask_for_every_kind_the_enumeration_admits() -> None:
+    """ADR-0226 §2's at-most-one-of-each rule, at its widest emission (§1, ADR-0240 §1).
 
     "``ReadRequest``'s validator binds unchanged: one emission carries at most one
-    ``WEB_SEARCH`` ask", and the kind is additive rather than exclusive — so one
-    envelope may carry all four, each with exactly its own argument and none of the
-    others. This is the arm that fails on a parser reading ``web_search`` as an
-    alternative to the other members rather than as a fourth one.
+    ``WEB_SEARCH`` ask", and ADR-0240 §1 says the same of its own kind — each is
+    additive rather than exclusive, so one envelope may carry one of every member,
+    each with exactly its own argument and none of the others. This is the arm that
+    fails on a parser reading a later member as an alternative to the earlier ones
+    rather than as one more.
+
+    **Asserted against ``set(ReadKind)``**, so the next additive member fails here
+    until this parser learns to read it.
     """
-    plan = await _emitted(_envelope(query="the lease", labels=["M1"], file="F1", web_search=True))
+    plan = await _emitted(
+        _envelope(
+            query="the lease",
+            labels=["M1"],
+            file="F1",
+            web_search=True,
+            structured={"start": "2026-03-01T00:00:00+00:00"},
+        )
+    )
 
     request = plan.read_request
     assert request is not None

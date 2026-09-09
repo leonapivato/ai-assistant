@@ -101,7 +101,7 @@ from ai_assistant.core.types import (
     rests_on_recorded_external_content,
 )
 from ai_assistant.orchestration.payloads import JSON_STRING_QUOTE_BYTES, encoded_text_bytes
-from ai_assistant.orchestration.reads import READ_BUDGET
+from ai_assistant.orchestration.reads import READ_BUDGET, StructuredFacts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
@@ -350,6 +350,86 @@ what you can answer, say that you stopped short, and offer to look again if the 
 asks."""
 
 
+#: ADR-0240 §8's **reach** fact, as one clause of this system's own text.
+#:
+#: **What it discharges.** ADR-0237 §6 puts the obligation on the surface performing a
+#: structured read — such a surface "says what the read did not reach … and that the
+#: reach of the read is the values that were **recorded** rather than the subject the
+#: owner has in mind" — and ADR-0239 §6 states the same of a participant label. This
+#: consumer is that surface, and no lane reads either clause as discharged by anything
+#: else, or as discharged only where a read came back empty.
+#:
+#: **It is owed on a successful read as much as on an empty one**, which is the half an
+#: earlier draft of the ADR missed: a person-filtered read that returns the one labelled
+#: episode has excluded every unlabelled episode about that person, and a reply
+#: presenting it as *the* conversations with Alex is exactly the over-claim §6 exists to
+#: prevent.
+#:
+#: **It carries no label, no axis name, no count and no query**, so this text is written
+#: here, by this module, out of material it was never given — the construction
+#: :data:`_STOPPED_ASKING_PROMPT` already uses one fact over.
+#:
+#: **And it never states that the thing did not happen.** ADR-0237 §7's
+#: no-assertion-of-absence clause binds the composed reply entirely, so what this asks
+#: for is a statement about this system's own index and not about the world.
+_STRUCTURED_REACH_PROMPT: Final = """\
+Some of what you looked up for this answer was found by filtering on labels a record \
+carries — who it involved, or what it was filed under. Records that carry no such \
+label were not reached at all, whatever they are in fact about, and most records here \
+carry none. So where your answer rests on that lookup, say plainly that you are \
+speaking from what was labelled rather than from everything there is, and do not \
+present what you found as the whole of it. Never say that something did not happen or \
+that there was no such conversation: what you know is what this system has recorded \
+under those labels, and nothing about the world beyond it."""
+
+
+#: ADR-0240 §8's **temporal** fact, as one clause of this system's own text.
+#:
+#: **What it discharges.** ADR-0237 §8 rules that ``occurred_within`` filters the
+#: instant of *the exchange* and not of the event, and that a surface answering a
+#: time-scoped question over captured episodes "says which instant it filtered on
+#: wherever the distinction could mislead". Nothing else on this path could carry it:
+#: this stage renders an episode's ``occurred_at`` but renders no ``read_request`` and
+#: names no applied filter, so a successful window-only read would otherwise answer
+#: *"what repairs happened last week"* from an exchange recorded last week about a
+#: repair from a year ago, with nothing saying which instant was filtered.
+#:
+#: **It names the field's meaning and never a value** (§8). "Which instant the filter
+#: was on" is a property of the field rather than a value read off the ask, so this
+#: text states the distinction and could not interpolate a window if a later editor
+#: wanted it to.
+_STRUCTURED_TEMPORAL_PROMPT: Final = """\
+Part of what you looked up for this answer was bounded to a period. The period was \
+matched against **when the conversation was recorded**, not against when the thing \
+discussed in it happened — a conversation held last week about something from years \
+ago is inside that period, and one held years ago about last week is outside it. \
+Where the difference could change how your answer is read, say which of the two you \
+are speaking about, in a short clause and without naming dates you were not given."""
+
+
+#: ADR-0240 §8's **emptiness** fact, as one clause of this system's own text.
+#:
+#: **Given on a turn whose last structured read was empty in §6's sense**, and on no
+#: other turn: a turn that broadened and found records has an answer and needs no note
+#: about the path it took there, which ADR-0240 §10's audit records instead.
+#:
+#: **It is a different fact from :data:`_STOPPED_ASKING_PROMPT` and both may be given.**
+#: That one says the turn stopped while still asking; this one says a specific
+#: structural question had no answer in the store. ADR-0240 §13 item 18 is the turn on
+#: which both hold.
+#:
+#: **It carries no window, no label and no count**, on :data:`_STRUCTURED_REACH_PROMPT`'s
+#: reasoning, and it is bound by ADR-0237 §7 in exactly the same way: an empty result
+#: says that no record carries those labels in that window, and nothing at all about
+#: whether the thing happened.
+_STRUCTURED_EMPTY_PROMPT: Final = """\
+The last thing you looked up for this answer came back with nothing in it. That means \
+this system holds no record matching what was asked for — not that the thing did not \
+happen, was not said, or does not exist. Say that you could not find it and say what \
+you can answer from what you do have; do not conclude from the absence, and do not \
+offer the absence as a finding."""
+
+
 @dataclass(frozen=True, slots=True)
 class ComposedReply:
     """What the composing stage produced for one turn (ADR-0170 §3, §8).
@@ -539,6 +619,7 @@ class ComposingStage:
         deliveries: Mapping[str, SpokenDelivery] = MappingProxyType({}),
         hop_reached: Sequence[str] = (),
         stopped_while_asking: bool = False,
+        structured: StructuredFacts | None = None,
     ) -> ComposedReply:
         """Compose the answer for one turn, or say that composing it failed.
 
@@ -606,6 +687,17 @@ class ComposingStage:
                 fact** and carries no count, no duration, no guard name, no query and
                 no label. ``False`` on every other turn, where it renders nothing and
                 the assembled prompt is byte-identical to what it was before ADR-0228.
+            structured: ADR-0240 §8's three facts about what this turn's structured
+                reads filtered on and what the last of them returned — the reach fact,
+                the temporal fact and the emptiness fact. **Supplied, not inferred**,
+                on ``hop_reached``'s reasoning: they are computed at the servicer,
+                which is the one component that can tell which axes an ask applied and
+                what its store call returned, and this stage derives none of them from
+                the plan, from the supply or from the audit. Each carries **no window,
+                no instant, no label, no query, no count and no kind name**. ``None``
+                — or three ``False`` values — on every turn that ran no structured
+                read, where the assembled prompt is byte-identical to what it was
+                before ADR-0240.
 
         Returns:
             The answer, or a degraded report where the call raised a ``ModelError``
@@ -625,6 +717,7 @@ class ComposingStage:
                     unbounded_audience=unbounded_audience,
                     withheld=withheld,
                     stopped_while_asking=stopped_while_asking,
+                    structured=structured,
                 ),
             ),
             Message(
@@ -797,6 +890,7 @@ class ComposingStage:
         deliveries: Mapping[str, SpokenDelivery] = MappingProxyType({}),
         hop_reached: Sequence[str] = (),
         stopped_while_asking: bool = False,
+        structured: StructuredFacts | None = None,
     ) -> AsyncIterator[ReplyChunk | ComposedReply]:
         """Compose the answer as it arrives, yielding chunks then one report.
 
@@ -858,6 +952,10 @@ class ComposingStage:
                 declares the same PT20S budget ``converse`` does, so a streamed turn
                 reaches the guards exactly as a whole one does and the fact is not
                 decorative here.
+            structured: ADR-0240 §8's three facts, as :meth:`compose` takes them. A
+                streamed turn's channel audience is bounded, so a structured read is
+                serviced on it exactly as on a whole turn and these are not decorative
+                here either.
 
         Yields:
             Each :class:`~ai_assistant.core.types.ReplyChunk` as it is composed, and
@@ -884,6 +982,7 @@ class ComposingStage:
                     unbounded_audience=False,
                     withheld=False,
                     stopped_while_asking=stopped_while_asking,
+                    structured=structured,
                 ),
             ),
             Message(
@@ -1036,7 +1135,12 @@ def _routed_prompt(
 
 
 def _system_prompt(
-    base: str, *, unbounded_audience: bool, withheld: bool, stopped_while_asking: bool = False
+    base: str,
+    *,
+    unbounded_audience: bool,
+    withheld: bool,
+    stopped_while_asking: bool = False,
+    structured: StructuredFacts | None = None,
 ) -> str:
     """The instruction for this pass, given the channel it is for and what it lost.
 
@@ -1061,6 +1165,14 @@ def _system_prompt(
             such a channel and ADR-0228 §2(c) admits a revision only where one was
             serviced, so no turn of an unbounded-audience operation reaches either
             guard.
+        structured: ADR-0240 §8's three facts about this turn's structured reads, or
+            ``None`` where the caller has none to give. Each is appended on its own
+            condition and **none is inferred from another**: any two or three are
+            appended together where their conditions hold together, and on a turn given
+            none of them the assembled prompt is byte-identical to what it is without
+            ADR-0240. Never ``True`` on any axis beside ``unbounded_audience``, for
+            ``stopped_while_asking``'s reason one clause over: ADR-0226 §5 declines to
+            service a read request on such a channel, so no structured read runs there.
 
     Returns:
         The system message's content.
@@ -1072,6 +1184,16 @@ def _system_prompt(
         clauses.append(_WITHHOLDING_PROMPT)
     if stopped_while_asking:
         clauses.append(_STOPPED_ASKING_PROMPT)
+    # ADR-0240 §8's three, in the order §8 states them — reach, then temporal, then
+    # emptiness — appended after ADR-0228 §10's stop clause because each is a fact
+    # about *what was looked up*, which a reader has to have met the looking to place.
+    facts = structured or StructuredFacts()
+    if facts.reach:
+        clauses.append(_STRUCTURED_REACH_PROMPT)
+    if facts.temporal:
+        clauses.append(_STRUCTURED_TEMPORAL_PROMPT)
+    if facts.empty:
+        clauses.append(_STRUCTURED_EMPTY_PROMPT)
     return "\n\n".join(clauses)
 
 

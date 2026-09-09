@@ -187,6 +187,7 @@ from ai_assistant.orchestration.payloads import (
     utc_instant,
 )
 from ai_assistant.orchestration.questions import question_state
+from ai_assistant.orchestration.reads import StructuredFacts
 from ai_assistant.orchestration.routing import (
     FORGET_LOOKUP_KINDS,
     Resolved,
@@ -1498,6 +1499,17 @@ type _RoutedComposer = Callable[[RoutedOperation, str], Awaitable[ComposedReply 
 #: looking while it was still asking: no count, no duration, no guard name, no query
 #: and no label. ``False`` on every other pass, where the assembled prompt is
 #: byte-identical to what it is today.
+#:
+#: **The seventh is ADR-0240 §8's three facts**, carried as one value for the reason
+#: the sixth is carried at all: they are computed at the servicer — the one place that
+#: can say which axes an ask applied and what its store call returned — and §8 rules
+#: that none of them is inferred at the render site, "not from the plan, not from the
+#: supply's length, not from the audit". They carry **no window, no instant, no label,
+#: no query, no count and no kind name**, and the default value is a pass with no
+#: structured read, on which the assembled prompt is byte-identical to what it is
+#: without ADR-0240. Three facts in one value rather than three members here, because
+#: they are computed together and read together and a triple that could come apart
+#: between the two is a triple one edit can put out of step.
 type _Composer = Callable[
     [
         TurnResult | None,
@@ -1506,6 +1518,7 @@ type _Composer = Callable[
         Mapping[str, SpokenDelivery],
         Sequence[str],
         bool,
+        StructuredFacts,
     ],
     Awaitable[ComposedReply | None],
 ]
@@ -4006,6 +4019,7 @@ class Engine:
         deliveries: Mapping[str, SpokenDelivery],
         hop_reached: Sequence[str],
         stopped_while_asking: bool,
+        structured: StructuredFacts,
         *,
         supply: UnboundedAudienceSupply,
     ) -> ComposedReply | None:
@@ -4080,6 +4094,13 @@ class Engine:
                 ADR-0228 §4 makes that doubly true by declaring **no** planning budget
                 for ``converse_spoken`` (§2(a)). Accepted and passed on rather than
                 replaced with ``False``, for the same reason.
+            structured: ADR-0240 §8's three facts about this turn's structured reads.
+                **Always none of them given here**, on the two carriers above's
+                reason: ADR-0226 §5 declines to service a read request on this
+                operation, so no structured read runs, nothing is filtered on any axis
+                and no read comes back empty. Accepted and passed on rather than
+                replaced with a default, for the same reason — one composer shape, and
+                no second statement of §5's scoping at this site.
             supply: The applier this call minted, read for the bare fact of whether
                 anything was held back. Bound by :meth:`converse_spoken` rather than
                 passed by :meth:`_run_turn`, which knows nothing of disclosure.
@@ -4102,6 +4123,12 @@ class Engine:
             deliveries=deliveries,
             hop_reached=hop_reached,
             stopped_while_asking=stopped_while_asking,
+            # ADR-0226 §5 declines to service a read request on a channel of unbounded
+            # audience, so no structured read runs on this pass and this value is
+            # ADR-0240 §8's default. Passed rather than omitted so that the two
+            # composers have one shape and a later lane cannot make them differ by
+            # forgetting one (ADR-0240 §13 item 16).
+            structured=structured,
         )
 
     async def resume(
@@ -7578,9 +7605,17 @@ class Engine:
             deliveries: Mapping[str, SpokenDelivery],
             hop_reached: Sequence[str],
             stopped_while_asking: bool,
+            structured: StructuredFacts,
         ) -> ComposedReply | None:
             return await self._compose_streaming(
-                turn, step, conversation, chunks, deliveries, hop_reached, stopped_while_asking
+                turn,
+                step,
+                conversation,
+                chunks,
+                deliveries,
+                hop_reached,
+                stopped_while_asking,
+                structured,
             )
 
         async def compose_routed(
@@ -7614,6 +7649,7 @@ class Engine:
         deliveries: Mapping[str, SpokenDelivery],
         hop_reached: Sequence[str],
         stopped_while_asking: bool,
+        structured: StructuredFacts,
     ) -> ComposedReply | None:
         """Compose atomically, ignoring the conversation the streaming twin needs.
 
@@ -7642,6 +7678,7 @@ class Engine:
             deliveries=deliveries,
             hop_reached=hop_reached,
             stopped_while_asking=stopped_while_asking,
+            structured=structured,
         )
 
     async def _persist_plans(self, plans: Sequence[ActionPlan]) -> None:
@@ -7810,6 +7847,10 @@ class Engine:
         # set above is and never inferred here — not from the plan, not from the
         # supply's length, and not from the audit.
         stopped_while_asking = responded.stopped_while_asking
+        # ADR-0240 §8's three facts, threaded exactly as ADR-0228 §10's is above and
+        # never inferred here — not from the plan, not from the supply, and not from
+        # the audit.
+        structured = responded.structured
         # ADR-0205 §5: the fact travels with the episode it qualifies and never
         # without it. `turn.memories` is the supply as `narrow` returned it, so
         # intersecting here is what makes a withheld record's delivery unreachable by
@@ -7848,7 +7889,13 @@ class Engine:
             await self._plans.save_goal(turn.goal)
             await self._persist_plans(plans)
             composed = await compose(
-                turn, None, conversation.id, deliveries, hop_reached, stopped_while_asking
+                turn,
+                None,
+                conversation.id,
+                deliveries,
+                hop_reached,
+                stopped_while_asking,
+                structured,
             )
             return await self._capture(
                 conversation.id,
@@ -7926,7 +7973,13 @@ class Engine:
         # point is the single place a ``TurnOutcome`` is built, and folding one more
         # already-computed value into it beats threading a second construction site.
         composed = await compose(
-            turn, step, conversation.id, deliveries, hop_reached, stopped_while_asking
+            turn,
+            step,
+            conversation.id,
+            deliveries,
+            hop_reached,
+            stopped_while_asking,
+            structured,
         )
         return await self._capture(
             conversation.id,
@@ -8671,7 +8724,7 @@ class Engine:
         )
         return tuple([await self._project(record) for record in records])
 
-    async def _compose(
+    async def _compose(  # noqa: PLR0913 — the turn, the step, and one keyword per fact the composing stage is supplied rather than allowed to infer; each is a distinct input, as on the stage's own signature
         self,
         turn: TurnResult | None,
         step: StepOutcome | None,
@@ -8679,6 +8732,7 @@ class Engine:
         deliveries: Mapping[str, SpokenDelivery],
         hop_reached: Sequence[str] = (),
         stopped_while_asking: bool = False,
+        structured: StructuredFacts | None = None,
     ) -> ComposedReply | None:
         """Compose this pass's answer, or decline to on the shapes that owe none.
 
@@ -8713,6 +8767,11 @@ class Engine:
         from a recovered park carries: nothing about that pass planned at all, so it
         stopped at no guard. Every ordinary pass is told the turn's own value.
 
+        **And ADR-0240 §8's three facts default to none of them given**, for the same
+        reason one clause over: a pass that planned nothing performed no structured
+        read, so it filtered on no axis and its last read was not empty. On such a pass
+        the assembled prompt is byte-identical to what it is without ADR-0240.
+
         Returns:
             What the stage composed, or ``None`` where no answer was owed.
         """
@@ -8728,9 +8787,10 @@ class Engine:
             deliveries=deliveries,
             hop_reached=hop_reached,
             stopped_while_asking=stopped_while_asking,
+            structured=structured,
         )
 
-    async def _compose_streaming(  # noqa: PLR0913 — the turn, the step, the conversation, the chunk queue, the delivery facts, the hop's reach and ADR-0228 §10's stop fact; each is a distinct input, as on :meth:`_compose`
+    async def _compose_streaming(  # noqa: PLR0913 — the turn, the step, the conversation, the chunk queue, the delivery facts, the hop's reach, ADR-0228 §10's stop fact and ADR-0240 §8's three; each is a distinct input, as on :meth:`_compose`
         self,
         turn: TurnResult | None,
         step: StepOutcome | None,
@@ -8739,6 +8799,7 @@ class Engine:
         deliveries: Mapping[str, SpokenDelivery],
         hop_reached: Sequence[str] = (),
         stopped_while_asking: bool = False,
+        structured: StructuredFacts | None = None,
     ) -> ComposedReply | None:
         """Stream this pass's answer onto ``chunks``, and report what it composed.
 
@@ -8781,6 +8842,7 @@ class Engine:
             deliveries=deliveries,
             hop_reached=hop_reached,
             stopped_while_asking=stopped_while_asking,
+            structured=structured,
         )
         async with closing_stream(stream) as composing:
             async for produced in composing:

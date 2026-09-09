@@ -281,7 +281,7 @@ class _DeletingPlanner:
         self._request = request
         self.calls: list[tuple[MemoryRecord, ...]] = []
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -289,6 +289,7 @@ class _DeletingPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         del context, capabilities
         self.calls.append(tuple(memories))
@@ -317,7 +318,7 @@ class _SuspendingPlanner:
         self._armed = asyncio.Event()
         self.held: LoopSuspension | None = None
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -325,6 +326,7 @@ class _SuspendingPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         del context, memories, capabilities
         self.held = self._store.suspend_next_operation()
@@ -413,7 +415,7 @@ class _SuspendAfterNthSearch(FakeMemoryStore):
 class _RaisingPlanner:
     """A planner that cannot plan — §10's third arm."""
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -421,6 +423,7 @@ class _RaisingPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         del goal, context, memories, capabilities
         msg = "no plan for that"
@@ -1248,6 +1251,16 @@ async def test_the_audit_copies_no_text_and_carries_only_the_correlation_id() ->
         # class: no query, no fragment, no length, no origin, no host, no address, no
         # title, no snippet and no provider message can reach this record.
         "disposition",
+        # ADR-0240 §10's **two** added fields, on the same terms as the two above.
+        # `structured_axes` is a tuple of closed-enumeration members — the classes of
+        # the axes an ask applied, and never an instant, a person label, a topic label
+        # or a query — and `structured` is one member of a second closed enumeration or
+        # absent. Both are recorded on this servicing: the axes tuple is **empty**
+        # because no `STRUCTURED_READ` ask was emitted, and the outcome is the
+        # `not_asked` member, which is what a completed servicing carrying no such ask
+        # reports. The pin stays closed over both because neither can carry a value.
+        "structured_axes",
+        "structured",
         "truncated_kinds",
         "failed",
         "failed_after_read_returned",

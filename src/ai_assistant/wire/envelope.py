@@ -1128,7 +1128,67 @@ from ai_assistant.wire.errors import (
 #: **This move covers the shape going forward and repairs nothing already
 #: released**, on the chain every entry above it is on: #1956's window stays open,
 #: and this entry neither repairs it nor inherits it.
-PROTOCOL_VERSION: Final[int] = 31
+#:
+#: **32 since ADR-0240 §11**, which admits ``STRUCTURED_READ`` to
+#: :class:`~ai_assistant.core.types.ReadKind` (§1) and gives
+#: :class:`~ai_assistant.core.types.ReadAsk` a fifth field, ``structure``, carrying a
+#: :class:`~ai_assistant.core.types.StructuredAsk` (§2). It is obliged by **both**
+#: halves of ADR-0124 §9's second limb, where the entry at 30 was obliged by one and
+#: the entry at 27 by the other — each limb checked against the tree rather than
+#: inherited:
+#:
+#: * ``ActionPlan`` is carried to a client and a ``ReadAsk`` rides inside it, by the
+#:   route the entries at 27 and 30 trace: ``wire/client.py``'s ``converse`` and
+#:   ``resume`` return :class:`~ai_assistant.core.types.TurnOutcome`, whose ``turn``
+#:   is a :class:`~ai_assistant.core.types.TurnResult`, whose ``plan`` is an
+#:   ``ActionPlan``, whose ``read_request`` carries the asks.
+#: * ``wire/codec.py``'s ``project`` renders a model with a bare ``model_dump()``,
+#:   which **includes** a defaulted ``None`` rather than omitting it — so a version 32
+#:   hub emits ``structure`` on **every** ask of every request-carrying turn, and
+#:   ``ReadAsk`` sets ``ConfigDict(extra="forbid", frozen=True)``, so a version 31
+#:   client fails ``extra_forbidden`` on the first one. That is the wider half, and it
+#:   is the half ADR-0231 §1's no-field decision kept out of the entry at 30.
+#: * ``ReadAsk.kind`` is a **closed** enumeration, so a version 31 peer handed
+#:   ``"structured_read"`` refuses the value outright — the narrower half, over the
+#:   population of turns on which a planner asks by structure.
+#:
+#: **It bites in both directions, and each is stated rather than assumed.** A version
+#: 32 hub sends a plan whose every ask carries ``structure`` and a version 31 client
+#: refuses it on the field; a version 31 hub emits no such field, so a version 32
+#: client decoding one takes the ``None`` default rather than ``missing`` — quiet in
+#: that direction on the field, and total in it on the *kind*, which a version 31 hub
+#: never emits at all. A peer at 31 and a peer at 32 do not agree about the surface on
+#: either ground.
+#:
+#: **The number was read rather than assumed.** ADR-0240 §11 fixes no figure and says
+#: why — "ADR-0238 has already scheduled ``PROTOCOL_VERSION`` 31 → 32 for a lane that
+#: may land before or after this one, and a numeral in a ratified ADR that the tree has
+#: moved past is the failure ADR-0226 §4's own successors had to correct" — so this
+#: lane read the constant as ADR-0235's lane left it and moved it by one.
+#: ``tests/core/test_engine_surface_closure.py`` pins the pair beside this constant.
+#:
+#: **The method set does not move and stands at fifty-four**, and ADR-0177 §1's
+#: browser enumeration does not move either and stands at thirty-one: ADR-0240 adds no
+#: Protocol, no method to the promoted ``AssistantEngine`` surface and no gateway
+#: route. The one Protocol it touches is ``Planner``, which is on neither surface —
+#: ``Planner.plan``'s new ``empty_reads`` keyword (§7) is an in-process argument the
+#: loop passes and no peer emits, so it is not a second ground for this bump.
+#:
+#: **No row is minted in ADR-0087 §2c's scalar table**: ``project`` already renders
+#: every ``Enum`` as its ``value``, exactly as it renders the four ``ReadKind``
+#: members that crossed before this one, and ``StructuredAsk`` is a ``BaseModel``
+#: rendered by ``model_dump()`` like every other nested model — its
+#: :class:`~ai_assistant.core.types.TimeWindow` carries two ``datetime`` values, which
+#: is the type ``ShownFile.modified_at`` already puts on this wire. Nothing else under
+#: ``wire/`` changes — not the framing, the connect exchange, the frame kinds, the
+#: codec's dispatch, ``surface.METHODS`` or either adapter — and the error registry is
+#: untouched, because ADR-0240 adds no error class: a malformed ask costs the request
+#: and never the plan (§3), and a failed servicing degrades the turn (ADR-0226 §5).
+#:
+#: **This move covers the shape going forward and repairs nothing already
+#: released**, on the chain every entry above it is on: #1956's window stays open, and
+#: ADR-0240 §11 states in terms that this decision "neither repairs nor inherits" it.
+PROTOCOL_VERSION: Final[int] = 32
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a
