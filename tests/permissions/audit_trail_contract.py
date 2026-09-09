@@ -673,6 +673,38 @@ class AuditTrailContract:
             InvalidAuthorisationError,
         )
 
+    async def test_a_closed_loop_decision_over_external_content_is_recorded(self) -> None:
+        """ADR-0238 §6's supersession of that floor, in its one limb and one scope.
+
+        §6 rules that ADR-0193 §6's eighth-check clause is superseded "in one limb, for a
+        closed-loop request alone": its seventh limb becomes "whose
+        ``planned_with_external_content`` is ``False``, **or** whose ``closed_loop`` is
+        ``True``". **The other seven are untouched** — this row still names an
+        outstanding grant, still passes both ends of liveness, still matches on tool,
+        account and destination set, and still carries the recomputed
+        ``subject_digest``.
+
+        §6 requires this arm and its twin above "in the same change as the field" and
+        defers neither to a later lane, because a field carried to a check that never
+        reads it is a field with no meaning. What the trail validates is **the fact on
+        the binding and not the conditions behind it**: it holds no conversation store,
+        no trust store and no supply, and the four conditions are ``orchestration``'s to
+        compute at the one site ADR-0238 §5 names — exactly as
+        ``planned_with_external_content`` is, which the trail has never revalidated
+        either.
+        """
+        granted = recipient_grant(member(ALICE), grant_id="g-1")
+        trail = self.trail_over(self._held(granted))
+
+        recorded = route_b_decision(
+            grant_id="g-1",
+            subject=granted.subject_digest,
+            bound=binding(ALICE, external=True, closed_loop=True),
+        )
+        await trail.record(recorded)
+
+        assert await trail.get(recorded.id) == recorded, "the row is written and read back"
+
     async def test_a_decision_whose_origin_was_never_recorded_is_refused_by_name(self) -> None:
         """The check is over the binding's **arm**, not over a field's value (§6).
 

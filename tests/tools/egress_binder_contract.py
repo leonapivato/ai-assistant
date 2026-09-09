@@ -2081,6 +2081,84 @@ class EgressBinderContract(ABC):
             "equality refusal does not fire on the field ADR-0181 §3 adds"
         )
 
+    async def test_bind_writes_the_closed_loop_fact_from_the_carrier_unchanged(
+        self, binder: EgressBinder
+    ) -> None:
+        """ADR-0238 §5: "the seam writes the binding's value from the carrier's unchanged".
+
+        The seam holds none of the four conditions behind the fact — a conversation's
+        recorded turns, the current turn's supply, a trust store and a budget fold are
+        every one of them ``orchestration``'s — so it can neither derive it nor check it,
+        and §5's last clause says a lane that finds itself computing it here has breached
+        the section. Both states are driven, so a seam that hard-coded either passes
+        neither.
+        """
+        self.register_egress(binder, SEND_EMAIL)
+        parameters: dict[str, FrozenJson] = {
+            "to": ["a@example.com"],
+            "subject": "s",
+            "body": "b",
+        }
+        for carried in (True, False):
+            bound = await binder.bind(
+                SEND_EMAIL,
+                parameters=parameters,
+                provenance=CarriedProvenance(
+                    spans={},
+                    planned_with_external_content=False,
+                    coverage=SpanCoverage.NOT_COVERED,
+                    closed_loop=carried,
+                ),
+            )
+            assert bound is not None
+            assert bound.binding.closed_loop is carried
+
+    async def test_rebind_answers_false_for_closed_loop_and_transcribes_nothing(
+        self, binder: EgressBinder
+    ) -> None:
+        """ADR-0238 §15's Arm 8b, and the reason §5 gave the field a default at all.
+
+        "A parked ``send_email`` confirmation resumes through ``rebind`` unchanged: the
+        re-derived binding carries ``closed_loop`` false by default, transcribes nothing
+        new from ``approved``, and equals the parked binding — so ADR-0152 §7's
+        comparison passes exactly as it does today."
+
+        That is what keeps ADR-0152 §7's transcription count at the three it already
+        admits rather than a fourth: ``False`` is the **correct** value for every request
+        that can resume, because a ``CONFIRM`` on a ``WEB_SEARCH`` decision "resolves in
+        no turn" (ADR-0231 §9) and no closed-loop request is ever resumed. The arm is
+        driven from an approved binding carrying ``True`` — a state no production path
+        parks, and exactly the one that tells a transcribing seam from a defaulting one.
+        """
+        self.register_egress(binder, SEND_EMAIL)
+        parameters: dict[str, FrozenJson] = {
+            "to": ["a@example.com"],
+            "subject": "s",
+            "body": "b",
+        }
+        ordinary = await binder.bind(
+            SEND_EMAIL,
+            parameters=parameters,
+            provenance=CarriedProvenance(
+                spans={}, planned_with_external_content=False, coverage=SpanCoverage.NOT_COVERED
+            ),
+        )
+        assert ordinary is not None
+        assert ordinary.binding.closed_loop is False
+
+        again = await binder.rebind(SEND_EMAIL, parameters=parameters, approved=ordinary.binding)
+
+        assert again is not None
+        assert again.binding == ordinary.binding, "ADR-0152 §7's comparison passes as today"
+
+        # An approval carrying ``True`` is the state that tells a defaulting seam from a
+        # transcribing one: a seam that transcribed would re-derive ``True``, compare
+        # equal and resume; this one derives ``False``, compares unequal, and refuses —
+        # which is ADR-0152 §7's equality refusal doing exactly what §5 relies on it for.
+        forged = ordinary.binding.model_copy(update={"closed_loop": True})
+        with pytest.raises(EgressBindingError):
+            await binder.rebind(SEND_EMAIL, parameters=parameters, approved=forged)
+
     async def test_rebind_answers_false_where_the_approved_binding_said_false(
         self, binder: EgressBinder
     ) -> None:

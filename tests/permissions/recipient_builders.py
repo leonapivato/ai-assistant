@@ -99,6 +99,7 @@ def binding(
     *supplied: str,
     account: BoundAccount = ACCOUNT,
     external: bool = False,
+    closed_loop: bool = False,
 ) -> EgressBinding:
     """A whole binding selecting ``supplied``.
 
@@ -106,6 +107,10 @@ def binding(
     connected account alone (ADR-0148 §2's third clause), which is the shape the
     account-member cases are about — never an empty set, because the derived set
     is never empty.
+
+    ``closed_loop`` defaults ``False``, which is ADR-0238 §5's own default and the value
+    every binding in this corpus carried before that decision; a case setting it is
+    asking about §6's one-limb supersession of ADR-0193 §6's eighth check.
     """
     return EgressBinding(
         spans=tuple(span(value, index) for index, value in enumerate(supplied)),
@@ -113,6 +118,7 @@ def binding(
         transport_endpoint=ENDPOINT,
         planned_with_external_content=external,
         coverage=SpanCoverage.NOT_COVERED,
+        closed_loop=closed_loop,
     )
 
 
