@@ -1,6 +1,6 @@
 # 241. The search seam is handed the deadline it runs under, and an expiry is an outcome of its own
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-09
 - **Partially supersedes**
   [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
