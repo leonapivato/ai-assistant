@@ -155,6 +155,10 @@ async def bound() -> AsyncIterator[Harness]:
         legacy = _stored(trail, "d-legacy")
         del legacy["egress_binding"]["planned_with_external_content"]
         del legacy["egress_binding"]["coverage"]
+        # And no ``closed_loop``: ADR-0238 §13 added that member after both, and
+        # every older shape forbids an extra key (ADR-0184 §2's ladder, in time
+        # order).
+        del legacy["egress_binding"]["closed_loop"]
         _rewrite(trail, "d-legacy", legacy)
         yield harness
     finally:

@@ -38,6 +38,7 @@ from pydantic import ValidationError
 from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
 from ai_assistant.core.types import (
     FIRST_TURN_ORDINAL,
+    ConversationSearchDraw,
     ParkedBinding,
     SpokenDelivery,
     SpokenDeliveryState,
@@ -703,6 +704,19 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _TurnOfBindingOp,
     _ExportOp,
 )
+
+
+async def _draw_of(store: ConversationStore, conversation_id: str) -> ConversationSearchDraw:
+    """The conversation's draw, asserted present.
+
+    A one-line guard rather than an ``assert … is not None`` at each call site: the
+    cases below that read a field of the draw are cases in which its absence is a
+    *different* failure — one the lifecycle arms assert directly — so narrowing the
+    type here keeps each of them about the field it names.
+    """
+    draw = await store.search_draw(conversation_id)
+    assert draw is not None, f"conversation {conversation_id!r} has no draw"
+    return draw
 
 
 class ConversationStoreContract:
@@ -2349,6 +2363,365 @@ class ConversationStoreContract:
         """§7: ``None`` disables reclaim; zero is not a spelling for it."""
         with pytest.raises(ValueError, match="retention"):
             _build(factory, retention=timedelta(0))
+
+    # --- the per-conversation search budget (ADR-0238 §8, §14) ---------------
+
+    def shared_history(self) -> tuple[ConversationStore, ConversationStore] | None:
+        """Override with **two handles over one history**, or ``None`` where impossible.
+
+        Two things need it, and neither is reachable through the ``store`` fixture
+        alone. ADR-0238 §15's Arm 6b's fourth shape — "a store reopened after a process
+        exit reads that same one, the increment having been taken before the call
+        rather than at capture" — and §8's clause that "two engines over one data
+        directory can none of them be admitted against the same draw", which ADR-0074
+        §9 gives the reason for: "two engines — in one process or two — hold two locks
+        and serialise nothing", which is why the obligation sits on the store.
+
+        ``None`` where the implementation does not outlive its object, and the two arms
+        below skip — the posture the ledger contracts already take, and the one
+        ADR-0238 §14 names in terms ("an implementation that cannot be opened twice
+        states so and skips").
+        """
+        return None
+
+    async def test_a_fresh_conversation_starts_clean_with_nothing_spent(
+        self, store: ConversationStore
+    ) -> None:
+        """§8: ``start`` creates the draw, and the flag's value at creation is ``True``.
+
+        Safe because a conversation ``start`` mints has **no turns at all** — §2's
+        ``last_turn_at`` is "unset until a turn lands" — so "every recorded external
+        span this conversation has carried was minted by a ``WEB_SEARCH`` servicing at
+        a destination of recorded trust ``USER_CHOSEN``" is *vacuously true* of it.
+        That is the one instant at which ``True`` cannot be wrong, which is why §8 puts
+        creation here and nowhere else.
+        """
+        conversation = await store.start()
+
+        assert await store.search_draw(conversation.id) == ConversationSearchDraw(
+            calls=0, all_external_user_chosen=True
+        )
+
+    async def test_admit_search_increments_and_answers_the_draw_after_the_increment(
+        self, store: ConversationStore
+    ) -> None:
+        """§8: compare, increment, and answer **as it stands after the increment**.
+
+        The draw it returns is the value at the moment of admission — §5 forbids
+        carrying it forward and requires the footing to be read by ``search_draw`` at
+        the moment the request is built, so what this answers is a receipt and not a
+        snapshot anyone may reuse.
+        """
+        conversation = await store.start()
+
+        admitted = await store.admit_search(conversation.id, max_calls=3)
+
+        assert admitted == ConversationSearchDraw(calls=1, all_external_user_chosen=True)
+        assert await store.search_draw(conversation.id) == admitted
+
+    async def test_admission_stops_at_the_bound_and_the_last_permitted_call_is_usable(
+        self, store: ConversationStore
+    ) -> None:
+        """§8: refused where the stored ``calls`` have **reached** the bound.
+
+        Both halves, because §15's Arm 6g is about the second: the last permitted call
+        is *usable*, so a store refusing at ``calls + 1 > max_calls`` would be right and
+        one refusing at ``calls + 1 >= max_calls`` would silently cost every deployment
+        its final search.
+        """
+        conversation = await store.start()
+
+        assert await store.admit_search(conversation.id, max_calls=2) is not None
+        assert await store.admit_search(conversation.id, max_calls=2) is not None
+        assert await store.admit_search(conversation.id, max_calls=2) is None
+        assert (await _draw_of(store, conversation.id)).calls == 2
+
+    async def test_a_zero_bound_refuses_every_search(self, store: ConversationStore) -> None:
+        """§15's Arm 6g2, and it exists because the idiomatic guard gets it wrong.
+
+        Zero is a **legal setting whose stated meaning is that no search is serviced in
+        any conversation** (§8). The idiomatic spelling of a reached-the-bound
+        comparison is a truthiness guard on the bound — ``if max_calls and …`` — which
+        admits at zero, ``0`` being falsy. An arm at one call cannot catch it.
+        """
+        conversation = await store.start()
+
+        assert await store.admit_search(conversation.id, max_calls=0) is None
+        assert (await _draw_of(store, conversation.id)).calls == 0
+
+    @pytest.mark.parametrize("ceiling", [-1, 1.5, True, "2", None])
+    async def test_a_ceiling_that_is_not_a_non_negative_int_is_refused(
+        self, store: ConversationStore, ceiling: object
+    ) -> None:
+        """The type is part of the domain, not merely the value.
+
+        ``calls >= float("nan")`` is false for every count, so a store handed one
+        admits **without limit** while every message still names a ceiling — a cap
+        disabled by a number rather than by an operator. ``True`` is an ``int`` and is
+        nobody's ceiling, and a negative names no bound at all.
+        """
+        conversation = await store.start()
+
+        with pytest.raises(ValueError, match="max_calls"):
+            await store.admit_search(conversation.id, max_calls=cast("int", ceiling))
+
+    async def test_an_admitted_call_is_never_refunded(self, store: ConversationStore) -> None:
+        """§15's Arm 6d: no path lowers ``calls``.
+
+        A servicing that is admitted and then does not transmit — a binding that
+        refused, a ruling that was not ``ALLOW``, a provider that rejected — still
+        spends its increment, and the store offers **no member through which a caller
+        could give one back**. That is the whole of what the arm can assert at this
+        seam, and it is the half that matters: a refund rule would oblige the servicer
+        to tell two ``PROVIDER_REFUSED`` outcomes apart when nothing in the contract
+        distinguishes them (§8).
+        """
+        conversation = await store.start()
+        await store.admit_search(conversation.id, max_calls=4)
+
+        await store.observe_search(conversation.id, all_external_user_chosen=False)
+        await store.observe_search(conversation.id, all_external_user_chosen=True)
+
+        assert (await _draw_of(store, conversation.id)).calls == 1
+        assert not hasattr(store, "refund_search")
+
+    async def test_observe_search_folds_by_and_and_never_raises_the_flag(
+        self, store: ConversationStore
+    ) -> None:
+        """§8: folded by logical **and**, and **once false it never returns to true**.
+
+        ADR-0106 §4's monotonicity read on this axis, and §15's Arm 6e: it is what
+        keeps a conversation closed after the tainting episode has fallen out of the
+        tail (ADR-0223 §6's un-tainting, which ADR-0238 does not disturb).
+        """
+        conversation = await store.start()
+
+        await store.observe_search(conversation.id, all_external_user_chosen=True)
+        assert (await _draw_of(store, conversation.id)).all_external_user_chosen
+
+        await store.observe_search(conversation.id, all_external_user_chosen=False)
+        assert not (await _draw_of(store, conversation.id)).all_external_user_chosen
+
+        await store.observe_search(conversation.id, all_external_user_chosen=True)
+        assert not (await _draw_of(store, conversation.id)).all_external_user_chosen
+
+    async def test_the_three_members_create_nothing_for_an_unknown_id(
+        self, store: ConversationStore
+    ) -> None:
+        """§14's first lifecycle edge, and it is the arm that catches a second store.
+
+        "An implementation that stored the counter anywhere but on the record would
+        pass every other assertion in it." On an id that **names nothing**:
+        ``search_draw`` answers ``None``, ``admit_search`` answers ``None``,
+        ``observe_search`` raises nothing, and afterwards ``search_draw`` **still**
+        answers ``None`` — nothing was created.
+        """
+        assert await store.search_draw("no-such-conversation") is None
+        assert await store.admit_search("no-such-conversation", max_calls=5) is None
+        await store.observe_search("no-such-conversation", all_external_user_chosen=False)
+
+        assert await store.search_draw("no-such-conversation") is None
+
+    async def test_the_three_members_answer_for_a_stamped_conversation(
+        self, store: ConversationStore
+    ) -> None:
+        """§14's second lifecycle edge: the same three answers behind a tombstone.
+
+        They **answer instead of raising** — where :meth:`append` raises
+        ``UnknownConversationError``, which this case asserts alongside — because each
+        is reached by a servicing that may already have been in flight when the
+        deletion landed, and a user deleting a conversation should not turn a running
+        turn into an error (§8).
+        """
+        conversation = await store.start()
+        await store.admit_search(conversation.id, max_calls=5)
+        await store.stamp_deleted(conversation.id)
+
+        assert await store.search_draw(conversation.id) is None
+        assert await store.admit_search(conversation.id, max_calls=5) is None
+        await store.observe_search(conversation.id, all_external_user_chosen=False)
+        with pytest.raises(UnknownConversationError):
+            await store.append(conversation.id, occurred_at=_NOW)
+
+        assert await store.search_draw(conversation.id) is None
+
+    async def test_the_budget_goes_with_the_record_and_no_step_is_added_to_make_it(
+        self, factory: ConversationStoreFactory
+    ) -> None:
+        """§15's Arms 6h and 6h2: after ``drop_if_eligible`` there is nothing left.
+
+        The counter went with the record **in that one call**, so a process that dies
+        immediately afterwards strands nothing and no sweep is owed. ADR-0074 §7's and
+        §8's sequences run exactly as they run on ``origin/main`` — no extra call, no
+        extra ordering — and a conversation whose record is gone reads as an unknown
+        id.
+        """
+        clock = MovableClock()
+        store = _build(factory, now=clock)
+        conversation = await store.start()
+        await store.admit_search(conversation.id, max_calls=5)
+        await store.stamp_deleted(conversation.id)
+        clock.advance(_GRACE * 2)
+
+        assert await store.drop_if_eligible(conversation.id) is True
+
+        assert await store.search_draw(conversation.id) is None
+        assert await store.admit_search(conversation.id, max_calls=5) is None
+        await store.observe_search(conversation.id, all_external_user_chosen=False)
+        assert await store.search_draw(conversation.id) is None
+
+    async def test_a_reclaim_that_declines_leaves_the_draw_exactly_as_it_was(
+        self, factory: ConversationStoreFactory
+    ) -> None:
+        """§15's Arm 6h3, and it is the arm a sweep-based design fails.
+
+        ADR-0074 §7's reclaim of an **ineligible** conversation leaves that
+        conversation's counter and flag exactly as they were, and its next search is
+        admitted against them. Any design in which some sweep decided, from outside the
+        store's exclusion, that a conversation's budget could be cleared would fail
+        here.
+        """
+        store = _build(factory)
+        conversation = await store.start()
+        await store.admit_search(conversation.id, max_calls=5)
+        await store.observe_search(conversation.id, all_external_user_chosen=False)
+
+        assert await store.drop_if_eligible(conversation.id) is False
+
+        assert await store.search_draw(conversation.id) == ConversationSearchDraw(
+            calls=1, all_external_user_chosen=False
+        )
+        assert await store.admit_search(conversation.id, max_calls=5) is not None
+
+    async def test_a_fold_landing_after_the_record_is_dropped_writes_nothing(
+        self, factory: ConversationStoreFactory
+    ) -> None:
+        """§15's Arms 6c4 and 6c4b, driven as the interleaving rather than assumed.
+
+        Arm 6c4b is the order a cross-store check would have got wrong: the fold's
+        caller reads the conversation as **existing**, the deletion then lands, and the
+        fold calls ``observe_search``. Nothing is created, ``search_draw`` answers
+        ``None``, and a subsequent ``admit_search`` answers ``None`` and spends
+        nothing. It is the one interleaving no ordering between two stores could have
+        fenced, and putting the counter on the record makes it unreachable rather than
+        merely unlikely.
+        """
+        clock = MovableClock()
+        store = _build(factory, now=clock)
+        conversation = await store.start()
+        observed = await store.search_draw(conversation.id)
+        assert observed is not None, "the caller reads the conversation as existing"
+
+        await store.stamp_deleted(conversation.id)
+        clock.advance(_GRACE * 2)
+        assert await store.drop_if_eligible(conversation.id) is True
+        await store.observe_search(conversation.id, all_external_user_chosen=False)
+
+        assert await store.search_draw(conversation.id) is None
+        assert await store.admit_search(conversation.id, max_calls=5) is None
+
+    async def test_two_concurrent_admissions_against_a_bound_of_one_yield_one(
+        self, store: ConversationStore
+    ) -> None:
+        """§14: the atomicity ``admit_search`` claims, in ``RecipientGrantStore``'s shape.
+
+        "Concurrent admissions against a bound of one yield exactly one admission, and
+        an implementation that reads, compares and writes as three awaits fails it."
+        ADR-0021 §4's argument: "the system composes on one event loop" is precisely
+        the setting in which an ``await`` between a read and a write is an interleaving
+        point. This is §15's Arm 6b's first two shapes at the store's own seam — two
+        servicings of one turn, and two concurrent turns, are the same interleaving
+        from this contract's side.
+        """
+        conversation = await store.start()
+
+        outcomes = await asyncio.gather(
+            store.admit_search(conversation.id, max_calls=1),
+            store.admit_search(conversation.id, max_calls=1),
+        )
+
+        assert sum(1 for outcome in outcomes if outcome is not None) == 1
+        assert (await _draw_of(store, conversation.id)).calls == 1
+
+    async def test_the_draw_is_durable_and_a_second_handle_reads_the_same_one(self) -> None:
+        """§15's Arm 6b's fourth shape: the increment is taken **before** the call.
+
+        "A store reopened after a process exit reads that same one, the increment
+        having been taken before the call rather than at capture." That is what answers
+        the defect a per-turn budget had — a ``PlanningError`` on a later revision
+        cannot erase a completed search's draw, because the increment is durable and
+        was taken before the channel opened (§8).
+        """
+        pair = self.shared_history()
+        if pair is None:
+            pytest.skip("this implementation cannot be opened twice over one history")
+        first, second = pair
+        conversation = await first.start()
+        await first.admit_search(conversation.id, max_calls=5)
+        await first.observe_search(conversation.id, all_external_user_chosen=False)
+
+        assert await second.search_draw(conversation.id) == ConversationSearchDraw(
+            calls=1, all_external_user_chosen=False
+        )
+
+    async def test_two_handles_over_one_history_cannot_be_admitted_against_one_draw(
+        self,
+    ) -> None:
+        """§8: "two engines over one data directory can none of them be admitted against
+        the same draw".
+
+        The clause ADR-0074 §9 gives the reason for — "the engine's own code already
+        contemplates 'another engine over the same durable stores', so two engines — in
+        one process or two — hold two locks and serialise nothing", which is why the
+        obligation sits on the *store* and no caller-side lock discharges it.
+        """
+        pair = self.shared_history()
+        if pair is None:
+            pytest.skip("this implementation cannot be opened twice over one history")
+        first, second = pair
+        conversation = await first.start()
+
+        first_outcome = await first.admit_search(conversation.id, max_calls=1)
+        second_outcome = await second.admit_search(conversation.id, max_calls=1)
+
+        assert first_outcome is not None
+        assert second_outcome is None
+
+    async def test_the_three_members_read_no_settings_field_and_hold_no_policy(
+        self, store: ConversationStore
+    ) -> None:
+        """§8: "these three members read no ``Settings`` field … and hold no policy".
+
+        The bound is **passed in**, so a store built with no configuration answers
+        whatever bound the caller names — which is what keeps every judgement about
+        what a bound *is* in `orchestration`. A store that read the setting would
+        answer the same for both figures here.
+        """
+        conversation = await store.start()
+
+        assert await store.admit_search(conversation.id, max_calls=1) is not None
+        assert await store.admit_search(conversation.id, max_calls=1) is None
+        assert await store.admit_search(conversation.id, max_calls=99) is not None
+
+    async def test_no_member_creates_a_conversation_as_a_side_effect(
+        self, store: ConversationStore
+    ) -> None:
+        """§8: "no member of this store creates a conversation as a side effect".
+
+        The laundering hole an earlier revision had — a first admission minting a clean
+        row for a conversation that already had turns, permanently closing a legacy
+        conversation into the exception — is unreachable **by construction** rather
+        than forbidden by a rule, because the field is created by the act that creates
+        the conversation. This is that claim over the two members that could have
+        created one.
+        """
+        before = {conversation.id for conversation in await store.recent(limit=50)}
+
+        await store.admit_search("invented-id", max_calls=5)
+        await store.observe_search("invented-id", all_external_user_chosen=True)
+
+        assert {conversation.id for conversation in await store.recent(limit=50)} == before
+        assert await store.get("invented-id") is None
 
     # --- cancellation (ADR-0060) ---------------------------------------------
 

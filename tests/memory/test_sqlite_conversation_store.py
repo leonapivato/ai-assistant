@@ -28,7 +28,12 @@ from conversation_store_contract import (
 )
 
 from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
-from ai_assistant.core.types import ParkedBinding, SpokenDelivery, SpokenDeliveryState
+from ai_assistant.core.types import (
+    ConversationSearchDraw,
+    ParkedBinding,
+    SpokenDelivery,
+    SpokenDeliveryState,
+)
 from ai_assistant.memory.conversation_store import SqliteConversationStore, _run_to_completion
 from ai_assistant.testing.cancellation import (
     ResourceLog,
@@ -214,6 +219,27 @@ class TestSqliteConversationStoreContract(ConversationStoreContract):
         opened = SqliteConversationStore(path=":memory:", now=clock)
         yield opened, clock
         opened.close()
+
+    def shared_history(self) -> tuple[ConversationStore, ConversationStore] | None:
+        """Two connections over one file — what two engines over one data directory get.
+
+        A file rather than ``":memory:"``, because that is the whole question: ADR-0074
+        §9's exclusion is owed **across processes**, and an in-memory database is a
+        private history no second handle can reach. The pair is closed by the
+        ``_shared`` fixture's teardown.
+        """
+        return self._shared_pair
+
+    @pytest.fixture(autouse=True)
+    def _shared(self, tmp_path: Path) -> Iterator[None]:
+        """Open the pair lazily-ish and close both, whatever the case did with them."""
+        path = tmp_path / "conversations.db"
+        first = SqliteConversationStore(path=path, now=_fixed_now)
+        second = SqliteConversationStore(path=path, now=_fixed_now)
+        self._shared_pair: tuple[ConversationStore, ConversationStore] = (first, second)
+        yield
+        first.close()
+        second.close()
 
     @pytest.fixture
     def factory(self) -> Iterator[ConversationStoreFactory]:
@@ -2111,3 +2137,160 @@ async def test_the_watermark_survives_a_reopen(tmp_path: Path) -> None:
         ] == [2]
     finally:
         reopened.close()
+
+
+# --- ADR-0238 §8, §13: what a record written before this decision decodes to ---
+
+
+def _drop_the_search_draw_columns(database: Path) -> None:
+    """Rewrite ``conversations`` back to the shape a pre-ADR-0238 store wrote.
+
+    :func:`_drop_the_watermark_column`'s approach and for its reason: the file is
+    produced by the *current* store and then walked backwards, so everything but the
+    two columns under test is authentic and a legacy database in the wild is exactly
+    this file. ``ALTER TABLE … DROP COLUMN`` rather than a rebuild, because that is the
+    minimal walk back and it leaves ``observed_through`` in place — the point is a row
+    written by the build *immediately* before this decision, not by one before every
+    decision.
+    """
+    raw = sqlite3.connect(database, isolation_level=None)
+    try:
+        raw.execute("ALTER TABLE conversations DROP COLUMN search_calls")
+        raw.execute("ALTER TABLE conversations DROP COLUMN all_external_user_chosen")
+    finally:
+        raw.close()
+
+
+async def test_a_conversation_written_before_this_decision_decodes_with_a_zero_draw(
+    tmp_path: Path,
+) -> None:
+    """ADR-0238 §8 and §13, and the ``False`` is the load-bearing half.
+
+    "A conversation record written before this decision decodes with a **zero draw and
+    the flag ``False``**." That is ADR-0181 §12's own reading of a pre-existing row and
+    the fail-closed direction: this decision never observed such a conversation's
+    turns, so it may not report them clean. ``observe_search`` folds by **and**, so no
+    later clean turn raises it, and §5's recorded half refuses every search of such a
+    conversation for as long as it lives.
+
+    **This is what closes a legacy conversation whose stamped episode is gone** (§8).
+    Such a conversation may, by the time of its next turn, have lost that episode —
+    expired under ADR-0007 §2, deleted, or fallen out of the tail — so its current
+    turn's supply can be perfectly clean. The decoded ``False`` is what refuses it, and
+    no later clean capture rescues it.
+    """
+    path = tmp_path / "conversations.db"
+    first = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        conversation = await first.start()
+        await first.admit_search(conversation.id, max_calls=5)
+        await first.append(conversation.id, occurred_at=_NOW)
+    finally:
+        first.close()
+    _drop_the_search_draw_columns(path)
+
+    reopened = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        assert await reopened.search_draw(conversation.id) == ConversationSearchDraw(
+            calls=0, all_external_user_chosen=False
+        )
+
+        await reopened.observe_search(conversation.id, all_external_user_chosen=True)
+
+        folded = await reopened.search_draw(conversation.id)
+        assert folded is not None
+        assert not folded.all_external_user_chosen
+    finally:
+        reopened.close()
+
+
+async def test_a_conversation_from_before_every_column_decodes_the_same_way(
+    tmp_path: Path,
+) -> None:
+    """The older rung of the same ladder, so the migration is not order-dependent.
+
+    A file written before ADR-0212 lacks the watermark *and* the two columns here, and
+    both migrations run in one open. Asserted because ``CREATE TABLE IF NOT EXISTS`` is
+    a no-op against a file that already holds ``conversations``, so a store opened over
+    such a database would otherwise fail its first read on columns that are not there —
+    a resident process that will not start, found after a downgrade rather than in
+    review.
+    """
+    path = tmp_path / "conversations.db"
+    first = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        conversation = await first.start()
+    finally:
+        first.close()
+    _drop_the_watermark_column(path)
+
+    reopened = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        assert await reopened.search_draw(conversation.id) == ConversationSearchDraw(
+            calls=0, all_external_user_chosen=False
+        )
+    finally:
+        reopened.close()
+
+
+async def test_an_insert_naming_only_the_pre_decision_columns_still_succeeds(
+    tmp_path: Path,
+) -> None:
+    """§13 pinned against the **schema** rather than assumed from the code.
+
+    A build written before this decision names only the columns it knows in its
+    ``INSERT INTO conversations(...)``. ``NOT NULL DEFAULT 0`` is what keeps that
+    build's ``start`` working against an upgraded database — a ``NOT NULL`` column with
+    no default would make it fail, which is a refusal to serve arriving through the
+    schema, the failure ``_OBSERVED_COLUMN`` already states one column over.
+
+    And the row it writes decodes with the flag ``False``, which is the correct answer:
+    this decision did not create that conversation, so it has not observed its turns.
+    """
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        raw = sqlite3.connect(path, isolation_level=None)
+        try:
+            raw.execute(
+                "INSERT INTO conversations(id, started_at, last_active_at, last_turn_at, "
+                "deleted_at) VALUES ('older-build', 0, 0, NULL, NULL)"
+            )
+        finally:
+            raw.close()
+
+        assert await store.search_draw("older-build") == ConversationSearchDraw(
+            calls=0, all_external_user_chosen=False
+        )
+        assert await store.admit_search("older-build", max_calls=2) == ConversationSearchDraw(
+            calls=1, all_external_user_chosen=False
+        )
+    finally:
+        store.close()
+
+
+async def test_a_row_carrying_a_negative_counter_is_a_store_fault(tmp_path: Path) -> None:
+    """A corrupt draw is reported rather than handed on as an ordinary integer.
+
+    ``calls`` is what a ceiling is compared against, so a negative one reaching a
+    caller would admit searches past the bound while every message still named a
+    ceiling — the mechanism turned off by a number rather than by an operator. Decoded
+    through the model for that reason, exactly as ``_decode_conversation`` decodes a
+    row rather than reading it positionally.
+    """
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        conversation = await store.start()
+        raw = sqlite3.connect(path, isolation_level=None)
+        try:
+            raw.execute(
+                "UPDATE conversations SET search_calls = -1 WHERE id = ?", (conversation.id,)
+            )
+        finally:
+            raw.close()
+
+        with pytest.raises(ConversationStoreError, match="corrupt search draw"):
+            await store.search_draw(conversation.id)
+    finally:
+        store.close()

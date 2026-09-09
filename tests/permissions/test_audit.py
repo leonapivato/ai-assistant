@@ -1899,6 +1899,11 @@ async def _record_as_legacy(trail: SqliteAuditTrail, recorded: PermissionDecisio
     legacy = _stored(trail, recorded.id)
     del legacy["egress_binding"]["planned_with_external_content"]
     del legacy["egress_binding"]["coverage"]
+    # A row of either older epoch carries no ``closed_loop`` either: ADR-0238 §13
+    # added that member after both, and every older shape forbids an extra key. The
+    # ladder is in time order, so a rung is the current encoding minus every member
+    # added after it (ADR-0184 §2).
+    del legacy["egress_binding"]["closed_loop"]
     _rewrite(trail, recorded.id, legacy)
 
 
@@ -1912,6 +1917,11 @@ async def _record_as_coverage_legacy(trail: SqliteAuditTrail, recorded: Permissi
     await trail.record(recorded)
     legacy = _stored(trail, recorded.id)
     del legacy["egress_binding"]["coverage"]
+    # A row of either older epoch carries no ``closed_loop`` either: ADR-0238 §13
+    # added that member after both, and every older shape forbids an extra key. The
+    # ladder is in time order, so a rung is the current encoding minus every member
+    # added after it (ADR-0184 §2).
+    del legacy["egress_binding"]["closed_loop"]
     _rewrite(trail, recorded.id, legacy)
 
 
@@ -2217,6 +2227,9 @@ async def test_resolution_of_returns_a_legacy_resolution_by_its_binding(
     legacy = _stored(ephemeral, "d-answer")
     del legacy["egress_binding"]["planned_with_external_content"]
     del legacy["egress_binding"]["coverage"]
+    # And no ``closed_loop``: ADR-0238 §13 added that member after both, so a row of
+    # this epoch carries none and every older shape forbids an extra key.
+    del legacy["egress_binding"]["closed_loop"]
     _rewrite(ephemeral, "d-answer", legacy)
 
     resolution = await ephemeral.resolution_of(execution_id="exec-a", step_id="step-1")
