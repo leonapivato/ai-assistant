@@ -25,11 +25,9 @@ The other half is that the drill is not a *model* of `ship` — it is `ship`,
 stopped before the write. So each case below is run twice where the comparison is
 meaningful, once with `--drill` and once without, and the two must agree.
 
-Helpers come from `test_ship`, `test_ship_base_drift` and — for the ratification
-fixture, which carries a real `scripts/adr_ratify.py` in the checkout —
-`test_adr_ratify`, rather than being re-derived, for the reason those modules
-already give: a second, subtly different fake is how #45 shipped a no-op with
-green tests.
+Helpers come from `test_ship` and `test_ship_base_drift` rather than being
+re-derived, for the reason those modules already give: a second, subtly
+different fake is how #45 shipped a no-op with green tests.
 """
 
 from __future__ import annotations
@@ -40,8 +38,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 sys.path.insert(0, str(Path(__file__).parent))
-from test_adr_ratify import _reviewed_adr_branch
-from test_adr_ratify import _run as _run_adr_ratify
 from test_ship import (
     _VERDICT,
     _fake_gh,
@@ -593,21 +589,6 @@ def _shadow_python(bin_dir: Path, mark: Path) -> None:
         shim.chmod(0o755)
 
 
-def _project_venv(repo: Path) -> None:
-    """Give the fake checkout a project environment, the way `uv sync` does.
-
-    Excluded through `.git/info/exclude` rather than `.gitignore`: the latter is
-    tracked in this fixture, so writing to it would leave the tree dirty and
-    `ship` would refuse before reaching anything this module is about.
-    """
-    (repo / ".git" / "info" / "exclude").write_text(".venv/\n")
-    bin_dir = repo / ".venv" / "bin"
-    bin_dir.mkdir(parents=True)
-    python = bin_dir / "python"
-    python.write_text(f'#!/usr/bin/env bash\nexec "{sys.executable}" "$@"\n')
-    python.chmod(0o755)
-
-
 def test_the_floor_test_does_not_run_under_an_older_path_python(tmp_path: Path) -> None:
     """#2150: the floor verdict must not depend on the machine's `python3`.
 
@@ -632,27 +613,3 @@ def test_the_floor_test_does_not_run_under_an_older_path_python(tmp_path: Path) 
     assert not mark.exists(), f"the floor test ran under the PATH python: {mark.read_text()}"
     assert "clear over the 1 path(s) listed above" in result.stderr
     assert "NOT DECIDED" not in result.stderr
-
-
-def test_the_ratification_check_runs_under_the_checkout_s_interpreter(tmp_path: Path) -> None:
-    """The other half of the same selection, and it resolves differently.
-
-    `ship` reads `scripts/adr_ratify.py` out of the repository it is run in, not
-    from beside itself, so the interpreter that runs it is that repository's —
-    which is only the same directory in a real ship. Under the PATH interpreter
-    `check-shape` fails, the flip is not recognised, and ADR-0165's exemption is
-    lost as silently as the floor verdict was.
-    """
-    repo = tmp_path / "repo"
-    _reviewed_adr_branch(repo, tmp_path)
-    assert _run_adr_ratify(repo, "ratify").returncode == 0
-    ratified = _git(repo, "rev-parse", "HEAD")
-    _project_venv(repo)
-    mark = tmp_path / "path-python-used"
-    _shadow_python(tmp_path / "bin", mark)
-
-    result = _run_ship(repo, tmp_path, pr_sha=ratified)
-
-    assert result.returncode == 0, result.stderr
-    assert not mark.exists(), f"check-shape ran under the PATH python: {mark.read_text()}"
-    assert "ADR ratification" in (tmp_path / "comment.md").read_text()

@@ -130,18 +130,29 @@ command -v gh >/dev/null 2>&1 || die "gh CLI not found on PATH"
 # `requires-python >=3.14`. Where the PATH `python3` is older it cannot parse
 # 3.14 syntax at all, `floor_test.py` reports the endpoint as unparseable, and
 # §6 binds the base move — so every open lane pays a review round for the
-# machine's interpreter rather than for anything the move did (#2150). The same
-# selection decides `scripts/adr_ratify.py check-shape`, where an old
-# interpreter costs the ADR-0165 exemption instead, just as silently.
+# machine's interpreter rather than for anything the move did (#2150).
 #
-# So the project environment comes first and the PATH interpreter is the
+# So the project environment comes first, and the PATH interpreter is the
 # fallback for a checkout that has none.
 #
 # THE ARGUMENT IS THE PROJECT ROOT OF THE SCRIPT ABOUT TO RUN, not "the
-# project". Ship resolves `adr_ratify.py` under the repository it is run in and
-# `floor_test.py` beside itself, and those are the same directory only in a real
-# ship — ship's tests drive it against a checkout that is not its own. An
-# interpreter chosen beside the script it runs is the right one in both.
+# project": ship resolves `floor_test.py` beside itself and `adr_ratify.py`
+# under the repository it is run in, and those are the same directory only in a
+# real ship — ship's tests drive it against a checkout that is not its own.
+#
+# `_ratify_python` BELOW IS DELIBERATELY NOT ROUTED THROUGH THIS, and that is
+# not an oversight. `scripts/codex-review.sh` calls the same
+# `scripts/adr_ratify.py check-shape` on the producing side, so that the round
+# it records covers exactly the content `ship` will then judge — the recogniser
+# and the producer mirror one rule, which is why that block says "one
+# implementation of the shape". Selecting the interpreter differently on the two
+# sides would let them disagree about whether HEAD is a flip at all — on a
+# machine with a project environment but no `python3` on PATH, ship would
+# re-anchor to HEAD's parent while a freshly paid round recorded HEAD's own
+# tree, and no number of further rounds could satisfy ship. The two selections
+# move together or not at all, and `codex-review.sh` is one of ADR-0209 §1's
+# standing review contracts, whose every edit costs every open lane a round.
+# `floor_test.py` has no such counterpart: `ship` is its only caller.
 #
 # `uv run --project` is deliberately NOT a rung of this ladder. It can create or
 # sync an environment, and answering "does this base move cost a round" must
@@ -367,7 +378,7 @@ expected_base="$(git merge-base FETCH_HEAD "$sha")"
 # a root commit — any of them leaves `content_sha` at `$sha`, and the flip costs
 # its round, which is exactly the behaviour that predates this block.
 ratify_adr=""
-_ratify_python="$(_python_beside "$repo_root")"
+_ratify_python="$(command -v python3 || command -v python || true)"
 if [[ -n "$_ratify_python" && -f "${repo_root}/scripts/adr_ratify.py" ]]; then
     ratify_adr="$("$_ratify_python" "${repo_root}/scripts/adr_ratify.py" \
         check-shape "$sha" 2>/dev/null || true)"
