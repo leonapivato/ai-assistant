@@ -3677,6 +3677,79 @@ async def test_an_offered_axis_renders_the_values_that_opened_it_as_quoted_spans
     assert "filed under:" in user
 
 
+async def test_the_topic_guidance_states_the_form_a_topic_label_actually_has() -> None:
+    """ADR-0213 §3's clauses, not a stricter invention of the prompt's.
+
+    ``TopicLabel``'s form is: non-empty, bounded in length, equal to its own
+    ``str.casefold()``, no whitespace but ``U+0020``, no leading or trailing space and
+    no doubled space. **Punctuation is admitted** — ``c++`` and ``follow-up`` are
+    canonical labels — so a block telling the planner that punctuation invalidates a
+    word would have it strip a spelling it was shown into one that matches nothing,
+    losing exactly the episodes the axis was offered for. The adversarial lens raised
+    that on round 2 and was right.
+
+    Asserted with a punctuated stored label, through the assembled prompt **and**
+    through the production parser, so the two halves cannot drift: the word is on the
+    page to copy, and copying it builds an ask.
+    """
+    system, user = await _prompts_over(
+        _preference(), _labelled("e1", "Ada: the build broke.", topics=("c++",))
+    )
+
+    assert '"topics"' in system, "the axis is offered"
+    assert "no punctuation" not in system
+    assert "`c++`" in system, "the form is described by example rather than by a ban"
+    assert '"c++"' in user, "and the stored spelling is on the page to copy"
+
+    plan = await _emitted(_envelope(structured={"topics": ["c++"]}), _preference())
+    request = plan.read_request
+    assert request is not None
+    [ask] = request.asks
+    assert ask.structure is not None
+    assert ask.structure.topics == ("c++",), "copying it builds the ask it was offered for"
+
+
+async def test_the_participant_guidance_admits_a_name_the_user_gave() -> None:
+    """ADR-0240 §9: the user is a namer, and the prompt may not say otherwise.
+
+    "ADR-0226 §3 admits the **user** as a namer, and a person the user named in this
+    turn is a value the planner may write whether or not the supply happens to show
+    it." A block telling the planner that a name drawn from the conversation "matches
+    nothing" would make §9's own clause unreachable in practice: the axis would be
+    offered off one shown label and the planner told not to use it for anybody else.
+
+    What the copy guidance is *for* stays stated — a spelling copied from the page is
+    the one certain to match — and that is the half ADR-0213 §3's refuse-rather-than-
+    repair rule needs.
+    """
+    system, _ = await _prompts_over(
+        _preference(), _labelled("e1", "Ada: the thing broke.", participants=("quixotic-alex",))
+    )
+
+    assert '"participants"' in system
+    assert "matches nothing" not in system, "a user-named person is a value §9 admits"
+    assert "you may write that name too" in system
+    assert "copy that spelling exactly" in system, "the copy guidance is kept, not dropped"
+
+
+async def test_the_window_is_not_required_of_every_structured_ask() -> None:
+    """ADR-0240 §2: at least one *structural* axis, and a window is one of several.
+
+    A label-only ask is a valid emission — §2 requires "at least one of its four axes",
+    not a window — so a prompt saying an object with neither endpoint "is not a request
+    that can be answered" would push the planner into an unnecessary time restriction
+    or into abandoning a read the store can answer. What the window's own clause bounds
+    is a *window*: name at least one end where you are bounding a period at all.
+    """
+    system, _ = await _prompts_over(
+        _preference(), _labelled("e1", "Ada: the thing broke.", participants=("quixotic-alex",))
+    )
+
+    assert "where you are bounding a period at all" in system
+    assert "at least one must be present" in system, "the ask's own condition, stated"
+    assert "it may be sent on its own or beside the period" in system
+
+
 async def test_the_gate_governs_the_invitation_and_never_the_ask() -> None:
     """ADR-0240 §9: an ask naming a label nothing in the supply carried is serviced.
 

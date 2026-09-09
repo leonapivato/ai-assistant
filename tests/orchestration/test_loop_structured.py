@@ -1233,6 +1233,12 @@ async def test_an_empty_reads_fact_survives_a_later_servicing_that_read_no_struc
     assert responded.structured.reach is True, "the first read's reach survives too"
     system, _ = await _composed(responded)
     assert "came back with nothing in it" in system
+    assert "The last thing you looked up" not in system, (
+        "the query that followed it returned records, so the empty one was not the last"
+    )
+    assert "Do not read that as the whole of what you found here" in system, (
+        "ADR-0240 §8's fact is about one lookup and says so"
+    )
 
 
 async def test_a_budget_blocked_second_read_neither_sets_nor_clears_the_emptiness_fact() -> None:

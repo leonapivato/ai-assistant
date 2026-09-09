@@ -765,8 +765,9 @@ asks for past conversations by **structure** rather than by wording:
                 "end":   "2026-04-01T00:00:00+00:00"}
 
 `start` and `end` bound **when a conversation was recorded**. Both are ISO-8601 \
-instants with an offset, written out in full; `start` is included and `end` is not, \
-so the pair above is the whole of March. You may send only one of them — `start` \
+instants **with an offset, written out in full** — `2026-03-01T00:00:00+00:00`, \
+never a bare date, a number, or a date with no offset. `start` is included and \
+`end` is not, so the pair above is the whole of March. You may send only one of them — `start` \
 alone is everything since that instant, `end` alone everything before it — but where \
 you are bounding a period at all, name at least one of the two, and `end` must be \
 after `start`. Work the instants out yourself from the `now` printed in the next \
@@ -826,11 +827,13 @@ Where they are, you may add `"topics": ["..."]` inside the same `structured` \
 object, and what comes back are conversations filed under at least one of the words \
 you name.
 
-A filing word has a strict written form — lower case, single spaces, no punctuation \
-and no leading or trailing space — and one that breaks it is **refused**, which \
-costs you the whole of this read rather than that one word. Copying a word exactly \
-as it is printed below is how you are certain of the form; a word of your own is \
-allowed where it already meets it.""",
+A filing word has a written form of its own: short, all in lower case, with single \
+spaces between words and none at either end. Punctuation is allowed and is part of \
+the word — `c++` and `follow-up` are filing words, and stripping either one makes a \
+different word that matches nothing. A word that breaks the form is **refused**, \
+which costs you the whole of this read rather than that one word. Copying a word \
+exactly as it is printed below, character for character, is how you are certain of \
+the form; a word of your own is allowed where it already meets it.""",
     "about_person": """\
 Some conversations in the next message are printed with an `about:` line. Where \
 they are, you may add `"about_person": ["..."]` inside the same `structured` \
@@ -1684,7 +1687,41 @@ def _structured_window(structured: Mapping[str, object]) -> TimeWindow | None:
     ends = {end: structured[end] for end in ("start", "end") if end in structured}
     if not ends:
         return None
-    return TimeWindow.model_validate(ends)
+    # **The instant is read as ISO-8601 here and not left to the field's coercion**
+    # (ADR-0240 §3: "the planner writes ISO-8601 instants"). ``UtcInstant`` is
+    # annotated ``datetime``, and pydantic reads a bare number — and a numeric
+    # *string* — as a Unix timestamp, so ``{"start": 20260301}`` and
+    # ``{"start": "20260301"}`` both become an instant in 1970 and the servicer then
+    # reads decades of episodes. That is a window the planner did not compose, which
+    # is the substitution §3's whole-ask drop exists to prevent, so the form is
+    # decided here and anything else raises into the caller's one disposition.
+    return TimeWindow.model_validate({end: _iso_instant(value) for end, value in ends.items()})
+
+
+def _iso_instant(value: object) -> datetime:
+    """One window endpoint, read as the ISO-8601 instant ADR-0240 §3 fixes.
+
+    ``datetime.fromisoformat`` and nothing else: it is the reading the ADR names, it
+    refuses a bare number outright, and a numeric string like ``"20260301"`` reaches it
+    as a *date* with no offset — which ``UtcInstant`` then refuses for being naive,
+    rather than becoming an instant in 1970. What it accepts, ``TimeWindow``'s own
+    annotation and validator go on to judge: this function decides the **form** and
+    settles nothing about the bounds.
+
+    Args:
+        value: The endpoint, whatever the model wrote there.
+
+    Returns:
+        The instant it names.
+
+    Raises:
+        TypeError: If the endpoint is not a string at all.
+        ValueError: If it is a string ``fromisoformat`` cannot read.
+    """
+    if not isinstance(value, str):
+        msg = "a window endpoint is an ISO-8601 instant written as a string"
+        raise TypeError(msg)
+    return datetime.fromisoformat(value)
 
 
 def _structured_axis(structured: Mapping[str, object], axis: str) -> tuple[str, ...] | None:
