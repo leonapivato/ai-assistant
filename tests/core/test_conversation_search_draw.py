@@ -9,10 +9,13 @@ decides, and the one field whose required-ness is load-bearing.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Final
 
 import pytest
 from pydantic import ValidationError
 
+from ai_assistant import orchestration
 from ai_assistant.core.types import (
     Conversation,
     ConversationExport,
@@ -87,3 +90,68 @@ def test_the_conversation_types_gain_no_field_and_the_export_keeps_its_version()
     assert "all_external_user_chosen" not in Conversation.model_fields
     assert "search_calls" not in ConversationTurn.model_fields
     assert ConversationExport(exported_at=datetime(2026, 9, 9, tzinfo=UTC)).schema_version == 2
+
+
+# --- §8's flag is read and folded together, or not at all (ADR-0137 §2's seam cut) ---
+
+
+#: The three names ADR-0238 §8 makes one mechanism: the read that presents the footing,
+#: and the fold that maintains it. ``admit_search`` is deliberately **not** here — §8
+#: says in terms that it "does not consult the flag" and that "no member of this store
+#: gates admission on the footing", so a lane wiring admission alone changes nothing
+#: about what the flag means.
+_FOOTING_READ: Final = "search_draw"
+_FOOTING_FOLD: Final = "observe_search"
+
+
+def _orchestration_sources() -> str:
+    """Every line of ``ai_assistant.orchestration``, concatenated.
+
+    A text scan rather than an import graph, because what is being asked is whether a
+    *call site exists at all* — the cheapest possible question, and one that cannot be
+    answered by wiring, since ADR-0238 §8's members are reached through a Protocol the
+    subsystem already holds for other reasons.
+    """
+    package = Path(orchestration.__file__).parent
+    return "\n".join(module.read_text(encoding="utf-8") for module in sorted(package.rglob("*.py")))
+
+
+def test_the_footing_is_read_and_folded_in_one_change_or_in_neither() -> None:
+    """The half-wired state ADR-0238 §8's flag semantics would be false in.
+
+    §8 makes the flag mean *every turn this decision has observed was clean*, and that
+    sentence is only true where `orchestration` both **reads** it at build time and
+    **folds** it — at admission of a disqualifying span, and again at capture. A tree
+    that read the footing without folding it would report a conversation clean on the
+    strength of turns nobody observed, which is the exact misreading §13's decoded
+    ``False`` exists to prevent one epoch earlier.
+
+    **So this is a biconditional, not a prohibition.** It passes on the contract lane's
+    tree, where neither name appears and the mechanism is legible and inert — the
+    posture ADR-0238's own exit note describes and ADR-0231 §9 recorded for the search
+    itself. It passes again once the consumer lane wires both. It fails on exactly one
+    state: the half where a reader has landed and its folds have not.
+
+    **Why a test rather than a note.** ADR-0238's implementation was cut at its contract
+    seam under ADR-0137 §2, and §4 of that decision makes every further consumer group a
+    follow-on lane briefed against the merged contract. What a seam cut cannot leave
+    behind is a rule kept by whoever reads the brief; this is that rule as a mechanism,
+    and it is the one thing the contract lane can do about a state it does not itself
+    reach. The lane that lands the consumer group deletes nothing here — it makes both
+    halves true.
+
+    The residue this does *not* close is filed: a conversation started between the two
+    lanes carries a ``True`` neither lane observed, which #2186 records with what would
+    fire a decision about it.
+    """
+    sources = _orchestration_sources()
+
+    reads = _FOOTING_READ in sources
+    folds = _FOOTING_FOLD in sources
+
+    assert reads == folds, (
+        f"`orchestration` {'reads' if reads else 'folds'} ADR-0238 §8's footing without "
+        f"{'folding' if reads else 'reading'} it. The flag means *every turn this decision "
+        f"has observed was clean*, which is false of a tree that maintains it on only one "
+        f"side — see ADR-0238 §8 and §13."
+    )
