@@ -231,9 +231,9 @@ def _checked_cost(amount: Decimal | None, currency: str | None) -> ToolCost | No
         The ``PER_CALL`` cost where both are given, and ``None`` where neither is.
 
     Raises:
-        TypeError: If ``amount`` is not an exact ``Decimal``. The type is part of the
-            domain for the two bounds' reason, and the canonical fake must not be the
-            looser of the two.
+        TypeError: If ``amount`` is not an exact ``Decimal``, or if ``currency`` is
+            given and is not a ``str``. The type is part of the domain for the two
+            bounds' reason, and the canonical fake must not be the looser of the two.
         ValueError: If exactly one of the two is given; if ``amount`` is non-finite,
             negative, or not countable under ADR-0194 §1; or if ``currency`` is not
             exactly three uppercase ASCII letters.
@@ -263,6 +263,12 @@ def _checked_cost(amount: Decimal | None, currency: str | None) -> ToolCost | No
             f"fractional digits (ADR-0194 §1), got {amount!r}"
         )
         raise ValueError(msg)
+    if type(currency) is not str:
+        # The builder's own guard, in the same place and with the same class: a
+        # wrong-typed code is refused by name before the shape check reaches
+        # ``len()``. Exact, like the amount's above.
+        msg = f"cost_currency must be a string, got {type(currency).__name__}"
+        raise TypeError(msg)
     if len(currency) != _CURRENCY_CODE_LENGTH or not (
         currency.isascii() and currency.isupper() and currency.isalpha()
     ):

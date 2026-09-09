@@ -412,6 +412,36 @@ def test_the_fake_refuses_an_amount_that_is_not_a_decimal() -> None:
         FakeWebSearcher(cost_per_call=0.005, cost_currency="USD")  # type: ignore[arg-type]  # the subject
 
 
+class _LyingCode(str):
+    """A ``str`` subclass that says what the shape check wants to hear (#2131)."""
+
+    def isupper(self) -> bool:
+        """Report upper case whatever the text is."""
+        return True
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        pytest.param(0, id="an-int"),
+        pytest.param(b"USD", id="a-bytes-code-passing-every-shape-predicate"),
+        pytest.param(_LyingCode("usd"), id="a-str-subclass-lying-about-its-case"),
+    ],
+)
+def test_the_fake_refuses_a_currency_that_is_not_a_string(code: object) -> None:
+    """The builder's own list, at the fake — ADR-0236 §7's parity clause (#2131).
+
+    ``tests/tools/test_web_search_cost.py``'s :data:`MISTYPED_CODES` is the same list,
+    for :data:`_REFUSED_COSTS`' reason: a fake that admitted a code the builder refuses
+    would be the looser of the two statements of one rule. None of these is reached by
+    the shape check — ``bytes`` answers every predicate it applies, and a ``str``
+    subclass can answer them however it likes — so the type is refused where it is
+    given, which is this fake's posture everywhere else (ADR-0231 §17).
+    """
+    with pytest.raises(TypeError, match="cost_currency"):
+        FakeWebSearcher(cost_per_call=Decimal("0.005"), cost_currency=code)  # type: ignore[arg-type]  # the subject
+
+
 def test_no_argument_of_any_name_gives_the_fake_a_free_basis() -> None:
     """ADR-0236 §8 item 8's second half, and §3 asserted as the absence it is.
 

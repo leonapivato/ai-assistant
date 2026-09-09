@@ -357,6 +357,57 @@ def test_the_cost_helper_refuses_the_same_states_the_builder_does(
         checked_search_cost(amount, code)
 
 
+class _LyingCode(str):
+    """A ``str`` subclass that says what the shape check wants to hear (#2131)."""
+
+    def isupper(self) -> bool:
+        """Report upper case whatever the text is."""
+        return True
+
+
+#: Every non-``str`` code the type guard refuses, on the same two-statements-of-one-rule
+#: footing as :data:`REFUSED_PAIRS` above — ``tests/tools/test_fake_web_searcher.py``
+#: asks the canonical fake for the same list, because ADR-0236 §7 forbids the fake being
+#: the looser of the two.
+#:
+#: **A shape check alone reaches none of these.** ``b"USD"`` satisfies every predicate
+#: it applies — a length of three, ``isascii``, ``isupper`` and ``isalpha`` are all
+#: ``bytes`` methods too — and so does a ``str`` subclass that overrides one of them;
+#: an ``int`` does not reach the predicates at all, because ``len()`` raises first, with
+#: a ``TypeError`` naming ``int`` rather than the field the operator set (#2131).
+MISTYPED_CODES: Final = [
+    pytest.param(0, id="an-int"),
+    pytest.param(b"USD", id="a-bytes-code-passing-every-shape-predicate"),
+    pytest.param(_LyingCode("usd"), id="a-str-subclass-lying-about-its-case"),
+]
+
+
+@pytest.mark.parametrize("code", MISTYPED_CODES)
+async def test_the_builder_refuses_a_currency_that_is_not_a_string(code: object) -> None:
+    """The type is part of the domain here, exactly as it is for a bound (#2131).
+
+    ``_check_bounds`` already refuses a non-``int`` bound by name, and ADR-0231 §5's
+    domain includes the type for that reason: a caller that ignored the annotation is
+    told which parameter it got wrong, rather than being handed whatever exception the
+    first operation on the value happens to raise. Driven through the builder as well
+    as through :func:`checked_search_cost` below, for :data:`REFUSED_PAIRS`' reason.
+    """
+    with pytest.raises(TypeError, match="cost_currency"):
+        await built(cost_per_call=FIGURE, cost_currency=code)  # type: ignore[arg-type]  # the subject
+
+
+@pytest.mark.parametrize("code", MISTYPED_CODES)
+def test_the_cost_helper_refuses_a_currency_that_is_not_a_string(code: object) -> None:
+    """The same list at the function the builder delegates to, driven synchronously.
+
+    The class is ``TypeError`` and not the ``ValueError`` a malformed *code* earns:
+    the two mistakes are different, and only the shape one is what
+    ``Settings.web_search_cost_currency`` can be misconfigured into (ADR-0236 §2).
+    """
+    with pytest.raises(TypeError, match="cost_currency"):
+        checked_search_cost(FIGURE, code)  # type: ignore[arg-type]  # the subject
+
+
 @pytest.mark.parametrize(
     "amount",
     [Decimal("0"), Decimal("1.0000000000"), Decimal("999999999999999.999999999")],
