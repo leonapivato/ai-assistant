@@ -1,6 +1,6 @@
 # 242. The act that trusts a destination has its own surface, and a search that did not happen is explained in the reply
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-09
 - **Partially supersedes** [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
   — **§9's third clause, and nothing else in that ADR.** That clause reads *"The composing
