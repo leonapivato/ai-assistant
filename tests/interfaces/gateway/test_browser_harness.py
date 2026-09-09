@@ -169,18 +169,101 @@ def test_an_absent_browser_build_skips_naming_the_command_that_installs_it() -> 
 def test_a_browser_that_is_present_and_will_not_start_is_a_failure() -> None:
     """Everything but an absent build is reported rather than skipped past.
 
-    The half that makes the skip safe. A missing system library or a refused sandbox
-    is a machine that *has* the build and cannot run it, and turning that into a skip
-    would let ADR-0216's layer go green having executed nothing -- silently, on
-    exactly the runner where it matters. The refusal is re-raised unchanged, so what
-    Playwright said is what the report carries.
+    The half that makes the skip safe. A refused sandbox is a machine that *has* the
+    build and cannot run it, and turning that into a skip would let ADR-0216's layer
+    go green having executed nothing -- silently, on exactly the runner where it
+    matters. The refusal is re-raised unchanged, so what Playwright said is what the
+    report carries, and it is the same object: nothing here interprets a refusal it
+    does not recognise.
+
+    This case used to be written over a *shared-library* message. It is a sandbox
+    refusal now because the shared-library one has an arm of its own below (#2143),
+    and a case meant to pin "unrecognised refusals pass straight through" cannot be
+    written over a message the code recognises. The property it asserts is unchanged.
     """
     refusal = BrowserError(
-        "BrowserType.launch: Target page, context or browser has been closed\n"
-        "error while loading shared libraries: libnss3.so"
+        "BrowserType.launch: Failed to launch the browser process.\n"
+        "Browser logs:\n"
+        "Failed to move to new namespace: "
+        "PID namespaces supported, Network namespace supported, "
+        "but failed: errno = Operation not permitted"
     )
 
     with pytest.raises(BrowserError) as raised:
         conftest.classify_launch_refusal(refusal)
 
     assert raised.value is refusal
+
+
+#: One realistic refusal per route Playwright reaches a missing system library by,
+#: keyed by the substring `tests/conftest.py` matches. The loader form is what issue
+#: #2143 observed on a fresh Ubuntu box; the validation form is what Playwright
+#: raises itself before it spawns anything, on the ordinary path where its
+#: `DEPENDENCIES_VALIDATED` marker has not suppressed the check.
+_UNLAUNCHABLE_BUILDS = {
+    "the loader kills the spawned browser": (
+        "BrowserType.launch: Failed to launch the browser process.\n"
+        "Browser logs:\n"
+        "/home/dev/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome: "
+        "error while loading shared libraries: libasound.so.2: "
+        "cannot open shared object file: No such file or directory"
+    ),
+    "playwright validates the build before spawning it": (
+        "BrowserType.launch: Host system is missing dependencies to run browsers.\n"
+        "Please install them with the following command:\n"
+        "    sudo playwright install-deps\n"
+        "Full list of missing libraries:\n"
+        "    libasound.so.2"
+    ),
+}
+
+
+@pytest.mark.parametrize("refusal_text", _UNLAUNCHABLE_BUILDS.values(), ids=_UNLAUNCHABLE_BUILDS)
+def test_an_unlaunchable_build_fails_naming_the_command_that_installs_its_libraries(
+    refusal_text: str,
+) -> None:
+    """Issue #2143: the failure stays a failure, and it names its remedy.
+
+    The gap #2143 records is that a build which is *present and unlaunchable* takes
+    neither of ADR-0216 §6's paths legibly: the files exist so the skip does not fire,
+    and every case in the layer errors with a loader message that says nothing about
+    `playwright install-deps` -- which needs root, so `just setup` cannot have run it.
+    A new contributor reads 65 errors and no cause.
+
+    So both halves are asserted, and the first is the one that matters most: this
+    **raises**. Routing it to the skip path would widen §6's condition, which that
+    section forbids in its own last paragraph ("skipped for any *other* reason" does
+    not discharge an anchor), and would let the layer certify a page it never
+    executed. Only the message changed.
+    """
+    refusal = BrowserError(refusal_text)
+
+    with pytest.raises(BrowserError) as raised:
+        conftest.classify_launch_refusal(refusal)
+
+    reported = str(raised.value)
+    assert "uv run playwright install-deps chromium" in reported
+    assert "root" in reported
+    assert "just setup" in reported
+    # What Playwright said survives, and is reachable both ways: quoted into the new
+    # message, and chained, so a traceback shows the original refusal underneath.
+    assert refusal_text in reported
+    assert raised.value.__cause__ is refusal
+
+
+def test_an_unlaunchable_build_is_never_skipped_past() -> None:
+    """The half of #2143's arm that a `pytest.raises(BrowserError)` cannot state.
+
+    `pytest.skip.Exception` inherits from `BaseException`, not `Exception`, so a
+    `classify_launch_refusal` that skipped here would not be caught by the case above
+    -- it would propagate and skip *that* case, which pytest reports as a skip rather
+    than a failure. The one assertion that catches a regression into the skip path has
+    to be written outside `pytest.raises`, so it is.
+    """
+    for refusal_text in _UNLAUNCHABLE_BUILDS.values():
+        try:
+            conftest.classify_launch_refusal(BrowserError(refusal_text))
+        except pytest.skip.Exception:  # pragma: no cover - the regression this pins
+            pytest.fail(f"a present-but-unlaunchable build was skipped past: {refusal_text!r}")
+        except BrowserError:
+            pass
