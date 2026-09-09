@@ -1,6 +1,6 @@
 # 228. A serviced read may revise the plan once, and the turn stops looking at a bound or a deadline
 
-- Status: Partially superseded by ADR-0240 (§2's condition (e) alone: a serviced structured read that was reached with budget remaining and whose completed store call returned no record at all satisfies (e), so a revision fires on it under the other six conditions unchanged; (a), (b), (c), (d), (f) and (g), §2's all-of-them rule, its closing clause and its prohibition on an implementation widening a request or substituting a read of its own all stand, and §§1 and 3-15 are untouched)
+- Status: Partially superseded by ADR-0240 (three scopes. §2's condition (e): a serviced structured read that was reached with budget remaining and whose completed store call returned no record at all satisfies (e), so a revision fires on it under the other six conditions unchanged; (a), (b), (c), (d), (f) and (g), §2's all-of-them rule, its closing clause and its prohibition on an implementation widening a request or substituting a read of its own all stand, and §2's other clauses are untouched; §12's no-signal clause and §1's nothing-else clause, in the single respect that the second planner call receives a defaulted parameter holding the asks whose read returned nothing, with every other signal those clauses forbid — an iteration index, a "last look" instruction, a count of the turn's calls, a budget or deadline signal — still forbidden and §1's enumeration of what is not re-run binding verbatim; §§3-11 and 13-15 are untouched)
 - Date: 2026-09-03
 - **Partially supersedes five ADRs, in eight narrowly stated scopes** — five of
   ADR-0226, one of ADR-0158, one of ADR-0014 and one of ADR-0204 — and §15 shows the
@@ -117,7 +117,26 @@
   planner composes from a period and the labels a record carries, serviced through the
   `MemoryStore` reads ADR-0237 ratified.
 
-  **The supersession.** (e) reads *"The servicing returned **at least one record the
+  **Three scopes, and no others: §2's (e), §12's no-signal clause and §1's nothing-else
+  clause.** The last two go together and are one respect between them — the second
+  planner call receives ADR-0240 §7's carrier, a defaulted `Planner.plan` parameter
+  holding, byte for byte, the asks of this turn's reads that returned nothing. §12 rules
+  that *"No lane adds an iteration index, a 'last look' instruction **or any other signal
+  to the planner's input**, and `Planner.plan`'s signature gains no parameter"*; §1 that
+  *"what a revision plans over that the first plan did not is the fourth group and nothing
+  else"*. A reader holding only this ADR refuses to build that carrier, so ADR-0070 §1's
+  test is met on both. **Everything else those clauses forbid stays forbidden**: no
+  iteration index, no "last look" instruction, no count of the turn's calls, no signal
+  about its budget or its deadline, and §1's enumeration of what is not re-run — one
+  context assembly, one tail read, one retrieval, one episodic supplement, and no group of
+  the supply beyond the fourth — binds verbatim. §12's every other clause, over
+  `orchestration`, the stores, `core` and the tests, is untouched. **One reading is
+  disclosed rather than relied on**: §12's section is *"What the implementing lane owes"*,
+  so the clause reads first as an instruction to this ADR's own lane, and on that reading
+  ADR-0230 §3 added `files` to the same signature and recorded nothing here. ADR-0240 does
+  not rest on it — the sentence says *"No lane"* — and records the scope instead.
+
+  **The supersession of (e).** (e) reads *"The servicing returned **at least one record the
   supply did not already hold**, counted after ADR-0226 §7's deduplication."* ADR-0240 §6
   fires a revision where a structured read that was reached with budget remaining, and
   whose store call completed, returned **no record at all** — the state ADR-0237 §7

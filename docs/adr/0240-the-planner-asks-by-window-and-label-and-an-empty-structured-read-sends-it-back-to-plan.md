@@ -1,6 +1,6 @@
 # 240. The planner asks by window and by label, and an empty structured read sends it back to plan
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-09-08
 - **Partially supersedes**
   [ADR-0228](0228-a-serviced-read-may-revise-the-plan-once-and-the-turn-stops-looking-at-a-bound-or-a-deadline.md)
@@ -19,6 +19,19 @@
   honoured rather than set aside, because §7 below gives the second call an input the
   first did not have. §3's bound of two planner calls is untouched and is the bound on
   this revision too.
+- **And of the same ADR, two further scopes, taken together as one:** **§12's no-signal
+  clause and §1's nothing-else clause**, in the single respect that the second planner
+  call receives §7 below's carrier — a defaulted `Planner.plan` parameter holding, byte
+  for byte, the asks of this turn's reads that returned nothing. §12 rules that *"No lane
+  adds an iteration index, a 'last look' instruction or any other signal to the planner's
+  input, and `Planner.plan`'s signature gains no parameter"*; §1 that *"what a revision
+  plans over that the first plan did not is the fourth group and nothing else"*. **Every
+  other signal those clauses forbid stays forbidden** — the iteration index, the "last
+  look" instruction, a count of the turn's calls, and any signal about its budget or its
+  deadline — and §1's enumeration of what is not re-run binds verbatim: one context
+  assembly, one tail read, one retrieval, one episodic supplement, and no group of the
+  supply beyond the fourth. §15 works both, including why §12's clause is recorded
+  against on the reading that binds every lane rather than only ADR-0228's own.
 - **Amends the same ADR** — **§11's two-kinds statement, and that alone.** §11 reads
   *"Both kinds a revision may emit are the two that ADR admits, both terminate in the
   owner's own `MemoryStore`"*, which ADR-0230 and ADR-0231 have already made an
@@ -368,11 +381,16 @@ type rather than by convention.
 
 > **Normative.** **A malformed member costs the whole ask and never the plan, and the
 > ask is never partially repaired.** Where any axis of a `STRUCTURED_READ` ask cannot be
-> read as the model this section fixes — a window that is not two readable instants or
-> that `TimeWindow` refuses, a label the canonical form refuses, an empty sequence, an
-> axis set applying nothing — the ask is dropped whole, the drop is logged as every
-> other unreadable ask already is, and the plan stands. No implementation drops the
-> offending axis and services the rest.
+> read as the model this section fixes — a window **endpoint that is present and is not
+> a readable instant**, a window `TimeWindow` refuses, a label the canonical form
+> refuses, an empty sequence, an axis set applying nothing — the ask is dropped whole,
+> the drop is logged as every other unreadable ask already is, and the plan stands. No
+> implementation drops the offending axis and services the rest.
+
+> **Normative.** **An absent endpoint is not a malformed one.** ADR-0237 §2 admits a
+> window with either end unset — an unbounded side — and refuses only the both-unset and
+> the inverted cases, so *"everything since the first of September"* is a window this ask
+> carries and no implementation drops it for naming one instant.
 
 **A composed value is admitted by §3's own terms, and the sentence that decides it is
 §2's.** ADR-0226 §2 admits a `SIGHTED_QUERY` ask carrying *"a **query** the planner
@@ -430,6 +448,21 @@ the talking happened. §8 below is where a turn's reply is kept honest about tha
 > retrieval stage and by a `SIGHTED_QUERY` — and this ADR neither narrows nor widens
 > either. No lane widens this kind to beliefs, and no lane narrows the sighted query to
 > episodes.
+
+**One axis is admitted knowing no producer can fill it, and that is ADR-0226 §1 working
+rather than an oversight.** `about_person` reaches no episode any producer writes:
+capture writes none, and ADR-0239 §7 rules that the episode-labelling producer *"writes
+**no `about_person`**, on an episode or on anything else"*, with ADR-0100 §4 forbidding
+one to be inferred. ADR-0239 §11 defers the field on an episode by name and fires it only
+*"with an ADR that reckons with that clause"*. The axis is nonetheless stated here,
+because ADR-0226 §1 forbids a later lane from *"widening an admitted kind's meaning to
+carry a read the ADR that admitted it did not describe"* — an axis this ADR left out
+could not be added to this kind afterwards without superseding §1. So it is described at
+admission and it is **inert until ADR-0239 §11's deferral fires**; §9's gate keeps it out
+of the prompt meanwhile, because no record in any supply carries a value on it, and §13
+asserts that inertness as the *specified* behaviour rather than leaving it to be
+discovered. The milestone's own exit is served by `participants`, which ADR-0239 §1's
+producer does write.
 
 **Episodes, because that is the population the envelope cannot otherwise reach and the
 one the milestone is about.** The turn already reads beliefs three ways — the retrieval
@@ -577,7 +610,7 @@ novelty branch is therefore satisfied on exactly those turns, and where the othe
 conditions hold the turn revises anyway. What §6 withholds from such a turn is not the
 revision but the **empty-read fact**: the structured read established nothing, so §7's
 carrier is empty and the second plan is composed over the ten new records rather than
-over an absence. §13's seventh test is written to assert that pair rather than a
+over an absence. §13's eighth test is written to assert that pair rather than a
 suppression.
 
 **The not-reached case is stated as a clause because it is the one an implementation
@@ -703,6 +736,18 @@ this ADR asserts.
 > an implementation that accepts it and ignores its value means exactly what it meant.
 > ADR-0230 §3's paragraph on its own `files` is inherited whole and not re-argued.
 
+**This parameter moves two clauses of ADR-0228 and the records are owed**, which §15
+works and the header carries. §12 rules that *"the planner is not told which iteration it
+is on. No lane adds an iteration index, a 'last look' instruction or any other signal to
+the planner's input, and `Planner.plan`'s signature gains no parameter"*, and §1 concludes
+that *"what a revision plans over that the first plan did not is the fourth group and
+nothing else"*. This carrier is a signal to the planner's input and a parameter on that
+signature, so both are partially superseded in one narrow scope. **What stays forbidden
+is everything else those clauses forbid**: no iteration index, no "last look"
+instruction, no count of the turn's calls, no budget or deadline signal, no second
+context read, no second retrieval, no second supplement, and no group of the supply the
+first call did not see beyond the fourth.
+
 **A Protocol input rather than ADR-0228 §10's carrier, and the difference is which
 subsystem needs the fact.** §10 carries its stop fact *"inside
 `ai_assistant.orchestration`, from the component that knows it to the render site"*,
@@ -751,11 +796,13 @@ store's shape from it, and a reply cannot be shaped by it except through a secon
 
 ### 8. The reply says what the read did not reach
 
-> **Normative.** **Two facts, and they are separate.** The **reach** fact is that a
+> **Normative.** **Three facts, and they are separate.** The **reach** fact is that a
 > structured read reached only records carrying a recorded value on the axes it
-> filtered. The **emptiness** fact is that such a read returned nothing. Each is given
-> to the composing stage on its own condition below, both are given where both hold,
-> and neither is inferred from the other.
+> filtered. The **temporal** fact is that such a read filtered on the instant of the
+> exchange rather than of the event. The **emptiness** fact is that such a read returned
+> nothing. Each is given to the composing stage on its own condition below, any two or
+> three are given together where their conditions hold together, and none is inferred
+> from another.
 
 > **Normative.** **The reach fact is given on every turn on which *any* structured read
 > the turn performed applied a `participants`, `topics` or `about_person` axis, whether
@@ -764,6 +811,15 @@ store's shape from it, and a reply cannot be shaped by it except through a secon
 > one did, so the obligation does not turn on the yield; and ADR-0228 §7 keeps every
 > servicing's records in one growing fourth group, so a label-filtered read's records are
 > still in front of the composing stage after a second read the turn went on to make.
+
+> **Normative.** **The temporal fact is given on every turn whose structured read
+> applied a window, whether that read returned records or none.** It states that the
+> read filtered on the instant the exchange was recorded and not on the instant of
+> whatever the exchange was about (ADR-0237 §8), and it is what discharges ADR-0237 §8's
+> second clause — *"A surface answering a time-scoped question over captured episodes
+> says which instant it filtered on wherever the distinction could mislead"* — for this
+> consumer. No lane reads that clause as discharged by anything else, or as owed only
+> where a read came back empty.
 
 > **Normative.** **A window-only structured read owes no reach fact**, and the ground is
 > a property of the records rather than a convenience: this kind reads episodes (§4),
@@ -776,15 +832,17 @@ store's shape from it, and a reply cannot be shaped by it except through a secon
 > **Normative.** **The emptiness fact is given on a turn whose last structured read was
 > empty in §6's sense**, and on no other turn.
 
-> **Normative.** **On a turn given neither fact the composing stage receives nothing,
-> and the assembled prompt is byte-identical to what it is today.**
+> **Normative.** **On a turn given none of the three facts the composing stage receives
+> nothing, and the assembled prompt is byte-identical to what it is today.**
 
-> **Normative.** Neither fact carries **a window, an instant, a label, a query, a count
-> or a kind name**. Both are carried **inside `ai_assistant.orchestration`**, from the
-> component that knows them to the render site, as data; they add **no field to a `core`
-> type**, no member to a Protocol, and neither is inferred at the render site — not from
-> the plan, not from the supply's length, not from the audit. This is ADR-0228 §10's
-> rule and ADR-0227 §3's, applied to two more facts for their own reason.
+> **Normative.** No fact carries **a window, an instant, a label, a query, a count or a
+> kind name** — the temporal fact says *which instant the filter was on*, which is a
+> property of the field rather than a value read off the ask. All three are carried
+> **inside `ai_assistant.orchestration`**, from the component that knows them to the
+> render site, as data; they add **no field to a `core` type**, no member to a Protocol,
+> and none is inferred at the render site — not from the plan, not from the supply's
+> length, not from the audit. This is ADR-0228 §10's rule and ADR-0227 §3's, applied to
+> three more facts for their own reason.
 
 > **Normative.** **The reach fact is what discharges ADR-0237 §6's third clause and
 > ADR-0239 §6's third clause for this consumer**, and no lane reads either as discharged
@@ -798,8 +856,18 @@ store's shape from it, and a reply cannot be shaped by it except through a secon
 > **Normative.** No lane renders this fact through the step account. ADR-0170 §5a's
 > closed vocabularies are unchanged and gain no member.
 
-**ADR-0237 §6 puts this obligation on the surface performing the read, and this ADR is
-that surface.** Its clause is that such a surface *"says what the read did not reach …
+**ADR-0237 §8's clause is the third fact's, and a draft left it undischarged.** That
+section rules that `occurred_within` filters on *"the exchange's"* instant and that a
+surface answering a time-scoped question *"says which instant it filtered on wherever the
+distinction could mislead"*. The architecture lens found on round 5 that a **successful
+window-only** read supplied none of this ADR's facts and left the prompt unchanged, so
+*"what repairs happened last week"* could answer from an exchange recorded last week about
+a repair from a year ago with nothing saying which instant was filtered. The composing
+stage renders an episode's `occurred_at` but renders no `read_request` and names no
+applied filter, so nothing else on the path could carry it.
+
+**ADR-0237 §6 puts the reach obligation on the surface performing the read, and this ADR
+is that surface.** Its clause is that such a surface *"says what the read did not reach …
 and that the reach of the read is the values that were **recorded** rather than the
 subject the owner has in mind"*. On the tree that reach is nearly nothing on the who and
 what axes — capture writes no labels and ADR-0239's producer has not landed — so a turn
@@ -842,6 +910,12 @@ read that also applied a label axis, both facts hold and both are given.
 > axis nor its spelling, and a turn on which no axis is described states no
 > `STRUCTURED_READ` member at all.
 
+> **Normative.** **Where an axis is offered, the values that opened it are rendered.**
+> A record of the sequence the loop passed that carries a value on an offered axis has
+> that value rendered to the planner, as a quoted span under ADR-0098 §2 exactly as the
+> record's other spans already are, so the planner can copy the stored spelling byte for
+> byte. No axis is described to the planner whose values the same call leaves unrendered.
+
 > **Normative.** **The condition governs the invitation and never the ask.** A
 > `STRUCTURED_READ` naming a label no record of the supply carried is a valid emission,
 > is serviced, and is neither refused nor re-written: ADR-0226 §3 admits the **user** as
@@ -856,11 +930,18 @@ only resolve to nothing. Three of these four axes are in that position today by 
 §8's own decision: no backlog pass is run, so labels exist only on episodes a labelling
 observation has since read.
 
-**And the gate buys more than a saved drop: it is what makes a label *copyable*.** A
-`TopicLabel` is refused rather than normalised (ADR-0213 §3, ADR-0237 §2), so a planner
-inventing a spelling loses its whole ask under §3. A planner that is offered the axis
-because a record in front of it carries a label is a planner that can copy that label
-exactly — which is ADR-0226 §3's namer rule in its strongest form, **data**, reached
+**And the gate buys more than a saved drop: it is what makes a label *copyable* — but
+only if the value is on the page, which today it is not.** A `TopicLabel` is refused
+rather than normalised (ADR-0213 §3, ADR-0237 §2), so a planner inventing a spelling
+loses its whole ask under §3. `planning/planner.py`'s `_render_record` renders a record's
+`content`, its `outcome` or disposition phrase and an episode's `occurred_at`, and
+renders **neither `participants` nor `topics` nor `about_person`** — so two records
+carrying different canonical topics render identically, and a gate keyed on a value the
+model cannot see would offer an axis whose spelling the model would then have to guess.
+Both lenses raised that on round 5 and both were right. The rendering clause above is
+what makes the gate mean what §9 says it means: the axis is offered **because** a value
+is in front of the planner, and the value is in front of it **as characters it can
+copy** — which is ADR-0226 §3's namer rule in its strongest form, **data**, reached
 without an ordinal or a table. As ADR-0239's producer fills episodes, the gate opens on
 its own, on the turns where it can be answered, with no ADR and no configuration.
 
@@ -1066,11 +1147,15 @@ revision's guidance reflects the supply the revision is planning over.
 > **Normative.** The implementing lane owes tests for each of the following, and each is
 > a test over behaviour rather than over a call count.
 
-1. **The milestone's exit.** Several conversations on one topic, all near in similarity;
-   exactly one carries the asked person **and** falls in the asked period. The planner
-   emits a `STRUCTURED_READ` conjoining `about_person` and `window`; the fourth group
-   carries that one episode and no other; and the answer carries it. Asserted over the
-   supply and the reply, with the distractors crowding the candidate budget.
+1. **The milestone's exit, over episodes shaped as a producer writes them.** Several
+   conversations on one topic, all near in similarity; exactly one carries the asked
+   person **and** falls in the asked period. The planner emits a `STRUCTURED_READ`
+   conjoining **`participants`** and `window`; the fourth group carries that one episode
+   and no other; and the answer carries it. Asserted over the supply and the reply, with
+   the distractors crowding the candidate budget. **`participants` and not
+   `about_person`**, because ADR-0239 §7 forbids the episode labeller from writing a
+   subject and capture writes none, so a fixture hand-populating `about_person` would
+   pass while demonstrating a capability no production path can reach (§4).
 2. **The first slice, with text.** A window plus a query returns the week's
    conversations about the thing asked and excludes an identically-worded conversation
    from the month before — the arm serviced by `search` rather than `select`, asserted
@@ -1084,17 +1169,23 @@ revision's guidance reflects the supply the revision is planning over.
 4. **Ambiguous.** Two episodes match the same person and window; both reach the fourth
    group, in ADR-0237 §5's order on the query-less arm, and neither is preferred by any
    quantity.
-5. **A caption is never the reason.** An episode whose text is engineered to sit near
+5. **The subject axis is inert, and that is the specified behaviour.** Over a store of
+   episodes written as capture and ADR-0239's labeller write them, a `STRUCTURED_READ`
+   applying `about_person` returns nothing, the audit records the empty outcome, and the
+   test asserts that as the decision working rather than as a defect — ADR-0237 §10 item
+   7's shape, for the axis ADR-0239 §11 defers. Asserted beside a call whose supply
+   carries no `about_person` at all, where §9's gate leaves the axis out of the prompt.
+6. **A caption is never the reason.** An episode whose text is engineered to sit near
    unrelated questions is not returned by a structured read whose filters it fails, at
    any similarity — run on the query-less arm, and again on the `search` arm with a
    query the caption matches, which is the arm where similarity would otherwise win.
-6. **Deduplication is not emptiness.** A servicing whose only ask is a structured read,
+7. **Deduplication is not emptiness.** A servicing whose only ask is a structured read,
    and whose every returned record was already in the supply, fires **no** revision —
    nothing satisfies either branch of ADR-0228 §2(e) — records the outcome as having
    returned records, and puts nothing in `empty_reads`. This is the case §6 turns on and
    the one a servicer reading the union's admissions rather than the store's own result
    gets wrong.
-7. **The budget is not emptiness, and it does not suppress the revision either.** A
+8. **The budget is not emptiness, and it does not suppress the revision either.** A
    servicing in which the earlier kinds admit ten records the supply did not hold
    reaches the structured read with no slot and makes **no store call**; the audit
    records the not-reached outcome; `empty_reads` is **empty** on the second planner
@@ -1104,7 +1195,7 @@ revision's guidance reflects the supply the revision is planning over.
    fixture with one slot left, which does make the call. What it is written against is
    an implementation that reads a not-reached read as an empty one, putting an ask into
    `empty_reads` that established nothing.
-8. **The separator condition, asserted through the production renderer and in the
+9. **The separator condition, asserted through the production renderer and in the
    audit.** On a turn whose belief composition is empty and whose supply is entirely
    `EPISODIC` when the structured read is reached, no store call is made, the audit
    records **the separator outcome by name**, and the assembled prompt carries no episode
@@ -1118,44 +1209,53 @@ revision's guidance reflects the supply the revision is planning over.
    query is serviced normally, and the servicing **completes** — the arm §10's fifth
    member exists for. And where the supply is episode-only **and** the budget is spent,
    the separator outcome is the one recorded, not the slot one.
-9. **The servicing order and the truncation.** A request carrying a file, a search, a
-   hop, a structured read and a query yields a fourth group in that order; a structured
-   read reached with fewer slots than the whole budget and filling every one of them is
-   recorded in `truncated_kinds`; one given the whole budget is not, however much more
-   the store held.
-10. **Every condition §2 puts on the models is refused by the models**, arm for arm: a
+10. **The servicing order and the truncation.** A request carrying a file, a search, a
+    hop, a structured read and a query yields a fourth group in that order; a structured
+    read reached with fewer slots than the whole budget and filling every one of them is
+    recorded in `truncated_kinds`; one given the whole budget is not, however much more
+    the store held.
+11. **Every condition §2 puts on the models is refused by the models**, arm for arm: a
     `StructuredAsk` applying no axis; an empty sequence on each of the three sequence
     axes; a `TimeWindow` with both ends unset and one whose end is not after its start
     (ADR-0237 §2's two refusals, reached through this ask); a `STRUCTURED_READ` ask with no
     `structure`; one carrying `labels` or an `entry`; a `structure` on each of the other
     four kinds; an unknown field on `StructuredAsk`; and a mutation after construction.
-11. **A malformed member costs the ask and never the plan.** An envelope whose
-    structured member carries an unreadable instant, a topic label the canonical form
-    refuses, or an axis set applying nothing yields a plan with `read_request` `None`,
-    one logged drop, and no partially-serviced read. Asserted for each, and asserted
-    that no axis of the offending ask was serviced.
-12. **The guidance is conditional and the ask is not.** On a call whose `memories`
-    carry no value on any of the three label axes, the assembled prompt states no
-    participants, topics or subject member — asserted over the rendered prompt through
-    the production renderer, not over a fake's reply (ADR-0226's ADR-0227 amendment).
-    On a call whose supply carries one labelled record, the axis is stated. And a
-    `STRUCTURED_READ` naming a label nothing in the supply carried is serviced normally,
-    which is the clause that keeps the gate off the ask.
-13. **The reply says what it did not reach, on a successful read as well as an empty
-    one.** Four arms, each asserted **through `orchestration/composing.py`'s production
+12. **A malformed member costs the ask and never the plan — and an unset endpoint is
+    not malformed.** An envelope whose structured member carries an unreadable instant,
+    a topic label the canonical form refuses, an empty sequence, or an axis set applying
+    nothing yields a plan with `read_request` `None`, one logged drop, and no
+    partially-serviced read; asserted for each, and asserted that no axis of the
+    offending ask was serviced. Beside them, **two acceptance arms**: a window naming
+    only a `start` and a window naming only an `end` each build an ask and are serviced,
+    which is ADR-0237 §2's unbounded side reaching this seam intact.
+13. **The guidance is conditional, the values are visible, and the ask is not gated.**
+    On a call whose `memories` carry no value on any of the three label axes, the
+    assembled prompt states no participants, topics or subject member — asserted over the
+    rendered prompt through the production renderer, not over a fake's reply (ADR-0226's
+    ADR-0227 amendment). On a call whose supply carries one record labelled
+    `participants=("alex",)` and another labelled `topics=("home maintenance",)`, both
+    axes are stated **and both stored spellings appear in the prompt as quoted spans the
+    planner can copy** — asserted with labels whose characters appear nowhere in either
+    record's `content`, which is the arm a renderer that shows only `content` fails. And
+    a `STRUCTURED_READ` naming a label nothing in the supply carried is serviced
+    normally, which is the clause that keeps the gate off the ask.
+14. **The reply says what it did not reach and which instant it filtered, on a
+    successful read as well as an empty one.** Six arms, each asserted **through `orchestration/composing.py`'s production
     renderer** over records shaped as the production capture site writes them (ADR-0226's
     ADR-0227 amendment). Over a store holding one episode labelled with the asked person
     and a second, unlabelled episode that is in fact about that person, a person-filtered
     read returns the first and the reply **states the reach** — that records carrying no
     value on that axis were not reached — rather than presenting the one as the whole.
     A turn ending on an empty structured read states the reach **and** the emptiness. A
-    turn whose structured read applied the window alone, and a turn with no structured
-    read at all, are given neither fact, and on the second the assembled prompt is
-    byte-identical to what it is today. And a fifth arm for the two-servicing case:
+    turn whose structured read applied the window alone is given the **temporal** fact
+    and no other — the reply says which instant the read filtered on, which is ADR-0237
+    §8's clause — and a turn with no structured read at all is given none of the three,
+    with the assembled prompt byte-identical to what it is today. And a further arm for
+    the two-servicing case:
     a first read filtered by person returns a record and fires a revision, a second read
     filtered by window alone returns more, and the reply **still states the reach** —
     because ADR-0228 §7 keeps the first read's record in the final supply.
-14. **The two carriers carry different things, and the audit carries no value.** A turn
+15. **The two carriers carry different things, and the audit carries no value.** A turn
     whose structured ask named a distinctive person label, a distinctive topic and a
     distinctive query emits an audit event in which **none of those three, and neither
     of the window's instants, appears anywhere** — the event carries the axes as
@@ -1164,17 +1264,17 @@ revision's guidance reflects the supply the revision is planning over.
     emitted. The composing stage's two facts carry neither. Asserted over the emitted
     event's own fields, over the parameter's own value and over the assembled second
     prompt, not over the redaction net.
-15. **The channel scoping holds.** A turn on `converse_spoken` whose planner emits a
+16. **The channel scoping holds.** A turn on `converse_spoken` whose planner emits a
     `STRUCTURED_READ` performs no store call for it, reaches the composing stage with
     the three groups ADR-0203 §1 narrowed, records the emission as declined, and makes
     no second planner call — the last because ADR-0228 §2(c) fails and, independently,
     because that operation declares no planning budget.
-16. **A failed servicing degrades and establishes nothing.** A store that raises during
+17. **A failed servicing degrades and establishes nothing.** A store that raises during
     a structured read leaves the turn composing from the supply planning saw, records
     the degradation with ADR-0226 §9's pair of failure fields, fires no revision, and
     puts nothing in `empty_reads` — the arm that keeps ADR-0228 §2(d) meaning what it
     means.
-17. **The bound is not raised.** A turn whose first structured read is empty and whose
+18. **The bound is not raised.** A turn whose first structured read is empty and whose
     second plan's structured read is also empty makes exactly two planner calls, and the
     composing stage is told both that the turn stopped while still asking (ADR-0228 §10)
     and, under §8, what the last read did not reach.
@@ -1255,8 +1355,34 @@ other; §4's budget declaration and its clock rule are untouched and gate this f
 condition exactly as they gate the others; §7's monotonicity and per-servicing budget are
 untouched and are what make a second structured read's deduplication well-defined; §9's
 per-emission accounting is untouched and covers this turn's second servicing as it covers
-any; §10's carrier is untouched and §8 above is a second fact beside it rather than a
-change to it; §11's rulings are untouched and are treated in the header record.
+any; §10's carrier is untouched and §8 above carries three facts beside it rather than
+changing it; §11's rulings are untouched and are treated in the header record. §1's and
+§12's two further scopes are worked below.
+
+**ADR-0228 §12's no-signal clause and §1's nothing-else clause are partially superseded
+too, in one scope between them, and the architecture lens is why they are recorded.** §12
+rules that *"No lane adds an iteration index, a 'last look' instruction **or any other
+signal to the planner's input**, and `Planner.plan`'s signature gains no parameter"*, and
+§1 that *"what a revision plans over that the first plan did not is the fourth group and
+nothing else"*. §7's carrier is a signal to the planner's input, arrives on that
+signature, and is something the second call has that the first did not — so a reader
+holding only ADR-0228 refuses to build it and ADR-0070 §1's test is met on both. **The
+scope is §7's carrier and nothing else.** Every other signal those clauses name stays
+forbidden — the iteration index, the "last look" instruction, a count of the turn's
+calls, and any signal about the budget or the deadline — and §1's enumeration of what is
+**not** re-run binds verbatim: one context assembly, one conversation-tail read, one
+retrieval, one episodic supplement, and no group of the supply beyond the fourth.
+
+**Two things a reader will want said about that record.** §12's evident subject is
+*"What the implementing lane owes"*, so the clause reads first as an instruction to
+ADR-0228's own lane — and on that reading ADR-0230 §3 added `files: Sequence[ShownFile] =
+()` to the same signature and recorded nothing against it. This ADR does not rest on that
+reading: the sentence says *"No lane"*, a lane reading it would refuse this parameter,
+and ADR-0082 §1 puts the test on what a reader would do rather than on what an author
+meant. Recording it is the cheaper error. And the record is owed *because of the
+carrier*, not because of §6: the supersession of (e) admits a revision, and this one
+admits the input that makes the revision worth making — which is why §6 and §7 are argued
+as one and are superseded as one.
 
 **ADR-0228 §11's two-kinds statement is amended and its rulings are obeyed.** *"Both
 kinds a revision may emit are the two that ADR admits"* stopped being true when ADR-0230
@@ -1397,9 +1523,9 @@ ADR-0227 §§3 and 4.
 > of what it obliges, and unmarked text is read to determine what a marked clause means
 > and never supplies an obligation.
 
-What binds is **seventy marked clauses**: §1's three, §2's six, §3's five, §4's four,
-§5's ten, §6's five, §7's seven, §8's eight, §9's three, §10's seven, §11's six, §12's
-four, §13's one, and this section's one. §14's list, §15's classification and every argument in
+What binds is **seventy-three marked clauses**: §1's three, §2's six, §3's six, §4's
+four, §5's ten, §6's five, §7's seven, §8's nine, §9's four, §10's seven, §11's six,
+§12's four, §13's one, and this section's one. §14's list, §15's classification and every argument in
 this document are deliberately unmarked: they are deferral, attestation and argument,
 which ADR-0089 §1 classifies as non-normative however load-bearing.
 
@@ -1410,6 +1536,15 @@ of ADR-0228 — so it owes both lenses under ADR-0015 §1. It is drafted, review
 revised as `Proposed`, its status flipped only once both required reviews return clean on
 one tree, and the route is `CONTRIBUTING.md` → "Finishing an ADR PR". Nothing implements
 against it until it has merged (ADR-0015 §5, golden rule 5).
+
+**It records itself as ratified on its second flip**, which is that section's step 3 taken
+as written. Both lenses returned clean on one tree and the status was flipped; a base move
+then landed ADR-0237's implementation, the round that move owed produced findings, and the
+ADR was **returned to `Proposed`** and re-entered at step 1 rather than being amended
+under an `Accepted` header. That is ADR-0070 §1's third permitted in-place header edit,
+the route ADR-0127 §3 names and ADR-0127 and ADR-0133 each took on their own PRs, and it
+is available only pre-merge: an `Accepted` flip sitting on a branch has landed nowhere and
+binds no reader.
 
 ## Consequences
 
