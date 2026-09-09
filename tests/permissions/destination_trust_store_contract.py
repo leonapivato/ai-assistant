@@ -35,8 +35,9 @@ Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, overload
 
 import pytest
 from recipient_builders import ALICE, BOB, account_member, member
@@ -52,7 +53,7 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Iterator
 
 #: The instant every record here is established at. Fixed, because nothing in this
 #: contract reads a clock: ``established_at`` and ``revoked_at`` are the caller's, so
@@ -116,30 +117,49 @@ async def _refuses(store: DestinationTrustStore, record: DestinationTrustRecord)
     assert len(await store.export()) == before
 
 
-class _EmptiesAfterTheFirstRead(list[CanonicalDestination]):
-    """A ``Sequence`` that reports its members once and nothing afterwards.
+class _ClearedAfterTheEmptinessCheck(Sequence[CanonicalDestination]):
+    """A ``Sequence`` that is **non-empty by length and empty by iteration**.
 
     ``recipient_grant_contract.py``'s ``_Deceptive`` one contract over, and for its
     reason: a rule about *what a caller may hand over* is only tested by a value that
-    behaves differently the second time it is read. A real caller reaches this state
-    without any subclass at all — it passes a ``list`` and clears it while the store's
-    read is suspended — but a value that changes on its own makes the case
-    deterministic instead of racing a lock, and works against an implementation with no
-    suspension hook.
+    does not answer the same way twice.
 
-    Every member is yielded on the first iteration and the list empties itself, so a
-    second read sees an empty sequence. Only ``__iter__`` is overridden: ``__bool__``
-    and ``__len__`` stay ``list``'s, which is what lets the emptiness check pass before
-    the coverage check finds nothing left.
+    This models one interleaving exactly — the caller passes a one-member list, the
+    store's emptiness check reads it (``not destinations`` consults ``__len__``), the
+    call suspends on its store read, and the caller clears the list. When the coverage
+    check iterates, there is nothing left. An implementation that snapshots **before**
+    its first await never sees the second state; one that reads the argument twice sees
+    both, and its ``all(...)`` over no members is vacuously true.
+
+    Written as a value that behaves this way on its own rather than as a suspended
+    mutation, because that is deterministic and reaches an implementation with no
+    suspension hook. The states it presents are ones a plain ``list`` genuinely passes
+    through; nothing here is reachable only by a subclass.
     """
 
+    def __init__(self, reported: int = 1) -> None:
+        """Report ``reported`` members and yield none."""
+        self._reported = reported
+
+    def __len__(self) -> int:
+        """The length the caller's list had when the emptiness check read it."""
+        return self._reported
+
     def __iter__(self) -> Iterator[CanonicalDestination]:
-        """Yield the members once, then empty."""
-        members = list.__iter__(self)
-        try:
-            yield from list(members)
-        finally:
-            self.clear()
+        """Nothing: by the time anything iterates, the caller has cleared it."""
+        return iter(())
+
+    @overload
+    def __getitem__(self, index: int) -> CanonicalDestination: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> Sequence[CanonicalDestination]: ...
+
+    def __getitem__(
+        self, index: int | slice
+    ) -> CanonicalDestination | Sequence[CanonicalDestination]:
+        """Empty, like the iteration — the length is the only thing that lies."""
+        raise IndexError(index)
 
 
 class DestinationTrustStoreContract:
@@ -544,26 +564,26 @@ class DestinationTrustStoreContract:
         deterministic and reaches an implementation with no suspension hook.
         """
         await store.record(trust_record(ALICE, record_id="t-1"))
-        changing = _EmptiesAfterTheFirstRead([member(CAROL)])
+        changing = _ClearedAfterTheEmptinessCheck()
 
         answer = await store.trust_of(changing)
 
         assert answer is DestinationTrust.UNCHOSEN
 
-    async def test_a_query_read_once_still_answers_from_its_members(
+    async def test_a_query_that_does_not_change_still_answers_from_its_members(
         self, store: DestinationTrustStore
     ) -> None:
         """The other half: snapshotting must not turn every query into ``UNCHOSEN``.
 
         Stated because the case above would pass against an implementation that had
-        simply stopped reading its argument at all. The same self-emptying sequence,
-        over a destination the store *does* hold, has to answer ``USER_CHOSEN`` — which
-        it can only do from the one read it is allowed.
+        simply stopped reading its argument at all — and because the snapshot is taken
+        from an *iteration*, so a store reading only ``__len__`` would pass that case
+        and fail this one. The same query as a plain list, over a destination the store
+        holds, has to answer ``USER_CHOSEN``.
         """
         await store.record(trust_record(ALICE, record_id="t-1"))
-        changing = _EmptiesAfterTheFirstRead([member(ALICE)])
 
-        assert await store.trust_of(changing) is DestinationTrust.USER_CHOSEN
+        assert await store.trust_of([member(ALICE)]) is DestinationTrust.USER_CHOSEN
 
     # --- ADR-0060: a cancelled call leaves the store whole ------------------
 
