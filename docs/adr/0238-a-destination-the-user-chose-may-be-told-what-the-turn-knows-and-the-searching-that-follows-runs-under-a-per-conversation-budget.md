@@ -9,8 +9,9 @@
   ratified ADR under golden rule 5"*, and separately the owner ruling that milestone 31's
   exit is not met by calls and cost alone. Both triggers fired (#1908 on 2026-09-09,
   #2167), and ADR-0241 is the ADR §16 sent a lane to write. **The deferral is not
-  discharged**: ADR-0241 supplies the per-call quantity §16 had none of and leaves the
-  per-conversation bound deferred, restating what now fires it.
+  discharged**: ADR-0241 supplies the per-call quantity §16 had none of — a bound on a
+  servicing's **search work**, the two ledger appends staying unbounded under ADR-0192 §3
+  — and leaves the per-conversation bound deferred, restating what now fires it.
 
   **§13's `core`-surface clause, in one limb.** §13 rules that *"`ActionPolicy`,
   `AuditTrail`, `MemoryStore` and `WebSearcher` each gain no member, no argument and no
