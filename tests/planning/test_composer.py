@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, final
 
 import pytest
@@ -29,7 +30,17 @@ from query_composer_contract import (
 
 from ai_assistant import planning
 from ai_assistant.core.config import Settings
-from ai_assistant.core.types import Message, QueryRefusal, Role
+from ai_assistant.core.types import (
+    MemorySource,
+    Message,
+    Placement,
+    Provenance,
+    QueryRefusal,
+    Role,
+    SearchSupply,
+    SemanticMemory,
+    encodable_text,
+)
 from ai_assistant.planning.composer import (
     DEFAULT_SEARCH_QUERY_MAX_CHARS,
     ModelBackedQueryComposer,
@@ -164,6 +175,60 @@ async def test_the_model_is_shown_the_utterance_and_nothing_else() -> None:
     assert system.role is Role.SYSTEM
     assert user.role is Role.USER
     assert "where is the tallest building in Porto" in user.content
+
+
+async def test_a_supply_carrying_records_puts_none_of_them_in_the_prompt() -> None:
+    """The claim this lane makes about ``records``, asserted where it can be false.
+
+    ADR-0238 §2 widens what the composer may be **handed**; what this module does with
+    a non-empty ``records`` is the consumer lane's, and until that lane lands the
+    docstring's claim is "accepted and unused". A claim of that shape is worth exactly
+    what makes it checkable — and comparing two *outcomes* does not: this composer's
+    answer comes from a scripted model, so an implementation that appended every
+    record's content to the prompt would return the same ``QueryOutcome`` and satisfy
+    the conformance suite's equality case unchanged.
+
+    So this asserts over the **messages the provider actually received**: two turns,
+    the fixed instruction and one span, and no byte of any record's content, id or
+    kind anywhere in either. It is ADR-0231 §18's test 4 read on the axis §2 opened,
+    and it is the test the consumer lane has to come and change — deliberately, in the
+    change that widens the prompt — rather than one it can widen past.
+    """
+    model = FakeModelProvider(json.dumps({"query": "porto"}))
+    withheld = "the Douro flows past Porto"
+    supply = SearchSupply(
+        utterance=encodable_text("find more about that"),
+        records=(_belief("belief-in-the-supply", withheld),),
+    )
+
+    await _over(model).compose(supply)
+
+    assert model.call_count == 1
+    system, user = model.last_messages
+    prompt = system.content + "\n" + user.content
+    assert "find more about that" in user.content
+    assert withheld not in prompt, "no record's content reaches the prompt"
+    assert "belief-in-the-supply" not in prompt, "and no record's id does either"
+
+
+def _belief(record_id: str, content: str) -> SemanticMemory:
+    """One belief a turn's retrieval could have selected, placed for ``ANYONE``.
+
+    Built here rather than taken from the conformance suite because the *content* is
+    what the case above searches the prompt for, so it has to be a string this test
+    chose.
+    """
+    return SemanticMemory(
+        id=record_id,
+        content=content,
+        fact=content,
+        placement=Placement(),
+        provenance=Provenance(
+            source=MemorySource.OBSERVED,
+            confidence=0.6,
+            last_updated=datetime(2026, 9, 9, 12, 0, tzinfo=UTC),
+        ),
+    )
 
 
 async def test_the_utterance_cannot_write_the_prompts_own_syntax() -> None:
