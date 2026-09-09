@@ -1280,3 +1280,152 @@ def test_plan_export_is_deeply_immutable() -> None:
     export = PlanExport(exported_at=_WHEN, goals=(_goal(),))
     with pytest.raises(ValidationError):
         export.goals[0].statement = "tampered"
+
+
+# --- StructuredAsk (ADR-0240 §2) ------------------------------------------
+
+
+def _window() -> TimeWindow:
+    """The one window every arm below reuses — March 2026, half-open."""
+    return TimeWindow(start=_WHEN, end=datetime(2026, 4, 1, tzinfo=UTC))
+
+
+def test_a_structured_ask_carries_the_four_axes_adr_0237_put_on_the_store() -> None:
+    """ADR-0240 §2: one value object, four axes, each defaulting to ``None``.
+
+    "The axes this model carries reach ``MemoryStore`` unchanged — ``None`` for
+    ``None``, and the values given otherwise — so no implementation translates between
+    an ask's convention and the store's." What is asserted here is the shape that makes
+    that true: the field names are ADR-0237 §1's own, and an axis nobody applied is
+    ``None`` rather than ``()``.
+    """
+    ask = StructuredAsk(
+        window=_window(),
+        participants=("alex",),
+        topics=("home maintenance",),
+        about_person=("marta",),
+    )
+
+    assert ask.window == _window()
+    assert ask.participants == ("alex",)
+    assert ask.topics == ("home maintenance",)
+    assert ask.about_person == ("marta",)
+    assert ask.applied() == ("window", "participants", "topics", "about_person")
+    assert StructuredAsk(window=_window()).applied() == ("window",)
+
+
+def test_a_structured_ask_applying_no_axis_is_refused() -> None:
+    """ADR-0240 §2: "a ``StructuredAsk`` applies at least one of its four axes".
+
+    ADR-0237 §4 makes the same requirement of ``select`` for the same reason — no
+    value of any axis means "everything" — and "a query alone is a ``SIGHTED_QUERY``
+    and not this kind", which is what keeps the two distinct at the type rather than
+    by convention.
+    """
+    with pytest.raises(ValidationError, match="at least one of its four axes"):
+        StructuredAsk()
+
+
+@pytest.mark.parametrize("axis", ["participants", "topics", "about_person"])
+def test_an_empty_sequence_is_refused_on_every_sequence_axis(axis: str) -> None:
+    """ADR-0240 §2: ``None`` is the one spelling of "not applied" on this path.
+
+    The asymmetry with ADR-0237's store surface is deliberate and is the one §2 draws
+    for the window: an ``()`` on the store means *select nothing*, "which is a coherent
+    thing for a caller to compute and an incoherent thing for a planner to ask for" —
+    an ask occupying the one slot its kind has while asking for a result that is empty
+    by construction. Refusing it here also removes the convention mismatch outright.
+    """
+    with pytest.raises(ValidationError, match="never empty"):
+        StructuredAsk(**{axis: ()})  # type: ignore[arg-type]  # the refusal is the subject
+
+
+def test_a_structured_asks_window_inherits_adr_0237s_two_refusals() -> None:
+    """ADR-0240 §2: ``TimeWindow`` "is used exactly as ADR-0237 §2 defines it".
+
+    The half-open reading, the unset ends, the refusal of a window with both ends
+    unset and the refusal of one whose ``end`` is not after its ``start`` are that
+    ADR's and are inherited whole — reached here through this ask, so the inheritance
+    is asserted at the seam that uses it rather than only where the type is defined.
+    """
+    with pytest.raises(ValidationError):
+        StructuredAsk(window=TimeWindow())
+    with pytest.raises(ValidationError):
+        StructuredAsk(window=TimeWindow(start=datetime(2026, 4, 1, tzinfo=UTC), end=_WHEN))
+
+    # ADR-0237 §2's unbounded side, both ways round, reaching this seam intact.
+    assert StructuredAsk(window=TimeWindow(start=_WHEN)).window is not None
+    assert StructuredAsk(window=TimeWindow(end=_WHEN)).window is not None
+
+
+def test_a_structured_ask_refuses_an_unknown_field_and_refuses_mutation() -> None:
+    """ADR-0240 §2: "it refuses unknown fields and refuses mutation"."""
+    with pytest.raises(ValidationError):
+        StructuredAsk(window=_window(), kinds=("episodic",))  # type: ignore[call-arg]
+    ask = StructuredAsk(window=_window())
+    with pytest.raises(ValidationError):
+        ask.window = None
+
+
+def test_a_structured_read_ask_carries_a_structure_and_may_carry_a_query() -> None:
+    """ADR-0240 §2's validator arm, in the two shapes it admits.
+
+    "A ``STRUCTURED_READ`` ask carries a non-``None`` ``structure``, no ``labels`` and
+    no ``entry``, and **may** carry a non-blank ``query``" — and the presence of the
+    query "is what §4 makes the difference between the two store members".
+    """
+    structure = StructuredAsk(window=_window())
+
+    without = ReadAsk(kind=ReadKind.STRUCTURED_READ, structure=structure)
+    assert without.query is None
+    with_text = ReadAsk(kind=ReadKind.STRUCTURED_READ, structure=structure, query="the lease")
+    assert with_text.query == "the lease"
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        pytest.param({}, "must carry a structure", id="no_structure"),
+        pytest.param(
+            {"structure": StructuredAsk(window=_window()), "labels": ("M1",)},
+            "must not carry labels",
+            id="labels",
+        ),
+        pytest.param(
+            {"structure": StructuredAsk(window=_window()), "entry": "F1"},
+            "must not carry an entry",
+            id="entry",
+        ),
+    ],
+)
+def test_a_structured_read_ask_refuses_the_other_kinds_arguments(
+    payload: dict[str, object], message: str
+) -> None:
+    """ADR-0240 §2's arm, refusal by refusal.
+
+    Each condition is "enforced by the model rather than by its callers, exactly as
+    ADR-0226 §4 requires of the arms already there", and each is refused separately
+    because each is a different mistake with a different fix.
+    """
+    with pytest.raises(ValidationError, match=message):
+        ReadAsk(kind=ReadKind.STRUCTURED_READ, **payload)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("kind", "extra"),
+    [
+        pytest.param(ReadKind.SIGHTED_QUERY, {"query": "the lease"}, id="sighted_query"),
+        pytest.param(ReadKind.CITATION_HOP, {"labels": ("M1",)}, id="citation_hop"),
+        pytest.param(ReadKind.LOCAL_FILE, {"entry": "F1"}, id="local_file"),
+        pytest.param(ReadKind.WEB_SEARCH, {}, id="web_search"),
+    ],
+)
+def test_every_other_kind_refuses_a_structure(kind: ReadKind, extra: dict[str, object]) -> None:
+    """ADR-0240 §2: "every other kind carries no ``structure``".
+
+    Written out per kind rather than left to a fall-through, on the reasoning the
+    validator's own fourth arm already carries: a member added without an arm would be
+    refused with a message about the wrong kind.
+    """
+    with pytest.raises(ValidationError, match="must not carry a structure"):
+        ReadAsk(kind=kind, structure=StructuredAsk(window=_window()), **extra)  # type: ignore[arg-type]

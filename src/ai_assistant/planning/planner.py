@@ -1579,6 +1579,17 @@ def _structured_ask(structured: object) -> list[ReadAsk]:
     if not isinstance(structured, dict):
         _log.info(_READ_REQUEST_DROPPED, reason="structured_not_an_object")
         return []
+    if not structured.keys() <= _STRUCTURED_MEMBERS:
+        # **A member outside the grammar costs the ask**, which is
+        # :class:`~ai_assistant.core.types.StructuredAsk`'s own ``extra="forbid"``
+        # reaching the seam that builds one. This is not ADR-0047 §4's ignore-other-keys
+        # rule: that governs keys *beside* an envelope's own, where this object **is**
+        # the ask's shape — a model writing ``"kinds"`` here has asked for a narrower
+        # read than the one it would silently get, and servicing the rest would be the
+        # substitution ADR-0228 §2's last clause forbids. Refused whole and never
+        # repaired, exactly as §3's own enumerated faults are.
+        _log.info(_READ_REQUEST_DROPPED, reason="unusable_structured")
+        return []
     try:
         window = _structured_window(structured)
         ask = ReadAsk(
@@ -1603,6 +1614,16 @@ def _structured_ask(structured: object) -> list[ReadAsk]:
         _log.info(_READ_REQUEST_DROPPED, reason="unusable_structured")
         return []
     return [ask]
+
+
+#: The whole of ADR-0240 §3's grammar for the ``structured`` member.
+#:
+#: Named rather than spelled at the use site because two things read it — the
+#: unknown-member refusal and the four axis reads — and a second list is a second place
+#: for the grammar to drift from the prompt that teaches it.
+_STRUCTURED_MEMBERS: Final[frozenset[str]] = frozenset(
+    {"start", "end", "participants", "topics", "about_person", "query"}
+)
 
 
 def _structured_window(structured: Mapping[str, object]) -> TimeWindow | None:

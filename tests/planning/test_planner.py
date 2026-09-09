@@ -38,11 +38,14 @@ from ai_assistant.core.types import (
     Message,
     PreferenceMemory,
     Provenance,
+    ReadAsk,
     ReadKind,
     Role,
     SemanticMemory,
     ShownFile,
+    StructuredAsk,
     TimeOfDay,
+    TimeWindow,
 )
 from ai_assistant.planning import ModelBackedPlanner
 from ai_assistant.planning.planner import (
@@ -256,6 +259,32 @@ _SEARCH_ASKING_REPLY = json.dumps(
 )
 
 
+#: A reply asking by structure, so ADR-0240 §2's contract arms bind on the production
+#: parser rather than on a request a test assembled.
+#:
+#: **Every axis at once, and a query beside them**, which is the widest shape §2 admits
+#: for this kind: the arms assert that the ask carries a structure, no ``labels`` and no
+#: ``entry``, that at least one axis is applied, that no sequence axis is empty, and
+#: that no value on any axis is the id of a record the call was shown. A reply naming
+#: one axis would leave three of those unexercised.
+_STRUCTURE_ASKING_REPLY = json.dumps(
+    {
+        "rationale": "one step to relocate",
+        "steps": [{"intent": "find a place", "capability": "search_housing", "parameters": {}}],
+        "read_request": {
+            "structured": {
+                "start": "2026-03-01T00:00:00+00:00",
+                "end": "2026-04-01T00:00:00+00:00",
+                "participants": ["alex"],
+                "topics": ["home maintenance"],
+                "about_person": ["marta"],
+                "query": "the lease",
+            }
+        },
+    }
+)
+
+
 class TestModelBackedPlannerContract(PlannerContract):
     """Runs ModelBackedPlanner through the shared Planner conformance suite."""
 
@@ -289,6 +318,16 @@ class TestModelBackedPlannerContract(PlannerContract):
         — and a request a test assembled would certify nothing about that.
         """
         return _planner(_SEARCH_ASKING_REPLY)
+
+    @pytest.fixture
+    def structured_asking_planner(self) -> Planner | None:
+        """A planner over a model that asks by structure, so ADR-0240's arms bind here.
+
+        Read by the **production** parser for ``file_asking_planner``'s reason: what
+        §2's conditions are about is an *emission*, and a request a test assembled
+        would certify nothing about the seam that builds one.
+        """
+        return _planner(_STRUCTURE_ASKING_REPLY)
 
 
 async def test_extracts_capabilities_in_order() -> None:
@@ -3396,3 +3435,329 @@ async def test_a_dropped_search_member_is_logged_without_the_text_it_dropped() -
     drops = [event for event in captured if event["event"] == _READ_REQUEST_DROPPED]
     assert [event["reason"] for event in drops] == ["unusable_web_search"]
     assert composed not in json.dumps(drops)
+
+
+# --------------------------------------------------------------------------- #
+# ADR-0240 §3, §7, §9 at the planning seam                                     #
+# --------------------------------------------------------------------------- #
+
+
+def _labelled(
+    record_id: str,
+    content: str,
+    *,
+    participants: tuple[str, ...] = (),
+    topics: tuple[str, ...] = (),
+    about_person: str | None = None,
+) -> EpisodicMemory:
+    """An episode as ADR-0239's producer labels one.
+
+    The labels are deliberately spelled with characters that appear **nowhere** in
+    ``content``, which is the arm ADR-0240 §13 item 13 names: a renderer showing only
+    ``content`` would put the axis in the prompt with its spelling nowhere on the page,
+    and the planner would have to guess a canonical form that is refused rather than
+    repaired.
+    """
+    return EpisodicMemory(
+        id=record_id,
+        content=content,
+        occurred_at=_WHEN,
+        participants=participants,
+        topics=topics,
+        about_person=about_person,
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=_WHEN),
+    )
+
+
+async def _prompts_over(
+    *records: MemoryRecord,
+    reply: str = _VALID_REPLY,
+    empty_reads: tuple[ReadAsk, ...] = (),
+) -> tuple[str, str]:
+    """The system and user turns the production assembler builds for one call."""
+    model = FakeModelProvider(reply)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+    await planner.plan(
+        _goal(),
+        context=_context(),
+        memories=list(records),
+        capabilities=_VOCABULARY,
+        empty_reads=empty_reads,
+    )
+    [call] = model.calls
+    return (
+        next(one.content for one in call.messages if one.role is Role.SYSTEM),
+        next(one.content for one in call.messages if one.role is Role.USER),
+    )
+
+
+# --- §13 item 12: a malformed member costs the ask and never the plan ---------
+
+
+@pytest.mark.parametrize(
+    "structured",
+    [
+        pytest.param({"start": "last week"}, id="unreadable_instant"),
+        pytest.param(
+            {"start": "2026-03-01T00:00:00+00:00", "end": "2026-02-01T00:00:00+00:00"},
+            id="inverted_window",
+        ),
+        pytest.param({"topics": ["Home Maintenance"]}, id="uncanonical_topic"),
+        pytest.param({"participants": []}, id="empty_sequence"),
+        pytest.param({"query": "the lease"}, id="no_axis_applied"),
+        pytest.param({"participants": "alex"}, id="not_a_list"),
+        pytest.param({"participants": [3]}, id="not_a_list_of_strings"),
+        pytest.param({"start": "2026-03-01T00:00:00+00:00", "colour": "blue"}, id="unknown_field"),
+    ],
+)
+async def test_a_malformed_structured_member_costs_the_ask_and_never_the_plan(
+    structured: dict[str, object],
+) -> None:
+    """ADR-0240 §3: dropped whole, logged, and the plan stands.
+
+    "Where any axis of a ``STRUCTURED_READ`` ask cannot be read as the model this
+    section fixes … the ask is dropped whole, the drop is logged as every other
+    unreadable ask already is, and the plan stands. **No implementation drops the
+    offending axis and services the rest.**" Dropping the whole ask is ADR-0228 §2's
+    last clause applied at the emitting seam: a read composed of *some* of the axes the
+    planner named is a different read, wider and wider in a direction nobody chose.
+    """
+    with structlog.testing.capture_logs() as captured:
+        plan = await _emitted(_envelope(structured=structured))
+
+    assert plan.read_request is None, "no partially-serviced read, and no axis of it"
+    assert [step.capability for step in plan.steps] == ["search_housing"], "the plan stands"
+    reasons = [event["reason"] for event in captured if event["event"] == _READ_REQUEST_DROPPED]
+    assert "unusable_structured" in reasons or "structured_not_an_object" in reasons
+
+
+@pytest.mark.parametrize(
+    ("structured", "described"),
+    [
+        pytest.param({"start": "2026-03-01T00:00:00+00:00"}, "start", id="start_only"),
+        pytest.param({"end": "2026-04-01T00:00:00+00:00"}, "end", id="end_only"),
+    ],
+)
+async def test_a_window_naming_one_endpoint_builds_an_ask(
+    structured: dict[str, object], described: str
+) -> None:
+    """ADR-0240 §3: "an absent endpoint is not a malformed one".
+
+    ADR-0237 §2 admits a window with either end unset — an unbounded side — and refuses
+    only the both-unset and the inverted cases, so *"everything since the first of
+    September"* is a window this ask carries and no implementation drops it for naming
+    one instant.
+    """
+    plan = await _emitted(_envelope(structured=structured))
+
+    request = plan.read_request
+    assert request is not None
+    [ask] = request.asks
+    assert ask.kind is ReadKind.STRUCTURED_READ
+    assert ask.structure is not None
+    assert ask.structure.applied() == ("window",)
+    assert getattr(ask.structure.window, described) is not None
+    assert getattr(ask.structure.window, "end" if described == "start" else "start") is None
+
+
+async def test_the_axes_are_carried_byte_for_byte_from_the_envelope() -> None:
+    """ADR-0240 §3: "a label is carried byte for byte from the planner to the store".
+
+    "No implementation trims, casefolds, normalises, strips, tokenises, truncates or
+    otherwise transforms a value on any axis at the planner seam or at the servicing
+    seam. Matching is ADR-0237 §3's and is the store's alone." Asserted with values
+    whose spelling a normaliser would move — a fold, a strip and a sort each have a
+    visible effect on this set.
+    """
+    plan = await _emitted(
+        _envelope(
+            structured={
+                "start": "2026-03-01T00:00:00+00:00",
+                "participants": ["Alex Q", "bea"],
+                "topics": ["home maintenance", "billing"],
+                "query": "  the lease  ",
+            }
+        )
+    )
+
+    request = plan.read_request
+    assert request is not None
+    [ask] = request.asks
+    assert ask.structure is not None
+    assert ask.structure.participants == ("Alex Q", "bea"), "no fold and no sort"
+    assert ask.structure.topics == ("home maintenance", "billing"), "no sort"
+    assert ask.query == "  the lease  ", "the query is carried as handed"
+
+
+# --- §13 item 13: the guidance is conditional and the values are visible ------
+
+
+async def test_no_label_axis_is_stated_where_no_episode_carries_one() -> None:
+    """ADR-0240 §9: the gate, asserted over the rendered prompt.
+
+    "The ``participants``, ``topics`` and ``about_person`` axes are described to the
+    planner only where at least one **episodic** record of the sequence the loop passed
+    on that call carries a value on that axis." The window half is unconditional —
+    every episode carries an ``occurred_at``, so it is always answerable — which is why
+    the ``structured`` member itself is stated here and its label axes are not.
+    """
+    system, _ = await _prompts_over(_preference(), _labelled("e1", "Ada: the boiler broke."))
+
+    assert '"structured"' in system, "the window axis is offered unconditionally"
+    assert '"participants"' not in system
+    assert '"topics"' not in system
+    assert '"about_person"' not in system
+
+
+async def test_a_belief_carrying_a_subject_opens_no_axis() -> None:
+    """ADR-0240 §9's second clause, over the mixed supply it exists for.
+
+    "A belief's value opens no axis, and the ground is that §4 confines this read to
+    episodes: a subject or a topic carried by a retrieved belief is a value this kind's
+    read can never match, so an invitation resting on one would offer an axis whose
+    every ask returns nothing." A gate reading the whole sequence fails exactly this
+    arm.
+    """
+    belief = SemanticMemory(
+        id="m2",
+        content="marta minds the boiler",
+        fact="marta minds the boiler",
+        about_person="marta",
+        topics=("home maintenance",),
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.8, last_updated=_WHEN),
+    )
+
+    system, _ = await _prompts_over(belief, _labelled("e1", "Ada: the boiler broke."))
+
+    assert '"about_person"' not in system, "no episode carries a subject"
+    assert '"topics"' not in system, "and none carries a topic"
+
+
+async def test_an_offered_axis_renders_the_values_that_opened_it_as_quoted_spans() -> None:
+    """ADR-0240 §9: the axis is offered **because** the value is on the page.
+
+    "Where an axis is offered, the values that opened it are rendered … as a quoted
+    span under ADR-0098 §2 exactly as the record's other spans already are, so the
+    planner can copy the stored spelling byte for byte." A ``TopicLabel`` is refused
+    rather than normalised, so an axis whose spelling the model had to guess would be
+    an axis whose every ask is dropped — and ``_render_record`` shows neither
+    ``participants`` nor ``topics``.
+
+    **Asserted with labels whose characters appear nowhere in either record's
+    ``content``**, which is the arm a renderer showing only ``content`` fails.
+    """
+    system, user = await _prompts_over(
+        _preference(),
+        _labelled("e1", "Ada: the thing broke.", participants=("quixotic-alex",)),
+        _labelled("e2", "Ada: the other thing.", topics=("stroopwafel",)),
+    )
+
+    assert '"participants"' in system
+    assert '"topics"' in system
+    assert '"about_person"' not in system, "no episode carries a subject"
+    assert '"quixotic-alex"' in user, "the stored spelling is on the page to copy"
+    assert '"stroopwafel"' in user
+    assert "who was involved:" in user
+    assert "filed under:" in user
+
+
+async def test_the_gate_governs_the_invitation_and_never_the_ask() -> None:
+    """ADR-0240 §9: an ask naming a label nothing in the supply carried is serviced.
+
+    "A ``STRUCTURED_READ`` naming a label no record of the supply carried is a valid
+    emission, is serviced, and is neither refused nor re-written: ADR-0226 §3 admits
+    the **user** as a namer, and a person the user named in this turn is a value the
+    planner may write whether or not the supply happens to show it." Nothing at this
+    seam filters an emission against the page it was rendered from.
+    """
+    plan = await _emitted(
+        _envelope(structured={"participants": ["nobody the supply showed"]}),
+        _preference(),
+    )
+
+    request = plan.read_request
+    assert request is not None
+    [ask] = request.asks
+    assert ask.structure is not None
+    assert ask.structure.participants == ("nobody the supply showed",)
+
+
+# --- §7: the empty-read carrier reaches the prompt ---------------------------
+
+
+async def test_an_empty_read_is_rendered_back_as_what_the_turn_already_asked() -> None:
+    """ADR-0240 §7: the planner's own prior composition, and nothing the store said.
+
+    "It can say what this turn already asked and that the store returned nothing for
+    it, and it cannot say how many records anything held, how much of the budget is
+    gone, or how long the turn has left." So the rendered block carries the ask's own
+    values as quoted spans and carries no count, no record and no instant of the read.
+    """
+    asked = ReadAsk(
+        kind=ReadKind.STRUCTURED_READ,
+        query="marmalade",
+        structure=StructuredAsk(
+            window=TimeWindow(start=_WHEN, end=datetime(2026, 4, 1, tzinfo=UTC)),
+            participants=("quixotic-alex",),
+            topics=("stroopwafel",),
+        ),
+    )
+
+    _, user = await _prompts_over(_preference(), empty_reads=(asked,))
+
+    assert "nothing at all came back" in user
+    assert '"quixotic-alex"' in user, "the planner's own composition, handed back"
+    assert '"stroopwafel"' in user
+    assert '"marmalade"' in user
+
+
+async def test_a_first_call_renders_no_empty_read_block_at_all() -> None:
+    """ADR-0240 §7: ``()`` means no read of this turn came back empty.
+
+    On a turn's first call the value is always ``()``, and the assembled prompt is then
+    byte-identical to what it is without ADR-0240's carrier — asserted as an equality
+    against the same call made with the parameter omitted entirely, which is what a
+    caller that knows nothing of it passes.
+    """
+    _, explicit = await _prompts_over(_preference(), empty_reads=())
+    model = FakeModelProvider(_VALID_REPLY)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+    await planner.plan(
+        _goal(), context=_context(), memories=[_preference()], capabilities=_VOCABULARY
+    )
+    [call] = model.calls
+    omitted = next(one.content for one in call.messages if one.role is Role.USER)
+
+    assert explicit == omitted
+    assert "nothing at all came back" not in explicit
+
+
+async def test_the_gate_is_computed_over_the_sequence_passed_on_that_call() -> None:
+    """ADR-0240 §12's second check: the gate is per call, not per turn.
+
+    "§9's gate is computed over the sequence the loop passed on **that** call, so a
+    revision's guidance reflects the supply the revision is planning over." ADR-0228 §8
+    binds ADR-0226 §3's label scheme per call for the same reason and the supply grows
+    across a turn — so a first call handed unlabelled episodes states no label axis, and
+    a second call handed a fourth group whose episode carries one does.
+    """
+    model = FakeModelProvider(_VALID_REPLY)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+    first: list[MemoryRecord] = [_preference(), _labelled("e1", "Ada: the thing broke.")]
+    serviced = _labelled("e2", "Ada: the other thing.", participants=("quixotic-alex",))
+
+    await planner.plan(_goal(), context=_context(), memories=first, capabilities=_VOCABULARY)
+    await planner.plan(
+        _goal(),
+        context=_context(),
+        memories=[*first, serviced],
+        capabilities=_VOCABULARY,
+        empty_reads=(),
+    )
+
+    opening, revision = (
+        next(one.content for one in call.messages if one.role is Role.SYSTEM)
+        for call in model.calls
+    )
+    assert '"participants"' not in opening, "no episode of the first call carried one"
+    assert '"participants"' in revision, "the fourth group's episode opens the axis"
