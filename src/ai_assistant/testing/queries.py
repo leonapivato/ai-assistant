@@ -50,6 +50,7 @@ from ai_assistant.testing.cancellation import SuspendableResource
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from ai_assistant.core.types import SearchSupply
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
 
 #: What this fake composes unless a test names something else. Distinctive enough
@@ -164,7 +165,18 @@ class FakeQueryComposer:
         #: arms — a test asserting that a refused composition reached no searcher
         #: still wants to see that the composer itself was called — so it is
         #: appended on entry.
+        #:
+        #: **Still the utterances and not the supplies**, though ADR-0238 §2 widened
+        #: what ``compose`` takes: this is the record ADR-0231 §18's test 4a reads to
+        #: assert that no supply value reached the searcher, and a list of supplies
+        #: would answer a different question. :attr:`supplies` beside it is the whole
+        #: value, for a consumer that needs the records.
         self.utterances: list[str] = []
+        #: Every supply this composer was handed, in call order — the whole value,
+        #: beside :attr:`utterances`. It is what lets a consumer's test assert *which*
+        #: records a servicing site put in front of a composer, which is the fact
+        #: ADR-0238 §2's two admissible populations turn on.
+        self.supplies: list[SearchSupply] = []
 
     @property
     def log(self) -> ResourceLog:
@@ -182,28 +194,37 @@ class FakeQueryComposer:
         """
         return self._resource.suspend_next()
 
-    async def compose(self, utterance: str, /) -> QueryOutcome:
-        """Return the scripted composition for ``utterance``, or its refusal.
+    async def compose(self, supply: SearchSupply, /) -> QueryOutcome:
+        """Return the scripted composition for ``supply``, or its refusal.
 
         **One positional parameter and no keyword parameters**, which is the clause
-        ADR-0231 §3's whole safety claim rests on and the one the conformance suite
-        checks against the runtime signature. This fake holds no store, no supply and
-        no listing — there is nothing else it *could* be handed.
+        the safety claim rests on and the one the conformance suite checks against the
+        runtime signature (ADR-0231 §3, kept by ADR-0238 §2). This fake holds no
+        store, no policy and no listing — there is nothing else it *could* be handed.
+
+        **Scripted by utterance, and the records are accepted and unused**, which
+        mirrors the production composer under the contract lane: a supply carrying
+        records and one carrying none compose identically. What the fake does record
+        is both — the utterance in :attr:`utterances` and the whole value in
+        :attr:`supplies` — so a consumer's test can assert which records a servicing
+        site put in front of a composer without this fake having to interpret them.
 
         Args:
-            utterance: The turn's own words.
+            supply: What this composition may be composed over.
 
         Returns:
-            The outcome scripted for this utterance: its refusal where one was
-            scripted, :attr:`QueryRefusal.TOO_LONG` where the scripted composition is
-            longer than this fake's bound, and otherwise that composition.
+            The outcome scripted for this supply's utterance: its refusal where one
+            was scripted, :attr:`QueryRefusal.TOO_LONG` where the scripted composition
+            is longer than this fake's bound, and otherwise that composition.
 
         Raises:
             CancelledError: Re-raised unchanged when a call armed by
                 :meth:`suspend_next` is cancelled from outside while suspended, and
                 converted into neither a query nor a refusal (ADR-0060, ADR-0231 §3).
         """
+        utterance = supply.utterance
         self.utterances.append(utterance)
+        self.supplies.append(supply)
         async with self._resource.held():
             refusal = self._refusals.get(utterance)
             if refusal is not None:

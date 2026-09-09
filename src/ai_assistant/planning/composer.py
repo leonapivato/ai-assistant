@@ -28,9 +28,19 @@ accounting by name.
 
 **Nothing here reads a store, and there is no parameter through which one could
 arrive.** This class holds a ``ModelProvider`` and a bound. It is handed one
-``str`` — see :class:`~ai_assistant.core.protocols.QueryComposer` for why that is the
-whole safety claim of the utterance-only route, and ADR-0231 §4 for why it keeps the
-query outside ADR-0155 §3.
+:class:`~ai_assistant.core.types.SearchSupply` — see
+:class:`~ai_assistant.core.protocols.QueryComposer` for why the safety claim now
+lives on that value rather than on the absence of a parameter (ADR-0238 §2).
+
+**Under this lane the supply's ``records`` are accepted and unused, deliberately.**
+ADR-0238's implementation was cut at its contract seam (ADR-0137 §2): this module
+adapts its *signature* here, and what a composed query does with a supply's records
+— the prompt that carries them, and every clause about what may be written over them
+— is the consumer lane's. So a supply with records and one without compose
+identically today, which is exactly `origin/main`'s behaviour and the reason this
+change moves no ratified property: with ``records`` empty, ADR-0231 §3's and §4's
+reasoning applies word for word, the utterance being a value this system received
+from its user and obtained from no store.
 """
 
 from __future__ import annotations
@@ -43,7 +53,7 @@ from ai_assistant.core.types import Message, QueryOutcome, QueryRefusal, Role, e
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import ModelProvider
-    from ai_assistant.core.types import NonBlankEncodableText
+    from ai_assistant.core.types import SearchSupply
 
 #: ADR-0231 §5's named default for ``search_query_max_chars``, written out here as
 #: ``readers/files.py`` writes ADR-0230 §6's five: a concrete implementation states
@@ -179,21 +189,26 @@ class ModelBackedQueryComposer:
         self._model = model
         self._max_chars = max_chars
 
-    async def compose(self, utterance: NonBlankEncodableText, /) -> QueryOutcome:
-        """Write the query for ``utterance``, or refuse (ADR-0231 §3).
+    async def compose(self, supply: SearchSupply, /) -> QueryOutcome:
+        """Write the query for ``supply``, or refuse (ADR-0238 §2, ADR-0231 §3).
 
-        One ``complete`` call, no repair round (§15). The utterance is the whole of
-        what reaches the prompt: no record, no supply, no context facet, no listing,
-        no plan, no rationale, no prior turn, no conversation tail and no episode —
-        there is no parameter through which one could arrive, which is the property
-        §4's argument rests on and ``tests/planning/test_composer.py`` asserts over
-        the messages the provider actually received.
+        One ``complete`` call, no repair round (ADR-0231 §15).
+
+        **Under this lane the supply's ``records`` are accepted and unused**, and the
+        prompt carries the utterance alone: no record, no context facet, no listing,
+        no plan, no rationale, no prior turn, no conversation tail and no episode
+        reaches it. ``tests/planning/test_composer.py`` asserts that over the messages
+        the provider actually received, including for a supply that *carries* records
+        — so this lane's claim is tested rather than promised, and the consumer lane
+        that widens the prompt has to change that test to do it.
 
         Each of the four refusals is **returned** and none is raised, so a non-yield
         is a value the audit can count and the turn can ignore.
 
         Args:
-            utterance: The unrewritten user text for the turn being planned.
+            supply: What this composition may be composed over (ADR-0238 §2). Every
+                member of its ``records`` is already placed for ``ANYONE``, refused at
+                construction otherwise, so there is nothing here to check.
 
         Returns:
             An outcome carrying the composed query, or the one reason none was
@@ -210,7 +225,10 @@ class ModelBackedQueryComposer:
         """
         conversation = [
             Message(role=Role.SYSTEM, content=_SYSTEM_PROMPT),
-            Message(role=Role.USER, content=f"{_UTTERANCE_HEADING}\n{json.dumps(utterance)}"),
+            Message(
+                role=Role.USER,
+                content=f"{_UTTERANCE_HEADING}\n{json.dumps(supply.utterance)}",
+            ),
         ]
         try:
             reply = await self._model.complete(conversation)

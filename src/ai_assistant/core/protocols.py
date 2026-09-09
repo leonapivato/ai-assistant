@@ -122,6 +122,7 @@ if TYPE_CHECKING:
         BeliefBand,
         BeliefSummary,
         BoundEgressCall,
+        CanonicalDestination,
         CarriedProvenance,
         Confirmation,
         ConflictRelation,
@@ -131,6 +132,7 @@ if TYPE_CHECKING:
         Conversation,
         ConversationDigest,
         ConversationExport,
+        ConversationSearchDraw,
         ConversationSummary,
         ConversationTurn,
         CurrentContext,
@@ -138,6 +140,8 @@ if TYPE_CHECKING:
         DeferralClaim,
         DeferralState,
         DeferredProposal,
+        DestinationTrust,
+        DestinationTrustRecord,
         DurableIdentifier,
         EgressBinding,
         Embedding,
@@ -185,6 +189,7 @@ if TYPE_CHECKING:
         ReplyChunk,
         RoutedOperationRecord,
         SearchOutcome,
+        SearchSupply,
         SecretName,
         SecretValue,
         ShownFile,
@@ -3161,50 +3166,72 @@ class Fetcher(Protocol):
 
 @runtime_checkable
 class QueryComposer(Protocol):
-    """Turns the turn's own utterance into one web-search query (ADR-0231 §3).
+    """Turns what a turn may be composed over into one web-search query (ADR-0238 §2).
 
-    The **composing** seam: it is handed the unrewritten user text for the turn
-    being planned, and it answers with the query a search would be made with, or
-    with the reason none was composed. Named for its product role, as every
-    Protocol here is: the role is *writing the question this turn would ask the
-    world*.
+    The **composing** seam: it is handed a
+    :class:`~ai_assistant.core.types.SearchSupply` for the turn being planned, and
+    it answers with the query a search would be made with, or with the reason none
+    was composed. Named for its product role, as every Protocol here is: the role is
+    *writing the question this turn would ask the world*.
 
-    **One member, one positional argument, and that is the safety claim.** The
-    whole claim of the utterance-only route is that *no store value is in view when
-    the query is written*, and a claim of that shape is worth exactly what makes it
-    true. Two things could: a rule that implementations must not pass records, or a
-    contract with no parameter for them. This corpus has already ruled which is
-    worth having — ADR-0093 §10 gave :meth:`Reader.read` no arguments *by decision*,
-    on the ground that "a caller able to widen the read is a caller able to defeat
-    the bound", and ADR-0230 §4 built the ``Fetcher`` bound the same way. So the
-    property here is **decidable from the signature**: an implementation that wanted
-    store content would have to acquire it out of band, which is a different defect
-    in a different place, and one a reviewer of ``planning/`` is looking straight at.
+    **One member, one positional argument, and that is still the safety claim — but
+    the claim now lives on the value** (ADR-0238 §2). ADR-0231 §3 gave this seam one
+    argument on ADR-0093 §10's ground, that "a caller able to widen the read is a
+    caller able to defeat the bound", so the property was decidable from the
+    declaration rather than kept by a rule. Widening what the one argument *carries*
+    does not weaken that argument; it **relocates** it, from the absence of a
+    parameter to the validator on the value. A caller holding a record placed for
+    anyone but ``ANYONE`` still has nothing to pass, because
+    :class:`~ai_assistant.core.types.SearchSupply` refuses it at construction. That
+    is ADR-0231 §3's mechanism surviving with only its content moved, which is the
+    whole of what ADR-0238 §2 does here.
 
-    **No later lane adds a parameter, a keyword, a second member, or a constructor
-    dependency on a store seam** (§3) — not a
-    :class:`~ai_assistant.core.types.MemoryRecord`, not a
-    :class:`MemoryStore`, not a :class:`ContextProvider`, not a
-    :class:`ConversationStore`, not a :class:`TranscriptArchive`, not any other.
-    The conformance suite checks the one-positional-parameter half against the
-    runtime signature, because it is the clause on which §3's safety claim rests for
-    **every** ``QueryComposer`` this system ever wires.
+    **Why one value rather than three parameters** (§2). Three parameters would put
+    the bound back in the caller's hands — a supply site that passed the right
+    records would be conforming and one that passed the wrong ones would be a defect
+    nobody could see from the signature. One validating value moves the whole
+    question to a place a reviewer reads once.
 
-    **What the argument is, and what it is not.** It is the turn's own utterance as
-    `orchestration` already holds it, and no implementation is passed — or may be
-    passed — a record, a supply, a context facet, a listing, a plan, a rationale, a
-    prior turn, a conversation tail, an episode, a capability set, or any value
-    obtained from a store under ``Settings.data_dir``. There is no parameter through
-    which one could arrive.
+    **The parameter stays positional-only and stays the only one, this stays a
+    single-member Protocol, and every other clause of ADR-0231 §3 binds entire and
+    unchanged** (ADR-0238 §2): no keyword, no second member, and no constructor
+    dependency on a store seam — not a :class:`MemoryStore`, not a
+    :class:`ContextProvider`, not a :class:`ConversationStore`, not a
+    :class:`TranscriptArchive`, not any other. A composer holds a
+    :class:`ModelProvider` and nothing else that reads, lives in
+    ``ai_assistant.planning``, and is reached by `orchestration` through this
+    Protocol and by no other route. The conformance suite checks the
+    one-positional-parameter half against the runtime signature, and restates it
+    over the new parameter type, because it is the clause the safety claim rests on
+    for **every** ``QueryComposer`` this system ever wires.
 
-    **Why that keeps the query outside ADR-0155 §3** (§4). That section defines
-    covered content as a value obtained from a store this system keeps under
-    ``Settings.data_dir``, and the output of any operation supplied covered content.
-    The utterance is a value this system **received from its user** and obtained
-    from no store, so the composer's model call is supplied no covered content and
-    its output is not covered content either — neither §3's second clause nor its
-    third has a subject. Nothing here relaxes, narrows or scopes any clause of
-    ADR-0155 §3, and no lane cites this Protocol toward the fork §3 reserves.
+    **What the argument is, and what it is not.** It is one
+    :class:`~ai_assistant.core.types.SearchSupply`, and no implementation is passed
+    — or may be passed — a context facet, a listing, a plan, a rationale, a prior
+    turn, a conversation tail, a capability set, or any *second* value at all. There
+    is no parameter through which one could arrive.
+
+    **Which supply a destination gets is decided by a recorded fact and never by a
+    judgement** (ADR-0238 §2). A supply carrying a non-empty ``records`` is
+    constructed only for a destination whose recorded trust is
+    :attr:`~ai_assistant.core.types.DestinationTrust.USER_CHOSEN`; where the
+    destination reads ``UNCHOSEN`` the supply carries the utterance and an empty
+    ``records``. That is a property of the **one construction site** ADR-0238 §2
+    fixes — ``service_read_request`` in `orchestration` — and not of this contract,
+    which is why a conforming composer is handed the same type either way.
+
+    **What this gives up, said plainly** (ADR-0238 §4). ADR-0231 §4's first clause —
+    "no component supplies a ``QueryComposer`` with covered content in ADR-0155 §3's
+    sense" — is **superseded** in terms, and ADR-0155 §3's third clause takes a
+    second exception beside ADR-0233 §9's. The replacement is *not* a new structural
+    claim: it is a destination the user chose by name, a per-conversation budget and
+    an audit. No lane reads this docstring as though the utterance-only property
+    survived a supply carrying records; what survives it is the per-record exclusion
+    above, which is a different and narrower guarantee. Where the supply's
+    ``records`` is empty — every destination on a tree with no recorded trust —
+    ADR-0231 §3's and §4's reasoning applies exactly as ratified, because the
+    utterance is a value this system received from its user and obtained from no
+    store.
 
     **A composer holds a ``ModelProvider`` and nothing else that reads** (§3). It
     may not hold a store, may not read a belief, and may not decide the fate of
@@ -3223,13 +3250,13 @@ class QueryComposer(Protocol):
     change under a suspended call.
     """
 
-    async def compose(self, utterance: NonBlankEncodableText, /) -> QueryOutcome:
-        """Write the query this turn would search with, or refuse to (ADR-0231 §3).
+    async def compose(self, supply: SearchSupply, /) -> QueryOutcome:
+        """Write the query this turn would search with, or refuse to (ADR-0238 §2).
 
-        **The parameter is positional-only, and that is a decision** (§3). No
-        keyword name of it exists for a caller to pass a second value under, and no
-        implementation may rename it into a wider one. It takes one positional
-        argument and no other.
+        **The parameter is positional-only, and that is a decision** (ADR-0231 §3,
+        kept by ADR-0238 §2). No keyword name of it exists for a caller to pass a
+        second value under, and no implementation may rename it into a wider one. It
+        takes one positional argument and no other.
 
         **A refusal is a return value and never an exception** (§3). Every member of
         :class:`~ai_assistant.core.types.QueryRefusal` is *returned*: a composer
@@ -3243,9 +3270,14 @@ class QueryComposer(Protocol):
         truncated** (§3), with :attr:`~ai_assistant.core.types.QueryRefusal.TOO_LONG`.
 
         Args:
-            utterance: The unrewritten user text for the turn being planned, as
-                `orchestration` holds it — non-blank and UTF-8-encodable. It is the
-                whole of what an implementation is given.
+            supply: What this composition may be composed over (ADR-0238 §2) — the
+                turn's unrewritten utterance and, for a destination of recorded
+                trust ``USER_CHOSEN``, the records it may draw on. Every member of
+                ``records`` is placed for
+                :attr:`~ai_assistant.core.types.PlacementReach.ANYONE`, refused at
+                construction otherwise, so an implementation is never handed an
+                excluded record and has nothing to check. It is the whole of what an
+                implementation is given.
 
         Returns:
             One outcome carrying a query **or** a refusal, never both and never
@@ -6576,6 +6608,245 @@ class RecipientGrantStore(Protocol):
 
 
 @runtime_checkable
+class DestinationTrustStore(Protocol):
+    """What the user said about the destinations they picked by name (ADR-0238 §1).
+
+    The **mirror** of the source side. #2096 keeps one fact per *source* — who may
+    write here — and this is the same rule read on the other axis: **who the user
+    picked to be told about**. One rule covers two milestones, so milestone 31's
+    provider and milestone 32's returned site are two values of it rather than two
+    boundaries.
+
+    **The fact it records is set by a recorded act of the user and by nothing else**
+    (§1). No configuration sets it, no connected account sets it, no operator
+    setting sets it, no tool declaration sets it, no :class:`RecipientGrant` sets it,
+    and **no model output ever sets it, raises it, or is consulted about it**. A
+    model may not propose a destination's trust, may not be shown a destination in
+    order to judge it, and no component infers the fact by inspecting a destination,
+    a host, a response, or any content whatever. That is ADR-0217 §3's precedence
+    read on the destination axis — the owner's act is final and a model may only
+    narrow — with the narrowing arm not granted here at all.
+
+    **Absence reads** :attr:`~ai_assistant.core.types.DestinationTrust.UNCHOSEN`, and
+    so does a revoked record and a record that cannot be read (§1). That is the
+    fail-closed direction, stated as ADR-0146 §2 states its own — "a span for which
+    no origin was recorded is **system-selected**" — for the same reason: the
+    permissive default is what makes an unimplemented path work and is therefore
+    precisely the state in which the rule would be false.
+
+    **Exactly five members and no more** (§1). No member is added, no argument
+    widened and no return changed by any later lane without the ADR that decides it.
+
+    **This store is not a field on a** :class:`RecipientGrant`, **and the two acts
+    are separate** (§1). A grant authorises *whether this system may talk to this
+    party*; a record here authorises *what class of payload this system may compose
+    for it*. A destination nobody chose has no grant to carry a field — milestone
+    32's subject is a site a provider returned — and ADR-0193 §5 is correct and is
+    left standing: "a grant states nothing about the payload and authorises no
+    content". So a grant established before this decision, or after it without the
+    second act, leaves its destination reading ``UNCHOSEN``, and **no component reads
+    the existence, breadth, age or liveness of a grant as evidence of trust**.
+
+    A **Tier 1 local store** (ADR-0004 §7): it holds facts about the user's own
+    recipients. So ADR-0004 §2's residency clause governs it — implementations
+    persist locally only, under ``Settings.data_dir`` and owner-only, and **none of
+    this is ever written to a remote service** (§1).
+
+    **Append-only, and a revocation is prospective** (§1, on ADR-0193 §9's shape). A
+    revocation takes effect for every later read and **rewrites no recorded
+    decision**; a destination whose record is revoked reads ``UNCHOSEN`` from that
+    moment. Ids and instants are supplied by the caller that records, as
+    :attr:`~ai_assistant.core.types.RecipientGrant.id` is: the record is a complete
+    value before it reaches any store, so the duplicate refusal is a comparison
+    rather than an allocation.
+
+    Cancelling any method here is governed by this module's cancellation clause
+    (ADR-0060). Its input-observation clause (ADR-0065) is **vacuous**, as it is for
+    :class:`RecipientGrantStore` and for the same reason: the one caller-owned
+    argument to a write is a
+    :class:`~ai_assistant.core.types.DestinationTrustRecord`, immutable all the way
+    down. What a caller *can* still do is write past the frozen model through
+    ``__dict__``, which is what :meth:`record`'s detachment obligation closes.
+    """
+
+    async def record(self, record: DestinationTrustRecord) -> str:
+        """Append ``record`` and return its id (ADR-0238 §1).
+
+        **Write-once**: re-recording an id already present raises rather than
+        overwriting, for :meth:`AuditTrail.record`'s reason — a store that upserts is
+        one where history can be rewritten by replaying a write.
+
+        **Atomic, and this is the clause that fails silently without it.** The
+        duplicate-``id`` check, the empty-set refusal, the duplicate-**live-set**
+        refusal and the append are **one operation, with no interleaving point
+        between them** — not a read followed by a write. Two engines over one data
+        directory each reading no live record over a destination set and each
+        appending would leave the store holding two, and the user's revocation of the
+        record they were shown would leave the other standing: §1's revocation clause
+        would then be false of the *store* rather than of any one record, and a
+        destination the user withdrew would keep reading ``USER_CHOSEN``. This is
+        :meth:`RecipientGrantStore.record`'s own obligation, read one store over, for
+        the reason that store gives for the same refusal — "revoking one would leave
+        the other standing and the user would have revoked nothing". **No caller-side
+        lock discharges it**, for the reason ADR-0074 §9 gives: the engine already
+        contemplates another engine over the same durable stores, so two engines hold
+        two locks and serialise nothing.
+
+        **The duplicate refusal is over the *live* set**, and the canonical ordering
+        of :attr:`~ai_assistant.core.types.DestinationTrustRecord.destinations` is
+        what makes it a comparison of *sets* rather than of tuples: ``(Alice, Bob)``
+        and ``(Bob, Alice)`` are unequal tuples over one logical set, and admitting
+        both is exactly the failure this refusal exists to prevent. The record's own
+        validator pins the spelling at construction, so this member compares and does
+        not re-canonicalise.
+
+        **Stores a detached, validated snapshot**, recursively over reachable state,
+        and never retains the caller's object. ``frozen=True`` refuses
+        ``record.destinations = …`` and does *not* refuse
+        ``record.__dict__["destinations"] = …``, so a store keeping the caller's
+        object would let a recorded act be **widened after it was appended**
+        (ADR-0018 §4, ADR-0021 §4).
+
+        **It reads no clock.** ``established_at`` is the caller's, as
+        :attr:`~ai_assistant.core.types.RecipientGrant.decided_at` is, and every rule
+        this member applies is a fact about two records.
+
+        Args:
+            record: The act to append. A record whose ``trust`` is ``UNCHOSEN`` is
+                unconstructable, so this member never meets one.
+
+        Returns:
+            The recorded id.
+
+        Raises:
+            InvalidDestinationTrustError: If the id is already recorded, if the
+                destination set is empty, if the destinations duplicate those of a
+                **live** record, if the record does not satisfy its own model, or if
+                the store cannot be written. Pydantic's ``ValidationError`` is
+                deliberately not allowed to escape.
+        """
+        ...
+
+    async def trust_of(self, destinations: Sequence[CanonicalDestination]) -> DestinationTrust:
+        """The recorded trust of ``destinations``, as one value (ADR-0238 §1).
+
+        **``USER_CHOSEN`` only where every member of the sequence is a member of some
+        one live record's** ``destinations``, and ``UNCHOSEN`` otherwise — including
+        for an **empty sequence**, for a partial match, and for a match spanning two
+        records.
+
+        **Coverage is a comparison of recorded values and is never an inference**
+        (§1). No implementation folds case, matches a domain, treats an account member
+        as covering a recipient member or the reverse, relates the two sets by
+        anything but membership, or re-canonicalises either side. A
+        :class:`~ai_assistant.core.types.CanonicalDestination` compares as it
+        compares — **every field, never across protocols**. That is ADR-0193 §3's
+        second clause restated over this store because the hazard is identical and
+        the store is a different one.
+
+        **The rule here is membership rather than order**, so no clause
+        re-canonicalises a caller's query sequence: the canonical ordering pinned on
+        the *record* is what :meth:`record`'s duplicate refusal needs, and it does
+        not reach this member.
+
+        **This member raises for no reason at all, and that is a clause** (§1). The
+        trust of a destination is ``UNCHOSEN`` "in every other case, including … where
+        a record cannot be read", so an implementation that cannot read answers
+        ``UNCHOSEN`` — the fail-closed direction — rather than raising into a policy
+        path. Reading a total function over a partial store is **not inference** in
+        ADR-0098 §1's sense: inference is deciding a fact by inspecting content, and
+        nothing here inspects anything.
+
+        Args:
+            destinations: The canonical destination set to ask about, as a request's
+                binding derived it. Order is immaterial; membership is the rule.
+
+        Returns:
+            :attr:`~ai_assistant.core.types.DestinationTrust.USER_CHOSEN` or
+            :attr:`~ai_assistant.core.types.DestinationTrust.UNCHOSEN`.
+        """
+        ...
+
+    async def revoke(self, record_id: str, revoked_at: datetime) -> None:
+        """Withdraw the record with ``record_id``, prospectively (ADR-0238 §1).
+
+        **Prospective and idempotent**: it takes effect for every later read,
+        **rewrites no recorded decision**, and revoking an already-revoked record is a
+        no-op that leaves the first instant standing rather than restamping it. From
+        that moment the destinations it named read ``UNCHOSEN``, unless another live
+        record covers them.
+
+        **The boundary is the read and it is not the send**, which is ADR-0193 §9's
+        boundary arrived at for ADR-0193 §9's reason (ADR-0238 §5). ``UNCHOSEN``
+        "from that moment" governs every read that *begins* after the revocation is
+        recorded; it is **not** a claim about work already past its read, and no
+        clause here says a revocation stops a request that has already read.
+
+        **The instant is the caller's and this member reads no clock**, as
+        :meth:`RecipientGrantStore.record` does not on its write path. A revocation is
+        never refused for its timestamp, including one that predates
+        ``established_at``: a host clock corrected backwards would otherwise make a
+        record permanently unrevokable.
+
+        Args:
+            record_id: The record to withdraw.
+            revoked_at: The instant of the user's act; timezone-aware.
+
+        Raises:
+            InvalidDestinationTrustError: If ``record_id`` names no record the store
+                holds, if ``revoked_at`` is not a usable instant, or if the store
+                cannot be written.
+        """
+        ...
+
+    async def live(self) -> list[DestinationTrustRecord]:
+        """Every record that is not revoked, in a stable order (ADR-0238 §1).
+
+        **The operating read, and the one a surface renders**: it is what lets a user
+        see and revoke what they granted. Ordered by ``established_at`` descending
+        with ``id`` ascending as the tie-break, for :meth:`AuditTrail.recent`'s
+        reason — "newest first" is ambiguous between insertion order and act time,
+        which disagree whenever records are appended out of order, and an ``id``
+        tie-break makes the order total rather than merely mostly determined.
+
+        **Complete or nothing**, and no implementation truncates, samples or elides: a
+        page of what the user authorised that read as complete while omitting an
+        authorisation would be lying to them about their own standing policy.
+
+        Returns:
+            A detached snapshot of every unrevoked record. An empty list means the
+            store holds none, **never** that it could not be read.
+
+        Raises:
+            InvalidDestinationTrustError: If the store cannot be read, or holds a
+                record that no longer validates.
+        """
+        ...
+
+    async def export(self) -> list[DestinationTrustRecord]:
+        """**Every** record, revoked ones included, in :meth:`live`'s order (§1).
+
+        **This member exists because the data right does.** ADR-0004 §6 gives the
+        owner their data, and ADR-0193 §1 already applies that to authorisation
+        records, live and revoked alike: a revoked record is the evidence that the
+        user once permitted a destination and then withdrew it, which is exactly what
+        an audit of one's own decisions is for. :meth:`live` is the operating read
+        and this is the right; **neither stands in for the other**, and an
+        implementation that delegated this to :meth:`live` would silently drop every
+        revoked record. The user-facing *layout* of an export stays the surface
+        lanes' (§14).
+
+        Returns:
+            A detached snapshot of every stored record.
+
+        Raises:
+            InvalidDestinationTrustError: If the store cannot be read, or holds a
+                record that no longer validates.
+        """
+        ...
+
+
+@runtime_checkable
 class SourceReadRecorder(Protocol):
     """Records that a source was read, and can answer nothing (ADR-0185 §4).
 
@@ -7898,6 +8169,188 @@ class ConversationStore(Protocol):
             nothing. ``False`` on absence is what makes the sweep idempotent: it
             can run any number of times, and a re-run after a successful drop is a
             no-op rather than an error.
+
+        Raises:
+            ConversationStoreError: If the store cannot be written.
+        """
+        ...
+
+    async def search_draw(self, conversation_id: str, /) -> ConversationSearchDraw | None:
+        """What this conversation has spent, and whether it is still clean (ADR-0238 §8).
+
+        The read half of the budget. **One indivisible read** of the counter and the
+        flag, so a caller never sees a draw assembled from two moments.
+
+        **``None`` for an id that names nothing and for a conversation stamped
+        deleted**, which is :meth:`get`'s own rule — "``None`` when the id names
+        nothing **or** names a conversation stamped deleted" — and ``None`` fails
+        ADR-0238 §5's recorded-half condition. An earlier revision of that section
+        needed a second limb, because a separate store could be *silent* about a
+        conversation that existed; this store cannot be silent about one, so the limb
+        is gone.
+
+        **It creates nothing.** For an unknown id, for a stamped conversation, and
+        after :meth:`drop_if_eligible` has removed the record, this answers ``None``
+        and afterwards still answers ``None``.
+
+        **A record written before ADR-0238 decodes with a zero draw and the flag
+        ``False``** (§8, §13) — ADR-0181 §12's reading of a pre-existing row, and the
+        fail-closed direction: this decision never observed such a conversation's
+        turns, so it may not report them clean. **No lane back-fills the field, infers
+        it from an episode, a log or a trail, or reads its absence as a clean
+        history.**
+
+        **It reads no ``Settings`` field and consults no clock.** That the store has a
+        clock of its own for :meth:`drop_if_eligible`'s grace is not a licence for
+        this one to read it.
+
+        Args:
+            conversation_id: Untrusted input from an adapter, treated as such.
+
+        Returns:
+            The draw, or ``None`` where the conversation is unknown or stamped.
+            ``None`` means exactly that and **never** that the store could not be
+            read.
+
+        Raises:
+            ConversationStoreError: If the store cannot be read, or a stored row is
+                corrupt.
+        """
+        ...
+
+    async def admit_search(
+        self, conversation_id: str, /, *, max_calls: int
+    ) -> ConversationSearchDraw | None:
+        """Admit or refuse the next search call against the ceiling (ADR-0238 §8).
+
+        **One atomic step: compare, increment, and answer.** Given a conversation and
+        the bound, it refuses where the stored ``calls`` have **reached**
+        ``max_calls``; otherwise it increments ``calls`` by one and answers the draw
+        **as it stands after the increment**. The read, the comparison and the write
+        are one indivisible step.
+
+        **There is no handle.** It returns no token, nothing is settled afterwards,
+        and no member of this store takes a claim, a charge, a deadline or an
+        interval. An earlier revision of ADR-0238 §8 carried all of that and it is
+        deleted rather than relocated.
+
+        **The atomicity is an obligation this store already carries, extended rather
+        than invented.** §9 rules that this store "owes per-conversation mutual
+        exclusion between an append and a deletion as a contract obligation … which
+        every implementation satisfies in its own way: an in-memory store with a
+        lock, a SQLite-backed one with a transaction, which is also what makes it
+        hold across processes". **The exclusion the increment needs is the exclusion
+        the record already owes**, and it is why concurrent turns, a failed turn and a
+        process exit are answered by one clause rather than three: **two turns of one
+        conversation, two servicings of one turn, and two engines over one data
+        directory can none of them be admitted against the same draw.** A caller-side
+        lock discharges none of it, for §9's own reason.
+
+        **The bound is passed in rather than read by the store**, so this member reads
+        no ``Settings`` field, consults no clock and holds no policy — every judgement
+        about what a bound *is* stays in `orchestration`. ``max_calls`` of **zero** is
+        legal and refuses every search, because the stored ``calls`` have already
+        reached it; an implementation guarding on the bound's truthiness admits at
+        zero and is wrong.
+
+        **An admitted call is consumed whatever the outcome, and there is no refund**
+        (§8). A servicing that is admitted and then does not transmit — a binding that
+        refused, a ruling that was not ``ALLOW``, a provider that rejected before or
+        after receiving the query — still spends its increment, and **no path lowers
+        ``calls``**. The increment is durable and taken **before** the call rather
+        than written at capture, so a ``PlanningError`` on a later revision cannot
+        erase a completed search's draw.
+
+        **It creates nothing, and that is** :meth:`append`'s **property rather than a
+        new one.** For an id that names nothing, and for one naming a conversation
+        stamped deleted, this answers ``None``. It **answers instead of raising** —
+        where :meth:`append` raises ``UnknownConversationError`` — because it is
+        reached by a servicing that may already have been in flight when the deletion
+        landed, and a user deleting a conversation should not turn a running turn into
+        an error.
+
+        **It does not consult the flag.** Admission is decided on ``calls`` and on
+        nothing else, and **no member of this store gates admission on the footing**.
+        The draw this returns is the value at the moment of admission and is
+        **not** ADR-0238 §5's recorded-half read: that section forbids carrying it
+        forward, and requires the flag to be read by :meth:`search_draw` at the moment
+        the request is built.
+
+        **No ``initial_footing``, and no argument on any member decides what the flag
+        starts at** (§8). An earlier revision passed a history fact in because this
+        member could create a row; it cannot, so there is nothing for such an argument
+        to be for, and **a lane that adds one has reintroduced the creation path that
+        clause removes.**
+
+        Args:
+            conversation_id: Untrusted input from an adapter, treated as such.
+            max_calls: The ceiling to compare against — a deployment's
+                ``Settings.search_calls_per_conversation``, supplied by the caller.
+                Non-negative.
+
+        Returns:
+            The draw after the increment where the call is admitted, or ``None``
+            where it is refused, where the id names nothing, or where the
+            conversation is stamped deleted. ``None`` never means the store could not
+            be read.
+
+        Raises:
+            ValueError: If ``max_calls`` is not a non-negative ``int``. Refused rather
+                than clamped, for :meth:`recent`'s reason: a bound that is not an
+                integer can *disable* the comparison rather than mis-size it.
+            ConversationStoreError: If the store cannot be written.
+        """
+        ...
+
+    async def observe_search(
+        self, conversation_id: str, /, *, all_external_user_chosen: bool
+    ) -> None:
+        """Fold the caller's value into the stored flag by logical **and** (ADR-0238 §8).
+
+        **The store folds; it does not compute.** `orchestration` decides whether
+        **every** recorded external span the turn carried was minted by a
+        ``WEB_SEARCH`` servicing at a destination of recorded trust ``USER_CHOSEN``,
+        from records it holds as data it fetched, and passes the answer here. This
+        member holds no policy, reads no ``Settings`` field and consults no clock.
+
+        **By ``and`` and by no other operation** (§8). **Once false the flag never
+        returns to true** — ADR-0106 §4's monotonicity read on this axis — which is
+        what keeps a conversation closed after the tainting episode has fallen out of
+        the tail (ADR-0223 §6's un-tainting, which ADR-0238 does not disturb). No lane
+        adds a member, a flag or a repair that raises it.
+
+        **Called twice per turn in the ordinary case, and the two agree.** The **early
+        fold** fires the moment `orchestration` admits to a turn a recorded external
+        span that was *not* so minted — whether or not that turn ever builds a search
+        request — and capture's fold remains, unchanged. The early one is *earlier,
+        not instead*, and it is why the flag goes false **as early as the fact
+        exists** rather than at the end of the turn.
+
+        **A half that reads *true* is never folded early** (§8): reporting a turn
+        clean stays capture's alone, because only capture sees the turn's *final*
+        supply. The early fold writes ``False`` and nothing else, it is idempotent,
+        and repeating it costs nothing.
+
+        **It creates nothing and raises nothing at the lifecycle edges** (§8). For an
+        id that names nothing, for a conversation stamped deleted, and after
+        :meth:`drop_if_eligible` has removed the record, this **does nothing and
+        raises nothing** — there is nothing for a late fold to resurrect, because the
+        budget is a property of the conversation record. Like :meth:`admit_search` it
+        answers instead of raising, and for the same reason: the fold may arrive from
+        a servicing that was already in flight when the deletion landed.
+
+        **Nothing here serialises two turns of one conversation** (§8). The store's
+        per-conversation exclusion serialises each member's own read-and-write, not
+        two turns' worth of work, and `orchestration` cannot fold a fact before it
+        holds it — so a :meth:`search_draw` concurrent with this single await can
+        still return the not-yet-lowered value. **A lane that reads any clause here as
+        an ordering obligation on the caller has misread that section**; there is no
+        such obligation, and none would be dischargeable.
+
+        Args:
+            conversation_id: Untrusted input from an adapter, treated as such.
+            all_external_user_chosen: The caller's computed value for one turn, folded
+                by ``and`` into what is stored.
 
         Raises:
             ConversationStoreError: If the store cannot be written.

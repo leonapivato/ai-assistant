@@ -1188,7 +1188,64 @@ from ai_assistant.wire.errors import (
 #: **This move covers the shape going forward and repairs nothing already
 #: released**, on the chain every entry above it is on: #1956's window stays open, and
 #: ADR-0240 §11 states in terms that this decision "neither repairs nor inherits" it.
-PROTOCOL_VERSION: Final[int] = 32
+#: **33 since ADR-0238 §13**, which gives
+#: :class:`~ai_assistant.core.types.EgressBinding` a **sixth** field, ``closed_loop``,
+#: and mirrors it onto :class:`~ai_assistant.core.types.CarriedProvenance` (§5). The
+#: ground is ADR-0124 §9's second limb and ADR-0178 §6's rule, and it is the entry at
+#: 29's exactly — ``AssistantEngine.recent_decisions`` and ``export_decisions`` return
+#: ``tuple[PermissionDecision, ...]`` across the wire (``wire/client.py``), a
+#: :class:`~ai_assistant.core.types.PermissionDecision` carries an ``EgressBinding``,
+#: and that binding's shape changed. ADR-0233's own entry gives the same ground for the
+#: same type one field earlier.
+#:
+#: **The number was read rather than assumed, and it is not the numeral ADR-0238 §13
+#: wrote.** That section says "``PROTOCOL_VERSION`` moves 31 → 32", written while the
+#: tree stood at 31; ADR-0240's lane moved it to 32 in between. The **substance** of
+#: §13's clause is the move and its ground — one more than the tree of the implementing
+#: lane's own day, with a log entry naming this ADR and the ``EgressBinding`` reason —
+#: so the constant moves 32 → 33 and the numeral is recorded here where it can be
+#: checked. ADR-0240 §11 anticipated exactly this in terms: "ADR-0238 has already
+#: scheduled ``PROTOCOL_VERSION`` 31 → 32 for a lane that may land before or after this
+#: one, and a numeral in a ratified ADR that the tree has moved past is the failure
+#: ADR-0226 §4's own successors had to correct".
+#:
+#: **The field's ``False`` default is why a peer one version behind still decodes what
+#: it is sent, and the move is owed because the shape changed rather than because
+#: anything breaks** (§13). It bites in the direction a default cannot cover:
+#: ``wire/codec.py``'s ``project`` renders a model with a bare ``model_dump()``, which
+#: **includes** a defaulted value rather than omitting it, so a version 33 hub emits
+#: ``closed_loop`` on every binding it carries and ``EgressBinding`` sets
+#: ``ConfigDict(extra="forbid", frozen=True)`` — a version 32 client fails
+#: ``extra_forbidden`` on the first recorded decision it is handed. In the other
+#: direction a version 32 hub emits no such field and a version 33 client takes the
+#: ``False`` default, which is the correct value for every binding that peer can have
+#: built.
+#:
+#: **The method set does not move and stands at fifty-four**, and ADR-0177 §1's browser
+#: enumeration does not move either and stands at thirty-one: ADR-0238 adds no method to
+#: the promoted ``AssistantEngine`` surface and no gateway route. The one **new**
+#: Protocol it adds, ``DestinationTrustStore``, is on neither promoted surface — it is a
+#: hub-side store the composition root constructs and nothing crosses the wire on
+#: account of it — and the three members it adds to ``ConversationStore``
+#: (``search_draw``, ``admit_search``, ``observe_search``) are in-process reads and
+#: writes no peer emits, so neither is a second ground for this bump.
+#:
+#: **No row is minted in ADR-0087 §2c's scalar table**: ``closed_loop`` is a ``bool``,
+#: which ``project`` already renders as itself, exactly as it renders
+#: ``planned_with_external_content`` on the same type. ``ConfirmationEgress`` gains no
+#: member and ``ConversationExport`` changes neither shape nor version (§13) —
+#: ``closed_loop`` is an authorisation-route fact rather than a fact about what would
+#: leave, and §8's counter and flag are the conversation store's own row state and
+#: appear on neither presented model — so ``ConversationExport.schema_version`` stays at
+#: **2** and ADR-0212 §8 and ADR-0014 §5 are untouched. Nothing else under ``wire/``
+#: changes: not the framing, the connect exchange, the frame kinds, the codec's
+#: dispatch, ``surface.METHODS`` or either adapter. The error registry is derived from
+#: ``core.errors`` and reaches ``InvalidDestinationTrustError`` with no edit.
+#:
+#: **This move covers the shape going forward and repairs nothing already released**,
+#: on the chain every entry above it is on: #1956's window stays open, and this entry
+#: neither repairs it nor inherits it.
+PROTOCOL_VERSION: Final[int] = 33
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

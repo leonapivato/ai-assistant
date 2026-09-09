@@ -1440,6 +1440,48 @@ class DuplicateRecipientGrantError(InvalidRecipientGrantError):
     """
 
 
+class InvalidDestinationTrustError(AssistantError):
+    """A destination-trust store refused a record, or could not answer (ADR-0238 §1).
+
+    Raised by :meth:`~ai_assistant.core.protocols.DestinationTrustStore.record` — a
+    duplicate id (the store is write-once), an empty destination set, a record
+    duplicating a **live** record's destination set, or a record that does not
+    satisfy its own model — and by
+    :meth:`~ai_assistant.core.protocols.DestinationTrustStore.revoke` for an unknown
+    id. It is the class ADR-0238 §1 names, "beside
+    :class:`InvalidRecipientGrantError`", and it sits beside it here.
+
+    **One class, and ADR-0238 §13 is why there is not a second.** That section closes
+    this decision's ``core/errors.py`` surface at exactly this name, so there is no
+    ``DestinationTrustError`` base for a store fault to take. The class therefore
+    covers both grounds — a refusal, and a read or write this store could not
+    perform on :meth:`~ai_assistant.core.protocols.DestinationTrustStore.record`,
+    :meth:`~ai_assistant.core.protocols.DestinationTrustStore.revoke`,
+    :meth:`~ai_assistant.core.protocols.DestinationTrustStore.live` and
+    :meth:`~ai_assistant.core.protocols.DestinationTrustStore.export` — which is
+    :class:`InvalidRecipientGrantError`'s own stated reason for one class rather than
+    several, read one store over: the caller's recourse is identical in every case,
+    so a family would be several names for one response.
+
+    **:meth:`~ai_assistant.core.protocols.DestinationTrustStore.trust_of` raises
+    nothing, and that is a clause rather than an omission.** ADR-0238 §1 rules the
+    trust of a destination ``UNCHOSEN`` "in every other case, including where no
+    record exists, where a record was revoked, and **where a record cannot be
+    read**". So the one read a policy path depends on fails *closed* by answering
+    rather than by raising, and there is no fault for it to report.
+
+    **A duplicate is refused over the *live* set, and the refusal is atomic with the
+    append** (§1). Two engines over one data directory each reading no live record
+    over a destination set and each appending would leave the store holding two, and
+    the user's revocation of the record they were shown would leave the other
+    standing — so §1's revocation clause would be false of the *store* rather than of
+    any one record. That is
+    :meth:`~ai_assistant.core.protocols.RecipientGrantStore.record`'s own obligation,
+    for the reason that store gives for the same refusal: "revoking one would leave
+    the other standing and the user would have revoked nothing".
+    """
+
+
 class UngrantableActError(AssistantError):
     """The establishing act was refused before any answer was recorded (ADR-0235 §3).
 

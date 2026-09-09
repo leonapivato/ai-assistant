@@ -87,6 +87,7 @@ from ai_assistant.orchestration import (
 from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
 from ai_assistant.permissions import (
     SqliteAuditTrail,
+    SqliteDestinationTrustStore,
     SqliteRecipientGrantStore,
     SqliteRoutingTrail,
     SqliteSourceGrantStore,
@@ -702,6 +703,30 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             max_outstanding=settings.recipient_grant_max_outstanding,
         )
         opened.append(recipient_grants.close)
+        # **ADR-0238 §1's destination-trust store, constructed here and wired
+        # nowhere yet.** §14 makes this root "the only place the concrete store is
+        # constructed", and the servicing site that reads it is the consumer lane's
+        # (ADR-0137 §2's seam cut). It is built rather than deferred so that the file
+        # is created, opened and closed on every start from the first release that
+        # carries the contract — a store whose schema first appears on the day a
+        # consumer needs it is a migration nobody has run.
+        #
+        # **It holds no records on this tree and it is meant not to** (ADR-0238's exit
+        # note). The fact §1 records is set by a **user act**, §14 defers the surface
+        # offering that act to ADR-0177, ADR-0178 and ADR-0186, and until one of those
+        # exists there is nothing to perform the act with. So no destination reads
+        # ``USER_CHOSEN``, no request is closed-loop, and every supersession ADR-0238
+        # makes has no live subject here: the mechanism is legible and inert, exactly
+        # the posture ADR-0231 §9 recorded for the search itself.
+        #
+        # **No ceiling and no clock reach the constructor**, unlike the grant store
+        # above: ADR-0238 §1 gives this record no expiry and no count bound, so
+        # liveness here is "not revoked" rather than an interval and there is nothing
+        # for a deployment to configure.
+        destination_trust = SqliteDestinationTrustStore(
+            path=directory / "destination_trust.db",
+        )
+        opened.append(destination_trust.close)
         # **The sole reader of ADR-0194 §1's four spend settings, and of the fifth
         # this mechanism depends on** (ADR-0194 §5, §11). The store takes explicit
         # values and never a `Settings` read, so this is the one place the two
