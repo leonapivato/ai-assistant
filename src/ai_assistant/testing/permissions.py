@@ -137,7 +137,8 @@ def _check_standing_shape(decision: PermissionDecision) -> None:
         InvalidAuthorisationError: If a **resolving** ``ALLOW`` carries an
             ``authorised_subject``; or if a route-(b) egress decision's binding
             records no origin, records that the call was planned over external
-            content, or carries no ``authorised_subject`` to check.
+            content **without recording that it was closed-loop** (ADR-0238 §6), or
+            carries no ``authorised_subject`` to check.
     """
     ruling = decision.ruling
     if decision.resolves is not None:
@@ -159,7 +160,14 @@ def _check_standing_shape(decision: PermissionDecision) -> None:
             f"covers such a call (ADR-0193 §2, §6)"
         )
         raise InvalidAuthorisationError(msg)
-    if binding.planned_with_external_content:
+    if binding.planned_with_external_content and not binding.closed_loop:
+        # ADR-0238 §6's supersession of ADR-0193 §6's eighth-check clause, in the same
+        # one limb and the same one scope the concrete trail applies it in: the seventh
+        # limb becomes "``planned_with_external_content`` is ``False``, **or**
+        # ``closed_loop`` is ``True``", and the other seven are untouched. The fake and
+        # the store state one rule, so a conformance case cannot pass here and fail
+        # there. **The ``OriginUnrecordedBinding`` arm above still refuses by name**: it
+        # carries no ``closed_loop``, so it never reaches this line.
         msg = (
             f"decision {decision.id!r} rests on a standing authorisation but records a "
             f"call planned over external content; route (a) — a decision of the user "
@@ -333,7 +341,14 @@ class FakeActionPolicy:
         The last clause is ADR-0181 §5's and is not configurable: a request whose
         binding carries ``planned_with_external_content`` gets no ``ALLOW``, because
         ADR-0148 §3's route (a) — the user's own answer about *this* request — is
-        unavailable to a member holding no resolution. It is monotone like the rest
+        unavailable to a member holding no resolution.
+
+        **ADR-0238 §6 adds no branch here, and that is the section read rather than
+        skipped.** What §6 moves is whether route **(b)** is reachable for a
+        closed-loop request; this fake holds no ``RecipientGrants``, reaches route (b)
+        for no request of any kind, and so has no ``ALLOW`` for the exception to open.
+        A closed-loop request ruled by this fake is a ``CONFIRM``, which is exactly what
+        ADR-0021 §3 requires of a policy with no authorisation source. It is monotone like the rest
         (a step function of one field of the request, combined by maximum), so the
         knobs still cannot configure this fake out of conformance. A request whose
         binding carries ``False``, or which carries no binding, is judged on the

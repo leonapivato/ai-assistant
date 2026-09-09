@@ -447,10 +447,17 @@ class _Turns:
     started: bool = False
 
     async def respond(self, utterance: str, **kwargs: Any) -> RespondedTurn:
-        """Begin the conversation once, then run one turn of it."""
+        """Begin the conversation once, then run one turn of it.
+
+        Begun **here** only where a case has not begun it already: ``_admitted`` exists
+        for the cases that drive the servicing site directly, and a store whose id
+        factory is fixed refuses a second ``start`` rather than minting a twin
+        (ADR-0074 §1's collision budget), which is the store being right.
+        """
         if not self.started:
             self.started = True
-            await self.footing.conversations.start()
+            if await self.footing.conversations.get(self.footing.conversation_id) is None:
+                await self.footing.conversations.start()
         return await self.loop.respond(
             utterance, conversation_id=self.footing.conversation_id, **kwargs
         )

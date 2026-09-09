@@ -30,12 +30,18 @@ import pytest
 
 from ai_assistant.app import build_engine
 from ai_assistant.app import composition as composition_module
+from ai_assistant.app.composition import _search_destinations
 from ai_assistant.core.config import EmbedderKind, Settings
-from ai_assistant.core.types import CostBasis
+from ai_assistant.core.types import CanonicalDestination, CostBasis, DestinationProtocol
 from ai_assistant.tools import WebSearchIntegration, build_web_search_integration
 from ai_assistant.tools.egress import StreamOutboundTransport, WebSearchTransport
 from ai_assistant.tools.egress_binder import EgressBindingSeam
-from ai_assistant.tools.web_search import WEB_SEARCH, WEB_SEARCH_ID, WebSearchEgress
+from ai_assistant.tools.web_search import (
+    ORIGIN_ARGUMENT,
+    WEB_SEARCH,
+    WEB_SEARCH_ID,
+    WebSearchEgress,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -364,3 +370,64 @@ async def test_a_cost_pair_with_no_search_account_is_refused_at_settings_load() 
             web_search_cost_per_call=FIGURE,
             web_search_cost_currency=CODE,
         )
+
+
+async def test_the_root_derives_the_destination_set_the_seam_would_bind_to(
+    tmp_path: Path,
+) -> None:
+    """ADR-0238 §2's pre-composition read, and the drift it would otherwise open.
+
+    §2 obliges the search servicing site to read a destination's recorded trust
+    **before** the supply is built, and at that instant no request and so no binding
+    exists: ``WebSearcher`` has no destination member and ADR-0238 §13 gives it none. So
+    ``app.composition`` derives the set from ``Settings.web_search_origin``, and the
+    hazard that creates is a second statement of ADR-0148 §2's rule — a root that
+    canonicalised differently from the seam would read the trust of a destination no
+    binding ever carries, and every search would silently fail the second closed-loop
+    condition.
+
+    ``canonical_destination`` is what closes it: **one** implementation, called by the
+    root and by :meth:`EgressBindingSeam._occurrence` alike. This case asserts the two
+    agree over the same origin the searcher's transport is built from, against the
+    occurrence the **real seam** derives from the **real declaration** — so a lane that
+    gave the root a canonicaliser of its own fails here rather than in production.
+    """
+    engine = build_engine(_settings(configured=True), data_dir=tmp_path)
+    try:
+        seam = engine._runner._binder
+        assert isinstance(seam, EgressBindingSeam)
+        occurrence = seam._occurrence(
+            seam._declaration(WEB_SEARCH),
+            ORIGIN_ARGUMENT,
+            None,
+            DestinationProtocol.HTTPS,
+            SEARCH_ORIGIN,
+        )
+    finally:
+        await engine.aclose()
+
+    assert _search_destinations(SEARCH_ORIGIN) == (
+        CanonicalDestination(protocol=occurrence.protocol, canonical=occurrence.canonical),
+    ), "the root's member is the one the seam's own occurrence deduplicates into"
+
+
+async def test_a_deployment_that_connected_no_account_has_an_empty_destination_set() -> None:
+    """ADR-0238 §1's empty-sequence answer, read as the wiring it is rather than a case.
+
+    "``UNCHOSEN`` for an empty sequence" — so a deployment with no search account needs
+    no branch anywhere downstream: its footing reads ``UNCHOSEN``, its supply carries the
+    utterance alone, and it holds no ``SearchServicer`` to service anything with.
+    """
+    assert _search_destinations(None) == ()
+
+
+async def test_an_origin_with_no_canonical_form_leaves_the_set_empty() -> None:
+    """The refusal is answered rather than raised, and the direction is fail-closed.
+
+    A composition root that raised here would take the whole process down for a search
+    the seam would refuse anyway — ADR-0148 §1's third clause refuses such a call before
+    the ruling. Answering the empty set instead means the destination reads ``UNCHOSEN``,
+    which is the restrictive value: nothing composes over records and no request is
+    closed-loop.
+    """
+    assert _search_destinations("not an origin at all") == ()

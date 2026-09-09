@@ -588,6 +588,7 @@ class FakeEgressBinder:
             carried.spans,
             carried.planned_with_external_content,
             carried.coverage,
+            carried.closed_loop,
         )
         self._refuse_unlocated(binding, carried.spans)
         return self._pair(binding, checked, arguments)
@@ -645,6 +646,11 @@ class FakeEgressBinder:
             # ADR-0233 §4's sixth clause, one field over from the clause above and
             # for its reason: transcribed from ``approved``, never re-derived.
             was.coverage,
+            # ADR-0238 §5: **not** transcribed, and the default is the correct value for
+            # every request that can resume — a ``CONFIRM`` on a ``WEB_SEARCH`` decision
+            # "resolves in no turn" (ADR-0231 §9), so no closed-loop request is ever
+            # resumed. This keeps ADR-0152 §7's transcription count at the three above.
+            False,
         )
         if binding != was:
             msg = (
@@ -855,13 +861,16 @@ class FakeEgressBinder:
         provenance: Mapping[EgressSpanLocator, DiscloserProvenance],
         planned_with_external_content: bool,
         coverage: SpanCoverage,
+        closed_loop: bool,
     ) -> EgressBinding:
         """Derive every field of the binding from the declaration and the arguments.
 
-        Three members are **carried** rather than derived and each arrives resolved:
+        Four members are **carried** rather than derived and each arrives resolved:
         each span's ``provenance`` (ADR-0146 §2), the call's
-        ``planned_with_external_content`` (ADR-0181 §3, §4) and its ``coverage``
-        (ADR-0233 §4, §5). Nothing here computes, infers or defaults any of them,
+        ``planned_with_external_content`` (ADR-0181 §3, §4), its ``coverage``
+        (ADR-0233 §4, §5) and its ``closed_loop`` (ADR-0238 §5 — "the seam writes the
+        binding's value from the carrier's unchanged", and this seam holds none of the
+        four conditions behind it). Nothing here computes, infers or defaults any of them,
         and a ``PATH_WITHOUT_MODEL`` coverage is refused by the construction below
         rather than by a check of this fake's own (ADR-0233 §6).
         """
@@ -901,6 +910,7 @@ class FakeEgressBinder:
                 transport_endpoint=registration.transport_endpoint,
                 planned_with_external_content=planned_with_external_content,
                 coverage=coverage,
+                closed_loop=closed_loop,
             )
         except ValidationError as exc:
             msg = (
