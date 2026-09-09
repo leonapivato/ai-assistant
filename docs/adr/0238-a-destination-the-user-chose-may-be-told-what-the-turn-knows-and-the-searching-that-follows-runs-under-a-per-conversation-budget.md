@@ -104,6 +104,13 @@
   InvalidDestinationTrustError`, no check is moved, and no atomicity is weakened. What moved is
   the refusal's type and nothing else.
 
+  **What follows for the triad is two conformance arms and nothing more.** §14's *"One new
+  Protocol, and it ships as a triad"* binds entire and this ADR's lane ships it; ADR-0242 §13
+  makes the lane implementing *that* ADR a **second** contributor to the same suite, adding one
+  arm that `record` raises the subclass on the duplicate-live-set ground and one that it raises
+  the base class unchanged on the other two. No member is added, no argument widened, no return
+  changed, and no check moved out of `record`'s atomic operation.
+
   **Everything else in §1 stands entire and ADR-0242 relies on it throughout** — the
   two-member vocabulary, the fail-closed absence, *"set by a recorded act of the user and by
   nothing else"* with its bar on every model, the record's five fields, ADR-0193 §1's
