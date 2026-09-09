@@ -1,6 +1,6 @@
 # 240. The planner asks by window and by label, and an empty structured read sends it back to plan
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-08
 - **Partially supersedes**
   [ADR-0228](0228-a-serviced-read-may-revise-the-plan-once-and-the-turn-stops-looking-at-a-bound-or-a-deadline.md)
