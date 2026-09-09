@@ -315,7 +315,7 @@
   would be had the planner asked for nothing. ADR-0228 §10's carrier is stated over a turn
   that stopped at the bound or the budget and is neither widened, re-used nor read as covering
   this case."* ADR-0242 §6 gives the composing stage a second carrier — one member of a
-  closed seven-member vocabulary, on a turn in which at least one search servicing did not
+  closed vocabulary ADR-0242 §8 fixes, on a turn in which at least one search servicing did not
   reach a result — so a reader holding only this ADR would assert a byte-identity that no
   longer holds. That is ADR-0070 §1's test on the supersession side, and §3's partial form is
   the sanctioned tool.
