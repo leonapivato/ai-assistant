@@ -25,6 +25,7 @@ from test_engine_routing import _UTTERANCE, _parked, _routed_harness, _seed_beli
 from ai_assistant.core.errors import TranscriptArchiveError
 from ai_assistant.core.types import (
     ExchangeDisposition,
+    ReadAsk,
     SpokenAudio,
     SpokenAudioFormat,
     TranscriptEntry,
@@ -74,7 +75,7 @@ class RecordingPlanner:
     def __init__(self) -> None:
         self.shown: list[tuple[Goal, CurrentContext, Sequence[MemoryRecord]]] = []
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -82,6 +83,7 @@ class RecordingPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         from ai_assistant.core.types import ActionPlan  # noqa: PLC0415 — a fake's own import
 

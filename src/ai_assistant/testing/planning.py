@@ -53,6 +53,7 @@ if TYPE_CHECKING:
         CurrentContext,
         Goal,
         MemoryRecord,
+        ReadAsk,
         ReadRequest,
         ShownFile,
         StepTransition,
@@ -162,6 +163,27 @@ class FakePlanner:
     audit exists to count and which a filtering fake would put out of a consumer's
     reach.
 
+    **It records ADR-0240 §7's carrier and reads nothing into it either.**
+    ``empty_reads`` joins :attr:`calls` as a **sixth** element, so a consumer's test can
+    assert what the planner was *told* — that a turn's first call was handed ``()``,
+    that a second call was handed the very ask the first plan emitted byte for byte, and
+    that a read the budget did not reach, one the supply's shape blocked, one merely
+    deduplicated away and a failed servicing each leave it empty — without standing a
+    model up. Nothing here renders it, and nothing here changes what the fake returns on
+    account of it: what a planner makes of the fact is an implementation's business, and
+    §7's own clause is that "an implementation that accepts it and ignores its value
+    means exactly what it meant".
+
+    **A ``STRUCTURED_READ`` ask needs nothing of this fake but the existing hook**
+    (ADR-0240 §2). A consumer drives a structured turn by scripting
+    ``read_request=ReadRequest(asks=(ReadAsk(kind=ReadKind.STRUCTURED_READ,
+    structure=StructuredAsk(window=TimeWindow(start=...))),))``, and the emission is
+    passed through unfiltered exactly as an ``M`` label or an ``F`` entry is: this fake
+    checks no axis against ``memories``, so a scripted ask naming a label nothing in the
+    supply carried is emitted and serviced, which is ADR-0240 §9's clause that "the
+    condition governs the invitation and never the ask" left reachable from a
+    consumer's tests.
+
     **A ``WEB_SEARCH`` ask needs nothing of this fake but the same hook** (ADR-0231
     §1). The kind carries no argument, so a consumer drives a searching turn by
     scripting ``read_request=ReadRequest(asks=(ReadAsk(kind=ReadKind.WEB_SEARCH),))``
@@ -237,10 +259,13 @@ class FakePlanner:
         #: one per entry in the listing's own order", which is a fact about the
         #: **call** and about no return value.
         #:
-        #: **A fifth element rather than a second attribute**, so the five facts of one
+        #: **One element per fact rather than a second attribute**, so the facts of one
         #: call cannot come apart: a parallel list is one `append` away from recording
         #: a listing against the wrong call, and every consumer already reads this by
-        #: index.
+        #: index. The sixth is ADR-0240 §7's ``empty_reads``, recorded for the reason
+        #: the fifth is: §7 states a property of the **call** — that the second one
+        #: receives the very ask the first plan emitted, byte for byte, and nothing the
+        #: store returned — which is a fact about no return value.
         self.calls: list[
             tuple[
                 Goal,
@@ -248,6 +273,7 @@ class FakePlanner:
                 tuple[MemoryRecord, ...],
                 tuple[str, ...],
                 tuple[ShownFile, ...],
+                tuple[ReadAsk, ...],
             ]
         ] = []
 
@@ -269,7 +295,7 @@ class FakePlanner:
         except ClockReadingError as exc:
             raise PlanningError(str(exc)) from exc
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the goal plus one keyword per thing the pipeline assembled before planning, as the Protocol declares them; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -277,6 +303,7 @@ class FakePlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         """Return the scripted plan, recording the arguments it was given.
 
@@ -328,8 +355,25 @@ class FakePlanner:
                 is legal, means no file is nameable, and changes nothing about what
                 this fake returns. Frozen into a tuple, so a caller mutating the
                 sequence it passed cannot rewrite what this records.
+            empty_reads: The asks of this turn's already-serviced reads that came back
+                empty (ADR-0240 §7). Recorded and **not acted on**, for ``files``' own
+                reason: what a planner makes of the fact is an implementation's
+                business, and a fake that broadened its own scripted ask on account of
+                it would be a fake with an opinion the contract leaves to an
+                implementation — and would put ADR-0228 §2's last clause, that no
+                implementation widens a request, out of a consumer's reach. Empty is
+                legal and is every first call. Frozen into a tuple, as the others are.
         """
-        self.calls.append((goal, context, tuple(memories), tuple(capabilities), tuple(files)))
+        self.calls.append(
+            (
+                goal,
+                context,
+                tuple(memories),
+                tuple(capabilities),
+                tuple(files),
+                tuple(empty_reads),
+            )
+        )
         ordinal = len(self.calls)
         if self._revision is not None:
             if ordinal > _CALLS_PER_TURN:

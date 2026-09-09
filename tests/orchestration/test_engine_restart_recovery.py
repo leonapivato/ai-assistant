@@ -31,6 +31,7 @@ from ai_assistant.core.types import (
     Disposition,
     Idempotency,
     PlanStep,
+    ReadAsk,
     Reversibility,
     RiskLevel,
     SkipReason,
@@ -221,7 +222,7 @@ def _egress_binder(tool: ToolDefinition) -> FakeEgressBinder:
 class _OneStepPlanner:
     """Plans exactly one confirmable step for the goal it is given."""
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -229,6 +230,7 @@ class _OneStepPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         step = PlanStep(
             id="step-1", intent="send the note", capability=CAPABILITY, parameters=PARAMETERS

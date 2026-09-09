@@ -593,7 +593,7 @@ class _FetchingOneStepPlanner(OneStepPlanner):
     ADR-0230 §14 item 10 asserts would be indistinguishable from the first turn's own.
     """
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -601,6 +601,7 @@ class _FetchingOneStepPlanner(OneStepPlanner):
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         """Answer the base plan, carrying a ``LOCAL_FILE`` ask the first time only."""
         first = self._calls == 0

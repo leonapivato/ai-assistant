@@ -87,6 +87,7 @@ from ai_assistant.core.types import (
     PlacementSetter,
     PlanStep,
     Provenance,
+    ReadAsk,
     Reversibility,
     RiskLevel,
     Role,
@@ -263,7 +264,7 @@ class _OneStepPlanner:
     the id the loop minted, so the façade's ``save_plan`` finds its goal.
     """
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -271,6 +272,7 @@ class _OneStepPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         """Return a one-step plan for the goal."""
         step = PlanStep(
@@ -287,7 +289,7 @@ class _NoStepPlanner:
     binding free of a permission fixture it would otherwise have to carry.
     """
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -295,6 +297,7 @@ class _NoStepPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         """Return an empty plan for the goal."""
         return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(), created_at=AT)

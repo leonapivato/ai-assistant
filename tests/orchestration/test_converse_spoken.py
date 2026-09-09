@@ -42,6 +42,7 @@ from ai_assistant.core.types import (
     MemoryWrite,
     MemoryWriteMode,
     Provenance,
+    ReadAsk,
     RoutableOperation,
     SemanticMemory,
     SpeechFailure,
@@ -1101,7 +1102,7 @@ def test_a_frozenset_of_formats_has_no_wire_form() -> None:
 class _RaisingPlanner:
     """A ``Planner`` whose plan fails, so the turn raises rather than degrading."""
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -1109,6 +1110,7 @@ class _RaisingPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         """Raise ``PlanningError``, which is one of ``converse``'s declared failures."""
         del goal, context, memories, capabilities

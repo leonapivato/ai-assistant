@@ -35,6 +35,8 @@ from ai_assistant.core.types import (
     StepFailure,
     StepStatus,
     StepTransition,
+    StructuredAsk,
+    TimeWindow,
     ToolFailureKind,
 )
 
@@ -952,14 +954,19 @@ def test_a_request_naming_two_web_search_asks_is_refused() -> None:
         ReadRequest(asks=(ask, ask))
 
 
-def test_a_request_may_carry_a_web_search_ask_beside_every_other_kind() -> None:
-    """The widest emission the envelope now admits: four kinds, one of each.
+def test_a_request_may_carry_one_ask_of_every_kind_the_enumeration_admits() -> None:
+    """The widest emission the envelope now admits: one ask of every kind.
 
-    ADR-0231 §1 makes the kind *additive* rather than exclusive — it "adds no second
-    request object, no second servicing site, no second budget and no second audit" —
-    so a plan may ask for a search beside the three reads that stay inside this
-    system. This is the arm that fails on a validator reading ``WEB_SEARCH`` as an
-    alternative to the others rather than as a fourth member.
+    ADR-0231 §1 and ADR-0240 §1 each make their kind *additive* rather than exclusive
+    — neither "adds a second request object, a second servicing site, a second budget
+    or a second audit" — so a plan may ask for a search and a structured read beside
+    the three reads that were there before. This is the arm that fails on a validator
+    reading a later member as an alternative to the others rather than as one more.
+
+    **Asserted against ``set(ReadKind)`` rather than against a written-out list**, so
+    the next additive member fails here until its own arm is written: an enumeration
+    that grew without this emission growing with it is exactly the case §1's
+    additive-entry licence is about.
     """
     request = ReadRequest(
         asks=(
@@ -967,6 +974,10 @@ def test_a_request_may_carry_a_web_search_ask_beside_every_other_kind() -> None:
             _hop("M1"),
             ReadAsk(kind=ReadKind.LOCAL_FILE, entry="F1"),
             ReadAsk(kind=ReadKind.WEB_SEARCH),
+            ReadAsk(
+                kind=ReadKind.STRUCTURED_READ,
+                structure=StructuredAsk(window=TimeWindow(start=_WHEN)),
+            ),
         )
     )
 
@@ -1036,22 +1047,22 @@ def test_a_label_that_resolves_to_nothing_is_still_constructible() -> None:
         assert _hop(label).labels == (label,)
 
 
-def test_the_kind_vocabulary_is_the_four_the_decisions_admit() -> None:
+def test_the_kind_vocabulary_is_the_five_the_decisions_admit() -> None:
     """ADR-0226 §1: a closed enumeration, and §4: added to and never renamed.
 
     Pinned by value as well as by name, because the serialised spelling is what a
     ``PlanExport`` carries and what a later reader matches on — renaming a member
     would silently invalidate every document already written.
 
-    **Four since ADR-0231 §1**, which admits ``WEB_SEARCH`` as an *additive entry*
-    under ADR-0226 §1's own licence, exactly as ADR-0230 §1 admitted ``LOCAL_FILE``:
-    it adds no second request object, no second servicing site, no second budget and
-    no second audit. The closure is unchanged — a fifth still needs the ADR that
-    decides it — and so is the no-rename rule, which is why the three older values
-    are still asserted here one by one.
+    **Five since ADR-0240 §1**, which admits ``STRUCTURED_READ`` as an *additive
+    entry* under ADR-0226 §1's own licence, exactly as ADR-0231 §1 admitted
+    ``WEB_SEARCH`` and ADR-0230 §1 ``LOCAL_FILE``: it adds no second request object,
+    no second servicing site, no second budget and no second audit. The closure is
+    unchanged — a sixth still needs the ADR that decides it — and so is the no-rename
+    rule, which is why the four older values are still asserted here one by one.
 
     **The set assertion is what closes it**, and it is the half that fails on a
-    member added without a decision: an implementation growing a fifth spelling
+    member added without a decision: an implementation growing a sixth spelling
     passes every value assertion below and fails the equality above.
     """
     assert {member.value for member in ReadKind} == {
@@ -1059,11 +1070,13 @@ def test_the_kind_vocabulary_is_the_four_the_decisions_admit() -> None:
         "citation_hop",
         "local_file",
         "web_search",
+        "structured_read",
     }
     assert ReadKind.SIGHTED_QUERY.value == "sighted_query"
     assert ReadKind.CITATION_HOP.value == "citation_hop"
     assert ReadKind.LOCAL_FILE.value == "local_file"
     assert ReadKind.WEB_SEARCH.value == "web_search"
+    assert ReadKind.STRUCTURED_READ.value == "structured_read"
 
 
 # --- PlanExport ---------------------------------------------------------
@@ -1071,28 +1084,30 @@ def test_the_kind_vocabulary_is_the_four_the_decisions_admit() -> None:
 
 def test_export_is_versioned_and_defaults_to_empty() -> None:
     export = PlanExport(exported_at=_WHEN)
-    assert export.schema_version == 6
+    assert export.schema_version == 7
     assert export.goals == ()
 
 
-def test_export_pins_the_schema_version_to_exactly_six() -> None:
+def test_export_pins_the_schema_version_to_exactly_seven() -> None:
     """The label is a fact about the document, not a producer's claim (ADR-0039 §10).
 
-    ``Literal[6]`` refuses an explicit ``5`` — a document of the shape this export
-    had before ``ReadKind`` gained ``WEB_SEARCH`` does not validate against this
-    contract at all (ADR-0231 §16), exactly as a ``4`` stopped validating when that
-    enumeration gained ``LOCAL_FILE`` and ``ReadAsk`` gained ``entry``, a ``3`` when
+    ``Literal[7]`` refuses an explicit ``6`` — a document of the shape this export
+    had before ``ReadKind`` gained ``STRUCTURED_READ`` and ``ReadAsk`` gained
+    ``structure`` does not validate against this contract at all (ADR-0240 §11),
+    exactly as a ``5`` stopped validating when that enumeration gained
+    ``WEB_SEARCH``, a ``4`` when it gained ``LOCAL_FILE`` and ``ReadAsk`` gained
+    ``entry``, a ``3`` when
     ``ActionPlan`` gained ``supersedes`` and a ``2`` when it gained ``read_request``
     — and any other value, so the advertised version cannot be mislabelled. The
     positive default is what a producer gets for free; only the rejections pin it.
 
-    **The neighbour on each side is asserted and not only the far ones**: ``5`` is
-    the shape this contract had one decision ago and ``7`` is the shape nobody has
+    **The neighbour on each side is asserted and not only the far ones**: ``6`` is
+    the shape this contract had one decision ago and ``8`` is the shape nobody has
     decided, and a ``Literal`` that admitted either would be a document announcing a
     shape it does not have.
     """
-    assert PlanExport(exported_at=_WHEN, schema_version=6).schema_version == 6
-    for stale in (1, 2, 3, 4, 5, 7):
+    assert PlanExport(exported_at=_WHEN, schema_version=7).schema_version == 7
+    for stale in (1, 2, 3, 4, 5, 6, 8):
         with pytest.raises(ValidationError):
             PlanExport(exported_at=_WHEN, schema_version=stale)  # type: ignore[arg-type]
 
@@ -1137,7 +1152,7 @@ def test_export_carries_a_whole_supersession_chain() -> None:
 
     export = PlanExport(exported_at=_WHEN, goals=(_goal(),), plans=(first, revision))
 
-    assert export.schema_version == 6
+    assert export.schema_version == 7
     assert [plan.supersedes for plan in export.plans] == [None, "p1"]
 
 
@@ -1218,7 +1233,7 @@ def test_export_round_trips_through_json() -> None:
     export = PlanExport(exported_at=_WHEN, goals=(_goal(),), plans=(plan,), executions=(execution,))
     restored = TypeAdapter(PlanExport).validate_json(export.model_dump_json())
     assert restored == export
-    assert restored.schema_version == 6
+    assert restored.schema_version == 7
     request = restored.plans[0].read_request
     assert request is not None
     assert {ask.kind for ask in request.asks} == {ReadKind.SIGHTED_QUERY, ReadKind.CITATION_HOP}

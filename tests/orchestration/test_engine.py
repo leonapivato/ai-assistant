@@ -77,6 +77,7 @@ from ai_assistant.core.types import (
     ProvisioningState,
     QuestionState,
     QueueOutcome,
+    ReadAsk,
     Reversibility,
     RiskLevel,
     SemanticMemory,
@@ -408,7 +409,7 @@ class OneStepPlanner:
         # expansion — without a second planner class.
         self._parameters = PARAMETERS if parameters is None else parameters
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -416,6 +417,7 @@ class OneStepPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         step = PlanStep(
             id="step-1",
@@ -437,7 +439,7 @@ class NoStepPlanner:
 
     _calls: int = 0
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -445,6 +447,7 @@ class NoStepPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         self._calls += 1
         return ActionPlan(
@@ -874,7 +877,7 @@ async def test_converse_refuses_a_plan_built_for_another_goal() -> None:
     class MismatchPlanner:
         """Returns a plan pointing at a different goal than the one it was given."""
 
-        async def plan(
+        async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
             self,
             goal: Goal,
             *,
@@ -882,6 +885,7 @@ async def test_converse_refuses_a_plan_built_for_another_goal() -> None:
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
             files: Sequence[ShownFile] = (),
+            empty_reads: Sequence[ReadAsk] = (),
         ) -> ActionPlan:
             step = PlanStep(id="step-1", intent="x", capability=CAPABILITY, parameters=PARAMETERS)
             return ActionPlan(
@@ -2195,7 +2199,7 @@ async def test_shutdown_drains_in_flight_work_before_closing() -> None:
     closed_while_inflight = False
 
     class GatedPlanner:
-        async def plan(
+        async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
             self,
             goal: Goal,
             *,
@@ -2203,6 +2207,7 @@ async def test_shutdown_drains_in_flight_work_before_closing() -> None:
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
             files: Sequence[ShownFile] = (),
+            empty_reads: Sequence[ReadAsk] = (),
         ) -> ActionPlan:
             entered.set()
             await release.wait()
@@ -2236,7 +2241,7 @@ async def test_a_cancelled_call_does_not_abandon_its_underlying_work() -> None:
     finished = asyncio.Event()
 
     class GatedPlanner:
-        async def plan(
+        async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
             self,
             goal: Goal,
             *,
@@ -2244,6 +2249,7 @@ async def test_a_cancelled_call_does_not_abandon_its_underlying_work() -> None:
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
             files: Sequence[ShownFile] = (),
+            empty_reads: Sequence[ReadAsk] = (),
         ) -> ActionPlan:
             entered.set()
             await release.wait()
@@ -2279,7 +2285,7 @@ async def test_cancelling_aclose_still_closes_the_resources() -> None:
     closed = asyncio.Event()
 
     class GatedPlanner:
-        async def plan(
+        async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
             self,
             goal: Goal,
             *,
@@ -2287,6 +2293,7 @@ async def test_cancelling_aclose_still_closes_the_resources() -> None:
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
             files: Sequence[ShownFile] = (),
+            empty_reads: Sequence[ReadAsk] = (),
         ) -> ActionPlan:
             entered.set()
             await release.wait()
@@ -2332,7 +2339,7 @@ class _NeverFinishing:
         self.entered = asyncio.Event()
         self.cancelled = asyncio.Event()
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -2340,6 +2347,7 @@ class _NeverFinishing:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         self.entered.set()
         try:
@@ -2411,7 +2419,7 @@ async def test_nothing_is_closed_until_the_cancelled_work_has_completed() -> Non
     unwound = asyncio.Event()
 
     class _SlowToUnwind:
-        async def plan(
+        async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
             self,
             goal: Goal,
             *,
@@ -2419,6 +2427,7 @@ async def test_nothing_is_closed_until_the_cancelled_work_has_completed() -> Non
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
             files: Sequence[ShownFile] = (),
+            empty_reads: Sequence[ReadAsk] = (),
         ) -> ActionPlan:
             try:
                 await asyncio.Event().wait()
@@ -2460,7 +2469,7 @@ async def test_work_that_finishes_inside_the_budget_is_never_cancelled() -> None
     finished = asyncio.Event()
 
     class _Gated:
-        async def plan(
+        async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
             self,
             goal: Goal,
             *,
@@ -2468,6 +2477,7 @@ async def test_work_that_finishes_inside_the_budget_is_never_cancelled() -> None
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
             files: Sequence[ShownFile] = (),
+            empty_reads: Sequence[ReadAsk] = (),
         ) -> ActionPlan:
             await release.wait()
             finished.set()
@@ -3194,7 +3204,7 @@ async def test_concurrent_parks_get_distinct_tokens_despite_a_colliding_factory(
     seen = 0
 
     class GatedConfirmPlanner:
-        async def plan(
+        async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
             self,
             goal: Goal,
             *,
@@ -3202,6 +3212,7 @@ async def test_concurrent_parks_get_distinct_tokens_despite_a_colliding_factory(
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
             files: Sequence[ShownFile] = (),
+            empty_reads: Sequence[ReadAsk] = (),
         ) -> ActionPlan:
             nonlocal seen
             seen += 1
@@ -3288,7 +3299,7 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
     seen = 0
 
     class GatedConfirmPlanner:
-        async def plan(
+        async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
             self,
             goal: Goal,
             *,
@@ -3296,6 +3307,7 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
             files: Sequence[ShownFile] = (),
+            empty_reads: Sequence[ReadAsk] = (),
         ) -> ActionPlan:
             nonlocal seen
             seen += 1
@@ -4254,7 +4266,7 @@ class RecordingPlanner(OneStepPlanner):
         super().__init__()
         self.seen: list[tuple[MemoryRecord, ...]] = []
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -4262,6 +4274,7 @@ class RecordingPlanner(OneStepPlanner):
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         self.seen.append(tuple(memories))
         return await super().plan(

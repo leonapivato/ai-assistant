@@ -66,6 +66,7 @@ from ai_assistant.core.types import (
     PlacementSetter,
     PlanStep,
     Provenance,
+    ReadAsk,
     Role,
     SemanticMemory,
     SpokenAudio,
@@ -674,7 +675,7 @@ class _EchoingPlanner:
         self._needs = needs
         self.calls: list[tuple[CurrentContext, tuple[MemoryRecord, ...]]] = []
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -682,6 +683,7 @@ class _EchoingPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         """Record what this turn was supplied, and plan over exactly that."""
         supplied = tuple(memories)

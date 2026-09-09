@@ -1423,7 +1423,7 @@ class _SearchingOneStepPlanner(OneStepPlanner):
     asserts would be indistinguishable from the second turn's own search.
     """
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -1431,6 +1431,7 @@ class _SearchingOneStepPlanner(OneStepPlanner):
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         """Answer the base plan, carrying a ``WEB_SEARCH`` ask the first time only."""
         first = self._calls == 0

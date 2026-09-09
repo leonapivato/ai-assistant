@@ -178,6 +178,7 @@ if TYPE_CHECKING:
         PlanExport,
         QueryOutcome,
         Question,
+        ReadAsk,
         RecipientGrant,
         RecordChunk,
         RecordedInvocation,
@@ -3459,7 +3460,7 @@ class Planner(Protocol):
     property of deterministic code (VISION §7).
     """
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the goal plus one keyword per thing the pipeline assembled before planning; ADR-0230 §3 and ADR-0240 §7 each add one, and bundling them into a context object would mint a core type no ADR names
         self,
         goal: Goal,
         *,
@@ -3467,6 +3468,7 @@ class Planner(Protocol):
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         """Produce a plan for ``goal``.
 
@@ -3665,6 +3667,58 @@ class Planner(Protocol):
         prompt escapes it for that target under ADR-0098 §2, as it does any other
         external span, and renders none of it as a fact of the system's own.
 
+        **``empty_reads`` carries the asks of this turn's already-serviced reads that
+        came back empty, and nothing else** (ADR-0240 §7). Each member is the frozen
+        :class:`~ai_assistant.core.types.ReadAsk` **this planner itself emitted**,
+        carried back byte for byte and never edited on the way — no implementation,
+        and no caller, widens a window, drops an axis, rewrites a label or composes a
+        suggested ask to put in its place. Under ADR-0240 the only kind that ever
+        appears in it is ``STRUCTURED_READ``; no lane adds another without the ADR
+        that decides it (§14).
+
+        **An *empty read* is a narrow fact and three neighbouring turns are not it**
+        (ADR-0240 §5, §6). It is an ask that was serviced, was reached with at least
+        one slot of the budget remaining, whose store call completed, and whose store
+        call returned **no record at all**. A read the budget did not reach is not in
+        this sequence — a read that was never made certifies nothing about the store
+        — nor is one the supply's shape blocked, nor a servicing that failed or was
+        partial (ADR-0226 §5 leaves the supply as planning saw it), nor a read whose
+        records were all deduplicated out, because the store *did* return records and
+        a planner told otherwise would broaden away from records already in front of
+        it.
+
+        **Nothing the store said crosses on it.** No record, no count, no identifier,
+        no instant of the read, no ``capped`` value and no value of any kind the store
+        returned or computed. The only content it carries is the planner's own prior
+        composition, and the only thing it says about the read is that it returned
+        nothing.
+
+        **``()`` means no read of this turn came back empty**, which is the
+        semantically correct answer for a turn's **first** call — where it is always
+        ``()`` — for a turn that asked for nothing, for a servicing that failed or was
+        declined, and for a ``Planner`` that knows nothing of this parameter.
+
+        **This parameter is what makes the second call worth making** (ADR-0240 §6,
+        §7). ADR-0228 §2(e) admitted a revision only on a servicing that returned
+        something new, on the ground that a planner called twice over one input "is
+        being asked the same question twice"; ADR-0240 §6 partially supersedes that
+        condition for an empty structured read, and this parameter is the input that
+        keeps §2(e)'s own reasoning honoured rather than set aside. A later lane that
+        dropped it while keeping §6 would have reinstated the defect (e) exists to
+        prevent.
+
+        **Every other signal ADR-0228 §12 forbids stays forbidden.** The planner is
+        still not told which iteration it is on, and no lane adds an iteration index,
+        a "last look" instruction, a count of the turn's calls, or any signal about
+        its budget or its deadline. §1's enumeration of what is not re-run binds
+        verbatim: one context assembly, one conversation-tail read, one retrieval, one
+        episodic supplement, and no group of the supply beyond the fourth.
+
+        **This carrier and ADR-0240 §10's audit record are governed separately**, and
+        neither is licence for the other: the audit is a Tier 2 log event carrying no
+        value on any axis, while this is an in-process argument handed to the author
+        of the value it carries.
+
         **This one is a compatibility break, where the four widenings above were not**
         (ADR-0230 §3, golden rule 5). The parameter is additive and defaulted, and
         this contract does not argue itself out of the classification on that ground:
@@ -3674,6 +3728,14 @@ class Planner(Protocol):
         the widening is the **semantics**, not the signature — an implementation that
         accepts the parameter and ignores its value means exactly what it meant, which
         is what ``()``'s default encodes. Its declaration must move.
+
+        **And so is ``empty_reads``, on the identical footing** (ADR-0240 §7, golden
+        rule 5). The loop passes it on **every** call for the same reason it passes
+        ``files`` on every call, so a ``plan`` declaring no such parameter raises
+        ``TypeError``; ADR-0230 §3's paragraph above is inherited whole and not
+        re-argued. Every ``Planner`` implementation must be widened to declare it, and
+        an implementation that accepts it and ignores its value means exactly what it
+        meant.
 
         Args:
             goal: The objective to plan for.
@@ -3699,6 +3761,12 @@ class Planner(Protocol):
                 ``LOCAL_FILE`` label indexes into, and the whole of what such an ask
                 may name (§2). Defaults to ``()``, which means no file is nameable on
                 this turn and is never an error.
+            empty_reads: The asks of this turn's already-serviced reads that came
+                back empty (ADR-0240 §7) — each the frozen ``ReadAsk`` this planner
+                emitted, carried back byte for byte and carrying nothing the store
+                said. Always ``()`` on a turn's first call, and ``()`` on any later
+                call where no read of the turn was empty in ADR-0240 §6's sense,
+                which is never an error.
 
         Returns:
             A frozen :class:`~ai_assistant.core.types.ActionPlan`, carrying a

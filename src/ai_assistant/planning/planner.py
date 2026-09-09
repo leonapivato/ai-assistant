@@ -103,6 +103,8 @@ from ai_assistant.core.types import (
     ReadKind,
     ReadRequest,
     Role,
+    StructuredAsk,
+    TimeWindow,
     band_of,
 )
 
@@ -160,6 +162,22 @@ _TAIL_HEADING: Final = "Recent conversation turns, in order:"
 #: reads a private name knowingly, which is cheaper than widening ``planning``'s
 #: public surface for a driver that is not a subsystem.
 _RETRIEVED_HEADING: Final = "Relevant memories about the user:"
+
+#: The heading ADR-0240 §7's empty-read fact is printed under.
+#:
+#: **A heading of its own, and it is the system's own text** (ADR-0098 §2). What sits
+#: under it is the planner's own composition written back to it, so a reader of the
+#: assembled prompt can tell this block from the memories above it and from the file
+#: listing below — three sources, three headings, which is the same division
+#: :data:`_FILES_HEADING` makes.
+#:
+#: **It states the fact and not the instruction.** Whether to widen the window, drop
+#: the person, ask the same question as text, or answer from what there is and say what
+#: could not be reached are all the planner's (ADR-0240 §6), and a heading that steered
+#: between them would be the loop broadening rather than the planner.
+_EMPTY_READS_HEADING: Final = (
+    "You already asked for this earlier in this turn, and nothing at all came back:"
+)
 
 #: The heading the turn's file listing is printed under (ADR-0230 §2, §3).
 #:
@@ -696,7 +714,130 @@ step: it does not belong in `steps`, and asking for it does not change which of 
 two shapes you are sending. You are still answering now from what you have."""
 
 
-def _system_prompt(capabilities: Sequence[str], *, files_shown: bool) -> str:
+#: ADR-0240 §1's fifth member of ``read_request``, and §3's grammar for it.
+#:
+#: **The window half is unconditional and the label half is not** (§9). Every episode
+#: carries an ``occurred_at``, so a window is always answerable and there is no
+#: condition to state; the ``participants``, ``topics`` and ``about_person`` axes are
+#: described "only where at least one **episodic** record of the sequence the loop
+#: passed on that call carries a value on that axis", which is
+#: :data:`_LOCAL_FILE_GUIDANCE`'s conditionality one seam over and for a sharpened form
+#: of its reason. On today's episodes the three reach nothing — capture writes no
+#: labels and ADR-0239 §8 declines a backlog pass — so an unconditional invitation
+#: would produce asks that are dropped or empty, on exactly the deployments that have
+#: not yet run the producer.
+#:
+#: **A belief's value opens no axis** (§9). §4 confines this read to episodes, so a
+#: subject or a topic carried by a retrieved belief is a value this kind's read can
+#: never match, and an invitation resting on one would offer an axis whose every ask
+#: returns nothing.
+#:
+#: **The gate buys more than a saved drop: it is what makes a label copyable.** A
+#: ``TopicLabel`` is refused rather than normalised (ADR-0213 §3, ADR-0237 §2), so a
+#: planner inventing a spelling loses its whole ask under §3. The axis is offered
+#: *because* a value is in front of the planner, and the value is in front of it **as
+#: characters it can copy** (:func:`_label_lines`) — which is ADR-0226 §3's namer rule
+#: in its strongest form, data, reached without an ordinal or a table.
+#:
+#: **The window is written in absolute UTC instants and this system composes none**
+#: (§3). No implementation converts a relative phrase into a window, infers one from
+#: the utterance, supplies a default, extends one or clamps one to a retention horizon;
+#: the clock the planner reads is the ``now`` :func:`_render_request` already prints.
+#:
+#: **A malformed member costs the whole ask and never the plan** (§3), and the block
+#: says so, because a model that believes a near-miss will be repaired writes near
+#: misses. What it does not say is that an axis may be dropped and the rest serviced:
+#: nothing does that (:func:`_structured_ask`).
+#:
+#: **It corrects :data:`_READ_REQUEST_GUIDANCE` rather than restating it**, on the
+#: footing :data:`_LOCAL_FILE_GUIDANCE` and :data:`_WEB_SEARCH_GUIDANCE` already share:
+#: that block says "Both members of ``read_request`` are optional", which stopped being
+#: the whole truth two decisions ago, and it describes ``query`` as the way to search
+#: memory — true, and not the whole of what this member does.
+#:
+#: A separate constant for :data:`_STATED_FACT_GUIDANCE`'s reason: the prompt test can
+#: assert it **reaches the model** without string-matching its wording.
+_STRUCTURED_READ_GUIDANCE = """\
+There is one more member you may add to the same `read_request` object, and it \
+asks for past conversations by **structure** rather than by wording:
+
+ "structured": {"start": "2026-03-01T00:00:00+00:00",
+                "end":   "2026-04-01T00:00:00+00:00"}
+
+`start` and `end` bound **when a conversation was recorded**. Both are ISO-8601 \
+instants with an offset, written out in full; `start` is included and `end` is not, \
+so the pair above is the whole of March. You may send only one of them — `start` \
+alone is everything since that instant, `end` alone everything before it — but a \
+`structured` object with neither, and one whose `end` is not after its `start`, is \
+not a request that can be answered. Work the instants out yourself from the `now` \
+printed in the next message; nothing here will turn "last week" into a period for \
+you, and a word instead of an instant costs you the whole of this read.
+
+Ask this way when the goal turns on *which* earlier conversation something was in, \
+and when a period is a better handle on it than any wording you could guess — "what \
+did we settle in March", "the conversation before the trip". What comes back are \
+past conversations, never beliefs, so a question about what the user is like is \
+answered by `query` and not by this.
+
+You may add `query` inside the same object, spelled as it is at the top level. With \
+one, what comes back are the conversations of that period nearest those words; \
+without one, the most recently recorded conversations of that period. Send it only \
+where you have words worth ranking by; a period with no wording is an ordinary use \
+of this member and not a gap in it.
+
+Send at most one `structured` object, do not send the key at all unless you are \
+asking, and do not send an empty one. This read is of this assistant's own record of \
+the user: no tool runs for it, nothing is sent anywhere, and it is not a step."""
+
+
+#: ADR-0240 §9's who-and-what half of the block above, stated only where the supply
+#: can name one.
+#:
+#: **Assembled rather than written out, because which axes it offers varies per call**
+#: (§9). One paragraph per axis, appended in a fixed order, so a turn whose episodes
+#: carry participants and no topic is told about participants and not about topics —
+#: and a turn whose episodes carry none of the three sees this block at all.
+#:
+#: **The spelling rule is stated in the same breath as the axis** (§3, ADR-0213 §3). A
+#: label is carried byte for byte to the store and matched there; a topic the planner
+#: spells freshly is refused rather than normalised, which costs the whole ask. So each
+#: paragraph says: copy what you were shown.
+_STRUCTURED_AXIS_GUIDANCE: Final[Mapping[str, str]] = {
+    "participants": """\
+The conversations in the next message may be printed with a `who was involved:` \
+line. Where they are, you may add `"participants": ["..."]` inside the same \
+`structured` object, and what comes back are conversations involving at least one \
+of the people you name. Copy a name exactly as it is printed there, character for \
+character — a name you have spelled yourself, or drawn from the conversation, \
+matches nothing.""",
+    "topics": """\
+Some conversations in the next message are printed with a `filed under:` line. \
+Where they are, you may add `"topics": ["..."]` inside the same `structured` \
+object, and what comes back are conversations filed under at least one of the \
+words you name. These are filing words with an exact spelling, so copy one as it is \
+printed — a word of your own, however close, is refused and costs you the whole of \
+this read.""",
+    "about_person": """\
+Some conversations in the next message are printed with an `about:` line. Where \
+they are, you may add `"about_person": ["..."]` inside the same `structured` \
+object, and what comes back are conversations recorded as being about at least one \
+of the people you name. Copy a name exactly as it is printed there.""",
+}
+
+
+#: The order §9's three axes are offered in, which is
+#: :class:`~ai_assistant.core.types.StructuredAsk`'s own field order less the window.
+#:
+#: Fixed here rather than taken from a set's iteration order, so that two calls whose
+#: supplies open the same axes assemble the same prompt — a prompt whose paragraph
+#: order moved with a hash would be a prompt no test could assert and no cache could
+#: reuse.
+_STRUCTURED_AXES: Final[tuple[str, ...]] = ("participants", "topics", "about_person")
+
+
+def _system_prompt(
+    capabilities: Sequence[str], *, files_shown: bool, label_axes: Sequence[str] = ()
+) -> str:
     """Build the planning system prompt over the vocabulary advertised this turn.
 
     A function rather than a constant because ADR-0211 §4 makes the vocabulary part
@@ -725,6 +866,18 @@ def _system_prompt(capabilities: Sequence[str], *, files_shown: bool) -> str:
     label actually printed — already says what that leaves askable, without this
     function taking a second input to say it twice.
 
+    :data:`_STRUCTURED_READ_GUIDANCE` sits below :data:`_WEB_SEARCH_GUIDANCE` on the
+    same footing — it adds a fifth member to the request those blocks have described —
+    and its window half is **unconditional** where its label half is not (ADR-0240 §9).
+    Every episode carries an ``occurred_at``, so a window is always answerable; the
+    ``participants``, ``topics`` and ``about_person`` paragraphs are stated only where
+    an **episodic** record of this call's supply carries a value on that axis, which is
+    :data:`_LOCAL_FILE_GUIDANCE`'s conditionality reached by a sharper form of the same
+    argument. That is why this function takes a **third** input rather than a second:
+    what varies is not whether the member exists but which of its axes can be answered,
+    and the answer is per call rather than per deployment (ADR-0228 §8's per-call
+    binding, so a revision's guidance reflects the supply the revision plans over).
+
     :data:`_WEB_SEARCH_GUIDANCE` sits below :data:`_ACT_RECORD_GUIDANCE` for the same
     reason again — it adds a member to the request those blocks have described — and
     **unconditionally**, which is ADR-0226 §5's scoping posture as ADR-0231 §17 applies
@@ -751,6 +904,13 @@ def _system_prompt(capabilities: Sequence[str], *, files_shown: bool) -> str:
             listing will be printed in the next message and an ``F`` label can name
             something (ADR-0230 §2). The *contents* decide nothing here; what the
             prompt states is that the member exists.
+        label_axes: Which of ADR-0240 §9's three label axes this call's supply can
+            name — computed by :func:`_label_axes` over the **episodic** records of
+            the sequence the loop passed, because §4 confines this read to episodes
+            and a belief's value opens no axis. Each named axis gets its paragraph
+            and every value that opened it is rendered in the next message
+            (:func:`_label_lines`); an axis not named here is described nowhere, so
+            no emission can be invited that could only resolve to nothing.
 
     Returns:
         The system turn for this call.
@@ -771,6 +931,17 @@ def _system_prompt(capabilities: Sequence[str], *, files_shown: bool) -> str:
         _ACT_RECORD_GUIDANCE,
         "",
         _WEB_SEARCH_GUIDANCE,
+        "",
+        _STRUCTURED_READ_GUIDANCE,
+    ]
+    # ADR-0240 §9: the window half above is unconditional — every episode carries an
+    # ``occurred_at``, so a window is always answerable — and each label axis is
+    # offered only where an episode of *this call's* supply carries a value on it.
+    blocks += [
+        line
+        for axis in _STRUCTURED_AXES
+        if axis in label_axes
+        for line in ("", _STRUCTURED_AXIS_GUIDANCE[axis])
     ]
     if files_shown:
         blocks += ["", _LOCAL_FILE_GUIDANCE]
@@ -875,7 +1046,7 @@ class ModelBackedPlanner:
         except ClockReadingError as exc:
             raise PlanningError(str(exc)) from exc
 
-    async def plan(
+    async def plan(  # noqa: PLR0913 — the goal plus one keyword per thing the pipeline assembled before planning, as the Protocol declares them; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
         goal: Goal,
         *,
@@ -883,6 +1054,7 @@ class ModelBackedPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
     ) -> ActionPlan:
         """Produce a frozen plan for ``goal`` (ADR-0047).
 
@@ -916,6 +1088,23 @@ class ModelBackedPlanner:
         opens anything or holds a ``Fetcher``: the sequence is passed in exactly as
         ``context`` and ``memories`` are, for ADR-0014 §6's reason, and what comes back
         is a label the loop resolves.
+
+        **``empty_reads`` is rendered as what this turn already asked for and did not
+        get** (ADR-0240 §7). It is the planner's own prior composition handed back to
+        it, byte for byte and never edited on the way, carrying nothing the store said
+        — no record, no count, no identifier, no instant of the read. What it buys is
+        that a second call over an otherwise identical input is not asked the same
+        question twice, which is ADR-0228 §2(e)'s own reason honoured rather than set
+        aside. ``()`` on a turn's first call, where it renders nothing at all.
+
+        **``memories`` also decides which of ADR-0240 §9's three label axes the system
+        turn offers**, computed over the **episodic** records of the sequence this call
+        was handed (:func:`_label_axes`) — because §4 confines that read to episodes and
+        a belief's ``topics`` or ``about_person`` is a value it can never match. The
+        values that opened an offered axis are rendered beside their bullets
+        (:func:`_label_lines`), so a planner copying a spelling is copying characters it
+        was shown rather than guessing at a canonical form that is refused rather than
+        repaired.
 
         ``goal`` is observed **once**, on this coroutine's first executed line and
         before the first ``await`` (ADR-0065). ``Goal`` is mutable, the model call
@@ -953,6 +1142,10 @@ class ModelBackedPlanner:
                 and the cap are the fetcher's and a second opinion here would put
                 the two sides' ordinals out of step. Empty is legal and is the
                 ordinary case: it renders no listing and states no ``file`` member.
+            empty_reads: The asks of this turn's already-serviced reads that came back
+                empty (ADR-0240 §7), rendered into the user turn under a heading of
+                their own and read once, before the first ``await``. Empty is legal and
+                is the ordinary case — every first call — and renders nothing.
 
         Returns:
             A frozen :class:`~ai_assistant.core.types.ActionPlan` for ``goal``.
@@ -969,14 +1162,22 @@ class ModelBackedPlanner:
         # `model_copy(update=...)` here would be shallow and would not detach it.
         snapshot = goal.model_copy(deep=True)
         shown = tuple(files)
+        asked = tuple(empty_reads)
+        # ADR-0240 §9's gate, computed over the sequence this call was passed and read
+        # by both messages: the system turn offers an axis and the user turn renders
+        # the values that opened it, which is what §9's "no axis is described whose
+        # values the same call leaves unrendered" asks of a pair of prompts.
+        label_axes = _label_axes(memories)
         conversation: list[Message] = [
             Message(
                 role=Role.SYSTEM,
-                content=_system_prompt(capabilities, files_shown=bool(shown)),
+                content=_system_prompt(
+                    capabilities, files_shown=bool(shown), label_axes=sorted(label_axes)
+                ),
             ),
             Message(
                 role=Role.USER,
-                content=_render_request(snapshot, context, memories, shown),
+                content=_render_request(snapshot, context, memories, shown, asked),
             ),
         ]
 
@@ -1086,11 +1287,13 @@ class ModelBackedPlanner:
 def _optional_read_request(envelope: dict[str, object]) -> ReadRequest | None:
     """Read ADR-0226 §4's ``read_request`` out of one envelope, or return ``None``.
 
-    Builds at most one ask of each kind from the four optional members the prompt
+    Builds at most one ask of each kind from the five optional members the prompt
     asks for — a non-blank ``query`` becomes a ``SIGHTED_QUERY`` ask, a list of one
     or two label strings becomes a ``CITATION_HOP`` ask, a non-blank ``file``
-    becomes a ``LOCAL_FILE`` ask (ADR-0230 §1), and a ``web_search`` of exactly
-    ``true`` becomes a ``WEB_SEARCH`` ask (ADR-0231 §1) — and hands them to
+    becomes a ``LOCAL_FILE`` ask (ADR-0230 §1), a ``web_search`` of exactly
+    ``true`` becomes a ``WEB_SEARCH`` ask (ADR-0231 §1), and a readable
+    ``structured`` object becomes a ``STRUCTURED_READ`` ask (ADR-0240 §3) — and
+    hands them to
     :class:`~ai_assistant.core.types.ReadRequest`, whose validators are the
     authority on every condition §4 states. An envelope carrying no ``read_request``,
     or one from which no ask could be built, yields ``None``, which ADR-0226 §4
@@ -1137,10 +1340,7 @@ def _optional_read_request(envelope: dict[str, object]) -> ReadRequest | None:
     asks: list[ReadAsk] = []
     query = raw.get("query")
     if query is not None:
-        if isinstance(query, str) and query.strip():
-            asks.append(ReadAsk(kind=ReadKind.SIGHTED_QUERY, query=query))
-        else:
-            _log.info(_READ_REQUEST_DROPPED, reason="unusable_query")
+        asks += _query_ask(query)
 
     labels = raw.get("labels")
     if labels is not None:
@@ -1154,6 +1354,10 @@ def _optional_read_request(envelope: dict[str, object]) -> ReadRequest | None:
     if searched is not None:
         asks += _search_ask(searched)
 
+    structured = raw.get("structured")
+    if structured is not None:
+        asks += _structured_ask(structured)
+
     if not asks:
         _log.info(_READ_REQUEST_DROPPED, reason="no_usable_ask")
         return None
@@ -1165,6 +1369,33 @@ def _optional_read_request(envelope: dict[str, object]) -> ReadRequest | None:
         # not anticipated must cost the request and never the plan.
         _log.info(_READ_REQUEST_DROPPED, reason="refused_by_core")
         return None
+
+
+def _query_ask(query: object) -> list[ReadAsk]:
+    """Build the ``SIGHTED_QUERY`` ask from an envelope's ``query``, or nothing.
+
+    The query is taken **verbatim** and passed to ``assemble_by_band`` as handed
+    (ADR-0226 §2, §4). What the blank check refuses is a value ``ReadAsk``'s own
+    annotation would refuse — §4 requires a non-blank query on this kind — so the drop
+    is counted here rather than surfacing as a ``ValidationError`` that would cost the
+    whole request.
+
+    **This member is the top-level one and not the one inside ``structured``**
+    (ADR-0240 §2). The two are read separately and a request naming both emits two
+    asks, one of each kind, which ``ReadRequest``'s at-most-one-of-each-kind rule
+    admits.
+
+    Args:
+        query: The envelope's ``query`` member, whatever the model wrote there.
+
+    Returns:
+        A one-element list holding the ask, or an empty list where the member is not a
+        non-blank string.
+    """
+    if not isinstance(query, str) or not query.strip():
+        _log.info(_READ_REQUEST_DROPPED, reason="unusable_query")
+        return []
+    return [ReadAsk(kind=ReadKind.SIGHTED_QUERY, query=query)]
 
 
 def _hop_ask(labels: object) -> list[ReadAsk]:
@@ -1302,11 +1533,153 @@ def _search_ask(searched: object) -> list[ReadAsk]:
     return []
 
 
+def _structured_ask(structured: object) -> list[ReadAsk]:
+    """Build the ``STRUCTURED_READ`` ask from an envelope's ``structured``, or nothing.
+
+    **A malformed member costs the whole ask and never the plan, and the ask is never
+    partially repaired** (ADR-0240 §3). Where any axis cannot be read as the model this
+    section fixes — a window endpoint that is present and is not a readable instant, a
+    window ``TimeWindow`` refuses, a label the canonical form refuses, an empty
+    sequence, an axis set applying nothing — the ask is dropped **whole**, the drop is
+    logged as every other unreadable ask already is, and the plan stands. Nothing here
+    drops the offending axis and services the rest: a read composed of *some* of the
+    axes the planner named is a different read from the one it asked for, wider and
+    wider in a direction nobody chose, and ADR-0228 §2's last clause forbids an
+    implementation substituting one.
+
+    **That is a different judgement from ADR-0239 §5's, and the ADR says why.** §5
+    judges a *labelling* per axis because a labelling's two axes are "never read for
+    each other"; a structured read's axes compose by **conjunction**, so dropping one
+    changes what the remaining ones select.
+
+    **An absent endpoint is not a malformed one** (§3). ADR-0237 §2 admits a window
+    with either end unset and refuses only the both-unset and the inverted cases, so
+    *"everything since the first of September"* is a window this builds and no
+    implementation drops it for naming one instant.
+
+    **The values are carried byte for byte** (§3). Nothing here trims, casefolds,
+    normalises, strips, tokenises or truncates a value on any axis: matching is
+    ADR-0237 §3's and is the store's alone, and a ``TopicLabel`` that is not already
+    canonical is **refused** rather than repaired (ADR-0213 §9), which is what §14
+    defers by name.
+
+    **And no window is composed here** (§3). The instants are the planner's own, read
+    off the ``now`` :func:`_render_request` printed; nothing converts a relative phrase,
+    infers a window from the utterance, supplies a default, extends one, or clamps one
+    to a retention horizon.
+
+    Args:
+        structured: The envelope's ``structured`` member, whatever the model wrote
+            there.
+
+    Returns:
+        A one-element list holding the ask, or an empty list where any part of the
+        member could not be read as ADR-0240 §2's models.
+    """
+    if not isinstance(structured, dict):
+        _log.info(_READ_REQUEST_DROPPED, reason="structured_not_an_object")
+        return []
+    try:
+        window = _structured_window(structured)
+        ask = ReadAsk(
+            kind=ReadKind.STRUCTURED_READ,
+            # `query` is optional on this kind and on this kind alone (ADR-0240 §2),
+            # and `ReadAsk`'s own annotation refuses a blank one — so a blank here is
+            # a `ValidationError` caught below rather than a condition restated.
+            query=structured.get("query"),
+            structure=StructuredAsk(
+                window=window,
+                participants=_structured_axis(structured, "participants"),
+                topics=_structured_axis(structured, "topics"),
+                about_person=_structured_axis(structured, "about_person"),
+            ),
+        )
+    except ValidationError, ValueError, TypeError:
+        # Every refusal §3 enumerates arrives here: an unreadable instant, a window
+        # `TimeWindow` refuses, a label `TopicLabel` refuses, an empty sequence, and an
+        # axis set applying nothing. They are caught together because §3 gives them one
+        # disposition — the whole ask, dropped, logged, plan standing — and a
+        # per-refusal reason here would be a second vocabulary nothing reads.
+        _log.info(_READ_REQUEST_DROPPED, reason="unusable_structured")
+        return []
+    return [ask]
+
+
+def _structured_window(structured: Mapping[str, object]) -> TimeWindow | None:
+    """The ``TimeWindow`` an envelope's ``structured`` names, or ``None``.
+
+    **Absent means the axis is not applied and present means it must parse** (ADR-0240
+    §3). An endpoint the member does not carry is unbounded on that side, which
+    ADR-0237 §2 admits; an endpoint that is present and is not a readable instant is a
+    malformed member, and the caller drops the whole ask for it.
+
+    **The instant is read by ``TimeWindow``'s own annotation and not by this
+    function.** ``UtcInstant`` is what decides tz-awareness and range, so a string is
+    handed over as-is and pydantic's own ISO-8601 reading is the one authority — a
+    second parse here would be a second answer to what an instant is.
+
+    Args:
+        structured: The member, already known to be a mapping.
+
+    Returns:
+        The window, or ``None`` where the member names neither endpoint.
+
+    Raises:
+        ValueError: If an endpoint is present and unreadable, if both ends are unset
+            while the member named one, or if ``end`` is not after ``start``. Each is
+            ADR-0237 §2's refusal reaching this seam intact.
+        ValidationError: For the same conditions, as pydantic raises them.
+    """
+    ends = {end: structured[end] for end in ("start", "end") if structured.get(end) is not None}
+    if not ends:
+        return None
+    return TimeWindow.model_validate(ends)
+
+
+def _structured_axis(structured: Mapping[str, object], axis: str) -> tuple[str, ...] | None:
+    """One sequence axis of an envelope's ``structured``, or ``None``.
+
+    **``None`` where the member is absent and a refusal where it is present and not a
+    list of strings** (ADR-0240 §2, §3). An empty list is *not* read as "not applied":
+    §2 refuses an empty sequence on this model outright — on the store it means *select
+    nothing*, "a coherent thing for a caller to compute and an incoherent thing for a
+    planner to ask for" — so it is passed through and ``StructuredAsk`` refuses it,
+    which costs the whole ask.
+
+    A value that is not a list, or a list holding anything but strings, is the same
+    disposition by a different route: the tuple this builds fails the field's own
+    annotation and the caller drops the ask.
+
+    Args:
+        structured: The member, already known to be a mapping.
+        axis: Which axis to read.
+
+    Returns:
+        The values as written, in the order the model named them, or ``None`` where the
+        member carries no such key.
+
+    Raises:
+        TypeError: If the value is not iterable at all, which the caller catches with
+            the rest.
+    """
+    value = structured.get(axis)
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        # Refused rather than wrapped: a bare string is a model that has written one
+        # label where the axis takes a list, and honouring it would service a read
+        # spelled differently from the one it asked for.
+        msg = f"a structured ask's {axis} is a list of labels"
+        raise TypeError(msg)
+    return tuple(value)
+
+
 def _render_request(
     goal: Goal,
     context: CurrentContext,
     memories: Sequence[MemoryRecord],
     files: Sequence[ShownFile] = (),
+    empty_reads: Sequence[ReadAsk] = (),
 ) -> str:
     """Render the goal, context, memories and file listing into the user-turn prompt.
 
@@ -1344,7 +1717,23 @@ def _render_request(
     §11's test 14). ADR-0222 §5 states why these two counts cannot ride an
     ``OPERATION`` trace instead.
 
-    **``files`` is printed last, under a heading of its own** (ADR-0230 §2, §3). It
+    **ADR-0240 §7's fact is printed after the listing, under a heading of its own**
+    (:func:`_render_empty_reads`). It is not a fourth group of ``memories`` and not a
+    third address space: it is what *this turn* already asked for and did not get, so
+    it sits below everything the planner is composing from. It carries the planner's
+    own prior ask and nothing the store said.
+
+    **And an episode's label values are rendered beside its bullet** (ADR-0240 §9,
+    :func:`_label_lines`). §9 offers an axis only where an episode of this call's supply
+    carries a value on it, and requires the values that opened it to be on the page as
+    quoted spans the planner can copy — a ``TopicLabel`` is refused rather than
+    normalised, so an axis whose spelling the model had to guess would be an axis whose
+    every ask is dropped. They are appended here rather than inside
+    :func:`_render_record` because that function is imported by ``benchmarks/`` and the
+    harness's answering prompt states no such invitation.
+
+    **``files`` is printed last of the material, under a heading of its own**
+    (ADR-0230 §2, §3). It
     is a second address space, not a fourth group of ``memories``: an ``M`` label is an
     ordinal into this call's ``memories`` and an ``F`` label an ordinal into this call's
     ``files``, and printing a listing under either memory heading would put two
@@ -1393,16 +1782,21 @@ def _render_request(
                 lines.append(_render_record(record, label=_label(ordinal)))
                 reply = _reply_lines(record)
                 lines += reply.lines
+                # ADR-0240 §9: the values that opened an axis, rendered as quoted
+                # spans the planner can copy byte for byte. Appended beside the
+                # bullet rather than folded into `_render_record`, which the
+                # benchmark harness imports by name — the labels belong to *this*
+                # assembler's own invitation and a harness prompt states none.
+                lines += _label_lines(record)
                 eligible += reply.eligible
                 elided += reply.elided
             if retrieved:
                 lines.append("")
         if retrieved:
             lines.append(_RETRIEVED_HEADING)
-            lines += [
-                _render_record(record, label=_label(ordinal))
-                for ordinal, record in enumerate(retrieved, start=len(turns) + 1)
-            ]
+            for ordinal, record in enumerate(retrieved, start=len(turns) + 1):
+                lines.append(_render_record(record, label=_label(ordinal)))
+                lines += _label_lines(record)
     else:
         lines.append("No stored memories were retrieved for this goal.")
 
@@ -1411,8 +1805,169 @@ def _render_request(
         lines.append("")
         lines += listing
 
+    # ADR-0240 §7, printed **last**: it is a fact about this turn's own earlier ask
+    # rather than a source of material, so it sits below everything the planner is
+    # composing from. Empty on a turn's first call, where these two lines add nothing
+    # and the assembled prompt is byte-identical to what it was before ADR-0240.
+    asked = _render_empty_reads(empty_reads)
+    if asked:
+        lines.append("")
+        lines += asked
+
     _log.info("planner_tail_replies_rendered", eligible=eligible, elided=elided)
     return "\n".join(lines)
+
+
+def _label_axes(memories: Sequence[MemoryRecord]) -> frozenset[str]:
+    """Which of ADR-0240 §9's three axes this call's **episodes** can name.
+
+    **Keyed on the episodic records and not on the whole sequence**, which is §9's
+    second clause and the reason it is stated: ``Planner.plan``'s ``memories`` carries
+    retrieved beliefs as well as episodes, and beliefs **do** carry ``topics`` and
+    ``about_person`` today — the observer and the consolidation stage fill them. A gate
+    reading the whole sequence would open the subject axis off a semantic belief while
+    every episode carries ``about_person`` ``None``, and the ask that followed would
+    search episodes, return nothing, and be entitled under §6 to spend the turn's
+    revision on an absence nobody could have filled.
+
+    **Read per call** (ADR-0228 §8's per-call binding). A turn's second call is handed
+    a supply its first was not, so a revision's guidance reflects the supply the
+    revision is planning over.
+
+    Args:
+        memories: The sequence the loop passed on **this** call, in its groups.
+
+    Returns:
+        The names of the axes at least one episodic record carries a value on, drawn
+        from :data:`_STRUCTURED_AXES`. Empty where none does, which is a call on which
+        the prompt states no label axis at all.
+    """
+    episodes = [record for record in memories if isinstance(record, EpisodicMemory)]
+    return frozenset(
+        axis
+        for axis in _STRUCTURED_AXES
+        if any(getattr(episode, axis, None) for episode in episodes)
+    )
+
+
+def _label_lines(record: MemoryRecord) -> list[str]:
+    """ADR-0240 §9's rendering of one episode's label values, or nothing.
+
+    **The values that opened an axis are what makes the axis copyable** (§9). A
+    ``TopicLabel`` is refused rather than normalised (ADR-0213 §3), so a planner
+    inventing a spelling loses its whole ask under §3 — and ``_render_record`` renders a
+    record's ``content``, its outcome phrase and an episode's ``occurred_at`` and
+    **none of these three**, so two records carrying different canonical topics render
+    identically. An axis offered off a value the model cannot see would be an axis whose
+    spelling the model would have to guess. §9's clause is that "no axis is described to
+    the planner whose values the same call leaves unrendered", and this is the other
+    half of it.
+
+    **Every span is quoted** (ADR-0098 §2), exactly as ``_render_record`` quotes a
+    record's ``content`` and ``outcome``. A label is a value a producer wrote out of the
+    owner's own records, so it is external content and could otherwise open a bullet,
+    forge a label or reopen a heading.
+
+    **Episodes only, and no belief's own fields move** (§9's last clause). A belief
+    carrying ``topics`` or ``about_person`` renders exactly as it renders today: this
+    function is called for the records §4's read can reach and for no others, so the
+    values on the page and the values the read can match are the same population.
+
+    Args:
+        record: The record whose bullet has just been rendered.
+
+    Returns:
+        One continuation line per axis the record carries a value on, in
+        :data:`_STRUCTURED_AXES`' order. Empty for a belief and for an unlabelled
+        episode, which keeps the assembled prompt byte-identical for a supply ADR-0239's
+        producer has not reached.
+    """
+    if not isinstance(record, EpisodicMemory):
+        return []
+    lines = []
+    if record.participants:
+        joined = ", ".join(_quoted_span(name) for name in record.participants)
+        lines.append(f"    who was involved: {joined}")
+    if record.topics:
+        joined = ", ".join(_quoted_span(topic) for topic in record.topics)
+        lines.append(f"    filed under: {joined}")
+    if record.about_person is not None:
+        lines.append(f"    about: {_quoted_span(record.about_person)}")
+    return lines
+
+
+def _render_empty_reads(empty_reads: Sequence[ReadAsk]) -> list[str]:
+    """ADR-0240 §7's fact, rendered as what this turn already asked for.
+
+    **What crosses is the planner's own prior composition and nothing the store
+    said** (§7). No record, no count, no identifier, no instant of the read and no
+    ``capped`` value: this function is handed asks and could not interpolate a store
+    value if a later editor wanted it to. What it says about the read is that it
+    returned nothing.
+
+    **The ask is rendered as emitted and is never edited on the way** (§7). Nothing
+    here widens a window, drops an axis, rewrites a label or composes a suggested ask
+    to put in its place — what the second call receives is what the first call emitted,
+    and the ask the second call makes is its own composition (§6).
+
+    **What it must not say is as fixed as what it may** (§7). It cannot say how many
+    records anything held, how much of the budget is gone, or how long the turn has
+    left, so a planner cannot learn the turn's budget or the store's shape from it.
+
+    **Empty on a turn's first call and on any call where no read came back empty**, so
+    the assembled prompt is then byte-identical to what it is without ADR-0240.
+
+    Args:
+        empty_reads: The asks this turn's already-serviced reads emitted that came back
+            with no record at all.
+
+    Returns:
+        The block's lines, or an empty list where there is nothing to state.
+    """
+    if not empty_reads:
+        return []
+    lines = [_EMPTY_READS_HEADING]
+    for ask in empty_reads:
+        lines.append(f"  - {_describe_ask(ask)}")
+    return lines
+
+
+def _describe_ask(ask: ReadAsk) -> str:
+    """One structured ask, written back to its author (ADR-0240 §7).
+
+    The axes it applied and the values it named, each value a quoted span under
+    ADR-0098 §2 — the planner's own output, handed back to the planner, revealing it
+    to nobody who did not compose it. An ask of any other kind is named by its kind
+    alone, which is the honest rendering of a value this ADR admits no other kind into
+    (§7, §14) and is unreachable today.
+
+    Args:
+        ask: The ask, exactly as the planner emitted it.
+
+    Returns:
+        One line describing it.
+    """
+    structure = ask.structure
+    if structure is None:
+        return f"a {ask.kind.value} read"
+    parts = []
+    if structure.window is not None:
+        start = (
+            "the beginning"
+            if structure.window.start is None
+            else structure.window.start.isoformat()
+        )
+        end = "now" if structure.window.end is None else structure.window.end.isoformat()
+        parts.append(f"recorded between {start} and {end}")
+    for axis, label in (("participants", "involving"), ("about_person", "about")):
+        values = getattr(structure, axis)
+        if values is not None:
+            parts.append(f"{label} {', '.join(_quoted_span(value) for value in values)}")
+    if structure.topics is not None:
+        parts.append(f"filed under {', '.join(_quoted_span(topic) for topic in structure.topics)}")
+    if ask.query is not None:
+        parts.append(f"nearest the words {_quoted_span(ask.query)}")
+    return "conversations " + ", ".join(parts)
 
 
 def _render_facets(context: CurrentContext) -> list[str]:

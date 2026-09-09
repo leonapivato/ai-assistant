@@ -990,6 +990,14 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     about a tree that may move again before the lane does", so the lane read the
     constant at 30 and moved it by one. That is what this pin is for.
 
+    **32 is ADR-0240 §11**, and the method set does not move with it: that decision
+    admits ``STRUCTURED_READ`` to ``ReadKind`` and gives ``ReadAsk`` a ``structure``
+    field, so it is under ADR-0124 §9's **second** limb on both halves at once — a
+    closed enumeration gaining a member, and a defaulted field the projection emits
+    on every ask that ``extra="forbid"`` then refuses. The one Protocol it widens is
+    ``Planner``, which is on neither promoted surface. §11 fixes no number either,
+    and for the sharper reason that another lane had 31 → 32 already scheduled.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -998,7 +1006,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (54, 31), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (54, 32), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"
