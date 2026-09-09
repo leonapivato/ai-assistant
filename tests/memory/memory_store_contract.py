@@ -2608,6 +2608,103 @@ class MemoryStoreContract:
             "boundary and return records, never raise (ADR-0237 §7)"
         )
 
+    async def test_select_excludes_the_unreadable_and_does_it_before_the_cut(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0237 §1's "alongside" clause, on the read that has no query.
+
+        The Protocol says every axis "binds before the cut, alongside ADR-0007 §2's
+        retention deadline and both ends of ADR-0045 §6's validity window, which
+        this read honours exactly as ``get``/``search``/``list_beliefs`` honour
+        them", and that "an implementation may not let a record failing any of them
+        consume the candidate budget the cut is taken from". Both halves are
+        asserted here and neither is inherited: every existing retention and
+        validity case in this suite drives ``get``, ``search`` or ``export``, so an
+        implementation that dropped these predicates from ``select`` alone would
+        pass all of them while returning expired and retired records.
+
+        The three unreadable records are deliberately the **newest writes** and the
+        ``limit`` is exactly the number of live ones. Under §5's order they would
+        sort first, so a store applying the lifecycle predicates *after* the cut
+        answers with nothing at all — the crowding-out failure, which an assertion
+        that merely no ineligible record came back would not catch.
+        """
+        await store.add(_semantic("live-old", _ANY, topics=("renovation",), last_updated=_REVISED))
+        await store.add(
+            _semantic("live-new", _ANY, topics=("renovation",), last_updated=_REVISED + _ONE_HOUR)
+        )
+        # Each unreadable for one reason and stamped as the newest write there is.
+        await store.add(
+            _semantic(
+                "expired",
+                _ANY,
+                topics=("renovation",),
+                last_updated=_FAR_FUTURE,
+                expires_at=_LONG_AGO,
+            )
+        )
+        await store.add(
+            _semantic(
+                "retired",
+                _ANY,
+                topics=("renovation",),
+                last_updated=_FAR_FUTURE,
+                validity=Validity(valid_until=_LONG_AGO),
+            )
+        )
+        await store.add(
+            _semantic(
+                "not-yet-valid",
+                _ANY,
+                topics=("renovation",),
+                last_updated=_FAR_FUTURE,
+                validity=Validity(valid_from=_FAR_FUTURE),
+            )
+        )
+
+        page = await store.select(topics=["renovation"], limit=2)
+
+        assert [record.id for record in page.records] == ["live-new", "live-old"], (
+            "the expired, retired and not-yet-valid records are off this read path, and "
+            "being the newest writes they must not have spent the two slots the cut "
+            "takes either (ADR-0237 §1)"
+        )
+        assert page.capped is False, "the ceiling did not bind; the limit did (ADR-0128 §2)"
+
+    async def test_select_reads_both_lifecycle_boundaries_the_same_way_the_others_do(
+        self, store: MemoryStore, now: datetime
+    ) -> None:
+        """The half-open ends, on ``select``, at the instant they turn.
+
+        ADR-0045 §6's window is ``[valid_from, valid_until)`` and ADR-0007 §2's
+        retention deadline is passed *at* it, which is what
+        ``test_valid_until_boundary_is_half_open`` and
+        ``test_valid_from_boundary_is_half_open`` pin for ``get`` and ``search``. A
+        store can exclude the far-past and far-future cases above with an
+        inclusive comparison and still be wrong here by one instant in both
+        directions, so the boundary is asserted rather than assumed from them.
+        """
+        await store.add(
+            _semantic("at-until", _ANY, topics=("renovation",), validity=Validity(valid_until=now))
+        )
+        await store.add(
+            _semantic("at-from", _ANY, topics=("renovation",), validity=Validity(valid_from=now))
+        )
+        await store.add(_semantic("at-expiry", _ANY, topics=("renovation",), expires_at=now))
+        await store.add(
+            _semantic(
+                "before-until",
+                _ANY,
+                topics=("renovation",),
+                validity=Validity(valid_until=now + _ONE_HOUR),
+            )
+        )
+
+        assert _ids(await store.select(topics=["renovation"])) == {"at-from", "before-until"}, (
+            "closed at valid_until and retained only while expires_at is still ahead: "
+            "the ends this read honours are the ones every other read honours"
+        )
+
     @pytest.fixture
     def select_candidate_ceiling(self) -> int | None:
         """The store-under-test's candidate ceiling **on ``select``**, or ``None``.
