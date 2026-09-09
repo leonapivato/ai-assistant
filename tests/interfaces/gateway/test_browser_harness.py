@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
-import threading
+import sys
 import time
 from typing import TYPE_CHECKING, Any, cast
 
@@ -219,32 +219,48 @@ async def test_a_context_that_will_not_close_still_releases_the_gateway(
 
 
 @pytest.mark.integration
-async def test_a_port_released_after_the_first_probe_is_reported_free() -> None:
+async def test_a_port_released_after_the_first_probe_is_reported_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The wait is what answers, which is the whole of issue #2139's fix.
 
-    The port is *held* when the assertion begins, so the single sample the two cases
-    above used to take would report it busy and fail them. The case therefore fails
-    against the version this replaced and passes against this one, rather than
-    passing against both -- which is the only way a regression pin on a wait can be
-    written, since a wait that never waits is indistinguishable from one that does on
-    a port that was free all along.
+    The port is held when the helper takes its first sample and let go only once
+    that sample has answered, so the single probe the two cases above used to take
+    reports it busy: this case fails against the version it replaced and passes
+    against this one. A wait that never waits is otherwise indistinguishable from
+    one that does, because a port free all along is reported free either way.
+
+    **The release rides on the probe rather than on a clock.** Closing the socket
+    from a timer would have put a scheduling race into the one module that exists
+    to take a scheduling race out: a pause before the first sample releases the port
+    early and fails a correct helper, and a pause after it hands the helper a port
+    that was already free and pins nothing at all (adversarial review, round 1,
+    ``major``). Ordering the release *inside* the first probe's return leaves no
+    pause anywhere that can reorder the two.
     """
     port = gateway_ports.free_port()
     holder = socket.socket()
     holder.bind(("127.0.0.1", port))
     holder.listen(1)
-    # A timer rather than a sleep in the case: what is under test is that the helper
-    # keeps asking while somebody else's socket is still up, and a release the case
-    # performed itself before asking would be the free-port arm below wearing a
-    # disguise.
-    releasing = threading.Timer(0.1, holder.close)
-    releasing.start()
+    answers: list[bool] = []
+    sample = _is_free
+
+    def releasing_probe(asked: int) -> bool:
+        answer = sample(asked)
+        answers.append(answer)
+        if len(answers) == 1:
+            holder.close()
+        return answer
+
+    # Substituted on this module, which is where :func:`_becomes_free` looks its
+    # probe up -- it is a module global, so a case can reach it without a parameter
+    # neither production call site would ever pass.
+    monkeypatch.setattr(sys.modules[__name__], "_is_free", releasing_probe)
     try:
-        assert not _is_free(port), "the case did not start from a held port"
         assert await _becomes_free(port)
     finally:
-        releasing.cancel()
         holder.close()
+    assert answers == [False, True], "the port was not held across the first probe"
 
 
 @pytest.mark.integration
@@ -264,14 +280,34 @@ async def test_a_port_held_for_the_whole_window_is_reported_busy() -> None:
 
 @pytest.mark.integration
 async def test_a_port_that_is_already_free_is_answered_without_waiting() -> None:
-    """The passing path still costs one ``bind``.
+    """The passing path still costs one ``bind`` and no wait at all.
 
-    Stated over a window of no length at all, because that is the only window in
-    which "answered before anything slept" is the only way to answer at all: a probe
-    ordered before the deadline check reports a free port free, and one ordered after
-    it cannot.
+    Asserted by what the event loop did *not* get to run. A coroutine scheduled
+    immediately before the call runs at the first point this one yields, so a helper
+    that slept -- before its first probe or after it -- lets it run, and one that
+    answers straight out of that first bind cannot.
+
+    A window of no length does not reach that claim on its own, which is why it is
+    not what this asserts: the probe is ordered before the deadline check, so a
+    ``within`` of zero is satisfied by a helper that slept first (adversarial review,
+    round 1, ``minor``). Keeping the zero window as well costs nothing and states
+    the other half -- that no length of window is needed to answer.
     """
-    assert await _becomes_free(gateway_ports.free_port(), within=0.0)
+    yielded = False
+
+    async def watch() -> None:
+        nonlocal yielded
+        yielded = True
+
+    watcher = asyncio.create_task(watch())
+    free = await _becomes_free(gateway_ports.free_port(), within=0.0)
+    # Read before the loop is given a turn, so that awaiting the watcher below --
+    # which is what keeps a pending task out of the run -- cannot set it first.
+    slept = yielded
+    await watcher
+
+    assert free
+    assert not slept, "the helper yielded to the loop on a port that was already free"
 
 
 def test_an_absent_browser_build_skips_naming_the_command_that_installs_it() -> None:
