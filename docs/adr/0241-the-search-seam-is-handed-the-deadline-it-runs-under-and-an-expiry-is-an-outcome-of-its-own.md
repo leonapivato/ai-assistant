@@ -1,6 +1,6 @@
 # 241. The search seam is handed the deadline it runs under, and an expiry is an outcome of its own
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-09-09
 - **Partially supersedes**
   [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
@@ -501,10 +501,20 @@ cited.
 > is ADR-0029 §4's *"a tool that raised"* limb at this seam; which mechanism establishes
 > the provenance is the implementing lane's, and that one must exist is this clause's.
 
-> **Normative.** **A cancellation still completes the claim before it re-raises**, with
-> `interrupted_outcome` and an `UNKNOWN` cost, and releases the channel — which is what
-> `consumed_call` already does and what ADR-0192 §3 requires. §5's completion clause and
-> this one are one rule read at two exits, not two rules.
+> **Normative.** **A cancellation that interrupted the call completes the claim before it
+> re-raises**, with `interrupted_outcome` and an `UNKNOWN` cost, and releases the channel —
+> which is what `consumed_call` already does and what ADR-0192 §3 requires. §5's completion
+> clause and this one are one rule read at two exits, not two rules.
+
+> **Normative.** **A cancellation delivered after the outcome was established changes no
+> row.** Where the callable has returned and the cancellation lands while the completion
+> append is in flight, the row carries **the outcome the call actually reached** and that
+> result's own cost; the append is absorbed to completion rather than abandoned, and the
+> cancellation is raised after it. That is ADR-0192 §3's retained, shielded append,
+> unchanged. **No lane rewrites an established outcome into `interrupted_outcome` on that
+> path, and no lane writes a second completion** — `interrupted_outcome` is the answer for
+> an interruption of the *call*, and a search that reached its answer was not interrupted
+> in that sense however the task ends.
 
 > **Normative.** **The deadline stops the waiting, not the work.** No implementation
 > represents an expiry as the request having been abandoned, and no caller assumes the
@@ -749,6 +759,24 @@ It owes, and nothing beyond it:
 > Driven through `FakeWebSearcher.suspend_next` in the suite and through the production
 > searcher in its own test.
 
+> **Normative.** **Arm 3b — a cancellation after the answer keeps the answer's row.** The
+> provider returns successfully, the **completion** append is held on a barrier, and the
+> task is then cancelled: the row that lands carries the outcome the call reached and that
+> result's cost — **not** `interrupted_outcome` and **not** an `UNKNOWN` substituted for a
+> figure the result carried — the append is not abandoned, exactly one completion is
+> written, and the cancellation leaves afterwards. The arm exists because §7's two
+> cancellation clauses differ only in when the cancellation landed, and an implementation
+> that read the first as unconditional would rewrite a good row.
+
+> **Normative.** **Arm 12 — the admission and the call are one window, not two.** With
+> `search_call_deadline` at five seconds, a gate made to take three and a transport made to
+> take three more, and prompt ledger appends: the search returns `DEADLINE_EXPIRED` at the
+> single shared deadline and **does not** succeed at six seconds. ADR-0194 §3 names this
+> failure in terms — *"An implementation handing the admission its own fresh window and the
+> callable another passes every never-answering-gate fixture and then returns successfully
+> at nearly twice the deadline the caller set"* — and neither Arm 1 nor Arm 2b sees it,
+> because each stalls one stage past the whole bound.
+
 > **Normative.** **Arm 4 — the pre-registered two-turn arm, read against ADR-0231 §16.**
 > A conversation whose first turn searched and answered and whose second turn's search
 > expires: the second turn's reply **still answers from what the conversation actually
@@ -965,9 +993,9 @@ ADR-0148** — relied upon as written.
 > of what it obliges, and unmarked text is read to determine what a marked clause means
 > and never supplies an obligation.
 
-What binds is **sixty-six marked clauses**: §1's seven, §2's two, §3's five, §4's five,
-§5's four, §6's three, §7's five, §8's four, §9's six, §10's five, §11's four, §12's
-fifteen, and this section's one. §13's list, §14's classification and every argument in
+What binds is **sixty-nine marked clauses**: §1's seven, §2's two, §3's five, §4's five,
+§5's four, §6's three, §7's six, §8's four, §9's six, §10's five, §11's four, §12's
+seventeen, and this section's one. §13's list, §14's classification and every argument in
 this document are deliberately unmarked: they are deferral, attestation and argument,
 which ADR-0089 §1 classifies as non-normative however load-bearing.
 
