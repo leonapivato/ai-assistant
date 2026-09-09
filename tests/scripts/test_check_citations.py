@@ -125,8 +125,22 @@ def _rendered(root: Path, output_format: str, *args: str) -> str:
     return result.stdout
 
 
-def _fake_gh(directory: Path, numbers: list[int], *, before: str = "") -> dict[str, str]:
+def _fake_gh(
+    directory: Path,
+    numbers: list[int],
+    *,
+    before: str = "",
+    newest: int | None = None,
+    broken_page: tuple[int, str] | None = None,
+) -> dict[str, str]:
     """Put a ``gh`` on PATH that reports ``numbers`` and never touches the network.
+
+    The shim answers the real endpoint's shape rather than one fixed body: it
+    reads ``per_page`` and ``page`` out of the URL it is handed and serves that
+    slice of ``numbers`` sorted newest-first, so the checker's ``per_page=1``
+    call for the newest number and its ``page=1,2,...`` walk are answered as
+    GitHub answers them (#2153). A page past the end is empty, which is how the
+    walk terminates.
 
     Args:
         directory: Where to write the shim; it is prepended to ``PATH``.
@@ -135,12 +149,37 @@ def _fake_gh(directory: Path, numbers: list[int], *, before: str = "") -> dict[s
             test observes *that* the fetch happened — touch a file and look for
             it — and how it mutates the checkout *while* it is happening, which
             is the only deterministic way to pin what the fetch may be ordered
-            between.
+            between. It runs on every call, so keep it idempotent.
+        newest: What the ``per_page=1`` call reports as the newest number,
+            defaulting to the highest of ``numbers``. Setting it higher is how a
+            test makes the read demonstrably short of the tracker.
+        broken_page: A page and how it misbehaves — ``"exit"`` for a non-zero
+            exit with nothing on stdout, ``"garbage"`` for exit 0 with a body
+            that is not a list of numbers.
     """
     script = directory / "gh"
-    body = "\n".join(str(n) for n in numbers)
+    body = "\n".join(str(n) for n in sorted(numbers, reverse=True))
+    top = newest if newest is not None else (max(numbers) if numbers else 0)
     hook = "" if not before else f"{before}\n"
-    script.write_text(f'#!/bin/sh\n{hook}cat <<"EOF"\n{body}\nEOF\n', encoding="utf-8")
+    bad_page, bad_action = broken_page or (0, "exit")
+    bad_action = "exit 2" if bad_action == "exit" else "printf 'not-a-number\\n'; exit 0"
+    script.write_text(
+        f"""#!/bin/sh
+{hook}url="$2"
+per_page="${{url#*per_page=}}"
+per_page="${{per_page%%&*}}"
+case "$url" in
+  *"&page="*) page="${{url##*&page=}}"; page="${{page%%&*}}" ;;
+  *) page=1 ;;
+esac
+if [ "$per_page" = 1 ]; then printf '%s\\n' "{top}"; exit 0; fi
+if [ "$page" = "{bad_page}" ]; then {bad_action}; fi
+sed -n "$(( (page - 1) * per_page + 1 )),$(( page * per_page ))p" <<"EOF"
+{body}
+EOF
+""",
+        encoding="utf-8",
+    )
     script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     env = dict(os.environ)
     env["PATH"] = f"{directory}{os.pathsep}{env.get('PATH', '')}"
@@ -483,6 +522,96 @@ def test_an_unreachable_tracker_passes_silently_rather_than_failing(tmp_path: Pa
     assert _findings(report, "tracker") == []
     assert report["tracker_checked"] is False
     assert report["notes"]
+
+
+# --------------------------------------------------------------------------- #
+# #2153 — the read is complete or it is nothing.
+#
+# The tracker fetch used to take any non-empty answer as the whole tracker, and
+# GitHub's issues endpoint answers a paginated read short — silently, exit 0,
+# valid JSON — on a repository this size. Every number missing from that answer
+# was then reported as a dangling citation, which is the confident wrong finding
+# ADR-0088 §6 ranks above every miss: 5,424 of them, and a red `main`.
+#
+# So the checker now walks explicit pages and refuses to call the result
+# complete unless it reaches `1`, tops out at the newest number GitHub reports,
+# and covers nearly all of the space between. Each of these pins one of those
+# refusals, and each of them asserts the *skip* — `tracker_checked` false with no
+# finding — because §6's asymmetry is that not knowing is silent.
+# --------------------------------------------------------------------------- #
+
+
+def _tracker(
+    tmp_path: Path,
+    citation: str,
+    numbers: list[int],
+    *,
+    newest: int | None = None,
+    broken_page: tuple[int, str] | None = None,
+) -> dict[str, object]:
+    """Run the checker over one ADR citing ``citation``, against a shimmed ``gh``."""
+    _make_repo(tmp_path, {"0001-one.md": f"# 1. One\n\nTracked by {citation}.\n"})
+    env = _fake_gh(tmp_path, numbers, newest=newest, broken_page=broken_page)
+    return _report(tmp_path, env=env)
+
+
+def test_the_tracker_is_read_page_by_page_to_a_short_last_page(tmp_path: Path) -> None:
+    """Three pages, the last one short, and the whole space is known afterwards."""
+    report = _tracker(tmp_path, "#1 and #251", list(range(1, 251)))
+
+    assert report["tracker_checked"] is True
+    assert _citations(report, "tracker") == ["#251"]
+
+
+def test_a_tracker_missing_a_few_deleted_numbers_is_still_complete(tmp_path: Path) -> None:
+    """The tolerance exists because a deleted or transferred number leaves a gap."""
+    numbers = [n for n in range(1, 251) if n not in {5, 7, 9, 11, 13}]
+
+    report = _tracker(tmp_path, "#1", numbers)
+
+    assert report["tracker_checked"] is True
+    assert _findings(report, "tracker") == []
+
+
+def test_a_page_that_fails_makes_the_whole_read_unevaluable(tmp_path: Path) -> None:
+    report = _tracker(tmp_path, "#999", list(range(1, 251)), broken_page=(2, "exit"))
+
+    assert report["tracker_checked"] is False
+    assert _findings(report, "tracker") == []
+
+
+def test_a_page_that_answers_with_nonsense_makes_the_read_unevaluable(tmp_path: Path) -> None:
+    """An unparsable page is not filtered down to the digits it happens to hold."""
+    report = _tracker(tmp_path, "#999", list(range(1, 251)), broken_page=(2, "garbage"))
+
+    assert report["tracker_checked"] is False
+    assert _findings(report, "tracker") == []
+
+
+def test_a_read_that_never_reaches_number_one_is_unevaluable(tmp_path: Path) -> None:
+    """Under the newest-first sort, ``1`` is the marker that the last page arrived."""
+    report = _tracker(tmp_path, "#999", list(range(2, 251)))
+
+    assert report["tracker_checked"] is False
+    assert _findings(report, "tracker") == []
+
+
+def test_a_read_topping_out_below_the_newest_number_is_unevaluable(tmp_path: Path) -> None:
+    """The completeness test comes from a separate call, not from the read itself."""
+    report = _tracker(tmp_path, "#999", list(range(1, 201)), newest=250)
+
+    assert report["tracker_checked"] is False
+    assert _findings(report, "tracker") == []
+
+
+def test_a_read_short_by_more_than_the_tolerance_is_unevaluable(tmp_path: Path) -> None:
+    """Reaching both ends is not enough when the middle is missing."""
+    numbers = [1, *range(101, 251)]
+
+    report = _tracker(tmp_path, "#999", numbers, newest=250)
+
+    assert report["tracker_checked"] is False
+    assert _findings(report, "tracker") == []
 
 
 def test_issue_state_is_not_checked(tmp_path: Path) -> None:

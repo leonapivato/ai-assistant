@@ -62,6 +62,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -1029,38 +1030,153 @@ def _liveness_findings(adrs: dict[int, tuple[str, str]]) -> Iterator[Finding]:
 # Tracker citations (ADR-0088 §2(c))
 # --------------------------------------------------------------------------- #
 
+#: How many numbers one page of the tracker read asks for. The endpoint's
+#: maximum, so that the read is as few round trips as it can be.
+_TRACKER_PAGE_SIZE = 100
 
-def fetch_tracker_numbers(root: Path) -> frozenset[int] | None:
-    """Return every issue and PR number GitHub knows, or ``None`` if unreachable.
+#: The sort the tracker is read under, stated rather than left to the endpoint's
+#: default. Newest-first is what makes ``1`` the marker of the last page, and
+#: what makes an issue opened *during* the read appear on a page already passed
+#: rather than shifting every later page by one.
+_TRACKER_ORDER = "&sort=created&direction=desc"
 
-    GitHub's REST issues endpoint returns pull requests too, so one paginated
-    call covers the shared number space a ``#NNN`` citation lives in.
+#: How many times a short page is re-asked before its answer is taken as the end
+#: of the list. The endpoint answers with fewer items than it was asked for on
+#: roughly one call in six (#2153), which over twenty-odd pages is most runs;
+#: four attempts is what makes a complete read the normal outcome rather than
+#: the rare one, and a page that is genuinely last is never re-asked at all.
+_TRACKER_PAGE_ATTEMPTS = 4
 
-    Returns ``None`` — unevaluable, therefore silent (ADR-0088 §6) — when ``gh``
-    is missing, unauthenticated, the call fails, or it succeeds while naming no
-    number at all. That last case is deliberate: a repository always holds at
-    least the issue an ADR cites, so an empty answer is a broken call rather than
-    an empty tracker, and reading it as "every citation is dangling" would fail
-    the whole corpus on a transport fault. A checker that cannot reach the
-    tracker has learned nothing about the citation, and inventing a failure from
-    that is the false report §6 forbids.
+#: The share of ``1..newest`` the assembled set must cover to be called complete.
+#: See :func:`fetch_tracker_numbers` for the measurements this sits between.
+_TRACKER_DENSITY_FLOOR = 0.95
+
+#: The whole read's wall-clock budget, in seconds — one deadline across every
+#: call rather than one per call (#2000).
+_TRACKER_TIMEOUT_SECONDS = 120.0
+
+
+def _gh_issue_numbers(root: Path, query: str, deadline: float) -> list[int] | None:
+    """Return the numbers one ``gh api`` call names, in the order it named them.
+
+    Args:
+        root: The checkout the call is made from.
+        query: The query string appended to the repository's issues endpoint.
+        deadline: A ``time.monotonic()`` reading the call must finish before.
+
+    Returns:
+        The numbers, possibly empty, or ``None`` when the call could not be made,
+        exited non-zero, ran past the deadline, or answered with anything other
+        than whitespace-separated digits. Every one of those is unevaluable, and
+        an unparsable answer is *not* filtered down to the digits it happens to
+        contain: a partial answer read as a whole one is the failure this whole
+        function exists to make impossible.
     """
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return None
     argv = [
         "gh",
         "api",
-        "repos/{owner}/{repo}/issues?state=all&per_page=100",
-        "--paginate",
+        f"repos/{{owner}}/{{repo}}/issues?{query}",
         "--jq",
         ".[].number",
     ]
     try:
         result = subprocess.run(  # noqa: S603  # fixed argv, no shell
-            argv, capture_output=True, text=True, check=True, cwd=root, timeout=120
+            argv, capture_output=True, text=True, check=True, cwd=root, timeout=remaining
         )
     except OSError, subprocess.SubprocessError:
         return None
-    numbers = {int(line) for line in result.stdout.split() if line.strip().isdigit()}
-    return frozenset(numbers) if numbers else None
+    fields = result.stdout.split()
+    if not all(field.isdigit() for field in fields):
+        return None
+    return [int(field) for field in fields]
+
+
+def fetch_tracker_numbers(root: Path) -> frozenset[int] | None:
+    """Return every issue and PR number GitHub knows, or ``None`` if unreachable.
+
+    GitHub's REST issues endpoint returns pull requests too, so it covers the
+    shared number space a ``#NNN`` citation lives in. It is read newest-first in
+    explicit ``page=1,2,...`` steps, stopping at the first page shorter than
+    ``per_page``, rather than by following the ``Link`` header with ``gh
+    --paginate``: on a repository this size that cursor walk stops early and
+    exits 0, and five consecutive runs returned 251, 334, 333, 46 and 148 of
+    ~2,150 numbers (#2153).
+
+    **The answer is returned only when it is demonstrably complete.** Explicit
+    pages are not a fix on their own — the endpoint also answers a single page
+    with valid JSON holding fewer items than it was asked for, roughly one call
+    in six as measured on 2026-09-09 — so a short page is re-asked up to
+    ``_TRACKER_PAGE_ATTEMPTS`` times, and the assembled set is then tested
+    against three facts that a truncated read cannot satisfy:
+
+    - it holds ``1``, which under the descending sort is only reachable from the
+      last page;
+    - its highest number equals the newest number GitHub reports, read by a
+      separate ``per_page=1`` call so that the completeness test does not come
+      out of the read it is testing;
+    - it covers at least ``_TRACKER_DENSITY_FLOOR`` of ``1..newest``. ADR-0088
+      §6's premise is that "an issue number once assigned stays assigned", so
+      that space is dense apart from deleted or transferred numbers — this
+      repository had **no** gap at all in 2,154 numbers on 2026-09-09, while the
+      truncations observed were short by 88% to 98%. The floor is a share rather
+      than a count because deletions accrue with the tracker's size, and it is
+      loose by two orders of magnitude against every truncation seen and tight by
+      one against the gaps a real tracker carries.
+
+    Returns ``None`` — unevaluable, therefore silent (ADR-0088 §6) — when ``gh``
+    is missing, unauthenticated, a call fails or is unparsable, the whole read
+    runs past ``_TRACKER_TIMEOUT_SECONDS``, or the assembled set fails any of the
+    three tests above. The empty answer is the degenerate case of the last of
+    them and is refused for the reason it always was: a repository always holds
+    at least the issue an ADR cites, so an empty answer is a broken call rather
+    than an empty tracker. Reading a broken call as "every citation is dangling"
+    fails the whole corpus on a transport fault, and a checker that could not
+    reach the tracker has learned nothing about the citation — inventing a
+    failure from that is the false report §6 forbids, whether the answer it was
+    given was empty or merely short.
+
+    The budget is one deadline across every call, in the spirit of the single
+    120-second timeout the ``--paginate`` call carried: #2000's reason for it was
+    that a local, deterministic diagnostic must not be made to wait out a stalled
+    network, and that reason is about the wall clock of the whole read rather
+    than of any one request within it.
+    """
+    deadline = time.monotonic() + _TRACKER_TIMEOUT_SECONDS
+    newest = _gh_issue_numbers(root, f"state=all&per_page=1{_TRACKER_ORDER}", deadline)
+    if not newest:
+        return None
+    highest = newest[0]
+
+    # One page per hundred numbers, plus the short last one, plus one to spare:
+    # a read still going past that is not converging and is not to be trusted.
+    last_possible_page = highest // _TRACKER_PAGE_SIZE + 2
+    numbers: set[int] = set()
+    for page in range(1, last_possible_page + 1):
+        query = f"state=all&per_page={_TRACKER_PAGE_SIZE}{_TRACKER_ORDER}&page={page}"
+        got: list[int] | None = None
+        for _ in range(_TRACKER_PAGE_ATTEMPTS):
+            got = _gh_issue_numbers(root, query, deadline)
+            # A page holding ``1`` is the last one, by construction of the
+            # descending sort, so its shortness is the end of the list rather
+            # than a truncation and re-asking would only cost calls.
+            if got is None or len(got) == _TRACKER_PAGE_SIZE or 1 in got:
+                break
+        if got is None:
+            return None
+        numbers.update(got)
+        if len(got) < _TRACKER_PAGE_SIZE:
+            break
+    else:
+        return None  # Still full pages after the newest number can account for.
+
+    if 1 not in numbers or max(numbers) != highest:
+        return None
+    if len(numbers) < highest * _TRACKER_DENSITY_FLOOR:
+        return None
+    return frozenset(numbers)
 
 
 # --------------------------------------------------------------------------- #
