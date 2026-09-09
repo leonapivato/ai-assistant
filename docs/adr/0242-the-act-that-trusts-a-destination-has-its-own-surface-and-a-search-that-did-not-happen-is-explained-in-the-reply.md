@@ -292,7 +292,7 @@ class SearchNotServiced(StrEnum):                      # core/types.py, §7, §8
     TRUST_MISSING         = "trust_missing"
     AUTHORISATION_MISSING = "authorisation_missing"
     INTERRUPTED           = "interrupted"
-    NOT_MADE              = "not_made"
+    UNAVAILABLE           = "unavailable"
 
 
 class TurnOutcome(BaseModel):                          # core/types.py, §9
@@ -577,18 +577,27 @@ happen and why, even though the act that would fix it is on a screen.
 
 ### 6. The reply says a search did not happen, and that is the clause the owner's amendment moves
 
-> **Normative.** On a turn in which **at least one search servicing did not reach a result**,
-> the composing stage is given one member of §8's closed vocabulary and composes an answer
-> that says so. On every other turn it is given nothing, and the assembled prompt is
+> **Normative.** On a turn in which **at least one search servicing recorded a
+> `SearchDisposition`**, the composing stage is given one member of §8's closed vocabulary and
+> composes an answer that says so. On every other turn it is given nothing, and the assembled prompt is
 > byte-identical to what it is today — the same guarantee ADR-0228 §10 makes for its own
 > carrier and ADR-0227 §3 for its own, and the clause that keeps a new prompt input from
 > silently moving every reply the system composes.
 
-> **Normative.** A servicing **reached a result** where the search ran and the provider
-> answered, including where it answered with nothing. `SearchRefusal.NO_RESULT` is not a
-> refusal and maps to no `SearchDisposition` member (ADR-0231 §13), and a turn whose only
-> search found nothing carries **no** member: the assistant looked, and saying it did not is
-> false.
+> **Normative.** **The eligibility condition is the disposition's presence and nothing else**,
+> and it is stated that way rather than over any account of what happened, because the tree
+> already computes it: `ServicedRead.disposition` is `None` on a servicing that yielded records
+> into the supply and carries a member on every servicing that did not. A turn on which every
+> servicing yielded records carries **no** `SearchNotServiced` member.
+
+> **Normative.** In particular a search that **ran, reached the provider and found nothing**
+> carries no member. `SearchRefusal.NO_RESULT` is not a refusal and maps to no
+> `SearchDisposition` member (ADR-0231 §13), so the assistant looked, and saying it did not
+> would be false. **A search that reached the provider and whose response was then refused —
+> unattested, oversized, or refused by the provider — *does* carry one**, and it carries
+> `UNAVAILABLE` (§8): records reached no supply, the user has no act, and §9 fixes a statement
+> for that member which says the lookup produced nothing usable and **does not say that no
+> request was made**.
 
 > **Normative.** **This is a reply and not a notification.** No lane mints a `Notification`, a
 > notification kind, a delivery or a poll result for a search that did not happen. ADR-0235
@@ -681,7 +690,8 @@ the user could not already have deduced from having asked the question.
 >    answered `UNCHOSEN`.
 > 5. **`AUTHORISATION_MISSING`** — the policy did not rule `ALLOW` on any other ground.
 > 6. **`INTERRUPTED`** — the search was begun and stopped before it answered (§10).
-> 7. **`NOT_MADE`** — every other way a servicing does not reach a result.
+> 7. **`UNAVAILABLE`** — every other way a servicing yields no records into the supply,
+>    including one whose request reached the provider and whose response was refused.
 >
 > The vocabulary is **added to and never renamed**, and no implementation or later ADR adds an
 > eighth member without the ADR that decides it.
@@ -701,32 +711,44 @@ the user could not already have deduced from having asked the question.
 > | ADR-0238 §11's sixteenth member (`admit_search` refused) | `ALLOWANCE_EXHAUSTED` |
 > | `SPEND_REFUSED` | `SPEND_EXHAUSTED` |
 > | `RULING_DENY` | `AUTHORISATION_DENIED` |
-> | `RULING_CONFIRM` | `TRUST_MISSING` where the binding carried `planned_with_external_content` `True` **and** `trust_of` answered `UNCHOSEN`; `AUTHORISATION_MISSING` otherwise |
-> | `NOT_CONFIGURED`, `NO_BUDGET`, `COMPOSER_DECLINED`, `COMPOSER_UNAVAILABLE`, `COMPOSER_MALFORMED`, `COMPOSER_TOO_LONG`, `BINDING_FAILED`, `RULING_UNAVAILABLE`, `TRANSPORT_FAILED`, `PROVIDER_REFUSED`, `RESPONSE_TOO_LARGE`, `UNATTESTED` | `NOT_MADE` |
+> | `RULING_CONFIRM`, binding carried `planned_with_external_content` `False` | `AUTHORISATION_MISSING` |
+> | `RULING_CONFIRM`, binding carried `planned_with_external_content` `True`, `trust_of` answered `UNCHOSEN` | `TRUST_MISSING` |
+> | `RULING_CONFIRM`, binding carried `planned_with_external_content` `True`, `trust_of` answered `USER_CHOSEN` | `UNAVAILABLE` |
+> | `NOT_CONFIGURED`, `NO_BUDGET`, `COMPOSER_DECLINED`, `COMPOSER_UNAVAILABLE`, `COMPOSER_MALFORMED`, `COMPOSER_TOO_LONG`, `BINDING_FAILED`, `RULING_UNAVAILABLE`, `TRANSPORT_FAILED`, `PROVIDER_REFUSED`, `RESPONSE_TOO_LARGE`, `UNATTESTED` | `UNAVAILABLE` |
 >
 > That is all sixteen members ADR-0238 §11 leaves the enumeration closed at, and `INTERRUPTED`
 > is reached by no disposition in this table (§10).
 
-> **Normative.** A `SearchDisposition` member minted by a **later** ADR maps to `NOT_MADE`
+> **Normative.** A `SearchDisposition` member minted by a **later** ADR maps to `UNAVAILABLE`
 > unless that ADR's own text maps it elsewhere. The default is the least-claiming member —
 > §9's rendering for it names no cause and no act — so a member nobody has mapped degrades to
 > silence about the reason rather than to a wrong reason.
 
-> **Normative.** The `RULING_CONFIRM` row is **two members and not one**, and the
-> discrimination is over two recorded values rather than an inference. A `RULING_CONFIRM` is
-> recorded both where **no recipient grant covers the destination at all** and where **a grant
-> stands but ADR-0193 §4's external-content bar refused this request** because ADR-0238 §5's
-> closed loop was not closed. The user's act differs — `remember-recipients` in the first case,
-> `trust-destinations` in the second — and the disposition cannot tell them apart. **The
-> `planned_with_external_content` limb is what keeps a first search out of the trust arm**: a
-> query composed from the utterance alone carries `False`, so a user with neither
-> authorisation is sent to the grant, which is the act that unblocks anything at all; trust
-> alone would change nothing for them.
+> **Normative.** The `RULING_CONFIRM` row is **three members and not one**, and each limb is
+> read from a recorded value rather than inferred. One disposition covers three situations with
+> three different answers to *"what would change this?"*, and the disposition cannot tell them
+> apart: **no recipient grant covers the destination at all**; **a grant stands and ADR-0193
+> §4's external-content bar refused the request because the destination is `UNCHOSEN`**; and
+> **a grant stands, the destination is `USER_CHOSEN`, and ADR-0238 §5's closed-loop condition
+> is false for some other reason.**
 
-> **Normative.** Where the binding carried `planned_with_external_content` `True` and
-> `trust_of` answered `USER_CHOSEN`, the member is `AUTHORISATION_MISSING` and not
-> `TRUST_MISSING`. The loop failed for a reason other than trust, no grant covered the
-> request, and *"no standing authorisation covers this"* is the true statement.
+> **Normative.** **`AUTHORISATION_MISSING` is carried only where the binding carried
+> `planned_with_external_content` `False`**, and that limb is what makes its guidance always
+> correct rather than usually correct. A decision on such a binding is one ADR-0235 §3's
+> seventh condition admits, so the recipient-grant act is genuinely available on it; a query
+> composed from the utterance alone carries `False`, so a user with neither authorisation is
+> sent to the grant, which is the act that unblocks anything at all.
+
+> **Normative.** **Where the binding carried `planned_with_external_content` `True` and
+> `trust_of` answered `USER_CHOSEN`, the member is `UNAVAILABLE`** — the member that names no
+> cause and no act — and it is neither `AUTHORISATION_MISSING` nor `TRUST_MISSING`. The
+> destination is already chosen, so the trust act is not the answer; and ADR-0238 §5's
+> **recorded** half is monotone over the conversation, so a grant established now would not
+> repair it and the decision that records the refusal is itself not one ADR-0235 §3 offers the
+> act on. **Naming an act that cannot help is worse than naming none**, and the permitted
+> inputs (§7) cannot establish which of §5's conditions failed, so this ADR takes the
+> fail-safe direction rather than guessing. §14 defers the finer explanation with its
+> trigger.
 
 > **Normative.** **The two inputs are read at the site and never reconstructed.**
 > `trust_of`'s answer is the one ADR-0238 §5 already obliges the servicing site to take, read
@@ -737,10 +759,11 @@ the user could not already have deduced from having asked the question.
 **Seven members chosen by what the user can do, and the count is argued rather than assumed.**
 Four of them name an act the user or the operator can perform and each act is different;
 `INTERRUPTED` names something that happened to the request rather than something missing, and
-its recourse is to ask again; `NOT_MADE` is the deliberate residue, and it is one member
-rather than twelve because none of the twelve dispositions behind it gives the user anything
-to do. Collapsing further would merge acts; splitting further would report the system's
-stages, which is `SearchDisposition`'s job and the audit's.
+its recourse is to ask again; `UNAVAILABLE` is the deliberate residue, and it is one member
+rather than thirteen because none of the situations behind it gives the user anything to do —
+including the closed-loop case, where an act exists but is not one the user can perform.
+Collapsing further would merge acts; splitting further would report the system's stages,
+which is `SearchDisposition`'s job and the audit's.
 
 ### 9. `TurnOutcome` carries the same member, and the command name is on the surface and not in the reply
 
@@ -768,15 +791,42 @@ stages, which is `SearchDisposition`'s job and the audit's.
 > that is the whole of what it is for. A surface renders, beside the reply and never in place
 > of it, one fixed statement per member, naming: for `AUTHORISATION_MISSING`, that no standing
 > authorisation covers the search's recipients, and `assistant remember-recipients`; for
-> `TRUST_MISSING`, that the destination is not one the user has chosen so the search was
-> composed from their words alone, and `assistant trust-destinations` with `assistant
-> remember-recipients` as where the decision id is read; for `ALLOWANCE_EXHAUSTED`, that this
-> conversation's search allowance is spent and a new conversation searches again; for
-> `SPEND_EXHAUSTED`, that a spend ceiling refused it and that it is an operator setting; for
-> `AUTHORISATION_DENIED`, that the search was declined when it was ruled on; for
-> `INTERRUPTED`, that the search was begun and stopped; and for `NOT_MADE`, that no search was
-> made, **naming no cause and no act**. The exact wording is the lane's; what is fixed is
-> which command each names and that `NOT_MADE` names none.
+> `TRUST_MISSING`, that the destination is not one the user has chosen, and `assistant
+> trust-destinations` with **`assistant decisions`** as where the decision id is read; for
+> `ALLOWANCE_EXHAUSTED`, that this conversation's search allowance is spent and a new
+> conversation searches again; for `SPEND_EXHAUSTED`, that a spend ceiling refused it and that
+> it is an operator setting; for `AUTHORISATION_DENIED`, that the search was declined when it
+> was ruled on; for `INTERRUPTED`, that the search was begun and stopped; and for
+> `UNAVAILABLE`, that the lookup produced nothing the turn could use, **naming no cause and no
+> act**. The exact wording is the lane's; what is fixed is which command each names and that
+> `UNAVAILABLE` names none.
+
+> **Normative.** **`TRUST_MISSING`'s statement says nothing about what the query was composed
+> from**, and no lane restores such a sentence. The two `trust_of` reads ADR-0238 §5 admits
+> are separated by a window that ADR sets out and ADR-0238 §16 defers closing, so a
+> revocation landing between them leaves a supply that *was* composed over records and a
+> build-time read that answers `UNCHOSEN`. A statement asserting the composition's inputs
+> would be false in exactly that case, and the surface has not been told them. What the
+> statement says is that the destination is not one the user has chosen and that the search
+> was not made.
+
+> **Normative.** **`TRUST_MISSING`'s statement names `assistant decisions` and not
+> `assistant remember-recipients` as where the decision id is read**, and the difference is
+> load-bearing rather than stylistic. The decision recording a `TRUST_MISSING` refusal carries
+> `planned_with_external_content` `True`, so ADR-0235 §3's seventh condition excludes it from
+> `grantable_decisions` **and** §1's third condition above excludes it from the trust act; and
+> the earlier decision the user granted from has been resolved, so ADR-0235 §3's fourth
+> condition has taken it out of that listing too. `assistant remember-recipients` can therefore
+> be empty at exactly the moment its guidance is followed. **`assistant decisions` is
+> ADR-0186 §1's bounded read of the whole trail**, it carries resolved decisions, and the
+> earlier decision remains a valid subject of the trust act because §1 makes the act
+> indifferent to a decision's ruling and resolution. §15 owes the arm.
+
+> **Normative.** `assistant remember-recipients`' listing keeps naming both acts (§5) and is
+> the right route on the **first** refusal, where the decision is unanswered and its binding
+> carries `planned_with_external_content` `False`. No lane reads the clause above as removing
+> that line or as making one of the two listings the only route; what is fixed is that the
+> statement rendered for `TRUST_MISSING` names the listing that always has the id.
 
 > **Normative.** **None of the seven statements carries** a destination, a host, an origin, a
 > provider name, a connection reference, an account identity, a query or any fragment of one,
@@ -815,7 +865,7 @@ stages, which is `SearchDisposition`'s job and the audit's.
 > `SearchDisposition` member maps to it under this ADR**. The member ADR-0241 mints maps to
 > `INTERRUPTED` by **ADR-0241's own text or by the lane implementing it in the same change**,
 > which is §8's default rule applied deliberately: until that mapping exists the member is
-> unreachable, and until then an interrupted search reaches the user as `NOT_MADE` — the
+> unreachable, and until then an interrupted search reaches the user as `UNAVAILABLE` — the
 > least-claiming member — rather than as a wrong reason.
 
 > **Normative.** The implementing lane of **this** ADR implements no producer for
@@ -922,13 +972,14 @@ other, and neither can land a half of the pair that does not compile.
 
 ### 13. What the implementing lane owes
 
-> **Normative.** The lane is **one PR and one subsystem plus the `core` surface §2 names**:
-> `core/protocols.py` (three members), `core/types.py` (`SearchNotServiced`, one
-> `TurnOutcome` field), `core/errors.py` (two classes), `orchestration/` (the engine members,
-> the servicing-site computation, the carrier and the prompt fragments),
-> `interfaces/cli.py` (three commands, the four refusal renderings, the seven statements, the
-> `remember-recipients` next-step line), `wire/client.py` and `wire/envelope.py` (the three
-> `RemoteEngine` methods, the constant, the log entry), and their tests. **It lands after lane
+> **Normative.** The lane is **one PR** over `core/protocols.py` (three members),
+> `core/types.py` (`SearchNotServiced`, one `TurnOutcome` field), `core/errors.py` (two
+> classes), the durable trust store and its canonical fake and conformance suite (the
+> subclass, below), `orchestration/` (the engine members, the servicing-site computation, the
+> carrier and the prompt fragments), `interfaces/cli.py` (three commands, the four refusal
+> renderings, the seven statements, the `remember-recipients` next-step line),
+> `wire/client.py` and `wire/envelope.py` (the three `RemoteEngine` methods, the constant, the
+> log entry), and their tests. **It lands after lane
 > B1 and lane B2 of batch #2178**, because `DestinationTrustStore`,
 > `InvalidDestinationTrustError`, `DestinationTrustRecord` and ADR-0238 §11's sixteenth
 > disposition are theirs and every clause here is stated over them.
@@ -937,11 +988,25 @@ other, and neither can land a half of the pair that does not compile.
 > engine** and to nothing else, and the store is constructed there and nowhere else (ADR-0238
 > §14). No `interfaces/` module imports it, and `uv run lint-imports` is what keeps that true.
 
-> **Normative.** The lane **adds no arm to `DestinationTrustStore`'s conformance suite** and
-> changes none: that suite is lane B1's under ADR-0238 §14, this ADR adds no store member and
-> no store obligation, and a lane editing it has changed ADR-0238 rather than implemented this.
-> What it **does** owe is `AssistantEngineContract` arms for the three new members, beside the
-> five ADR-0235 §12 added.
+> **Normative.** **The lane extends `DestinationTrustStore`'s conformance suite by exactly two
+> arms, and extends the canonical fake and the durable store to satisfy them**: that
+> `record` raises `DuplicateDestinationTrustError` where a record duplicates a **live**
+> record's destination set, and that it raises the base `InvalidDestinationTrustError`
+> unchanged on the duplicate-`id` and empty-set grounds. That is what §2's supersession of
+> ADR-0238 §1's refusal type entails, and it is owed **at the suite** rather than at an engine
+> test because a store implementation raising the base class on the third ground would pass
+> every engine test against a different store and still make §5's *already chosen* rendering
+> unreachable — the failure §2's read-from-the-type clause forbids repairing by inference.
+
+> **Normative.** **That is the whole of what the lane changes in the triad.** It adds **no
+> member** to `DestinationTrustStore`, widens no argument, changes no return, moves no check
+> out of `record`'s atomic operation and weakens no assertion the suite already carries —
+> ADR-0238 §1's exact-surface clause and its atomicity clause both bind entire, and a lane
+> touching either has changed ADR-0238 rather than implemented this. The suite is lane B1's
+> and this lane is a **second** contributor to it, in the one scope this ADR's header records.
+
+> **Normative.** The lane also owes `AssistantEngineContract` arms for the three new members,
+> beside the five ADR-0235 §12 added.
 
 > **Normative.** The lane **reads `trust_of` once**, at the position ADR-0238 §5 fixes, and
 > carries its answer to §8's computation as data. It does not take a second read to render a
@@ -979,16 +1044,26 @@ other, and neither can land a half of the pair that does not compile.
   ADR-0004 §6 and reaches no operation here. ADR-0186 §9 reserves the bare `assistant export`
   for ADR-0004 §6's whole-installation artifact and **#1502** holds it. **Fired** with that
   lane.
-- **A bounded or filtered read of the trust store, and a `trust_of` read at the engine.**
-  §4's listing is `live` and nothing else; a surface that wanted to ask "is *this* destination
-  trusted?" for a row it is rendering has no operation for it, and would need a member on
-  `AssistantEngine` taking a `CanonicalDestination` sequence. §5 discharges the discovery
-  problem with a fixed next-step line instead, at no read. **Fired** by a measurement that a
-  real user cannot tell from the two listings what they trust. Not fired by a lane finding the
-  fixed line blunt.
 - **A second `SearchNotServiced` member, and any eighth.** §8 closes the vocabulary. **Fired**
   by an ADR with a user act that none of the seven names. Not fired by a lane wanting a finer
   reason, which is reporting the system's stages by another name.
+- **A finer explanation of a closed-loop refusal.** §8 routes a `RULING_CONFIRM` on a request
+  with `planned_with_external_content` `True` and a `USER_CHOSEN` destination to `UNAVAILABLE`,
+  which names no cause, because the two permitted inputs cannot say which of ADR-0238 §5's
+  conditions failed and no act the user can perform repairs the recorded half. **Fired** by an
+  ADR that decides a conversation's provenance footing is a thing to show the user — which
+  would need a third input at the site and a member with an honest recourse behind it. Not
+  fired by a lane finding `UNAVAILABLE` unhelpful in that case, which is the honest answer
+  rather than a gap.
+- **A bounded or filtered read of the trust store, and a read that answers "is *this*
+  destination trusted?" for a row a surface is rendering.** §4's listing is `live` and nothing
+  else; §5 discharges discovery with a fixed next-step line at no read; and §9 sends a
+  `TRUST_MISSING` user to `assistant decisions` rather than to a filtered listing. Closing it
+  would take a member on `AssistantEngine` taking a `CanonicalDestination` sequence.
+  **Fired** by a measurement that users perform the grant act and not the trust act, or that a
+  real user cannot find an eligible decision in `assistant decisions` — which is where §9's
+  recovery journey puts them and where the cost of not having this read lands. Not fired by a
+  lane finding the fixed line blunt.
 - **Telling the user *which* servicing of a turn did not land, or how many.** §7 carries one
   member per turn. **Fired** by an ADR that decides a turn's search shape is a thing to show
   the user, which is the same question ADR-0238 §16 defers for the draw. Not fired by an
@@ -1022,14 +1097,23 @@ other, and neither can land a half of the pair that does not compile.
 >   `servicings[].disposition` is `None` on both, no confirmation is parked, and
 >   `TurnOutcome.search_not_serviced` is `None` on both — which is §6's byte-identity
 >   guarantee made checkable.
-> - **Arm 2 — missing authority, both kinds, and the discrimination between them.** (a) No
->   grant: `disposition` is `RULING_CONFIRM`, the decision is in `grantable_decisions`, the
->   carried member is **`AUTHORISATION_MISSING`**, the reply states a lookup did not happen,
->   and the surface names `assistant remember-recipients`. (b) Grant, no trust record: the
->   supply is utterance-only, the second search is non-`ALLOW`, the carried member is
->   **`TRUST_MISSING`**, and the surface names `assistant trust-destinations`. **The two arms
->   share every input but the trust record**, which is what makes the discrimination the
->   subject of the test rather than a coincidence.
+> - **Arm 2 — missing authority, both kinds, and the discrimination stated as three fixtures
+>   rather than two.** Each fixture fixes its grant state and its request's
+>   `planned_with_external_content` explicitly; they are not variations of one input.
+>   **(a) No grant, a first search:** the binding carries `planned_with_external_content`
+>   `False`, `disposition` is `RULING_CONFIRM`, the decision **is** in `grantable_decisions`,
+>   the carried member is **`AUTHORISATION_MISSING`**, the reply states a lookup did not
+>   happen, and the surface names `assistant remember-recipients`. **(b) Grant, no trust
+>   record, a follow-up search:** the binding carries `planned_with_external_content` `True`,
+>   `trust_of` answers `UNCHOSEN`, `disposition` is `RULING_CONFIRM`, the carried member is
+>   **`TRUST_MISSING`**, and the surface names `assistant trust-destinations` and `assistant
+>   decisions`. **(c) Grant *and* trust, a follow-up search the closed-loop condition refuses
+>   for another reason:** the binding carries `planned_with_external_content` `True`,
+>   `trust_of` answers `USER_CHOSEN`, `disposition` is `RULING_CONFIRM`, and the carried
+>   member is **`UNAVAILABLE`**, whose statement **names no act**. **(b) and (c) differ in the
+>   `trust_of` answer alone**, which is what makes that discrimination the subject of the test
+>   rather than a coincidence; (a) differs from both in the binding's footing, which §8 makes
+>   the discriminator it is.
 > - **Arm 3 — revoked authority, both kinds.** (a) `revoke_recipient_grant`, then the next
 >   search records `RULING_CONFIRM` and `recent_recipient_grants` shows the revoking record.
 >   (b) `revoke_destination_trust`, then the second search of a turn is refused, the carried
@@ -1052,15 +1136,22 @@ other, and neither can land a half of the pair that does not compile.
 > **Normative.** Beside the five, the lane owes: an arm per §1 availability condition, each
 > asserting `UntrustableDestinationError` and that **no store was written**; an arm that the
 > act succeeds on a decision whose confirmation has already been **answered**, which is the
-> ordering trap §1 exists to close; an arm that `DuplicateDestinationTrustError` is raised and
-> rendered as *already chosen* on a second act over one live set; an arm that
-> `revoke_destination_trust` answers `False` for an unknown and for an already-revoked id and
-> writes nothing; an arm that the mapping table in §8 is **total over all sixteen
-> `SearchDisposition` members**, failing if a member is added without a mapping; an arm that a
-> turn whose only search returned `SearchRefusal.NO_RESULT` carries **no** member; an arm that
-> `search_not_serviced` is `None` on a restatement (ADR-0198 §1); and an arm per member that
-> the reply and the surface statement carry **no** destination, host, query, count, figure,
-> duration or `Settings` name — asserted over the rendered bytes, not over an intention.
+> ordering trap §1 exists to close; **the recovery journey §9 names — grant, then a follow-up
+> refusal, then `grantable_decisions` observed *empty*, then the earlier resolved decision
+> found through `recent_decisions` and the trust act performed on it**; an arm that
+> `DuplicateDestinationTrustError` is raised and rendered as *already chosen* on a second act
+> over one live set; an arm that `revoke_destination_trust` answers `False` for an unknown and
+> for an already-revoked id and writes nothing; an arm that the mapping table in §8 is
+> **total over all sixteen `SearchDisposition` members**, failing if a member is added without
+> a mapping; an arm that a turn whose only search returned `SearchRefusal.NO_RESULT` carries
+> **no** member and one that a turn whose search recorded `UNATTESTED` carries `UNAVAILABLE`
+> and renders a statement that **does not say no request was made**; **an arm in which trust
+> is revoked between ADR-0238 §5's two reads, asserting that the carried member is
+> `TRUST_MISSING` and that the statement rendered asserts nothing about what the query was
+> composed from**; an arm that `search_not_serviced` is `None` on a restatement (ADR-0198 §1);
+> and an arm per member that the reply and the surface statement carry **no** destination,
+> host, query, count, figure, duration or `Settings` name — asserted over the rendered bytes,
+> not over an intention.
 
 > **Normative.** **No arm asserts that a model produced particular words.** What is asserted
 > of the reply is that the fixed fragment reached the assembled prompt and that the prompt on
@@ -1198,9 +1289,9 @@ ADR-0235 §4 did the same and recorded none either.
 > what it obliges, and unmarked text is read to determine what a marked clause means and never
 > supplies an obligation.
 
-What binds is **one hundred and two marked clauses**: §1's eight, §2's nine, §3's six, §4's
-eight, §5's nine, §6's four, §7's five, §8's seven, §9's eight, §10's three, §11's eight,
-§12's seven, §13's six, §15's four, §16's nine, and this section's one. §14's deferrals,
+What binds is **one hundred and nine marked clauses**: §1's eight, §2's nine, §3's six, §4's
+eight, §5's nine, §6's five, §7's five, §8's eight, §9's eleven, §10's three, §11's eight,
+§12's seven, §13's eight, §15's four, §16's nine, and this section's one. §14's deferrals,
 §17's classification, and every argument, table caption and worked comparison in this
 document are deliberately unmarked: they are deferral, attestation and argument, which
 ADR-0089 §1 classifies as non-normative however load-bearing.
@@ -1245,15 +1336,15 @@ that move owes is spent rather than argued about (ADR-0027 §2, ADR-0209).
   they will drift if a later lane treats either as derivable from the other. §8's
   non-injectivity is deliberate and §11 keeps the second out of the audit, but the maintenance
   cost is real: a seventeenth disposition needs a mapping entry, and §15's totality arm is what
-  makes forgetting one a test failure rather than a silent `NOT_MADE`.
+  makes forgetting one a test failure rather than a silent `UNAVAILABLE`.
 - **`DestinationTrustStore.live` joins the unbounded reads #1551 asks about.** §4's listing
   has no `limit` for a good reason and no bound for the same reason the grant stores have
   none; a deployment that accumulates many trust records will find that out before #1551 is
   answered.
 - **What would trigger revisiting this.** A measurement that users perform the grant act and
   not the trust act, which would say §5's next-step line is too weak and §14's per-row trust
-  read is owed. A measurement that replies carrying `NOT_MADE` are the common case, which would
-  say the twelve dispositions behind it need splitting. And an ADR admitting a bounded audible
+  read is owed. A measurement that replies carrying `UNAVAILABLE` are the common case, which
+  would say the situations behind it need splitting. And an ADR admitting a bounded audible
   channel, which reopens §5's withholding on its own terms.
 
 ## Alternatives considered
