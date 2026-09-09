@@ -24,11 +24,13 @@
   and ADR-0241 §1's last clause forbids widening it into anything that is.
 
   **§17's closure of `SearchRefusal` at exactly six members, in that count alone.**
-  ADR-0241 §4 adds `DEADLINE_EXPIRED`, so the enumeration becomes **seven**, and narrows
-  `TRANSPORT_FAILED`'s stated scope to conditions in which this system's own reach failed
-  and nothing was disclosed — an expired deadline stops being one of them, because the two
-  differ in what the system may assert about whether it disclosed anything, and a single
-  member cannot map to `FAILED` for a refused connection and `INDETERMINATE` for an expiry.
+  ADR-0241 §4 adds `DEADLINE_EXPIRED`, so the enumeration becomes **seven**, and takes an
+  expired deadline out of `TRANSPORT_FAILED` — because ADR-0029 §4's
+  `FAILED`-or-`INDETERMINATE` rule attaches to a deadline expiry or a cancellation and to
+  nothing else, and while one member carries both an expiry and a refused connection no
+  mapping from it can apply that rule to the first without applying it to the second.
+  **`TRANSPORT_FAILED`'s other conditions keep the member, their meaning and their
+  classification**, and ADR-0241 asserts nothing about what any of them disclosed.
   The six members, their values, their lower-cased spellings, the
   added-to-and-never-renamed rule and the raise-for-no-source-reason posture all stand
   entire, and ADR-0241 §4's member is returned and never raised.
