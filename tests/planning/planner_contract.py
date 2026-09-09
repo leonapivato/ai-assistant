@@ -29,10 +29,13 @@ from ai_assistant.core.types import (
     Goal,
     MemorySource,
     Provenance,
+    ReadAsk,
     ReadKind,
     ReadRequest,
     ShownFile,
+    StructuredAsk,
     TimeOfDay,
+    TimeWindow,
 )
 
 if TYPE_CHECKING:
@@ -658,6 +661,166 @@ class PlannerContract:
             f"a planner takes what the loop pushes and nothing more; {taken - pushed} "
             "would condition the emission on something ADR-0231 §17 does not show it"
         )
+
+    # --- ADR-0240 §§2, 7: the fifth kind, and the widened input ----------------
+    # §12 obliges the implementing lane to extend this suite "for the widened input,
+    # so that every ``Planner`` implementation is held to it — the model-backed planner
+    # and the canonical fake alike, through the ``Test…Contract`` subclasses that
+    # already run it", on ADR-0226 §10's own reason: "a canonical fake updated without
+    # the suite is an unverified fake". Unlike ADR-0231's widening and like ADR-0230's,
+    # this **is** a compatibility break (§7, golden rule 5): the loop passes
+    # ``empty_reads`` on every call, so a ``plan`` declaring no such parameter raises
+    # ``TypeError``.
+
+    @pytest.fixture
+    def structured_asking_planner(self) -> Planner | None:
+        """The same implementation, arranged to ask by structure — or ``None``.
+
+        Optional for ``asking_planner``'s reason: ADR-0240 §1 makes the kind an
+        additive member of an already-defaulted field, so a ``Planner`` that never asks
+        by structure conforms exactly as one that never asks for a read does.
+
+        Returns:
+            A planner of the implementation under test that emits a ``STRUCTURED_READ``
+            ask, or ``None`` where the implementation never emits one.
+        """
+        return None
+
+    async def test_it_accepts_the_asks_that_came_back_empty(self, planner: Planner) -> None:
+        """ADR-0240 §7's widened input, at its weakest and most total form.
+
+        The parameter is additive and defaulted on the contract, and the loop passes it
+        on **every** call — so what every conforming planner owes is to *accept* it and
+        return a plan for the goal it was asked about. What an implementation makes of
+        the value is its own business: §7 rules in terms that "an implementation that
+        accepts it and ignores its value means exactly what it meant", and ADR-0211 §9
+        item 2 forbids this suite asserting which envelope any planner returns.
+
+        **Asserted with a non-empty value as well as by omission**, because the
+        omission alone is satisfied by a signature that never sees one: a planner
+        handed the ask its own first plan emitted is the input §7 actually creates.
+        """
+        empty = ReadAsk(
+            kind=ReadKind.STRUCTURED_READ,
+            structure=StructuredAsk(window=TimeWindow(start=_WHEN)),
+        )
+        plan = await planner.plan(
+            _goal(),
+            context=_context(),
+            memories=_supply() + _fourth_group(),
+            capabilities=_VOCABULARY,
+            empty_reads=(empty,),
+        )
+        assert plan.goal_id == "g1"
+
+    async def test_the_carrier_is_optional_and_defaults_to_nothing_came_back_empty(
+        self, planner: Planner
+    ) -> None:
+        """§7: ``()`` is the semantically correct answer and never an error.
+
+        "On a turn's **first** planner call it is always ``()``, and ``()`` means **no
+        read of this turn came back empty** — which is the semantically correct answer
+        for the first call, for a turn that asked for nothing, for a servicing that
+        failed or was declined, and for a ``Planner`` that knows nothing of this
+        parameter." So a call omitting it entirely raises nothing and drives no repair
+        round, exactly as an empty ``files`` or an empty vocabulary does.
+        """
+        plan = await planner.plan(
+            _goal(), context=_context(), memories=_supply(), capabilities=_VOCABULARY
+        )
+        assert plan.goal_id == "g1"
+
+        explicit = await planner.plan(
+            _goal("g2"),
+            context=_context(),
+            memories=_supply(),
+            capabilities=_VOCABULARY,
+            empty_reads=(),
+        )
+        assert explicit.goal_id == "g2"
+
+    async def test_the_carrier_is_declared_and_keyword_only(self, planner: Planner) -> None:
+        """§7: the compatibility break, asserted where an implementation can fail it.
+
+        "Every ``Planner`` implementation must be widened to declare the parameter",
+        and the loop passes it by keyword on every call — so a ``plan`` whose
+        ``empty_reads`` is positional, or absent, is one the loop cannot call. This is
+        ADR-0230 §3's own arm for ``files``, taken again for the parameter that
+        joined the signature after it.
+        """
+        parameters = inspect.signature(planner.plan).parameters
+        assert "empty_reads" in parameters, "ADR-0240 §7's parameter is declared"
+        assert parameters["empty_reads"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameters["empty_reads"].default == (), (
+            "additive and defaulted: () means no read of this turn came back empty"
+        )
+
+    async def test_a_structured_read_it_asks_for_carries_a_structure_and_no_other_argument(
+        self, structured_asking_planner: Planner | None
+    ) -> None:
+        """ADR-0240 §2, asserted over what a planner actually emitted.
+
+        "A ``STRUCTURED_READ`` ask carries a non-``None`` ``structure``, no ``labels``
+        and no ``entry``, and **may** carry a non-blank ``query``", and the structure
+        itself "applies at least one of its four axes" with no empty sequence on any of
+        them.
+
+        **The conditions are the models' own, and that is exactly why they are
+        re-asserted here** — ``model_construct`` skips validation, and an
+        implementation assembling a request by hand could ship an ask no ``core`` test
+        would ever see. Bound on the emission, they are what §2 says they are: enforced
+        by the model rather than by its callers, for every ``Planner`` this system
+        wires.
+        """
+        if structured_asking_planner is None:
+            pytest.skip("this implementation never asks by structure (ADR-0240 §1)")
+        plan = await structured_asking_planner.plan(
+            _goal(), context=_context(), memories=_supply(), capabilities=_VOCABULARY
+        )
+        request = plan.read_request
+        assert request is not None, "the fixture promises an implementation that asks"
+
+        structured = [ask for ask in request.asks if ask.kind is ReadKind.STRUCTURED_READ]
+        assert structured, "the fixture promises a STRUCTURED_READ ask"
+        assert len(structured) == 1, "at most one ask of each kind (ADR-0226 §2)"
+        [ask] = structured
+        assert ask.labels == ()
+        assert ask.entry is None
+        assert ask.query is None or ask.query.strip(), "optional here, non-blank where present"
+        structure = ask.structure
+        assert structure is not None
+        assert structure.applied(), "at least one of the four axes (ADR-0240 §2)"
+        for axis in ("participants", "topics", "about_person"):
+            values = getattr(structure, axis)
+            assert values is None or values, "None where not applied, and never empty"
+
+    async def test_a_structured_read_names_no_identifier(
+        self, structured_asking_planner: Planner | None
+    ) -> None:
+        """ADR-0240 §3: the no-identifier rule, on the kind that could most look like one.
+
+        "No axis of a ``StructuredAsk`` is an identifier, a key or a reference; a
+        person label resolves to nothing, a topic label resolves to nothing, and a
+        window names an interval rather than a record." ADR-0226 §3's invariant is that
+        the namer may be data, or the user, or the model pointing outward — never the
+        model pointing inward — so no value on any axis is the id of a record the call
+        was shown.
+        """
+        if structured_asking_planner is None:
+            pytest.skip("this implementation never asks by structure (ADR-0240 §1)")
+        supply = _supply() + _fourth_group()
+        plan = await structured_asking_planner.plan(
+            _goal(), context=_context(), memories=supply, capabilities=_VOCABULARY
+        )
+        request = plan.read_request
+        assert request is not None
+        shown = {record.id for record in supply}
+        for ask in request.asks:
+            if ask.kind is not ReadKind.STRUCTURED_READ or ask.structure is None:
+                continue
+            for axis in ("participants", "topics", "about_person"):
+                for value in getattr(ask.structure, axis) or ():
+                    assert value not in shown, "a label is a value, never an identifier"
 
     async def test_it_sets_no_supersedes(self, planner: Planner) -> None:
         """ADR-0228 §5: that field is the loop's, on every plan a planner returns.

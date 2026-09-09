@@ -28,7 +28,9 @@ from ai_assistant.core.types import (
     ReadKind,
     ReadRequest,
     ShownFile,
+    StructuredAsk,
     TimeOfDay,
+    TimeWindow,
 )
 from ai_assistant.testing import FakePlanner, FakePlanStore
 from ai_assistant.testing.cancellation import SuspendedMidWrite
@@ -140,6 +142,34 @@ class TestFakePlannerContract(PlannerContract):
                     ReadAsk(kind=ReadKind.LOCAL_FILE, entry="F2"),
                     ReadAsk(kind=ReadKind.CITATION_HOP, labels=("M1", "M2")),
                     ReadAsk(kind=ReadKind.SIGHTED_QUERY, query="which lender did you recommend?"),
+                )
+            ),
+        )
+
+    @pytest.fixture
+    def structured_asking_planner(self) -> Planner | None:
+        """The fake arranged to ask by structure, so ADR-0240 §2's arms bind on it.
+
+        Scripted through the same ``read_request`` hook as every other kind — ADR-0240
+        adds no second hook, because the ask is a value the constructor is handed and
+        is not derived from ``memories`` (§9's "the condition governs the invitation
+        and never the ask"). Every axis at once, with a query beside them, which is the
+        widest shape §2 admits for the kind.
+        """
+        return FakePlanner(
+            now=_fixed_now,
+            read_request=ReadRequest(
+                asks=(
+                    ReadAsk(
+                        kind=ReadKind.STRUCTURED_READ,
+                        query="the lease",
+                        structure=StructuredAsk(
+                            window=TimeWindow(start=datetime(2026, 3, 1, tzinfo=UTC)),
+                            participants=("alex",),
+                            topics=("home maintenance",),
+                            about_person=("marta",),
+                        ),
+                    ),
                 )
             ),
         )
