@@ -3508,6 +3508,22 @@ async def _prompts_over(
         pytest.param({"participants": "alex"}, id="not_a_list"),
         pytest.param({"participants": [3]}, id="not_a_list_of_strings"),
         pytest.param({"start": "2026-03-01T00:00:00+00:00", "colour": "blue"}, id="unknown_field"),
+        # **A member written as ``null`` is present and unreadable, never absent** — the
+        # arm that separates this object from the four members beside it, where an
+        # explicit ``null`` reads as the absent member (:func:`_search_ask`). Each of
+        # these would otherwise become a *wider* read than the planner composed: the
+        # first two an unbounded read over a label axis, the third a period with no
+        # label on it, which is the "drops the offending axis and services the rest"
+        # ADR-0240 §3 forbids in terms.
+        pytest.param(
+            {"start": None, "end": None, "participants": ["alex"]},
+            id="null_endpoints_beside_a_label_axis",
+        ),
+        pytest.param({"start": None, "participants": ["alex"]}, id="one_null_endpoint"),
+        pytest.param(
+            {"start": "2026-03-01T00:00:00+00:00", "participants": None},
+            id="null_label_axis",
+        ),
     ],
 )
 async def test_a_malformed_structured_member_costs_the_ask_and_never_the_plan(

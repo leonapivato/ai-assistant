@@ -1204,3 +1204,70 @@ async def test_two_empty_structured_reads_make_exactly_two_planner_calls() -> No
     system, _ = await _composed(responded)
     assert "stopped before you could" in system, "ADR-0228 §10's clause"
     assert "came back with nothing in it" in system, "ADR-0240 §8's emptiness fact"
+
+
+async def test_an_empty_reads_fact_survives_a_later_servicing_that_read_no_structure() -> None:
+    """ADR-0240 §8: the fact is the turn's last **structured read**, not its last servicing.
+
+    A first structured read comes back empty and fires the revision; the revision asks
+    for a sighted query alone, which is serviced and establishes nothing about any
+    structural question. The turn's last structured read is still the empty one, so the
+    composing stage is still owed the emptiness fact — and a loop replacing the fact on
+    **every** servicing suppresses the instruction on exactly the turn ADR-0240 §6 exists
+    to serve.
+
+    Both review lenses raised this on round 1 and both were right.
+    """
+    memory = _StructuredJournal()
+    await memory.add(_belief("belief-1", "the boiler question"))
+    await memory.add(_belief("by-query", "the plumber is booked for tuesday"))
+    planner = _Script(_structured(participants=("nobody",)), _query("plumber booked tuesday"), None)
+
+    responded = await _turn(memory, planner)
+
+    assert len(planner.calls) == 2, "the empty structured read fired ADR-0228 §2(e)"
+    assert "by-query" in _ids(responded.turn.memories), "the revision's query was serviced"
+    assert responded.structured.empty is True, (
+        "a servicing that performed no structured read neither sets nor clears the fact"
+    )
+    assert responded.structured.reach is True, "the first read's reach survives too"
+    system, _ = await _composed(responded)
+    assert "came back with nothing in it" in system
+
+
+async def test_a_budget_blocked_second_read_neither_sets_nor_clears_the_emptiness_fact() -> None:
+    """ADR-0240 §5 and §8 together: a read that made no store call establishes nothing.
+
+    "A read the budget prevented is not a read that found nothing, and no
+    implementation, carrier or audit field conflates them" — which cuts both ways. Such
+    a read cannot *set* the emptiness fact, and it cannot **clear** one an earlier read
+    established either: the certification an empty result carries is a statement about
+    the store, and a read that never reached the store certifies nothing.
+
+    **Only the slot condition is reachable on a second servicing**, and that is a
+    property of ADR-0228 §7 rather than a gap here: the supply only grows across a turn,
+    so a first servicing whose structured read ran at all had a separator, and that
+    record is still in front of the second. The separator condition is asserted on a
+    turn's first servicing instead, where it is the one that can actually hold.
+    """
+    memory = _StructuredJournal()
+    await memory.add(_belief("belief-1", "the boiler question"))
+    cited = tuple(f"cited-{n}" for n in range(READ_BUDGET))
+    tail = _conversation("tail-1", "Ada: an earlier boiler exchange.", evidence=cited)
+    for name in cited:
+        await memory.add(_episode(name, f"Ada: a cited exchange, {name}."))
+    await memory.add(tail)
+    planner = _Script(
+        _structured(participants=("nobody",)),
+        ReadRequest(asks=(_hop("M1").asks[0], _structured_ask(topics=("boiler",)))),
+        None,
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        responded = await _turn(memory, planner, history=(tail,))
+
+    assert len(planner.calls) == 2
+    assert _serviced(captured, 1)["structured"] == StructuredOutcome.NO_SLOT.value
+    assert responded.structured.empty is True, (
+        "a read that made no store call cannot clear a fact an earlier read established"
+    )

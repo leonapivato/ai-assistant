@@ -767,17 +767,22 @@ asks for past conversations by **structure** rather than by wording:
 `start` and `end` bound **when a conversation was recorded**. Both are ISO-8601 \
 instants with an offset, written out in full; `start` is included and `end` is not, \
 so the pair above is the whole of March. You may send only one of them — `start` \
-alone is everything since that instant, `end` alone everything before it — but a \
-`structured` object with neither, and one whose `end` is not after its `start`, is \
-not a request that can be answered. Work the instants out yourself from the `now` \
-printed in the next message; nothing here will turn "last week" into a period for \
-you, and a word instead of an instant costs you the whole of this read.
+alone is everything since that instant, `end` alone everything before it — but where \
+you are bounding a period at all, name at least one of the two, and `end` must be \
+after `start`. Work the instants out yourself from the `now` printed in the next \
+message; nothing here will turn "last week" into a period for you, and a word \
+instead of an instant costs you the whole of this read.
+
+Every member of this object is optional and **at least one must be present**: a \
+`structured` object carrying none of them, or carrying a member written as `null`, \
+asks for nothing and is discarded whole — you are not owed a partial reading of it, \
+and no part of it is serviced on its own.
 
 Ask this way when the goal turns on *which* earlier conversation something was in, \
-and when a period is a better handle on it than any wording you could guess — "what \
-did we settle in March", "the conversation before the trip". What comes back are \
-past conversations, never beliefs, so a question about what the user is like is \
-answered by `query` and not by this.
+and when a period or a label is a better handle on it than any wording you could \
+guess — "what did we settle in March", "the conversation before the trip". What \
+comes back are past conversations, never beliefs, so a question about what the user \
+is like is answered by `query` and not by this.
 
 You may add `query` inside the same object, spelled as it is at the top level. With \
 one, what comes back are the conversations of that period nearest those words; \
@@ -804,24 +809,34 @@ the user: no tool runs for it, nothing is sent anywhere, and it is not a step.""
 #: paragraph says: copy what you were shown.
 _STRUCTURED_AXIS_GUIDANCE: Final[Mapping[str, str]] = {
     "participants": """\
-The conversations in the next message may be printed with a `who was involved:` \
-line. Where they are, you may add `"participants": ["..."]` inside the same \
-`structured` object, and what comes back are conversations involving at least one \
-of the people you name. Copy a name exactly as it is printed there, character for \
-character — a name you have spelled yourself, or drawn from the conversation, \
-matches nothing.""",
+Some conversations in the next message are printed with a `who was involved:` line. \
+Where they are, you may add `"participants": ["..."]` inside the same `structured` \
+object, and it may be sent on its own or beside the period. What comes back are \
+conversations recorded as involving at least one of the people you name.
+
+A name is matched against the names that were **recorded** on a conversation, \
+letter for letter apart from capitals. So where the person you want is printed \
+under one of those lines, copy that spelling exactly — it is the one certain to \
+match. Where the user has named someone the lines below do not show, you may write \
+that name too: it reaches whatever was recorded under it, which may be nothing at \
+all, and nothing about that is an error.""",
     "topics": """\
 Some conversations in the next message are printed with a `filed under:` line. \
 Where they are, you may add `"topics": ["..."]` inside the same `structured` \
-object, and what comes back are conversations filed under at least one of the \
-words you name. These are filing words with an exact spelling, so copy one as it is \
-printed — a word of your own, however close, is refused and costs you the whole of \
-this read.""",
+object, and what comes back are conversations filed under at least one of the words \
+you name.
+
+A filing word has a strict written form — lower case, single spaces, no punctuation \
+and no leading or trailing space — and one that breaks it is **refused**, which \
+costs you the whole of this read rather than that one word. Copying a word exactly \
+as it is printed below is how you are certain of the form; a word of your own is \
+allowed where it already meets it.""",
     "about_person": """\
 Some conversations in the next message are printed with an `about:` line. Where \
 they are, you may add `"about_person": ["..."]` inside the same `structured` \
 object, and what comes back are conversations recorded as being about at least one \
-of the people you name. Copy a name exactly as it is printed there.""",
+of the people you name — matched the same way a name under `who was involved:` is, \
+against what was recorded rather than against the subject you have in mind.""",
 }
 
 
@@ -1579,6 +1594,19 @@ def _structured_ask(structured: object) -> list[ReadAsk]:
     if not isinstance(structured, dict):
         _log.info(_READ_REQUEST_DROPPED, reason="structured_not_an_object")
         return []
+    if any(structured[member] is None for member in structured):
+        # **A member that is present carries a value, and ``null`` is not one**
+        # (ADR-0240 §3). This is where this object parts company with the four members
+        # beside it: ``read_request``'s own members read an explicit ``null`` as the
+        # absent member, because each *is* a whole ask and a declined one asks for
+        # nothing. Inside a structured ask a member is an **axis**, and §3 rules that "a
+        # window endpoint that is present and is not a readable instant" costs the whole
+        # ask and that no implementation "drops the offending axis and services the
+        # rest". Read the other way, ``{"start": null, "end": null, "participants":
+        # [...]}`` would silently become an unbounded participant read — a wider read
+        # than the planner composed, in a direction nobody chose.
+        _log.info(_READ_REQUEST_DROPPED, reason="unusable_structured")
+        return []
     if not structured.keys() <= _STRUCTURED_MEMBERS:
         # **A member outside the grammar costs the ask**, which is
         # :class:`~ai_assistant.core.types.StructuredAsk`'s own ``extra="forbid"``
@@ -1632,7 +1660,9 @@ def _structured_window(structured: Mapping[str, object]) -> TimeWindow | None:
     **Absent means the axis is not applied and present means it must parse** (ADR-0240
     §3). An endpoint the member does not carry is unbounded on that side, which
     ADR-0237 §2 admits; an endpoint that is present and is not a readable instant is a
-    malformed member, and the caller drops the whole ask for it.
+    malformed member, and the caller drops the whole ask for it. A ``null`` is the
+    second of those and never the first — the caller has already refused it, so
+    ``{"start": null}`` never reaches here as "no start".
 
     **The instant is read by ``TimeWindow``'s own annotation and not by this
     function.** ``UtcInstant`` is what decides tz-awareness and range, so a string is
@@ -1651,7 +1681,7 @@ def _structured_window(structured: Mapping[str, object]) -> TimeWindow | None:
             ADR-0237 §2's refusal reaching this seam intact.
         ValidationError: For the same conditions, as pydantic raises them.
     """
-    ends = {end: structured[end] for end in ("start", "end") if structured.get(end) is not None}
+    ends = {end: structured[end] for end in ("start", "end") if end in structured}
     if not ends:
         return None
     return TimeWindow.model_validate(ends)
@@ -1661,7 +1691,9 @@ def _structured_axis(structured: Mapping[str, object], axis: str) -> tuple[str, 
     """One sequence axis of an envelope's ``structured``, or ``None``.
 
     **``None`` where the member is absent and a refusal where it is present and not a
-    list of strings** (ADR-0240 §2, §3). An empty list is *not* read as "not applied":
+    list of strings** (ADR-0240 §2, §3). A ``null`` is not absence here either — the
+    caller refuses one before this is reached — so the only spelling of "not applied"
+    is a key the object does not carry. An empty list is *not* read as "not applied":
     §2 refuses an empty sequence on this model outright — on the store it means *select
     nothing*, "a coherent thing for a caller to compute and an incoherent thing for a
     planner to ask for" — so it is passed through and ``StructuredAsk`` refuses it,
@@ -1683,9 +1715,9 @@ def _structured_axis(structured: Mapping[str, object], axis: str) -> tuple[str, 
         TypeError: If the value is not iterable at all, which the caller catches with
             the rest.
     """
-    value = structured.get(axis)
-    if value is None:
+    if axis not in structured:
         return None
+    value = structured[axis]
     if not isinstance(value, list):
         # Refused rather than wrapped: a bare string is a model that has written one
         # label where the axis takes a list, and honouring it would service a read
