@@ -866,6 +866,10 @@ def checked_search_cost(amount: Decimal | None, currency: str | None) -> ToolCos
         is.
 
     Raises:
+        TypeError: If ``currency`` is supplied and is not a ``str``. The type is part
+            of the domain, so a caller that ignored the annotation is refused by name
+            rather than by ``len()`` raising one field along, and the canonical fake
+            states the same rule (ADR-0236 §7).
         ValueError: If exactly one of the two is supplied; if ``amount`` is not an
             exact ``Decimal``, is non-finite, is negative, or is not countable
             under ADR-0194 §1; or if ``currency`` is not exactly three uppercase
@@ -899,6 +903,15 @@ def checked_search_cost(amount: Decimal | None, currency: str | None) -> ToolCos
             f"most {_COST_AMOUNT_SCALE} fractional digits (ADR-0194 §1); got {amount!r}"
         )
         raise ValueError(msg)
+    if type(currency) is not str:
+        # Refused by name, and before the shape check below reaches ``len()``. An
+        # exact ``str`` and not an ``isinstance`` match, for the amount's reason one
+        # field up: a subclass overriding ``__len__`` or ``isupper`` would satisfy the
+        # shape check while declaring something else. ``TypeError`` and not the
+        # ``ValueError`` a malformed *code* earns, because the class states which
+        # mistake was made.
+        msg = f"cost_currency is a str; got {type(currency).__name__}"
+        raise TypeError(msg)
     if len(currency) != _CURRENCY_CODE_LENGTH or not (
         currency.isascii() and currency.isupper() and currency.isalpha()
     ):
