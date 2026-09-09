@@ -11,7 +11,7 @@ import asyncio
 import sqlite3
 import stat
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from destination_trust_store_contract import (
@@ -27,6 +27,7 @@ from ai_assistant.permissions.destination_trust import SqliteDestinationTrustSto
 from ai_assistant.testing.cancellation import ThreadSuspension
 
 if TYPE_CHECKING:
+    from collections.abc import Coroutine
     from pathlib import Path
 
     from ai_assistant.core.protocols import DestinationTrustStore
@@ -218,25 +219,127 @@ async def test_a_naive_revocation_instant_is_refused(path: Path) -> None:
 # --- ADR-0060 §3: the resource outlives the cancelled coroutine ---------------
 
 
-async def test_a_cancelled_write_holds_the_connection_until_its_worker_finishes(
-    path: Path,
+#: Every ``async with self._lock`` site this store has, and the private sync method a
+#: worker runs inside it. ADR-0060 §3 binds *any* method that acquires the resource
+#: rather than any method that mutates, so the reads are here beside the writes (#492's
+#: clause one store over) — and ``trust_of`` and ``live`` genuinely share ``_live_sync``,
+#: which is why parking it holds both.
+_SYNC_SEAMS: Final = {
+    "record": "_record_sync",
+    "revoke": "_revoke_sync",
+    "trust_of": "_live_sync",
+    "live": "_live_sync",
+    "export": "_ordered_sync",
+}
+
+#: How long the case waits for the second worker to *fail* to start. Only ever spent in
+#: full on a passing run, so it is short; a conforming store never sets the event at all
+#: and a breached one sets it in microseconds.
+_ENTRY_SECONDS: Final = 0.25
+
+
+def _call(store: SqliteDestinationTrustStore, operation: str) -> Coroutine[Any, Any, object]:
+    """One call of ``operation`` against ``store``, ready to be scheduled."""
+    if operation == "record":
+        return store.record(trust_record(ALICE, record_id="t-first"))
+    if operation == "revoke":
+        return store.revoke("t-held", LATER)
+    if operation == "trust_of":
+        return store.trust_of([member(ALICE)])
+    if operation == "live":
+        return store.live()
+    return store.export()
+
+
+@pytest.mark.parametrize("operation", sorted(_SYNC_SEAMS))
+async def test_a_cancelled_call_holds_the_connection_until_its_worker_finishes(
+    path: Path, operation: str
 ) -> None:
-    """ADR-0060 §3's clause, driven where ADR-0054's bug actually lived.
+    """ADR-0060 §3's clause, at **every** lock site and not only the write path.
 
     ``_run_to_completion`` absorbs the cancellation and keeps waiting on the worker's
     physical completion signal, so ``async with self._lock`` is held for the whole life
-    of the thread. Without that, the cancellation unwinds the ``async with`` **while
-    the worker is still using the connection**, and a second caller then uses the same
+    of the thread. Without that, the cancellation unwinds the ``async with`` **while the
+    worker is still using the connection**, and a second caller then uses the same
     ``sqlite3`` connection concurrently — which SQLite refuses, and which no assertion
     about this store's answers would catch.
 
-    The worker is **parked** rather than left to race: a transaction finishes in
-    microseconds, so whether the second caller arrives while the first still holds the
-    connection would otherwise be a race between a commit and an event-loop tick, and
-    an invariant exercised only sometimes is not evidence about it. The case is
-    ``tests/memory/test_sqlite_conversation_store.py``'s harness in miniature, kept
-    here rather than in the shared suite because parking a worker needs a hook into
-    *this* implementation's private sync method.
+    **Every seam, because each is its own place ADR-0054's bug can reappear.** A lane
+    replacing one member's completion shield with a bare ``asyncio.to_thread`` leaves
+    every other case in this file passing, and the reads are as exposed as the writes:
+    ``trust_of`` runs inside a transaction like the rest, and it is the member a policy
+    path depends on.
+
+    **What is observed is the second worker's *entry*, and nothing weaker.** Asserting
+    that the second call is not `done()` proves nothing: it has an executor round trip
+    ahead of it either way, so it is pending whether or not it was let through. What
+    discriminates is whether its sync method **began** while the cancelled worker was
+    still parked — so the second seam is wrapped in a recorder and the case waits for an
+    entry that a conforming store never makes. Reverting any one shield to a bare
+    ``to_thread`` fails the corresponding parameter and nothing else, which is what makes
+    the parametrisation worth having.
+    """
+    store = SqliteDestinationTrustStore(path=path)
+    await store.record(trust_record("held@example.com", record_id="t-held"))
+    suspension = ThreadSuspension()
+    parked = getattr(store, _SYNC_SEAMS[operation])
+    armed = threading.Event()
+
+    def blocking(*args: object) -> object:
+        if not armed.is_set():  # the first worker only; later ones run free
+            armed.set()
+            suspension.hold()
+        return parked(*args)
+
+    # **The observer is always a different seam from the parked one**, so what is
+    # watched is the connection lock rather than a queue behind one statement — and so
+    # that parking and watching never collide on one attribute, which would make the
+    # case observe its own wrapper.
+    parked_attribute = _SYNC_SEAMS[operation]
+    watched_attribute = "_live_sync" if parked_attribute == "_ordered_sync" else "_ordered_sync"
+    observed = getattr(store, watched_attribute)
+    entered = threading.Event()
+
+    def watching(*args: object) -> object:
+        entered.set()
+        return observed(*args)
+
+    setattr(store, parked_attribute, blocking)
+    setattr(store, watched_attribute, watching)
+    try:
+        first = asyncio.ensure_future(_call(store, operation))
+        await suspension.reached()
+        first.cancel()
+        second = asyncio.ensure_future(
+            store.live() if watched_attribute == "_live_sync" else store.export()
+        )
+
+        # Waited *off* the loop, so the executor genuinely gets its chance: a store that
+        # released the lock early submits the second worker at once and this returns
+        # true within microseconds.
+        assert not await asyncio.to_thread(entered.wait, _ENTRY_SECONDS), (
+            f"a second worker entered the connection while {operation}'s cancelled worker "
+            f"was still inside it (ADR-0060 §3, ADR-0054)"
+        )
+
+        suspension.release()
+
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert isinstance(await second, list)
+        assert entered.is_set(), "the second call ran once the first worker finished"
+    finally:
+        suspension.release()
+        store.close()
+
+
+async def test_a_cancelled_write_is_absorbed_and_its_work_still_lands(path: Path) -> None:
+    """The other half of the same clause: the *caller's* task cancels, the work does not.
+
+    ``_run_to_completion`` re-raises the cancellation once the thread has finished, so
+    the awaiting task still cancels — what is prevented is connection reuse, not the
+    write. Asserted over a reopened store, because "the worker ran to completion" is a
+    claim about the file rather than about the object.
     """
     store = SqliteDestinationTrustStore(path=path)
     suspension = ThreadSuspension()
