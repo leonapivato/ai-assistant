@@ -1,6 +1,6 @@
 # 242. The act that trusts a destination has its own surface, and a search that did not happen is explained in the reply
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-09-09
 - **Partially supersedes** [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
   — **§9's third clause, and nothing else in that ADR.** That clause reads *"The composing
@@ -286,7 +286,8 @@ class AssistantEngine(Protocol):                       # core/protocols.py
 
 
 class SearchNotServiced(StrEnum):                      # core/types.py, §7, §8
-    ALLOWANCE_EXHAUSTED   = "allowance_exhausted"
+    SEARCH_DISABLED       = "search_disabled"
+    NOT_ADMITTED          = "not_admitted"
     SPEND_EXHAUSTED       = "spend_exhausted"
     DECLINED              = "declined"
     TRUST_MISSING         = "trust_missing"
@@ -637,9 +638,11 @@ and the listing is where the act is performed.
 ### 7. The carrier: one member, computed once at the servicing site, carried inside `orchestration`
 
 > **Normative.** The member is computed **at the servicing site**, by the component that
-> recorded the `SearchDisposition`, from that disposition and from **the `trust_of` answer and
-> the request binding's `planned_with_external_content` that site already holds** (§8), and
-> from nothing else. It is **supplied, not inferred**: no component derives it from the plan,
+> recorded the `SearchDisposition`, from that disposition and from **three values that site
+> already holds** — the `trust_of` answer, the request binding's
+> `planned_with_external_content`, and `Settings.search_calls_per_conversation` (§8) — and from
+> nothing else. The third is a deployment configuration, constant across every turn and read
+> from no record. It is **supplied, not inferred**: no component derives it from the plan,
 > from the supply's length, from the reply, from the audit, from a store read of its own or
 > from any content whatever.
 
@@ -693,26 +696,47 @@ gains nothing the user could not already have deduced from having asked the ques
 ### 8. The vocabulary, and the mapping that is total
 
 > **Normative.** `SearchNotServiced` is a `StrEnum` in `core/types.py`, valued by lower-cased
-> member name, closed at exactly **seven** members and declared in this order, which is also
+> member name, closed at exactly **eight** members and declared in this order, which is also
 > **the precedence order §7 applies**:
 >
-> 1. **`ALLOWANCE_EXHAUSTED`** — the conversation's per-conversation call budget refused the
->    servicing before a query was composed (ADR-0238 §8, §11).
-> 2. **`SPEND_EXHAUSTED`** — a monetary ceiling or an undetermined accounted total refused it
+> 1. **`SEARCH_DISABLED`** — `admit_search` refused the servicing and
+>    `Settings.search_calls_per_conversation` is **`0`**, which ADR-0238 §8 defines as *"no
+>    search is serviced in any conversation"*.
+> 2. **`NOT_ADMITTED`** — `admit_search` refused the servicing under a **positive** bound
+>    (ADR-0238 §8, §11).
+> 3. **`SPEND_EXHAUSTED`** — a monetary ceiling or an undetermined accounted total refused it
 >    (ADR-0194, ADR-0236, ADR-0238 §10).
-> 3. **`DECLINED`** — the policy ruled `DENY` on it.
-> 4. **`TRUST_MISSING`** — the policy ruled `CONFIRM`, the request's binding carried
+> 4. **`DECLINED`** — the policy ruled `DENY` on it.
+> 5. **`TRUST_MISSING`** — the policy ruled `CONFIRM`, the request's binding carried
 >    `planned_with_external_content` `True`, **and** the servicing site's `trust_of` read
 >    answered `UNCHOSEN`.
-> 5. **`AUTHORISATION_AWAITED`** — the policy ruled `CONFIRM` on a request whose binding
+> 6. **`AUTHORISATION_AWAITED`** — the policy ruled `CONFIRM` on a request whose binding
 >    carried `planned_with_external_content` `False`, so a decision the establishing act may
 >    ride was recorded.
-> 6. **`INTERRUPTED`** — the search was begun and stopped before it answered (§10).
-> 7. **`UNAVAILABLE`** — every other way a servicing yields no records into the supply,
+> 7. **`INTERRUPTED`** — the search was begun and stopped before it answered (§10).
+> 8. **`UNAVAILABLE`** — every other way a servicing yields no records into the supply,
 >    including one whose request reached the provider and whose response was refused.
 >
-> The vocabulary is **added to and never renamed**, and no implementation or later ADR adds an
-> eighth member without the ADR that decides it.
+> The vocabulary is **added to and never renamed**, and no implementation or later ADR adds a
+> ninth member without the ADR that decides it.
+
+> **Normative.** **`admit_search`'s refusal is two members and not one**, because the single
+> statement §9 fixes per member cannot be true of both configurations. ADR-0238 §8 makes `0`
+> mean *"no search is serviced in any conversation"*, so a statement pointing a user at a new
+> conversation is false on a deployment that has switched searching off; and a statement that
+> named neither would leave #2168's exhausted-allowance case with nothing to say. The
+> discriminator is the **deployment's own configuration** — a `Settings` value the servicing
+> site already holds, constant across every turn — which is ADR-0236 §4's own move: *"The two
+> grounds are told apart from the deployment's **own configuration** and never from a per-turn
+> record."*
+
+> **Normative.** **`NOT_ADMITTED` asserts that the servicing was not admitted and does not
+> assert that this conversation's allowance was consumed.** ADR-0238 §14 makes `admit_search`
+> answer `None` on a conversation id that names nothing and on one stamped deleted as well as
+> on a bound that is reached, and the site cannot tell those apart. What §9's statement says is
+> that the search was not admitted **for this conversation** and that the allowance is per
+> conversation — the mechanism ADR-0238 §8 fixes — and it names no quantity, no bound and no
+> consumption.
 
 > **Normative.** The mapping from `SearchDisposition` is **total and non-injective, and that
 > is the design rather than a compromise**. `SearchDisposition` names *the stage that produced
@@ -726,7 +750,8 @@ gains nothing the user could not already have deduced from having asked the ques
 >
 > | `SearchDisposition` | `SearchNotServiced` |
 > | --- | --- |
-> | ADR-0238 §11's sixteenth member (`admit_search` refused) | `ALLOWANCE_EXHAUSTED` |
+> | ADR-0238 §11's sixteenth member (`admit_search` refused), `search_calls_per_conversation` is `0` | `SEARCH_DISABLED` |
+> | ADR-0238 §11's sixteenth member (`admit_search` refused), the bound is positive | `NOT_ADMITTED` |
 > | `SPEND_REFUSED` | `SPEND_EXHAUSTED` |
 > | `RULING_DENY` | `DECLINED` |
 > | `RULING_CONFIRM`, binding carried `planned_with_external_content` `False` | `AUTHORISATION_AWAITED` |
@@ -783,8 +808,8 @@ gains nothing the user could not already have deduced from having asked the ques
 > the binding the request carried. No component re-reads the trust store to render a reply, and
 > no renderer asks either question for itself.
 
-**Seven members chosen by what the user can do, and the count is argued rather than assumed.**
-Four of them name an act the user or the operator can perform and each act is different;
+**Eight members chosen by what the user can do, and the count is argued rather than assumed.**
+Five of them name an act the user or the operator can perform and each act is different;
 `DECLINED` and `INTERRUPTED` name something that happened to the request rather than something
 available, and their recourses are to change a threshold and to ask again; `UNAVAILABLE` is
 the deliberate residue, and it is one member rather than thirteen because none of the
@@ -823,8 +848,11 @@ review found an earlier draft doing.
 > with `assistant remember-recipients` as the listing of decisions they can still answer; for
 > `TRUST_MISSING`, that the destination is not one the user has chosen, and `assistant
 > trust-destinations` with **`assistant decisions`** as where the decision id is read; for
-> `ALLOWANCE_EXHAUSTED`, that this conversation's search allowance is spent and a new
-> conversation searches again; for `SPEND_EXHAUSTED`, that a spend ceiling refused it and that
+> `SEARCH_DISABLED`, that searching is switched off in this deployment and that it is an
+> operator setting, **naming no user act**; for `NOT_ADMITTED`, that this conversation did not
+> admit the search and that the allowance is per conversation, so a new conversation has one of
+> its own — **asserting neither that this conversation's allowance was consumed nor that a new
+> conversation will succeed**; for `SPEND_EXHAUSTED`, that a spend ceiling refused it and that
 > it is an operator setting; for `DECLINED`, that the search was declined when it was ruled on;
 > for `INTERRUPTED`, that the search was begun and stopped; and for `UNAVAILABLE`, that the
 > lookup produced nothing the turn could use, **naming no cause and no act**. The exact wording
@@ -875,7 +903,7 @@ review found an earlier draft doing.
 > that line or as making one of the two listings the only route; what is fixed is that the
 > statement rendered for `TRUST_MISSING` names the listing that always has the id.
 
-> **Normative.** **None of the seven statements carries** a destination, a host, an origin, a
+> **Normative.** **None of the eight statements carries** a destination, a host, an origin, a
 > provider name, a connection reference, an account identity, a query or any fragment of one,
 > a record, a count, a monetary figure, a duration, a budget, a `Settings` field name or a
 > `SearchDisposition` value. §7's bar on the prompt fragments and this bar are one rule stated
@@ -1024,7 +1052,7 @@ other, and neither can land a half of the pair that does not compile.
 > classes), the durable trust store and its canonical fake and conformance suite (the
 > subclass, below), `orchestration/` (the engine members, the servicing-site computation, the
 > carrier and the prompt fragments), `interfaces/cli.py` (three commands, the four refusal
-> renderings, the seven statements, the `remember-recipients` next-step line),
+> renderings, the eight statements, the `remember-recipients` next-step line),
 > `wire/client.py` and `wire/envelope.py` (the three `RemoteEngine` methods, the constant, the
 > log entry), and their tests. **It lands after lane
 > B1 and lane B2 of batch #2178**, because `DestinationTrustStore`,
@@ -1091,8 +1119,8 @@ other, and neither can land a half of the pair that does not compile.
   ADR-0004 §6 and reaches no operation here. ADR-0186 §9 reserves the bare `assistant export`
   for ADR-0004 §6's whole-installation artifact and **#1502** holds it. **Fired** with that
   lane.
-- **A second `SearchNotServiced` member, and any eighth.** §8 closes the vocabulary. **Fired**
-  by an ADR with a user act that none of the seven names. Not fired by a lane wanting a finer
+- **A ninth `SearchNotServiced` member.** §8 closes the vocabulary at eight. **Fired**
+  by an ADR with a user act that none of the eight names. Not fired by a lane wanting a finer
   reason, which is reporting the system's stages by another name.
 - **A typed account of *why* a ruling was not an `ALLOW`.** §8 states each member over what
   its inputs establish precisely because a `RULING_CONFIRM` does not say which floor fired
@@ -1178,10 +1206,15 @@ other, and neither can land a half of the pair that does not compile.
 > - **Arm 2b — the turn-wide precedence and retention rule, over more than one servicing.** A
 >   turn whose servicings record, in this encounter order, `SPEND_REFUSED` and then
 >   `COMPOSER_DECLINED` carries **`SPEND_EXHAUSTED`** and not `UNAVAILABLE`, which a
->   last-computed-wins implementation fails while passing every single-servicing arm above. A
->   turn whose first search is refused and whose second **succeeds** still carries the first's
->   member. Both are asserted on the production servicing path with the dispositions produced
->   rather than injected.
+>   last-computed-wins implementation fails while passing every single-servicing arm above.
+>   **And the reversed order is a required arm and not an optional one**: a turn recording
+>   `COMPOSER_DECLINED` and *then* `SPEND_REFUSED` carries **`SPEND_EXHAUSTED`** too, which a
+>   first-computed-wins implementation fails — an implementation assigning only while the
+>   carrier is `None` passes every other arm here, so without this one the precedence rule is
+>   untested in the direction it is most likely to be got wrong. A turn whose first search is
+>   refused and whose second **succeeds** still carries the first's member. All three are
+>   asserted on the production servicing path with the dispositions produced rather than
+>   injected, and each is asserted at **both** renderers.
 > - **Arm 2c — the trust act does not repair the conversation it was prompted by.** The
 >   recovery journey §9 names, walked to its end: grant, a granted search that returns external
 >   records from an `UNCHOSEN` destination, a follow-up refused as **`TRUST_MISSING`**,
@@ -1198,10 +1231,14 @@ other, and neither can land a half of the pair that does not compile.
 >   — which is §4's prospectivity clause asserted rather than assumed.
 > - **Arm 4 — exhausted allowance, and spend kept distinct.**
 >   `search_calls_per_conversation=1` yields ADR-0238 §11's sixteenth disposition on the third
->   turn and the member **`ALLOWANCE_EXHAUSTED`**; `=0` refuses every search before the
->   composer with the same member; and a spend refusal yields `SPEND_REFUSED` and the
->   **distinct** member `SPEND_EXHAUSTED`, with a distinct statement. The arm asserts the
->   three are not collapsed.
+>   turn and the member **`NOT_ADMITTED`**, whose statement asserts **no** consumed quantity;
+>   `=0` refuses every search before the composer and yields **`SEARCH_DISABLED`**, whose
+>   statement names **no user act** and does not point at a new conversation; a servicing whose
+>   conversation is stamped deleted before admission also yields `NOT_ADMITTED` and the same
+>   statement, which is the arm that pins §8's no-consumption rule against the case that
+>   falsifies the easier wording; and a spend refusal yields `SPEND_REFUSED` and the
+>   **distinct** member `SPEND_EXHAUSTED`, with a distinct statement. The arm asserts the four
+>   are not collapsed.
 > - **Arm 5 — the load-time refusal reaches the user as a configuration fault.** A
 >   configuration setting `web_search_cost_per_call` and an ADR-0194 period ceiling without
 >   `world_spend_unknown_allowance` raises `ConfigurationError` naming the field at `Settings`
@@ -1366,8 +1403,8 @@ ADR-0235 §4 did the same and recorded none either.
 > what it obliges, and unmarked text is read to determine what a marked clause means and never
 > supplies an obligation.
 
-What binds is **one hundred and fourteen marked clauses**: §1's eight, §2's nine, §3's seven,
-§4's eight, §5's nine, §6's five, §7's six, §8's nine, §9's thirteen, §10's three, §11's
+What binds is **one hundred and sixteen marked clauses**: §1's eight, §2's nine, §3's seven,
+§4's eight, §5's nine, §6's five, §7's six, §8's eleven, §9's thirteen, §10's three, §11's
 eight, §12's seven, §13's eight, §15's four, §16's nine, and this section's one. §14's deferrals,
 §17's classification, and every argument, table caption and worked comparison in this
 document are deliberately unmarked: they are deferral, attestation and argument, which
