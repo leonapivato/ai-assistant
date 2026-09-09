@@ -2380,3 +2380,94 @@ async def test_the_two_values_this_store_writes_decode(tmp_path: Path, stored: i
         assert draw.all_external_user_chosen is bool(stored)
     finally:
         store.close()
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        pytest.param("1_0", id="a numeric underscore SQL and pydantic read differently"),
+        pytest.param("2x", id="a numeric prefix SQL takes and pydantic refuses"),
+        pytest.param(-1, id="a negative count"),
+        pytest.param("many", id="text with no numeric reading"),
+    ],
+)
+async def test_a_corrupt_counter_is_refused_without_changing_the_row(
+    tmp_path: Path, stored: object
+) -> None:
+    """ADR-0238 §8's "no path lowers ``calls``", against the reader that would.
+
+    The load-bearing case is ``"1_0"``, and it is not a range problem. **Pydantic reads
+    it as 10** — Python's numeric underscores — while **SQLite reads the same text as 1
+    for arithmetic**, taking the leading numeric prefix. A store that decoded with the
+    first and incremented with the second would tell a caller the draw is 10, grant an
+    admission against a bound of 12, answer 11, and leave the row at **2**: an admission
+    that lowered the recorded draw and bought the conversation further admissions it
+    never earned. Every number in that sentence is in range, so only the **type** check
+    catches it.
+
+    Both halves are asserted: the refusal, and that the refusal **wrote nothing**. A
+    store that raised after mutating would have done the damage and reported it.
+    """
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        conversation = await store.start()
+        raw = sqlite3.connect(path, isolation_level=None)
+        try:
+            raw.execute(
+                "UPDATE conversations SET search_calls = ? WHERE id = ?",
+                (stored, conversation.id),
+            )
+        finally:
+            raw.close()
+
+        with pytest.raises(ConversationStoreError, match="corrupt search draw"):
+            await store.search_draw(conversation.id)
+        with pytest.raises(ConversationStoreError, match="corrupt search draw"):
+            await store.admit_search(conversation.id, max_calls=12)
+
+        raw = sqlite3.connect(path, isolation_level=None)
+        try:
+            held = raw.execute(
+                "SELECT search_calls FROM conversations WHERE id = ?", (conversation.id,)
+            ).fetchone()
+        finally:
+            raw.close()
+        assert held == (stored,), "a refusal writes nothing"
+    finally:
+        store.close()
+
+
+async def test_a_clean_observation_cannot_repair_a_corrupt_footing(tmp_path: Path) -> None:
+    """The fold is a write path, and SQL's ``AND`` is a coercion (ADR-0238 §8).
+
+    A stored ``2`` folded against a clean observation evaluates ``2 AND 1`` and writes
+    ``1`` — so without a check inside the mutation, a fold would turn a value this store
+    never wrote into a **valid clean flag**. That repairs a corruption into the one
+    state §8's monotonicity makes unrecoverable, and it does so on the path least likely
+    to be looked at: every *reading* path already refuses such a row, which is exactly
+    what makes the write path the way round them.
+
+    Driven with ``True`` because that is the direction that does the damage; the fold's
+    own ``and`` would carry a ``False`` through harmlessly and prove nothing.
+    """
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        conversation = await store.start()
+        raw = sqlite3.connect(path, isolation_level=None)
+        try:
+            raw.execute(
+                "UPDATE conversations SET all_external_user_chosen = 2 WHERE id = ?",
+                (conversation.id,),
+            )
+        finally:
+            raw.close()
+
+        with pytest.raises(ConversationStoreError, match="corrupt search draw"):
+            await store.observe_search(conversation.id, all_external_user_chosen=True)
+
+        with pytest.raises(ConversationStoreError, match="corrupt search draw"):
+            await store.search_draw(conversation.id)
+    finally:
+        store.close()
