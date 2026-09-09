@@ -497,7 +497,9 @@ what it found, are on #1844 rather than here.
   relaxing them — the composer that sees only the latest utterance (ADR-0231 §3)
   and the conversation that declines every later search once it has read one
   (ADR-0231 §12) — and the ground of the reversal is **destination trust**: the
-  provider is a destination the user chose, recorded once at connection, so
+  provider is a destination the user chose, in an explicit and revocable act of
+  the user's own that no connected account, no configuration and no model output
+  can stand in for (ADR-0238 §1; ADR-0242 §1 for the surface that act rides), so
   task-relevant context reaching it is disclosure to a trusted party bounded by
   budget and audit. The bounds are that searches go only to the configured,
   authorised provider; that credentials stay out structurally; that *excluded*
