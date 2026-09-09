@@ -4188,6 +4188,89 @@ class DeferralAdmission(BaseModel):
 # unusable, and only the producer can tell those apart (§4).
 
 
+class EpisodeLabelling(BaseModel):
+    """What one episode of an observed batch was about, and who it involved.
+
+    ADR-0239 §2's seam value: the two filing axes an observation pass proposes for
+    an episode it read, carried back to the caller that selected the batch. It is
+    a `core` type because it crosses a subsystem boundary — `learning` mints it,
+    `orchestration` writes from it — and it rides
+    :attr:`ObservationOutcome.labellings` rather than a seam of its own, so
+    ``Observer.observe``'s signature is untouched (§9).
+
+    **It names labels and never a record**, which is ADR-0047 §2's rule in a
+    second currency (§2). A labelling carries two tuples and an id the *producer
+    itself* resolved from its own batch labels; the write is built by applying
+    those two tuples to the stored :class:`EpisodicMemory` the caller already
+    holds, so no value a model emits can reach ``content``, ``occurred_at``,
+    ``outcome``, ``disposition``, ``capture``, ``importance``, ``about_person``,
+    ``provenance``, ``placement``, ``validity``, ``expires_at`` or the record's
+    id. A seam carrying a *record* would have handed a model a way to rewrite an
+    episode's text, its instant or its band under cover of filing it; carrying
+    labels alone makes that unreachable by construction rather than by review.
+
+    **One value rather than two parallel mappings**, on
+    :class:`ObservationOutcome`'s own precedent that a seam returning more than
+    one fact returns a named value rather than a tuple: two
+    ``Mapping[str, tuple[...]]`` members can disagree about which episodes were
+    labelled, and one model carrying both axes cannot.
+
+    **Both axes take :data:`TopicLabel`'s canonical form and share nothing else**
+    (ADR-0239 §4, §7). The form ADR-0213 §3 fixes for a topic is *literally* the
+    form a participant label takes, and minting a second annotated type with an
+    identical predicate would be two statements of one rule — the defect ADR-0086
+    §1 names when it declines a second enforcement point. What the shared form
+    transfers is deterministic equality over short readable strings and **nothing
+    else**: a participant label is not a subject, not an identifier, not a tier,
+    not a band, not a grant and not an ordering term, and nothing derives either
+    axis from the other.
+
+    **The bound and the code-point order are the producer's, not this type's.**
+    ADR-0239 §4 obliges a producer to propose at most
+    :data:`MAX_TOPICS_PER_PROPOSAL` labels per axis, strictly increasing with no
+    repeats, and §5 rules that an axis breaking any of that yields **no labels on
+    that axis** — ignored, never repaired and never truncated to the bound. That
+    judgement is made *before* a labelling exists, exactly as
+    ``learning.observer._topics`` already makes it for a proposal's topics, so a
+    bound here would only move a producer's own miss to a ``ValidationError`` its
+    caller cannot act on. §9 fixes the `core` change as this model plus
+    :attr:`ObservationOutcome.labellings` and its validator, and this is that
+    scope read literally.
+
+    Attributes:
+        episode_id: The episode being labelled — an id the **producer** resolved
+            from its own labels for the batch it was handed, never one a model
+            wrote (ADR-0239 §1). A labelling naming anything the producer was not
+            handed is ignored before it becomes one of these.
+        topics: What that episode was about, as canonical filing words. Empty
+            states that **no topic was recorded** for it — never that it is about
+            nothing, and never that it is about everything (§6).
+        participants: Who that episode involved, in the same form and with the
+            same empty reading (§4, §6). It resolves to nothing: two equal labels
+            are one label exactly when the stored characters are equal, and for no
+            other reason.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    episode_id: EncodableText
+    topics: tuple[TopicLabel, ...] = Field(
+        default=(),
+        description=(
+            "What the episode was about, as canonical filing words (ADR-0239 §4). "
+            "Empty means no topic was recorded for it (§6)."
+        ),
+    )
+    participants: tuple[TopicLabel, ...] = Field(
+        default=(),
+        description=(
+            "Who the episode involved, in ADR-0213 §3's canonical form and "
+            "resolving to nothing (ADR-0239 §4). Empty means no participant was "
+            "recorded for it (§6)."
+        ),
+    )
+
+
 class ObservationOutcome(BaseModel):
     """What one :class:`~ai_assistant.core.protocols.Observer` pass produced.
 
@@ -4229,6 +4312,26 @@ class ObservationOutcome(BaseModel):
             producer's configured maximum. Discarded rather than queued: a queue
             is durable state nothing here ratifies, and the episodes remain in the
             store for a later pass to read again (ADR-0077 §2).
+        labellings: What the pass proposes the **episodes it read** were about and
+            who they involved (ADR-0239 §1, §2). At most one entry per episode,
+            each naming an episode of the batch the producer was handed. Empty is
+            a normal outcome, not a degradation: a response carrying no labelling
+            key at all, and one naming an admissible value on neither axis, both
+            leave the episodes unlabelled (§5).
+
+            **The write is the caller's, never the producer's** (§2). An
+            ``Observer`` holds no store and writes nothing, so this member is how
+            a labelling reaches the component that selected the batch — which
+            builds the write from the stored :class:`EpisodicMemory` it already
+            holds and never from anything a producer supplies.
+
+    **The two counts are untouched by a labelling, and no third counter is added**
+    (ADR-0239 §2, §5). A labelling is not an entry of the proposal population, an
+    ignored labelling is not a discard, and a labelling the caller declines to
+    write is not one either — so ``len(proposals) + discarded_unusable +
+    discarded_over_limit`` keeps exactly the meaning above and no counter moves
+    for anything on this axis. Counting one would break an invariant that is
+    exhaustive over a different population.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -4247,6 +4350,52 @@ class ObservationOutcome(BaseModel):
         ge=0,
         description="Usable proposals dropped to meet the producer's configured maximum.",
     )
+    labellings: tuple[EpisodeLabelling, ...] = Field(
+        default=(),
+        description=(
+            "What the episodes of the batch were about and who they involved "
+            "(ADR-0239 §2). At most one entry per episode; empty is normal."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _at_most_one_labelling_per_episode(self) -> Self:
+        """Refuse an outcome naming one episode twice (ADR-0239 §2).
+
+        **Refused at construction rather than left to the writer**, where ADR-0213
+        §1 put its own topics bound at the seam instead — and the difference is
+        what each rule is about. That bound stays off the type because it is a
+        number a later ADR is likely to *raise*, and a ``max_length`` on a stored,
+        wire-crossing field would make a record written at the new bound
+        unreadable to a peer at the old one. Neither half holds here: this type
+        crosses no wire and no store decodes into it (ADR-0239 §9), so there is no
+        older peer and no stored value to refuse, and uniqueness is not a figure
+        anybody raises.
+
+        What the validator buys is that the ambiguity cannot reach the writing
+        stage at all. Without it a conforming outcome could name one episode
+        twice, and that stage would have to choose between an atomic batch
+        carrying duplicate ids and a sequence whose result depends on response
+        order — two undefined behaviours where the decision needs one. The
+        *producer's* half of the same rule is §5's: a response naming one episode
+        more than once yields no labels for it on either axis, both entries
+        dropped rather than the first winning, because "the first" is a property
+        of a response nobody guaranteed the order of.
+
+        Raises:
+            ValueError: If two labellings carry equal ``episode_id``.
+        """
+        seen: set[str] = set()
+        for labelling in self.labellings:
+            if labelling.episode_id in seen:
+                msg = (
+                    "an outcome carries at most one labelling per episode "
+                    f"(ADR-0239 §2); {describe_untrusted(labelling.episode_id)} is "
+                    "named more than once"
+                )
+                raise ValueError(msg)
+            seen.add(labelling.episode_id)
+        return self
 
 
 # --- context facets: a source's situational "right now" (ADR-0096) -----------

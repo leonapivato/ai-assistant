@@ -14,6 +14,10 @@ holds both durable stores by injection (ADR-0074 §9). This stage:
   ADR-0217 §1 the **narrowest ``placement``** over the episodes it supplied,
   assigned rather than merged, exactly as ADR-0106 §3 has the consolidation stage
   mark its sibling field;
+* **labels** each episode the producer read, where the producer proposed labels
+  for it: a conditional write at the episode's own id, of ``topics`` and
+  ``participants`` and no other field, built from the stored record this stage
+  already holds (ADR-0239 §3);
 * **ingests** each returned proposal through
   :meth:`~ai_assistant.core.protocols.MemoryWriter.ingest`, in order and
   independently, ruling by ruling (§4) — the model proposes, a deterministic
@@ -69,13 +73,22 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
+import structlog
+
 from ai_assistant.core.clock import checked_clock
-from ai_assistant.core.errors import UnknownConversationError, UnresolvedEvidenceError
+from ai_assistant.core.errors import (
+    MemoryStoreError,
+    MemoryStoreStaleError,
+    UnknownConversationError,
+    UnresolvedEvidenceError,
+)
 from ai_assistant.core.types import (
     EpisodicMemory,
     Evidence,
     LearnDecision,
     MemoryKind,
+    MemoryWrite,
+    MemoryWriteMode,
     ObservationReport,
     ObservedProposal,
     Placement,
@@ -95,10 +108,13 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         Conversation,
         ConversationTurn,
+        EpisodeLabelling,
         MemoryIngestResult,
         MemoryUpdateProposal,
     )
     from ai_assistant.orchestration.writes import MemoryWriteStage
+
+_log = structlog.get_logger(__name__)
 
 #: Defaults for ADR-0218 §7's three run figures. All three are also
 #: composition-root arguments, so an operator's ``Settings`` values win; these are
@@ -560,6 +576,16 @@ class ObservationStage:
         **An empty batch reaches no observer.** There is nothing to observe, no
         provider is called, and the report names no route (§9.7).
 
+        **The episodes the pass read are filed, after the proposals and before the
+        advance** (ADR-0239 §3, ADR-0111 §3). Each labelling the producer proposed
+        lands as a conditional write at that episode's own id — ``topics`` and
+        ``participants`` and no other field — against the revision the selection's
+        read returned, on an episode carrying no label on either axis and only
+        where the whole page shares one placement reach and setter. It is an effect
+        rather than a certificate: it goes through no ``MemoryPolicy``, it is not
+        part of the batch that installed the proposals, and a refusal or a failure
+        of it changes nothing about the advance below. See :meth:`_label`.
+
         **The advance is one attempt, at the end, and never computed from the page's
         length** (ADR-0212 §5). A pass that read a **non-empty** page makes exactly
         one ``record_observed`` call, after every proposal it produced has been ruled
@@ -710,6 +736,13 @@ class ObservationStage:
             if entry.decision is None:
                 dropped += 1
             proposals.append(entry)
+        # The episodes the producer read are filed, from the very records it was
+        # handed and with no read between (ADR-0239 §3). It is an effect of this
+        # chunk and is made durable **before** the advance is attempted (ADR-0111
+        # §3), and it is a condition of nothing: it is not part of the batch that
+        # installed the proposals above, and whether it landed, was refused or
+        # failed does not reach the line below.
+        await self._label(episodes, outcome.labellings)
         # The pass's one and only write to the watermark, and it is the **last** act
         # of the pass: every proposal above has been ruled by the write path, so the
         # position records work that was done (ADR-0111 §3, ADR-0212 §5). The return
@@ -725,6 +758,133 @@ class ObservationStage:
             route=self._route,
             conversation_id=target.id,
             episodes_read=len(episodes),
+        )
+
+    async def _label(
+        self, episodes: Sequence[EpisodicMemory], labellings: Sequence[EpisodeLabelling]
+    ) -> None:
+        """File the episodes this pass read, one conditional write each (ADR-0239 §3).
+
+        **From the stored record the producer was handed, and never a re-read.** The
+        expectation is the ``revision`` the selection's own read returned (ADR-0219
+        §1), so every race in which the row moved *after* that read is closed by the
+        store rather than by a check here — and an implementation that read the
+        episode again between the producer's call and this write would be expecting
+        a revision the pass never reasoned about. §3 rules that non-conforming in
+        terms, whatever the re-read returns.
+
+        **Two tuples and no other field.** The write is the stored episode with
+        ``topics`` and ``participants`` replaced; ``content``, ``occurred_at``,
+        ``outcome``, ``disposition``, ``capture``, ``importance``, ``about_person``,
+        ``provenance``, ``placement``, ``validity`` and ``expires_at`` are carried
+        across exactly as they were read, and the id is the episode's own. Nothing
+        the producer emitted reaches any of them: an
+        :class:`~ai_assistant.core.types.EpisodeLabelling` carries labels, never a
+        record (§2). No validity window opens or closes, no placement moves, no id
+        is minted and no record is retired, deleted or superseded.
+
+        **An episode already carrying a label on either axis is not written.** No
+        pass overwrites a label — its own, an earlier pass's, or the owner's — and
+        that is what makes ADR-0111 §3's at-least-once repetition a no-op rather
+        than a second model judgement over the same words: a page re-read after an
+        advance that did not commit carries the labels the earlier pass wrote, so
+        this declines it. It is also what leaves the owner's relabel final over an
+        episode a pass has labelled (ADR-0213 §9).
+
+        **A page whose episodes' placements differ is labelled nowhere** (§3). A
+        label proposed over a batch is a derivation over all of it, and ADR-0217 §3
+        rules that a producer deriving from records of this store writes the
+        narrowest reach over **every** record it was supplied — so filing a
+        reach-``ANYONE`` episode under a word drawn from a reach-``OWNER`` one beside
+        it would launder the narrowing into a record that stays exactly as
+        disclosable as it was (ADR-0204 §5). The **setter** is part of the test and
+        not an afterthought: two episodes can share reach ``OWNER`` and differ
+        entirely in what may become of it, since ADR-0217 §7's ``unguard`` lifts an
+        ``OWNER_ACT`` placement and writes nothing at all against a ``DERIVED`` one
+        — so a rule comparing reach alone would let the same laundering happen one
+        act later. Equality of both fields needs no ordering, stays correct when a
+        later ADR adds a denotation or a setter, and fails in the one safe
+        direction: the page's labels are lost whole, and §6's disclosure covers
+        those episodes like every other unlabelled one. **Nothing is written, so no
+        placement moves** — this clause reads two fields and writes neither, and no
+        lane may cite it as a placement rule.
+
+        **A refusal or a failure is abandoned, never retried**, and the pass carries
+        on with the rest. The only writes that can move an episode's row between the
+        pass's read and this one are the owner's own relabel act and a concurrent
+        pass, and **both should win**: a retry computed against the older row would
+        overwrite the owner's correction with a model's guess, which is the one
+        outcome ADR-0213 §9 exists to make impossible. Nothing waits on a labelling,
+        so abandoning costs a filing word and buys the owner's correction surviving
+        a race. Each labelling is its own ``write_atomic`` call for the same reason:
+        one batch would make one stale row abandon every other episode's label with
+        it, where §3 says the pass continues.
+
+        **It is a condition of nothing.** It is not part of the batch that installs
+        the pass's proposals, it passes through no ``MemoryPolicy``, it is ruled by
+        no ``Disposition``, it opens no deferred question and it is counted in no
+        ``MemoryIngestResult`` — a labelling asserts nothing about the user, so
+        ADR-0075 §1's belief-scoped rule does not reach it and no exemption is
+        claimed from it. And it never conditions the watermark: this returns
+        normally whatever the store did, so the advance below is computed and
+        attempted exactly as it is today (ADR-0212 §§5-6).
+
+        Args:
+            episodes: The batch handed to the producer, as the very records read.
+            labellings: What the producer proposed for them, at most one per
+                episode (ADR-0239 §2).
+        """
+        if not labellings:
+            return
+        # ADR-0217 §3's uniformity test, over the batch the producer was **supplied**
+        # rather than over the episodes it happened to name. The destination is one
+        # of these, so a uniform batch is a batch every destination matches.
+        if len({(record.placement.reach, record.placement.set_by) for record in episodes}) > 1:
+            _log.info("observation_labelling_declined_non_uniform_page", labellings=len(labellings))
+            return
+        selected = {record.id: record for record in episodes}
+        written = abandoned = failed = 0
+        for labelling in labellings:
+            stored = selected.get(labelling.episode_id)
+            # An id outside the batch names no episode this pass selected, and an
+            # episode already filed is not relabelled. A labelling carrying nothing
+            # on either axis has no write to make: it leaves the episode unlabelled
+            # (§5), which is what an untouched record already says.
+            if stored is None or stored.topics or stored.participants:
+                continue
+            if not labelling.topics and not labelling.participants:
+                continue
+            write = MemoryWrite(
+                record=stored.model_copy(
+                    update={
+                        "topics": labelling.topics,
+                        "participants": labelling.participants,
+                    }
+                ),
+                mode=MemoryWriteMode.IF_UNCHANGED,
+                expected_revision=stored.revision,
+            )
+            try:
+                await self._memory.write_atomic([write])
+            except MemoryStoreStaleError:
+                # The row moved under this pass — the owner relabelled it, or a
+                # concurrent pass labelled it first. Both win (§3).
+                abandoned += 1
+            except MemoryStoreError:
+                # Any other refusal of the write. It is abandoned on the same rule:
+                # nothing waits on a filing word, and §3 forbids it conditioning the
+                # advance, so it is counted and reported rather than propagated.
+                failed += 1
+            else:
+                written += 1
+        # Counts alone, and no id among them: an episode id names the conversation
+        # it was captured in, which ADR-0004 §5 keeps out of a log line.
+        _log.info(
+            "observation_labelling_written",
+            proposed=len(labellings),
+            written=written,
+            abandoned=abandoned,
+            failed=failed,
         )
 
     async def run(self) -> ObservationRunReport:
