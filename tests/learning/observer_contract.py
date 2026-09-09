@@ -35,6 +35,7 @@ import pytest
 
 from ai_assistant.core.protocols import Observer
 from ai_assistant.core.types import (
+    MAX_TOPICS_PER_PROPOSAL,
     BeliefBand,
     EpisodicMemory,
     MemoryKind,
@@ -125,6 +126,29 @@ class GatedObservation:
     gate: ObservationGate
 
 
+@dataclass(frozen=True)
+class LabellingObservation:
+    """One observer scripted to file the episodes it is handed (ADR-0239 §1).
+
+    What the labelling clauses need from an implementation, and no more. Every
+    conforming observer *may* label; a subject that labels nothing satisfies §5's
+    "leaves the episodes unlabelled" and would pass the cases below having
+    exercised none of them, so the suite asks each implementation for a subject
+    that does — a scripted response for a model-backed one, a script for a fake.
+
+    ``episodes`` is the batch that subject expects: the suite hands it exactly
+    this and asserts what comes back against it.
+
+    Attributes:
+        observer: The subject, ready to be called.
+        episodes: The batch to hand it. Must hold at least two episodes, so a case
+            asserting that only the batch is named is not vacuous.
+    """
+
+    observer: Observer
+    episodes: list[EpisodicMemory]
+
+
 def _cited(outcome: ObservationOutcome) -> set[str]:
     """Every episode id cited by any proposal in ``outcome``."""
     return {
@@ -163,6 +187,13 @@ class ObserverContract:
 
         Called once per case that needs it, so each gets a fresh gate and a fresh
         subject. See :class:`GatedObservation`.
+        """
+        raise NotImplementedError
+
+    def labelling_observation(self) -> LabellingObservation:
+        """Override with a subject that files the episodes it is handed (ADR-0239).
+
+        Called once per case that needs it. See :class:`LabellingObservation`.
         """
         raise NotImplementedError
 
@@ -435,6 +466,72 @@ class ObserverContract:
 
         assert outcome == ObservationOutcome()
 
+    # --- what the pass says about the episodes it read (ADR-0239) -----------
+
+    async def test_a_labelling_names_an_episode_of_the_batch_and_no_other(self) -> None:
+        """The ids are the producer's, resolved from its own labels (§1, §2).
+
+        A labelling is proposed for an episode of the batch the caller handed the
+        producer and for no other; one naming anything else — an id the producer
+        was not handed, a record of another kind, a conversation, or a value that
+        is not one of its own labels — is ignored. This is ADR-0047 §2's rule in a
+        second currency: a model that can write an id can write one for an episode
+        it never saw, and the destination of a labelling write would then be a
+        record nobody selected.
+        """
+        given = self.labelling_observation()
+        batch = {record.id for record in given.episodes}
+
+        outcome = await given.observer.observe(given.episodes)
+
+        named = {labelling.episode_id for labelling in outcome.labellings}
+        assert named, "the subject labelled nothing, so these clauses would pass vacuously"
+        assert named <= batch
+
+    async def test_no_episode_is_labelled_twice(self) -> None:
+        """At most one labelling per episode, so no caller has to pick between two (§2).
+
+        The type refuses the ambiguity at construction, so an implementation that
+        emitted two entries for one episode fails before it returns; this asserts
+        the property from the outside, over whatever the subject actually produced,
+        because that is the clause a *consumer* relies on.
+        """
+        given = self.labelling_observation()
+
+        outcome = await given.observer.observe(given.episodes)
+
+        named = [labelling.episode_id for labelling in outcome.labellings]
+        assert named
+        assert len(set(named)) == len(named)
+
+    async def test_every_axis_of_every_labelling_is_within_the_bound_and_in_order(self) -> None:
+        """§4's bound and canonical order, on both axes and per axis.
+
+        The canonical *form* is the type's (both axes are ``TopicLabel``), and what
+        an implementation still owes is the bound and the ordering: at most
+        ``MAX_TOPICS_PER_PROPOSAL`` labels per axis, strictly increasing by code
+        point with no repeats, exactly as ADR-0213 §1 requires of a stored topics
+        tuple. An axis breaking any of that yields **no labels on that axis** (§5),
+        so a conforming subject never returns one that does.
+        """
+        given = self.labelling_observation()
+
+        outcome = await given.observer.observe(given.episodes)
+
+        assert outcome.labellings
+        for labelling in outcome.labellings:
+            for axis in (labelling.topics, labelling.participants):
+                assert len(axis) <= MAX_TOPICS_PER_PROPOSAL
+                assert list(axis) == sorted(set(axis))
+
+    async def test_an_empty_batch_is_labelled_as_well_as_unobserved(self) -> None:
+        """Nothing to observe is nothing to file, and neither is a degradation."""
+        given = self.labelling_observation()
+
+        outcome = await given.observer.observe([])
+
+        assert outcome == ObservationOutcome()
+
     # --- input observation (ADR-0065) ---------------------------------------
 
     async def test_observe_cannot_tear_on_a_mid_flight_mutation_of_its_batch(self) -> None:
@@ -519,5 +616,15 @@ def assert_conforms(outcome: ObservationOutcome, batch: Sequence[EpisodicMemory]
         assert distinct <= given
         if provenance.source is MemorySource.INFERRED:
             assert len(distinct) >= 2
+    named = [labelling.episode_id for labelling in outcome.labellings]
+    # ADR-0239 §1's scope limit and §2's uniqueness, over whatever this outcome
+    # carried — vacuous for a subject that labelled nothing, which is a normal
+    # outcome (§5), and the whole clause for one that did.
+    assert set(named) <= given
+    assert len(set(named)) == len(named)
+    for labelling in outcome.labellings:
+        for axis in (labelling.topics, labelling.participants):
+            assert len(axis) <= MAX_TOPICS_PER_PROPOSAL
+            assert list(axis) == sorted(set(axis))
     assert outcome.discarded_unusable >= 0
     assert outcome.discarded_over_limit >= 0

@@ -15,9 +15,20 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
 import pytest
-from observer_contract import GatedObservation, ObserverContract, batch_of, episode
+from observer_contract import (
+    GatedObservation,
+    LabellingObservation,
+    ObserverContract,
+    batch_of,
+    episode,
+)
 
-from ai_assistant.core.types import MemoryKind, MemorySource
+from ai_assistant.core.types import (
+    EpisodeLabelling,
+    MemoryKind,
+    MemorySource,
+    ObservationOutcome,
+)
 from ai_assistant.testing import FakeObserver, ObservationGate, ObservedBelief
 
 if TYPE_CHECKING:
@@ -50,6 +61,22 @@ class TestFakeObserverContract(ObserverContract):
             observer=FakeObserver(gate=gate),
             episodes=batch_of(2),
             gate=gate,
+        )
+
+    def labelling_observation(self) -> LabellingObservation:
+        episodes = batch_of(2)
+        return LabellingObservation(
+            observer=FakeObserver(
+                labellings=[
+                    EpisodeLabelling(
+                        episode_id=episodes[0].id,
+                        topics=("health", "sleep"),
+                        participants=("alex",),
+                    ),
+                    EpisodeLabelling(episode_id=episodes[1].id, topics=("car maintenance",)),
+                ]
+            ),
+            episodes=episodes,
         )
 
     def observation_asked_to_state_a_subject(self) -> Observer:
@@ -435,3 +462,144 @@ def test_a_template_the_producer_could_only_ignore_is_refused_at_construction(
     """
     with pytest.raises(ValueError, match=r"topic|Value error"):
         ObservedBelief(content="a belief", topics=topics)
+
+
+# --- the second script: ADR-0239 §1's labellings ----------------------------
+
+
+async def test_a_scripted_labelling_is_returned_for_an_episode_of_the_batch() -> None:
+    """The ordinary case, and the one every consumer of the write path drives."""
+    batch = batch_of(2)
+    observer = FakeObserver(
+        labellings=[
+            EpisodeLabelling(
+                episode_id=batch[0].id, topics=("health",), participants=("alex", "bob")
+            )
+        ]
+    )
+
+    outcome = await observer.observe(batch)
+
+    assert [
+        (entry.episode_id, entry.topics, entry.participants) for entry in outcome.labellings
+    ] == [(batch[0].id, ("health",), ("alex", "bob"))]
+
+
+async def test_a_labelling_naming_an_episode_outside_the_batch_is_ignored() -> None:
+    """§1's scope limit, honoured by the fake rather than left to each consumer.
+
+    A producer labels an episode of the batch it was handed and no other, so a fake
+    emitting one for anything else would be the fault injector this module refuses
+    to be. Every other entry still stands, which is what makes this an *ignore*
+    rather than a refusal of the response.
+    """
+    batch = batch_of(2)
+    observer = FakeObserver(
+        labellings=[
+            EpisodeLabelling(episode_id="conv:elsewhere:1", topics=("health",)),
+            EpisodeLabelling(episode_id=batch[1].id, topics=("sleep",)),
+        ]
+    )
+
+    outcome = await observer.observe(batch)
+
+    assert [entry.episode_id for entry in outcome.labellings] == [batch[1].id]
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        pytest.param(("health",), ("money",), id="two-usable-entries"),
+        pytest.param(("money",), ("health",), id="the-same-two-in-the-other-order"),
+    ],
+)
+async def test_an_episode_named_twice_yields_no_labels_for_it(
+    first: tuple[str, ...], second: tuple[str, ...]
+) -> None:
+    """§2's second arm, which ADR-0239 §10 asks the canonical fake for by name.
+
+    Both entries are dropped rather than the first winning, and the pair of
+    parameters is what pins that: "the first" is a property of a response nobody
+    guaranteed the order of, so a rule preferring it would make the outcome depend
+    on something no clause fixes. Every **other** episode of the batch is labelled
+    normally, which is the half that makes this an ignore rather than a refusal.
+    """
+    batch = batch_of(3)
+    observer = FakeObserver(
+        labellings=[
+            EpisodeLabelling(episode_id=batch[0].id, topics=first),
+            EpisodeLabelling(episode_id=batch[2].id, topics=("cars",)),
+            EpisodeLabelling(episode_id=batch[0].id, topics=second),
+        ]
+    )
+
+    outcome = await observer.observe(batch)
+
+    assert [entry.episode_id for entry in outcome.labellings] == [batch[2].id]
+
+
+async def test_a_labelling_admissible_on_neither_axis_is_not_carried() -> None:
+    """It names no label, so there is nothing for a caller to write (§5).
+
+    An episode it was proposed for is left unlabelled, which is exactly what an
+    untouched record already says — so carrying the entry would only offer a
+    consumer a write that changes nothing.
+    """
+    batch = batch_of(2)
+    observer = FakeObserver(labellings=[EpisodeLabelling(episode_id=batch[0].id)])
+
+    outcome = await observer.observe(batch)
+
+    assert outcome.labellings == ()
+
+
+async def test_an_unscripted_observer_labels_nothing() -> None:
+    """The default, and it is a normal outcome rather than a degradation (§5).
+
+    Every pass before ADR-0239 produced exactly this, and so does a response
+    carrying no labelling key at all — so the default script has nothing to make
+    non-vacuous, and a consumer that has not asked for labels sees the behaviour it
+    saw before.
+    """
+    outcome = await FakeObserver().observe(batch_of(2))
+
+    assert outcome.labellings == ()
+    assert outcome.proposals
+
+
+async def test_an_empty_batch_yields_no_labelling_however_the_fake_is_scripted() -> None:
+    """There is nothing to have filed, exactly as there is nothing to have observed."""
+    observer = FakeObserver(
+        labellings=[EpisodeLabelling(episode_id="e0", topics=("health",))],
+    )
+
+    assert await observer.observe([]) == ObservationOutcome()
+
+
+@pytest.mark.parametrize(
+    ("axis", "labels"),
+    [
+        pytest.param("topics", ("a", "b", "c", "d", "e"), id="topics-past-the-bound"),
+        pytest.param("participants", ("a", "b", "c", "d", "e"), id="participants-past-the-bound"),
+        pytest.param("topics", ("sleep", "health"), id="topics-unsorted"),
+        pytest.param("participants", ("bob", "alex"), id="participants-unsorted"),
+        pytest.param("topics", ("health", "health"), id="topics-repeated"),
+        pytest.param("participants", ("alex", "alex"), id="participants-repeated"),
+    ],
+)
+def test_a_labelling_script_the_producer_could_only_ignore_is_refused(
+    axis: str, labels: tuple[str, ...]
+) -> None:
+    """``ObservedBelief``'s topics check, applied to the second object carrying the rule.
+
+    ``EpisodeLabelling`` refuses the canonical form at construction and
+    deliberately leaves §4's bound and code-point order to the producer, which §5
+    rules it **ignores** rather than repairs. "The axis was ignored" is not an
+    observable outcome — no counter moves for it — so a fake that silently emptied
+    such a script would hide the consumer's mistake in the one place nothing can
+    see it.
+    """
+    labelling = EpisodeLabelling(episode_id="e0", **{axis: labels})
+
+    with pytest.raises(ValueError, match=r"ADR-0239 §4"):
+        FakeObserver(labellings=[labelling])

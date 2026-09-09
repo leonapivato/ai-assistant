@@ -6,6 +6,11 @@ golden rule 1). What is under test is the *stage*: which episodes it selects, wh
 it does with each proposal that comes back, and what its report says — never the
 producer's own clauses, which its conformance suite owns.
 
+Two of the canonical fakes are subclassed rather than wrapped —
+:class:`_WatchedConversations` and :class:`_WatchedMemory` — so what is under test
+is still the canonical fake's own behaviour, with a call log and the one scripted
+refusal no fake can be asked to produce on its own.
+
 The one hand-rolled double is :class:`_RacingWriter`, which delegates every call to
 the canonical :class:`FakeMemoryWriter` and raises
 :class:`UnresolvedEvidenceError` for named proposals. It has to be scripted:
@@ -29,12 +34,14 @@ from ai_assistant.core.errors import (
     ConversationStoreError,
     MemoryStoreConflictError,
     MemoryStoreError,
+    MemoryStoreStaleError,
     ModelError,
     UnknownConversationError,
     UnresolvedEvidenceError,
 )
 from ai_assistant.core.types import (
     DeferralAdmissionOutcome,
+    EpisodeLabelling,
     EpisodicMemory,
     LearnDecision,
     MemoryDecision,
@@ -42,6 +49,8 @@ from ai_assistant.core.types import (
     MemoryKind,
     MemorySource,
     MemoryUpdateProposal,
+    MemoryWrite,
+    MemoryWriteMode,
     ObservationOutcome,
     ObservationReport,
     Placement,
@@ -318,6 +327,66 @@ class _WatchedConversations(FakeConversationStore):
         return stamped
 
 
+class _WatchedMemory(FakeMemoryStore):
+    """The canonical store fake, with every read and every batch it was asked for.
+
+    A thin subclass rather than a delegating wrapper, so what is under test is the
+    canonical fake's own behaviour. It exists because ADR-0239 §3's clauses are
+    about *calls* and are unobservable from any report: that the labelling write is
+    an ``IF_UNCHANGED`` element at the episode's own id, that it carries the
+    revision the pass's own selection read, and that each labelling is its own
+    batch so one stale row abandons its own label and no other. §3's "no re-read
+    between the selection and the write" is **not** read off a call count — the
+    write path resolves citations through this same store, so a count cannot tell
+    the two readers apart — and is pinned behaviourally instead, by moving the row
+    while the pass is suspended.
+
+    :attr:`stale_on` and :attr:`fail_on` are the scripted refusals. A conditional
+    write refused because the row moved is ADR-0219 §3's ordinary race, which a
+    case can also produce for real by moving the row (see the owner and overlap
+    arms below); a store that simply will not take the write is the one §3's "a
+    failure or refusal of it does not stop the advance" is about, and nothing else
+    produces one.
+    """
+
+    def __init__(self, *, now: Callable[[], datetime]) -> None:
+        """Wrap the canonical fake, adding the call logs and the two refusals."""
+        super().__init__(now=now)
+        #: Every ``write_atomic`` batch it was asked for, in call order.
+        self.batches: list[tuple[MemoryWrite, ...]] = []
+        #: Record ids whose conditional write refuses as though the row had moved.
+        self.stale_on: set[str] = set()
+        #: Record ids whose conditional write fails as a broken backing would.
+        self.fail_on: set[str] = set()
+
+    @property
+    def labelling_writes(self) -> list[MemoryWrite]:
+        """Every conditional write of an episode this store was asked to make.
+
+        The proposal installs go through ``write_atomic`` too, so a case asserting
+        on ADR-0239 §3's write narrows to the mode and the kind that identify it.
+        """
+        return [
+            write
+            for batch in self.batches
+            for write in batch
+            if write.mode is MemoryWriteMode.IF_UNCHANGED
+            and isinstance(write.record, EpisodicMemory)
+        ]
+
+    async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
+        """Apply the batch, recording it and honouring whichever refusal is scripted."""
+        self.batches.append(tuple(writes))
+        named = {write.record.id for write in writes}
+        if named & self.stale_on:
+            msg = "the row moved under this write"
+            raise MemoryStoreStaleError(msg)
+        if named & self.fail_on:
+            msg = "the store is broken"
+            raise MemoryStoreError(msg)
+        return await super().write_atomic(writes)
+
+
 class Harness:
     """A wired :class:`ObservationStage` and the fakes behind it, for assertions."""
 
@@ -327,6 +396,7 @@ class Harness:
         observer: Observer | None = None,
         writer: MemoryWriter | None = None,
         policy: FakeMemoryPolicy | None = None,
+        memory: FakeMemoryStore | None = None,
         batch_size: int = BATCH,
         now: Callable[[], datetime] | None = None,
         new_id: Callable[[], str] | None = None,
@@ -339,7 +409,7 @@ class Harness:
         #: The store's clock where a case supplied a settable one, so a helper can
         #: move it between ``start`` and ``append``.
         self.store_clock = now if isinstance(now, _Clock) else None
-        self.memory = FakeMemoryStore(now=lambda: AT)
+        self.memory = memory if memory is not None else FakeMemoryStore(now=lambda: AT)
         self.conversations = _WatchedConversations(
             now=self._advancing if now is None else now, new_id=new_id
         )
@@ -368,6 +438,19 @@ class Harness:
             run_budget=run_budget,
             now=run_now if run_now is not None else (lambda: RUN),
         )
+
+    def swap_observer(self, observer: Observer) -> None:
+        """Put a differently-scripted observer behind the stage this harness built.
+
+        ``swap_writer``'s shape for the producer, and it exists for a reason of
+        ADR-0239's: a labelling names an **episode id**, and the ids are minted by
+        the conversation store when the harness records the turns — so a case
+        scripting a labelling cannot know what to script until after the harness
+        exists. Swapping keeps the canonical fake as the producer rather than
+        introducing a second hand-rolled double for the sake of construction order.
+        """
+        self.observer = observer
+        self.stage._observer = observer
 
     def swap_writer(self, writer: MemoryWriter) -> None:
         """Put a scripted writer behind the stage's write stage.
@@ -2314,3 +2397,593 @@ async def test_a_run_figure_that_is_not_a_duration_is_a_type_error(figure: str) 
             route=ROUTE,
             **figures,
         )
+
+
+# --- filing the episodes the pass read (ADR-0239 §3) ------------------------
+
+
+async def _labelled_harness(
+    *,
+    turns: int = 2,
+    labels: Sequence[tuple[int, tuple[str, ...], tuple[str, ...]]] = (
+        (0, ("house renovation",), ("alex",)),
+    ),
+    memory: FakeMemoryStore | None = None,
+    gate: ObservationGate | None = None,
+) -> tuple[Harness, str, list[str]]:
+    """A harness whose observer files the episodes of a freshly-built conversation.
+
+    The ids a labelling names are minted by the conversation store, so the
+    conversation is built first and the canonical fake is scripted and swapped in
+    after — see :meth:`Harness.swap_observer`.
+
+    Args:
+        turns: How many turns the conversation holds, every one captured.
+        labels: ``(index into the page, topics, participants)`` per labelling.
+        memory: The store to wire, for a case that watches it.
+        gate: Held at the observer's first ``await``, for a case that moves the
+            store while the pass is suspended.
+
+    Returns:
+        The harness, the conversation's id, and its episode ids in ordinal order.
+    """
+    harness = Harness(memory=memory)
+    conversation = await harness.conversation_with(turns)
+    episodes = [turn.episode_id for turn in await harness.conversations.turns(conversation)]
+    harness.swap_observer(
+        FakeObserver(
+            gate=gate,
+            labellings=[
+                EpisodeLabelling(
+                    episode_id=episodes[index], topics=topics, participants=participants
+                )
+                for index, topics, participants in labels
+            ],
+        )
+    )
+    return harness, conversation, episodes
+
+
+async def _stored(harness: Harness, episode_id: str) -> EpisodicMemory:
+    """The episode as the store holds it now."""
+    record = await harness.memory.get(episode_id)
+    assert isinstance(record, EpisodicMemory)
+    return record
+
+
+async def test_a_labelling_lands_on_the_episodes_own_id_and_moves_two_fields() -> None:
+    """§3: ``topics`` and ``participants`` and **no other field**, at the same id.
+
+    Asserted field by field against the record the store held before the pass,
+    which ADR-0239 §10 asks for in terms — a rewrite of ``content``, of
+    ``occurred_at`` or of the band would be exactly the reach a labelling seam
+    carrying a *record* would have opened, and §2 closes it by carrying two tuples
+    instead. The revision is the one field that legitimately moves: every write
+    that stores a row stamps a fresh one (ADR-0219 §1).
+    """
+    harness, conversation, episodes = await _labelled_harness()
+    before = await _stored(harness, episodes[0])
+
+    await harness.stage.observe(conversation)
+
+    after = await _stored(harness, episodes[0])
+    assert after.topics == ("house renovation",)
+    assert after.participants == ("alex",)
+    assert after.id == before.id
+    assert after.content == before.content
+    assert after.occurred_at == before.occurred_at
+    assert after.outcome == before.outcome
+    assert after.disposition == before.disposition
+    assert after.capture == before.capture
+    assert after.importance == before.importance
+    assert after.about_person == before.about_person
+    assert after.provenance == before.provenance
+    assert after.placement == before.placement
+    assert after.validity == before.validity
+    assert after.expires_at == before.expires_at
+    assert after.revision != before.revision
+
+
+async def test_the_labelling_write_is_conditional_on_the_revision_the_pass_read() -> None:
+    """§3: an ``IF_UNCHANGED`` element carrying the selection's own revision.
+
+    Never an ``add``, never an ``UPSERT``, never an ``INSERT_IF_ABSENT`` and never
+    a supersession — the instrument is ADR-0219 §2's conditional replacement, and
+    the expectation is the revision carried by the very record the producer was
+    handed. **Each labelling is its own batch**, which is what makes §3's "the pass
+    continues with the rest of its labellings" possible at all: one atomic batch
+    would abandon every other episode's label with the first stale row.
+    """
+    memory = _WatchedMemory(now=lambda: AT)
+    harness, conversation, episodes = await _labelled_harness(
+        labels=((0, ("health",), ()), (1, (), ("alex",))), memory=memory
+    )
+    selected = {episode_id: await _stored(harness, episode_id) for episode_id in episodes}
+
+    await harness.stage.observe(conversation)
+
+    writes = memory.labelling_writes
+    assert [write.record.id for write in writes] == episodes
+    assert [write.mode for write in writes] == [MemoryWriteMode.IF_UNCHANGED] * 2
+    assert [write.expected_revision for write in writes] == [
+        selected[episode_id].revision for episode_id in episodes
+    ]
+    assert [len(batch) for batch in memory.batches if writes[0] in batch or writes[1] in batch] == [
+        1,
+        1,
+    ]
+
+
+async def test_a_row_that_moved_after_the_producer_was_handed_it_is_not_relabelled() -> None:
+    """§3, and §10's re-read arm: the expectation is pinned to the selection's read.
+
+    The stimulus is the discriminator, and it is chosen so that a **re-reading**
+    implementation fails it: while the pass is suspended inside the observer, the
+    episode is rewritten with its two axes still empty. An implementation expecting
+    the revision its own selection read finds the row moved, abandons the labelling
+    and writes nothing; one that re-read the episode between the producer's call
+    and the write would expect the *new* revision, satisfy ``IF_UNCHANGED`` and
+    land — which §3 rules non-conforming "whatever the re-read returns", because
+    the write would then be computed against a row the pass never reasoned about.
+
+    That the emptiness test alone cannot catch it is the point: both axes are still
+    empty at the moment of the write, so nothing but the conditional expectation
+    stands between the two implementations.
+    """
+    gate = ObservationGate()
+    harness, conversation, episodes = await _labelled_harness(gate=gate)
+    stored = await _stored(harness, episodes[0])
+
+    call = asyncio.ensure_future(harness.stage.observe(conversation))
+    try:
+        await gate.reached()
+        # An in-place write of every other field, leaving both axes empty. It moves
+        # the row's revision and nothing a labelling reads.
+        await harness.memory.write_atomic(
+            [
+                MemoryWrite(
+                    record=stored.model_copy(update={"importance": 0.5}),
+                    mode=MemoryWriteMode.IF_UNCHANGED,
+                    expected_revision=stored.revision,
+                )
+            ]
+        )
+    finally:
+        gate.release()
+    await call
+
+    after = await _stored(harness, episodes[0])
+    assert after.topics == ()
+    assert after.participants == ()
+    assert after.importance == 0.5
+
+
+async def test_the_owners_relabel_survives_a_pass_that_had_already_read_the_episode() -> None:
+    """§3's owner arm: the labelling is discarded and the owner's labels stand.
+
+    A retry computed against the older row would overwrite the owner's correction
+    with a model's guess, which is the one outcome ADR-0213 §9 exists to make
+    impossible — "the instrument is the relabel act, which is deterministic and
+    final for that record". So abandoning is not a weaker answer than retrying; it
+    is the correct one. Nothing waits on a labelling, so what it costs is a filing
+    word and what it buys is the owner's act surviving a race.
+    """
+    gate = ObservationGate()
+    harness, conversation, episodes = await _labelled_harness(gate=gate)
+    stored = await _stored(harness, episodes[0])
+
+    call = asyncio.ensure_future(harness.stage.observe(conversation))
+    try:
+        await gate.reached()
+        await harness.memory.write_atomic(
+            [
+                MemoryWrite(
+                    record=stored.model_copy(
+                        update={"topics": ("the owner's own word",), "participants": ("marta",)}
+                    ),
+                    mode=MemoryWriteMode.IF_UNCHANGED,
+                    expected_revision=stored.revision,
+                )
+            ]
+        )
+    finally:
+        gate.release()
+    report = await call
+
+    after = await _stored(harness, episodes[0])
+    assert after.topics == ("the owner's own word",)
+    assert after.participants == ("marta",)
+    # And the pass is otherwise exactly the pass it was: the beliefs landed and the
+    # watermark moved (§3's "a refused labelling write leaves every belief the pass
+    # installed exactly where the write path put it").
+    assert report.proposals
+    assert await harness.watermark(conversation) is not None
+
+
+async def test_a_stale_labelling_is_abandoned_and_the_rest_of_the_page_is_still_filed() -> None:
+    """§3: not retried, not re-read, not re-proposed and not written unconditionally.
+
+    The pass continues with the rest of its labellings, which is the half a single
+    atomic batch would have lost.
+    """
+    memory = _WatchedMemory(now=lambda: AT)
+    harness, conversation, episodes = await _labelled_harness(
+        turns=3,
+        labels=((0, ("health",), ()), (1, ("money",), ()), (2, ("cars",), ())),
+        memory=memory,
+    )
+    memory.stale_on = {episodes[1]}
+
+    await harness.stage.observe(conversation)
+
+    assert (await _stored(harness, episodes[0])).topics == ("health",)
+    assert (await _stored(harness, episodes[1])).topics == ()
+    assert (await _stored(harness, episodes[2])).topics == ("cars",)
+    # One attempt for the refused episode and no second: abandonment is not a retry
+    # with a different name.
+    assert [write.record.id for write in memory.labelling_writes] == episodes
+
+
+async def test_a_failed_labelling_write_stops_neither_the_advance_nor_anything_else() -> None:
+    """§3: a labelling is a condition of nothing, and the advance is unchanged.
+
+    "The advance is computed and attempted exactly as it is today whether or not
+    any labelling landed" — so a store that will not take the write leaves every
+    belief the pass installed where the write path put it, leaves the watermark
+    where the pass committed it, and does not propagate a ``MemoryStoreError`` the
+    caller could do nothing with.
+    """
+    memory = _WatchedMemory(now=lambda: AT)
+    harness, conversation, episodes = await _labelled_harness(memory=memory)
+    memory.fail_on = {episodes[0]}
+
+    report = await harness.stage.observe(conversation)
+
+    assert (await _stored(harness, episodes[0])).topics == ()
+    assert report.proposals
+    assert await harness.watermark(conversation) == 2
+    assert harness.conversations.advances == [(conversation, 2)]
+
+
+async def test_the_labelling_is_durable_before_the_advance_is_attempted() -> None:
+    """ADR-0111 §3's ordering, which ADR-0239 §3 takes rather than chooses.
+
+    The effects land in the memory store and the cursor on the conversation index,
+    and where they live in different stores the effects are made durable first: "a
+    cursor that lags its effects costs repeated work; a cursor that leads them costs
+    coverage, permanently and silently". Asserted by holding the advance open and
+    reading the episode back while it is held — the label is already in the store,
+    so a crash between the two re-processes a page that is already filed.
+    """
+    memory = _WatchedMemory(now=lambda: AT)
+    harness, conversation, episodes = await _labelled_harness(memory=memory)
+    harness.conversations.hold_advance = {1}
+
+    call = asyncio.ensure_future(harness.stage.observe(conversation))
+    try:
+        async with asyncio.timeout(5.0):
+            await harness.conversations.reached[1].wait()
+        assert (await _stored(harness, episodes[0])).topics == ("house renovation",)
+    finally:
+        harness.conversations.release[1].set()
+    await call
+
+    assert await harness.watermark(conversation) == 2
+
+
+async def test_a_page_re_read_after_an_uncommitted_advance_is_not_relabelled() -> None:
+    """§10's re-read arm: ADR-0111 §3's at-least-once repetition, made a no-op.
+
+    A pass labels a page and its advance does not commit; the next pass reads the
+    same page whole and writes nothing, because every episode already carries
+    labels. §3's write-once test is what makes the repetition the *safe* kind the
+    ordering requires rather than a second model judgement over the same words —
+    and the labels the second pass would have written are deliberately different, so
+    a pass that overwrote would be visible.
+    """
+    memory = _WatchedMemory(now=lambda: AT)
+    harness, conversation, episodes = await _labelled_harness(memory=memory)
+    harness.conversations.advance_raises = True
+
+    with pytest.raises(ConversationStoreError):
+        await harness.stage.observe(conversation)
+    assert await harness.watermark(conversation) is None
+    first = await _stored(harness, episodes[0])
+
+    harness.conversations.advance_raises = False
+    harness.swap_observer(
+        FakeObserver(
+            labellings=[EpisodeLabelling(episode_id=episodes[0], topics=("a second judgement",))]
+        )
+    )
+    await harness.stage.observe(conversation)
+
+    after = await _stored(harness, episodes[0])
+    assert after.topics == ("house renovation",)
+    assert after.revision == first.revision
+    assert len(memory.labelling_writes) == 1
+
+
+async def test_an_episode_carrying_a_label_on_either_axis_is_not_relabelled() -> None:
+    """§3: a pass labels an episode carrying no label on either axis, and no other.
+
+    No pass overwrites a label — its own, an earlier pass's, or the owner's — and
+    a **non-empty either axis** is what the test reads, so an episode the owner
+    filed under a person alone is as protected as one filed under a topic.
+    """
+    memory = _WatchedMemory(now=lambda: AT)
+    harness, conversation, episodes = await _labelled_harness(
+        turns=2, labels=((0, ("health",), ()), (1, ("money",), ())), memory=memory
+    )
+    # Through ``add``'s upsert rather than a conditional write, so the setup does
+    # not land in the very log this case reads back.
+    for episode_id, existing in ((episodes[0], "topics"), (episodes[1], "participants")):
+        stored = await _stored(harness, episode_id)
+        await harness.memory.add(stored.model_copy(update={existing: ("already filed",)}))
+
+    await harness.stage.observe(conversation)
+
+    assert (await _stored(harness, episodes[0])).topics == ("already filed",)
+    assert (await _stored(harness, episodes[1])).participants == ("already filed",)
+    assert memory.labelling_writes == []
+
+
+async def test_two_passes_over_one_page_label_it_once() -> None:
+    """§10's overlap arm: the second is refused by ``IF_UNCHANGED`` and writes nothing.
+
+    Two passes over one conversation may overlap and nothing serialises them
+    (ADR-0212 §5). Each holds the record its own selection read, so whichever
+    writes first stamps a fresh revision and the other's expectation no longer
+    matches — no model judgement overwrites another, and ADR-0213 §8's "set once"
+    survives in the shape that matters.
+    """
+    memory = _WatchedMemory(now=lambda: AT)
+    harness, conversation, episodes = await _labelled_harness(memory=memory)
+    gate = ObservationGate()
+    second = harness.stage_over(
+        FakeObserver(
+            gate=gate,
+            labellings=[EpisodeLabelling(episode_id=episodes[0], topics=("the other pass",))],
+        )
+    )
+
+    held = asyncio.ensure_future(second.observe(conversation))
+    try:
+        await gate.reached()
+        await harness.stage.observe(conversation)
+    finally:
+        gate.release()
+    await held
+
+    assert (await _stored(harness, episodes[0])).topics == ("house renovation",)
+    assert len(memory.labelling_writes) == 2
+
+
+async def test_a_page_whose_episodes_differ_in_placement_reach_is_labelled_nowhere() -> None:
+    """§3: no labelling is written for **any** episode of a non-uniform page.
+
+    A label proposed over a batch is a derivation over all of it, and ADR-0217 §3
+    rules that a producer deriving from records of this store writes the narrowest
+    reach over every record it was supplied — so filing a reach-``ANYONE`` episode
+    under a word drawn from a reach-``OWNER`` one beside it would launder the
+    narrowing into a record that stays exactly as disclosable as it was (ADR-0204
+    §5). The decision **declines the write** rather than moving a placement, so
+    nothing is laundered because nothing is written.
+    """
+    memory = _WatchedMemory(now=lambda: AT)
+    harness = Harness(memory=memory)
+    conversation = await harness.conversations.start()
+    placements = (
+        Placement(),
+        Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=AT),
+    )
+    episodes = []
+    for placement in placements:
+        turn = await harness.conversations.append(conversation.id, occurred_at=AT)
+        await harness.memory.add(_episode_placed(turn.episode_id, placement=placement))
+        episodes.append(turn.episode_id)
+    harness.swap_observer(
+        FakeObserver(
+            labellings=[
+                EpisodeLabelling(episode_id=episode_id, topics=("health",))
+                for episode_id in episodes
+            ]
+        )
+    )
+
+    report = await harness.stage.observe(conversation.id)
+
+    assert memory.labelling_writes == []
+    for episode_id, placement in zip(episodes, placements, strict=True):
+        stored = await _stored(harness, episode_id)
+        assert stored.topics == ()
+        assert stored.participants == ()
+        assert stored.placement == placement
+    # The page is otherwise an ordinary page: the beliefs landed and the walk moved.
+    assert report.proposals
+    assert await harness.watermark(conversation.id) == 2
+
+
+async def test_a_page_sharing_a_reach_but_split_between_setters_is_labelled_nowhere() -> None:
+    """§3: the setter is part of the test and not an afterthought.
+
+    Two episodes can share reach ``OWNER`` and differ entirely in what may become
+    of it: ADR-0217 §7 rules that against a ``DERIVED`` placement ``unguard``
+    writes **nothing**, while a placement the owner set with ``OWNER_ACT`` is
+    exactly what it lifts to reach ``ANYONE``. A rule comparing reach alone would
+    let a label drawn from a ``DERIVED`` episode land on an ``OWNER_ACT`` one and
+    reach ``ANYONE`` the moment the owner unguards it — the same laundering one act
+    later. Equality of both fields closes that with no placement arithmetic of this
+    decision's own.
+    """
+    memory = _WatchedMemory(now=lambda: AT)
+    harness = Harness(memory=memory)
+    conversation = await harness.conversations.start()
+    episodes = []
+    for setter in (PlacementSetter.DERIVED, PlacementSetter.OWNER_ACT):
+        turn = await harness.conversations.append(conversation.id, occurred_at=AT)
+        await harness.memory.add(
+            _episode_placed(
+                turn.episode_id,
+                placement=Placement(reach=PlacementReach.OWNER, set_by=setter, set_at=AT),
+            )
+        )
+        episodes.append(turn.episode_id)
+    harness.swap_observer(
+        FakeObserver(
+            labellings=[
+                EpisodeLabelling(episode_id=episode_id, topics=("health",))
+                for episode_id in episodes
+            ]
+        )
+    )
+
+    await harness.stage.observe(conversation.id)
+
+    assert memory.labelling_writes == []
+    for episode_id in episodes:
+        assert (await _stored(harness, episode_id)).topics == ()
+
+
+async def test_a_uniformly_placed_page_is_labelled_and_its_placement_does_not_move() -> None:
+    """The other side of the same clause: uniform is written, and writes no placement.
+
+    §3's placement clause "reads two fields and writes neither" — it decides only
+    whether a *labelling* is written, and no lane may cite it as a placement rule.
+    A page every one of whose episodes carries reach ``OWNER`` with setter
+    ``DERIVED`` is filed exactly like a default-placed one, and comes out of the
+    pass placed exactly as it went in.
+    """
+    harness = Harness()
+    conversation = await harness.conversations.start()
+    placement = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=AT)
+    episodes = []
+    for _ in range(2):
+        turn = await harness.conversations.append(conversation.id, occurred_at=AT)
+        await harness.memory.add(_episode_placed(turn.episode_id, placement=placement))
+        episodes.append(turn.episode_id)
+    harness.swap_observer(
+        FakeObserver(labellings=[EpisodeLabelling(episode_id=episodes[0], participants=("alex",))])
+    )
+
+    await harness.stage.observe(conversation.id)
+
+    labelled = await _stored(harness, episodes[0])
+    assert labelled.participants == ("alex",)
+    assert labelled.placement == placement
+    assert (await _stored(harness, episodes[1])).participants == ()
+
+
+async def test_a_labelling_naming_an_episode_outside_the_page_writes_nothing() -> None:
+    """The destination is a record **this pass** selected, never one a producer named.
+
+    §3's write is at the episode's own id, and the stage builds it from the stored
+    record it already holds — so an id it is handed but did not select resolves to
+    nothing to write from, and no read is made to find one. The canonical fake
+    cannot produce this (it drops such an entry itself, ADR-0239 §1), so the
+    stimulus is a conforming outcome over a *different* conversation's episode.
+    """
+    memory = _WatchedMemory(now=lambda: AT)
+    harness = Harness(memory=memory)
+    watched = await harness.conversation_with(2)
+    elsewhere = await harness.conversation_with(1)
+    foreign = (await harness.conversations.turns(elsewhere))[0].episode_id
+    harness.swap_observer(
+        FakeObserver(labellings=[EpisodeLabelling(episode_id=foreign, topics=("health",))])
+    )
+
+    await harness.stage.observe(watched)
+
+    assert memory.labelling_writes == []
+    assert (await _stored(harness, foreign)).topics == ()
+
+
+async def test_a_pass_whose_producer_labels_nothing_writes_nothing() -> None:
+    """The state every pass before ADR-0239 was in, and a normal outcome (§5)."""
+    memory = _WatchedMemory(now=lambda: AT)
+    harness = Harness(memory=memory)
+    conversation = await harness.conversation_with(2)
+
+    report = await harness.stage.observe(conversation)
+
+    assert memory.labelling_writes == []
+    assert report.proposals
+
+
+async def test_a_provider_failure_leaves_every_episode_exactly_as_capture_wrote_it() -> None:
+    """§1: a provider outage yields **no** labels, never a wrong one.
+
+    A ``ModelError`` ends the pass rather than degrading it, so there is no outcome
+    to file from; the record, its ``content`` and its ``occurred_at`` are all
+    exactly as they were, and the watermark has not moved either (ADR-0212 §6).
+    """
+    memory = _WatchedMemory(now=lambda: AT)
+    harness = Harness(observer=_FailingObserver(), memory=memory)
+    conversation = await harness.conversation_with(2)
+    episodes = [turn.episode_id for turn in await harness.conversations.turns(conversation)]
+
+    with pytest.raises(ModelError):
+        await harness.stage.observe(conversation)
+
+    assert memory.labelling_writes == []
+    for episode_id in episodes:
+        stored = await _stored(harness, episode_id)
+        assert stored.topics == ()
+        assert stored.participants == ()
+    assert await harness.watermark(conversation) is None
+
+
+async def test_a_labelling_is_ruled_by_no_policy_and_parks_no_question() -> None:
+    """§3: the proposal-to-policy path does not reach a labelling write.
+
+    It passes through no ``MemoryPolicy``, is ruled by no ``Disposition``, opens no
+    deferred question and is counted in no ``MemoryIngestResult`` — a labelling
+    asserts nothing about the user, so ADR-0075 §1's belief-scoped rule does not
+    reach it and no exemption is claimed from it. Asserted against a policy that
+    **refuses everything**: every belief the pass proposed is rejected, and the
+    labelling lands all the same.
+    """
+    harness = Harness(policy=FakeMemoryPolicy(MemoryDecisionKind.REJECT))
+    conversation = await harness.conversation_with(2)
+    episodes = [turn.episode_id for turn in await harness.conversations.turns(conversation)]
+    harness.swap_observer(
+        FakeObserver(labellings=[EpisodeLabelling(episode_id=episodes[0], topics=("health",))])
+    )
+
+    report = await harness.stage.observe(conversation)
+
+    assert report.proposals
+    assert all(entry.decision is LearnDecision.REJECTED for entry in report.proposals)
+    assert (await _stored(harness, episodes[0])).topics == ("health",)
+    assert await harness.deferrals.pending() == []
+
+
+async def test_the_report_gains_no_count_of_what_was_filed() -> None:
+    """§2 and §9: no counter moves and no member is added for a labelling.
+
+    A labelling is not an entry of the proposal population, an ignored one is not a
+    discard, and one this stage declined to write is not one either — so the
+    report's fields are exactly what they were, and a pass that filed two episodes
+    reports what a pass that filed none reports.
+    """
+    harness, conversation, _ = await _labelled_harness()
+
+    report = await harness.stage.observe(conversation)
+
+    assert report.discarded_unusable == 0
+    assert report.discarded_over_limit == 0
+    assert report.dropped_unsupported == 0
+    assert {field.name for field in fields(ObservationRunReport)} == {
+        "passes",
+        "conversations",
+        "episodes_read",
+        "model_calls",
+        "proposed",
+        "committed",
+        "deferred",
+        "rejected",
+        "dropped_unsupported",
+        "discarded_unusable",
+        "discarded_over_limit",
+        "budget_spent",
+    }
