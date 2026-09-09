@@ -16,6 +16,13 @@ scripted proposal would carry citations chosen before the batch existed, so the
 first consumer to script one would get a fake that violates the one clause the
 ``Observer`` suite cares most about — every cited id is drawn from the batch.
 
+It carries a second script for ADR-0239 §1's labellings, and applies to it the
+two rules a producer's response is judged by: a labelling naming an episode
+outside the batch is ignored, and an episode the script names more than once
+yields no labels for it at all. Both are producer-side clauses ADR-0239 §10 asks
+the canonical fake to honour, so a consumer driving the labelling write path gets
+them from the fake rather than restating them.
+
 Beyond the contract it records every batch it was given to :attr:`batches`, so a
 test can assert what its subject selected. Only the behaviour pinned by the
 shared ``Observer`` conformance suite is part of the contract; the scripting,
@@ -32,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, final
@@ -40,6 +48,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.types import (
     MAX_TOPICS_PER_PROPOSAL,
+    EpisodeLabelling,
     MemoryKind,
     MemorySource,
     MemoryUpdateProposal,
@@ -285,10 +294,11 @@ class FakeObserver:
     which is what makes the configured maximum bite.
     """
 
-    def __init__(  # noqa: PLR0913 — two bounds, a script, a discard count, a gate and a clock; each is one knob a consumer sets on its own
+    def __init__(  # noqa: PLR0913 — two bounds, two scripts, a discard count, a gate and a clock; each is one knob a consumer sets on its own
         self,
         beliefs: Sequence[ObservedBelief] | None = None,
         *,
+        labellings: Sequence[EpisodeLabelling] | None = None,
         max_batch_size: int = DEFAULT_MAX_BATCH_SIZE,
         max_proposals: int = DEFAULT_MAX_PROPOSALS,
         discarded_unusable: int = 0,
@@ -304,6 +314,24 @@ class FakeObserver:
                 synthesises them from the batch instead; an *empty* sequence is
                 the distinct, explicit "this observer proposes nothing", which a
                 consumer needs for its no-op path.
+            labellings: What to say each episode of the batch was about and who it
+                involved (ADR-0239 §1). ``None`` (the default) and an empty
+                sequence both label nothing, which is what every pass produced
+                before that decision and what a response carrying no labelling key
+                still produces: it is a normal outcome rather than a degradation
+                (§5), so there is nothing for a default script to make
+                non-vacuous. A consumer driving the labelling write path scripts
+                the episodes of the batch it is about to supply.
+
+                Scripted as finished
+                :class:`~ai_assistant.core.types.EpisodeLabelling` values rather
+                than as templates, unlike ``beliefs``: the reason a belief is a
+                template is that its *evidence* is the producer's to draw from the
+                batch, and a labelling has none — it names an episode and two
+                tuples, all three of which the consumer already knows. What the
+                fake still applies is the two rules a producer applies to its own
+                response: an entry naming an episode outside the batch is ignored,
+                and an episode named more than once yields no labels for it.
             max_batch_size: The largest batch this observer accepts. A longer one
                 is refused with ``ValueError``, never truncated (ADR-0077 §1).
             max_proposals: The most proposals one call may return. Usable beliefs
@@ -330,15 +358,21 @@ class FakeObserver:
         Raises:
             TypeError: If ``max_batch_size`` or ``max_proposals`` is not an
                 ``int`` (``bool`` included).
-            ValueError: If either bound is below 1, or ``discarded_unusable`` is
-                negative. A zero batch bound observes nothing while reporting
-                health; a zero proposal bound can never propose anything.
+            ValueError: If either bound is below 1, ``discarded_unusable`` is
+                negative, or a scripted labelling carries an axis the real
+                producer could only ignore. A zero batch bound observes nothing
+                while reporting health; a zero proposal bound can never propose
+                anything.
         """
         _check_bound("max_batch_size", max_batch_size)
         _check_bound("max_proposals", max_proposals)
         if discarded_unusable < 0:
             msg = f"discarded_unusable must not be negative, got {discarded_unusable}"
             raise ValueError(msg)
+        for labelling in labellings or ():
+            _check_axis(labelling.topics, name="topics")
+            _check_axis(labelling.participants, name="participants")
+        self._labellings = () if labellings is None else tuple(labellings)
         self._beliefs = None if beliefs is None else tuple(beliefs)
         self._max_batch_size = max_batch_size
         self._max_proposals = max_proposals
@@ -419,6 +453,38 @@ class FakeObserver:
             proposals=tuple(usable[: self._max_proposals]),
             discarded_unusable=unusable,
             discarded_over_limit=max(len(usable) - self._max_proposals, 0),
+            labellings=self._labelled(batch),
+        )
+
+    def _labelled(self, batch: Sequence[EpisodicMemory]) -> tuple[EpisodeLabelling, ...]:
+        """The scripted labellings this batch admits (ADR-0239 §1, §2).
+
+        Two producer-side rules, applied here so a consumer gets them from the
+        canonical fake rather than restating them:
+
+        - **an entry naming an episode outside the batch is ignored** (§1). A
+          producer proposes a labelling for an episode of the batch it was handed
+          and for no other, and a fake that emitted one for anything else would be
+          the fault injector this module refuses to be. A consumer testing a
+          *stage's* reaction to a non-conforming producer supplies its own stub;
+        - **an episode the script names more than once yields no labels for it**,
+          on either axis, whatever each entry says (§2). Both entries are dropped
+          rather than the first winning, because "the first" is a property of a
+          response nobody guaranteed the order of — and the type would refuse the
+          outcome outright, so this is the only shape in which the clause is
+          expressible at all.
+
+        A labelling carrying nothing on either axis is dropped too: it names no
+        label, so there is nothing for a caller to write and nothing an outcome
+        needs to carry (§5).
+        """
+        given = {episode.id for episode in batch}
+        named = [entry for entry in self._labellings if entry.episode_id in given]
+        times_named = Counter(entry.episode_id for entry in named)
+        return tuple(
+            entry
+            for entry in named
+            if times_named[entry.episode_id] == 1 and (entry.topics or entry.participants)
         )
 
     def _identify(self, template: ObservedBelief) -> str:
@@ -518,6 +584,38 @@ class FakeObserver:
             # catches ``ValidationError`` alone.
             return None
         return MemoryUpdateProposal(proposed=record, rationale=template.rationale)
+
+
+def _check_axis(labels: tuple[str, ...], *, name: str) -> None:
+    """Refuse a labelling axis the real producer could only ignore (ADR-0239 §4).
+
+    :class:`~ai_assistant.core.types.EpisodeLabelling` annotates both axes with
+    :data:`~ai_assistant.core.types.TopicLabel`, so the canonical form is already
+    refused at construction; what it deliberately leaves to the producer is §4's
+    bound and code-point order, which §5 rules a producer **ignores** rather than
+    repairs. "The axis was ignored" is not an observable outcome — no counter moves
+    for it — so a fake that silently emptied such a script would hide the
+    consumer's mistake in the one place nothing can see it. This is
+    :class:`ObservedBelief`'s topics check, applied to the second object that
+    carries the same rule.
+
+    Raises:
+        ValueError: If the axis names more than
+            :data:`~ai_assistant.core.types.MAX_TOPICS_PER_PROPOSAL` labels or is
+            not strictly increasing by code point.
+    """
+    if len(labels) > MAX_TOPICS_PER_PROPOSAL:
+        msg = (
+            f"a producer proposes at most {MAX_TOPICS_PER_PROPOSAL} {name} labels "
+            f"per episode (ADR-0239 §4), got {len(labels)}"
+        )
+        raise ValueError(msg)
+    if list(labels) != sorted(set(labels)):
+        msg = (
+            f"a labelling's {name} are strictly increasing by code point with no "
+            f"repeats (ADR-0239 §4), got {labels!r}"
+        )
+        raise ValueError(msg)
 
 
 def _check_bound(name: str, value: int) -> None:

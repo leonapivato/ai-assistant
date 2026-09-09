@@ -42,6 +42,14 @@ These boundaries shape the module:
   the batch expresses is therefore a function of the batch this module was
   handed and of nothing inside it — which is what the distinct-support count of
   the bullet above actually rests on.
+- **It also says what each episode it read was about, and the write is not
+  its own** (ADR-0239 §1, §2). The labelling rides the envelope this module
+  already sends — one optional key of the response it already parses, on the
+  provider call it always made — so there is no second model call, no second
+  round trip and no second walk. What comes back is two tuples per episode and
+  never a record: the ids are *ours*, mapped back from our own labels exactly as
+  the citations are, and the component that selected the batch performs the
+  write from the stored episode it already holds.
 - **A malformed response degrades; a model failure propagates.** Entries that
   cannot be used are discarded and *counted* rather than repaired, invented, or
   re-prompted for: an observation has nothing waiting on it, so the cheap remedy
@@ -58,6 +66,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections import Counter
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, NamedTuple, assert_never
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -69,6 +78,7 @@ from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import (
     MAX_TOPICS_PER_PROPOSAL,
+    EpisodeLabelling,
     ExchangeDisposition,
     MemorySource,
     MemoryUpdateProposal,
@@ -405,7 +415,21 @@ can never make one more speakable than it already is, and the user can lift your
 flag on any belief in a single act. So flag what a careful person would not want \
 overheard and leave everything else unflagged — most of what anyone says is \
 ordinary, and flagging the ordinary leaves the assistant unable to answer aloud \
-the questions the user most wants answered."""
+the questions the user most wants answered.
+
+Separately from the beliefs, file each EPISODE you were shown, in `episodes`. \
+For an episode, give at most FOUR short filing words under `topics` — what that \
+conversation was about — and at most FOUR names under `participants` — the \
+other people it was about or involved. Both lists take the same form as a \
+belief's filing words: lower case, one to a few plain words separated by single \
+spaces, at most 64 characters, no leading or trailing space, and no entry \
+repeated within one list. Name each episode by its bracket label, exactly as it \
+appears, and name each episode at most once. The user you are working for, you \
+the assistant, and this system are NEVER participants: both of you are party to \
+every conversation, so naming either files nothing and says nothing. Where no \
+short honest word fits a list, give an empty list — a label stretched to fit is \
+worse than none, and an episode you have nothing honest to say about is simply \
+left out."""
 
 #: What a producer holding the zone says about time (ADR-0156 §2, §3). Four things,
 #: in the order they bite: what the rendered instant *is*, when a belief states a
@@ -505,6 +529,11 @@ Reply with a single JSON object and nothing else — no prose, no code fence:
     "guarded": true | false,
     "rationale": "<why the cited episodes justify it>",
     "steps": ["<ordered step>", ...]}
+ ],
+ "episodes": [
+   {"episode": "<label>",
+    "topics": ["<filing word>", ...],
+    "participants": ["<name>", ...]}
  ]}
 
 `beliefs` must be a list, and may be empty. `steps` applies to a "procedural" \
@@ -513,9 +542,13 @@ be empty; a `topics` list this system cannot use is dropped and the belief is \
 kept, so a belief is never worth omitting over its filing words. `guarded` is \
 optional and defaults to false: write the literal `true` to flag a belief, and \
 anything else — `false`, "true", 1, or leaving the key out — leaves the belief \
-unflagged. Do not include ids, confidence values, or any timestamp field of your \
-own; those are assigned downstream. A date you are entitled to state belongs in \
-the belief's `content` sentence and nowhere else."""
+unflagged. `episodes` is optional and may be empty or omitted; an entry naming a \
+label that is not in the batch, or naming a label twice, is dropped, and every \
+other entry still stands, and a list this system cannot use is dropped on that \
+list alone while the other one is kept. Do not include ids, confidence values, \
+or any timestamp field of your own; those are assigned downstream. A date you \
+are entitled to state belongs in the belief's `content` sentence and nowhere \
+else."""
 
 
 def _uuid() -> str:
@@ -706,7 +739,14 @@ class ModelBackedObserver:
         filled, so six entries of which one was junk would yield four proposals
         instead of five.
         """
-        entries = _entries(content)
+        envelope = _extract_object(content)
+        # **The two keys are read independently, and one cannot cost the other**
+        # (ADR-0239 §5). A response whose `beliefs` list is missing still files the
+        # episodes it did name, and a response whose `episodes` key is unusable
+        # still yields every belief it proposed — the same division ADR-0213 §4
+        # already makes between a belief and its filing words, one level out.
+        labellings = _labellings(envelope, labels)
+        entries = _entries(envelope)
         if entries is None:
             # An envelope that does not decode, or that carries no `beliefs` list,
             # counts as exactly one entry and that entry is unusable (ADR-0077
@@ -714,7 +754,7 @@ class ModelBackedObserver:
             # proposals and zero discards, which is indistinguishable from a model
             # that read the batch and honestly proposed nothing — the one
             # confusion this counting exists to remove.
-            return ObservationOutcome(discarded_unusable=1)
+            return ObservationOutcome(discarded_unusable=1, labellings=labellings)
 
         usable: list[MemoryUpdateProposal] = []
         unusable = 0
@@ -728,6 +768,7 @@ class ModelBackedObserver:
             proposals=tuple(usable[: self._max_proposals]),
             discarded_unusable=unusable,
             discarded_over_limit=max(len(usable) - self._max_proposals, 0),
+            labellings=labellings,
         )
 
     def _to_proposal(
@@ -1419,6 +1460,90 @@ def _topics(raw: object) -> tuple[str, ...]:
     return tuple(sorted(labels))
 
 
+def _labellings(
+    envelope: dict[str, object] | None, labels: dict[str, str]
+) -> tuple[EpisodeLabelling, ...]:
+    """What the response says each episode of the batch was about (ADR-0239 §1, §2).
+
+    **The ids are ours and none is accepted from the model**, which is
+    :func:`_resolve`'s rule applied to a second key of the same envelope
+    (ADR-0047 §2). An entry names an episode by one of the labels *this module*
+    assigned when it rendered the batch, and the label is mapped back to the id of
+    the episode actually read under it; an entry naming anything else — a label
+    that is not in this batch, an id, a conversation, a value that is not a
+    string — is **ignored** (§1). A model that can write an id can write one for
+    an episode it never saw, and the destination of a labelling write is a record
+    the *caller* selected rather than one this response named.
+
+    **An episode named more than once yields no labels for it**, on either axis,
+    whatever each entry says (§2). The entries are ignored — not merged, not
+    reconciled and not resolved by response order — and every other episode of the
+    batch is unaffected. Dropping both rather than letting the first win is
+    deliberate: "the first" is a property of a response nobody guaranteed the
+    order of, so a rule preferring it would make the outcome depend on something
+    no clause fixes. The count is taken over the entries that **resolve**, because
+    an entry naming a label outside the batch names no episode at all and so names
+    none twice.
+
+    **Each axis is judged on its own, and on observable properties of the value
+    alone** (§5). Both go through :func:`_topics` — ADR-0213 §4's rule, whole and
+    in one implementation — so an axis naming more than
+    :data:`~ai_assistant.core.types.MAX_TOPICS_PER_PROPOSAL` labels, naming a
+    value ADR-0213 §3's canonical form refuses, or repeating one yields **no
+    labels on that axis** while the other stands. The value is validated as it
+    stands: nothing case-folds, strips, truncates to the bound or otherwise
+    repairs it on the way to a label, because a producer that folded its own
+    response would hide its miss in the one place nobody looks. §4's rule that the
+    owner and the assistant are not participants binds the **ask** and not this
+    check: this system holds no user identity at all (ADR-0036 §3, ADR-0097 §1),
+    so a canonical label naming the owner is byte-identical to one naming anybody
+    else with that name, and a refusal here would be an unobservable one. The
+    prompt says it; no name list, heuristic or identity check appears on this
+    path.
+
+    **An entry admissible on neither axis is dropped rather than carried**, which
+    is §5's "leaves the episodes unlabelled" made structural: a labelling with
+    nothing on either axis names no label, so there is nothing for it to carry and
+    nothing for a caller to write.
+
+    **Nothing here is counted** (§5). An ignored entry, an ignored axis and a
+    dropped duplicate are not discards:
+    :class:`~ai_assistant.core.types.ObservationOutcome`'s two counts are
+    exhaustive and disjoint over the *proposal* population, and moving one for a
+    filing word would report a discard for an entry that was never a proposal.
+
+    Args:
+        envelope: The decoded response object, or ``None`` where the reply carried
+            no usable one at all.
+        labels: This pass's own ``[E<n>]`` label to episode id map, as
+            :meth:`ModelBackedObserver.observe` built it from the batch it read.
+
+    Returns:
+        One labelling per episode the response usably named, in response order.
+    """
+    if envelope is None:
+        return ()
+    raw = envelope.get("episodes")
+    if not isinstance(raw, list):
+        return ()
+    named: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        label = entry.get("episode")
+        if not isinstance(label, str) or label not in labels:
+            continue
+        named.append(
+            (labels[label], _topics(entry.get("topics")), _topics(entry.get("participants")))
+        )
+    times_named = Counter(episode_id for episode_id, _, _ in named)
+    return tuple(
+        EpisodeLabelling(episode_id=episode_id, topics=topics, participants=participants)
+        for episode_id, topics, participants in named
+        if times_named[episode_id] == 1 and (topics or participants)
+    )
+
+
 def _placement(raw: object, now: datetime) -> Placement:
     """The placement the entry's ``guarded`` key proposes, or the default.
 
@@ -1553,7 +1678,7 @@ def _record(  # noqa: PLR0913 — the record's own axes: kind, text, steps, warr
             )
 
 
-def _entries(content: str) -> list[object] | None:
+def _entries(envelope: dict[str, object] | None) -> list[object] | None:
     """The envelope's ``beliefs`` list, or ``None`` where there is no usable one.
 
     ``None`` is the synthetic single unusable entry of ADR-0077 §4 — a reply that
@@ -1561,8 +1686,12 @@ def _entries(content: str) -> list[object] | None:
     envelope whose ``beliefs`` is present and *empty* is not that case: it is a
     model that read the batch and honestly proposed nothing, which is a normal
     outcome and must not be reported as a discard.
+
+    It takes the **decoded** object rather than the reply text because the reply
+    now carries two independent keys (ADR-0239 §1): scanning it a second time to
+    find the labellings would be a second decode of one response, and two scans
+    can disagree about which candidate object the envelope was.
     """
-    envelope = _extract_object(content)
     if envelope is None:
         return None
     beliefs = envelope.get("beliefs")
