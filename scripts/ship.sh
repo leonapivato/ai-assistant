@@ -122,6 +122,46 @@ require_byte_budget() {
 
 command -v gh >/dev/null 2>&1 || die "gh CLI not found on PATH"
 
+# --- The interpreter a helper script runs under (#2150) ----------------------
+#
+# NOT simply the first `python3` on PATH. `scripts/floor_test.py` READS THIS
+# PROJECT'S OWN SOURCE: ADR-0209 §§3-4's tests parse `core/protocols.py` and
+# `core/types.py` at both endpoints of a base move, and the project is
+# `requires-python >=3.14`. Where the PATH `python3` is older it cannot parse
+# 3.14 syntax at all, `floor_test.py` reports the endpoint as unparseable, and
+# §6 binds the base move — so every open lane pays a review round for the
+# machine's interpreter rather than for anything the move did (#2150). The same
+# selection decides `scripts/adr_ratify.py check-shape`, where an old
+# interpreter costs the ADR-0165 exemption instead, just as silently.
+#
+# So the project environment comes first and the PATH interpreter is the
+# fallback for a checkout that has none.
+#
+# THE ARGUMENT IS THE PROJECT ROOT OF THE SCRIPT ABOUT TO RUN, not "the
+# project". Ship resolves `adr_ratify.py` under the repository it is run in and
+# `floor_test.py` beside itself, and those are the same directory only in a real
+# ship — ship's tests drive it against a checkout that is not its own. An
+# interpreter chosen beside the script it runs is the right one in both.
+#
+# `uv run --project` is deliberately NOT a rung of this ladder. It can create or
+# sync an environment, and answering "does this base move cost a round" must
+# install nothing. Where no project environment exists the selection is exactly
+# what it has always been, and §6's fail-closed posture still governs whatever
+# comes of it.
+_python_beside() {
+    local candidate="${1}/.venv/bin/python"
+    if [[ -x "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+    command -v python3 || command -v python || true
+}
+
+# Ship's own directory, resolved BEFORE the `cd` below, so that an invocation by
+# a relative path from anywhere still finds what ships beside this script.
+_ship_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+_ship_root="$(dirname -- "$_ship_dir")"
+
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
@@ -327,7 +367,7 @@ expected_base="$(git merge-base FETCH_HEAD "$sha")"
 # a root commit — any of them leaves `content_sha` at `$sha`, and the flip costs
 # its round, which is exactly the behaviour that predates this block.
 ratify_adr=""
-_ratify_python="$(command -v python3 || command -v python || true)"
+_ratify_python="$(_python_beside "$repo_root")"
 if [[ -n "$_ratify_python" && -f "${repo_root}/scripts/adr_ratify.py" ]]; then
     ratify_adr="$("$_ratify_python" "${repo_root}/scripts/adr_ratify.py" \
         check-shape "$sha" 2>/dev/null || true)"
@@ -506,14 +546,16 @@ head_patch_id="$(patch_identity "$expected_base" "$content_sha")"
 declare -a floor_args=()
 floor_dir="$(mktemp -d -t ship-floor.XXXXXX)" || die "could not create a scratch directory"
 trap 'rm -rf "$floor_dir"' EXIT
-_floor_python="$(command -v python3 || command -v python || true)"
 # Resolved against THIS script's own directory, not the repository root: ship and
 # its floor test ship together, so the rule that runs is the one sitting beside
 # the ship that ran — "whatever version of the acceptance rule is on disk at ship
 # time", which is the same reason `scripts/ship.sh` is not itself on the floor.
 # A repository-root path would also be wrong wherever ship is invoked against a
-# checkout that is not its own, which is exactly how its tests drive it.
-_floor_script="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/floor_test.py"
+# checkout that is not its own, which is exactly how its tests drive it. The
+# interpreter is chosen beside the script for the same reason and in the same
+# place: the floor test and the Python that can run it ship together too.
+_floor_script="${_ship_dir}/floor_test.py"
+_floor_python="$(_python_beside "$_ship_root")"
 
 # The base move, read into parallel arrays plus a floor verdict.
 #
