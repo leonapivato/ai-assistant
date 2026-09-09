@@ -914,11 +914,17 @@ review found an earlier draft doing.
 > enough, and ADR-0181 §1 keeps that class wider than a prior search — the trail's only
 > decision is the one recording that refusal, and §1's third condition above forbids the act on
 > it. So the statement names `assistant decisions` **and what makes a decision a subject of the
-> act**: a decision about a request this system planned from the user's own words rather than
-> from material it had already fetched, stated in ADR-0181 §6's plain terms and naming no
-> source and no kind of source. It says where to look and what to look for and asserts nothing
-> about what is there; a statement promising an available id would be false on exactly that
-> deployment, and no lane restores one.
+> act**, stated at the strength the recorded predicate carries and no higher: a decision whose
+> `egress_binding` is an `EgressBinding` on which **no record selected into the model call that
+> produced the request was marked as resting on recorded external content**. That is ADR-0181
+> §6's second clause binding here — `False` is rendered as no assurance, so the statement does
+> **not** say the request was composed from the user's own words alone, does not say that no
+> external content was involved, and names no source and no kind of source. A request planned
+> over retrieved records none of which carried the marker satisfies §1 and **is** an eligible
+> subject; a statement that sent such a user looking for a narrower population would send them
+> past the row that qualifies. The statement says where to look and what to look for and
+> asserts nothing about what is there; one promising an available id would be false on exactly
+> the deployment above, and no lane restores one.
 
 > **Normative.** **No surface reads a store to find out whether an eligible decision exists,
 > and none invents a route where none does.** The discrimination is the user's to make at the
@@ -1293,7 +1299,10 @@ this one.
 > that the act on that id raises `UntrustableDestinationError` naming §1's third condition,
 > that no store was written, and that the statement rendered for `TRUST_MISSING` named what
 > makes a decision eligible and promised no available id**, which arm 2c does not reach because
-> it seeds an earlier eligible decision; an arm that
+> it seeds an earlier eligible decision; an arm that a decision whose binding carries
+> `planned_with_external_content` `False` **is** an eligible subject even where the request was
+> planned over retrieved records — none of them carrying the marker — which pins §9's
+> eligibility clause at the predicate's own strength against the stronger reading; an arm that
 > `DuplicateDestinationTrustError` is raised and rendered as *already chosen* on a second act
 > over one live set; an arm that `revoke_destination_trust` answers `False` for an unknown and
 > for an already-revoked id and writes nothing; an arm that the mapping table in §8 is
