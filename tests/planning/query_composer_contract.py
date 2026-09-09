@@ -56,12 +56,22 @@ from __future__ import annotations
 import asyncio
 import inspect
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
 
 from ai_assistant.core.protocols import QueryComposer
-from ai_assistant.core.types import QueryRefusal, SearchSupply, encodable_text
+from ai_assistant.core.types import (
+    MemoryRecord,
+    MemorySource,
+    Placement,
+    Provenance,
+    QueryRefusal,
+    SearchSupply,
+    SemanticMemory,
+    encodable_text,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -144,6 +154,26 @@ def supply_of(utterance: str) -> SearchSupply:
     return SearchSupply(utterance=encodable_text(utterance))
 
 
+def _a_record_placed_for_anyone() -> MemoryRecord:
+    """One belief a turn's retrieval could have selected, placed for ``ANYONE``.
+
+    Built here rather than taken from a hook, because the *content* is immaterial: what
+    the case above needs is a member ``SearchSupply`` admits, and every implementation
+    must accept the same one.
+    """
+    return SemanticMemory(
+        id="belief-for-the-supply",
+        content="Porto is on the Douro",
+        fact="Porto is on the Douro",
+        placement=Placement(),
+        provenance=Provenance(
+            source=MemorySource.OBSERVED,
+            confidence=0.6,
+            last_updated=datetime(2026, 9, 9, 12, 0, tzinfo=UTC),
+        ),
+    )
+
+
 class QueryComposerContract:
     """Behaviour every ``QueryComposer`` implementation must exhibit (ADR-0231 §3)."""
 
@@ -222,6 +252,63 @@ class QueryComposerContract:
             "QueryComposer.compose takes exactly one positional-only parameter and no "
             f"keyword parameters (ADR-0231 §3). Got: {parameters!r}"
         )
+
+    def test_the_one_parameter_is_the_search_supply(self, composer: QueryComposer) -> None:
+        """ADR-0238 §14: the check above, **restated over the new parameter type**.
+
+        The kind check alone no longer carries the safety claim. ADR-0231 §3 made the
+        property decidable from the *absence* of a parameter; ADR-0238 §2 relocates it
+        onto the value the one parameter takes — "a caller holding an excluded record
+        still has nothing to pass, because the type refuses it". So what a suite must
+        also pin is that the parameter is that type, since a composer declaring
+        ``compose(self, anything, /)`` would satisfy every clause above and accept a
+        bare string, a mapping, or a list of records.
+
+        Asserted over the **Protocol's** annotation rather than the subject's, because
+        that is where the contract is written and where a conforming implementation
+        takes its signature from: an implementation annotating its own parameter more
+        loosely is a ``mypy`` failure at the composition root rather than a runtime
+        fact this suite could see.
+
+        Compared as the *name* rather than as the class, because ``core/protocols.py``
+        carries ``from __future__ import annotations`` and imports this type under
+        ``TYPE_CHECKING`` — so the annotation is a string at runtime and evaluating it
+        would need an import the module deliberately does not make. The name is what
+        the contract says, and it is what a widened parameter would change.
+        """
+        declared = inspect.signature(QueryComposer.compose).parameters["supply"]
+
+        assert declared.kind is inspect.Parameter.POSITIONAL_ONLY
+        assert declared.annotation == SearchSupply.__name__
+        assert isinstance(composer, QueryComposer)
+
+    async def test_a_supply_carrying_records_composes_as_one_carrying_none_does(self) -> None:
+        """ADR-0238 §2: one type, and a conforming composer is handed it either way.
+
+        **Which** population a destination gets is decided by a recorded fact at the
+        one construction site §2 fixes — not by the composer, and not by this
+        contract. So what every implementation owes is that a supply carrying records
+        is an ordinary argument rather than a second mode: a composer that refused one,
+        or that answered differently on the records alone, would make the two
+        admissible populations two behaviours and put the servicing site's decision
+        back in the composer's hands.
+
+        The records are ADR-0217-placed for ``ANYONE`` because
+        :class:`~ai_assistant.core.types.SearchSupply` refuses anything else at
+        construction — so there is no case here for an excluded record, and that is the
+        point.
+        """
+        subject = self.composing("porto portugal")
+
+        bare = await subject.composer.compose(supply_of(subject.utterance))
+        with_records = await subject.composer.compose(
+            SearchSupply(
+                utterance=encodable_text(subject.utterance),
+                records=(_a_record_placed_for_anyone(),),
+            )
+        )
+
+        assert with_records == bare
 
     # --- what an outcome carries (ADR-0231 §3) ------------------------------
 

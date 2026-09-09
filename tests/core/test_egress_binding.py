@@ -205,7 +205,18 @@ def test_a_request_carries_exactly_one_field_for_the_binding() -> None:
     assert binding_fields == {"egress_binding"}
 
 
-@pytest.mark.parametrize("omitted", sorted(EgressBinding.model_fields))
+#: The one member of a binding that carries a default, and ADR-0238 §5 is why.
+#: ``False`` is the **restrictive** value here, where every other field's
+#: safe-looking default is the permissive one — a composition site that fails to
+#: compute it yields a request that is not closed-loop and rules exactly as
+#: ``origin/main`` rules today, so the failure mode of the omission is that
+#: milestone 31 does not work rather than a floor bypassed by a missing field. It is
+#: also what keeps ADR-0152 §7's transcription count untouched: ``rebind``
+#: constructs ``False`` rather than transcribing a fourth thing from ``approved``.
+_DEFAULTED = "closed_loop"
+
+
+@pytest.mark.parametrize("omitted", sorted(set(EgressBinding.model_fields) - {_DEFAULTED}))
 def test_every_field_of_a_binding_is_required(omitted: str) -> None:
     """§1's "every field §2 names is required on it", one omission at a time.
 
@@ -214,6 +225,10 @@ def test_every_field_of_a_binding_is_required(omitted: str) -> None:
     to see: an omitted description would silently become an *empty* one rather
     than obliging the producer to state that the payload has no spans, and the
     empty description is exactly what ADR-0148 §8's third clause makes a floor.
+
+    ``closed_loop`` is excluded by name rather than by the parametrisation reading
+    ``model_fields``, so that adding a *second* defaulted field is a deliberate edit
+    to :data:`_DEFAULTED` and not something a later lane gets for free.
     """
     whole = {
         "spans": (_span("body", extent=2),),
@@ -235,6 +250,29 @@ def test_every_field_of_a_binding_is_required(omitted: str) -> None:
         EgressBinding(**{name: value for name, value in whole.items() if name != omitted})  # type: ignore[arg-type]  # heterogeneous test kwargs
 
     assert omitted in str(raised.value)
+
+
+def test_the_one_defaulted_field_defaults_to_the_restrictive_value() -> None:
+    """ADR-0238 §5's default, asserted as the exception the case above excludes.
+
+    A binding built without it is **not** closed-loop, so it rules exactly as every
+    binding this corpus builds today rules — which is what makes the field land inert
+    until a servicing site computes it, and what makes ADR-0181 §12's reading of a
+    pre-existing row (`a stored binding written before this decision decodes with
+    ``closed_loop`` false`) true by construction rather than by a decode rule.
+    """
+    whole = {
+        "spans": (_span("body", extent=2),),
+        "account": _ACCOUNT,
+        "transport_endpoint": _ENDPOINT,
+        "planned_with_external_content": False,
+        "coverage": SpanCoverage.NOT_COVERED,
+    }
+
+    binding = EgressBinding(**whole)  # type: ignore[arg-type]  # heterogeneous test kwargs
+
+    assert binding.closed_loop is False
+    assert EgressBinding(**whole, closed_loop=True).closed_loop is True  # type: ignore[arg-type]  # heterogeneous test kwargs
 
 
 # --- §8: validating models, and no message renders a value -------------------

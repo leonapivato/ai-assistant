@@ -1042,6 +1042,13 @@ def test_every_integer_setting_is_discovered() -> None:
         # keeps §11's precedence true in every configuration.
         "search_max_results",
         "search_max_result_chars",
+        # ADR-0238 §8's per-conversation call bound, acknowledged here with the
+        # same `bool` argument the caps above carry — and with one of its own:
+        # **zero is a legal value whose stated meaning is that no search is
+        # serviced in any conversation**, so `search_calls_per_conversation=True`
+        # is a bound of one rather than a disabled mechanism, and a `float` would
+        # disable the comparison outright.
+        "search_calls_per_conversation",
         # ADR-0159 §3's spend bound, acknowledged here with the same `bool`
         # argument the caps above carry: `reconciler_max_conflicts=True` is a
         # bound of one, which asks the model about the best-ranked conflict alone
@@ -2627,6 +2634,12 @@ class TestTheSearchCostSettings:
             web_search_cost_currency="EUR",
             world_spend_currency="USD",
             world_spend_day_ceiling=Decimal("10"),
+            # ADR-0238 §10's cross-field refusal fires on a declared figure beside a
+            # period ceiling, so this case supplies the allowance to reach the clause
+            # it is actually about. The two rules are independent: §10 is about
+            # whether a priced search is **repeatable** and says nothing about which
+            # currency either figure is denominated in.
+            world_spend_unknown_allowance=Decimal("0.01"),
         )
         unmetered = self._registered(
             web_search_cost_per_call=Decimal("0.005"), web_search_cost_currency="EUR"
@@ -2686,3 +2699,157 @@ class TestTheSearchCostSettings:
 
         with pytest.raises(ConfigurationError, match="web_search_cost_currency"):
             load_settings()
+
+
+class TestTheSearchBudgetSettings:
+    """ADR-0238 §8's one field, and §10's cross-field refusal (Arm 7's load half).
+
+    What the bound then *does* is the store's and the servicing site's; what is here
+    is the domain and the two refusals an operator meets at load.
+
+    **The registration pair is set in every case that touches a cost field**, for
+    :class:`TestTheSearchCostSettings`' own reason: neither cost field may be set
+    unless ``web_search_connection`` and ``web_search_origin`` both are, so a case
+    that omitted them would exercise ADR-0236 §2's cross-field refusal rather than the
+    one it means to.
+    """
+
+    _CONNECTION: Final = "conn-0001"
+    _ORIGIN: Final = "https://search.example.invalid"
+
+    def _priced(self, **overrides: Any) -> Settings:
+        """``Settings`` for a deployment that declares a per-call search figure."""
+        fields: dict[str, Any] = {
+            "web_search_connection": self._CONNECTION,
+            "web_search_origin": self._ORIGIN,
+            "web_search_cost_per_call": Decimal("0.01"),
+            "web_search_cost_currency": "USD",
+            "world_spend_currency": "USD",
+        }
+        fields.update(overrides)
+        return Settings(**fields)
+
+    # --- §8: the bound ships with a value -----------------------------------
+
+    def test_the_bound_ships_with_a_value_rather_than_meaning_unbounded_when_unset(
+        self,
+    ) -> None:
+        """§8: "a bound the milestone's exit is stated over may not be absent by omission".
+
+        ADR-0194 §1's "unset means unbounded" governs a *monetary* ceiling an operator
+        chooses; this is a call bound milestone 31's exit is stated over, so a
+        deployment that configures nothing still searches under it.
+        """
+        assert Settings().search_calls_per_conversation == 8
+
+    @pytest.mark.parametrize("value", [0, 1, 8, 63, 64])
+    def test_every_value_in_the_domain_loads(self, value: int) -> None:
+        """§8: the integers from **0** through **64** inclusive, both ends admitted.
+
+        Zero is in the domain and its meaning is stated: **no search is serviced in
+        any conversation**. It is a legal setting rather than a disabled mechanism,
+        which is why ADR-0238 §15's Arm 6g2 exists at the store.
+        """
+        assert Settings(search_calls_per_conversation=value).search_calls_per_conversation == value
+
+    @pytest.mark.parametrize("value", [-1, 65, 1000])
+    def test_a_value_outside_the_domain_is_refused_at_load_naming_the_field(
+        self, value: int
+    ) -> None:
+        """§8: refused with the ``ConfigurationError`` ADR-0194 §1's clause requires.
+
+        Naming the field, because an operator meeting a refusal that does not say
+        which setting is wrong has to bisect their own configuration.
+        """
+        with pytest.raises(ValidationError, match="search_calls_per_conversation"):
+            Settings(search_calls_per_conversation=value)
+
+    # --- §10: the interaction that is fatal to the milestone ----------------
+
+    @pytest.mark.parametrize(
+        "ceiling",
+        [
+            pytest.param({"world_spend_day_ceiling": Decimal("5")}, id="day"),
+            pytest.param({"world_spend_month_ceiling": Decimal("50")}, id="month"),
+            pytest.param(
+                {
+                    "world_spend_day_ceiling": Decimal("5"),
+                    "world_spend_month_ceiling": Decimal("50"),
+                },
+                id="both",
+            ),
+        ],
+    )
+    def test_a_priced_search_under_a_period_ceiling_needs_the_unknown_allowance(
+        self, ceiling: dict[str, Decimal]
+    ) -> None:
+        """§10, and §15's Arm 7's first half: refused at load, naming the field.
+
+        **The trap #2126 records is real and it is fatal to milestone 31.** On a
+        deployment with a declared figure, a grant, a period ceiling and no allowance,
+        the first search of a period completes, records ``UNKNOWN``, makes the period's
+        accounted total indeterminate, and every later search that period is refused
+        ``SpendUndeterminedError``. One search per period is not "continues within an
+        enforced budget"; it is a different milestone's behaviour arriving by accident.
+
+        Either ceiling alone fires it, because each binds independently and one alone
+        makes the period's total decide a refusal.
+        """
+        with pytest.raises(ValidationError, match="world_spend_unknown_allowance"):
+            self._priced(**ceiling)
+
+    def test_the_same_deployment_with_the_allowance_loads(self) -> None:
+        """§15's Arm 7's second half, in the part a load-time case can reach.
+
+        "One with the allowance set searches repeatedly without the period's total
+        becoming indeterminate" — the *searching* half is the gate's and is asserted
+        there; what this pins is that the configuration §10 requires is one an operator
+        can actually state.
+        """
+        loaded = self._priced(
+            world_spend_day_ceiling=Decimal("5"),
+            world_spend_unknown_allowance=Decimal("0.02"),
+        )
+
+        assert loaded.world_spend_unknown_allowance == Decimal("0.02")
+
+    def test_a_priced_search_under_no_ceiling_needs_no_allowance(self) -> None:
+        """The refusal is stated over the **pair**, and neither half alone fires it.
+
+        A deployment metering no period at all has no total to make indeterminate, so
+        requiring the allowance there would refuse a configuration that works — which
+        is ADR-0236 §6's own argument against coupling the two currencies, read on this
+        pair.
+        """
+        assert self._priced().world_spend_unknown_allowance is None
+
+    def test_a_period_ceiling_with_no_declared_figure_needs_no_allowance(self) -> None:
+        """The other half: an unpriced search declares ``UNKNOWN`` either way.
+
+        ADR-0238 §10 ratifies that a completed ``WEB_SEARCH`` reports an ``UNKNOWN``
+        incurred cost **by design** — so what the refusal is about is not the
+        ``UNKNOWN`` itself but the deployment that has *both* a figure it believes it
+        is metering and a ceiling that will refuse on it. Requiring the allowance for
+        every ceilinged deployment would be a rule about a case this decision does not
+        reach.
+        """
+        loaded = Settings(
+            world_spend_currency="USD",
+            world_spend_day_ceiling=Decimal("5"),
+        )
+
+        assert loaded.world_spend_unknown_allowance is None
+
+    def test_no_lane_copies_the_declared_figure_into_a_reported_one(self) -> None:
+        """§10: the boundary ADR-0194 §2 draws on purpose, pinned at the settings seam.
+
+        "**No lane copies ``web_search_cost_per_call`` into ``incurred_cost``**,
+        restates a declared estimate as a reported figure, or otherwise crosses
+        ADR-0194 §2's estimate/reported boundary: a reported figure nobody measured is
+        the substitution that clause's own no-stand-in rule refuses." The issue names
+        two ways to close #2126 and this decision takes the second — so what a reader
+        must not find here is a *third* setting that would let the first be taken by
+        configuration.
+        """
+        assert "web_search_incurred_cost" not in Settings.model_fields
+        assert "web_search_reported_cost" not in Settings.model_fields

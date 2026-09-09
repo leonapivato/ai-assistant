@@ -183,6 +183,11 @@ def test_the_three_rosters_are_the_chain_read_off_in_order() -> None:
         "transport_endpoint",
         "planned_with_external_content",
         "coverage",
+        # ADR-0238 §5's sixth, and it lands on the **leaf** rather than on the chain:
+        # a row of either older epoch predates it, so a member declared on the base
+        # would make every legacy shape carry a fact its own epoch never recorded —
+        # which is the failure this roster exists to catch (ADR-0184 §2).
+        "closed_loop",
     )
 
 

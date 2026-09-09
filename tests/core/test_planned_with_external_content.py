@@ -159,22 +159,41 @@ def test_each_model_keeps_the_value_it_was_given(stated: bool) -> None:
     assert reduced.planned_with_external_content is stated
 
 
-def test_the_carrier_holds_the_three_facts_it_carries_and_no_fourth() -> None:
-    """ADR-0181 §3 and ADR-0233 §4: two fields added, and ADR-0152 §1's is unchanged.
+def test_the_carrier_holds_the_four_facts_it_carries_and_no_fifth() -> None:
+    """ADR-0181 §3, ADR-0233 §4 and ADR-0238 §5: three fields added over ADR-0152 §1's.
 
     The span mapping still answers ADR-0146 §1's axis — *who disclosed this span* —
     and each added field answers an axis of its own: ADR-0181 §1's third, whether
-    this system's selection rested on recorded external content, and ADR-0233 §4's,
-    which of ADR-0155 §3's two prohibitions governs what the call would carry. Each
-    ADR forbids reading any of the three as an answer on another, and the type keeps
-    them apart by holding all three.
+    this system's selection rested on recorded external content; ADR-0233 §4's,
+    which of ADR-0155 §3's two prohibitions governs what the call would carry; and
+    ADR-0238 §5's, whether this request is closed-loop. Each ADR forbids reading any
+    of them as an answer on another, and the type keeps them apart by holding all
+    four.
+
+    **Three are required with no default and the fourth is not**, which is a decision
+    rather than an inconsistency (ADR-0238 §5). For the first three the safe-looking
+    default is the *permissive* value — ``False`` reads as "nothing external was in
+    front of the model" and ``NOT_COVERED`` asserts that nothing came from anywhere
+    near this system's stores — so a producer holding no answer must state one in code
+    a reviewer can see. ``closed_loop`` is the other way round: ``False`` is the
+    **restrictive** value, so a composition site that fails to compute it yields a
+    request that is not closed-loop and rules exactly as ``origin/main`` rules today.
+    The failure mode of the omission is that milestone 31 does not work, which is
+    loud — not a floor bypassed by a missing field. The default also keeps ADR-0152
+    §7's transcription count untouched, ``rebind`` constructing ``False`` rather than
+    transcribing a fourth thing from ``approved``.
     """
     assert set(CarriedProvenance.model_fields) == {
         "spans",
         "planned_with_external_content",
         "coverage",
+        "closed_loop",
     }
-    assert all(field.is_required() for field in CarriedProvenance.model_fields.values())
+    required = {
+        name for name, field in CarriedProvenance.model_fields.items() if field.is_required()
+    }
+    assert required == {"spans", "planned_with_external_content", "coverage"}
+    assert CarriedProvenance.model_fields["closed_loop"].get_default() is False
 
     carrier = CarriedProvenance(
         spans={EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED},
