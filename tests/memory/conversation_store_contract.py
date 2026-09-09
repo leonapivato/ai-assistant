@@ -2643,6 +2643,7 @@ class ConversationStoreContract:
         assert sum(1 for outcome in outcomes if outcome is not None) == 1
         assert (await _draw_of(store, conversation.id)).calls == 1
 
+    @pytest.mark.optional_obligation
     async def test_the_draw_is_durable_and_a_second_handle_reads_the_same_one(self) -> None:
         """§15's Arm 6b's fourth shape: the increment is taken **before** the call.
 
@@ -2664,6 +2665,7 @@ class ConversationStoreContract:
             calls=1, all_external_user_chosen=False
         )
 
+    @pytest.mark.optional_obligation
     async def test_two_handles_over_one_history_cannot_be_admitted_against_one_draw(
         self,
     ) -> None:

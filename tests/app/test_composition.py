@@ -1746,7 +1746,9 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
     classified". ADR-0225 §10's transcript archive is the **fourteenth** and obeys
     the ruling on the same terms, and it is the store the ruling matters most for:
     it holds Tier 1 text for longer than anything else here and nothing but the
-    user reads it (§4).
+    user reads it (§4). ADR-0238 §1's destination-trust store is the
+    **fifteenth**, and §1 states the residency clause explicitly for ADR-0185
+    §9's reason — "local and durable and … never written to a remote service".
 
     **The count in this docstring said "eight" while the list below named ten**,
     which is exactly the hazard ADR-0123's Context records — "the count in the most
@@ -1771,6 +1773,17 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
             "connections.db",
             "conversations.db",
             "deferrals.db",
+            # ADR-0238 §1's destination-trust store, the fifteenth and the
+            # fourteenth that is Tier 1: a record names destinations of the user's
+            # and the instant they chose them. **A separate file from
+            # ``recipient_grants.db``, and for that store's own reason one axis
+            # over** — §1 keeps the two acts separate ("a grant authorises whether
+            # this system may talk to this party; the record above authorises what
+            # class of payload this system may compose for it"), and "no component
+            # reads the existence, breadth, age or liveness of a grant as evidence
+            # of trust". Joining them in one file would be the first step toward
+            # joining them in one answer.
+            "destination_trust.db",
             "grants.db",
             "memory.db",
             "notifications.db",
