@@ -1,7 +1,69 @@
 # 238. A destination the user chose may be told what the turn knows, and the searching that follows runs under a per-conversation budget
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0241 (§13's `core`-surface clause in one limb — `WebSearcher` gains one argument, `timeout: timedelta`, on `search`; `ActionPolicy`, `AuditTrail` and `MemoryStore` are untouched, `WebSearcher` gains no member and no widened return, and every other clause of §13 binds entire — and §11's closure of `SearchDisposition` at exactly sixteen members in that count alone, including its no-seventeenth sentence (the enumeration becomes eighteen: one member for a deadline expiry and one for a fault the searcher itself raised, #2112; its members, their values, the injectivity of every mapping into it, its no-message rule, its exclusion of `SearchRefusal.NO_RESULT` and its audit clauses all stand). Those two scopes, and nothing else in this ADR)
 - Date: 2026-09-05
+- **Partially superseded and amended: 2026-09-09 by ADR-0241** — two scopes superseded,
+  one amended, and nothing else in this ADR. §16 defers *"a per-conversation bound on
+  elapsed search time"* and names what fires it: *"an ADR that first decides how a deadline
+  reaches `WebSearcher.search` at all — a `core/protocols.py` change, and so its own
+  ratified ADR under golden rule 5"*, and separately the owner ruling that milestone 31's
+  exit is not met by calls and cost alone. Both triggers fired (#1908 on 2026-09-09,
+  #2167), and ADR-0241 is the ADR §16 sent a lane to write. **The deferral is not
+  discharged**: ADR-0241 supplies the per-call quantity §16 had none of and leaves the
+  per-conversation bound deferred, restating what now fires it.
+
+  **§13's `core`-surface clause, in one limb.** §13 rules that *"`ActionPolicy`,
+  `AuditTrail`, `MemoryStore` and `WebSearcher` each gain no member, no argument and no
+  widened return"*. ADR-0241 §1 gives `WebSearcher.search` one required keyword-only
+  argument, `timeout: timedelta`, so that the bound is the caller's — ADR-0029 §4's
+  *"How long a turn may wait is a property of the turn"* at a second seam — and so that a
+  per-operation figure in ADR-0228 §4's shape stays a later `Settings` decision rather than
+  a later Protocol change. A reader holding only this ADR would refuse it, which is
+  ADR-0070 §1's test met. **The scope is `WebSearcher` and the argument limb alone**: the
+  other three Protocols are untouched, `WebSearcher` gains no member and no widened return,
+  and §13's enumerated `core/types.py` additions, its `PROTOCOL_VERSION` move, its
+  `ConfirmationEgress` and `ConversationExport` clauses and its two decodes-as-written
+  clauses all bind entire.
+
+  **§11's closure of `SearchDisposition` at sixteen, in that count alone.** §11 adds one
+  member and says *"no lane reads this as licence to add a seventeenth"* — a sentence
+  written to stop a lane adding one, and it stopped this one: the seventeenth and
+  eighteenth arrive by a ratified ADR, which is the instrument §11 reserves. ADR-0241 §4
+  adds a member for a deadline expiry, distinct from `TRANSPORT_FAILED` because the two
+  differ in what the system may assert about whether it disclosed anything; ADR-0241 §8
+  adds one for a fault the searcher itself raised after the ruling, which rules #2112 in
+  the same act and is the one stage §11's vocabulary had no member for. §11's audit
+  clauses — one event, one key, counts only, no identifier — its injectivity, its
+  no-message rule and its exclusion of `SearchRefusal.NO_RESULT` all stand entire.
+
+  **§8 is amended, not superseded, and the distinction is the point.** §8 grounds its
+  refusal to derive an elapsed bound on a premise: *"`WebSearcher.search(call, /)` takes
+  **no timeout and no deadline** … Nor is there a per-call bound to substitute"*, and
+  concludes *"With no bound on one servicing, no product of two ratified quantities bounds
+  a conversation's."* ADR-0241 §1 supplies that bound, so the premise stops being true once
+  its implementing lane lands, and a reader holding only this ADR would go on believing
+  there is nothing to derive from. **Nothing §8 decided changes**: it bounds provider calls
+  and not elapsed time; it adds one `Settings` field and not two; the deleted elapsed
+  counter, provisional charge and `SearchClaim` handle stay deleted and ADR-0241 §9
+  reinstates none of them; its correction of the ADR-0228 §4 derivation stands; and the
+  counter stays on the conversation record with `ConversationStore`'s lifecycle.
+  **ADR-0060's own header is the precedent**: ADR-0118 put a deadline on the embedding seam
+  and was recorded there as *"§5's `Embedder` assessment amended by ADR-0118"*, because
+  §5's assessment was a premise the deadline overtook while §1's rulings stood. This line
+  now carries the leading token, so under ADR-0082 §2 the amendment qualifier is not written
+  on it and this note is the whole of that record.
+
+  **What is relied upon as written.** §5's closed-loop condition and §6's reach; §8's
+  `admit_search`/`observe_search`/`search_draw` triad and its atomicity; §9's refusal of
+  #2116; §10's `UNKNOWN`-by-design ruling and its cross-field refusal, which ADR-0241 §5
+  extends to an interrupted call rather than moving; §12's negative arm, whose *"The
+  comparison has no other input — no clock reading, no interval and no duration a provider
+  could stretch"* binds verbatim, ADR-0241's deadline being a **separate** comparison and
+  not a second input to that one; and §15's arms, of which Arm 6d — *"an admitted call is
+  never refunded"* — is what ADR-0241 §6 applies to an interruption. The record is made in
+  ADR-0241's own change under ADR-0082 §7. This line carried no leading token before, so
+  the supersession leads and `Accepted` is dropped (`docs/adr/template.md`); the remainder
+  of this ADR stays accepted. Refs #1908, #2167, #2112, #2178.
 - **Partially supersedes** [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
   — **§3's utterance-only clause, §4's first and second clauses, §12's second and
   third clauses, and §13's closure of `SearchDisposition` at exactly fifteen members
