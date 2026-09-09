@@ -1044,12 +1044,23 @@ _TRACKER_ORDER = "&sort=created&direction=desc"
 #: of the list. The endpoint answers with fewer items than it was asked for on
 #: roughly one call in six (#2153), which over twenty-odd pages is most runs;
 #: four attempts is what makes a complete read the normal outcome rather than
-#: the rare one, and a page that is genuinely last is never re-asked at all.
+#: the rare one. Every attempt's numbers are kept, so a page truncated a
+#: different way each time is assembled out of what the attempts saw between
+#: them, and the last page is re-asked like any other — it is short for a
+#: legitimate reason *and* it can be truncated, and nothing in the answer tells
+#: the two apart.
 _TRACKER_PAGE_ATTEMPTS = 4
 
-#: The share of ``1..newest`` the assembled set must cover to be called complete.
-#: See :func:`fetch_tracker_numbers` for the measurements this sits between.
-_TRACKER_DENSITY_FLOOR = 0.95
+#: How many numbers may still be missing from ``1..newest`` after the walk before
+#: the read is refused outright. Each survivor costs one direct lookup, so this
+#: is the bound on that work: at ~0.35 s a lookup it is about 22 s against the
+#: budget below, on top of a ~35 s walk. It is an absolute count and not a share
+#: because it bounds *calls*. Every truncation measured on 2026-09-09 was short
+#: by hundreds, and this repository had no gap at all in 2,154 numbers, so the
+#: cap refuses a truncated read without spending a single lookup on it while
+#: leaving room for far more deleted or transferred numbers than any tracker of
+#: this size carries.
+_TRACKER_MAX_GAPS = 64
 
 #: The whole read's wall-clock budget, in seconds — one deadline across every
 #: call rather than one per call (#2000).
@@ -1094,6 +1105,79 @@ def _gh_issue_numbers(root: Path, query: str, deadline: float) -> list[int] | No
     return [int(field) for field in fields]
 
 
+def _gh_issue_exists(root: Path, number: int, deadline: float) -> bool | None:
+    """Ask GitHub directly whether one issue or PR number exists.
+
+    ``gh api -i`` prints the HTTP status line before the body and exits non-zero
+    on a 4xx, so the status line is read rather than the exit code or the error
+    prose: a transport fault produces no status line at all, which is exactly the
+    case that must not be read as an answer.
+
+    Args:
+        root: The checkout the call is made from.
+        number: The issue or pull request number to look up.
+        deadline: A ``time.monotonic()`` reading the call must finish before.
+
+    Returns:
+        ``True`` for 200, ``False`` for 404 or 410 — deleted, transferred or
+        never issued, all of which mean the number is not in the tracker — and
+        ``None`` for anything else, including any answer carrying no status line.
+    """
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return None
+    argv = ["gh", "api", "-i", f"repos/{{owner}}/{{repo}}/issues/{number}"]
+    try:
+        result = subprocess.run(  # noqa: S603  # fixed argv, no shell
+            argv, capture_output=True, text=True, check=False, cwd=root, timeout=remaining
+        )
+    except OSError, subprocess.SubprocessError:
+        return None
+    status = re.match(r"HTTP/\S+\s+(\d{3})\b", result.stdout)
+    if status is None:
+        return None
+    if status.group(1) == "200":
+        return True
+    if status.group(1) in {"404", "410"}:
+        return False
+    return None
+
+
+def _walk_tracker_pages(root: Path, highest: int, deadline: float) -> set[int] | None:
+    """Read the issues endpoint page by page and return every number it named.
+
+    Args:
+        root: The checkout the calls are made from.
+        highest: The newest number GitHub reports, which bounds how many pages
+            the walk may take before it is not converging on an end.
+        deadline: A ``time.monotonic()`` reading the whole walk must finish
+            before.
+
+    Returns:
+        The numbers seen, which is **not** a claim that they are all of them —
+        :func:`fetch_tracker_numbers` decides that. ``None`` when a call could
+        not be made or answered unusably, or when full pages were still arriving
+        past the last one the newest number can account for.
+    """
+    # One page per hundred numbers, plus the short last one, plus one to spare.
+    last_possible_page = highest // _TRACKER_PAGE_SIZE + 2
+    numbers: set[int] = set()
+    for page in range(1, last_possible_page + 1):
+        query = f"state=all&per_page={_TRACKER_PAGE_SIZE}{_TRACKER_ORDER}&page={page}"
+        full = False
+        for _ in range(_TRACKER_PAGE_ATTEMPTS):
+            got = _gh_issue_numbers(root, query, deadline)
+            if got is None:
+                return None
+            numbers.update(got)
+            full = len(got) == _TRACKER_PAGE_SIZE
+            if full:
+                break
+        if not full:
+            return numbers
+    return None
+
+
 def fetch_tracker_numbers(root: Path) -> frozenset[int] | None:
     """Return every issue and PR number GitHub knows, or ``None`` if unreachable.
 
@@ -1105,44 +1189,46 @@ def fetch_tracker_numbers(root: Path) -> frozenset[int] | None:
     exits 0, and five consecutive runs returned 251, 334, 333, 46 and 148 of
     ~2,150 numbers (#2153).
 
-    **The answer is returned only when it is demonstrably complete.** Explicit
-    pages are not a fix on their own — the endpoint also answers a single page
-    with valid JSON holding fewer items than it was asked for, roughly one call
-    in six as measured on 2026-09-09 — so a short page is re-asked up to
-    ``_TRACKER_PAGE_ATTEMPTS`` times, and the assembled set is then tested
-    against three facts that a truncated read cannot satisfy:
+    **Explicit pages are not a fix on their own.** The endpoint also answers a
+    single page with valid JSON holding fewer items than it was asked for,
+    roughly one call in six as measured on 2026-09-09, and nothing in the answer
+    distinguishes that from the genuinely short last page. So every short page is
+    re-asked up to ``_TRACKER_PAGE_ATTEMPTS`` times and every attempt's numbers
+    are kept.
 
-    - it holds ``1``, which under the descending sort is only reachable from the
-      last page;
-    - its highest number equals the newest number GitHub reports, read by a
-      separate ``per_page=1`` call so that the completeness test does not come
-      out of the read it is testing;
-    - it covers at least ``_TRACKER_DENSITY_FLOOR`` of ``1..newest``. ADR-0088
-      §6's premise is that "an issue number once assigned stays assigned", so
-      that space is dense apart from deleted or transferred numbers — this
-      repository had **no** gap at all in 2,154 numbers on 2026-09-09, while the
-      truncations observed were short by 88% to 98%. The floor is a share rather
-      than a count because deletions accrue with the tracker's size, and it is
-      loose by two orders of magnitude against every truncation seen and tight by
-      one against the gaps a real tracker carries.
+    **What is returned is complete, number by number, or it is nothing.** After
+    the walk the set must reach ``1`` — the last page's marker under the
+    descending sort — and top out at the newest number GitHub reports, read by a
+    separate ``per_page=1`` call so that the test does not come out of the read
+    it is testing. Whatever of ``1..newest`` is *still* missing is then settled
+    one number at a time against the tracker itself (:func:`_gh_issue_exists`):
+    a number GitHub answers 404 or 410 for is genuinely not there — deleted,
+    transferred, or never issued — and a number it answers 200 for means the walk
+    was short and is added back. No threshold decides this, because a threshold
+    is exactly what lets a small truncation through as a set of dangling
+    citations. ``_TRACKER_MAX_GAPS`` is not that threshold: it is the bound on
+    how many such lookups may be spent before the read is abandoned as truncated
+    rather than merely gappy.
 
     Returns ``None`` — unevaluable, therefore silent (ADR-0088 §6) — when ``gh``
     is missing, unauthenticated, a call fails or is unparsable, the whole read
-    runs past ``_TRACKER_TIMEOUT_SECONDS``, or the assembled set fails any of the
-    three tests above. The empty answer is the degenerate case of the last of
-    them and is refused for the reason it always was: a repository always holds
-    at least the issue an ADR cites, so an empty answer is a broken call rather
-    than an empty tracker. Reading a broken call as "every citation is dangling"
-    fails the whole corpus on a transport fault, and a checker that could not
-    reach the tracker has learned nothing about the citation — inventing a
-    failure from that is the false report §6 forbids, whether the answer it was
-    given was empty or merely short.
+    runs past ``_TRACKER_TIMEOUT_SECONDS``, the walk does not span ``1`` to the
+    newest number, more numbers are missing than ``_TRACKER_MAX_GAPS`` allows, or
+    any one of those numbers cannot be settled. The empty answer is the
+    degenerate case and is refused for the reason it always was: a repository
+    always holds at least the issue an ADR cites, so an empty answer is a broken
+    call rather than an empty tracker. Reading a broken call as "every citation
+    is dangling" fails the whole corpus on a transport fault, and a checker that
+    could not reach the tracker has learned nothing about the citation —
+    inventing a failure from that is the false report §6 forbids, whether the
+    answer it was given was empty or merely short.
 
     The budget is one deadline across every call, in the spirit of the single
     120-second timeout the ``--paginate`` call carried: #2000's reason for it was
     that a local, deterministic diagnostic must not be made to wait out a stalled
     network, and that reason is about the wall clock of the whole read rather
-    than of any one request within it.
+    than of any one request within it. Each call is given what is left of it, and
+    once it is gone no further call is made.
     """
     deadline = time.monotonic() + _TRACKER_TIMEOUT_SECONDS
     newest = _gh_issue_numbers(root, f"state=all&per_page=1{_TRACKER_ORDER}", deadline)
@@ -1150,32 +1236,18 @@ def fetch_tracker_numbers(root: Path) -> frozenset[int] | None:
         return None
     highest = newest[0]
 
-    # One page per hundred numbers, plus the short last one, plus one to spare:
-    # a read still going past that is not converging and is not to be trusted.
-    last_possible_page = highest // _TRACKER_PAGE_SIZE + 2
-    numbers: set[int] = set()
-    for page in range(1, last_possible_page + 1):
-        query = f"state=all&per_page={_TRACKER_PAGE_SIZE}{_TRACKER_ORDER}&page={page}"
-        got: list[int] | None = None
-        for _ in range(_TRACKER_PAGE_ATTEMPTS):
-            got = _gh_issue_numbers(root, query, deadline)
-            # A page holding ``1`` is the last one, by construction of the
-            # descending sort, so its shortness is the end of the list rather
-            # than a truncation and re-asking would only cost calls.
-            if got is None or len(got) == _TRACKER_PAGE_SIZE or 1 in got:
-                break
-        if got is None:
+    numbers = _walk_tracker_pages(root, highest, deadline)
+    if numbers is None or 1 not in numbers or max(numbers) != highest:
+        return None
+    survivors = sorted(set(range(1, highest + 1)) - numbers)
+    if len(survivors) > _TRACKER_MAX_GAPS:
+        return None
+    for survivor in survivors:
+        exists = _gh_issue_exists(root, survivor, deadline)
+        if exists is None:
             return None
-        numbers.update(got)
-        if len(got) < _TRACKER_PAGE_SIZE:
-            break
-    else:
-        return None  # Still full pages after the newest number can account for.
-
-    if 1 not in numbers or max(numbers) != highest:
-        return None
-    if len(numbers) < highest * _TRACKER_DENSITY_FLOOR:
-        return None
+        if exists:
+            numbers.add(survivor)
     return frozenset(numbers)
 
 

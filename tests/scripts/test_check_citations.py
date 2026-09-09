@@ -14,14 +14,19 @@ so most of what is asserted below is *silence*.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import stat
 import subprocess
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from types import ModuleType
 
 _SCRIPT = Path(__file__).parents[2] / "scripts" / "check_citations.py"
 
@@ -125,26 +130,97 @@ def _rendered(root: Path, output_format: str, *args: str) -> str:
     return result.stdout
 
 
+#: A ``gh`` that answers the two calls the tracker read makes, out of a fixed
+#: list of numbers and without touching the network. It is written in Python
+#: rather than ``sh`` because it has to model the endpoint's *behaviour* — the
+#: newest-first paging, a page that comes back partial, a number looked up one
+#: at a time — and each of those reads as one line here.
+_GH_SHIM = r"""#!@PYTHON@
+import os
+import re
+import subprocess
+import sys
+
+HOOK = @HOOK@
+NUMBERS = @NUMBERS@
+NEWEST = @NEWEST@
+BROKEN = @BROKEN@
+STATE = @STATE@
+
+if HOOK:
+    subprocess.run(HOOK, shell=True, check=False)
+
+url = next((a for a in sys.argv[1:] if a.startswith("repos/")), "")
+
+one = re.fullmatch(r"repos/\{owner\}/\{repo\}/issues/(\d+)", url)
+if one:
+    number = int(one.group(1))
+    if BROKEN == (number, "unreachable"):
+        sys.stderr.write("gh: could not resolve host\n")
+        sys.exit(1)
+    with open(os.path.join(STATE, "lookups.log"), "a") as handle:
+        handle.write("%d\n" % number)
+    if number in NUMBERS:
+        sys.stdout.write('HTTP/2.0 200 OK\n\n{"number": %d}\n' % number)
+        sys.exit(0)
+    sys.stdout.write('HTTP/2.0 404 Not Found\n\n{"message": "Not Found"}\n')
+    sys.stderr.write("gh: Not Found (HTTP 404)\n")
+    sys.exit(1)
+
+per_page = int(re.search(r"per_page=(\d+)", url).group(1))
+paged = re.search(r"&page=(\d+)", url)
+page = int(paged.group(1)) if paged else 1
+if per_page == 1:
+    sys.stdout.write("%d\n" % NEWEST)
+    sys.exit(0)
+
+with open(os.path.join(STATE, "pages.log"), "a") as handle:
+    handle.write("%d\n" % page)
+
+items = NUMBERS[(page - 1) * per_page:page * per_page]
+if BROKEN and BROKEN[0] == page:
+    if BROKEN[1] == "exit":
+        sys.exit(2)
+    if BROKEN[1] == "garbage":
+        sys.stdout.write("not-a-number\n")
+        sys.exit(0)
+    marker = os.path.join(STATE, "flaky")
+    once = BROKEN[1] == "flaky"
+    if BROKEN[1] == "partial" or (once and not os.path.exists(marker)):
+        if once:
+            open(marker, "w").close()
+        items = items[:1] + items[len(items) // 2:]
+sys.stdout.write("".join("%d\n" % n for n in items))
+"""
+
+
 def _fake_gh(
     directory: Path,
     numbers: list[int],
     *,
     before: str = "",
     newest: int | None = None,
-    broken_page: tuple[int, str] | None = None,
+    broken: tuple[int, str] | None = None,
 ) -> dict[str, str]:
     """Put a ``gh`` on PATH that reports ``numbers`` and never touches the network.
 
-    The shim answers the real endpoint's shape rather than one fixed body: it
-    reads ``per_page`` and ``page`` out of the URL it is handed and serves that
-    slice of ``numbers`` sorted newest-first, so the checker's ``per_page=1``
-    call for the newest number and its ``page=1,2,...`` walk are answered as
-    GitHub answers them (#2153). A page past the end is empty, which is how the
-    walk terminates.
+    The shim answers the endpoint's shape rather than one fixed body: it reads
+    ``per_page`` and ``page`` out of the URL and serves that slice of ``numbers``
+    newest-first, and it answers a single-number lookup with an HTTP status line
+    — 200 for a number in ``numbers``, 404 for one that is not. So the
+    ``per_page=1`` call, the ``page=1,2,...`` walk and the per-number settling
+    are each answered as GitHub answers them (#2153). A page past the end is
+    empty, which is how the walk terminates.
+
+    Every page request is appended to ``directory/pages.log`` and every
+    single-number lookup to ``directory/lookups.log``, which is how a test counts
+    the attempts a page was given and the numbers that had to be settled one at
+    a time.
 
     Args:
-        directory: Where to write the shim; it is prepended to ``PATH``.
-        numbers: The issue/PR numbers the shim reports.
+        directory: Where to write the shim and its call log; it is prepended to
+            ``PATH``.
+        numbers: The issue/PR numbers the shim reports, in any order.
         before: One ``/bin/sh`` line run before the shim answers. It is how a
             test observes *that* the fetch happened — touch a file and look for
             it — and how it mutates the checkout *while* it is happening, which
@@ -152,38 +228,39 @@ def _fake_gh(
             between. It runs on every call, so keep it idempotent.
         newest: What the ``per_page=1`` call reports as the newest number,
             defaulting to the highest of ``numbers``. Setting it higher is how a
-            test makes the read demonstrably short of the tracker.
-        broken_page: A page and how it misbehaves — ``"exit"`` for a non-zero
-            exit with nothing on stdout, ``"garbage"`` for exit 0 with a body
-            that is not a list of numbers.
+            test makes the walk demonstrably short of the tracker.
+        broken: One thing that misbehaves, as ``(subject, mode)``. Four modes
+            take a **page** as the subject — ``"exit"`` (a non-zero exit),
+            ``"garbage"`` (exit 0, unparsable body), ``"partial"`` (a page with
+            a hole punched through its middle, every time) and ``"flaky"`` (the
+            same hole once, then whole pages) — and
+            ``"unreachable"`` takes a **number**, whose lookup then fails with no
+            HTTP status line at all.
     """
     script = directory / "gh"
-    body = "\n".join(str(n) for n in sorted(numbers, reverse=True))
-    top = newest if newest is not None else (max(numbers) if numbers else 0)
-    hook = "" if not before else f"{before}\n"
-    bad_page, bad_action = broken_page or (0, "exit")
-    bad_action = "exit 2" if bad_action == "exit" else "printf 'not-a-number\\n'; exit 0"
-    script.write_text(
-        f"""#!/bin/sh
-{hook}url="$2"
-per_page="${{url#*per_page=}}"
-per_page="${{per_page%%&*}}"
-case "$url" in
-  *"&page="*) page="${{url##*&page=}}"; page="${{page%%&*}}" ;;
-  *) page=1 ;;
-esac
-if [ "$per_page" = 1 ]; then printf '%s\\n' "{top}"; exit 0; fi
-if [ "$page" = "{bad_page}" ]; then {bad_action}; fi
-sed -n "$(( (page - 1) * per_page + 1 )),$(( page * per_page ))p" <<"EOF"
-{body}
-EOF
-""",
-        encoding="utf-8",
-    )
+    body = _GH_SHIM
+    for placeholder, value in (
+        ("@PYTHON@", sys.executable),
+        ("@HOOK@", repr(before)),
+        ("@NUMBERS@", repr(sorted(numbers, reverse=True))),
+        ("@NEWEST@", repr(newest if newest is not None else max(numbers, default=0))),
+        ("@BROKEN@", repr(broken)),
+        ("@STATE@", repr(str(directory))),
+    ):
+        body = body.replace(placeholder, value)
+    script.write_text(body, encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     env = dict(os.environ)
     env["PATH"] = f"{directory}{os.pathsep}{env.get('PATH', '')}"
     return env
+
+
+def _asked(directory: Path, log: str) -> list[int]:
+    """Every page — or every single number — the shim was asked for, in order."""
+    path = directory / log
+    if not path.exists():
+        return []
+    return [int(line) for line in path.read_text(encoding="utf-8").split()]
 
 
 # --------------------------------------------------------------------------- #
@@ -547,11 +624,11 @@ def _tracker(
     numbers: list[int],
     *,
     newest: int | None = None,
-    broken_page: tuple[int, str] | None = None,
+    broken: tuple[int, str] | None = None,
 ) -> dict[str, object]:
     """Run the checker over one ADR citing ``citation``, against a shimmed ``gh``."""
     _make_repo(tmp_path, {"0001-one.md": f"# 1. One\n\nTracked by {citation}.\n"})
-    env = _fake_gh(tmp_path, numbers, newest=newest, broken_page=broken_page)
+    env = _fake_gh(tmp_path, numbers, newest=newest, broken=broken)
     return _report(tmp_path, env=env)
 
 
@@ -563,18 +640,133 @@ def test_the_tracker_is_read_page_by_page_to_a_short_last_page(tmp_path: Path) -
     assert _citations(report, "tracker") == ["#251"]
 
 
-def test_a_tracker_missing_a_few_deleted_numbers_is_still_complete(tmp_path: Path) -> None:
-    """The tolerance exists because a deleted or transferred number leaves a gap."""
+def test_a_gap_the_tracker_confirms_absent_is_not_a_truncation(tmp_path: Path) -> None:
+    """A deleted or transferred number leaves a hole, and the hole is settled."""
     numbers = [n for n in range(1, 251) if n not in {5, 7, 9, 11, 13}]
 
-    report = _tracker(tmp_path, "#1", numbers)
+    report = _tracker(tmp_path, "#1", numbers, newest=250)
 
     assert report["tracker_checked"] is True
     assert _findings(report, "tracker") == []
+    assert _asked(tmp_path, "lookups.log") == [5, 7, 9, 11, 13]
+
+
+def test_a_truncated_page_is_repaired_rather_than_reported_dangling(tmp_path: Path) -> None:
+    """The blocker this whole change exists for, at the scale that hides best.
+
+    A page that comes back with a hole in the middle still reaches ``1`` and
+    still tops out at the newest number, so no test taken over the *shape* of
+    the assembled set can see it — and every number in the hole would be
+    reported as a dangling citation, which is ADR-0088 §6's worst outcome. So
+    the survivors are settled against the tracker one at a time instead, and a
+    number that is really there is added back rather than reported.
+    """
+    report = _tracker(tmp_path, "#45", list(range(1, 261)), broken=(3, "partial"))
+
+    assert report["tracker_checked"] is True
+    assert _findings(report, "tracker") == []
+    assert _asked(tmp_path, "lookups.log") == list(range(31, 60))
+
+
+def test_a_page_that_recovers_on_a_retry_completes_the_read(tmp_path: Path) -> None:
+    """A short page is re-asked, so one bad answer does not end the walk."""
+    report = _tracker(tmp_path, "#1", list(range(1, 261)), broken=(2, "flaky"))
+
+    assert report["tracker_checked"] is True
+    assert _findings(report, "tracker") == []
+    assert _asked(tmp_path, "pages.log") == [1, 2, 2, 3, 3, 3, 3]
+
+
+def test_a_page_that_never_recovers_exhausts_its_retries_and_stops(tmp_path: Path) -> None:
+    """The retries are bounded, and what they could not read is not invented."""
+    report = _tracker(tmp_path, "#999", list(range(1, 261)), broken=(2, "partial"))
+
+    assert report["tracker_checked"] is False
+    assert _findings(report, "tracker") == []
+    assert _asked(tmp_path, "pages.log") == [1, 2, 2, 2, 2]
+
+
+def test_a_gap_that_cannot_be_settled_makes_the_read_unevaluable(tmp_path: Path) -> None:
+    """A lookup that answers with no HTTP status line has answered nothing."""
+    numbers = [n for n in range(1, 251) if n != 5]
+
+    report = _tracker(tmp_path, "#999", numbers, newest=250, broken=(5, "unreachable"))
+
+    assert report["tracker_checked"] is False
+    assert _findings(report, "tracker") == []
+
+
+def _load_checker() -> ModuleType:
+    """Import the checker as a module, for what only a controlled clock can pin."""
+    sys.path.insert(0, str(_SCRIPT.parent))
+    spec = importlib.util.spec_from_file_location("check_citations", _SCRIPT)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_CHECKER = _load_checker()
+
+
+class _Clock:
+    """A ``time`` stand-in whose only reading is the one the test moves."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        """Return the current reading."""
+        return self.now
+
+
+def test_the_whole_read_shares_one_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#2000's budget is the wall clock of the read, not of each call within it.
+
+    Both halves are asserted here because neither is visible to a test driving
+    the script as a subprocess: that every call is given only what is *left* of
+    the budget, and that once none of it is left no further call is made. A
+    per-call timeout would leave the first assertion's list flat, and dropping
+    the expiry check would add a fifth entry to it.
+
+    The clock is advanced by a quarter of the budget per call, taken from the
+    first timeout the read asks for, so the arithmetic follows the constant
+    rather than restating it.
+    """
+    clock = _Clock()
+    timeouts: list[float] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        timeout = kwargs["timeout"]
+        assert isinstance(timeout, float)
+        timeouts.append(timeout)
+        clock.now += timeouts[0] / 4
+        return subprocess.CompletedProcess(argv, 0, "2154\n", "")
+
+    monkeypatch.setattr(_CHECKER, "time", clock)
+    monkeypatch.setattr(_CHECKER.subprocess, "run", fake_run)
+
+    assert _CHECKER.fetch_tracker_numbers(Path()) is None
+
+    budget = timeouts[0]
+    assert timeouts == pytest.approx([budget, budget * 0.75, budget * 0.5, budget * 0.25])
+
+
+def test_more_gaps_than_the_cap_are_refused_without_spending_a_lookup(tmp_path: Path) -> None:
+    """Past the cap the read is truncated, not gappy, and lookups would be waste."""
+    numbers = [n for n in range(1, 251) if not 100 <= n < 170]
+
+    report = _tracker(tmp_path, "#999", numbers, newest=250)
+
+    assert report["tracker_checked"] is False
+    assert _findings(report, "tracker") == []
+    assert _asked(tmp_path, "lookups.log") == []
 
 
 def test_a_page_that_fails_makes_the_whole_read_unevaluable(tmp_path: Path) -> None:
-    report = _tracker(tmp_path, "#999", list(range(1, 251)), broken_page=(2, "exit"))
+    report = _tracker(tmp_path, "#999", list(range(1, 251)), broken=(2, "exit"))
 
     assert report["tracker_checked"] is False
     assert _findings(report, "tracker") == []
@@ -582,7 +774,7 @@ def test_a_page_that_fails_makes_the_whole_read_unevaluable(tmp_path: Path) -> N
 
 def test_a_page_that_answers_with_nonsense_makes_the_read_unevaluable(tmp_path: Path) -> None:
     """An unparsable page is not filtered down to the digits it happens to hold."""
-    report = _tracker(tmp_path, "#999", list(range(1, 251)), broken_page=(2, "garbage"))
+    report = _tracker(tmp_path, "#999", list(range(1, 251)), broken=(2, "garbage"))
 
     assert report["tracker_checked"] is False
     assert _findings(report, "tracker") == []
@@ -599,16 +791,6 @@ def test_a_read_that_never_reaches_number_one_is_unevaluable(tmp_path: Path) -> 
 def test_a_read_topping_out_below_the_newest_number_is_unevaluable(tmp_path: Path) -> None:
     """The completeness test comes from a separate call, not from the read itself."""
     report = _tracker(tmp_path, "#999", list(range(1, 201)), newest=250)
-
-    assert report["tracker_checked"] is False
-    assert _findings(report, "tracker") == []
-
-
-def test_a_read_short_by_more_than_the_tolerance_is_unevaluable(tmp_path: Path) -> None:
-    """Reaching both ends is not enough when the middle is missing."""
-    numbers = [1, *range(101, 251)]
-
-    report = _tracker(tmp_path, "#999", numbers, newest=250)
 
     assert report["tracker_checked"] is False
     assert _findings(report, "tracker") == []
