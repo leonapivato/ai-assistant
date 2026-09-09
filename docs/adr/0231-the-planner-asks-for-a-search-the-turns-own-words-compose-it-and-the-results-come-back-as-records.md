@@ -1,7 +1,51 @@
 # 231. The planner asks for a search, the turn's own words compose it, and the results come back as records
 
-- Status: Partially superseded by ADR-0235 (§9's second clause, in its second limb alone: a recorded `CONFIRM` on a `WEB_SEARCH` decision may be read from the trail and offered to a surface for the establishing act, as history and never as outstanding work; the limb's two siblings bind entire, so no lane resumes such a decision or treats it as outstanding work, and §9's first, third, fourth and fifth clauses, §19's entries and every other section of this ADR stand entire) and ADR-0238 (§3's argument-is-the-turn's-own-utterance clause, §4's first and second clauses, §12's second and third clauses, and §13's closure of `SearchDisposition` at exactly fifteen members in that count alone (the enumeration becomes sixteen; its members, their values, its injective mapping, its no-message rule and its exclusion of `SearchRefusal.NO_RESULT` all stand) — the composer's one positional-only parameter becomes a `SearchSupply`, which at a destination whose recorded trust is `USER_CHOSEN` may carry memory records, this conversation's episodes and its own prior results, so a search result may reach a later search request and a second search in a conversation that has read one may be ruled `ALLOW`; §3's one-parameter, one-member, no-store-seam-dependency and `planning`/`ModelProvider` clauses stand entire, the utterance-only content property still holds at every destination whose trust reads `UNCHOSEN`, §12's first and fourth clauses stand, and §1, §2, §5–§11, §13–§21 are untouched)
+- Status: Partially superseded by ADR-0235 (§9's second clause, in its second limb alone: a recorded `CONFIRM` on a `WEB_SEARCH` decision may be read from the trail and offered to a surface for the establishing act, as history and never as outstanding work; the limb's two siblings bind entire, so no lane resumes such a decision or treats it as outstanding work, and §9's first, third, fourth and fifth clauses, §19's entries and every other section of this ADR stand entire) and ADR-0238 (§3's argument-is-the-turn's-own-utterance clause, §4's first and second clauses, §12's second and third clauses, and §13's closure of `SearchDisposition` at exactly fifteen members in that count alone (the enumeration becomes sixteen; its members, their values, its injective mapping, its no-message rule and its exclusion of `SearchRefusal.NO_RESULT` all stand) — the composer's one positional-only parameter becomes a `SearchSupply`, which at a destination whose recorded trust is `USER_CHOSEN` may carry memory records, this conversation's episodes and its own prior results, so a search result may reach a later search request and a second search in a conversation that has read one may be ruled `ALLOW`; §3's one-parameter, one-member, no-store-seam-dependency and `planning`/`ModelProvider` clauses stand entire, the utterance-only content property still holds at every destination whose trust reads `UNCHOSEN`, §12's first and fourth clauses stand, and §1, §2, §5–§11, §13–§21 are untouched) and ADR-0241 (two scopes of §17 and nothing else in this ADR: the exact-signature declaration of `search`, which gains one keyword-only `timeout: timedelta` while `call` stays positional-only, `request`'s signature is untouched and the three-member closure and the no-store-no-supply-no-policy clause bind verbatim; and the closure of `SearchRefusal` at exactly six members in that count alone (the enumeration becomes seven; the six members, their values, the added-to-and-never-renamed rule and the raises-for-no-source-reason posture all stand). §5's four-field count is not moved — it is scoped to what this ADR adds — and §13's disposition count is not recorded against again, ADR-0238 having already superseded it in that count alone)
 - Date: 2026-09-04
+- **Partially superseded: 2026-09-09 by ADR-0241 — two scopes of §17, and nothing
+  else in this ADR.** The owner amended milestone 31 on `track:planning`'s live record
+  (#1908) on 2026-09-09 with an obligation (#2167) to *"decide how the deadline reaches
+  the search contract"*, and ADR-0238 §16 named that decision as what fires its own
+  deferral of an elapsed-time bound. ADR-0241 is that ADR.
+
+  **§17's declared signature for `search`.** §17 declares this Protocol *"with exactly
+  three members and no more, declared with exactly these signatures"* and gives
+  `async def search(self, call: ToolCall, /) -> SearchOutcome: ...`. ADR-0241 §1 adds one
+  **keyword-only** parameter, `timeout: timedelta`, required and with no default, so that
+  the bound a search runs under is declared by its caller and the contract has no spelling
+  for "unbounded". A reader holding only this ADR would refuse that parameter and would
+  build the suite case that exists today — each acting member takes *"no keyword
+  parameters"* — which is ADR-0070 §1's test coming out on the supersession side.
+  **The scope is that one signature.** The three-member closure stands, `request`'s
+  signature is untouched, `call` stays positional-only and both **value** parameters stay
+  positional-only, the `name` clauses stand, and §17's clause that *"No member of this
+  Protocol takes a `MemoryRecord`, a supply, a `MemoryStore`, an `ActionPolicy`, an
+  `AuditTrail` or a `RecipientGrants`"* binds verbatim — a duration is none of the six,
+  and ADR-0241 §1's last clause forbids widening it into anything that is.
+
+  **§17's closure of `SearchRefusal` at exactly six members, in that count alone.**
+  ADR-0241 §4 adds `DEADLINE_EXPIRED`, so the enumeration becomes **seven**, and narrows
+  `TRANSPORT_FAILED`'s stated scope to conditions in which this system's own reach failed
+  and nothing was disclosed — an expired deadline stops being one of them, because the two
+  differ in what the system may assert about whether it disclosed anything, and a single
+  member cannot map to `FAILED` for a refused connection and `INDETERMINATE` for an expiry.
+  The six members, their values, their lower-cased spellings, the
+  added-to-and-never-renamed rule and the raise-for-no-source-reason posture all stand
+  entire, and ADR-0241 §4's member is returned and never raised.
+
+  **What is *not* moved, and each is stated because a reader would look for it.** §5's
+  *"This decision adds exactly four `Settings` fields"* is scoped to what this ADR adds, so
+  ADR-0241 §3's `search_call_deadline` is a stacked addition under ADR-0082 §1 and no
+  record is owed there. §13's closure of `SearchDisposition` at fifteen was already
+  superseded by ADR-0238 in that count alone, so the live statement of that count is
+  ADR-0238 §11's and ADR-0241 records against **that**; a second pointer here would say the
+  same thing twice. §6's three checks and their order, §9's ruling chain, §10's minting,
+  §11's servicing order and budget, §13's audit clauses, §15's spend restraint and §19's
+  entries are relied upon as written. The record is made in ADR-0241's own change under
+  ADR-0082 §7 — §1's condition is that the superseding ADR *exists*, not that it is
+  ratified. This line already carries the leading token, so the pair is appended under
+  ADR-0070 §4's accumulation rule and no existing pair is dropped or rewritten.
+  Refs #1908, #2167, #2178.
 - **Partially superseded: 2026-09-05 by ADR-0238 — §3's utterance-only clause,
   §4's first and second clauses, §12's second and third clauses, and §13's closure of
   `SearchDisposition` at exactly fifteen members. Those six, and nothing else in this
