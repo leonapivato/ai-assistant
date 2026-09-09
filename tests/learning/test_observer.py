@@ -20,6 +20,7 @@ import pytest
 import structlog
 from observer_contract import (
     GatedObservation,
+    LabellingObservation,
     ObserverContract,
     assert_conforms,
     batch_of,
@@ -84,8 +85,36 @@ def _belief(
     }
 
 
-def _envelope(*beliefs: dict[str, Any]) -> str:
-    return json.dumps({"beliefs": list(beliefs)})
+def _envelope(*beliefs: dict[str, Any], episodes: list[dict[str, Any]] | None = None) -> str:
+    """The reply object, with ADR-0239 §1's optional second key where a case wants it."""
+    envelope: dict[str, Any] = {"beliefs": list(beliefs)}
+    if episodes is not None:
+        envelope["episodes"] = episodes
+    return json.dumps(envelope)
+
+
+def _filed(label: str, **axes: list[str]) -> dict[str, Any]:
+    """One ``episodes`` entry, naming the episode by the label the prompt gave it."""
+    return {"episode": label, **axes}
+
+
+def _labelling_reply(messages: Sequence[Message]) -> str:
+    """:func:`_eager_reply`'s beliefs, plus one usable labelling per labelled episode.
+
+    Reads the labels back out of the prompt this observer built, so it scales with
+    whatever batch the conformance suite hands the subject.
+    """
+    labels = _LABEL.findall(messages[-1].content)
+    beliefs = [
+        _belief(evidence=[label], content=f"a belief drawn from {label}") for label in labels
+    ]
+    return _envelope(
+        *beliefs,
+        episodes=[
+            _filed(label, topics=[f"topic {index}"], participants=["alex"])
+            for index, label in enumerate(labels)
+        ],
+    )
 
 
 def _observer(
@@ -191,6 +220,10 @@ class TestModelBackedObserverContract(ObserverContract):
             episodes=batch_of(2),
             gate=gate,
         )
+
+    def labelling_observation(self) -> LabellingObservation:
+        subject, _ = _observer(_labelling_reply)
+        return LabellingObservation(observer=subject, episodes=batch_of(2))
 
 
 # --- the payload and the citations (ADR-0077 §3, §5) ------------------------
@@ -2606,3 +2639,336 @@ async def test_the_prompt_asks_for_the_flag_and_states_what_it_does() -> None:
     assert "write the literal `true` to flag a belief" in system
     assert "still said back where the user alone is listening" in system
     assert "never make one more speakable" in system
+
+
+# --- what the pass says about the episodes it read (ADR-0239) ---------------
+
+
+async def test_the_labelling_rides_the_envelope_and_costs_no_second_call() -> None:
+    """§1: one optional key of the response this producer already parses.
+
+    No second model call, no second round trip, no second provider dependency and
+    no second walk — the whole ground on which ADR-0239 §1 puts the job on this
+    producer rather than on a labelling stage of its own. Asserted on the provider's
+    own call count, because that is the only place a second call would show.
+    """
+    batch = [episode("e0"), episode("e1")]
+    observer, provider = _observer(
+        _envelope(
+            _belief(evidence=["E1"]),
+            episodes=[
+                _filed("E1", topics=["house renovation"], participants=["alex"]),
+                _filed("E2", topics=["cars"]),
+            ],
+        )
+    )
+
+    outcome = await observer.observe(batch)
+
+    assert len(provider.calls) == 1
+    assert [
+        (entry.episode_id, entry.topics, entry.participants) for entry in outcome.labellings
+    ] == [
+        ("e0", ("house renovation",), ("alex",)),
+        ("e1", ("cars",), ()),
+    ]
+    assert_conforms(outcome, batch)
+
+
+async def test_an_entry_naming_a_label_outside_the_batch_is_ignored() -> None:
+    """§1: the ids are ours, and none is accepted from the model.
+
+    The prompt labels each episode and the model names labels; this module maps
+    every label back to the id of the episode it actually read, exactly as it does
+    for a citation (ADR-0047 §2). A label naming nothing in this batch names no
+    episode at all, so its entry is dropped and every other one still stands — a
+    model that can write an id can write one for an episode it never saw, and the
+    destination of a labelling write would then be a record nobody selected.
+    """
+    batch = [episode("e0")]
+    observer, _ = _observer(
+        _envelope(
+            _belief(evidence=["E1"]),
+            episodes=[
+                _filed("E9", topics=["invented"]),
+                _filed("e0", topics=["the store id itself"]),
+                _filed("E1", topics=["health"]),
+            ],
+        )
+    )
+
+    outcome = await observer.observe(batch)
+
+    assert [(entry.episode_id, entry.topics) for entry in outcome.labellings] == [
+        ("e0", ("health",))
+    ]
+
+
+@pytest.mark.parametrize(
+    "topics",
+    [
+        pytest.param(["health", "sleep", "money", "cars", "food"], id="past-the-bound"),
+        pytest.param(["Health"], id="not-casefolded"),
+        pytest.param(["health  care"], id="two-consecutive-spaces"),
+        pytest.param([" health"], id="a-leading-space"),
+        pytest.param(["health", "health"], id="a-repeated-label"),
+        pytest.param(["health", 7], id="not-all-strings"),
+        pytest.param("health", id="not-a-list"),
+    ],
+)
+async def test_an_unusable_axis_is_ignored_and_the_other_axis_stands(topics: object) -> None:
+    """§5: the judgement is **per axis**, on observable properties of the value alone.
+
+    ADR-0213 §4's rule is stated for a one-axis entry, where "the entry" and "the
+    axis" are the same object; a labelling has two, and ADR-0213 §14's third clause
+    makes them never read for each other. So a malformed topic is no evidence at
+    all about the participant list beside it, and discarding a usable list over it
+    would lose information for nothing. The offending value is ignored — never
+    repaired, never truncated to the bound and never inferred locally.
+    """
+    batch = [episode("e0")]
+    observer, _ = _observer(
+        _envelope(
+            _belief(evidence=["E1"]),
+            episodes=[{"episode": "E1", "topics": topics, "participants": ["alex"]}],
+        )
+    )
+
+    outcome = await observer.observe(batch)
+
+    assert [(entry.topics, entry.participants) for entry in outcome.labellings] == [((), ("alex",))]
+
+
+async def test_a_response_naming_one_episode_twice_yields_no_labels_for_it() -> None:
+    """§2: both entries are ignored, and every other episode is unaffected.
+
+    Not merged, not reconciled and not resolved by response order — "the first" is a
+    property of a response nobody guaranteed the order of, so a rule preferring it
+    would make the outcome depend on something no clause fixes. The pair below is
+    the same response with the two entries swapped, and both yield the same answer.
+    """
+    batch = [episode("e0"), episode("e1")]
+    entries = [
+        _filed("E1", topics=["health"]),
+        _filed("E2", topics=["cars"]),
+        _filed("E1", topics=["money"]),
+    ]
+    forwards, _ = _observer(_envelope(_belief(evidence=["E1"]), episodes=entries))
+    backwards, _ = _observer(_envelope(_belief(evidence=["E1"]), episodes=list(reversed(entries))))
+
+    first = await forwards.observe(batch)
+    second = await backwards.observe(batch)
+
+    assert [(entry.episode_id, entry.topics) for entry in first.labellings] == [("e1", ("cars",))]
+    assert [(entry.episode_id, entry.topics) for entry in second.labellings] == [("e1", ("cars",))]
+
+
+async def test_an_episode_named_twice_is_dropped_even_where_one_entry_is_unusable() -> None:
+    """The count is over the entries that **resolve**, before either axis is judged.
+
+    An episode this producer was handed and that the response named twice is
+    ambiguous however bad either entry was, so the axis judgement is not the thing
+    that decides it. Reading the count after the axes had been emptied would let a
+    malformed duplicate quietly promote its usable twin to the winner.
+    """
+    batch = [episode("e0")]
+    observer, _ = _observer(
+        _envelope(
+            _belief(evidence=["E1"]),
+            episodes=[_filed("E1", topics=["Health"]), _filed("E1", topics=["money"])],
+        )
+    )
+
+    outcome = await observer.observe(batch)
+
+    assert outcome.labellings == ()
+
+
+async def test_an_entry_admissible_on_neither_axis_leaves_the_episode_unlabelled() -> None:
+    """A normal outcome, and not an error or a degradation (§5)."""
+    batch = [episode("e0")]
+    observer, _ = _observer(
+        _envelope(
+            _belief(evidence=["E1"]),
+            episodes=[_filed("E1", topics=["Health"], participants=["Alex"])],
+        )
+    )
+
+    outcome = await observer.observe(batch)
+
+    assert outcome.labellings == ()
+    assert outcome.proposals
+
+
+@pytest.mark.parametrize(
+    "episodes",
+    [
+        pytest.param(None, id="the-key-is-absent"),
+        pytest.param([], id="an-empty-list"),
+        pytest.param("E1", id="not-a-list"),
+        pytest.param([["E1"], 7, None], id="entries-that-are-not-objects"),
+        pytest.param([{"topics": ["health"]}], id="an-entry-naming-no-episode"),
+        pytest.param([{"episode": 1, "topics": ["health"]}], id="a-label-that-is-not-a-string"),
+    ],
+)
+async def test_a_response_with_no_usable_labelling_key_is_a_normal_outcome(
+    episodes: object,
+) -> None:
+    """§5: it leaves the episodes unlabelled, and discards nothing.
+
+    Neither an error, nor degradation, nor a reason to discard the proposals beside
+    it: a labelling is strictly less load-bearing than the beliefs of the same pass,
+    and trading one for the other is the shape ADR-0213 §4 already refuses in its
+    own currency.
+    """
+    batch = [episode("e0")]
+    reply = json.dumps({"beliefs": [_belief(evidence=["E1"])], "episodes": episodes})
+    observer, _ = _observer(reply)
+
+    outcome = await observer.observe(batch)
+
+    assert outcome.labellings == ()
+    assert len(outcome.proposals) == 1
+    assert outcome.discarded_unusable == 0
+    assert outcome.discarded_over_limit == 0
+
+
+async def test_no_counter_moves_for_anything_on_the_labelling_axis() -> None:
+    """§2 and §5: the two counts stay exhaustive and disjoint over the proposals.
+
+    One response, five labelling entries and one belief: an entry outside the
+    batch, an entry naming an episode twice (both halves), an entry whose topics
+    are unusable and an entry that is usable. Not one of them is an entry of the
+    *proposal* population, so ``len(proposals) + discarded_unusable +
+    discarded_over_limit`` is still 1 — the invariant ADR-0077 §4 states over what
+    the model emitted, which a labelling counter would have broken by counting over
+    a different population.
+    """
+    batch = [episode("e0"), episode("e1")]
+    observer, _ = _observer(
+        _envelope(
+            _belief(evidence=["E1"]),
+            episodes=[
+                _filed("E7", topics=["outside the batch"]),
+                _filed("E1", topics=["health"]),
+                _filed("E1", topics=["money"]),
+                _filed("E2", topics=["Bad Case"]),
+                _filed("E2", participants=["alex"]),
+            ],
+        )
+    )
+
+    outcome = await observer.observe(batch)
+
+    assert len(outcome.proposals) + outcome.discarded_unusable + outcome.discarded_over_limit == 1
+    assert outcome.discarded_unusable == 0
+    assert outcome.discarded_over_limit == 0
+
+
+async def test_a_labelling_survives_a_response_whose_beliefs_list_is_missing() -> None:
+    """The two keys are read independently, and one cannot cost the other (§5).
+
+    An envelope carrying no ``beliefs`` list is ADR-0077 §4's synthetic single
+    unusable entry and still counts as exactly one — but the episodes it did
+    usably name are filed all the same, because §5's per-object judgement is about
+    the labelling and the malformed half is about the proposals.
+    """
+    batch = [episode("e0")]
+    observer, _ = _observer(
+        json.dumps({"episodes": [_filed("E1", topics=["health"], participants=["alex"])]})
+    )
+
+    outcome = await observer.observe(batch)
+
+    assert outcome.discarded_unusable == 1
+    assert outcome.proposals == ()
+    assert [(entry.episode_id, entry.topics) for entry in outcome.labellings] == [
+        ("e0", ("health",))
+    ]
+
+
+async def test_a_provider_failure_leaves_every_episode_unlabelled() -> None:
+    """§1: a provider outage yields **no** labels, never a wrong one.
+
+    A ``ModelError`` ends the pass rather than degrading it (ADR-0077 §3), so
+    there is no outcome at all and every episode of that batch stays exactly as
+    capture wrote it — its content, its instant and its two empty axes.
+    """
+
+    def _fail(messages: Sequence[Message]) -> str:
+        del messages
+        msg = "the provider is down"
+        raise ModelError(msg)
+
+    batch = [episode("e0")]
+    observer, _ = _observer(_fail)
+
+    with pytest.raises(ModelError):
+        await observer.observe(batch)
+
+    assert batch[0].topics == ()
+    assert batch[0].participants == ()
+
+
+async def test_the_prompt_asks_for_the_labelling_and_excludes_the_owner_and_the_assistant() -> None:
+    """§4: the owner clause binds the **ask**, and the prompt is where it is stated.
+
+    This system holds no user identity by decision (ADR-0036 §3, ADR-0097 §1) and
+    §5 supplies the producer no vocabulary, so a canonical label naming the owner
+    is byte-identical to one naming a stranger with that name and a clause obliging
+    a refusal would oblige an unobservable one. The obligation therefore sits where
+    it can be discharged — on what the producer asks for — and this is the
+    assertion that it was.
+    """
+    observer, provider = _observer(_envelope())
+
+    await observer.observe([episode("e0")])
+
+    prompt = provider.calls[-1].messages[0].content
+    assert "`episodes`" in prompt
+    assert "NEVER participants" in prompt
+    assert "at most FOUR names under `participants`" in prompt
+
+
+async def test_a_participant_label_naming_the_owner_is_written_like_any_other() -> None:
+    """§4: no name list, no heuristic, no model call and no identity check.
+
+    Pinned as the honest behaviour rather than as a refusal, which ADR-0239 §10
+    asks for in terms: a test asserting the label is *refused* would pin a rule
+    this ADR does not make. The residue is stated in §11 with the person registry
+    that is the only instrument that could close it; a lane closing it with a name
+    list would have built a second identity the corpus decided not to have.
+    """
+    batch = [episode("e0")]
+    observer, _ = _observer(
+        _envelope(
+            _belief(evidence=["E1"]), episodes=[_filed("E1", participants=["the user", "alex"])]
+        )
+    )
+
+    outcome = await observer.observe(batch)
+
+    assert [entry.participants for entry in outcome.labellings] == [("alex", "the user")]
+
+
+async def test_the_labelling_payload_is_still_the_batch_and_nothing_else() -> None:
+    """§5: no vocabulary is supplied to the observer, on either axis.
+
+    No belief, label derived from a belief, profile, facet, plan or preference
+    enters an observation prompt on ADR-0239's authority: ADR-0213 §5's last clause
+    and ADR-0077 §3's "the payload is the batch and nothing else" bind unchanged,
+    and this ADR is not the instrument that changes them. So the labelling
+    instruction names no example word the store holds, and the user turn is still
+    the batch alone.
+    """
+    batch = [episode("e0", content="the user talked about the renovation")]
+    observer, provider = _observer(_envelope())
+
+    await observer.observe(batch)
+
+    system, user = provider.calls[-1].messages
+    assert user.content.count("[E") == 1
+    assert "the user talked about the renovation" in user.content
+    # The only filing words the prompt states are its own illustrations, which are
+    # the same three ADR-0213 §4's belief instruction already carried.
+    assert system.content.count('"<filing word>"') == 2
