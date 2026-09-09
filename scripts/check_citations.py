@@ -1208,7 +1208,9 @@ def fetch_tracker_numbers(root: Path) -> frozenset[int] | None:
     is exactly what lets a small truncation through as a set of dangling
     citations. ``_TRACKER_MAX_GAPS`` is not that threshold: it is the bound on
     how many such lookups may be spent before the read is abandoned as truncated
-    rather than merely gappy.
+    rather than merely gappy — and it is applied by *counting* the survivors
+    rather than by listing them, so that a wild ``newest`` from a broken answer
+    is refused instead of allocated for.
 
     Returns ``None`` — unevaluable, therefore silent (ADR-0088 §6) — when ``gh``
     is missing, unauthenticated, a call fails or is unparsable, the whole read
@@ -1239,9 +1241,15 @@ def fetch_tracker_numbers(root: Path) -> frozenset[int] | None:
     numbers = _walk_tracker_pages(root, highest, deadline)
     if numbers is None or 1 not in numbers or max(numbers) != highest:
         return None
-    survivors = sorted(set(range(1, highest + 1)) - numbers)
-    if len(survivors) > _TRACKER_MAX_GAPS:
+    # Counted before the range is built, never after: ``highest`` is whatever
+    # GitHub said, and a two-number answer naming a billion would otherwise
+    # allocate a billion-element set on the way to discovering it is truncated.
+    # Past the cap nothing is built at all; under it the range is bounded by what
+    # was actually read, since at most ``_TRACKER_MAX_GAPS`` of it is missing.
+    within = sum(1 for number in numbers if 1 <= number <= highest)
+    if highest - within > _TRACKER_MAX_GAPS:
         return None
+    survivors = sorted(set(range(1, highest + 1)) - numbers)
     for survivor in survivors:
         exists = _gh_issue_exists(root, survivor, deadline)
         if exists is None:

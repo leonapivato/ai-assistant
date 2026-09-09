@@ -696,6 +696,20 @@ def test_a_gap_that_cannot_be_settled_makes_the_read_unevaluable(tmp_path: Path)
     assert _findings(report, "tracker") == []
 
 
+def test_a_wild_newest_number_is_refused_rather_than_allocated_for(tmp_path: Path) -> None:
+    """The cap is counted, not listed: nothing here builds a range of a billion.
+
+    ``newest`` is whatever GitHub said. A two-number answer that reaches ``1``
+    and tops out at that number passes both span tests, so the survivor cap is
+    the only thing between it and a set with a billion elements in it.
+    """
+    report = _tracker(tmp_path, "#999", [1, 1_000_000_000], newest=1_000_000_000)
+
+    assert report["tracker_checked"] is False
+    assert _findings(report, "tracker") == []
+    assert _asked(tmp_path, "lookups.log") == []
+
+
 def _load_checker() -> ModuleType:
     """Import the checker as a module, for what only a controlled clock can pin."""
     sys.path.insert(0, str(_SCRIPT.parent))
