@@ -120,9 +120,11 @@ if TYPE_CHECKING:
 _TRUST_VARIABLE: Final = "SSL_CERT_FILE"
 
 
-#: What this origin serves and what it refuses to serve. ADR-0231 §5's request
-#: target for the provider, spelled here so that a case can say the searcher asked
-#: for the path the integration declares rather than for whatever arrived.
+#: The provider's request path (``web_search._PROVIDER_PATH``). This origin serves
+#: whatever target it is asked for and **records** it, rather than routing on it: a
+#: fixture that answered only this path would turn a searcher asking for the wrong
+#: one into a transport failure, which is the least legible way to fail. The cases
+#: assert the recorded target against this instead.
 SEARCH_PATH: Final = "/res/v1/web/search"
 
 #: The end of a request's field section (RFC 9112 §2.1), which is where this origin
@@ -134,11 +136,6 @@ _END_OF_FIELDS: Final = b"\r\n\r\n"
 #: refuses a line that is not three, rather than indexing into whatever arrived.
 _REQUEST_LINE_FIELDS: Final = 3
 
-#: A ceiling on the request head this origin will read, so a client that sent an
-#: endless field section is refused rather than buffered. Generous: the request
-#: under test is a status line, four fields and a credential.
-_REQUEST_CEILING: Final = 64 * 1024
-
 #: How long the origin waits for a client's request before treating the connection
 #: as one that will not speak. Only reached by a client that opened and said
 #: nothing, which no case here arranges.
@@ -149,9 +146,9 @@ _REQUEST_WAIT: Final = timedelta(seconds=30)
 #: with a long life is one that can outlive the directory it was written to.
 _VALIDITY: Final = timedelta(hours=1)
 
-#: The clock skew the certificate tolerates. A self-signed certificate minted and
-#: verified in the same second by the same machine needs none in principle; a
-#: minute of slack costs nothing and removes an unreproducible failure.
+#: The clock skew the certificate tolerates. A certificate minted and verified in
+#: the same second by the same machine needs none in principle; a few minutes of
+#: backdating costs nothing and removes an unreproducible failure.
 _BACKDATE: Final = timedelta(minutes=5)
 
 #: What the origin answers with where a case names no results of its own. One
@@ -231,6 +228,10 @@ class AnsweringOrigin:
             configured with, for an arm that drives the whole servicing path.
         certificate: The anchor a client has to trust to reach it, which is what
             ``SSL_CERT_FILE`` names.
+        connections: How many connections were accepted. Counted rather than
+            inferred from ``requests``, so that the two together say what a pooled
+            transport would look like: ADR-0191 §3 opens a channel per call, and an
+            implementation that pooled would show two requests over one connection.
         requests: The request targets read, in order, so a case can say the
             searcher asked for the provider's path and asked once per call.
         answered: How many of them were answered from the script.
@@ -242,19 +243,10 @@ class AnsweringOrigin:
     endpoint: TransportEndpoint
     origin: str
     certificate: Path
+    connections: int = 0
     requests: list[str] = field(default_factory=list)
     answered: int = 0
     exhausted: asyncio.Event = field(default_factory=asyncio.Event)
-
-    @property
-    def connections(self) -> int:
-        """How many requests reached the origin over all its connections.
-
-        Returns:
-            The count, which is one per connection: this origin reads one request
-            per connection and never a second.
-        """
-        return len(self.requests)
 
 
 def _answer(results: Sequence[Mapping[str, Any]], *, date: str | None) -> bytes:
@@ -285,15 +277,15 @@ async def _read_request(reader: asyncio.StreamReader) -> str | None:
     Returns:
         The request target from the request line, or ``None`` where the client sent
         nothing this origin could read as a request — a connection opened and
-        dropped, a head past :data:`_REQUEST_CEILING`, or a client that said
-        nothing for :data:`_REQUEST_WAIT`.
+        dropped, a request line this origin cannot read, a head past the stream's
+        own limit (``asyncio``'s 64 KiB, which arrives as ``LimitOverrunError`` and
+        is what bounds the buffering here), or a client that said nothing for
+        :data:`_REQUEST_WAIT`.
     """
     try:
         async with asyncio.timeout(_REQUEST_WAIT.total_seconds()):
             head = await reader.readuntil(_END_OF_FIELDS)
     except TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, OSError:
-        return None
-    if len(head) > _REQUEST_CEILING:
         return None
     line = head.split(b"\r\n", 1)[0].decode("latin-1")
     fields = line.split(" ")
@@ -350,6 +342,7 @@ async def answering_origin(
                 ``Server.wait_closed`` has a handler to wait on that finishes.
         """
         assert origin is not None, "the handler cannot run before the yield below"
+        origin.connections += 1
         target = await _read_request(reader)
         if target is None:
             with suppress(OSError):
