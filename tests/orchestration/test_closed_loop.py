@@ -18,9 +18,10 @@ assert one property in two places rather than the same property at two levels.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, final
 
 import pytest
 import structlog
@@ -28,6 +29,7 @@ from test_engine import EGRESS_SCHEMA, SEARCH_DESTINATIONS, bound_binder, tool
 from test_loop_search import (
     _ASK,
     _DISTINCTIVE,
+    _EXPIRING,
     _NOW,
     _RESULT,
     _REVISING,
@@ -62,6 +64,8 @@ from ai_assistant.core.types import (
     PlacementReach,
     PlacementSetter,
     Provenance,
+    SearchOutcome,
+    SearchRefusal,
     SemanticMemory,
     SpanCoverage,
 )
@@ -1352,3 +1356,130 @@ async def test_the_whole_remaining_allowance_reads_the_unlowered_flag_and_the_ne
         "and every read landing after the fold commits sees the false — the boundary §8 "
         "states, which is over the read's instant and not over the admission's"
     )
+
+
+# --------------------------------------------------------------------------- #
+# ADR-0241 §12's Arm 4b — the within-turn arm, where retained results do exist  #
+# --------------------------------------------------------------------------- #
+
+
+@final
+class _ExpiringOnTheSecondServicing:
+    """A conforming ``WebSearcher`` whose *second* call outlives its bound.
+
+    ADR-0241 §12's Arm 4b needs one turn on which a first servicing mints records and
+    a plan revision's second servicing expires, and neither the canonical fake's
+    scripted refusals nor its ``suspend_next`` can express "the second one" from
+    outside a turn: the two servicings compose the same query, and the suspension is
+    armed for whichever call arrives next.
+
+    It **honours the bound** on the call it stalls — waiting past it and answering with
+    the classification — rather than returning the member immediately, so what the arm
+    drives is an expiry and not a label.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        """Delegate to ``inner``, expiring from the second call onward.
+
+        Args:
+            inner: The searcher this stands in front of, wrappers included, so the
+                binder, the policy and the trail see the subject they normally do.
+        """
+        self._inner = inner
+        self.calls = 0
+
+    @property
+    def name(self) -> str:
+        """The configured source this searcher serves."""
+        name: str = self._inner.name
+        return name
+
+    async def request(self, query: str, /) -> Any:
+        """Propose the search, exactly as the searcher it wraps does."""
+        return await self._inner.request(query)
+
+    async def search(self, call: Any, /, *, timeout: Any) -> Any:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, §2)
+        """Answer the first call, and let the bound expire on every one after it.
+
+        Args:
+            call: The authorised call.
+            timeout: The caller's bound, which the second call waits past.
+
+        Returns:
+            The inner searcher's outcome on the first call, and ``DEADLINE_EXPIRED``
+            after that (ADR-0241 §4 — returned, never raised).
+        """
+        self.calls += 1
+        if self.calls == 1:
+            return await self._inner.search(call, timeout=timeout)
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(timeout.total_seconds()):
+                await asyncio.sleep(timeout.total_seconds() * 100)
+        return SearchOutcome(refusal=SearchRefusal.DEADLINE_EXPIRED)
+
+
+async def test_a_second_servicing_that_expires_keeps_the_firsts_records() -> None:
+    """ADR-0241 §12's **Arm 4b**: the supply is monotone under an expiry.
+
+    On one turn of a ``USER_CHOSEN`` conversation a first servicing mints records and a
+    plan revision's second servicing expires. The reply answers from the first
+    servicing's records — ADR-0238 §2's third population, **within a turn** — because
+    an expired search returns no record rather than discarding one (ADR-0228 §7).
+
+    "This is the arm that shows the supply is monotone under an expiry, which the
+    cross-turn arm cannot show": across turns ADR-0231 §16 retains nothing at all, so
+    a two-turn arm would be asserting the absence of retention rather than its
+    presence.
+
+    **The interruption account the reply owes is not asserted here**, and that is
+    ADR-0241 §10 read against its sibling: ADR-0242 §7 computes the carrier at this
+    same site **from the disposition**, and §10 of that ADR puts the rendering in its
+    own implementing lane. What this arm pins is the input — the second servicing's
+    ``deadline_expired`` — and that the first's yield survived it.
+    """
+    searcher = FakeWebSearcher(results=(_RESULT,))
+    wrapped = _ExpiringOnTheSecondServicing(_CostedSearcher(searcher))
+
+    with structlog.testing.capture_logs() as captured:
+        responded = await _loop(
+            planner=_revising(),
+            search=_servicer(searcher=wrapped, granted=True, deadline=_EXPIRING),
+            footing=await _chosen_footing(),
+        ).respond(_ASK, narrow=_bounded(), operation=_REVISING)
+
+    assert wrapped.calls == 2, "`search` was reached on both servicings"
+    assert _serviced(captured, 0)["disposition"] is None, "the first yielded"
+    assert _serviced(captured, 1)["disposition"] == SearchDisposition.DEADLINE_EXPIRED.value, (
+        "and the second's bound expired, which is a disposition of its own (ADR-0241 §4)"
+    )
+    assert responded.turn is not None, "the turn answered rather than degrading"
+    minted = [one for one in responded.turn.memories if _DISTINCTIVE in one.content]
+    assert len(minted) == 1, (
+        "the first servicing's record is still in the supply the reply was composed "
+        "from: an expired search returns no record rather than discarding one"
+    )
+
+
+async def test_an_expired_second_servicing_still_spends_its_admitted_call() -> None:
+    """ADR-0241 §6 across two servicings of one turn, over the durable counter.
+
+    ADR-0238 §15's Arm 6d — "an admitted call is never refunded" — binds a deadline
+    expiry exactly as it binds a refused ruling. Both servicings were admitted, so the
+    conversation's draw is two whatever became of the second, and ADR-0238 §12's "a
+    provider that stalls therefore cannot reach the budget at all" stays true rather
+    than becoming a claim nothing checks.
+    """
+    footing = await _chosen_footing()
+    wrapped = _ExpiringOnTheSecondServicing(_CostedSearcher(FakeWebSearcher(results=(_RESULT,))))
+
+    with structlog.testing.capture_logs() as captured:
+        await _loop(
+            planner=_revising(),
+            search=_servicer(searcher=wrapped, granted=True, deadline=_EXPIRING),
+            footing=footing,
+        ).respond(_ASK, narrow=_bounded(), operation=_REVISING)
+
+    assert [_serviced(captured, index)["calls"] for index in (0, 1)] == [1, 2]
+    draw = await footing.conversations.search_draw(footing.conversation_id)
+    assert draw is not None
+    assert draw.calls == 2, "and no path lowered it on account of the expiry"
