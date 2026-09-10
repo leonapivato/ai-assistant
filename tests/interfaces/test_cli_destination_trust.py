@@ -26,6 +26,7 @@ from typer.testing import CliRunner
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import (
+    ConfigurationError,
     DuplicateDestinationTrustError,
     InvalidDestinationTrustError,
     UntrustableDestinationError,
@@ -598,3 +599,41 @@ def test_the_statement_is_rendered_beside_the_reply_and_never_in_place_of_it(
     assert rendered.index("this turn was not recorded") < rendered.index(
         "assistant trust-destinations"
     )
+
+
+# --- §15 Arm 5: a load-time refusal reaches the user as a configuration fault --
+
+
+async def test_a_configuration_refusal_is_rendered_as_one_and_never_as_a_search_refusal(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """§15 Arm 5: **what this lane owes is the rendering**.
+
+    ADR-0238 §10 raises ``ConfigurationError`` naming the field at ``Settings`` load
+    where ``web_search_cost_per_call`` is configured beside an ADR-0194 period ceiling
+    without ``world_spend_unknown_allowance``; the refusal itself is that decision's and
+    lane B1's. What §15 requires **here** is that the command's error boundary states it
+    as a configuration fault naming the field, at a controlled exit code, and **never**
+    as a search refusal, a :class:`~ai_assistant.core.types.SearchNotServiced` member or
+    a reply.
+    """
+
+    def _refused() -> object:
+        msg = (
+            "invalid configuration: web_search_cost_per_call is set beside a period "
+            "ceiling and world_spend_unknown_allowance is unset"
+        )
+        raise ConfigurationError(msg)
+
+    monkeypatch.setattr(cli, "load_settings", _refused)
+
+    code = await cli._ask("what is the weather", timeout_seconds=1.0, assume_yes=True)
+    rendered = _flat(output.getvalue())
+
+    assert code == 1, "a controlled exit code and never a traceback (ADR-0042 §7)"
+    assert "web_search_cost_per_call" in rendered
+    assert "world_spend_unknown_allowance" in rendered
+    for member in SearchNotServiced:
+        assert member.value not in rendered
+    for forbidden in ("lookup", "assistant trust-destinations", "assistant remember-recipients"):
+        assert forbidden not in rendered
