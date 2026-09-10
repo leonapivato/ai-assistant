@@ -175,7 +175,25 @@ async def test_a_second_search_against_a_stalled_answer_expires_and_leaves_the_f
         assert [record.content for record in answered.records] == [_TRANSCRIBED]
 
         started = asyncio.get_running_loop().time()
-        expired = await _searched(subject, origin=origin.origin, decision_id="d-answering-second")
+        # **The upper bound is a watchdog rather than an assertion, and that is the
+        # only shape that reports.** The regression this case exists to catch is a
+        # cancellation that stops reaching the response read — and against an origin
+        # that holds the connection for as long as the block lives, an assertion
+        # after the call is unreachable: the call never returns, so the run hangs
+        # instead of failing. Nothing else here is bounded — this corpus configures
+        # no per-test timeout, and CI's job has none either — so the bound has to
+        # wrap the await.
+        try:
+            async with asyncio.timeout((_BOUND + _SLACK).total_seconds()):
+                expired = await _searched(
+                    subject, origin=origin.origin, decision_id="d-answering-second"
+                )
+        except TimeoutError:  # pragma: no cover — the failure path this bound exists for
+            pytest.fail(
+                "the stalled search did not return within the bound plus ADR-0241 "
+                "§12's stated slack, so the deadline is no longer reaching the "
+                "response read"
+            )
         elapsed = asyncio.get_running_loop().time() - started
 
         assert origin.exhausted.is_set(), "the second request really was held, not failed"
@@ -185,9 +203,9 @@ async def test_a_second_search_against_a_stalled_answer_expires_and_leaves_the_f
 
     assert expired.refusal is SearchRefusal.DEADLINE_EXPIRED
     assert expired.records == ()
-    assert elapsed < (_BOUND + _SLACK).total_seconds(), (
-        "a search stalled in the response read is terminated within the declared bound"
-    )
+    # The upper bound is the watchdog above; what is left to assert is the *lower*
+    # one, which no watchdog can express — a call that returned early would be
+    # failing for some reason other than the deadline, and would still be inside it.
     assert elapsed >= (_BOUND - _EARLY).total_seconds(), (
         "and it really waited on the stall rather than failing early for another reason"
     )
