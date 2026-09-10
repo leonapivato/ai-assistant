@@ -427,10 +427,9 @@ that.** Context states what
 `status`, `open` or `retired`, written by `scripts/codex-review.sh` from whether
 Codex re-raised the finding. No author verdict appears in it. Putting one of five
 there would misreport the other four as absent, and putting all five there is a
-change to two scripts and to ADR-0025 §4's finding schema. That change is filed as
-an issue rather than taken here, and §7's obligation stands on the pull request
-record in the meantime — which is the surface every other triage verdict has
-always used.
+change to two scripts and to ADR-0025 §4's finding schema. That change is filed as **#2211**
+rather than taken here, and §7's obligation stands on the pull request record in
+the meantime — which is the surface every other triage verdict has always used.
 
 ### 9. The five verdicts, worked
 
@@ -706,6 +705,6 @@ and "Report the review, then mark it ready — on your own judgement",
 §4. The ADR-0082 §1 records on ADR-0020 and ADR-0138 ride with it too, for
 ADR-0136 §7's reason as ADR-0138 §7 restates it: a merged ADR-0243 sitting beside
 an unrecorded ADR-0020 is the window ADR-0082 exists to close. The mechanical carry
-of author verdicts into the published disposition record is filed as an issue and
-is a later lane's. **#2160 and #2164 each keep a pilot deliverable open**, by their
+of author verdicts into the published disposition record is **#2211** and is a
+later lane's. **#2160 and #2164 each keep a pilot deliverable open**, by their
 own terms; this change closes neither issue.
