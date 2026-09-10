@@ -482,3 +482,82 @@ async def test_a_non_conforming_clock_reading_is_the_stages_own_error() -> None:
 
     with pytest.raises(PlanningError, match="non-conforming"):
         await operations.establish_destination_trust("d-1")
+
+
+# --- §9's recovery journey, and the eligibility it states at the predicate's
+#     own strength -----------------------------------------------------------
+
+
+async def test_a_clean_footing_is_eligible_even_where_records_were_retrieved() -> None:
+    """§15: eligibility is the **recorded predicate's** strength and no higher.
+
+    A decision whose binding carries ``planned_with_external_content`` ``False`` **is**
+    an eligible subject "even where the request was planned over retrieved records —
+    none of them carrying the marker". ADR-0181 §6's second clause is why: ``False`` is
+    rendered as no assurance, so the statement §9 fixes does **not** say the request was
+    composed from the user's own words alone — and a surface that sent a user looking
+    for that narrower population "would send them past the row that qualifies".
+
+    The predicate is the binding's own field and the act reads nothing else: there is no
+    second condition here about how many records were in view, where they came from, or
+    whether any were retrieved at all.
+    """
+    operations, store, _ = _operations(
+        _decision("d-1", outcome=PermissionOutcome.CONFIRM, binding=_binding(planned=False))
+    )
+
+    record = await operations.establish_destination_trust("d-1")
+
+    assert [held.id for held in await store.live()] == [record.id]
+
+
+async def test_the_earlier_resolved_decision_is_the_subject_the_journey_ends_on() -> None:
+    """§9's recovery journey, at the point where the two listings differ.
+
+    The decision recording a ``TRUST_MISSING`` refusal carries
+    ``planned_with_external_content`` ``True``, so ADR-0235 §3's seventh condition
+    excludes it from ``grantable_decisions`` **and** ADR-0242 §1's third condition
+    excludes it from the trust act; and the earlier decision the user granted from has
+    been **resolved**, so §3's fourth condition has taken it out of that listing too.
+    "``assistant remember-recipients`` can therefore be empty at exactly the moment its
+    guidance is followed."
+
+    What makes the journey end anywhere is that the act is **indifferent to a decision's
+    ruling and resolution** (§1), so the earlier resolved row is still a valid subject —
+    which is what ``assistant decisions``, ADR-0186 §1's bounded read of the whole
+    trail, can hand back and the other listing cannot.
+    """
+    earlier = _decision("d-1", outcome=PermissionOutcome.CONFIRM, binding=_binding(planned=False))
+    answer = _decision(
+        "d-2", outcome=PermissionOutcome.ALLOW, binding=_binding(planned=False), resolves="d-1"
+    )
+    refusal = _decision("d-3", outcome=PermissionOutcome.CONFIRM, binding=_binding(planned=True))
+    operations, store, _ = _operations(earlier, answer, refusal)
+
+    with pytest.raises(UntrustableDestinationError, match="recorded external content"):
+        await operations.establish_destination_trust("d-3")
+    record = await operations.establish_destination_trust("d-1")
+
+    assert [held.id for held in await store.live()] == [record.id]
+
+
+async def test_a_trail_whose_only_decision_is_external_offers_the_act_on_nothing() -> None:
+    """§9: "**The statement promises no eligible decision**", and this is the deployment.
+
+    Where a deployment's *first* search is planned over external content — a retrieved
+    record marked as resting on recorded external content is enough, and ADR-0181 §1
+    keeps that class wider than a prior search — the trail's only decision is the one
+    recording that refusal, and §1's third condition forbids the act on it. So a
+    statement promising an available id would be false on exactly this deployment, which
+    is why §9's says where to look and what to look for and asserts nothing about what is
+    there. The statement's own half is asserted over the rendered bytes in
+    ``tests/interfaces/test_cli_destination_trust.py``.
+    """
+    operations, store, _ = _operations(
+        _decision("d-1", outcome=PermissionOutcome.CONFIRM, binding=_binding(planned=True))
+    )
+
+    with pytest.raises(UntrustableDestinationError, match="recorded external content"):
+        await operations.establish_destination_trust("d-1")
+
+    assert await store.export() == [], "nothing was written, and there is nothing to perform yet"
