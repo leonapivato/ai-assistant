@@ -575,9 +575,15 @@ class AbsorbingGate:
         absorbed: How many cancellations this stub swallowed.
     """
 
-    __slots__ = ("_admits", "_seconds", "absorbed", "admissions")
+    __slots__ = ("_admits", "_raises", "_seconds", "absorbed", "admissions")
 
-    def __init__(self, seconds: float = 60.0, *, admits: SpendGate | None = None) -> None:
+    def __init__(
+        self,
+        seconds: float = 60.0,
+        *,
+        admits: SpendGate | None = None,
+        raises: BaseException | None = None,
+    ) -> None:
         """Try to wait ``seconds``, then answer however this stub was configured to.
 
         Args:
@@ -585,12 +591,14 @@ class AbsorbingGate:
                 ends the wait.
             admits: A gate to take a real handle from, for the arm where the
                 absorption is followed by a **successful** admission — the shape that
-                lets a cancelled turn run its search to completion and come back with
-                a value. ``None`` raises a ``TimeoutError`` of this stub's own
-                spelling instead.
+                would let a cancelled turn run its search to completion.
+            raises: Raised instead of admitting, for the arm where the absorption is
+                followed by an ordinary fault rather than by a timeout. With neither,
+                a ``TimeoutError`` of this stub's own spelling.
         """
         self._seconds = seconds
         self._admits = admits
+        self._raises = raises
         self.admissions = 0
         self.absorbed = 0
 
@@ -604,7 +612,9 @@ class AbsorbingGate:
             The inner gate's handle, where one was configured.
 
         Raises:
-            TimeoutError: Where none was — after the cancellation has already landed.
+            BaseException: ``raises``, where a case supplied one.
+            TimeoutError: Where neither was — after the cancellation has already
+                landed.
         """
         self.admissions += 1
         try:
@@ -613,6 +623,8 @@ class AbsorbingGate:
             self.absorbed += 1
         if self._admits is not None:
             return await self._admits.admit_invocation(estimate=estimate)
+        if self._raises is not None:
+            raise self._raises
         msg = "the gate turned its cancellation into a timeout of its own"
         raise TimeoutError(msg)
 

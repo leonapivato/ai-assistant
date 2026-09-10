@@ -77,6 +77,7 @@ from web_searcher_contract import (
 )
 
 from ai_assistant.core.errors import (
+    AuditError,
     AuthorisationSpentError,
     ConnectionStoreError,
     ToolBindingError,
@@ -2218,11 +2219,13 @@ async def test_a_gate_that_absorbs_a_cancellation_and_then_admits_still_delivers
     then completes and this seam returns a value for a turn the executor cancelled,
     which is the one thing ADR-0060 §1 says a method never does.
 
-    So the precedence is checked against the **pre-admission** baseline on every exit
-    from that frame, and not only where no outcome came back. The completion the call
-    reached still stands — a search that reached its answer was not interrupted in
-    ``interrupted_outcome``'s sense however the task ends (ADR-0241 §7) — and the
-    cancellation leaves afterwards.
+    So the precedence is checked against the **pre-admission** baseline at the top of
+    the consume, *before* the claim is appended — which is the position that decides
+    what is owed. The cancellation arrived **before** the send, not after the outcome,
+    so ADR-0241 §7's keep-the-answer's-row clause does not reach it: this exit is above
+    ADR-0192 §1's placement, so no claim was appended, no completion is owed, no
+    credential was read and no channel was opened. `admitted_call`'s `finally` still
+    releases the reservation on the way out.
     """
     gate = AbsorbingGate(admits=FakeAuditTrail())
     subject = await built(channels=[answering(result())], gate=gate)
@@ -2237,15 +2240,9 @@ async def test_a_gate_that_absorbs_a_cancellation_and_then_admits_still_delivers
         await search
 
     assert gate.absorbed == 1, "the arrangement really did swallow the cancellation"
-    completions = [
-        row.invocation
-        for row in await subject.trail.export_invocations()
-        if row.invocation.completes is not None
-    ]
-    assert [row.outcome for row in completions] == [ToolOutcome.SUCCEEDED], (
-        "the row carries the outcome the call actually reached (ADR-0241 §7's Arm 3b "
-        "clause), and the cancellation is delivered rather than answered with it"
-    )
+    assert await subject.trail.export_invocations() == [], "no claim, so no completion"
+    assert subject.keyring.reads == [], "and no credential was read"
+    assert subject.transport.attempts == (), "and no channel was opened"
 
 
 async def test_a_cancellation_pending_before_entry_is_not_read_as_invented() -> None:
@@ -2276,3 +2273,54 @@ async def test_a_cancellation_pending_before_entry_is_not_read_as_invented() -> 
         await asyncio.ensure_future(cancelled_search())
 
     assert subject.transport.attempts == (), "the cancellation landed before the send"
+
+
+async def test_an_admission_fault_that_replaces_a_cancellation_still_delivers_it() -> None:
+    """Round 5's blocker: the transport's fault rule, at the stage above it.
+
+    A gate that catches the caller's ``CancelledError`` and raises an ``AuditError``
+    instead: the watching wrapper notices only a ``TimeoutError``, and the spend
+    clauses catch only ADR-0194 §4's two classes, so the fault would otherwise reach
+    ADR-0226 §5's degradation and ADR-0241 §8's ``SEARCH_FAILED`` — letting a
+    cancelled turn degrade and carry on, which is the absorption ADR-0060 §1 forbids.
+
+    Nothing was appended and nothing was opened, so this exit owes no row (ADR-0241
+    §5).
+    """
+    gate = AbsorbingGate(raises=AuditError("the gate could not read its own rows"))
+    subject = await built(channels=[answering(result())], gate=gate)
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    search = asyncio.ensure_future(subject.searcher.search(call, timeout=A_BOUND))
+    await settle()
+    assert gate.admissions == 1, "the admission was reached before the cancellation"
+    search.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await search
+
+    assert gate.absorbed == 1, "the arrangement really did swallow the cancellation"
+    assert await subject.trail.export_invocations() == [], "no claim, so no completion"
+    assert subject.transport.attempts == (), "and no channel was opened"
+
+
+async def test_an_admission_fault_with_nothing_cancelled_still_leaves_unchanged() -> None:
+    """The other direction of the arm above, so the precedence narrows nothing.
+
+    Where no cancellation is pending, an ordinary fault out of the admission leaves
+    exactly as the gate raised it — unwrapped and unannotated (ADR-0029 §3) — and
+    reaches ADR-0226 §5's degradation as before. Asserted beside the interruption arm
+    so a check written one condition too wide fails here rather than silently
+    converting every gate fault into a cancellation.
+    """
+    subject = await built(
+        channels=[answering(result())],
+        gate=RaisingGate(AuditError("the gate could not read its own rows")),
+    )
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    with pytest.raises(AuditError, match="could not read its own rows"):
+        await subject.searcher.search(call, timeout=A_BOUND)
+
+    assert await subject.trail.export_invocations() == []
+    assert subject.transport.attempts == ()

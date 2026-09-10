@@ -1407,6 +1407,17 @@ class WebSearchEgress:
             return _result_of(outcome, self._declaration, duration)
 
         async def consume(remaining: timedelta) -> ToolResult:
+            # **Before the claim, and this is the position that matters** (ADR-0192
+            # §1). A gate that swallowed the caller's cancellation and then admitted
+            # leaves `admitted_call` free to run this, and both `_claimed` and `act`
+            # sample their own baselines *after* that absorption — so neither sees it,
+            # and the search would append a claim, read a credential and open a channel
+            # for a turn the executor had already cancelled. The pre-admission baseline
+            # is the only one that still carries the fact, and checking it here is what
+            # keeps the cancellation *above* ADR-0192 §1's placement: no claim, so no
+            # completion is owed and none is written. `admitted_call`'s `finally` still
+            # releases the reservation on the way out.
+            self._deliver_absorbed(admitting)
             return await consumed_call(
                 ledger=self._ledger,
                 definition=self._declaration,
@@ -1457,6 +1468,16 @@ class WebSearchEgress:
             # here catches, wraps or annotates one.
             self._deliver_absorbed(admitting)
             return _refused(SearchRefusal.SPEND_REFUSED)
+        except Exception:
+            # **An ordinary fault out of the admission is not evidence that nothing was
+            # cancelled either.** A gate that catches the caller's cancellation and
+            # raises an `AuditError` instead would otherwise reach ADR-0226 §5's
+            # degradation and ADR-0241 §8's `SEARCH_FAILED`, letting a cancelled turn
+            # degrade and carry on. The transport's counterpart is checked inside
+            # `act`; this is the same rule at the one stage above it. Where nothing was
+            # cancelled the fault leaves exactly as it arrived (ADR-0029 §3).
+            self._deliver_absorbed(admitting)
+            raise
         # **A `CancelledError` that reaches here is delivered onward, and this frame
         # classifies none of them.** An earlier revision branched on the count's delta
         # and got it backwards: a caller already carrying a cancellation request when
