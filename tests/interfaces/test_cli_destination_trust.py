@@ -14,6 +14,7 @@ rendered bytes, because those are the system's own words".
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from typing import Final
@@ -701,3 +702,62 @@ async def test_a_configuration_refusal_is_rendered_as_one_and_never_as_a_search_
         assert member.value not in rendered
     for forbidden in ("lookup", "assistant trust-destinations", "assistant remember-recipients"):
         assert forbidden not in rendered
+
+
+def test_the_decisions_page_offers_the_act_and_states_the_five_facts(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """§3 on the route §9 prescribes, which is the one a refused follow-up sends users to.
+
+    ``TRUST_MISSING``'s statement names ``assistant decisions`` **and not** ``assistant
+    remember-recipients``, because the decision recording that refusal carries
+    ``planned_with_external_content`` and the decision the user granted from has been
+    resolved — so the other listing "can therefore be empty at exactly the moment its
+    guidance is followed" (§9). A user arriving here and typing the command would
+    otherwise read the five facts only after performing the act, which is what §3's
+    "before it collects the act" forbids.
+
+    **The grant act is not offered here**, and that is a decision rather than an
+    omission: ADR-0235 §3's availability set is what ``remember-recipients`` renders and
+    a row here may fail it for reasons this page does not compute, so naming that command
+    beside a row it cannot judge would be this surface deriving an availability it was
+    not given.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+
+    async def _recent(*, limit: int = 20) -> tuple[object, ...]:
+        return (_ELIGIBLE,)
+
+    monkeypatch.setattr(engine, "recent_decisions", _recent)
+    result = CliRunner().invoke(cli.app, ["decisions"])
+    rendered = _flat(output.getvalue())
+
+    assert result.exit_code == 0
+    assert "assistant trust-destinations <decision-id>" in rendered
+    assert "neither completes the other" in rendered
+    assert "not the question of whether I may talk" in rendered
+    assert "drawn from things I hold about you" in rendered
+    assert "carries no end date" in rendered
+    assert "not repaired by this" in rendered
+    assert "cannot show you what a future call would send" in rendered
+
+
+def test_the_five_facts_carry_no_word_the_decisions_page_bars(output: StringIO) -> None:
+    """ADR-0186 §8's two bars, held over the block that now renders on that page.
+
+    §8's third clause bars any word for an **event** beside a ruling — the page records
+    what was decided and never what was carried out — and its fifth bars
+    :attr:`~ai_assistant.core.types.ToolDefinition.reads`, ``writes`` and ``discloses``,
+    which are ceilings on what a tool *may* reach rather than per-call measurements. A
+    block written for one page and rendered on another is exactly where such a word
+    creeps back, so it is asserted here rather than left to the page's own arms.
+    """
+    cli._render_destination_trust_preamble()
+    rendered = _flat(output.getvalue()).lower()
+
+    for event in ("sent", "delivered", "transmitted", "emailed", "went"):
+        assert not re.search(rf"\b{event}\b", rendered), event
+    assert not re.search(r"\bread\b", rendered)
+    for reach in ("reads", "writes", "discloses"):
+        assert reach not in rendered

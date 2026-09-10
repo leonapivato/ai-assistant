@@ -9564,13 +9564,18 @@ def _render_destination_trust_preamble() -> None:
         "  2. After this, what I compose for those parties may be drawn from things "
         "I hold about you, rather than from your own words alone."
     )
+    # **Worded around ADR-0186 §8's bars**, because this block is rendered on
+    # ``assistant decisions`` too: that page may carry no word for an event beside a
+    # ruling and no tier-reach noun. "rewrites" carries `writes` and "has already read"
+    # carries `read`, so the same facts are stated without them — the wording is this
+    # lane's (ADR-0242 §9) and the facts are not.
     _print(
-        "  3. It applies to later requests and you can withdraw it at any time. It "
-        "rewrites nothing already decided."
+        "  3. It applies to later requests and you can withdraw it at any time. "
+        "Nothing already decided is changed by it."
     )
     _print("  4. It carries no end date. It stands until you withdraw it.")
     _print(
-        "  5. A conversation that has already read from a party you had not chosen "
+        "  5. A conversation that has already drawn on a party you had not chosen "
         "is [bold]not[/] repaired by this. What this changes is what a later "
         "conversation may compose."
     )
@@ -11518,6 +11523,27 @@ def _render_decisions(recorded: tuple[PermissionDecision, ...], *, limit: int) -
         "[dim]A digest binds the arguments a ruling was taken over. The arguments "
         "themselves are not in this record and are not shown.[/]"
     )
+    # ADR-0242 §9 sends a user here — "``assistant decisions`` … carries resolved
+    # decisions, and the earlier decision remains a valid subject of the trust act" —
+    # precisely because ``remember-recipients`` can be **empty at exactly the moment its
+    # guidance is followed**. So this page offers the act on the route §9 prescribes, and
+    # §3's obligation to state the five facts "before it collects the act" therefore
+    # lands here too: a user who arrived from that statement and typed the command would
+    # otherwise read them only after performing it.
+    #
+    # **It offers the trust act and not the grant act.** ADR-0235 §3's own availability
+    # set is what ``assistant remember-recipients`` renders, and a row here may fail it
+    # for reasons this page does not compute; naming that command beside a row it cannot
+    # judge would be this surface deriving an availability it was not given. The trust
+    # act's three conditions are on the row (ADR-0186 §7 renders the binding's origin in
+    # all three of ADR-0181 §6's states), which is what makes the offer honest here.
+    _print(
+        "[dim]From an eligible row here you can settle what I may compose for the "
+        "parties it names — assistant trust-destinations <decision-id>. That is not "
+        "the question of whether I may talk to them, which is 'assistant "
+        "remember-recipients', and neither completes the other.[/]"
+    )
+    _render_destination_trust_preamble()
 
 
 # --- rendering the read trail (ADR-0186 §10, ADR-0185 §1, §2, §7) -----------
