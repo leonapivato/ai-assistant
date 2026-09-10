@@ -80,6 +80,8 @@ from ai_assistant.core.errors import (
     AuditError,
     AuthorisationSpentError,
     ConnectionStoreError,
+    SpendCeilingError,
+    SpendUndeterminedError,
     ToolBindingError,
     ToolError,
     TransportError,
@@ -2350,6 +2352,56 @@ async def test_an_admission_fault_that_replaces_this_seams_own_expiry_is_still_a
     assert outcome.refusal is SearchRefusal.DEADLINE_EXPIRED, (
         "the fault the gate substituted does not become the turn's account of what "
         "happened: this deadline fired, and that outranks it (ADR-0241 §4, §7)"
+    )
+    assert await subject.trail.export_invocations() == [], "no claim, so no completion"
+    assert subject.keyring.reads == [], "and no credential was read"
+    assert subject.transport.attempts == (), "and no channel was opened"
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [
+        pytest.param(
+            SpendCeilingError("a configured ceiling would be crossed"),
+            id="ceiling",
+        ),
+        pytest.param(
+            SpendUndeterminedError("the period's total could not be reduced"),
+            id="undetermined",
+        ),
+    ],
+)
+async def test_an_admission_refusal_that_replaces_this_seams_own_expiry_is_an_expiry(
+    raised: BaseException,
+) -> None:
+    """Round 7's blocker: the same rule for the branch that answers with a refusal.
+
+    The last branch of the family rounds 1--7 walked. A gate that swallows this
+    deadline's cancellation and raises one of ADR-0194 §4's two spend classes instead
+    leaves the caller holding a refusal and a count that never moved --
+    ``asyncio.Timeout.__aexit__`` calls ``uncancel`` on its way out whatever the
+    exception was -- so ``SPEND_REFUSED`` would become the turn's account of a call
+    that in fact ran out of time.
+
+    ADR-0241 §4 defines the member as the bound expiring *before the search produced
+    an answer*, which is what happened here, and §7 keys the classification on whether
+    **this** deadline fired. §9 grants neither bound precedence over the other: it
+    forbids collapsing two or reporting one under the other's member, and a ceiling
+    reported for a call that timed out is that error in the other direction.
+
+    Nothing was appended and nothing was opened, so this exit owes no row (ADR-0192
+    §1, ADR-0241 §5).
+    """
+    gate = AbsorbingGate(raises=raised)
+    subject = await built(channels=[answering(result())], gate=gate)
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    outcome = await subject.searcher.search(call, timeout=_EXPIRING_BOUND)
+
+    assert gate.absorbed == 1, "the arrangement really did swallow the expiry"
+    assert outcome.refusal is SearchRefusal.DEADLINE_EXPIRED, (
+        "the refusal the gate substituted does not become the turn's account of what "
+        "happened: this deadline fired, and that outranks it (ADR-0241 §4, §7, §9)"
     )
     assert await subject.trail.export_invocations() == [], "no claim, so no completion"
     assert subject.keyring.reads == [], "and no credential was read"
