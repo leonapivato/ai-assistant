@@ -96,6 +96,7 @@ from ai_assistant.core.types import (
     Role,
     RoutableOperation,
     RouteOutcome,
+    SearchNotServiced,
     SpokenDeliveryState,
     band_of,
     rests_on_recorded_external_content,
@@ -633,6 +634,7 @@ class ComposingStage:
         hop_reached: Sequence[str] = (),
         stopped_while_asking: bool = False,
         structured: StructuredFacts | None = None,
+        search_not_serviced: SearchNotServiced | None = None,
     ) -> ComposedReply:
         """Compose the answer for one turn, or say that composing it failed.
 
@@ -711,6 +713,16 @@ class ComposingStage:
                 — or three ``False`` values — on every turn that ran no structured
                 read, where the assembled prompt is byte-identical to what it was
                 before ADR-0240.
+            search_not_serviced: ADR-0242 §7's carrier: which class of act would have
+                let a search this turn did not make happen, or ``None`` where every
+                servicing yielded and where the turn asked for none — on which the
+                assembled prompt is byte-identical to what it was before ADR-0242 (§6).
+                **Supplied, not inferred**, on ``hop_reached``'s and
+                ``stopped_while_asking``'s reasoning: it is computed at the servicing
+                site from three values that site holds, and this stage derives it from
+                nothing. What it names is the *class of act* that would change the
+                answer, and the fragment it selects carries no destination, host,
+                query, record, count, figure, duration or command name (§7).
 
         Returns:
             The answer, or a degraded report where the call raised a ``ModelError``
@@ -731,6 +743,7 @@ class ComposingStage:
                     withheld=withheld,
                     stopped_while_asking=stopped_while_asking,
                     structured=structured,
+                    search_not_serviced=search_not_serviced,
                 ),
             ),
             Message(
@@ -904,6 +917,7 @@ class ComposingStage:
         hop_reached: Sequence[str] = (),
         stopped_while_asking: bool = False,
         structured: StructuredFacts | None = None,
+        search_not_serviced: SearchNotServiced | None = None,
     ) -> AsyncIterator[ReplyChunk | ComposedReply]:
         """Compose the answer as it arrives, yielding chunks then one report.
 
@@ -969,6 +983,10 @@ class ComposingStage:
                 streamed turn's channel audience is bounded, so a structured read is
                 serviced on it exactly as on a whole turn and these are not decorative
                 here either.
+            search_not_serviced: ADR-0242 §7's carrier, as :meth:`compose` takes it. A
+                streamed turn's channel audience is bounded, so a search is serviced on
+                it exactly as on a whole turn and the fact is not decorative here
+                either.
 
         Yields:
             Each :class:`~ai_assistant.core.types.ReplyChunk` as it is composed, and
@@ -996,6 +1014,7 @@ class ComposingStage:
                     withheld=False,
                     stopped_while_asking=stopped_while_asking,
                     structured=structured,
+                    search_not_serviced=search_not_serviced,
                 ),
             ),
             Message(
@@ -1147,13 +1166,141 @@ def _routed_prompt(
     )
 
 
-def _system_prompt(
+#: ADR-0242 §7's **eight** prompt fragments, one per
+#: :class:`~ai_assistant.core.types.SearchNotServiced` member, **written out as
+#: literals** and interpolating nothing.
+#:
+#: **Eight literals and not a template over the enumeration** (ADR-0242 §13). Neither
+#: these nor the surface's eight statements are assembled from a member's value, its
+#: name, a format string over the vocabulary, or a mapping a later member would silently
+#: join: "A member added without its two texts is a member with no rendering, and §8's
+#: closure at eight is what makes that a review question rather than a runtime one."
+#:
+#: **Given on a turn in which at least one servicing recorded a**
+#: ``SearchDisposition`` **and on no other** (§6), so on every other turn the assembled
+#: prompt is byte-identical to what it was before ADR-0242 — the guarantee ADR-0228 §10
+#: makes for its own carrier and ADR-0227 §3 for its own, taken here for the same
+#: reason. In particular a search that **ran, reached the provider and found nothing**
+#: carries no member at all: the assistant looked, and saying it did not would be false.
+#:
+#: **No fragment carries** a destination, a host, an origin, a provider name, a
+#: connection reference, an account identity, a query or any fragment of one, a record,
+#: a count, a monetary figure, a duration, a budget, a ``Settings`` field name, a
+#: ``SearchDisposition`` value, a record id, a decision id, **or a command name** (§7).
+#: :data:`_STOPPED_ASKING_PROMPT` is the shape and its own bar is the model: "you have
+#: not been told any of that."
+#:
+#: **The command name is deliberately not here** (§9). A command name in a
+#: model-composed reply is wrong twice over — it would reach a browser and a voice
+#: channel where no terminal exists, and it would be a string a model may paraphrase,
+#: truncate or invent. So the model says **what was not done** and the surface says
+#: **what would enable it**, and each says only the half it can say truthfully.
+#:
+#: **None of them says the turn would have answered differently**, that the reply is
+#: incomplete, that a search would have succeeded, or that anything is owed — ADR-0235
+#: §8's third clause, which ADR-0242 §16 keeps binding entire on these texts.
+#:
+#: **They coexist with** :data:`_STOPPED_ASKING_PROMPT` (ADR-0242 §16): a turn that both
+#: stopped while asking and did not service a search carries both facts, each rendered
+#: by its own fragment, and neither substitutes for, suppresses or is derived from the
+#: other.
+_SEARCH_DISABLED_PROMPT: Final = """\
+While answering this you would have looked something up outside this system, and no \
+such lookup was made — this installation does not make them at all. Say so plainly, in \
+one short clause, and answer as well as what you have allows. Do not say whose \
+decision that is, do not offer to try again, and do not say what you would have looked \
+for or where: you have not been told any of that."""
+
+
+_NOT_ADMITTED_PROMPT: Final = """\
+While answering this you would have looked something up outside this system, and no \
+such lookup was made on this occasion. Say so plainly, in one short clause, and answer \
+as well as what you have allows. Do not say why, do not say how many times you have \
+looked or how many remain, do not say that anything has been used up, and do not \
+promise that trying again will work: you have not been told any of that."""
+
+
+_SPEND_EXHAUSTED_PROMPT: Final = """\
+While answering this you would have looked something up outside this system, and no \
+such lookup was made because a limit this installation is run under stood in the way. \
+Say so plainly, in one short clause, and answer as well as what you have allows. Do \
+not name the limit, quote a figure, guess at one, or suggest anything the person you \
+are answering could do about it: you have not been told any of that."""
+
+
+_DECLINED_PROMPT: Final = """\
+While answering this you would have looked something up outside this system, and the \
+rules this installation is run under declined it when they were consulted. Say so \
+plainly, in one short clause, and answer as well as what you have allows. Do not say \
+which rule, do not guess at why, do not present it as a fault, and do not offer to try \
+again: you have not been told any of that."""
+
+
+_TRUST_MISSING_PROMPT: Final = """\
+While answering this you would have looked something up outside this system, and no \
+such lookup was made: the party it would have gone to is not one this person has \
+chosen to have things composed for. Say so plainly, in one short clause, and answer as \
+well as what you have allows. Do not name that party, do not say what would have been \
+sent to it, do not say that this is the only thing standing in the way, and do not say \
+what the person should do — a screen elsewhere says that, and you have not been told \
+it."""
+
+
+_AUTHORISATION_AWAITED_PROMPT: Final = """\
+While answering this you would have looked something up outside this system, and \
+instead of making that lookup it was put to this person as a question, which is on \
+record for them to answer. Say so plainly, in one short clause, and answer as well as \
+what you have allows. Do not say what the question was, do not say what answering it \
+would achieve, do not say that nothing else stands in the way, and do not tell them \
+where to answer it — you have not been told any of that."""
+
+
+_INTERRUPTED_PROMPT: Final = """\
+While answering this you looked something up outside this system, and it was stopped \
+before it came back. Say so plainly, in one short clause, and answer as well as what \
+you have allows. Do not say how long it had, why it stopped, or what it would have \
+found, and do not present it as a fault of the place it was asking: you have not been \
+told any of that. You may offer to look again if the person asks."""
+
+
+_UNAVAILABLE_PROMPT: Final = """\
+While answering this you would have looked something up outside this system, and that \
+lookup produced nothing this turn could use. Say so plainly, in one short clause, and \
+answer as well as what you have allows. **Do not say that nothing was asked for** — \
+you have not been told whether anything was, and it may well have been. Do not guess \
+at a reason, do not name anything or anyone, and do not tell the person to do \
+something about it: there may be nothing for them to do."""
+
+
+#: The eight, keyed by member, so that :func:`_system_prompt` picks one **literal**
+#: rather than assembling text.
+#:
+#: **A mapping over eight written fragments is not a template over the enumeration**
+#: (ADR-0242 §13): every value here is a literal above, a ninth member joins nothing
+#: silently, and ``tests/orchestration/test_composing_search_not_serviced.py`` fails if
+#: the vocabulary and this table come apart.
+_SEARCH_NOT_SERVICED_PROMPTS: Final[Mapping[SearchNotServiced, str]] = MappingProxyType(
+    {
+        SearchNotServiced.SEARCH_DISABLED: _SEARCH_DISABLED_PROMPT,
+        SearchNotServiced.NOT_ADMITTED: _NOT_ADMITTED_PROMPT,
+        SearchNotServiced.SPEND_EXHAUSTED: _SPEND_EXHAUSTED_PROMPT,
+        SearchNotServiced.DECLINED: _DECLINED_PROMPT,
+        SearchNotServiced.TRUST_MISSING: _TRUST_MISSING_PROMPT,
+        SearchNotServiced.AUTHORISATION_AWAITED: _AUTHORISATION_AWAITED_PROMPT,
+        SearchNotServiced.INTERRUPTED: _INTERRUPTED_PROMPT,
+        SearchNotServiced.UNAVAILABLE: _UNAVAILABLE_PROMPT,
+    }
+)
+
+
+def _system_prompt(  # noqa: PLR0913 — the pass's own instruction plus one keyword per fact a clause is appended on; ADR-0228 §10, ADR-0240 §8 and ADR-0242 §7 each add one and none is derivable from another
     base: str,
     *,
     unbounded_audience: bool,
     withheld: bool,
     stopped_while_asking: bool = False,
     structured: StructuredFacts | None = None,
+    search_not_serviced: SearchNotServiced | None = None,
 ) -> str:
     """The instruction for this pass, given the channel it is for and what it lost.
 
@@ -1186,6 +1333,13 @@ def _system_prompt(
             ADR-0240. Never ``True`` on any axis beside ``unbounded_audience``, for
             ``stopped_while_asking``'s reason one clause over: ADR-0226 §5 declines to
             service a read request on such a channel, so no structured read runs there.
+        search_not_serviced: ADR-0242 §7's carrier — which class of act would have let a
+            search this turn did not make happen — or ``None`` where every servicing
+            yielded and where the turn asked for none. On ``None`` the assembled prompt
+            is byte-identical to what it is without ADR-0242, which is §6's guarantee
+            made checkable. Never a member beside ``unbounded_audience``, for
+            ``stopped_while_asking``'s reason one clause over: ADR-0226 §5 declines to
+            service a read request on such a channel, so no search is serviced there.
 
     Returns:
         The system message's content.
@@ -1207,6 +1361,13 @@ def _system_prompt(
         clauses.append(_STRUCTURED_TEMPORAL_PROMPT)
     if facts.empty:
         clauses.append(_STRUCTURED_EMPTY_PROMPT)
+    # ADR-0242 §7's fragment, **one literal per member**, appended last because it is a
+    # fact about a lookup that did not happen at all — which a reader has to have met
+    # the looking to place — and because it and ADR-0228 §10's stop clause may both be
+    # given on one turn, each rendered by its own fragment and neither derived from the
+    # other (ADR-0242 §16).
+    if search_not_serviced is not None:
+        clauses.append(_SEARCH_NOT_SERVICED_PROMPTS[search_not_serviced])
     return "\n\n".join(clauses)
 
 

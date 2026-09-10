@@ -79,7 +79,7 @@ episode it never saw" — and it is what makes the widest possible abuse of the 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from enum import StrEnum
 from types import MappingProxyType
@@ -100,6 +100,7 @@ from ai_assistant.core.types import (
     PlacementReach,
     QueryRefusal,
     ReadKind,
+    SearchNotServiced,
     SearchRefusal,
     SearchSupply,
     SpanCoverage,
@@ -604,6 +605,138 @@ class StructuredOutcome(StrEnum):
     did with them (ADR-0240 §6, §13 item 7)."""
 
 
+def not_serviced(  # noqa: PLR0911 — ADR-0242 §8's table has one arm per discriminated row, and collapsing them behind a mapping would hide the two rows a `Settings` value and a `trust_of` answer decide
+    disposition: SearchDisposition | None,
+    *,
+    max_calls: int,
+    planned_with_external_content: bool = False,
+    trust: DestinationTrust = DestinationTrust.UNCHOSEN,
+) -> SearchNotServiced | None:
+    """ADR-0242 §8's mapping, computed **at the servicing site** and nowhere else.
+
+    **Total over all eighteen** :class:`SearchDisposition` **members and
+    non-injective, and that is the design rather than a compromise** (ADR-0242 §8).
+    ``SearchDisposition`` names *the stage that produced the outcome*, for an operator
+    reading an audit; :class:`~ai_assistant.core.types.SearchNotServiced` names *the
+    act that would change it*, for the user reading a reply. Two dispositions with one
+    act behind them are one member, and one disposition with two acts behind it is two
+    members. **No lane makes this injective**, restores a stage name to it, or reports a
+    ``SearchDisposition`` value to a user.
+
+    **The three discriminating inputs are the three the site already holds** (§7), and
+    nothing here derives a value from the plan, the supply's length, the reply, the
+    audit, a store read of its own or any content. ``max_calls`` is
+    ``Settings.search_calls_per_conversation`` — a deployment configuration, constant
+    across every turn and read from no record; ``planned_with_external_content`` is read
+    off the binding the request carried; and ``trust`` is the answer ADR-0238 §5 already
+    obliges the site to take at the position §5 fixes, **carried here as data rather
+    than re-read**.
+
+    **A member minted by a later ADR maps to** ``UNAVAILABLE`` (§8), which is the
+    least-claiming member: an unmapped disposition degrades to silence about the reason
+    rather than to a wrong reason. The ``case _`` below is that rule, and the totality
+    arm over the eighteen is what makes forgetting a *deliberate* mapping a test failure
+    rather than a silent ``UNAVAILABLE``.
+
+    Args:
+        disposition: What this servicing's ``WEB_SEARCH`` ask resolved to, or ``None``
+            where it yielded records, reached the provider and returned none, or where
+            no such ask was made.
+        max_calls: ``Settings.search_calls_per_conversation``, which is the whole of
+            what tells :attr:`~ai_assistant.core.types.SearchNotServiced.SEARCH_DISABLED`
+            from :attr:`~ai_assistant.core.types.SearchNotServiced.NOT_ADMITTED` —
+            ADR-0236 §4's move: "The two grounds are told apart from the deployment's
+            **own configuration** and never from a per-turn record."
+        planned_with_external_content: ADR-0181 §4's fact for the request this
+            servicing built, or ``False`` where it built none — in which case no
+            ``RULING_CONFIRM`` can have been recorded and the value is not read.
+        trust: The build-time ``trust_of`` answer for this deployment's search
+            destination, or ``UNCHOSEN`` where the servicing never reached that read.
+
+    Returns:
+        The member this turn would carry for that disposition, or ``None`` where the
+        servicing yielded and there is nothing to say.
+    """
+    match disposition:
+        case None:
+            # §6: a servicing that yielded records — and one that reached the provider
+            # and found nothing, which `SearchRefusal.NO_RESULT` deliberately makes no
+            # disposition at all — carries no member. The assistant looked, and saying
+            # it did not would be false.
+            return None
+        case SearchDisposition.NOT_ADMITTED:
+            # §8's one configuration-discriminated row. ADR-0238 §8 makes a bound of
+            # `0` mean "no search is serviced in any conversation", so a statement
+            # pointing the user at a new conversation would be false there.
+            return (
+                SearchNotServiced.SEARCH_DISABLED
+                if max_calls == 0
+                else SearchNotServiced.NOT_ADMITTED
+            )
+        case SearchDisposition.SPEND_REFUSED:
+            return SearchNotServiced.SPEND_EXHAUSTED
+        case SearchDisposition.RULING_DENY:
+            return SearchNotServiced.DECLINED
+        case SearchDisposition.RULING_CONFIRM:
+            # §8's three-row split, and the finding that shapes the whole section:
+            # `RULING_CONFIRM` is recorded both where no grant covers the recipients at
+            # all and where a grant stands but the closed loop is not closed. Those have
+            # different acts behind them, the disposition cannot tell them apart, and an
+            # explanation derived from it alone would send half of milestone 31's users
+            # to the wrong command.
+            if not planned_with_external_content:
+                return SearchNotServiced.AUTHORISATION_AWAITED
+            # **`USER_CHOSEN` here is `UNAVAILABLE` and not `TRUST_MISSING`** (§8): the
+            # destination is already chosen, so the trust act is not the answer, and
+            # ADR-0238 §5's recorded half is monotone so nothing established now repairs
+            # it. Naming an act that cannot help is worse than naming none.
+            return (
+                SearchNotServiced.TRUST_MISSING
+                if trust is DestinationTrust.UNCHOSEN
+                else SearchNotServiced.UNAVAILABLE
+            )
+        case SearchDisposition.DEADLINE_EXPIRED:
+            # ADR-0241 §4's member, mapped here by name rather than left to the default
+            # (ADR-0242 §10). A search that was begun and stopped, which is what
+            # `INTERRUPTED`'s statement says — where `SEARCH_FAILED` is the searcher
+            # raising a fault the user has no act for and falls to `UNAVAILABLE` below.
+            return SearchNotServiced.INTERRUPTED
+        case _:
+            return SearchNotServiced.UNAVAILABLE
+
+
+def earliest(
+    held: SearchNotServiced | None, produced: SearchNotServiced | None
+) -> SearchNotServiced | None:
+    """Fold one servicing's member into the turn's, by ADR-0242 §7's precedence.
+
+    **At most one member is carried per turn**, and where a turn holds more than one
+    servicing that recorded a disposition the member carried is the one **earliest in
+    ADR-0242 §8's declared order** among them. **The order and not the encounter order
+    decides it**: a member is never overwritten by a later servicing's, and an
+    implementation carrying the last one it computed is wrong even where every
+    individual mapping is right — as is one assigning only while the carrier is
+    ``None``, which is why §15's Arm 2b requires *both* orders.
+
+    **A servicing that yields records does not clear a member an earlier one produced**
+    (§7). §6's eligibility is stated over the presence of a disposition, and a later
+    success does not remove one — so a ``None`` here leaves ``held`` exactly as it was.
+
+    Args:
+        held: What the turn carries so far, or ``None``.
+        produced: What this servicing computed, or ``None``.
+
+    Returns:
+        The one member the turn carries after this servicing.
+    """
+    if produced is None:
+        return held
+    if held is None:
+        return produced
+    order = tuple(SearchNotServiced)
+    return min(held, produced, key=order.index)
+
+
 @dataclass(frozen=True, slots=True)
 class ServicedRead:
     """What one servicing carried into the turn, and what §9 records of it.
@@ -926,10 +1059,22 @@ class _Searched:
             yielded records and where it reached the provider and returned none —
             the two cases §13 leaves the field empty for, once this class is only
             constructed for a servicing that carried the ask at all.
+        not_serviced: ADR-0242 §7's carrier for this servicing — which **class of act**
+            would have let the search happen, computed **here at the servicing site**
+            from :attr:`disposition` and the three values this site already holds, and
+            ``None`` exactly where :attr:`disposition` is. It is never recomputed
+            downstream and never inferred at a render site (§7).
+
+            **Two vocabularies over one event** (§8): :attr:`disposition` names the
+            stage for an operator reading the audit, and this names the act for the
+            user reading the reply. ADR-0242 §11 keeps this one **out** of the audit —
+            a member computed for a user is not a second spelling of a fact the audit
+            already records, and writing both would make the two drift.
     """
 
     records: tuple[MemoryRecord, ...]
     disposition: SearchDisposition | None
+    not_serviced: SearchNotServiced | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1045,6 +1190,18 @@ class ServicedCarriers:
             window-only read owes no reach fact and does owe this one — every
             episodic record carries the ``occurred_at`` a window filters on, so there
             is nothing such a read failed to reach for want of a value.
+        not_serviced: ADR-0242 §7's carrier: which class of act would have let this
+            servicing's search happen, or ``None`` where it yielded, where it reached
+            the provider and found nothing, and where the request carried no
+            ``WEB_SEARCH`` ask. **Computed at the servicing site** by the component that
+            recorded the disposition, and carried from there to the composing stage as
+            data — the shape ADR-0228 §10 fixes for its own fact and this class already
+            has for three more.
+
+            **It rides on the failing record's carriers too**, exactly as the
+            disposition does: a servicing whose searcher raised after the ruling carries
+            ``UNAVAILABLE`` here, and dropping it would report that turn as one whose
+            planner never asked for a search.
     """
 
     hop_reached: tuple[str, ...] = ()
@@ -1052,6 +1209,7 @@ class ServicedCarriers:
     structured_ran: bool = False
     label_filtered: bool = False
     window_filtered: bool = False
+    not_serviced: SearchNotServiced | None = None
 
 
 @dataclass(slots=True)
@@ -1449,7 +1607,7 @@ class SearchServicer:
             # §11 fixes** — the search is second and only the one-record file
             # precedes it — and stated anyway, as the forward-compatibility guard
             # §11 states in terms for the lane that reorders the kinds.
-            return _Searched((), SearchDisposition.NO_BUDGET)
+            return self._not_serviced(SearchDisposition.NO_BUDGET, footing)
         # ADR-0238 §8: **admission first**, before a supply is constructed, a query
         # composed, a ruling sought, a credential read or a channel opened. It is one
         # atomic step of the conversation record — compare, increment, answer — and it
@@ -1457,7 +1615,11 @@ class SearchServicer:
         # path lowers the draw. §11's sixteenth disposition is what records the refusal.
         admitted = await footing.admit()
         if admitted is None:
-            return _Searched((), SearchDisposition.NOT_ADMITTED)
+            # ADR-0242 §8's one configuration-discriminated row: the same disposition
+            # renders as `SEARCH_DISABLED` under a bound of `0` and `NOT_ADMITTED` under
+            # a positive one, told apart from `footing.max_calls` — the deployment's own
+            # `Settings` value — and never from a per-turn record.
+            return self._not_serviced(SearchDisposition.NOT_ADMITTED, footing)
         counts.calls = admitted.calls
         # ADR-0238 §2: **which** supply this servicing builds is decided here, from the
         # destination's recorded trust and from the records this component holds. The
@@ -1478,13 +1640,13 @@ class SearchServicer:
             # request at all** — no ruling is sought, no channel is opened, and
             # §13's disposition names the refusal". The mapping is total over the
             # vocabulary and injective, so no two causes are collapsed.
-            return _Searched((), QUERY_DISPOSITIONS[refusal])
+            return self._not_serviced(QUERY_DISPOSITIONS[refusal], footing)
         query = composed.query
         if query is None:  # pragma: no cover — `QueryOutcome` admits no such value
             # `QueryOutcome`'s own validator refuses an outcome carrying neither a
             # query nor a refusal, so this is unconstructable for a conforming
             # value and is written for the type checker rather than for a caller.
-            return _Searched((), SearchDisposition.COMPOSER_MALFORMED)
+            return self._not_serviced(SearchDisposition.COMPOSER_MALFORMED, footing)
         proposal = await self._searcher.request(query)
         if proposal is None:
             # §17: `request` "returns the `ActionRequest` for a composed query, or
@@ -1492,7 +1654,7 @@ class SearchServicer:
             # same provisioning fact a servicer holding no searcher at all reports,
             # under the same member — §13 admits one member for two outcomes of one
             # stage an operator would act on identically.
-            return _Searched((), SearchDisposition.NOT_CONFIGURED)
+            return self._not_serviced(SearchDisposition.NOT_CONFIGURED, footing)
         # ADR-0238 §5: **the last two values obtained before the request is built**,
         # with nothing awaited between them and the `EgressBinding`'s construction —
         # which is the whole of what makes §8's boundary true, the store being unable to
@@ -1521,7 +1683,7 @@ class SearchServicer:
             ),
         )
         if bound is None:
-            return _Searched((), SearchDisposition.BINDING_FAILED)
+            return self._not_serviced(SearchDisposition.BINDING_FAILED, footing)
         # ADR-0152 §1: the request is built from what the seam returned and never
         # from objects held across the call, with no `await` between the two — the
         # runner's own rule at a second call site. `step_id` and `execution_id` are
@@ -1532,7 +1694,7 @@ class SearchServicer:
         )
         recorded = await self._ruled(request)
         if recorded is None:
-            return _Searched((), SearchDisposition.RULING_UNAVAILABLE)
+            return self._not_serviced(SearchDisposition.RULING_UNAVAILABLE, footing)
         outcome = recorded.ruling.outcome
         if outcome is not PermissionOutcome.ALLOW:
             # §9: the one route to an `ALLOW` is ADR-0193's standing recipient
@@ -1551,11 +1713,22 @@ class SearchServicer:
             # search is this branch on `origin/main` for **two** reasons, which
             # is what §13's disposition is read against and why closing either
             # alone changes nothing.
-            return _Searched(
-                (),
+            # **ADR-0242 §7's carrier, computed here from the values this site already
+            # holds and from no read of its own.** `trust` is the build-time `trust_of`
+            # answer ADR-0238 §5 obliges, taken above at the position §5 fixes and
+            # carried as data — no second read, no earlier read, and §5's
+            # read-to-ruling window is not widened. `planned_with_external_content` is
+            # read off the binding this request carried, which is what tells a first
+            # refusal (`AUTHORISATION_AWAITED`) from a follow-up's (`TRUST_MISSING`);
+            # the disposition alone cannot, and an explanation derived from it would
+            # send half of milestone 31's users to the wrong command (§8).
+            return self._not_serviced(
                 SearchDisposition.RULING_DENY
                 if outcome is PermissionOutcome.DENY
                 else SearchDisposition.RULING_CONFIRM,
+                footing,
+                planned_with_external_content=bound.binding.planned_with_external_content,
+                trust=trust,
             )
         # ADR-0021 §1's `authorises` runs inside `ToolCall`'s own validator, so an
         # unauthorised search is unconstructable at the type level — which is
@@ -1576,7 +1749,7 @@ class SearchServicer:
             # search that reached the provider and yielded nothing is a completed
             # servicing whose returned count is zero, which ADR-0226 §9 already
             # records.
-            return _Searched((), SEARCH_DISPOSITIONS.get(search_refusal))
+            return self._not_serviced(SEARCH_DISPOSITIONS.get(search_refusal), footing)
         # ADR-0238 §2's third admissible population, recorded for **this turn** alone:
         # a record minted at a destination the user chose is one a later servicing of
         # this same turn may compose over, and one §5's third condition tolerates in
@@ -1584,7 +1757,47 @@ class SearchServicer:
         # it, so this set dies with the turn and a captured episode is never in it.
         if trust is DestinationTrust.USER_CHOSEN:
             footing.minted_user_chosen.update(record.id for record in result.records)
-        return _Searched(result.records, None)
+        return _Searched(result.records, None, None)
+
+    @staticmethod
+    def _not_serviced(
+        disposition: SearchDisposition | None,
+        footing: SearchFooting,
+        *,
+        planned_with_external_content: bool = False,
+        trust: DestinationTrust = DestinationTrust.UNCHOSEN,
+    ) -> _Searched:
+        """One non-yield, carrying ADR-0231 §13's disposition and ADR-0242 §7's member.
+
+        **The two are computed together, at this site, and never apart** (ADR-0242 §7).
+        A branch that returned one without the other would either put a disposition in
+        the audit with nothing for the user or a member in the reply with nothing in the
+        audit, and the second vocabulary exists precisely because neither is derivable
+        from the other downstream.
+
+        Args:
+            disposition: What this branch resolved to.
+            footing: This conversation's footing, for
+                ``Settings.search_calls_per_conversation`` alone — **no store call is
+                made here**, and the value was handed to the footing by the composition
+                root rather than read by it (ADR-0238 §8).
+            planned_with_external_content: The binding's own fact, where this branch
+                built a request.
+            trust: The build-time ``trust_of`` answer, where this branch reached it.
+
+        Returns:
+            The empty records, the disposition and the member.
+        """
+        return _Searched(
+            (),
+            disposition,
+            not_serviced(
+                disposition,
+                max_calls=footing.max_calls,
+                planned_with_external_content=planned_with_external_content,
+                trust=trust,
+            ),
+        )
 
     async def _bound(
         self,
@@ -2013,7 +2226,7 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
     # record too and a fault raised *by* the search leaves the call that would have
     # assigned it unreturned — where the honest value is the empty one §5's
     # degradation carries (issue #2112).
-    searched = _Searched((), None)
+    searched = _Searched((), None, None)
     # **ADR-0238 §11's three counts are *written* rather than returned**, for the reason
     # `_Reads` is: a fault the searcher raised after the ruling unwinds past the call
     # that would have returned them, and a record saying a servicing admitted no call
@@ -2212,7 +2425,7 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
         # `searched` still holds the initial value no stage has written to. The
         # counts are untouched — they are written through as each stage completes, so
         # what actually happened before the fault survives (ADR-0238 §11).
-        searched = _Searched((), SearchDisposition.SEARCH_FAILED)
+        searched = _Searched((), SearchDisposition.SEARCH_FAILED, SearchNotServiced.UNAVAILABLE)
     finally:
         # One record, on every path out of this function — the completed servicing,
         # the degraded one, and the one a cancellation carried away — and the
@@ -2256,7 +2469,12 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
                 failed_after_read_returned=reads.returned_any,
             ),
         )
-    return carried
+    # ADR-0242 §7's carrier, folded onto the servicing's carriers on **every** path out
+    # of the body above — the completed servicing, the degraded one, and the one whose
+    # searcher raised — because `searched` is assigned on each of them and `carried` is
+    # rebuilt only on the success path. It is what the servicing computed and is never
+    # recomputed here.
+    return replace(carried, not_serviced=searched.not_serviced)
 
 
 def _search_supply(
@@ -2430,12 +2648,23 @@ async def _serviced_search(  # noqa: PLR0913 — the seam, the ask, the composer
     if ask is None:
         # §13's second absence: "nothing where … no ``WEB_SEARCH`` ask was made".
         # Answered before the deployment is consulted, so a turn nobody asked a
-        # search of reads the same on a wired deployment and an unwired one.
-        return _Searched((), None)
+        # search of reads the same on a wired deployment and an unwired one. ADR-0242
+        # §6's eligibility is the disposition's presence, so this turn carries no
+        # member either and its assembled prompt is byte-identical to today's.
+        return _Searched((), None, None)
     if search is None:
-        return _Searched((), SearchDisposition.NOT_CONFIGURED)
+        # ADR-0242 §8's residue: a deployment that connected no search account gives the
+        # user no act, so `UNAVAILABLE` — the member that names no cause and no act.
+        return _Searched((), SearchDisposition.NOT_CONFIGURED, SearchNotServiced.UNAVAILABLE)
     if footing is None:
-        return _Searched((), SearchDisposition.NOT_ADMITTED)
+        # **No conversation to admit against, and therefore no `Settings` bound in
+        # hand.** ADR-0242 §8 discriminates this disposition on that bound alone, so
+        # this branch takes the positive-bound member: it is the one that names a
+        # per-conversation allowance rather than asserting that the deployment has
+        # switched searching off, which nothing here establishes. No production
+        # composition reaches it — `app/composition.py` wires the footing
+        # unconditionally — and the branch is fail-closed rather than a fallback.
+        return _Searched((), SearchDisposition.NOT_ADMITTED, SearchNotServiced.NOT_ADMITTED)
     # ADR-0238 §5's own words for what this holds: "the turn's pre-servicing supply and
     # every record this servicing has already contributed", read once here so that
     # ADR-0181 §4's fact, ADR-0238 §2's supply and §5's current-turn half are computed
