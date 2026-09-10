@@ -504,12 +504,20 @@ means and supplies no obligation of its own. ADR-0020 stays unmarked — marking
 forward-only (ADR-0089 §5) — and its clause named in §11 is read as the prose
 obligation it is.
 
-It decides no Protocol, no `core/types.py` value and no contract surface. It does
-decide **review protocol**, which ADR-0015 §5 and ADR-0020 §1 make the architecture
-lens's subject, so the required set is **adversarial and architecture** and both
-run on the same tree from round 1. It follows `CONTRIBUTING.md` → "Finishing an ADR
-PR": drafted and reviewed as `Proposed`, and flipped by `just adr-ratify` once the
-required set is terminal on one tree.
+It decides no Protocol, no `core/types.py` value and no contract surface, so
+`CONTRIBUTING.md` → "Stop when the required reviews are green" makes **adversarial**
+the mechanically required set. It was nonetheless dispatched to run **both lenses
+from round 1**, on the same tree, and that is a dispatch decision rather than a
+clause of ADR-0015 §1: what this change moves is `docs/review/guide.md`,
+`CONTRIBUTING.md` and two ratified ADRs' clauses — the standing contracts a
+reviewer is conducted under, and the subject of the architecture rubric's "ADR
+adherence" limb. Running a lens the test does not require is always available;
+this ADR does not widen the test, and a later change to review protocol owes only
+what `CONTRIBUTING.md` says it owes.
+
+It follows `CONTRIBUTING.md` → "Finishing an ADR PR": drafted and reviewed as
+`Proposed`, and flipped by `just adr-ratify` once the required set is terminal on
+one tree.
 
 Nothing implements against §§1–8 until this has merged. Because §§1–6 widen the
 review protocol every open lane is working under, and ADR-0209 §1 makes the
