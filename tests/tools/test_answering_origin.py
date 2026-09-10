@@ -31,18 +31,21 @@ would otherwise have kept.
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from datetime import timedelta
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import urlsplit
 
 import pytest
-from answering_origin_harness import SEARCH_PATH, answering_origin
+from answering_origin_harness import SEARCH_PATH, AnsweringOrigin, answering_origin
 from web_search_harness import REPORTED_AT, authorised_search, built, request
 
 from ai_assistant.core.types import CostBasis, SearchRefusal, ToolOutcome
 from ai_assistant.tools.egress import StreamOutboundTransport
 
 if TYPE_CHECKING:
+    from collections.abc import Coroutine
+
     from web_search_harness import Built
 
     from ai_assistant.core.types import SearchOutcome
@@ -70,6 +73,11 @@ _SLACK: Final = timedelta(seconds=5)
 #: is slack against the measurement rather than against the bound.
 _EARLY: Final = timedelta(milliseconds=100)
 
+#: A bound no run of the case that uses it reaches. Ten minutes, so that what ends
+#: that search is provably the release and not the deadline — which is the whole
+#: claim, and which a bound of any plausible size would leave arguable.
+_UNREACHABLE: Final = timedelta(minutes=10)
+
 #: What the origin's default result transcribes to under ADR-0231 §10's fixed form —
 #: title, address, snippet, one per line. Spelled out rather than rebuilt from
 #: ``result()``, because a case that rebuilt it from the same call the origin served
@@ -79,8 +87,14 @@ _TRANSCRIBED: Final = (
 )
 
 
-async def _searched(subject: Built, *, origin: str, decision_id: str) -> SearchOutcome:
-    """Drive one authorised search over ``subject``, under :data:`_BOUND`.
+async def _searched(
+    subject: Built,
+    *,
+    origin: str,
+    decision_id: str,
+    timeout: timedelta = _BOUND,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, §2)
+) -> SearchOutcome:
+    """Drive one authorised search over ``subject``.
 
     Args:
         subject: The configured integration, already pointed at a live origin.
@@ -88,13 +102,16 @@ async def _searched(subject: Built, *, origin: str, decision_id: str) -> SearchO
         decision_id: The decision this call is authorised by. Distinct per call:
             ADR-0192 §1 admits one claim per decision, so a second search under a
             spent decision is refused before it reaches the origin.
+        timeout: The bound to pass the seam (ADR-0241 §1). Defaults to
+            :data:`_BOUND`; one case names a figure no run of it reaches, so that
+            what ends the search is provably not the deadline.
 
     Returns:
         The outcome.
     """
     proposal = await request(subject, origin=origin)
     call = await authorised_search(subject.trail, proposal=proposal, decision_id=decision_id)
-    outcome: SearchOutcome = await subject.searcher.search(call, timeout=_BOUND)
+    outcome: SearchOutcome = await subject.searcher.search(call, timeout=timeout)
     return outcome
 
 
@@ -108,6 +125,55 @@ def _paths(targets: list[str]) -> list[str]:
         The paths, without the query the composed request carries.
     """
     return [urlsplit(target).path for target in targets]
+
+
+async def _under_watchdog(
+    searching: Coroutine[Any, Any, SearchOutcome], *, origin: AnsweringOrigin
+) -> SearchOutcome:
+    """Await one search against a stalled origin, or fail — never hang.
+
+    **The upper bound is a watchdog rather than an assertion, and it releases the
+    origin rather than only cancelling.** Two things make that necessary, and the
+    second is what a plain ``asyncio.timeout`` around the call gets wrong.
+
+    First, an assertion *after* the call is unreachable where the call never
+    returns: the origin holds the connection for as long as its block lives, so a
+    regression that stopped delivering the deadline would hang the run rather than
+    fail it. Nothing else bounds it — this corpus configures no per-test timeout and
+    CI's job has none either.
+
+    Second, a bound that only cancels is a bound the very regression this case is
+    written over can outlive. ``asyncio.timeout`` cancels the *current task*, which
+    is the same task the search is running in; an implementation that defers or
+    absorbs cancellations (ADR-0241 §4 and §7 distinguish exactly those) takes both
+    the deadline's cancellation at two seconds and the watchdog's at seven and keeps
+    waiting for octets that are not coming. So the search runs in a task of its own,
+    the wait is ``asyncio.wait``'s — which returns rather than cancelling — and the
+    escape is :meth:`AnsweringOrigin.release`, which closes the connection. A read
+    ends when there is nothing left to read from whether or not the reader can be
+    cancelled, which is the property ``test_releasing_the_origin_ends_a_stalled_search``
+    pins.
+
+    Args:
+        searching: The search to drive.
+        origin: The origin holding it, to release if the bound is reached.
+
+    Returns:
+        The outcome, where the search returned inside the bound.
+    """
+    task = asyncio.ensure_future(searching)
+    done, _ = await asyncio.wait({task}, timeout=(_BOUND + _SLACK).total_seconds())
+    if not done:  # pragma: no cover — the failure path this bound exists for
+        origin.release()
+        with suppress(BaseException):
+            async with asyncio.timeout(_SLACK.total_seconds()):
+                await task
+        task.cancel()
+        pytest.fail(
+            "the stalled search did not return within the bound plus ADR-0241 §12's "
+            "stated slack, so the deadline is no longer reaching the response read"
+        )
+    return task.result()
 
 
 async def test_a_real_origin_that_answers_mints_records_from_what_it_served() -> None:
@@ -175,25 +241,10 @@ async def test_a_second_search_against_a_stalled_answer_expires_and_leaves_the_f
         assert [record.content for record in answered.records] == [_TRANSCRIBED]
 
         started = asyncio.get_running_loop().time()
-        # **The upper bound is a watchdog rather than an assertion, and that is the
-        # only shape that reports.** The regression this case exists to catch is a
-        # cancellation that stops reaching the response read — and against an origin
-        # that holds the connection for as long as the block lives, an assertion
-        # after the call is unreachable: the call never returns, so the run hangs
-        # instead of failing. Nothing else here is bounded — this corpus configures
-        # no per-test timeout, and CI's job has none either — so the bound has to
-        # wrap the await.
-        try:
-            async with asyncio.timeout((_BOUND + _SLACK).total_seconds()):
-                expired = await _searched(
-                    subject, origin=origin.origin, decision_id="d-answering-second"
-                )
-        except TimeoutError:  # pragma: no cover — the failure path this bound exists for
-            pytest.fail(
-                "the stalled search did not return within the bound plus ADR-0241 "
-                "§12's stated slack, so the deadline is no longer reaching the "
-                "response read"
-            )
+        expired = await _under_watchdog(
+            _searched(subject, origin=origin.origin, decision_id="d-answering-second"),
+            origin=origin,
+        )
         elapsed = asyncio.get_running_loop().time() - started
 
         assert origin.exhausted.is_set(), "the second request really was held, not failed"
@@ -258,3 +309,42 @@ async def test_an_origin_that_hangs_up_is_not_read_as_an_expiry() -> None:
     assert outcome.refusal is SearchRefusal.TRANSPORT_FAILED
     assert outcome.records == ()
     assert elapsed < _BOUND.total_seconds(), "a hang-up is answered without waiting out the bound"
+
+
+async def test_releasing_the_origin_ends_a_stalled_search() -> None:
+    """The property every watchdog above rests on, pinned on its own.
+
+    ``_under_watchdog`` escapes a search that outlives its bound by releasing the
+    origin rather than by cancelling the search, on the reasoning that a read ends
+    when there is nothing left to read from whether or not the reader can be
+    cancelled — and that a bound which can only cancel is one that a
+    cancellation-deferring regression outlives. That reasoning is load-bearing for
+    the arm above, so it is asserted rather than described.
+
+    The deadline is put out of reach — :data:`_UNREACHABLE` is ten minutes — so
+    that what ends this search is provably :meth:`AnsweringOrigin.release` and not
+    ADR-0241 §1's expiry. The refusal is ``TRANSPORT_FAILED`` for the same reason:
+    the connection went away under the read, which is a transport failure and not
+    an expiry, and reading ``DEADLINE_EXPIRED`` here would mean the deadline had
+    fired after all.
+    """
+    async with answering_origin(answer=0, then="stall") as origin:
+        subject = await built(transport=StreamOutboundTransport(), origin=origin.origin)
+        searching = asyncio.ensure_future(
+            _searched(
+                subject,
+                origin=origin.origin,
+                decision_id="d-answering-released",
+                timeout=_UNREACHABLE,
+            )
+        )
+        async with asyncio.timeout(_SLACK.total_seconds()):
+            await origin.exhausted.wait()
+        assert not searching.done(), "the search is held in its response read"
+
+        origin.release()
+        async with asyncio.timeout(_SLACK.total_seconds()):
+            outcome = await searching
+
+    assert outcome.refusal is SearchRefusal.TRANSPORT_FAILED
+    assert outcome.records == ()
