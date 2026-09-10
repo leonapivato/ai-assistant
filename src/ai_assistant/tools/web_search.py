@@ -1320,38 +1320,6 @@ class WebSearchEgress:
             entered_with = pending_cancellations()
             deadline = asyncio.timeout(remaining.total_seconds())
 
-            def absorbed_a_cancellation() -> None:
-                """Deliver an interruption the callable swallowed, before classifying.
-
-                **A pending external cancellation takes precedence over every
-                classification this frame could make**, on every path out of the
-                callable — an exception it raised as well as a value it returned.
-                ADR-0029 §4 keeps that on the executor and ADR-0060 §1 says a method
-                never absorbs one, so a transport that catches the cancellation and
-                then raises a ``TimeoutError`` of its own must not have that
-                ``TimeoutError`` answered with a refusal. This is
-                ``_interruption``'s first clause one seam over, and it is a function
-                rather than three copies because a path that forgot it is exactly
-                what round 2 found.
-
-                Freshly raised rather than re-raised: the original was consumed
-                inside the callable, and what matters is that the cancellation
-                reaches the executor rather than being answered with a result.
-                ``consumed_call`` still completes the claim with the declaration's
-                ``interrupted_outcome`` and an ``UNKNOWN`` cost on the way past
-                (ADR-0192 §3).
-
-                Raises:
-                    CancelledError: If a cancellation of the invoking task is still
-                        pending.
-                """
-                if pending_cancellations() > entered_with:
-                    swallowed = (
-                        f"{self._declaration.id}: the searcher absorbed the "
-                        f"cancellation of its invoking task"
-                    )
-                    raise asyncio.CancelledError(swallowed)
-
             try:
                 async with deadline:
                     outcome = await self._asked(binding, origin=origin, query=query)
@@ -1390,12 +1358,25 @@ class WebSearchEgress:
                 # ``TimeoutError`` instead arrives here with the count still moved,
                 # and answering it with a refusal would be the absorption ADR-0060 §1
                 # says a method never performs.
-                absorbed_a_cancellation()
+                self._deliver_absorbed(entered_with)
                 outcome = _refused(
                     SearchRefusal.DEADLINE_EXPIRED
                     if deadline.expired()
                     else SearchRefusal.TRANSPORT_FAILED
                 )
+            except Exception:
+                # **A fault the callable raised is still not evidence that nothing was
+                # cancelled.** A connection reader that catches this task's
+                # `CancelledError` and raises `ConnectionStoreError` instead leaves the
+                # frame holding an ordinary exception, and letting it out would degrade
+                # the turn under ADR-0226 §5 while the cancellation the executor asked
+                # for was never delivered. Where nothing was cancelled the fault leaves
+                # exactly as it arrived — unwrapped, unannotated and with no outcome
+                # invented for it (ADR-0029 §3). `BaseException` is deliberately not
+                # caught: a process being torn down is not an interruption of this
+                # call, and the open claim is the honest state for it (ADR-0192 §3).
+                self._deliver_absorbed(entered_with)
+                raise
             else:
                 # **The state is read from the task and the deadline rather than
                 # inferred from what came back** (ADR-0029 §4, and `_interruption`'s
@@ -1405,7 +1386,7 @@ class WebSearchEgress:
                 # answer and no exception, and trusting that return would record
                 # `SUCCEEDED` for a call that outran its bound — the seam's worst
                 # available bug, and the one an implementation is most likely to have.
-                absorbed_a_cancellation()
+                self._deliver_absorbed(entered_with)
                 if deadline.expired():
                     # `Timeout.expired()` is this seam's own state and no callable can
                     # reset it, which is what makes the deadline half tool-proof where
@@ -1433,6 +1414,7 @@ class WebSearchEgress:
             return _refused(SearchRefusal.DEADLINE_EXPIRED)
 
         watched = _UpstreamWatchingGate(self._gate)
+        admitting = pending_cancellations()
         try:
             await admitted_call(
                 gate=watched,
@@ -1456,7 +1438,28 @@ class WebSearchEgress:
             # retry." Caught here rather than left to leave, because §17 makes every
             # `SearchRefusal` member a return value — and this is the one exit above
             # the claim that has one, so nothing was read and no row was written.
+            #
+            # A gate that swallowed this task's cancellation and then refused is
+            # answering a cancelled turn with a value, so the cancellation goes first
+            # (ADR-0060 §1). ADR-0194 §4's payload-free refusal is untouched: nothing
+            # here catches, wraps or annotates one.
+            self._deliver_absorbed(admitting)
             return _refused(SearchRefusal.SPEND_REFUSED)
+        except asyncio.CancelledError as cancellation:
+            if pending_cancellations() > admitting:
+                # An external cancellation from anywhere below — the gate, the claim,
+                # the callable — delivered onward unchanged (ADR-0060 §1). Any claim
+                # that was open has already been completed by `consumed_call` on the
+                # way past (ADR-0192 §3).
+                raise
+            # ADR-0031 §2's invented cancellation, one frame out from `act`'s: a
+            # collaborator raised one with nothing cancelled, and ADR-0241 §7 makes
+            # that a fault rather than a teardown that ends the turn.
+            invented = (
+                f"{self._declaration.id}: a collaborator raised a cancellation with "
+                f"nothing cancelled, so the search did not complete"
+            )
+            raise ToolError(invented) from cancellation
         if outcome is None:
             # `admitted_call` returned without entering `act`. **No claim was appended,
             # so no completion row is written** — ADR-0192 §1's placement relied upon
@@ -1472,10 +1475,54 @@ class WebSearchEgress:
             # forbids reporting as one. `_UpstreamWatchingGate` captures that where it
             # is unambiguous, at the call itself; see its docstring for why the
             # `Task.cancelling()` count and not a comparison against `expires_at`.
+            #
+            # **And a cancellation the gate absorbed outranks both**, because the
+            # count moving is the one fact that says this turn was cancelled at all;
+            # `admitted_call` cannot see it, having answered ADR-0029 §4's
+            # classification for the `TimeoutError` such a gate raises.
+            self._deliver_absorbed(admitting)
             if watched.upstream is not None:
                 return _refused(SearchRefusal.TRANSPORT_FAILED)
             return _refused(SearchRefusal.DEADLINE_EXPIRED)
         return outcome
+
+    def _deliver_absorbed(self, entered_with: int) -> None:
+        """Deliver an interruption a collaborator swallowed, before anything else.
+
+        **A pending external cancellation outranks every classification this seam
+        could make**, on every exit — an exception a collaborator raised as well as a
+        value it returned. ADR-0029 §4 keeps that on the executor and ADR-0060 §1 says
+        a method never absorbs one, so a transport that catches the cancellation and
+        then raises a ``TimeoutError``, a connection reader that replaces it with a
+        store fault, and a gate that swallows it and refuses are all the same case:
+        the object that came back says nothing about whether this turn was cancelled.
+        This is ``_interruption``'s first clause one seam over, in one place because a
+        path that forgot it is what rounds 2 and 3 each found.
+
+        **The count and not the class** (ADR-0031 §2): it is a lifetime figure only
+        ``uncancel`` lowers, so a collaborator that catches the exception cannot lower
+        it, and reading it as a *delta* from a baseline taken on entry is what keeps a
+        caller's earlier, unrelated cancellation from failing this call.
+
+        Freshly raised rather than re-raised: the original was consumed inside the
+        collaborator, and what matters is that the cancellation reaches the executor
+        rather than being answered with a result. Where a claim is open,
+        ``consumed_call`` still completes it with the declaration's
+        ``interrupted_outcome`` and an ``UNKNOWN`` cost on the way past (ADR-0192 §3);
+        where none was appended, none is owed (ADR-0241 §5).
+
+        Args:
+            entered_with: The count sampled before the work this is guarding.
+
+        Raises:
+            CancelledError: If a cancellation of the invoking task is still pending.
+        """
+        if pending_cancellations() > entered_with:
+            swallowed = (
+                f"{self._declaration.id}: the searcher absorbed the cancellation of "
+                f"its invoking task"
+            )
+            raise asyncio.CancelledError(swallowed)
 
     def _authorised(self, call: ToolCall) -> tuple[ToolCall, EgressBinding, str, str]:
         """Run ADR-0029 §2's three checks, and hand back what survived them.
