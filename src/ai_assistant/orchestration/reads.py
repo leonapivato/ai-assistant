@@ -1230,11 +1230,15 @@ class SearchFooting:
     to it in any other subsystem, and adds no second caller", and this object is what
     makes that one site reachable from the one place a turn is run.
 
-    **Every store call it makes is one of the four ADR-0238 admits**, and it makes no
-    other: :meth:`~ai_assistant.core.protocols.DestinationTrustStore.trust_of`, and
+    **Every judgement it makes about the budget is one of the four calls ADR-0238
+    admits**, and it makes no other:
+    :meth:`~ai_assistant.core.protocols.DestinationTrustStore.trust_of`, and
     ``ConversationStore``'s :meth:`admit_search`, :meth:`search_draw` and
-    :meth:`observe_search`. It reads no ``Settings`` — §8 puts the bound in the
-    caller's hands and this object *is* where the caller's judgement about it is
+    :meth:`observe_search`. The one further read it takes decides no part of the budget
+    and adds no member to any Protocol: :meth:`resolve_episodes` asks ADR-0074 §9's
+    ``turn_of_episode`` which conversation an episode belongs to, which is §2's
+    population question and not §8's. It reads no ``Settings`` — §8 puts the bound in
+    the caller's hands and this object *is* where the caller's judgement about it is
     carried — holds no clock, and mints nothing.
 
     Attributes:
@@ -1277,11 +1281,15 @@ class SearchFooting:
     #: refused is a conversation whose flag is down, which §8 makes monotone.
     minted_user_chosen: set[str] = field(default_factory=set)
     #: The ids of ADR-0238 §2's **first** population alone: "episodes of this
-    #: conversation that ``orchestration`` selected into the turn's supply". Written
-    #: once, by the loop, from the conversation tail
-    #: :meth:`~ai_assistant.orchestration.conversations.ConversationLifecycle.history`
-    #: resolved out of the conversation index — a **recorded membership fact** about
-    #: which turns are this conversation's, never a judgement about a record's content.
+    #: conversation that ``orchestration`` selected into the turn's supply". The loop
+    #: seeds it with the conversation tail and :meth:`resolve_episodes` adds every other
+    #: episode in the supply the index says is this conversation's.
+    #:
+    #: **Membership is the index's fact and never the record's**, which is ADR-0074
+    #: §10's own position: "conversation membership lives in this index and not as a
+    #: ``conversation_id`` field on ``EpisodicMemory``, so that an episode belonging to
+    #: no conversation is the *default* shape rather than a permitted exception". So it
+    #: is a set the loop was handed, never a predicate over content, a stage or a stamp.
     #:
     #: Recorded apart from :attr:`selected` because :meth:`clean` tells the two
     #: populations apart and :func:`_search_supply` does not: an episode of *this*
@@ -1336,11 +1344,11 @@ class SearchFooting:
 
         **Still blind to why a record is external** (§5). Nothing here asks what
         stamped a record: the third case is decided from *membership* — which turns the
-        conversation index records as this conversation's — and never from the cause of
-        a stamp, which is what ADR-0223 §6 requires of any clause reaching ADR-0181 §5's
-        floor. A stamped episode of some **other** conversation, and any
-        ``MemoryRecord`` retrieval selected, fail this predicate exactly as a fetched
-        page does, whatever their provenance says.
+        conversation index records as this conversation's (:meth:`resolve_episodes`) —
+        and never from the cause of a stamp, which is what ADR-0223 §6 requires of any
+        clause reaching ADR-0181 §5's floor. A stamped episode of some **other**
+        conversation, and any ``MemoryRecord`` retrieval selected, fail this predicate
+        exactly as a fetched page does, whatever their provenance says.
 
         **It reads a recorded fact and never content** (§5, §12): the predicate is
         ``rests_on_recorded_external_content`` over the record's own provenance and
@@ -1359,6 +1367,61 @@ class SearchFooting:
             or record.id in self.minted_user_chosen
             or record.id in self.conversation_episodes
         )
+
+    async def resolve_episodes(self, records: Sequence[MemoryRecord], /) -> None:
+        """Add every episode of **this** conversation in ``records`` to §2's first population.
+
+        **The tail is not the population; the index is.** The loop can name the
+        conversation tail without a read, because
+        :meth:`~ai_assistant.orchestration.conversations.ConversationLifecycle.history`
+        walked this conversation's index rows to build it — but §2's population is
+        "episodes of this conversation that ``orchestration`` selected into the turn's
+        supply", and ADR-0158 §3's episodic supplement selects episodes too, including
+        ones that have fallen out of ADR-0074 §9's replay window. Deciding those by the
+        stage they arrived through would refuse a conversation its own distant past and
+        leave §15 Arm 1b unreachable for exactly the long conversation the milestone is
+        about. So membership is resolved where ADR-0074 §10 puts it: ``turn_of_episode``,
+        which "the store owes both directions of" precisely so that no caller infers it.
+
+        **A read only for a record that would otherwise fail** :meth:`clean`. An episode
+        carrying no recorded external span passes on the first disjunct whatever the
+        index says, so asking about it would buy nothing — which is what keeps the cost
+        at zero for the turns that carry nothing tainted, and bounded by the supply's
+        stamped episodes otherwise.
+
+        **Not one of ADR-0238's four store calls, and it is not a fifth budget member.**
+        §8 adds three members to ``ConversationStore`` and rules that "a fourth is added
+        by no lane without the ADR that decides it"; this adds none — ``turn_of_episode``
+        is ADR-0074 §9's, already declared, already conformance-tested. §14's
+        no-second-caller restraint is stated over the **trust** store and is untouched
+        here.
+
+        **A store fault leaves the record out**, which is the fail-closed direction: an
+        episode this method could not place stays §2's second population and costs the
+        conversation its footing, exactly as it does today. The turn is not failed for
+        it, which is the posture :meth:`_fold` and ``ConversationLifecycle.history``
+        already take toward this store.
+
+        Args:
+            records: The turn's pre-servicing supply.
+        """
+        for record in records:
+            if record.id in self.conversation_episodes or not rests_on_recorded_external_content(
+                record.provenance
+            ):
+                continue
+            if MemoryKind(record.kind) is not MemoryKind.EPISODIC:
+                continue
+            try:
+                turn = await self.conversations.turn_of_episode(record.id)
+            except AssistantError as exc:
+                # The class and nothing else, for the reason `_fold` states: this
+                # frame's locals carry the conversation's id and the deployment's
+                # destinations, both Tier 1 (ADR-0238 §11).
+                _log.warning("search_footing_membership_degraded", error=type(exc).__name__)
+                continue
+            if turn is not None and turn.conversation_id == self.conversation_id:
+                self.conversation_episodes.add(record.id)
 
     async def trusted(self) -> DestinationTrust:
         """What the store records about this deployment's search destination (§1).

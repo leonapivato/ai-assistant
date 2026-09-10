@@ -1390,18 +1390,24 @@ class LearningLoop:
             # may read a file and *then* reach the search". A `MemoryRecord` retrieval
             # selected carries no such vouching and is not in here.
             #
-            # **The tail is the recorded membership fact**, not a stage-shaped guess:
-            # `ConversationLifecycle.history` resolves it from the conversation index,
-            # which is the only record of which turns are this conversation's. It is
-            # read from `recent` rather than from the narrowed supply because a record
-            # ADR-0203 §1's filter removed reaches no `clean` call anyway, so the two
-            # spellings cannot differ in effect. Narrowed to episodes because §2's
-            # population is "episodes of this conversation": a record of any other kind
-            # arriving through this sequence is not a turn of it, and the flag says
-            # nothing about it.
+            # **Membership is the conversation index's fact** (ADR-0074 §10), and it is
+            # taken in two steps only because the first is free. The tail needs no read:
+            # `ConversationLifecycle.history` built it by walking *this* conversation's
+            # index rows, so asking `turn_of_episode` about each would re-read rows this
+            # turn already walked. It is read from `recent` rather than from the narrowed
+            # supply because a record ADR-0203 §1's filter removed reaches no `clean`
+            # call anyway, so the two spellings cannot differ in effect. Narrowed to
+            # episodes because §2's population is "episodes of this conversation".
             footing.conversation_episodes.update(
                 record.id for record in recent if MemoryKind(record.kind) is MemoryKind.EPISODIC
             )
+            # And then the rest of the supply, which the tail cannot answer for: ADR-0158
+            # §3's episodic supplement selects episodes on relevance, including this
+            # conversation's own — the ones that have fallen out of ADR-0074 §9's replay
+            # window are exactly what a long conversation reaches back for. Deciding
+            # those by the stage they arrived through would refuse a conversation its own
+            # past and leave §15 Arm 1b unreachable for it.
+            await footing.resolve_episodes(memories)
             # ADR-0238 §8's **early** fold, on the turn's pre-servicing supply and
             # before the first planner call. "The moment ``orchestration`` admits to a
             # turn a recorded external span that was **not** minted by a ``WEB_SEARCH``
