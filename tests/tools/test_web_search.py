@@ -2083,3 +2083,90 @@ async def test_a_gate_that_absorbs_the_deadline_is_still_this_seams_expiry() -> 
     assert outcome.refusal is SearchRefusal.DEADLINE_EXPIRED
     assert await subject.trail.export_invocations() == [], "and no claim was appended"
     assert subject.transport.attempts == (), "and no channel was opened"
+
+
+async def test_a_gate_that_absorbs_an_outside_cancellation_still_delivers_it() -> None:
+    """Round 3's blocker: the gate's counterpart to the transport's absorption.
+
+    A gate suspended in ``admit_invocation`` when the *caller* cancels, which catches
+    the ``CancelledError`` and raises a ``TimeoutError`` of its own: ``admitted_call``
+    answers ADR-0029 §4's classification for it, and the count moving means the
+    wrapper does **not** record it as the gate's own — so a searcher that read only
+    those two signals would answer a cancelled turn with ``DEADLINE_EXPIRED``.
+
+    ADR-0060 §1 and ADR-0241 §7 both put the cancellation first, and the count is what
+    establishes it. **No claim was appended**, so none is completed: this exit is above
+    ADR-0192 §1's placement (ADR-0241 §5).
+    """
+    gate = AbsorbingGate()
+    subject = await built(channels=[answering(result())], gate=gate)
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    search = asyncio.ensure_future(subject.searcher.search(call, timeout=A_BOUND))
+    await settle()
+    assert gate.admissions == 1, "the admission was reached before the cancellation"
+    search.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await search
+
+    assert gate.absorbed == 1, "the arrangement really did swallow the cancellation"
+    assert await subject.trail.export_invocations() == [], "no claim, so no completion"
+    assert subject.transport.attempts == (), "and no channel was opened"
+
+
+async def test_a_fault_that_replaces_an_outside_cancellation_still_delivers_it() -> None:
+    """Round 3's second blocker: an ordinary fault is not evidence of no cancellation.
+
+    A connection reader that catches this task's ``CancelledError`` and raises
+    ``ConnectionStoreError`` instead leaves the frame holding an ordinary exception —
+    and letting it out would degrade the turn under ADR-0226 §5 with ADR-0241 §8's
+    ``SEARCH_FAILED`` while the cancellation the executor asked for was never
+    delivered, and the claim left open rather than completed.
+
+    So the precedence applies on the fault path too. The claim **is** open here, which
+    is what makes the completion assertable: ``consumed_call`` writes it with the
+    declaration's ``interrupted_outcome`` on the way past (ADR-0192 §3).
+    """
+    transport = AbsorbingTransport(60.0, raises=ConnectionStoreError("conn-0001 could not be read"))
+    subject = await built(transport=transport)
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    search = asyncio.ensure_future(subject.searcher.search(call, timeout=A_BOUND))
+    await settle()
+    assert transport.attempts, "the open was reached before the cancellation"
+    search.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await search
+
+    assert transport.absorbed == 1, "the arrangement really did swallow the cancellation"
+    completions = [
+        row.invocation
+        for row in await subject.trail.export_invocations()
+        if row.invocation.completes is not None
+    ]
+    assert [row.outcome for row in completions] == [ToolOutcome.INDETERMINATE], (
+        "and the row is the one ADR-0029 §4 computes for an interruption, not the "
+        "open claim a `SEARCH_FAILED` degradation would have left"
+    )
+
+
+async def test_a_fault_with_nothing_cancelled_still_leaves_unchanged() -> None:
+    """The other direction of the arm above: the precedence narrows nothing.
+
+    Where no cancellation is pending, an ordinary fault the searcher raised leaves
+    exactly as it arrived — unwrapped, unannotated, and with no outcome invented for
+    it (ADR-0029 §3) — so it reaches ADR-0226 §5's degradation and ADR-0241 §8's
+    ``SEARCH_FAILED`` as before. Asserted beside the interruption arm so a check
+    written one condition too wide fails here rather than silently converting every
+    store fault into a cancellation.
+    """
+    subject = await built(
+        channels=[answering(result())],
+        records=Records(ConnectionStoreError("the store is down")),
+    )
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    with pytest.raises(ConnectionStoreError, match="the store is down"):
+        await subject.searcher.search(call, timeout=A_BOUND)
