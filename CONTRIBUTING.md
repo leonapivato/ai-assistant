@@ -301,8 +301,11 @@ previous round's fix, because the question was never about the code.
 
 **Nothing turns on it mechanically.** The checkpoint authorises no merge, forbids
 no round, caps nothing, makes no lens terminal, and is **not** a second handoff
-trigger — ADR-0138 §1's seven-rounds and churn-1.5 arms are untouched. It costs a
-comment, and it always precedes the handoff, which costs a successor's spin-up.
+trigger — ADR-0138 §1's seven-rounds and churn-1.5 arms are untouched, and a
+handoff is never delayed or excused by a missing diagnosis. It costs a comment,
+and on any loop spending its rounds on new trees it comes before the handoff,
+which costs a successor's spin-up. Where your count never reaches four, no
+diagnosis is owed — say that in the handoff comment.
 Carry your most recent diagnosis, and the count of trees, into the handoff
 comment when one is owed (ADR-0243 §6) — and record the count of trees actually
 recorded, never the figure a failed launch printed.
