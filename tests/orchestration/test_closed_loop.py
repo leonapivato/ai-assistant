@@ -65,7 +65,11 @@ from ai_assistant.core.types import (
     SemanticMemory,
     SpanCoverage,
 )
-from ai_assistant.orchestration.reads import SearchDisposition, SearchFooting
+from ai_assistant.orchestration.reads import (
+    READ_AUDIT_EVENT,
+    SearchDisposition,
+    SearchFooting,
+)
 from ai_assistant.permissions.policy import ThresholdActionPolicy
 from ai_assistant.planning.composer import ModelBackedQueryComposer
 from ai_assistant.testing import (
@@ -1206,32 +1210,46 @@ class _BlockingFold(FakeConversationStore):
         await super().observe_search(conversation_id, **knobs)
 
 
-async def test_a_read_inside_the_fold_window_still_sees_the_unlowered_flag() -> None:
-    """§15 Arm 6f2(iii), stated as the residual §8 names rather than argued away.
+#: The conversation's whole call allowance for the concurrency arm below. Three rather
+#: than one, because ADR-0238 §15 Arm 6f2(iv) says in terms that a one-turn arm "passes
+#: identically whether the residual is one search or the whole budget, which is exactly
+#: how an earlier revision of §8 came to claim the smaller figure".
+_ALLOWANCE: Final = 3
 
-    "**B does read the not-yet-lowered flag**, which is the residual §8 names and this arm
-    records so that it is a ratified property and not a surprise found later." §8 is
-    explicit about why nothing closes it: "``admit_search`` does not consult the flag …
-    the boundary is this and no more: **every request whose recorded-half read returns
-    after the fold has committed sees the false**", and closing the remainder "means
-    serialising servicings of one conversation, which is a new obligation on
+
+async def test_the_whole_remaining_allowance_reads_the_unlowered_flag_and_the_next_is_not() -> None:
+    """§15 Arm 6f2(iii) **and** (iv): the residual at its true size, which is not one.
+
+    (iii) requires the window to be asserted "as the boundary §8 states and not as an
+    ordering" — a recorded-half read landing **while the admission fold is still in
+    flight** — and says the arm must block inside ``observe_search`` "rather than
+    sequencing the two calls and hoping".
+
+    (iv) requires it at its true size: "the same blocked fold is held open while **the
+    conversation's whole remaining call allowance** is admitted — *n* concurrent turns for
+    a draw with *n* left — and the arm asserts that **every one of them** reads the
+    not-yet-lowered flag and is ruled closed-loop, that the *(n+1)*th is refused by
+    ``admit_search`` **on the counter rather than by the footing**, and that every read
+    landing after the fold commits is not closed-loop."
+
+    §8 is explicit about why nothing closes this: "``admit_search`` does not consult the
+    flag … the boundary is this and no more: **every request whose recorded-half read
+    returns after the fold has committed sees the false**", and closing the remainder
+    "means serialising servicings of one conversation, which is a new obligation on
     ``orchestration`` across concurrent turns that nothing in this corpus provides today".
-
-    So this asserts **both** ends: a turn whose build-time read lands inside the window is
-    ruled closed-loop, and the next turn — whose read begins after the fold commits — is
-    not. A one-turn arm cannot catch either.
+    So the residual is recorded here as a ratified property rather than found later.
     """
     conversations = _BlockingFold(now=_clock, new_id=lambda: "c-1")
     await conversations.start()
     trust = FakeDestinationTrustStore([_CHOSEN])
 
-    def footing_for() -> Any:
+    def footing_for() -> SearchFooting:
         return SearchFooting(
             conversation_id="c-1",
             conversations=conversations,
             trust=trust,
             destinations=SEARCH_DESTINATIONS,
-            max_calls=8,
+            max_calls=_ALLOWANCE,
         )
 
     dirty = asyncio.create_task(
@@ -1244,34 +1262,89 @@ async def test_a_read_inside_the_fold_window_still_sees_the_unlowered_flag() -> 
     )
     await conversations.entered.wait()
 
+    # The whole remaining allowance, admitted **concurrently** while the fold is held.
     trail = _trail()
     inside = _servicer(
         searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))), trail=trail, granted=True
     )
-    await _loop(
-        planner=FakePlanner(now=_clock, read_request=_search()),
-        search=inside,
-        footing=footing_for(),
-    ).respond(_ASK, narrow=_bounded())
+    with structlog.testing.capture_logs() as captured:
+        await asyncio.gather(
+            *(
+                _loop(
+                    planner=FakePlanner(now=_clock, read_request=_search()),
+                    search=inside,
+                    footing=footing_for(),
+                ).respond(_ASK, narrow=_bounded())
+                for _ in range(_ALLOWANCE)
+            )
+        )
 
-    (during,) = await _bindings(trail)
-    assert during.closed_loop is True, (
-        "the read landed while the fold was in flight, which is §8's stated residual"
+    during = await _bindings(trail)
+    assert len(during) == _ALLOWANCE, "every one of them was admitted and ruled"
+    assert all(binding.closed_loop for binding in during), (
+        "every read landing inside the window saw the not-yet-lowered flag — the residual "
+        "is bounded by the call ceiling and by nothing tighter"
+    )
+    assert all(
+        decision.ruling.outcome is PermissionOutcome.ALLOW for decision in await trail.recent()
+    ), "and each was ruled ALLOW on route (b)"
+    spent = sorted(
+        servicing["calls"]
+        for event in captured
+        if event["event"] == READ_AUDIT_EVENT
+        for servicing in event["servicings"]
+    )
+    assert spent == list(range(1, _ALLOWANCE + 1)), (
+        "each spent one call of the allowance, and the counter is what serialised them — "
+        "`admit_search` is one atomic step, so no two turns were admitted against one draw"
     )
 
+    # The (n+1)th, refused **on the counter** and not on the footing, which is still true.
+    overflow_trail = _trail()
+    with structlog.testing.capture_logs() as overflowed:
+        await _loop(
+            planner=FakePlanner(now=_clock, read_request=_search()),
+            search=_servicer(
+                searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))),
+                trail=overflow_trail,
+                granted=True,
+            ),
+            footing=footing_for(),
+        ).respond(_ASK, narrow=_bounded())
+
+    assert _serviced(overflowed, 0)["disposition"] == SearchDisposition.NOT_ADMITTED.value
+    assert await overflow_trail.recent() == [], "nothing was composed, bound or ruled"
+    held = await conversations.search_draw("c-1")
+    assert held is not None
+    assert held.all_external_user_chosen is True, (
+        "and the footing is *still* true at that point, so the refusal is the counter's"
+    )
+
+    # The fold commits, and the boundary §8 states is the read's instant.
     conversations.release.set()
     await dirty
+    after = await conversations.search_draw("c-1")
+    assert after is not None
+    assert after.all_external_user_chosen is False, "the fold landed"
 
     after_trail = _trail()
-    after = _servicer(
-        searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))),
-        trail=after_trail,
-        granted=True,
-    )
     await _loop(
         planner=FakePlanner(now=_clock, read_request=_search()),
-        search=after,
-        footing=footing_for(),
+        search=_servicer(
+            searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))),
+            trail=after_trail,
+            granted=True,
+        ),
+        footing=SearchFooting(
+            conversation_id="c-1",
+            conversations=conversations,
+            trust=trust,
+            destinations=SEARCH_DESTINATIONS,
+            # Raised for this last turn alone, so the request it builds is refused by the
+            # **footing** rather than by the counter the three above exhausted — which is
+            # the half of §8's boundary this line is about.
+            max_calls=_ALLOWANCE + 1,
+        ),
     ).respond(_ASK, narrow=_bounded())
 
     (later,) = await _bindings(after_trail)
