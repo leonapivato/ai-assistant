@@ -674,6 +674,11 @@ class Harness:
         # composition root does. Two unrelated fakes would be a composition nothing
         # builds: capture would write into one store and ``forget`` would destroy from
         # another, so every cascade case would pass vacuously.
+        #: ADR-0238 §14's store, and ADR-0242 §4's: **the caller's where one was given**,
+        #: so the engine's three trust operations and the search footing below hold the
+        #: *same* object. A second assignment here would leave a case's seeded records
+        #: and armed faults reaching the servicing site and never the engine — the two
+        #: halves of one journey looking at two stores.
         self.destination_trust = (
             FakeDestinationTrustStore() if destination_trust is None else destination_trust
         )
@@ -852,10 +857,6 @@ class Harness:
         self.recipient_grants: RecipientGrantStore = (
             FakeRecipientGrantStore() if recipient_grants is None else recipient_grants
         )
-        #: The destination-trust store ADR-0242 §4's listing and revocation read and
-        #: write, held here so a case can seed it, revoke from it, or make its writes
-        #: fail — the states the trust act's own refusals are about.
-        self.destination_trust = FakeDestinationTrustStore()
         self.engine = Engine(
             composing=self.composing,
             grant_operations=_grant_operations(),
