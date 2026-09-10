@@ -41,6 +41,7 @@ from test_loop_search import (
     _CostedSearcher,
     _file_and_query,
     _file_only,
+    _footing,
     _grant,
     _loop,
     _search,
@@ -58,6 +59,7 @@ from ai_assistant.core.types import (
     CarriedProvenance,
     DestinationTrust,
     DestinationTrustRecord,
+    EpisodicMemory,
     MemorySource,
     PermissionOutcome,
     Placement,
@@ -1593,3 +1595,158 @@ async def test_an_expired_second_servicing_still_spends_its_admitted_call() -> N
     draw = await footing.conversations.search_draw(footing.conversation_id)
     assert draw is not None
     assert draw.calls == 2, "and no path lowered it on account of the expiry"
+
+
+# --------------------------------------------------------------------------- #
+# Arm 1b — the episode the tail no longer carries                              #
+# --------------------------------------------------------------------------- #
+
+
+async def _two_conversations() -> tuple[FakeConversationStore, str, str]:
+    """A store holding two started conversations, so membership can differ."""
+    ids = iter(("c-mine", "c-theirs"))
+    store = FakeConversationStore(now=_clock, new_id=lambda: next(ids))
+    mine = await store.start()
+    theirs = await store.start()
+    return store, mine.id, theirs.id
+
+
+async def _supplied_episode(
+    store: FakeConversationStore, conversation_id: str | None
+) -> tuple[FakeMemoryStore, str]:
+    """A memory store whose **supplement** offers one stamped episode, and its id.
+
+    The episode is not in any tail: the loop is driven with no ``history``, so the only
+    stage that can put it in front of the turn is ADR-0158 §3's episodic supplement —
+    which is how this conversation's own distant past actually arrives once the episode
+    has fallen out of ADR-0074 §9's replay window. A belief rides with it because §3's
+    separator rule returns nothing for a wholly episodic ``preceding``.
+
+    Args:
+        store: The conversation index the turn's membership is read from.
+        conversation_id: The conversation to record the episode against, or ``None`` to
+            record it against none at all — the shape ``turn_of_episode`` answers
+            ``None`` for.
+    """
+    episode_id = "episode-unrecorded"
+    if conversation_id is not None:
+        turn = await store.append(conversation_id, occurred_at=_NOW)
+        episode_id = turn.episode_id
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_belief("belief-porto", "the bell tower in Porto is worth the climb"))
+    await memory.add(
+        EpisodicMemory(
+            id=episode_id,
+            content="what is that bell tower in Porto, we looked it up",
+            occurred_at=_NOW,
+            provenance=Provenance(
+                source=MemorySource.OBSERVED,
+                confidence=0.9,
+                last_updated=_NOW,
+                derived_from_external=True,
+            ),
+        )
+    )
+    return memory, episode_id
+
+
+async def _supplemented(
+    conversations: FakeConversationStore, conversation_id: str, memory: FakeMemoryStore
+) -> tuple[Any, FakeAuditTrail, frozenset[str]]:
+    """Drive one turn whose supplement is on, and report what reached its supply.
+
+    The ids are returned so every arm asserts the episode **arrived**: an arm whose
+    supplement returned nothing would satisfy every ``closed_loop is False`` below
+    without touching the question, which is the one way a negative arm here can pass
+    for no reason.
+    """
+    footing = _footing(conversations=conversations, conversation_id=conversation_id, trusted=True)
+    trail = _trail()
+    servicer = _servicer(
+        composer=FakeQueryComposer(),
+        searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))),
+        trail=trail,
+        granted=True,
+    )
+    responded = await _loop(
+        planner=FakePlanner(now=_clock, read_request=_search()),
+        memory=memory,
+        search=servicer,
+        footing=footing,
+        episodic_limit=5,
+    ).respond(_ASK, narrow=_bounded())
+    return footing, trail, frozenset(record.id for record in responded.turn.memories)
+
+
+async def test_an_episode_of_this_conversation_outside_the_tail_stays_closed_loop() -> None:
+    """§15 Arm 1b for the conversation the tail can no longer answer for.
+
+    ADR-0074 §9 bounds ``turns`` to the store's configured replay window, so a long
+    conversation's own earlier episode reaches a later turn through ADR-0158 §3's
+    **supplement** rather than through the tail. §2's population is "episodes of this
+    conversation", not "episodes the tail carried", and ADR-0074 §10 puts that fact in
+    the index — "the store owes both directions of the membership relation" — so
+    ``turn_of_episode`` is what decides it and the arm is closed-loop.
+
+    Without this the milestone's exit holds only for a conversation short enough for its
+    whole history to fit the replay window, which is the case #2205 was reported from and
+    not the case it is about.
+    """
+    conversations, mine, _ = await _two_conversations()
+    memory, episode_id = await _supplied_episode(conversations, mine)
+
+    footing, trail, supplied = await _supplemented(conversations, mine, memory)
+
+    assert episode_id in supplied, "the supplement put it in front of the turn"
+    assert episode_id in footing.conversation_episodes, "the index placed it in this one"
+    (binding,) = await _bindings(trail)
+    assert binding.planned_with_external_content is True, "the episode is a recorded span"
+    assert binding.closed_loop is True, "and the recorded half already vouches for it"
+    draw = await footing.conversations.search_draw(mine)
+    assert draw is not None
+    assert draw.all_external_user_chosen is True, "§8's early fold did not fire on it"
+
+
+async def test_an_episode_of_another_conversation_outside_the_tail_is_refused() -> None:
+    """The pair: same stage, same stamp, a different row in the index.
+
+    Everything about the record and how it arrives is identical to the arm above; only
+    the conversation the index records it against differs. So the discrimination is
+    membership and nothing else, which is what keeps §5 "blind to why a record is
+    external" — and what stops the supplement becoming a route by which one
+    conversation's external content launders another's footing.
+    """
+    conversations, mine, theirs = await _two_conversations()
+    memory, episode_id = await _supplied_episode(conversations, theirs)
+
+    footing, trail, supplied = await _supplemented(conversations, mine, memory)
+
+    assert episode_id in supplied, "the supplement put it in front of the turn"
+    assert episode_id not in footing.conversation_episodes, "the index placed it elsewhere"
+    (binding,) = await _bindings(trail)
+    assert binding.closed_loop is False, "§2's second population is vouched for by nothing"
+    draw = await footing.conversations.search_draw(mine)
+    assert draw is not None
+    assert draw.all_external_user_chosen is False, "§8's early fold lowered it at admission"
+
+
+async def test_an_episode_belonging_to_no_conversation_is_refused() -> None:
+    """``turn_of_episode`` answering ``None`` is the fail-closed answer, not a gap.
+
+    ADR-0074 §10 makes "an episode belonging to no conversation … the *default* shape
+    rather than a permitted exception", and ADR-0074 §3 reserves an id namespace because
+    a foreign producer taking one is a fault the store must contemplate. Neither is
+    something this conversation's stored flag has ever reported on, so neither is
+    admitted.
+    """
+    conversations, mine, _ = await _two_conversations()
+    memory, episode_id = await _supplied_episode(conversations, None)
+
+    footing, trail, supplied = await _supplemented(conversations, mine, memory)
+
+    assert episode_id in supplied, "the supplement put it in front of the turn"
+    (binding,) = await _bindings(trail)
+    assert binding.closed_loop is False, "an unplaced episode is nobody's recorded turn"
+    draw = await footing.conversations.search_draw(mine)
+    assert draw is not None
+    assert draw.all_external_user_chosen is False

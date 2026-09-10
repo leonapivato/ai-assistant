@@ -493,19 +493,22 @@ class _Turns:
         )
 
 
-def _loop(
+def _loop(  # noqa: PLR0913 — one keyword per seam or bound a case may replace, all defaulted
     *,
     planner: Any = None,
     search: SearchServicer | None = None,
     memory: FakeMemoryStore | None = None,
     footing: SearchFooting | None = None,
     fetcher: Any = None,
+    episodic_limit: int = 0,
 ) -> _Turns:
     """A loop over canonical fakes, with the servicer a case supplies (or none).
 
-    The episodic supplement is **off**, for ``test_loop_fetch.py``'s reason: a case's
-    supply is then exactly the beliefs it seeded, so "what the servicing added" is a
-    reading rather than a subtraction.
+    The episodic supplement is **off by default**, for ``test_loop_fetch.py``'s reason:
+    a case's supply is then exactly the beliefs it seeded, so "what the servicing added"
+    is a reading rather than a subtraction. A case about ADR-0238 §2's **first**
+    population turns it on, because the supplement is the one stage that puts an episode
+    of this conversation in front of a turn without the conversation tail carrying it.
     """
     store = memory if memory is not None else FakeMemoryStore(now=_clock)
     held = _footing() if footing is None else footing
@@ -524,7 +527,7 @@ def _loop(
             search=search,
             footing=lambda _: held,
             retrieval_limit=30,
-            episodic_limit=0,
+            episodic_limit=episodic_limit,
             now=_clock,
             id_factory=lambda: "goal-1",
         ),
