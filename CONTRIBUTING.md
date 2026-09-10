@@ -253,11 +253,14 @@ separates the last from "I could not be bothered to file an issue" — a finding
 whose consequence you cannot write down is one you have not verified, and the
 verdict is then unavailable.
 
-**It is never available at `blocker` or `major`** (ADR-0243 §7), whatever else
-is true of the finding: at those severities the choice stays fix-or-waive, so
-no-action can never quietly hide one. It is also **prospective** — it disposes of
-a finding a review round raised, and authorises no closure or relabelling sweep
-of issues already filed.
+**It is never available at `blocker` or `major`** (ADR-0243 §7), whatever else is
+true of the finding. At those severities the dispositions stay exactly the ones
+above — fix it now where it concerns code in the current diff, open an issue where
+it does not, or waive it with the rationale on the record — so no-action can never
+quietly hide one, and nothing here withdraws the issue branch for a verified
+`major` about code the PR merely sits next to. It is also **prospective**: it
+disposes of a finding a review round raised, and authorises no closure or
+relabelling sweep of issues already filed.
 
 ### Diagnose the loop at the fourth reviewed tree
 
@@ -270,11 +273,13 @@ say *why* the loop was expensive.
 So, as a **dispatched lane** (ADR-0243 §§1–6, §10 — an agent under a coordinator
 who can brief a successor into its clone): once **four substantively reviewed
 trees** have been recorded under you, and before you invoke a further round,
-write a **diagnosis** as a comment on the PR. That count is the round number
-`just review-codex` already prints, less the figure recorded in the handoff
-comment you took the lane under; a byte-identical rebase, a squash, a second lens
-on one tree and an ADR-0165 ratification flip each count no tree, so it is the
-printed figure and no new arithmetic.
+write a **diagnosis** as a comment on the PR. The count is **persona-agnostic** —
+any lens's recorded artifact counts its tree, which is exactly what
+`scripts/codex-review.sh` counts — less the figure recorded in the handoff comment
+you took the lane under. A byte-identical rebase, a squash, a second lens on one
+tree and an ADR-0165 ratification flip each count no tree, and so does a round
+that recorded no artifact, whatever number its launch printed. So it is the round
+number a *successful* round prints, and no new arithmetic.
 
 The diagnosis does two things:
 
@@ -298,8 +303,9 @@ previous round's fix, because the question was never about the code.
 no round, caps nothing, makes no lens terminal, and is **not** a second handoff
 trigger — ADR-0138 §1's seven-rounds and churn-1.5 arms are untouched. It costs a
 comment, and it always precedes the handoff, which costs a successor's spin-up.
-Carry your most recent diagnosis, and the printed round number, into the handoff
-comment when one is owed (ADR-0243 §6).
+Carry your most recent diagnosis, and the count of trees, into the handoff
+comment when one is owed (ADR-0243 §6) — and record the count of trees actually
+recorded, never the figure a failed launch printed.
 
 ### Report the review, then mark it ready — on your own judgement
 

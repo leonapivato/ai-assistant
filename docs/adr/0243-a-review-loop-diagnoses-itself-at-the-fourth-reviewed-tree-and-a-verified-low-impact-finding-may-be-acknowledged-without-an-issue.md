@@ -185,18 +185,19 @@ finding to be disposed of without an issue.**
 > holder, and before that holder invokes a further review round.
 
 > **Normative.** A *substantively reviewed tree* is a tree of the branch for which
-> a required lens has a recorded `.review/` artifact and whose content differs
-> from the previously reviewed tree. This is the quantity
-> `scripts/codex-review.sh` already counts as its printed round number — distinct
-> reviewed trees of the branch — so a byte-identical rebase, a squash, an amend
-> and a second lens on one tree each count no tree, and an ADR-0165 §2
-> ratification flip counts none because the round it takes reviews and records its
-> parent's tree.
+> **any** review lens has a recorded `.review/` artifact and whose content differs
+> from the previously reviewed tree. The count is **persona-agnostic**: it is the
+> quantity `scripts/codex-review.sh` already counts, so a byte-identical rebase, a
+> squash, an amend and a second lens on one tree each count no tree, an ADR-0165
+> §2 ratification flip counts none because the round it takes reviews and records
+> its parent's tree, and a round that recorded no artifact counts none whatever
+> figure its launch printed.
 
-> **Normative.** A holder's count is that figure less the printed round number
-> recorded in the handoff comment (ADR-0138 §4, as §6 below extends it) under
-> which the holder took the lane; a lane's first holder counts from zero. A holder
-> whose tenure ends before four owes no diagnosis.
+> **Normative.** A holder's count is the number of substantively reviewed trees
+> recorded on the branch, less the number recorded in the handoff comment
+> (ADR-0138 §4, as §6 below extends it) under which the holder took the lane; a
+> lane's first holder counts from zero. A holder whose tenure ends before four
+> owes no diagnosis.
 
 The count is per **holder** and not per branch for ADR-0138's own reason, applied
 to this mechanism: its §8 declines a per-branch count — "Declined in §2" — because
@@ -206,6 +207,26 @@ fails the same way from the other end: it fires once and is then silent for
 exactly the loops that have run long enough to need it. PR #2136 is the case — five holders, and a
 per-branch checkpoint would have obliged one diagnosis, at round 4 of 26, from the
 holder with the least to diagnose.
+
+**The count is persona-agnostic where ADR-0138 §1's is per lens, and that is a
+choice rather than an oversight.** ADR-0138 §2 needs the per-lens figure because
+its trigger is about one lens exhausting a budget; the checkpoint is about the
+*loop* — whether the change is converging at all — and every recorded round is
+evidence about that whichever lens ran it. Defining it any other way would also
+put the clause out of step with the only counter that exists:
+`scripts/codex-review.sh` filters its round arithmetic on `branch=` and `tree=`
+and on **no** `persona=` field, so a lens-restricted definition would oblige a
+holder to compute a figure nothing prints, and would diverge from the printed one
+on exactly the lane that runs a lens its required set does not demand — which
+this ADR's own lane does.
+
+**What is recorded at a handoff is the count of trees, not the number a launch
+printed.** The printed round is recorded trees *plus the one in flight*, and a
+round can print it and then record nothing: PR #2136's handoff comment reports
+"round 4's launch was refused on the Codex usage limit and recorded nothing".
+Handing a successor the printed figure of such a round would overstate its
+baseline by one and push its diagnosis a tree late, so §6 requires the recorded
+count.
 
 Four is chosen against seven so that the checkpoint precedes the handoff under
 every holder (§5), and because three rounds is what #1684 took to alternate twice.
@@ -296,18 +317,22 @@ refused and ADR-0138 §8 refused again; the exposure it leaves is stated in
 > at least one diagnosis, and a holder that hands off on the churn arm before its
 > fourth tree writes none.
 
-Both counts are per holder and both restart at a handoff, which is what makes the
-first half of that sentence unconditional. The relation is one of order and not of
-dependence: neither mechanism conditions on the other, and §4's second clause says
-so.
+Both counts are per holder and both restart at a handoff, and ADR-0138 §2 supplies
+the arithmetic that makes the first half unconditional: the persona-agnostic tree
+count "is an upper bound on each lens's count", so a lens reaching seven under a
+holder means that holder has recorded at least seven trees, and therefore passed
+four. The relation is one of order and not of dependence: neither mechanism
+conditions on the other, and §4's second clause says so.
 
 ### 6. A handoff carries the diagnosis
 
 > **Normative.** A handoff comment under ADR-0138 §4 carries, in addition to what
 > §4 already requires of it, the current holder's most recent diagnosis — its
 > classification of each finding and the activity it chose — or states that none
-> was owed, and the round number `scripts/codex-review.sh` printed at the moment of
-> handoff.
+> was owed, and the **number of substantively reviewed trees recorded on the
+> branch** at the moment of handoff — which is the round number
+> `scripts/codex-review.sh` printed for the last round that actually recorded an
+> artifact, and never the figure printed by a launch that recorded none.
 
 The diagnosis is the part of the record a successor most needs and ADR-0138 §4
 does not ask for: §4 gets the successor the findings and the lane's assessment of
@@ -316,11 +341,11 @@ which is what to do differently. ADR-0138's own `Revisit if` anticipates the
 failure this closes — "if a successor is observed spending its rounds
 re-litigating the predecessor's settled findings".
 
-The printed round number is required because §1's subtraction reads it. ADR-0138
-§4 requires the *per-lens* counts, which are equal to the printed figure on a
-single-lens lane and on a both-lens lane run as one round of both lenses, but are
-not the same quantity in general; §1 needs the figure it actually subtracts to be
-on the record.
+The tree count is required because §1's subtraction reads it and nothing else on
+the record carries it. ADR-0138 §4 requires the *per-lens* counts, which are a
+different quantity — equal to the persona-agnostic figure on a single-lens lane
+and on a both-lens lane run as one round of both lenses, and not in general — so
+§1 needs the number it actually subtracts stated in its own terms.
 
 ### 7. Acknowledged, no action warranted
 
@@ -332,10 +357,12 @@ on the record.
 
 > **Normative.** That verdict is never available for a finding of `blocker` or
 > `major` severity, and never for a finding the holder has not verified against
-> the text it describes. A finding at either severity is fixed or waived with a
-> rationale, exactly as `CONTRIBUTING.md` → "Triage every finding — do not let the
-> PR grow to absorb them" and "Stop when the required reviews are green" require;
-> nothing here lets a `blocker` leave the loop unaddressed.
+> the text it describes. At those severities the available dispositions are
+> exactly the ones `CONTRIBUTING.md` → "Triage every finding — do not let the PR
+> grow to absorb them" already gives and this ADR does not move — fixed now where
+> the finding concerns code in the current diff, deferred to an issue where it
+> does not, or waived with a rationale on the record — and nothing here lets such
+> a finding leave the loop with no disposition at all.
 
 > **Normative.** A run whose remaining findings are all disposed of as
 > *acknowledged, no action warranted* is terminal in ADR-0138 §3's sense, on the
@@ -355,8 +382,13 @@ has not verified the finding, and the second clause then forbids the verdict.
 
 The severity floor is #2164's own bound and it is not negotiable here: "no-action
 must not silently hide a blocker". A holder who believes a `blocker` warrants no
-action has a `blocker` it believes is false, or one it will waive with a
-rationale, and both of those verdicts already exist.
+action has one it believes is false, one about ground this PR does not touch, or
+one it will waive with a rationale — and all three of those verdicts already
+exist. **The floor removes one option and adds none**: in particular it does not
+withdraw the issue branch of the triage rule, which is where a verified `major`
+about adjacent, unchanged code has always gone and still goes. Saying otherwise
+would have made this clause contradict the rule it restates, which is what
+architecture review found on round 1.
 
 ### 8. Where the verdict is recorded, and what the published record can carry
 
@@ -626,10 +658,14 @@ nothing yet says what the second diagnosis contains that the first did not.
   published by `ship`; the author's verdicts are in the PR text beside it. Until
   the issue §8 files is taken, reading the full disposition of a loop means reading
   both.
-- **One more per-holder count to carry across a handoff.** §6 adds the printed
-  round figure to the handoff comment for §1's subtraction, and, exactly as
-  ADR-0138 §2 records of its own subtraction, a handoff that omits it leaves the
-  successor unable to compute its own budget.
+- **One more per-holder count to carry across a handoff, and it is a third
+  quantity.** §6 adds the recorded-tree count to the handoff comment for §1's
+  subtraction. ADR-0138 §4 already carries the per-lens counts and the churn, and
+  the new figure is neither — it coincides with the per-lens counts on a
+  single-lens lane and on a both-lens lane run as one round of both lenses, and
+  parts from them otherwise. Exactly as ADR-0138 §2 records of its own
+  subtraction, a handoff that omits it leaves the successor unable to compute its
+  own budget.
 
 **Revisit if** a second diagnosis under one holder is wanted — the repeating form
 declined above should be ruled on once there is a case where the diagnosis at four

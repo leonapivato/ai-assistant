@@ -24,8 +24,9 @@
   standing finding with the lane's grounded assessment, settled versus contested,
   the exact next action, and the per-lens counts and churn. ADR-0243 §6 requires
   two more — the holder's most recent **diagnosis** (or a statement that none was
-  owed), and the round number `scripts/codex-review.sh` printed at the moment of
-  handoff, which is the figure ADR-0243 §1's per-holder subtraction reads. A reader
+  owed), and the number of substantively reviewed trees recorded on the branch at
+  the moment of handoff, which is the figure ADR-0243 §1's per-holder subtraction
+  reads — a different quantity from the per-lens counts §4 already requires. A reader
   holding only this ADR would write a comment with §4's four items and believe it
   complete. §4's three-things definition of a handoff, its no-merge,
   no-flip-to-ready and no-self-succession clauses, and its definition of a
