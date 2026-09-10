@@ -89,6 +89,7 @@ from ai_assistant.core.errors import (
     UnknownContinuationError,
     UnknownConversationError,
     UnresolvedEvidenceError,
+    UntrustableDestinationError,
     UnusableIdentityError,
 )
 from ai_assistant.core.protocols import AssistantEngine
@@ -6043,6 +6044,125 @@ class AssistantEngineContract(ABC):
         argument = parameters["remember_recipients_until"]
         assert argument.kind is inspect.Parameter.KEYWORD_ONLY
         assert argument.default is None
+
+    # --- ADR-0242 §2, §4: the destination-trust surface's three --------------
+    #
+    # ADR-0242 §13 obliges this suite arms "for the three new members, beside the five
+    # ADR-0235 §12 added", and the clauses below are the ones that bind **every**
+    # implementation over a subject holding nothing — the state every deployment starts
+    # in and the one a client meets first, since ADR-0238 §14 leaves the store empty
+    # until a user performs the act. What a *populated* store does to each — the three
+    # availability conditions against a real trail, the duplicate-set subclass, the
+    # revocation's instant — is the concrete operations object's, in
+    # `test_destination_trust_operations.py` and the store's own conformance suite,
+    # because those clauses are about a trail and a store a fake engine seeds itself.
+
+    async def test_the_standing_trust_read_answers_empty_rather_than_refusing(
+        self, engine: AssistantEngine
+    ) -> None:
+        """A store holding nothing is the ordinary state and never an error (§4).
+
+        It is `origin/main`'s state and ADR-0242's own last consequence — "``app``'s
+        standing comment stops being true of destination trust once this ADR's lane
+        lands" — so an implementation that refused here would make every fresh
+        deployment's first listing a fault. The answer is a **tuple**, on ADR-0085 §3b's
+        rule: a caller that mutated a returned page has changed nothing about the
+        engine's state and may believe otherwise.
+        """
+        assert await engine.standing_destination_trust() == ()
+
+    async def test_revoking_a_trust_record_no_store_holds_answers_false(
+        self, engine: AssistantEngine
+    ) -> None:
+        """§4: ``False`` where no **live** record carries that id, having written nothing.
+
+        It is the honest answer to a caller arriving after somebody else's revocation as
+        well as to one naming an id nothing ever held, and §4 makes the two one outcome
+        deliberately: "by the time that call completes the store holds no live record
+        with that id, which is exactly what ``False`` means here — and **the user's
+        recourse succeeded**". No implementation retries, revokes twice, or reports the
+        loss as a fault.
+        """
+        assert await engine.revoke_destination_trust("t-nothing-holds") is False
+        assert await engine.standing_destination_trust() == ()
+
+    async def test_a_trust_act_on_a_decision_the_trail_does_not_hold_is_refused(
+        self, engine: AssistantEngine
+    ) -> None:
+        """§1's first availability condition, and the type §1 names for every refusal.
+
+        ``UntrustableDestinationError`` and **not** ``UngrantableActError`` reused: that
+        class's ratified meaning is ADR-0235 §3's ordered seven and a caller catching it
+        means *the recipient-grant act was unavailable*. "Two acts with different
+        recourses answering to one handler is what ADR-0235 §7's two-vocabulary rule
+        refuses one noun over."
+
+        And an ``AssistantError`` rather than a bare ``ValueError``, for
+        ``UngrantableActError``'s own stated reason: a ``ValueError`` escapes a command's
+        ``except (AssistantError, TransportError)`` boundary as an uncaught traceback
+        with no controlled exit code, which ADR-0042 §7 forbids.
+        """
+        with pytest.raises(UntrustableDestinationError, match=r"\w"):
+            await engine.establish_destination_trust("d-nothing-holds")
+
+        assert await engine.standing_destination_trust() == (), (
+            "§1: the operation writes nothing to any store on any refusal"
+        )
+
+    @pytest.mark.parametrize("call", ["establish_destination_trust", "revoke_destination_trust"])
+    async def test_a_blank_destination_trust_identifier_is_refused_locally(
+        self, engine: AssistantEngine, call: str
+    ) -> None:
+        """§2: both identifier arguments undergo ``Identifier`` validation before any I/O.
+
+        The obligation is **inherited rather than restated** — ``AssistantEngine``'s own
+        second clause already puts it on every identifier argument, and ADR-0242 §2 adds
+        no validation rule of its own and mints no error for a blank id. This is where it
+        is checked on the two arguments that decision adds, so a wire client refuses the
+        same values without a round trip.
+        """
+        with pytest.raises(ValueError, match=r"\w"):
+            await getattr(engine, call)("  ")
+
+    async def test_the_trust_act_takes_one_argument_and_offers_no_substitution(
+        self,
+    ) -> None:
+        """§1, §2: **no** ``trust``, ``destinations``, ``id`` or instant argument.
+
+        "There is no parameter through which a caller could substitute any of them" —
+        ADR-0235 §4's clause read one act over, and ADR-0021 §3's move of removing the
+        capability rather than forbidding it. A signature assertion because the clause is
+        about what the surface *offers*: an implementation accepting a destination set and
+        ignoring it would pass every behavioural case here, and one accepting an expiry
+        would be the ``core/types.py`` change §14 defers.
+        """
+        taken = set(inspect.signature(AssistantEngine.establish_destination_trust).parameters)
+
+        assert taken == {"self", "decision_id"}
+
+    async def test_the_standing_trust_listing_takes_no_page_argument(self) -> None:
+        """§4: no ``limit``, for ``standing_recipient_grants``' stated reason.
+
+        "A truncated answer to *what do I trust* is a false answer rather than a partial
+        one." A signature assertion for that member's reason exactly.
+        """
+        taken = set(inspect.signature(AssistantEngine.standing_destination_trust).parameters)
+
+        assert taken == {"self"}
+
+    async def test_a_turn_that_serviced_no_search_carries_no_member(
+        self, engine: AssistantEngine
+    ) -> None:
+        """§9: ``search_not_serviced`` is ``None`` on every turn that searched nothing.
+
+        Every such ``converse``, ``converse_streaming`` and ``resume``, and ADR-0198 §1's
+        restatement. Where the member is absent a surface says nothing about a lookup at
+        all, which is §6's byte-identity guarantee at the surface: the absence is the
+        contract rather than an implementation's convenience.
+        """
+        outcome = await engine.converse("hello", timeout=_PATIENT)
+
+        assert outcome.search_not_serviced is None
 
 
 def backwards_clock() -> Callable[[], datetime]:

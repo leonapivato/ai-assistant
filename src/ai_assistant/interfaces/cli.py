@@ -5318,6 +5318,18 @@ async def _drive_revoke_destination_trust(engine: AssistantEngine, record_id: st
     time the call completes the store holds no live record with that id, which is
     exactly what ``False`` means — and a caller that lost a race to another revocation
     got what they asked for.
+
+    **``True`` is rendered over what it establishes and no further**, which is ADR-0242
+    §4's "No surface derives liveness from anything but ``standing_destination_trust()``"
+    read at the one place it is easy to break. ADR-0238 §1 refuses a second record over a
+    live record's **exact** destination set and admits an *overlapping* one — "what is
+    refused is a second record that **is** the first, not one that shares a member with
+    it" — and ``trust_of``'s rule is membership of *some one* live record. So with live
+    records over ``{A}`` and ``{A, B}``, revoking the first answers ``True`` while
+    ``trust_of({A})`` still answers ``USER_CHOSEN``. A sentence promising that
+    composition for those parties is back to the user's own words would be false in
+    exactly that case, and the boolean this operation returns establishes only that one
+    record was withdrawn.
     """
     try:
         revoked = await engine.revoke_destination_trust(record_id)
@@ -5340,9 +5352,10 @@ async def _drive_revoke_destination_trust(engine: AssistantEngine, record_id: st
         return _EXIT_OK
     _print("[green]Withdrawn.[/]")
     _print(
-        "[dim]What I compose for those parties from now on is drawn from your own "
-        "words alone again. Nothing already decided is rewritten, and nothing already "
-        "composed is retracted.[/]"
+        "[dim]That record no longer stands. It does not follow that those parties are "
+        "no longer chosen — another record you hold may name them too, and 'assistant "
+        "destination-trust' is the only honest answer to what stands now. Nothing "
+        "already decided is rewritten, and nothing already composed is retracted.[/]"
     )
     return _EXIT_OK
 
@@ -9365,6 +9378,14 @@ def _render_grantable_decisions(offerable: tuple[PermissionDecision, ...], *, li
         "<decision-id> --until <instant>[/]"
     )
     _print("[dim]  what may I compose for them — assistant trust-destinations <decision-id>[/]")
+    # ADR-0242 §3's five facts, **here** rather than only on the command that performs
+    # the act. §3 obliges a surface offering the act to state them "**before it collects
+    # it**", and on a terminal the act is collected when the user types the command — so
+    # a statement printed by that command has already been read too late. This listing is
+    # where the act is offered (§1: "The user names a decision from a listing"), and it
+    # is the shape ADR-0235 §5's own listing already takes for the sibling act: the rows
+    # and what an answer establishes are on screen before any id is typed.
+    _render_destination_trust_preamble()
 
 
 def _render_recipient_grant_established(grant: RecipientGrant) -> None:
@@ -9490,6 +9511,16 @@ def _render_recipient_grant_outcome(outcome: RecipientGrantOutcome | None) -> No
 
 def _render_destination_trust_preamble() -> None:
     """ADR-0242 §3's five facts, stated **before** the act is collected.
+
+    **Rendered at two places, and the listing is the load-bearing one.** On a terminal
+    the act is *collected* when the user types ``assistant trust-destinations
+    <decision-id>``, so a statement only that command prints has been read after the
+    decision rather than before it. §1 puts the offer at the listing — "The user names a
+    decision from a listing that already renders the canonical destination set ``core``
+    derived" — so :func:`_render_grantable_decisions` prints these beside the next-step
+    line that names both acts, which is where a user meets them before typing anything.
+    The command prints them again immediately above what it recorded, where they are the
+    account of what has just been done rather than the disclosure that precedes it.
 
     **Four facts about what the act does**, as facts about this record and naming no
     future call, no expected benefit and no behaviour this system cannot promise: that
