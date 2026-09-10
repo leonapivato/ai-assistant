@@ -118,6 +118,17 @@ An under-specified brief is the largest source of rework. Each one carries:
   `just ready` — and that the agent owns all of it without asking. Name `just
   ready` rather than bare `gh pr ready`: it is the recipe carrying ADR-0165 §5's
   refusal on an ADR the PR still leaves standing `Proposed` (issue #1044).
+- **The diagnosis checkpoint, and that its adjudication exit comes to you.**
+  ADR-0243 §§1–6: at the **fourth** substantively reviewed tree under a holder —
+  well before ADR-0138 §1's seventh round — the lane writes a comment classifying
+  each open and recently-fixed finding (new independent defect, regression from an
+  earlier fix in this loop, specification dispute, scope expansion) and names one
+  next activity. Where anything is a **specification dispute**, another round is
+  not on its list, so the request lands on you (§4 below). It authorises no merge
+  and forbids no round; it is the cheap intervention that precedes the expensive
+  one. Say it in the brief because it changes what arrives and when: a diagnosis
+  at four is a lane telling you the shape of its loop while rounds remain to be
+  saved.
 - **Fetch and rebase before gating *and* before reviewing.** A gate against a
   stale tree is not evidence, and Codex reads the working tree for context, so a
   stale branch makes it report other lanes' merged work as regressions.
@@ -226,12 +237,24 @@ adjudications are a yes or a no rather than a re-brief. Rule on *that* — and w
 you overrule it, say which authority overrules it, because the worker read the
 same texts and will otherwise reach the same conclusion again.
 
-**Two tiers arrive differently.** A **STOP** halts the lane and needs a ruling
+**Three tiers arrive differently.** A **STOP** halts the lane and needs a ruling
 before anything continues. A **FLAG** does not: the worker was entitled to decide
 it, did, and recorded it in the PR description and the report — so it needs your
 attention only if you disagree, and it costs nothing to arrive late. Method
 choices, and a brief that contradicted an ADR without reshaping the lane, come
-back as FLAGs. **Read them as feedback on your brief.** A lane that flags three
+back as FLAGs.
+
+The third is an **adjudication request** from a diagnosis checkpoint (ADR-0243
+§3), and it arrives as a **comment on the PR** rather than as a report — the lane
+may still be running, on the rest of its findings. It is narrow by construction:
+a specification dispute, meaning two readings of one clause or a finding that
+contradicts a sentence of a ratified ADR, quoted with both readings. Rule it the
+same way you rule a STOP — from the texts, and saying which authority decides —
+and rule it **promptly**, because the lane's alternative to your ruling is a
+grounded waiver rather than another round. What it must never become is a fourth
+round on the same sentence: issue #1684 is three correct findings, each forbidden
+by the previous round's fix, and #1155 is the same shape reached from a finding
+that was simply false. **Read them as feedback on your brief.** A lane that flags three
 method substitutions is telling you the brief was prescribing technique it should
 have left alone; a lane that flags an ADR conflict is telling you the brief was
 written against something the ADRs had already settled. Neither is the worker

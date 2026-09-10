@@ -1,7 +1,51 @@
 # 138. A dispatched lane hands its review loop to a successor at a counted threshold, and forbids no round
 
-- Status: Accepted
+- Status: Accepted, §3's terminality enumeration and §4's handoff-comment
+  enumeration amended by ADR-0243
 - Date: 2026-08-12
+- **Amended: 2026-09-10 by
+  [ADR-0243](0243-a-review-loop-diagnoses-itself-at-the-fourth-reviewed-tree-and-a-verified-low-impact-finding-may-be-acknowledged-without-an-issue.md)
+  (§3's second sentence and §4's enumeration of what the handoff comment carries;
+  §1, §2 and §5 untouched).** Two enumerations become incomplete.
+
+  **§3.** Its second sentence — *"A run whose remaining findings are all deferred
+  to issues, or waived with a rationale recorded in the PR, is terminal"* — names
+  two ways a run's remaining findings leave it terminal. ADR-0243 §7 adds a third
+  triage verdict, **acknowledged, no action warranted**, for a finding the holder
+  has verified as true and whose stated concrete consequence is too small to
+  justify future work; a run whose remaining findings all carry it is terminal on
+  the same ground. A reader holding only this ADR would read the pair as closed and
+  refuse to call such a run terminal, which is ADR-0070 §1's test failing on a
+  named clause. §3's **first** sentence — the operative test, that the run leaves no
+  finding `CONTRIBUTING.md` → "Triage every finding" requires this PR to fix — is
+  untouched, and is what the new verdict satisfies.
+
+  **§4.** Its first clause enumerates what the handoff comment carries: every
+  standing finding with the lane's grounded assessment, settled versus contested,
+  the exact next action, and the per-lens counts and churn. ADR-0243 §6 requires
+  two more — the holder's most recent **diagnosis** (or a statement that none was
+  owed), and the round number `scripts/codex-review.sh` printed at the moment of
+  handoff, which is the figure ADR-0243 §1's per-holder subtraction reads. A reader
+  holding only this ADR would write a comment with §4's four items and believe it
+  complete. §4's three-things definition of a handoff, its no-merge,
+  no-flip-to-ready and no-self-succession clauses, and its definition of a
+  successor are untouched.
+
+  **This is an amendment and not a supersession** (ADR-0070 §1), and no ratified
+  text below is rewritten. **§1 is untouched in both arms**: seven rounds per
+  required lens per holder, and churn first reaching 1.5 during the holder's
+  tenure, remain the only triggers of a handoff, and ADR-0243 §4's second clause
+  says so in terms — its checkpoint at four reviewed trees is not a second trigger
+  and neither obliges nor forbids a handoff. **§2 is untouched and is relied on
+  more than before**: ADR-0243 §1 borrows its per-holder subtraction rather than
+  changing it, and §2's ground for a per-holder rather than per-branch count is
+  what decides the checkpoint's own basis. **§5 is untouched**: ADR-0243 §10 scopes
+  its checkpoint to a dispatched lane on this ADR's own test, so §5's promise that
+  an author with no coordinator *"reads ADR-0020 exactly as it stands"* stays true.
+  **§8's four declined alternatives stand** — ADR-0243 declines the same four
+  again, and its checkpoint is none of them: it makes no judgement about closeness
+  to terminal, it reads a counter. ADR-0243 §11 applies §1's test to each clause.
+  Refs #2160, #2164, #2166.
 - **What this changes and what it does not.** It adds one obligation on one class
   of author: a **dispatched lane** stops holding its own review loop past a
   counted threshold and hands it to a successor. No review round is forbidden, no

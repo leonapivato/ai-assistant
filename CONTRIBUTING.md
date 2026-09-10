@@ -228,6 +228,11 @@ A review finding is not automatically this PR's problem. For each one:
   current diff.
 - **Otherwise open an issue** and leave the PR alone — a `minor`, a `nit`, or
   anything about code the PR merely sits next to.
+- **Or acknowledge it, with no action warranted** — where you have **verified**
+  the finding is true, can state its concrete consequence, and judge that
+  consequence too small to justify any future work (ADR-0243 §7). Write the
+  verdict and that one-line consequence in the PR, and the finding leaves the
+  loop without a tracker row.
 
 The trigger is the finding, not a size threshold. The PRs that got out of hand
 did not start large; they grew under review, one finding-fix commit at a time.
@@ -238,6 +243,63 @@ Waiving a `blocker`/`major` is allowed — write the rationale in the PR or the
 commit. A reviewer that disagrees with a ratified decision files an ADR
 proposal; it does not block on it (authority hierarchy: `docs/review/guide.md`).
 Review is advisory tooling, not a hard gate; the only required check is `gate`.
+
+**Five verdicts, and the third bullet is the newest of them.** *Fix now*;
+*deferred to an issue*; *rejected as false*, which asserts the finding is wrong;
+*waived with a rationale*, for a `blocker`/`major` you will not fix; and
+*acknowledged, no action warranted*, which asserts the finding is **right** and
+that nobody should ever act on it. The stated consequence is the whole of what
+separates the last from "I could not be bothered to file an issue" — a finding
+whose consequence you cannot write down is one you have not verified, and the
+verdict is then unavailable.
+
+**It is never available at `blocker` or `major`** (ADR-0243 §7), whatever else
+is true of the finding: at those severities the choice stays fix-or-waive, so
+no-action can never quietly hide one. It is also **prospective** — it disposes of
+a finding a review round raised, and authorises no closure or relabelling sweep
+of issues already filed.
+
+### Diagnose the loop at the fourth reviewed tree
+
+A long review loop can pass through several holders still doing the one thing
+that is not working. **PR #2136 did**: four ADR-0138 §1 handoffs, five holders,
+and it shipped at "round 26 · 2256 lines net across 27 commit(s) · churn ≥2.4×".
+Every handoff carried what ADR-0138 §4 asks for. None of them was ever obliged to
+say *why* the loop was expensive.
+
+So, as a **dispatched lane** (ADR-0243 §§1–6, §10 — an agent under a coordinator
+who can brief a successor into its clone): once **four substantively reviewed
+trees** have been recorded under you, and before you invoke a further round,
+write a **diagnosis** as a comment on the PR. That count is the round number
+`just review-codex` already prints, less the figure recorded in the handoff
+comment you took the lane under; a byte-identical rebase, a squash, a second lens
+on one tree and an ADR-0165 ratification flip each count no tree, so it is the
+printed figure and no new arithmetic.
+
+The diagnosis does two things:
+
+- **Classifies** every finding still open, and every finding you fixed since your
+  previous diagnosis, as exactly one of — a **new independent defect**; a
+  **regression** from an earlier fix in this loop; a **specification dispute**
+  (two readings of one clause, or a finding that contradicts a sentence of a
+  ratified ADR); or **scope expansion**.
+- **Names one next activity**, and only one: an executable probe, a smaller
+  decision (splitting the PR, cutting its scope), an adjudication request to the
+  coordinator written on the PR, a grounded waiver, or continued review with the
+  reason stated.
+
+**A specification dispute does not get another round.** Where the diagnosis
+classifies any finding as one, the chosen activity is the adjudication request —
+quote the clause, state both readings — or the grounded waiver. Issue #1684 is
+why: three rounds produced three correct findings, each forbidden by the
+previous round's fix, because the question was never about the code.
+
+**Nothing turns on it mechanically.** The checkpoint authorises no merge, forbids
+no round, caps nothing, makes no lens terminal, and is **not** a second handoff
+trigger — ADR-0138 §1's seven-rounds and churn-1.5 arms are untouched. It costs a
+comment, and it always precedes the handoff, which costs a successor's spin-up.
+Carry your most recent diagnosis, and the printed round number, into the handoff
+comment when one is owed (ADR-0243 §6).
 
 ### Report the review, then mark it ready — on your own judgement
 
@@ -254,6 +316,16 @@ not for the OpenAI spend it incurs, not to flip the PR ready. Deciding a change
 is done is the job; stopping to ask just adds a round-trip to something already
 authorized. Say what you concluded and why in the PR, and let the review and the
 gate speak for the rest.
+
+**"Say what you concluded and why in the PR" is where the author's record of the
+loop lives**, and it is not the same record as the one `ship` publishes. The
+disposition list in the ship comment is the **reviewer's** ledger: its `open` and
+`retired` statuses are written from whether Codex re-raised a finding, never from
+what you decided about it. So your triage verdicts go in the PR text — every
+waived `blocker`/`major` with its rationale, every *acknowledged, no action
+warranted* with its one-line consequence (ADR-0243 §8), links to the issues you
+filed, and any diagnosis the checkpoint above owed. That is what the coordinator
+and the reviewer at merge read.
 
 What still warrants stopping is unchanged and narrow: an irreversible or
 destructive action, or discovering the task itself was wrong. "Is this ready?"
@@ -381,6 +453,13 @@ required set, which is why `ship` can demand it unconditionally. When the
 required set is green, ship —
 do not commit again to improve wording, because that destroys the records and
 starts a fresh round.
+
+**"Green" is about the findings, not the verdict word** (ADR-0138 §3): a lens is
+terminal when its latest run leaves no finding the triage rule above requires
+this PR to fix. A run whose remaining findings are all deferred to issues, all
+waived with a rationale on the record, or all disposed of as *acknowledged, no
+action warranted* (ADR-0243 §7) is terminal. A run carrying a `blocker`/`major`
+about code in your diff is not, whatever line it printed.
 
 Each review run prints an aggregate, unasked: the round number on this branch,
 the net diff size, and the **churn ratio** (cumulative lines touched ÷ net lines

@@ -1,7 +1,39 @@
 # 20. Making the review loop terminate
 
-- Status: Accepted, §3 amended by ADR-0025, ADR-0027 and ADR-0165; Consequences' advisory-aggregate clause amended by ADR-0138
+- Status: Accepted, §3 amended by ADR-0025, ADR-0027 and ADR-0165; Consequences' advisory-aggregate clause amended by ADR-0138 and ADR-0243
 - Date: 2026-07-20
+- **Amended: 2026-09-10 by
+  [ADR-0243](0243-a-review-loop-diagnoses-itself-at-the-fourth-reviewed-tree-and-a-verified-low-impact-finding-may-be-acknowledged-without-an-issue.md)
+  (Consequences — the same advisory-aggregate clause, narrowed a second time and
+  at a lower figure; §§1–3 and both refusals stand).** The clause *"The aggregate
+  is advisory, so an author can still ignore it — deliberately; the alternative
+  forbids findings worth having"* was already over-wide as to a dispatched lane
+  past ADR-0138 §1's figures. ADR-0243 §1 narrows it again and earlier: a
+  dispatched lane writes a **diagnosis** on its pull request once four
+  substantively reviewed trees have been recorded under its current holder, and
+  before that holder invokes a further round. A reader holding only this ADR would
+  read the clause as licensing such a lane to run past four reviewed trees with
+  nothing owed, which is ADR-0070 §1's test failing on a named clause, so the
+  record is owed (ADR-0082 §1).
+  **This is an amendment and not a supersession** (ADR-0070 §1): nothing decided in
+  §§1–3 moves, and neither rejected alternative is undone. *"A hard round cap or
+  diff-size threshold"* stands on its stated ground, that it *"would have cost #90
+  its most valuable finding"* — ADR-0243 §4 forbids no round, caps no count and
+  authorises no merge, so #90 loses none. *"A stop-rule the author applies to
+  themselves"* stands on its ground too, that it asks for *"exactly the
+  self-diagnosis that failed twice"*: what failed twice was an author's private
+  judgement that the loop was fine, acted on by continuing, and ADR-0243's
+  diagnosis stops nothing and is **published** to the outside reader this ADR
+  identifies as the only one that has ever ended a loop. §2's *"Nothing here
+  blocks"* stays literally true — ADR-0243 §4's third clause makes the checkpoint
+  no kind of gate, fails no check on either figure, and changes neither
+  `scripts/codex-review.sh` nor `scripts/ship.sh`. §3 is untouched in every part.
+  An author with no coordinator to address an adjudication request to is outside
+  ADR-0243 §10's scope for §§1–6 and reads those unchanged; ADR-0243 §7's fifth
+  triage verdict binds every author but bears on `CONTRIBUTING.md`'s triage rule,
+  not on any sentence of this ADR. Nothing in Consequences is rewritten: the clause
+  above stays where it was written, and this note records what narrowed it a second
+  time. ADR-0243 §11 applies §1's test to each clause. Refs #2160, #2166.
 - Amended: 2026-08-20 by
   [ADR-0165](0165-numbering-stays-at-dispatch-and-the-ratification-flip-is-the-one-exempt-commit-shape.md)
   — §3's acceptance rule compares the artifact's recorded tree against `HEAD`'s
