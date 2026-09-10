@@ -268,8 +268,10 @@ from ai_assistant.core.errors import (
     AssistantError,
     ConfigurationError,
     DisplacedProvisioningError,
+    DuplicateDestinationTrustError,
     DuplicateRecipientGrantError,
     IncompleteProvisioningError,
+    InvalidDestinationTrustError,
     InvalidRecipientGrantError,
     InvalidResolutionError,
     OversizedValueError,
@@ -280,6 +282,7 @@ from ai_assistant.core.errors import (
     ResidualCredentialError,
     UngrantableActError,
     UnknownConnectionError,
+    UntrustableDestinationError,
     UnusableIdentityError,
 )
 from ai_assistant.core.logging import configure_logging
@@ -294,6 +297,7 @@ from ai_assistant.core.types import (
     ClassReach,
     CostBasis,
     CoverageUnrecordedBinding,
+    DestinationTrustRecord,
     DiscloserProvenance,
     Disposition,
     FeedbackEvent,
@@ -321,6 +325,7 @@ from ai_assistant.core.types import (
     ReplyChunk,
     RoutableOperation,
     RouteOutcome,
+    SearchNotServiced,
     SecretScope,
     SourceGrant,
     SourceReadRecord,
@@ -2143,6 +2148,83 @@ def remember_recipients(
     raise typer.Exit(code)
 
 
+@app.command("trust-destinations")
+def trust_destinations(
+    decision_id: str = typer.Argument(
+        ...,
+        callback=_present_id,
+        help="The recorded call whose recipients you are choosing, from a listing.",
+    ),
+) -> None:
+    """Choose the parties a recorded call would have gone to, so I may compose for them.
+
+    **This is not the question of whether I may talk to them.** That one is
+    ``assistant remember-recipients``, and it is a separate question with a separate
+    answer. Answering either does not answer the other, and withdrawing either
+    withdraws nothing of the other.
+
+    What this one settles is *what I may compose for them*: after it, what I put
+    together for those parties may be drawn from things I hold about you, rather than
+    from your own words alone. That takes effect for later requests, it has no end date
+    and stands until you withdraw it, and it rewrites nothing already decided.
+
+    **A conversation that has already read from a party you had not chosen is not
+    repaired by this.** What this changes is what a *later* conversation may compose.
+
+    Give a decision id from ``assistant decisions`` or from ``assistant
+    remember-recipients``. I take the parties from that recorded call and never from
+    anything you type, so there is nothing to spell and nothing to get wrong. **I
+    cannot show you what any future call would send**, because those calls have not
+    been planned yet, and I will not pretend otherwise.
+
+    See what stands with ``assistant destination-trust`` and withdraw one with
+    ``assistant revoke-destination-trust``.
+    """
+    code = asyncio.run(_establish_destination_trust(decision_id))
+    raise typer.Exit(code)
+
+
+@app.command("destination-trust")
+def destination_trust() -> None:
+    """Show the parties you have chosen to have things composed for.
+
+    The honest answer to "whose parties did I choose": every trust record that is live
+    right now, read from the record of what you decided.
+
+    **This is a different question from ``assistant recipient-grants``**, which is
+    about whether I may talk to a party at all, and from ``assistant granted``, which
+    is about reading your sources. None of the three is ever one list and none answers
+    another: withdrawing one withdraws nothing of the others.
+
+    There is no ``--limit`` here on purpose. A truncated answer to "what do I trust" is
+    a false answer rather than a partial one.
+    """
+    code = asyncio.run(_list_destination_trust())
+    raise typer.Exit(code)
+
+
+@app.command("revoke-destination-trust")
+def revoke_destination_trust(
+    record_id: str = typer.Argument(
+        ..., callback=_present_id, help="The record to withdraw, from the listing."
+    ),
+) -> None:
+    """Withdraw one choice of parties.
+
+    **No question is asked and nothing stands in the way**, deliberately: this is your
+    remedy, and a prompt between you and it is a prompt too many. It is never refused
+    for being "too many" — there is no ceiling here at all.
+
+    Withdrawal is whole: there is no partial withdrawal and no narrowing. Changing what
+    you have chosen is a withdrawal followed by a fresh choice from a recorded call.
+
+    It takes effect for later requests and rewrites nothing already decided: a call
+    already ruled on stays ruled, and anything already composed is not retracted.
+    """
+    code = asyncio.run(_revoke_destination_trust(record_id))
+    raise typer.Exit(code)
+
+
 @app.command("recipient-grants")
 def recipient_grants() -> None:
     """Show the recipients I am currently allowed to send to without asking.
@@ -3805,6 +3887,39 @@ async def _revoke_recipient_grant(grant_id: str) -> int:
     return await _drive_revoke_recipient_grant(engine, grant_id)
 
 
+async def _establish_destination_trust(decision_id: str) -> int:
+    """Obtain a client and perform the trust act (ADR-0242 §1)."""
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_trust_destinations(engine, decision_id)
+
+
+async def _list_destination_trust() -> int:
+    """Obtain a client, read what destinations are trusted now, and render it (§4)."""
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_destination_trust(engine)
+
+
+async def _revoke_destination_trust(record_id: str) -> int:
+    """Obtain a client and withdraw one destination-trust record (§4)."""
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_revoke_destination_trust(engine, record_id)
+
+
 async def _amend_source(source: str, *, scope: list[GrantScope], assume_yes: bool) -> int:
     """Obtain a client and run the two-act amendment (ADR-0139 §4, §5).
 
@@ -5124,6 +5239,111 @@ async def _drive_establish(  # noqa: PLR0911 — ADR-0235 §9's five renderings 
         _render_error(exc)
         return _EXIT_ERROR
     _render_recipient_grant_established(grant)
+    return _EXIT_OK
+
+
+async def _drive_trust_destinations(engine: AssistantEngine, decision_id: str) -> int:
+    """Perform the trust act, and state the outcome from the refusal's own type (§5).
+
+    **Four renderings, and each is read from the type of what was raised** — never
+    from its message, never from a count this adapter took, and never from a listing
+    read afterwards (ADR-0242 §2, §5). That is ``_drive_establish``'s ratified shape
+    one act over, and it is why
+    :class:`~ai_assistant.core.errors.DuplicateDestinationTrustError` exists as a
+    subclass rather than as a message convention: reading *already chosen* off a
+    string, or off a ``standing_destination_trust`` read taken after the refusal, is
+    exactly what §2 forbids.
+
+    **The five facts ADR-0242 §3 owes are stated before the act is collected**, by
+    :func:`_render_destination_trust_preamble` printed above the call. §3's *first*
+    clause — the destination set in both forms, the account, the tool and the instant
+    — is discharged at the **listing** the id was taken from, which is where ADR-0242
+    §1 puts it: "The user names a decision from a listing that already renders the
+    canonical destination set ``core`` derived." ``assistant decisions`` and
+    ``assistant remember-recipients`` both render the row whole through
+    :func:`_render_decision`, origin states and all.
+
+    **None of the four propagates as a traceback, and none is rendered as a fault of
+    any call** — the call this decision records was refused before this act and is not
+    made by it (ADR-0242 §1).
+    """
+    _render_destination_trust_preamble()
+    try:
+        record = await engine.establish_destination_trust(decision_id)
+    except DuplicateDestinationTrustError:
+        _render_destination_already_chosen()
+        return _EXIT_ERROR
+    except InvalidDestinationTrustError:
+        _render_destination_trust_refused()
+        return _EXIT_ERROR
+    except UntrustableDestinationError as exc:
+        _render_untrustable(exc)
+        return _EXIT_ERROR
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_destination_trust_established(record)
+    return _EXIT_OK
+
+
+async def _drive_destination_trust(engine: AssistantEngine) -> int:
+    """Ask what destinations are trusted now and render it (ADR-0242 §4).
+
+    **One call and no second one.** This does not read the recipient-grant store to
+    annotate the set, does not compute liveness of its own, and does not merge in what
+    ``assistant recipient-grants`` or ``assistant granted`` answer: the three are
+    separate vocabularies, and a page that answered one with another's records is how
+    someone comes to believe that revoking one revoked the other.
+    """
+    try:
+        standing = await engine.standing_destination_trust()
+    except InvalidDestinationTrustError:
+        # ADR-0242 §5's fourth rendering, on the one operation where the type is
+        # unambiguous: §2 gives this read exactly one failure — "if the trust store
+        # could not be read" — so a store fault is what this class means here, and
+        # saying so states what the type establishes rather than guessing.
+        _render_destination_trust_store_unavailable()
+        return _EXIT_ERROR
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_standing_destination_trust(standing)
+    return _EXIT_OK
+
+
+async def _drive_revoke_destination_trust(engine: AssistantEngine, record_id: str) -> int:
+    """Withdraw one record, or report that no live record carried the id (§4).
+
+    ``False`` is rendered as the honest answer it is rather than as a fault: by the
+    time the call completes the store holds no live record with that id, which is
+    exactly what ``False`` means — and a caller that lost a race to another revocation
+    got what they asked for.
+    """
+    try:
+        revoked = await engine.revoke_destination_trust(record_id)
+    except InvalidDestinationTrustError:
+        # As on the listing: ADR-0242 §4 leaves this operation one failure — the store
+        # could not be read or written — because the unknown-id refusal is unreachable
+        # after a live match and is answered `False` before it. Nothing is converted
+        # into `False` here, which §4 forbids in terms.
+        _render_destination_trust_store_unavailable()
+        return _EXIT_ERROR
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    if not revoked:
+        _print(
+            f"[yellow]Nothing to withdraw.[/] No live choice of parties "
+            f"{_safe(record_id)} is standing — it may already have been withdrawn."
+        )
+        _print("[dim]'assistant destination-trust' shows what stands now.[/]")
+        return _EXIT_OK
+    _print("[green]Withdrawn.[/]")
+    _print(
+        "[dim]What I compose for those parties from now on is drawn from your own "
+        "words alone again. Nothing already decided is rewritten, and nothing already "
+        "composed is retracted.[/]"
+    )
     return _EXIT_OK
 
 
@@ -6570,6 +6790,10 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
     if turn is not None and turn.memory_degraded:
         _print("[yellow]Note:[/] personal memory was unavailable, so this answer is generic.")
     _render_reply(outcome, streamed=streamed)
+    # ADR-0242 §9: **beside the reply and never in place of it**, and after it for
+    # `_render_recipient_grant_outcome`'s reason — it is about prose the user has by
+    # then read. The model said what was not done; this says what would enable it.
+    _render_search_not_serviced(outcome.search_not_serviced)
     routed = outcome.routed
     if routed is not None:
         # ADR-0197 §8: `routed` and `step` are never both present, and a routed pass
@@ -6656,6 +6880,114 @@ def _render_reply(outcome: TurnOutcome, *, streamed: _StreamedReply | None = Non
         "[yellow]Note:[/] that answer is incomplete — composing it did not finish, so "
         "it stops where it stops; what follows is the record of what was done."
     )
+
+
+def _render_search_not_serviced(member: SearchNotServiced | None) -> None:
+    """ADR-0242 §9's statement for this turn, **beside the reply and never in place of it**.
+
+    **One fixed statement per member, written out as a literal** (§9, §13). Neither
+    these nor the composing stage's eight prompt fragments are assembled from a
+    member's value, its name, a format string over the vocabulary, or a mapping a later
+    member would silently join: "A member added without its two texts is a member with
+    no rendering, and §8's closure at eight is what makes that a review question rather
+    than a runtime one."
+
+    **The command name is here and not in the reply, and the split is decided rather
+    than incidental** (§9). A command name in a model-composed reply is wrong twice
+    over — it would reach a browser and a voice channel where no terminal exists, and
+    it would be a string a model may paraphrase, truncate or invent. A surface
+    statement that restated the answer would be composing a reply in ``interfaces/``,
+    which golden rule 3 refuses. So the model says **what was not done** and this says
+    **what would enable it**, and each says only the half it can say truthfully.
+
+    **Rendering a fixed statement per enum member is presentation and not business
+    logic** (§9), and :func:`_render_recipient_grant_outcome`'s five statements over
+    ``RecipientGrantNotEstablished`` are the ratified precedent. Nothing here reads a
+    store, joins a row, computes a member, or renders a statement for a member it was
+    not given: the value is the one the servicing site computed, carried by value on
+    ``TurnOutcome``.
+
+    **No statement says that performing the act it names will make the next search
+    happen**, and none says why a ruling was not an ``ALLOW`` (§9).
+    ``AUTHORISATION_AWAITED`` does not say that no standing authorisation covers the
+    recipients — ADR-0236 §4 fixes a shipped default under which no grant is consulted
+    at all, so that sentence would be false on a reachable deployment;
+    ``TRUST_MISSING`` does not say that trust is the only thing missing; neither names
+    a floor, a threshold, a ``Settings`` field or a configuration. That is ADR-0235
+    §8's third clause binding on these statements as it binds on that listing.
+
+    **``TRUST_MISSING`` names ``assistant decisions`` and not ``assistant
+    remember-recipients``, and the difference is load-bearing rather than stylistic**
+    (§9). The decision recording *this* refusal carries origin over external content,
+    so ADR-0235 §3's seventh condition excludes it from ``grantable_decisions`` and
+    ADR-0242 §1's third condition excludes it from the trust act; and the earlier
+    decision the user granted from has been resolved, so §3's fourth condition has
+    taken it out of that listing too. ``assistant remember-recipients`` can therefore
+    be **empty at exactly the moment its guidance is followed**, where ``assistant
+    decisions`` is ADR-0186 §1's bounded read of the whole trail and carries resolved
+    decisions.
+
+    **And it promises no eligible decision, because there is a reachable deployment on
+    which none exists** (§9). Where a deployment's *first* search is planned over
+    external content, the trail's only decision is the one recording that refusal and
+    §1's third condition forbids the act on it. So the statement says where to look
+    **and what makes a decision eligible**, at the strength the recorded predicate
+    carries and no higher — ADR-0181 §6's second clause binding here, so it does not
+    say the request was composed from the user's own words alone, does not say no
+    external content was involved, and names no source and no kind of source.
+
+    **None of the eight carries** a destination, a host, an origin, a provider name, a
+    connection reference, an account identity, a query or any fragment of one, a
+    record, a count, a monetary figure, a duration, a budget, a ``Settings`` field name
+    or a ``SearchDisposition`` value (§9). §7's bar on the prompt fragments and this
+    bar are one rule stated at the two render sites it has to hold at.
+
+    **Silence where the member is absent** is a turn that serviced no search or
+    serviced every search it asked for, and the surface then says nothing about a
+    lookup at all — which is §6's byte-identity guarantee at this render site.
+
+    Args:
+        member: What ``TurnOutcome.search_not_serviced`` carried, or ``None``.
+    """
+    match member:
+        case None:
+            return
+        case SearchNotServiced.SEARCH_DISABLED:
+            _print(
+                "[dim]Note: looking things up outside this system is switched off in "
+                "this installation. That is an operator setting.[/]"
+            )
+        case SearchNotServiced.NOT_ADMITTED:
+            _print(
+                "[dim]Note: this conversation did not admit that lookup. The allowance "
+                "is per conversation, so a new conversation has one of its own.[/]"
+            )
+        case SearchNotServiced.SPEND_EXHAUSTED:
+            _print(
+                "[dim]Note: a spending ceiling refused that lookup. That is an operator setting.[/]"
+            )
+        case SearchNotServiced.DECLINED:
+            _print("[dim]Note: that lookup was declined when it was ruled on.[/]")
+        case SearchNotServiced.TRUST_MISSING:
+            _print(
+                "[dim]Note: the party that lookup would have gone to is not one you "
+                "have chosen. 'assistant trust-destinations <decision-id>' records "
+                "that choice; 'assistant decisions' is where you read a decision id. "
+                "A decision is one you can use here when the call it records went to "
+                "a party at all and no record selected into it was marked as resting "
+                "on recorded external content. Choosing changes what a later "
+                "conversation may compose.[/]"
+            )
+        case SearchNotServiced.AUTHORISATION_AWAITED:
+            _print(
+                "[dim]Note: that lookup was put to you as a question instead of being "
+                "made, and the question is recorded. 'assistant remember-recipients' "
+                "lists the decisions you can still answer.[/]"
+            )
+        case SearchNotServiced.INTERRUPTED:
+            _print("[dim]Note: that lookup was begun and stopped.[/]")
+        case SearchNotServiced.UNAVAILABLE:
+            _print("[dim]Note: that lookup produced nothing this turn could use.[/]")
 
 
 def _render_step(step: StepOutcome) -> bool:
@@ -9016,10 +9348,23 @@ def _render_grantable_decisions(offerable: tuple[PermissionDecision, ...], *, li
             f"[dim]Read from the most recent {limit} rulings. Ask for more with "
             "--limit; a call older than that window is not offered here.[/]"
         )
+    # ADR-0242 §5: this listing **names both acts, as two acts**, giving the granting
+    # form and the trusting form side by side over the same decision id and saying that
+    # they are two questions and that neither completes the other. It performs **no
+    # trust read** to do it — the line is a fixed statement of what the two commands
+    # are, not a rendering of any destination's current state — so no inference and no
+    # second store read enters this listing. This is what discharges ADR-0238 §1's
+    # "knowing it was a second question" at the point of discovery, and it is the whole
+    # of the coupling between the two acts.
     _print(
-        "[dim]To remember one call's recipients: assistant remember-recipients "
+        "[dim]Two separate questions can be answered from a decision here, and "
+        "neither completes the other:[/]"
+    )
+    _print(
+        "[dim]  may I talk to them at all — assistant remember-recipients "
         "<decision-id> --until <instant>[/]"
     )
+    _print("[dim]  what may I compose for them — assistant trust-destinations <decision-id>[/]")
 
 
 def _render_recipient_grant_established(grant: RecipientGrant) -> None:
@@ -9141,6 +9486,182 @@ def _render_recipient_grant_outcome(outcome: RecipientGrantOutcome | None) -> No
             _render_grant_declined()
         case None:  # pragma: no cover - the model's own validator refuses it
             return
+
+
+def _render_destination_trust_preamble() -> None:
+    """ADR-0242 §3's five facts, stated **before** the act is collected.
+
+    **Four facts about what the act does**, as facts about this record and naming no
+    future call, no expected benefit and no behaviour this system cannot promise: that
+    it is not the act deciding whether the system may talk to this party; that after it
+    what is composed for the party may be drawn from records held about the user rather
+    than from the user's own words alone; that the fact is prospective and revocable
+    and rewrites no recorded decision; and that it carries no end date.
+
+    **And a fifth that is easy to leave out and false to leave implied** (§3): a
+    conversation that has already read from a destination it did not trust is not
+    repaired by the act. ADR-0238 §5's recorded half is monotone over a conversation,
+    so what the act changes is what a *later* conversation may compose — stated as a
+    fact about how it takes effect, promising nothing about any conversation in
+    progress.
+
+    **ADR-0233 §8's span-value floor is not met here and this does not claim it is**
+    (§3). Nothing renders a digest as a value, reconstructs, summarises, excerpts or
+    paraphrases any call's arguments, or implies the user has been shown what a call
+    would send. The honest statement about the *future* is the harder one and is made
+    outright: the record widens what may be composed for calls **not yet planned**, so
+    no surface can show those bytes. What is shown is the class — records this system
+    holds about the user, composed into a query by a model, under a per-conversation
+    call budget — and it names no number, quotes no budget, estimates no volume and
+    promises no bound.
+
+    **The destination set itself is rendered at the listing** the id came from
+    (ADR-0242 §1, §3): ``assistant decisions`` and ``assistant remember-recipients``
+    render the recorded call whole through :func:`_render_decision` — the canonical
+    destination set in both supplied and canonical forms as ``core`` derived it, the
+    connected account's identity, the tool by its declaration's own identifier and
+    capability, the instant the decision was recorded, and the call's origin in all
+    three of ADR-0181 §6's states.
+    """
+    _print("[bold]Before this is recorded, four things about what it does — and a fifth:[/]")
+    _print(
+        "  1. This is [bold]not[/] the question of whether I may talk to those "
+        "parties. That is a separate question with a separate answer, and this "
+        "settles nothing about it."
+    )
+    _print(
+        "  2. After this, what I compose for those parties may be drawn from things "
+        "I hold about you, rather than from your own words alone."
+    )
+    _print(
+        "  3. It applies to later requests and you can withdraw it at any time. It "
+        "rewrites nothing already decided."
+    )
+    _print("  4. It carries no end date. It stands until you withdraw it.")
+    _print(
+        "  5. A conversation that has already read from a party you had not chosen "
+        "is [bold]not[/] repaired by this. What this changes is what a later "
+        "conversation may compose."
+    )
+    _print(
+        "[dim]I cannot show you what a future call would send, because those calls "
+        "have not been planned yet, and I will not pretend otherwise. What is drawn "
+        "on is records I hold about you, put into a query by a model, under a limit "
+        "on how many such lookups one conversation makes.[/]"
+    )
+
+
+def _render_destination_trust_established(record: DestinationTrustRecord) -> None:
+    """Say the choice was recorded, and say exactly which parties it is over (§3, §5)."""
+    _print(f"[green]Chosen.[/] Recorded as {_safe(record.id)}.")
+    _print("  [bold]Parties:[/]")
+    for member in record.destinations:
+        _print(f"    {_recorded_destination_line(member)}")
+    _print(f"  [bold]From:[/] {_decided_at(record.established_at)}")
+    _print(
+        "[dim]This says what I may compose for them and never that I may talk to "
+        "them — that is 'assistant remember-recipients', and it is a separate "
+        "question. 'assistant destination-trust' shows what stands; 'assistant "
+        "revoke-destination-trust' withdraws one.[/]"
+    )
+
+
+def _render_destination_already_chosen() -> None:
+    """Say the parties are already chosen, so there is nothing to do (ADR-0242 §5).
+
+    **Read from** :class:`~ai_assistant.core.errors.DuplicateDestinationTrustError`
+    **and from nothing else.** The user's recourse on this ground is *no act at all* —
+    what they asked for is already true — where every other refusal leaves them with
+    something to do, and reading the store back to work that out is what would give
+    them a second record they think is one (ADR-0242 §2, on ADR-0235 §4's argument).
+    """
+    _print(
+        "[yellow]Nothing to do.[/] Those parties are already ones you have chosen, "
+        "so no second record was made."
+    )
+    _print("[dim]'assistant destination-trust' shows what stands.[/]")
+
+
+def _render_destination_trust_refused() -> None:
+    """Say nothing was recorded, naming no cause it was not given (ADR-0242 §5).
+
+    **ADR-0242 §5's third and fourth renderings, in one statement, because the type
+    cannot separate them on this operation and §2 forbids separating them any other
+    way.** ADR-0238 §13 closes that decision's ``core/errors.py`` surface at exactly
+    one name, so there is deliberately no ``DestinationTrustError`` base for a store
+    fault to take: :class:`~ai_assistant.core.errors.InvalidDestinationTrustError`
+    "covers both grounds — a refusal, and a read or write this store could not
+    perform". ADR-0242 §2 then rules the outcome read "from the **type** of the refusal
+    and from nothing else" — no message parsed, no read-back taken — so a surface
+    branching on which of the two it was would be doing the one thing that clause
+    forbids, and one asserting either would be asserting what it was not told.
+
+    So this says the honest disjunction and the one thing both grounds establish:
+    nothing was recorded. **The store-fault sentence §5 fixes does exist and is
+    reachable** — on ``assistant destination-trust`` and ``assistant
+    revoke-destination-trust``, where ADR-0242 §2 and §4 make this class's only
+    remaining ground a read or a write the store could not perform, so the type *is*
+    unambiguous there (:func:`_render_destination_trust_store_unavailable`).
+    """
+    _print(
+        "[yellow]Not recorded.[/] No choice of parties was recorded — either it was "
+        "refused on a ground I was not told, or the record could not be written. "
+        "Nothing stands from this either way, and I will not guess which it was."
+    )
+
+
+def _render_destination_trust_store_unavailable() -> None:
+    """Say the store could not be read or written, and that nothing was (§5).
+
+    ADR-0242 §5's fourth rendering. Reached from the listing and the revocation, where
+    §2 and §4 leave :class:`~ai_assistant.core.errors.InvalidDestinationTrustError` one
+    remaining ground — a read or a write this store could not perform — so the type
+    establishes the sentence rather than the sentence guessing at the type.
+    """
+    _print(
+        "[yellow]Unavailable.[/] The record of parties you have chosen could not be "
+        "read or written, so nothing was changed and this is not an answer about what "
+        "stands. That is a storage fault and not a refusal of what you asked for."
+    )
+
+
+def _render_untrustable(exc: Exception) -> None:
+    """The refusal that recorded nothing, naming which condition failed (§1, §5).
+
+    **The message names the condition and this surface does not branch on it**
+    (ADR-0242 §1). Where more than one of the three fails, the first in §1's order is
+    the one named, so the refusal is deterministic across implementations — and this
+    renderer relays that sentence rather than re-deriving it, which is what keeps one
+    statement of the rule in the tree.
+    """
+    _print(f"[yellow]Not recorded.[/] {_safe(str(exc))}")
+    _print("[dim]Nothing was recorded and nothing was sent.[/]")
+
+
+def _render_standing_destination_trust(standing: tuple[DestinationTrustRecord, ...]) -> None:
+    """What parties the user has currently chosen (ADR-0242 §4)."""
+    if not standing:
+        _print(
+            "[yellow]Nothing chosen.[/] You have chosen no parties, so what I compose "
+            "for any of them is drawn from your own words alone."
+        )
+        _print(
+            "[dim]This is not the same question as 'assistant recipient-grants', which "
+            "is about whether I may talk to a party at all, or 'assistant granted', "
+            "which is about reading your sources.[/]"
+        )
+        return
+    _print(f"[bold]{len(standing)}[/] choice(s) of parties standing:\n")
+    for record in standing:
+        _print(f"  [bold]{_safe(record.id)}[/] [dim]since {_decided_at(record.established_at)}[/]")
+        for member in record.destinations:
+            _print(f"    {_recorded_destination_line(member)}")
+        console.print()
+    _print(
+        "[dim]Each says what I may compose for those parties and never that I may "
+        "talk to them. 'assistant revoke-destination-trust <id>' withdraws one. None "
+        "of these carries an end date; they stand until you withdraw them.[/]"
+    )
 
 
 def _render_standing_recipient_grants(standing: tuple[RecipientGrant, ...]) -> None:

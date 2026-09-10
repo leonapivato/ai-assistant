@@ -8174,7 +8174,9 @@ def test_every_id_parameter_on_the_surface_carries_an_id_callback() -> None:
         "forget-question:question_id": True,
         "observe:conversation_id": True,
         "remember-recipients:decision_id": True,
+        "revoke-destination-trust:record_id": True,
         "revoke-recipient-grant:grant_id": True,
+        "trust-destinations:decision_id": True,
     }
 
 
