@@ -107,12 +107,16 @@ and no issue is filed. It asserts the opposite of *rejected as false* (the
 finding is right) and the opposite of *deferred to an issue* (nobody should ever
 act on it), and the stated consequence is what keeps the three apart. It is
 **never** available at `blocker` or `major`, and never for a finding you have not
-checked against the text it describes; there the choice stays fix-or-waive.
+checked against the text it describes. At those severities the dispositions stay
+the ones `CONTRIBUTING.md` already gives — fix it now where it concerns code in
+the current diff, open an issue where it does not, or waive it with the rationale
+on the record.
 
 **And a loop that is not converging owes a diagnosis before it owes a handoff.**
 As a dispatched lane, once four substantively reviewed trees are recorded under
-you — the round number a run prints, less what the handoff comment you took the
-lane under recorded — write a comment on the PR classifying each open and
+you — any lens's recorded artifact counts its tree, so it is the round number a
+*successful* run prints, less what the handoff comment you took the lane under
+recorded — write a comment on the PR classifying each open and
 recently-fixed finding as a new independent defect, a regression from an earlier
 fix in this loop, a specification dispute, or scope expansion, and name one next
 activity: a probe, a smaller decision, an adjudication request to the
