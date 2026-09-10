@@ -2324,3 +2324,33 @@ async def test_an_admission_fault_with_nothing_cancelled_still_leaves_unchanged(
 
     assert await subject.trail.export_invocations() == []
     assert subject.transport.attempts == ()
+
+
+async def test_an_admission_fault_that_replaces_this_seams_own_expiry_is_still_an_expiry() -> None:
+    """Round 6's blocker: the transport's own-deadline rule, at the stage above it.
+
+    The one case the previous round's pair left open. ``asyncio.Timeout.__aexit__``
+    calls ``uncancel`` on its way out **whatever** the exception was, so a gate that
+    catches the deadline's cancellation and raises an ordinary fault instead leaves the
+    caller holding a fault and a count that never moved — and the expiry would be
+    reported as ADR-0241 §8's ``SEARCH_FAILED`` rather than as §4's own member, with
+    the turn degraded under ADR-0226 §5 for a call that simply ran out of time.
+
+    The provenance is therefore captured **inside** that context manager, where the
+    cancellation is still on the task, and read out here. Nothing was appended and
+    nothing was opened, so this exit owes no row (ADR-0192 §1, ADR-0241 §5).
+    """
+    gate = AbsorbingGate(raises=AuditError("the gate could not read its own rows"))
+    subject = await built(channels=[answering(result())], gate=gate)
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    outcome = await subject.searcher.search(call, timeout=_EXPIRING_BOUND)
+
+    assert gate.absorbed == 1, "the arrangement really did swallow the expiry"
+    assert outcome.refusal is SearchRefusal.DEADLINE_EXPIRED, (
+        "the fault the gate substituted does not become the turn's account of what "
+        "happened: this deadline fired, and that outranks it (ADR-0241 §4, §7)"
+    )
+    assert await subject.trail.export_invocations() == [], "no claim, so no completion"
+    assert subject.keyring.reads == [], "and no credential was read"
+    assert subject.transport.attempts == (), "and no channel was opened"

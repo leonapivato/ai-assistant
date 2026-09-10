@@ -983,12 +983,24 @@ class _UpstreamWatchingGate:
     raised for its own reasons, and its refusal keeps the class the tree already gives
     it (§4).
 
+    **It also carries the fact the caller cannot recover afterwards.**
+    ``asyncio.Timeout.__aexit__`` calls ``uncancel`` on its way out **whatever** the
+    exception was, so a gate that catches the deadline's cancellation and raises an
+    ordinary fault instead leaves the caller with a fault and a count that never
+    moved — and the expiry would be reported as ADR-0241 §8's ``SEARCH_FAILED``
+    rather than as §4's own member. This object sits inside that context manager, so
+    it observes the cancellation while it is still on the task.
+
     Attributes:
         upstream: The gate's own ``TimeoutError``, where one was raised with nothing
             cancelled. ``None`` otherwise, which is every ordinary call.
+        interrupted: Whether a cancellation reached this task while the gate was
+            running — this deadline's or the caller's, which
+            :meth:`WebSearchEgress._deliver_absorbed` then tells apart against the
+            baseline taken before the admission.
     """
 
-    __slots__ = ("_inner", "upstream")
+    __slots__ = ("_inner", "interrupted", "upstream")
 
     def __init__(self, inner: SpendGate) -> None:
         """Watch ``inner`` without deciding anything for it.
@@ -1001,6 +1013,7 @@ class _UpstreamWatchingGate:
         """
         self._inner = inner
         self.upstream: BaseException | None = None
+        self.interrupted = False
 
     async def admit_invocation(self, *, estimate: ToolCost) -> SpendAdmissionHandle:
         """Admit through the inner gate, noting a ``TimeoutError`` it raised itself.
@@ -1017,11 +1030,18 @@ class _UpstreamWatchingGate:
         entered_with = pending_cancellations()
         try:
             return await self._inner.admit_invocation(estimate=estimate)
-        except TimeoutError as upstream:
-            if pending_cancellations() == entered_with:
+        except BaseException as raised:
+            # **Read here, and that is the whole of why this wrapper exists.** This
+            # frame is *inside* `admitted_call`'s `asyncio.timeout_at`, and
+            # `asyncio.Timeout.__aexit__` calls `uncancel` on its way out whatever the
+            # exception was — so by the time the caller sees anything, a cancellation
+            # the deadline delivered has left no trace in the count at all. Observed
+            # from in here it is still there.
+            self.interrupted = pending_cancellations() > entered_with
+            if isinstance(raised, TimeoutError) and not self.interrupted:
                 # Nothing cancelled this task, so no deadline delivered anything here:
                 # ADR-0031 §2's case, and ADR-0241 §7's "not this seam's expiry".
-                self.upstream = upstream
+                self.upstream = raised
             raise
 
     def release_admission(self, handle: SpendAdmissionHandle) -> None:
@@ -1466,6 +1486,13 @@ class WebSearchEgress:
             # answering a cancelled turn with a value, so the cancellation goes first
             # (ADR-0060 §1). ADR-0194 §4's payload-free refusal is untouched: nothing
             # here catches, wraps or annotates one.
+            #
+            # **A refusal is a ruling and stays one even where the window closed under
+            # it.** ADR-0241 §9 keeps the three bounds apart in the value an audit
+            # records, and §4's member is for a search that produced no answer at all;
+            # a ceiling the gate did cross is a fact an operator acts on, and reporting
+            # it as an expiry would hide it under the very collapse §9 exists to
+            # prevent. So this branch reads the cancellation and nothing else.
             self._deliver_absorbed(admitting)
             return _refused(SearchRefusal.SPEND_REFUSED)
         except Exception:
@@ -1474,10 +1501,19 @@ class WebSearchEgress:
             # raises an `AuditError` instead would otherwise reach ADR-0226 §5's
             # degradation and ADR-0241 §8's `SEARCH_FAILED`, letting a cancelled turn
             # degrade and carry on. The transport's counterpart is checked inside
-            # `act`; this is the same rule at the one stage above it. Where nothing was
-            # cancelled the fault leaves exactly as it arrived (ADR-0029 §3).
+            # `act`; this is the same rule at the one stage above it.
             self._deliver_absorbed(admitting)
-            raise
+            if not watched.interrupted:
+                # Nothing interrupted the admission, so the fault is the whole of what
+                # happened and it leaves exactly as it arrived — unwrapped,
+                # unannotated and with no outcome invented for it (ADR-0029 §3).
+                raise
+            # **And this deadline having fired outranks the fault**, exactly as it does
+            # inside `act` one stage below. The check above has already established
+            # that the interruption was not the caller's, so it was this window
+            # closing; no claim was appended for it, so no completion is owed
+            # (ADR-0192 §1, ADR-0241 §5).
+            return _refused(SearchRefusal.DEADLINE_EXPIRED)
         # **A `CancelledError` that reaches here is delivered onward, and this frame
         # classifies none of them.** An earlier revision branched on the count's delta
         # and got it backwards: a caller already carrying a cancellation request when
