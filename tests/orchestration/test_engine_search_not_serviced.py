@@ -21,6 +21,7 @@ from datetime import timedelta
 from itertools import count
 from typing import TYPE_CHECKING, Any, Final
 
+import pytest
 import structlog
 from test_engine import AT, PATIENT, SEARCH_DESTINATIONS, Harness
 from test_engine_read_envelope import _AskingPlanner, _recorder
@@ -32,7 +33,7 @@ from ai_assistant.core.types import (
     Role,
     SearchNotServiced,
 )
-from ai_assistant.orchestration.reads import SearchDisposition, SearchServicer
+from ai_assistant.orchestration.reads import SearchServicer
 from ai_assistant.permissions.policy import ThresholdActionPolicy
 from ai_assistant.testing import (
     FakeAuditTrail,
@@ -346,50 +347,49 @@ async def test_the_positive_path_services_both_its_searches_and_parks_nothing() 
     assert await wired.engine.pending_confirmations() == ()
 
 
-async def test_the_next_turn_of_a_conversation_that_searched_is_not_laundered_clean() -> None:
-    """ADR-0238 §2's own clause, which is why §15 Arm 1's *second turn* is unreachable.
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "ADR-0238 §15 Arm 1b is unimplemented (#2205): `SearchFooting.clean` admits no "
+        "stamped episode of this conversation, so the cross-turn `ALLOW` that arm "
+        "requires is refused and this turn carries a member where ADR-0242 §15 Arm 1 "
+        "requires none. ADR-0242 §12 leaves that mechanism to ADR-0238 — 'It decides no "
+        "fact about any destination' — so this lane records the obligation rather than "
+        "reaching across its fence to satisfy it."
+    ),
+)
+async def test_two_turns_of_one_conversation_each_service_a_search() -> None:
+    """§15 Arm 1's cross-turn half, written as the ADR requires and expected to fail.
 
-    **This arm records a conflict between two ratified ADRs rather than papering over
-    one** (issue #2205). ADR-0242 §15 Arm 1 asks for "two turns of one conversation each
-    service a search". ADR-0238 §2 rules the opposite in terms, and lanes B1 and B2
-    implemented it: a turn's ``minted_user_chosen`` set is per-turn "because ADR-0231 §16
-    makes a minted id resolve in no store and no later turn reach it — what a later turn
-    has instead is the captured episode, which is **not** in this set and is exactly why
-    **a conversation that searched yesterday is not laundered clean today**". That
-    episode carries a recorded external span this decision did not mint, so ADR-0238 §8's
-    early fold lowers the conversation's flag the moment it is admitted, §5's recorded
-    half is monotone, and the next request is ruled ``CONFIRM``.
+    ADR-0242 §15 Arm 1: "**two turns of one conversation each service a search**, the
+    second composed over records rather than the utterance alone", asserting
+    ``search_not_serviced`` is ``None`` on both. ADR-0238 §15 Arm 1b states the same
+    turn's ruling in its own terms — "A later turn of the same conversation, whose supply
+    carries the stamped episode and no minted record of any earlier turn … **rules
+    ``ALLOW`` on route (b)** with the binding carrying both
+    ``planned_with_external_content`` **and** ``closed_loop`` true" — and ADR-0238 §2 is
+    what makes that coherent: "**What a later turn has instead is the captured episode**
+    … That is what resolves *find more about that* across turns."
 
-    **ADR-0242's own text settles which one governs.** §12: "It decides **no fact about
-    any destination** … ADR-0238 §1 binds entire", and "§15's arms over them assert the
-    *rendering* of an outcome those sections decide and never the outcome itself". So the
-    outcome asserted here is the one ADR-0238 decides, and what this lane owes over it is
-    the rendering: ``UNAVAILABLE``, the member that names no act — because the
-    destination *is* chosen, so the trust act is not the answer, and nothing established
-    now repairs the recorded half.
+    The tree refuses it. ``SearchFooting.clean`` admits a record only where it carries no
+    recorded external span or was minted by **this turn's** ``WEB_SEARCH`` servicing at a
+    chosen destination, so the stamped episode fails it, ADR-0238 §8's early fold lowers
+    the conversation's flag, and the ruling is a ``CONFIRM``.
+
+    **Strict, so this fails loudly the moment that ground is fixed** rather than
+    quietly continuing to pass — which is the point of writing the owed arm now instead
+    of waiting for the lane that closes #2205.
     """
     wired = _wired()
     await _wired_through_to_trust(wired)
     first = await wired.engine.converse(_ASKED, timeout=PATIENT)
 
-    with structlog.testing.capture_logs() as captured:
-        second = await wired.engine.converse(
-            _ASKED, timeout=PATIENT, conversation_id=first.conversation_id
-        )
+    second = await wired.engine.converse(
+        _ASKED, timeout=PATIENT, conversation_id=first.conversation_id
+    )
 
     assert first.search_not_serviced is None
-    assert [row["disposition"] for event in _audits(captured) for row in event["servicings"]] == [
-        SearchDisposition.RULING_CONFIRM.value
-    ]
-    assert second.search_not_serviced is SearchNotServiced.UNAVAILABLE, (
-        "§8: a `CONFIRM` on external footing at a destination the user **has** chosen "
-        "names no act, because naming one that cannot help is worse than naming none"
-    )
-    fresh = await wired.engine.converse(_ASKED, timeout=PATIENT)
-    assert fresh.search_not_serviced is None, (
-        "and a fresh conversation searches exactly as the first did, which is the "
-        "property §15 Arm 1 is really about"
-    )
+    assert second.search_not_serviced is None
 
 
 def _audits(captured: Sequence[Any]) -> list[Any]:
