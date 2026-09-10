@@ -99,6 +99,29 @@ Waiving a `blocker` or `major` is allowed; write the one-line rationale in the P
 or the commit. `CONTRIBUTING.md` covers triaging a finding that is real but
 belongs in its own issue.
 
+**A finding can also be true and not worth acting on.** Where you have verified
+it, can state its concrete consequence, and judge that consequence too small to
+justify any future work, dispose of it as **acknowledged, no action warranted**
+(ADR-0243 §7) — the verdict plus that one-line consequence, written in the PR,
+and no issue is filed. It asserts the opposite of *rejected as false* (the
+finding is right) and the opposite of *deferred to an issue* (nobody should ever
+act on it), and the stated consequence is what keeps the three apart. It is
+**never** available at `blocker` or `major`, and never for a finding you have not
+checked against the text it describes; there the choice stays fix-or-waive.
+
+**And a loop that is not converging owes a diagnosis before it owes a handoff.**
+As a dispatched lane, once four substantively reviewed trees are recorded under
+you — the round number a run prints, less what the handoff comment you took the
+lane under recorded — write a comment on the PR classifying each open and
+recently-fixed finding as a new independent defect, a regression from an earlier
+fix in this loop, a specification dispute, or scope expansion, and name one next
+activity: a probe, a smaller decision, an adjudication request to the
+coordinator, a grounded waiver, or continued review with a reason. Where anything
+is a specification dispute, another round is not on the list — quote the clause,
+give both readings, and ask for the ruling. `CONTRIBUTING.md` → "Diagnose the
+loop at the fourth reviewed tree" carries it, ADR-0243 §§1–6 decides it, and it
+authorises no merge and forbids no round.
+
 **A green review survives a rebase unless the base move bears on this PR.** The
 artifact answers *coverage* — did a reviewer read this content — and the gate
 answers *currency*, so a base move outside the reviewed hunks does not spend a
