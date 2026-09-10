@@ -1218,10 +1218,11 @@ class SearchFooting:
 
     **The three facts §5's condition is decided from that live outside this turn** —
     the destination's recorded trust, the conversation's stored footing flag, and its
-    call allowance — held beside the one fact that lives inside it: which of this
-    turn's records were minted by a ``WEB_SEARCH`` servicing at a destination of
-    recorded trust ``USER_CHOSEN``. It is **per turn** rather than per process, because
-    that last set is, and because the conversation it is about is the turn's.
+    call allowance — held beside the facts that live inside it: which of this turn's
+    records were minted by a ``WEB_SEARCH`` servicing at a destination of recorded
+    trust ``USER_CHOSEN``, and which of them are episodes of this conversation. It is
+    **per turn** rather than per process, because those sets are, and because the
+    conversation it is about is the turn's.
 
     **It is a value the loop threads, not a seam.** It names no capability, is
     registered nowhere and adds no route: ADR-0238 §14 rules that the lane "wires the
@@ -1262,12 +1263,32 @@ class SearchFooting:
     max_calls: int
     #: The ids of records **this turn's** ``WEB_SEARCH`` servicings minted at a
     #: destination of recorded trust ``USER_CHOSEN`` — ADR-0238 §2's third admissible
-    #: population, and the one class of recorded external span §5's third condition
-    #: tolerates. It is a per-turn set because ADR-0231 §16 makes a minted id resolve
-    #: in no store and no later turn reach it: what a later turn has instead is the
-    #: captured episode, which is **not** in this set and is exactly why a
-    #: conversation that searched yesterday is not laundered clean today.
+    #: population. It is a per-turn set because ADR-0231 §16 makes a minted id resolve
+    #: in no store and no later turn reach it: "a second turn re-searches … because
+    #: nothing was retained", so no id in here is ever seen again.
+    #:
+    #: **It is not the only recorded external span §5's third condition tolerates**, and
+    #: an earlier revision of this comment said it was. What a later turn has instead is
+    #: §2's own answer — "the captured episode … **that** is what resolves *find more
+    #: about that* across turns" — which reaches this turn through
+    #: :attr:`conversation_episodes` and not through here, and which §15 Arm 1b requires
+    #: to rule ``ALLOW``. A conversation that searched yesterday is admitted by the
+    #: **recorded** half having vouched for yesterday, not by this set; what stays
+    #: refused is a conversation whose flag is down, which §8 makes monotone.
     minted_user_chosen: set[str] = field(default_factory=set)
+    #: The ids of ADR-0238 §2's **first** population alone: "episodes of this
+    #: conversation that ``orchestration`` selected into the turn's supply". Written
+    #: once, by the loop, from the conversation tail
+    #: :meth:`~ai_assistant.orchestration.conversations.ConversationLifecycle.history`
+    #: resolved out of the conversation index — a **recorded membership fact** about
+    #: which turns are this conversation's, never a judgement about a record's content.
+    #:
+    #: Recorded apart from :attr:`selected` because :meth:`clean` tells the two
+    #: populations apart and :func:`_search_supply` does not: an episode of *this*
+    #: conversation is a record whose externality this conversation's own stored flag
+    #: has **already** answered (§8's capture fold), and a ``MemoryRecord`` retrieval
+    #: selected — §2's second population — is not, whatever it carries.
+    conversation_episodes: set[str] = field(default_factory=set)
     #: The ids of the records ADR-0238 §2's **first two** populations contributed to this
     #: turn: "episodes of this conversation that ``orchestration`` selected into the
     #: turn's supply" and "the ``MemoryRecord`` values the turn's retrieval and episodic
@@ -1279,8 +1300,8 @@ class SearchFooting:
     #: should be: "what a later turn has instead is the captured episode … **that** is
     #: what resolves *find more about that* across turns". Whether such an episode also
     #: prevents *closed-loop* authorisation is §5's separate question, answered by
-    #: :meth:`clean`, and conflating the two would delete the milestone's own exit
-    #: sentence in the name of enforcing it.
+    #: :meth:`clean` over :attr:`conversation_episodes`, and conflating the two would
+    #: delete the milestone's own exit sentence in the name of enforcing it.
     selected: set[str] = field(default_factory=set)
     #: Whether this turn has already folded ``False`` onto the record. §8's early fold
     #: "writes ``False`` and nothing else, it is idempotent, and repeating it costs
@@ -1291,17 +1312,41 @@ class SearchFooting:
     def clean(self, record: MemoryRecord, /) -> bool:
         """Whether ``record`` is one ADR-0238 §5's third condition tolerates.
 
-        True where the record carries no recorded external span at all, and where the
+        True in three cases: the record carries no recorded external span at all; the
         span it carries was minted by one of *this turn's* ``WEB_SEARCH`` servicings at
-        a destination of recorded trust ``USER_CHOSEN``. **Blind to why a record is
-        external** (§5): it is stated over what was minted and where it went, never
-        over the cause of a stamp, which is what ADR-0223 §6 requires of any clause
-        reaching ADR-0181 §5's floor and why no episode-shaped carve-out appears here.
+        a destination of recorded trust ``USER_CHOSEN``; or the record is an episode of
+        **this conversation** the loop selected into the turn's supply (§2's first
+        population, :attr:`conversation_episodes`).
+
+        **The third case is §5's own sentence rather than an exception to it.** The
+        current-turn half asks whether every recorded external span in view "was minted
+        by a ``WEB_SEARCH`` servicing at a destination of recorded trust
+        ``USER_CHOSEN``". For an episode of *this* conversation that question has
+        already been answered — by the same predicate, the same component and the same
+        data, at the capture of the turn that episode records — and the answer is the
+        conversation's stored ``all_external_user_chosen`` flag, which §5's **recorded**
+        half reads. So this half does not re-derive it; the recorded half carries it,
+        and §5's closing paragraph is what reserves this half for the other case: "a
+        turn may read a file and *then* reach the search" — a span **this** turn
+        introduced, which no record vouches for yet. Where the earlier span came from
+        anywhere but a chosen search the flag is already ``False`` and §8 makes it
+        monotone (Arms 6e, 6f), so nothing is reopened — and what this makes reachable
+        is §15 Arm 1b, the exit's cross-turn arm, which without it is refused
+        (`#2205 <https://github.com/leonapivato/ai-assistant/issues/2205>`_).
+
+        **Still blind to why a record is external** (§5). Nothing here asks what
+        stamped a record: the third case is decided from *membership* — which turns the
+        conversation index records as this conversation's — and never from the cause of
+        a stamp, which is what ADR-0223 §6 requires of any clause reaching ADR-0181 §5's
+        floor. A stamped episode of some **other** conversation, and any
+        ``MemoryRecord`` retrieval selected, fail this predicate exactly as a fetched
+        page does, whatever their provenance says.
 
         **It reads a recorded fact and never content** (§5, §12): the predicate is
         ``rests_on_recorded_external_content`` over the record's own provenance and
-        membership of a set this component built from acts it performed. No model
-        output, no query, no reply and no record's text contributes.
+        membership of two sets this component was handed by the one component that knows
+        which stage a record came from. No model output, no query, no reply and no
+        record's text contributes.
 
         Args:
             record: One record in view of this turn.
@@ -1312,6 +1357,7 @@ class SearchFooting:
         return (
             not rests_on_recorded_external_content(record.provenance)
             or record.id in self.minted_user_chosen
+            or record.id in self.conversation_episodes
         )
 
     async def trusted(self) -> DestinationTrust:
@@ -2497,20 +2543,25 @@ def _search_supply(
     ``MemoryRecord`` values the turn's retrieval and episodic supplement selected; and
     records **this turn's own** ``WEB_SEARCH`` servicings minted at a destination of
     recorded trust ``USER_CHOSEN``. The first two are :attr:`SearchFooting.selected`,
-    written by the loop from the supply it assembled; the third is
-    :attr:`SearchFooting.minted_user_chosen`. **Nothing of any other origin enters** —
+    written by the loop from the supply it assembled — the first of them recorded a
+    second time, on its own, as :attr:`SearchFooting.conversation_episodes`, because
+    :meth:`SearchFooting.clean` tells the two apart and this function does not; the
+    third is :attr:`SearchFooting.minted_user_chosen`. **Nothing of any other origin
+    enters** —
     "no record minted at an ``UNCHOSEN`` destination, by a fetch, by a file read, by a
     reader or by any tool" — and each of those reaches the turn through a *servicing*
     rather than through the supply the planner was assembled over, so none of them is in
     either set.
 
     **Membership of the enumerated populations, and never cleanliness.** A stamped
-    episode of an earlier turn carries a recorded external span and is admitted here,
-    because §2 names it and §2's own closing paragraph makes it the thing that "resolves
-    *find more about that* across turns". What such an episode costs is the *closed-loop*
-    condition (§5), which is a separate question answered by
-    :meth:`SearchFooting.clean` at the moment the request is built — so the query is
-    composed and then not sent, rather than never composed at all.
+    episode carries a recorded external span and is admitted here whichever conversation
+    it belongs to, because §2 names it and §2's own closing paragraph makes it the thing
+    that "resolves *find more about that* across turns". Whether it also costs the
+    *closed-loop* condition (§5) is a separate question answered by
+    :meth:`SearchFooting.clean` at the moment the request is built — and the two answers
+    differ: an episode of **this** conversation leaves the footing intact (§15 Arm 1b),
+    while a record of any other external origin is composed over and then **not sent**,
+    rather than never composed at all.
 
     **§3's filter is ``Placement.reach`` and no other axis**, read exactly as ADR-0217
     §1 defines it, with no field, member, tag or band added. It is applied here so the

@@ -21,7 +21,6 @@ from datetime import timedelta
 from itertools import count
 from typing import TYPE_CHECKING, Any, Final
 
-import pytest
 import structlog
 from test_engine import AT, PATIENT, SEARCH_DESTINATIONS, Harness
 from test_engine_read_envelope import _AskingPlanner, _recorder
@@ -30,6 +29,7 @@ from test_loop_search import _DEADLINE, _binder, _CostedSearcher, _search
 from ai_assistant.core.types import (
     DestinationTrust,
     DestinationTrustRecord,
+    PermissionOutcome,
     Role,
     SearchNotServiced,
 )
@@ -347,19 +347,8 @@ async def test_the_positive_path_services_both_its_searches_and_parks_nothing() 
     assert await wired.engine.pending_confirmations() == ()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "ADR-0238 §15 Arm 1b is unimplemented (#2205): `SearchFooting.clean` admits no "
-        "stamped episode of this conversation, so the cross-turn `ALLOW` that arm "
-        "requires is refused and this turn carries a member where ADR-0242 §15 Arm 1 "
-        "requires none. ADR-0242 §12 leaves that mechanism to ADR-0238 — 'It decides no "
-        "fact about any destination' — so this lane records the obligation rather than "
-        "reaching across its fence to satisfy it."
-    ),
-)
 async def test_two_turns_of_one_conversation_each_service_a_search() -> None:
-    """§15 Arm 1's cross-turn half, written as the ADR requires and expected to fail.
+    """§15 Arm 1's cross-turn half, and ADR-0238 §15 Arm 1b through the whole pipeline.
 
     ADR-0242 §15 Arm 1: "**two turns of one conversation each service a search**, the
     second composed over records rather than the utterance alone", asserting
@@ -371,14 +360,13 @@ async def test_two_turns_of_one_conversation_each_service_a_search() -> None:
     what makes that coherent: "**What a later turn has instead is the captured episode**
     … That is what resolves *find more about that* across turns."
 
-    The tree refuses it. ``SearchFooting.clean`` admits a record only where it carries no
-    recorded external span or was minted by **this turn's** ``WEB_SEARCH`` servicing at a
-    chosen destination, so the stamped episode fails it, ADR-0238 §8's early fold lowers
-    the conversation's flag, and the ruling is a ``CONFIRM``.
-
-    **Strict, so this fails loudly the moment that ground is fixed** rather than
-    quietly continuing to pass — which is the point of writing the owed arm now instead
-    of waiting for the lane that closes #2205.
+    **This is the arm the servicing seam cannot make**, and why it is written here as
+    well as in ``test_closed_loop.py``: nothing is arranged about the second turn's tail
+    or about the conversation's stored flag. The first turn searches, is captured with
+    the episode ADR-0223 §1 stamps, and folds its own observation onto the record; the
+    second turn is an ordinary ``converse`` continuation that finds that episode in front
+    of it. It was written as a strict ``xfail`` against #2205 and passes now that
+    ``SearchFooting.clean`` admits ADR-0238 §2's first population.
     """
     wired = _wired()
     await _wired_through_to_trust(wired)
@@ -390,6 +378,13 @@ async def test_two_turns_of_one_conversation_each_service_a_search() -> None:
 
     assert first.search_not_serviced is None
     assert second.search_not_serviced is None
+    assert await wired.engine.pending_confirmations() == (), "Arm 1b asks the user nothing"
+    ruled = [row for row in await wired.engine.recent_decisions() if row.egress_binding is not None]
+    latest = max(ruled, key=lambda row: row.id)
+    assert latest.egress_binding is not None
+    assert latest.ruling.outcome is PermissionOutcome.ALLOW, "Arm 1b: recorded, not refused"
+    assert latest.egress_binding.planned_with_external_content is True
+    assert latest.egress_binding.closed_loop is True, "ADR-0238 §15 Arm 1b, on a real turn"
 
 
 def _audits(captured: Sequence[Any]) -> list[Any]:

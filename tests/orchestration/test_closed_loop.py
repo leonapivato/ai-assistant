@@ -468,18 +468,50 @@ async def test_a_dirty_supply_lowers_the_flag_before_the_turn_is_captured() -> N
     reads a foreign external record and asks for no search at all still closes the
     conversation, which is the shape a fold at capture leaves open for the whole of a
     turn.
+
+    **The subject is a record retrieval selected**, which is §2's second population and
+    the one the early fold is stated over. A stamped episode of *this* conversation is
+    not: §8's own capture fold already reported on the span it carries, so folding on it
+    here would count one fact twice and make §15 Arm 1b unreachable (#2205). The arm
+    below asserts that half, so the two are pinned as the pair they are.
     """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_external_belief("belief-foreign", "something a reader ingested"))
     footing = await _chosen_footing()
 
-    await _loop(planner=FakePlanner(now=_clock), search=None, footing=footing).respond(
-        _ASK, narrow=_bounded(), history=(_stamped_episode("episode-of-another-turn"),)
-    )
+    await _loop(
+        planner=FakePlanner(now=_clock), memory=memory, search=None, footing=footing
+    ).respond(_ASK, narrow=_bounded())
 
     draw = await footing.conversations.search_draw(footing.conversation_id)
     assert draw is not None
     assert draw.all_external_user_chosen is False, (
         "the turn built no search request at all and the flag is down anyway"
     )
+    assert draw.calls == 0, "and nothing was admitted, because nothing was asked"
+
+
+async def test_this_conversations_own_episode_lowers_nothing_at_admission() -> None:
+    """§8's early fold, on the population it is **not** stated over (#2205).
+
+    §8's trigger is "a recorded external span that was **not** minted by a
+    ``WEB_SEARCH`` servicing at a destination of recorded trust ``USER_CHOSEN``". For an
+    episode of this conversation that question was answered when the turn it records was
+    captured, and the answer **is** the flag being read here — so a fold at admission
+    would lower a flag on account of a fact the flag already carries, which is what left
+    §15 Arm 1b unreachable.
+
+    Driven with no searcher at all, so nothing but the admission can move the flag.
+    """
+    footing = await _chosen_footing()
+
+    await _loop(planner=FakePlanner(now=_clock), search=None, footing=footing).respond(
+        _ASK, narrow=_bounded(), history=(_stamped_episode("episode-of-an-earlier-turn"),)
+    )
+
+    draw = await footing.conversations.search_draw(footing.conversation_id)
+    assert draw is not None
+    assert draw.all_external_user_chosen is True, "the recorded half already covers it"
     assert draw.calls == 0, "and nothing was admitted, because nothing was asked"
 
 
@@ -878,22 +910,31 @@ async def test_a_covered_query_is_not_sent_when_the_trust_went_while_it_composed
 
 
 # --------------------------------------------------------------------------- #
-# §2 — a stamped episode is admitted to the supply and refused the closed loop  #
+# Arm 1b — the exit's cross-turn arm                                            #
 # --------------------------------------------------------------------------- #
 
 
-async def test_a_stamped_episode_reaches_the_composer_and_still_closes_the_loop() -> None:
-    """ADR-0238 §2's first population, which is the milestone's own cross-turn answer.
+async def test_a_stamped_episode_of_this_conversation_is_supplied_and_stays_closed_loop() -> None:
+    """§15 Arm 1b at the servicing seam, and §2's own cross-turn answer.
 
-    §2: "**What a later turn has instead is the captured episode**, stamped and retrieved
-    exactly as ADR-0221, ADR-0223 and retrieval already deliver it … **That** is what
-    resolves *find more about that* across turns, and it is the first two populations
-    doing the work rather than the third."
+    Arm 1b: "A later turn of the same conversation, whose supply carries the stamped
+    episode and no minted record of any earlier turn … **rules ``ALLOW`` on route (b)**
+    with the binding carrying both ``planned_with_external_content`` **and**
+    ``closed_loop`` true, is recorded by ``AuditTrail.record`` rather than refused, and
+    asks the user nothing." §2 is what makes it coherent: "**What a later turn has
+    instead is the captured episode** … **That** is what resolves *find more about that*
+    across turns."
 
-    So the episode is **supplied**, its content reaches the query, and the request it
-    produces is **not** closed-loop — because §5's third condition is a separate question
-    from §2's enumeration, and answering them with one predicate would delete the
-    milestone's exit sentence in the name of enforcing it.
+    The two facts §5 decides that from are **both** here: the episode is in the turn's
+    supply, and the conversation's stored flag is still true — which is §8's capture fold
+    saying that every span this conversation has carried was minted by a chosen search.
+    The current-turn half does not re-derive that, so the request is closed-loop and the
+    ruling is an ``ALLOW`` rather than the ``CONFIRM`` #2205 recorded.
+
+    Driven at this seam **and** through the engine
+    (``test_engine_search_not_serviced.py``'s two-turn arm), because the loop can put a
+    stamped episode in the tail with the conversation's flag in a state a test controls,
+    and the engine arm is what proves a real second turn reaches that state.
     """
     episode = _stamped_episode("episode-we-looked-that-up")
     footing = await _chosen_footing()
@@ -906,7 +947,7 @@ async def test_a_stamped_episode_reaches_the_composer_and_still_closes_the_loop(
     )
 
     with structlog.testing.capture_logs() as captured:
-        await _loop(
+        responded = await _loop(
             planner=FakePlanner(now=_clock, read_request=_search()),
             search=servicer,
             footing=footing,
@@ -914,8 +955,77 @@ async def test_a_stamped_episode_reaches_the_composer_and_still_closes_the_loop(
 
     assert _serviced(captured, 0)["supplied"] == 1, "§2 admits the episode to the supply"
     assert _serviced(captured, 0)["withheld"] == 0, "§3's filter withheld nothing"
+    assert _serviced(captured, 0)["disposition"] is None, "the servicing yielded (Arm 1b)"
+    (decision,) = await trail.recent()
+    assert decision.ruling.outcome is PermissionOutcome.ALLOW, "recorded, not refused"
     (binding,) = await _bindings(trail)
-    assert binding.closed_loop is False, "and §5's third condition refuses it all the same"
+    assert binding.planned_with_external_content is True, "the episode is a recorded span"
+    assert binding.closed_loop is True, "and §5's four conditions all hold across the turn"
+    assert responded.turn.plan.steps == (), "asks the user nothing: no step, so no park"
+    draw = await footing.conversations.search_draw(footing.conversation_id)
+    assert draw is not None
+    assert draw.all_external_user_chosen is True, (
+        "§8's early fold does not lower the flag for a span the conversation's own "
+        "capture fold already reported on (#2205)"
+    )
+
+
+async def test_a_retrieved_record_carrying_a_foreign_span_still_closes_the_loop() -> None:
+    """The other side of Arm 1b: §2's **second** population is vouched for by nothing.
+
+    "The ``MemoryRecord`` values the turn's retrieval and episodic supplement selected"
+    reach a turn from wherever the store had them. This conversation's stored flag says
+    what **this conversation's turns** carried and nothing about them, so the recorded
+    half cannot answer for one — and admitting them would be exactly the "cross-kind
+    request §5 exists to refuse". Driven through *retrieval* rather than the tail,
+    because that is the route this population actually arrives by.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_external_belief("belief-foreign", "something a reader ingested"))
+    footing = await _chosen_footing()
+    trail = _trail()
+    servicer = _servicer(
+        composer=FakeQueryComposer(),
+        searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))),
+        trail=trail,
+        granted=True,
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        await _loop(
+            planner=FakePlanner(now=_clock, read_request=_search()),
+            memory=memory,
+            search=servicer,
+            footing=footing,
+        ).respond(_ASK, narrow=_bounded())
+
+    assert _serviced(captured, 0)["supplied"] == 1, "§2 admits it to the supply all the same"
+    (binding,) = await _bindings(trail)
+    assert binding.closed_loop is False, "and §5's third condition refuses it"
+    assert _serviced(captured, 0)["disposition"] == SearchDisposition.RULING_CONFIRM.value
+    draw = await footing.conversations.search_draw(footing.conversation_id)
+    assert draw is not None
+    assert draw.all_external_user_chosen is False, "§8's early fold lowered it at admission"
+
+
+async def test_the_predicate_separates_the_two_populations_by_membership_alone() -> None:
+    """§5's cause-blindness, over **one** record put in each population in turn.
+
+    "It is stated over what was minted and where it went, never over the cause of a
+    stamp" (§5). So the arm is made with a single stamped episode whose provenance never
+    changes: it fails :meth:`SearchFooting.clean` while it is nobody's — an episode
+    retrieval could have brought in from any conversation — and passes once it is
+    recorded as one of **this** conversation's turns. Nothing about the record moved, and
+    a predicate reading the cause of its stamp could not tell the two apart.
+    """
+    footing = await _chosen_footing()
+    episode = _stamped_episode("episode-either-way")
+
+    assert footing.clean(episode) is False, "§2's second population is vouched for by nothing"
+
+    footing.conversation_episodes.add(episode.id)
+
+    assert footing.clean(episode) is True, "§2's first population is the recorded half's"
 
 
 # --------------------------------------------------------------------------- #
