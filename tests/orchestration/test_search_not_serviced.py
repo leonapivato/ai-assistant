@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any, Final, cast, final
 
 import pytest
 import structlog
-from test_closed_loop import _CHOSEN, _chosen_footing
+from test_closed_loop import _CHOSEN, _chosen_footing, _external_belief
 from test_loop_search import (
     _ASK,
     _NOW,
@@ -445,6 +445,23 @@ async def test_a_standing_grant_and_an_unknown_cost_still_carry_authorisation_aw
     assert responded.search_not_serviced is SearchNotServiced.AUTHORISATION_AWAITED
 
 
+async def _followed_up() -> FakeMemoryStore:
+    """A store whose retrieval puts one record of **another** external origin in view.
+
+    What makes ADR-0242 §15 Arm 2's (b) and (c) *follow-up* searches is a recorded
+    external span in the turn's supply, and ADR-0238 §5's condition is "blind to why a
+    record is external" — so a reader's, a fetch's or an ingested message's serves as
+    well as any. **It may not be a stamped episode of this conversation**: ADR-0238 §15
+    Arm 1b rules that one an ``ALLOW`` and it is this milestone's exit, so a (c) built on
+    one would assert the closed-loop condition refuses a request the corpus deliberately
+    admits (#2205). (b) and (c) take the same store, because Arm 2 says they "differ in
+    the ``trust_of`` answer alone".
+    """
+    store = FakeMemoryStore(now=_clock)
+    await store.add(_external_belief("belief-foreign", "something a reader ingested"))
+    return store
+
+
 async def test_a_follow_up_from_an_unchosen_destination_carries_trust_missing() -> None:
     """§15 Arm 2(b): grant, **no** trust record, a follow-up search.
 
@@ -455,9 +472,10 @@ async def test_a_follow_up_from_an_unchosen_destination_carries_trust_missing() 
     with structlog.testing.capture_logs() as captured:
         responded = await _loop(
             planner=FakePlanner(now=_clock, read_request=_search()),
+            memory=await _followed_up(),
             search=_servicer(granted=True),
             footing=await _admitted(),
-        ).respond(_ASK, narrow=_bounded(), history=(_stamped_episode(),))
+        ).respond(_ASK, narrow=_bounded())
 
     assert _serviced(captured)["disposition"] == SearchDisposition.RULING_CONFIRM.value
     assert responded.search_not_serviced is SearchNotServiced.TRUST_MISSING
@@ -476,9 +494,10 @@ async def test_a_follow_up_at_a_chosen_destination_carries_unavailable() -> None
     with structlog.testing.capture_logs() as captured:
         responded = await _loop(
             planner=FakePlanner(now=_clock, read_request=_search()),
+            memory=await _followed_up(),
             search=_servicer(granted=True),
             footing=await _chosen_footing(),
-        ).respond(_ASK, narrow=_bounded(), history=(_stamped_episode(),))
+        ).respond(_ASK, narrow=_bounded())
 
     assert _serviced(captured)["disposition"] == SearchDisposition.RULING_CONFIRM.value
     assert responded.search_not_serviced is SearchNotServiced.UNAVAILABLE
@@ -497,14 +516,16 @@ async def test_the_three_fixtures_differ_only_where_the_adr_says_they_do() -> No
     ).respond(_ASK, narrow=_bounded())
     unchosen = await _loop(
         planner=FakePlanner(now=_clock, read_request=_search()),
+        memory=await _followed_up(),
         search=_servicer(granted=True),
         footing=await _admitted(conversation_id="c-2"),
-    ).respond(_ASK, narrow=_bounded(), history=(_stamped_episode(),))
+    ).respond(_ASK, narrow=_bounded())
     chosen = await _loop(
         planner=FakePlanner(now=_clock, read_request=_search()),
+        memory=await _followed_up(),
         search=_servicer(granted=True),
         footing=await _chosen_footing(),
-    ).respond(_ASK, narrow=_bounded(), history=(_stamped_episode(),))
+    ).respond(_ASK, narrow=_bounded())
 
     assert (
         clean.search_not_serviced,

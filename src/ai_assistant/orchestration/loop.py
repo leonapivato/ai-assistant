@@ -1381,15 +1381,40 @@ class LearningLoop:
             # an `UNCHOSEN` destination each reach the turn through a servicing, and §2
             # excludes every one of them by name.
             footing.selected.update(record.id for record in memories)
+            # ADR-0238 §2's **first** population on its own, because §5's third
+            # condition tells it apart from the second and `_search_supply` does not:
+            # an episode of *this* conversation is a record whose externality this
+            # conversation's own stored flag has already answered (§8's capture fold),
+            # so §5's **recorded** half is what vouches for it, and the current-turn
+            # half is left for the case §5's closing paragraph reserves it for — "a turn
+            # may read a file and *then* reach the search". A `MemoryRecord` retrieval
+            # selected carries no such vouching and is not in here.
+            #
+            # **The tail is the recorded membership fact**, not a stage-shaped guess:
+            # `ConversationLifecycle.history` resolves it from the conversation index,
+            # which is the only record of which turns are this conversation's. It is
+            # read from `recent` rather than from the narrowed supply because a record
+            # ADR-0203 §1's filter removed reaches no `clean` call anyway, so the two
+            # spellings cannot differ in effect. Narrowed to episodes because §2's
+            # population is "episodes of this conversation": a record of any other kind
+            # arriving through this sequence is not a turn of it, and the flag says
+            # nothing about it.
+            footing.conversation_episodes.update(
+                record.id for record in recent if MemoryKind(record.kind) is MemoryKind.EPISODIC
+            )
             # ADR-0238 §8's **early** fold, on the turn's pre-servicing supply and
             # before the first planner call. "The moment ``orchestration`` admits to a
             # turn a recorded external span that was **not** minted by a ``WEB_SEARCH``
             # servicing at a destination of recorded trust ``USER_CHOSEN``, it calls
             # ``observe_search`` with ``False``" — and it fires **whether or not that
             # turn ever builds a ``WEB_SEARCH`` request**, which is why it is here and
-            # not at the servicing site. A stamped episode of an earlier turn is the
-            # ordinary subject: it is a recorded external span this decision did not
-            # mint, so the conversation is closed from this turn onward.
+            # not at the servicing site. Its ordinary subject is a record of some other
+            # external origin the turn's retrieval selected — a reader's, a fetch's, an
+            # ingested message's — which closes the conversation from this turn onward.
+            # A stamped episode of an **earlier turn of this conversation** is not: the
+            # span it carries is one §8's own capture fold already reported on, and the
+            # report is the stored flag, so folding on it here would lower a flag for a
+            # fact already counted and make §15 Arm 1b unreachable (#2205).
             #
             # **Over the same population the capture fold sees**, which is the supply
             # after ADR-0203 §1's narrowing rather than before it, so the two folds
