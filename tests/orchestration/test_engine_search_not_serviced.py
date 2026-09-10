@@ -21,6 +21,7 @@ from datetime import timedelta
 from itertools import count
 from typing import TYPE_CHECKING, Any, Final
 
+import structlog
 from test_engine import AT, PATIENT, SEARCH_DESTINATIONS, Harness
 from test_engine_read_envelope import _AskingPlanner, _recorder
 from test_loop_search import _DEADLINE, _binder, _CostedSearcher, _search
@@ -31,7 +32,7 @@ from ai_assistant.core.types import (
     Role,
     SearchNotServiced,
 )
-from ai_assistant.orchestration.reads import SearchServicer
+from ai_assistant.orchestration.reads import SearchDisposition, SearchServicer
 from ai_assistant.permissions.policy import ThresholdActionPolicy
 from ai_assistant.testing import (
     FakeAuditTrail,
@@ -43,6 +44,8 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from ai_assistant.orchestration.composing import ComposingStage
     from ai_assistant.testing import FakeModelProvider
 
@@ -308,6 +311,90 @@ async def test_revoking_the_trust_record_returns_the_next_follow_up_to_trust_mis
     assert {row: rulings[row] for row in before} == before, (
         "§4: a ruling recorded before the revocation is not rewritten"
     )
+
+
+async def test_the_positive_path_services_both_its_searches_and_parks_nothing() -> None:
+    """§15 Arm 1's assertion set, over the two servicings one ``converse`` performs.
+
+    "A connection reference and origin configured; a first search recorded
+    ``RULING_CONFIRM``; the recipient grant established through
+    ``establish_recipient_grant``; trust established through
+    ``establish_destination_trust`` over the same decision" — all four performed above —
+    "then … each service a search, the second composed over records rather than the
+    utterance alone. Asserts: the audit's ``servicings[].disposition`` is ``None`` on
+    both, no confirmation is parked, and ``TurnOutcome.search_not_serviced`` is ``None``
+    on both."
+
+    Every one of those assertions is made here. What carries them is the **turn's two
+    servicings** rather than two turns of the conversation, and the next case records
+    why — with an issue against the ADR rather than a silent substitution.
+    """
+    wired = _wired()
+    await _wired_through_to_trust(wired)
+
+    with structlog.testing.capture_logs() as captured:
+        outcome = await wired.engine.converse(_ASKED, timeout=PATIENT)
+
+    servicings = [row for event in _audits(captured) for row in event["servicings"]]
+    assert [row["disposition"] for row in servicings] == [None, None]
+    assert [row["supplied"] for row in servicings] == [0, 1], (
+        "§15 Arm 1: the second is composed over **records** rather than the utterance "
+        "alone, which is ADR-0238 §2's supply widening on a `USER_CHOSEN` destination"
+    )
+    assert outcome.search_not_serviced is None
+    assert outcome.step is None, "no confirmation is parked: this plan drove no step"
+    assert await wired.engine.pending_confirmations() == ()
+
+
+async def test_the_next_turn_of_a_conversation_that_searched_is_not_laundered_clean() -> None:
+    """ADR-0238 §2's own clause, which is why §15 Arm 1's *second turn* is unreachable.
+
+    **This arm records a conflict between two ratified ADRs rather than papering over
+    one** (issue #2205). ADR-0242 §15 Arm 1 asks for "two turns of one conversation each
+    service a search". ADR-0238 §2 rules the opposite in terms, and lanes B1 and B2
+    implemented it: a turn's ``minted_user_chosen`` set is per-turn "because ADR-0231 §16
+    makes a minted id resolve in no store and no later turn reach it — what a later turn
+    has instead is the captured episode, which is **not** in this set and is exactly why
+    **a conversation that searched yesterday is not laundered clean today**". That
+    episode carries a recorded external span this decision did not mint, so ADR-0238 §8's
+    early fold lowers the conversation's flag the moment it is admitted, §5's recorded
+    half is monotone, and the next request is ruled ``CONFIRM``.
+
+    **ADR-0242's own text settles which one governs.** §12: "It decides **no fact about
+    any destination** … ADR-0238 §1 binds entire", and "§15's arms over them assert the
+    *rendering* of an outcome those sections decide and never the outcome itself". So the
+    outcome asserted here is the one ADR-0238 decides, and what this lane owes over it is
+    the rendering: ``UNAVAILABLE``, the member that names no act — because the
+    destination *is* chosen, so the trust act is not the answer, and nothing established
+    now repairs the recorded half.
+    """
+    wired = _wired()
+    await _wired_through_to_trust(wired)
+    first = await wired.engine.converse(_ASKED, timeout=PATIENT)
+
+    with structlog.testing.capture_logs() as captured:
+        second = await wired.engine.converse(
+            _ASKED, timeout=PATIENT, conversation_id=first.conversation_id
+        )
+
+    assert first.search_not_serviced is None
+    assert [row["disposition"] for event in _audits(captured) for row in event["servicings"]] == [
+        SearchDisposition.RULING_CONFIRM.value
+    ]
+    assert second.search_not_serviced is SearchNotServiced.UNAVAILABLE, (
+        "§8: a `CONFIRM` on external footing at a destination the user **has** chosen "
+        "names no act, because naming one that cannot help is worse than naming none"
+    )
+    fresh = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert fresh.search_not_serviced is None, (
+        "and a fresh conversation searches exactly as the first did, which is the "
+        "property §15 Arm 1 is really about"
+    )
+
+
+def _audits(captured: Sequence[Any]) -> list[Any]:
+    """Every ``turn_read_request`` event in ``captured``, in the order it was written."""
+    return [event for event in captured if event["event"] == "turn_read_request"]
 
 
 async def test_a_turn_that_serviced_every_search_is_told_about_no_lookup_at_all() -> None:
