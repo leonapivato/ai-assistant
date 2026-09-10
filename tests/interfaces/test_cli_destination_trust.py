@@ -400,6 +400,70 @@ def test_revoking_an_unknown_id_is_answered_and_not_reported_as_a_fault(
     assert "may already have been withdrawn" in rendered
 
 
+def test_a_successful_revocation_claims_only_what_the_boolean_establishes(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """§4: "No surface derives liveness from anything but ``standing_destination_trust()``."
+
+    ADR-0238 §1 refuses a second record over a live record's **exact** destination set
+    and admits an *overlapping* one, and ``trust_of``'s rule is membership of *some one*
+    live record. So with live records over ``{A}`` and ``{A, B}``, revoking the first
+    answers ``True`` while ``trust_of({A})`` still answers ``USER_CHOSEN`` — and a
+    sentence promising that composition for those parties is back to the user's own words
+    would be false in exactly that case.
+
+    What the boolean establishes is that **one record** was withdrawn, and the rendering
+    says that and points at the one read that answers what stands.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+
+    async def _revoked(record_id: object) -> bool:
+        return True
+
+    monkeypatch.setattr(engine, "revoke_destination_trust", _revoked)
+    result = CliRunner().invoke(cli.app, ["revoke-destination-trust", "t-1"])
+    rendered = _flat(output.getvalue())
+
+    assert result.exit_code == 0
+    assert "Withdrawn." in rendered
+    assert "another record you hold may name them too" in rendered
+    assert "'assistant destination-trust' is the only honest answer" in rendered
+    assert "It does not follow that those parties are no longer chosen" in rendered
+    for forbidden in ("your own words alone", "are no longer chosen."):
+        assert forbidden not in rendered
+
+
+def test_the_grantable_listing_states_the_five_facts_before_any_id_is_typed(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """§3: "**before it collects the act**", which on a terminal is before the typing.
+
+    §1 puts the offer at the listing — "The user names a decision from a listing that
+    already renders the canonical destination set ``core`` derived" — so this is where a
+    user meets the five facts, beside the next-step line that names both acts. A
+    statement only the performing command printed would have been read after the decision
+    to perform it rather than before.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+
+    async def _grantable(*, limit: int = 20) -> tuple[object, ...]:
+        return (_ELIGIBLE,)
+
+    monkeypatch.setattr(engine, "grantable_decisions", _grantable)
+    CliRunner().invoke(cli.app, ["remember-recipients"])
+    rendered = _flat(output.getvalue())
+
+    assert "not the question of whether I may talk" in rendered
+    assert "drawn from things I hold about you" in rendered
+    assert "carries no end date" in rendered
+    assert "not repaired by this" in rendered
+    assert rendered.index("assistant trust-destinations <decision-id>") < rendered.index(
+        "carries no end date"
+    ), "the command is offered and the facts follow it on the same screen, before any typing"
+
+
 # --- §5: the next-step line names both acts, as two acts ---------------------
 
 

@@ -604,6 +604,15 @@ class FakeAssistantEngine:
         #: clock over two stores is the shape that invites a test to reason about one
         #: from the other.
         self.destination_trust_clock: Callable[[], datetime] = lambda: _AT
+        #: Mints each trust record's id. **A fresh one per act**, as the production
+        #: operations do: ADR-0238 §1 makes the store write-once, so an id derived from
+        #: the *decision* would make a second act on one decision raise the duplicate-id
+        #: refusal — and after a revocation that act is one ADR-0242 §1 admits, because
+        #: the act is indifferent to a decision's ruling and resolution. A fake refusing
+        #: it would be stricter than every conforming engine, and it would raise the
+        #: **base** class where §2 fixes the subclass for a live duplicate, making the
+        #: *already chosen* rendering unreachable in a consumer's test.
+        self._trust_ids = count(1)
         #: The recorded ``CONFIRM`` each park stands for, by handle, where a test
         #: has bound one with :meth:`hold_confirmation_decision`. ``Confirmation``
         #: carries the **reduced** ``ConfirmationEgress`` and not the binding
@@ -2405,7 +2414,7 @@ class FakeAssistantEngine:
             )
             raise UntrustableDestinationError(msg)
         record = DestinationTrustRecord(
-            id=f"trust-{named}",
+            id=f"trust-{next(self._trust_ids)}",
             destinations=binding.canonical_destination_set,
             trust=DestinationTrust.USER_CHOSEN,
             established_at=self._destination_trust_now(),
