@@ -198,10 +198,12 @@ finding to be disposed of without an issue.**
 > which the holder took the lane; a lane's first holder counts from zero. A holder
 > whose tenure ends before four owes no diagnosis.
 
-The count is per **holder** and not per branch for ADR-0138 §2's own reason,
-applied to this mechanism: a per-branch count "hands a successor a spent budget",
-and a checkpoint that fires once on a branch is silent for exactly the loops that
-have run long enough to need it. PR #2136 is the case — five holders, and a
+The count is per **holder** and not per branch for ADR-0138's own reason, applied
+to this mechanism: its §8 declines a per-branch count — "Declined in §2" — because
+"it hands a successor a spent budget, so the second holder hands off on its first
+round and the loop degenerates into a relay". A checkpoint counted per branch
+fails the same way from the other end: it fires once and is then silent for
+exactly the loops that have run long enough to need it. PR #2136 is the case — five holders, and a
 per-branch checkpoint would have obliged one diagnosis, at round 4 of 26, from the
 holder with the least to diagnose.
 
@@ -219,11 +221,16 @@ every holder (§5), and because three rounds is what #1684 took to alternate twi
 > finding about ground the change did not previously touch.
 
 The four are the classes the record already contains. #1684 is the specification
-dispute, exhibited; #2136's round 6 architecture finding, contested by one holder
-and conceded by the next, is what a specification dispute looks like when nobody
-names it; ADR-0020's own runaway cases were regressions, described in its Context
-as "consecutive commits fixing what the previous commit introduced"; and scope
-expansion is the growth `CONTRIBUTING.md`'s triage rule exists to refuse.
+dispute in its two-readings form, exhibited whole. PR #2136's round-6 architecture
+`blocker` is the other form — a finding contradicting a sentence of a ratified
+ADR, which its holder rebutted from ADR-0082 §7's text and left a standing
+instruction about in the handoff comment: *"If a later round raises it again,
+rebut — do not edit."* That is §3's grounded waiver, taken ad hoc and without a
+name, by a holder who had no obligation to classify anything. ADR-0020's own
+runaway cases were regressions, and its §2 gives the churn ratio as "the
+mechanical proxy for 'consecutive commits fixing what the previous commit
+introduced'". Scope expansion is the growth `CONTRIBUTING.md`'s triage rule exists
+to refuse.
 
 The classification is a judgement and this ADR does not pretend otherwise. What
 makes it safe is §4: nothing turns on it mechanically, and a misclassification
