@@ -1376,7 +1376,19 @@ class WebSearchEgress:
                 # caught: a process being torn down is not an interruption of this
                 # call, and the open claim is the honest state for it (ADR-0192 §3).
                 self._deliver_absorbed(entered_with)
-                raise
+                if not deadline.expired():
+                    raise
+                # **And this deadline having fired outranks the fault too.** The
+                # `Timeout` context calls `uncancel` on its way out whatever the
+                # exception was, so a collaborator that catches the expiry's
+                # cancellation and raises a store fault instead leaves no trace in the
+                # count — but `Timeout.expired()` is this seam's own state and no
+                # callable can reset it. Letting the fault out would degrade the turn
+                # under ADR-0226 §5 and leave the claim open, where §5 requires an
+                # `INDETERMINATE` completion for a call that outran its bound. This is
+                # `invoke`'s `_interruption(...) or internal_failure(...)` one seam
+                # over, in the same order and for the same reason.
+                outcome = _refused(SearchRefusal.DEADLINE_EXPIRED)
             else:
                 # **The state is read from the task and the deadline rather than
                 # inferred from what came back** (ADR-0029 §4, and `_interruption`'s
@@ -1445,21 +1457,18 @@ class WebSearchEgress:
             # here catches, wraps or annotates one.
             self._deliver_absorbed(admitting)
             return _refused(SearchRefusal.SPEND_REFUSED)
-        except asyncio.CancelledError as cancellation:
-            if pending_cancellations() > admitting:
-                # An external cancellation from anywhere below — the gate, the claim,
-                # the callable — delivered onward unchanged (ADR-0060 §1). Any claim
-                # that was open has already been completed by `consumed_call` on the
-                # way past (ADR-0192 §3).
-                raise
-            # ADR-0031 §2's invented cancellation, one frame out from `act`'s: a
-            # collaborator raised one with nothing cancelled, and ADR-0241 §7 makes
-            # that a fault rather than a teardown that ends the turn.
-            invented = (
-                f"{self._declaration.id}: a collaborator raised a cancellation with "
-                f"nothing cancelled, so the search did not complete"
-            )
-            raise ToolError(invented) from cancellation
+        # **A `CancelledError` that reaches here is delivered onward, and this frame
+        # classifies none of them.** An earlier revision branched on the count's delta
+        # and got it backwards: a caller already carrying a cancellation request when
+        # `search` was entered moves the count by nothing, so a cancellation the loop
+        # delivered during the claim — which `_claimed` has already completed the claim
+        # for and re-raised, exactly as ADR-0192 §1 requires — read as "invented" and
+        # became a fault. `consume.py`'s `_driven` states the distinction in terms: a
+        # cancellation the event loop **delivered** is external whatever the delta says.
+        # The delta answers a question about a value a collaborator **returned**, which
+        # is where `_deliver_absorbed` uses it and where it is sound; nothing here can
+        # tell a delivery from an invention, so nothing here tries (ADR-0060 §1).
+        self._deliver_absorbed(admitting)
         if outcome is None:
             # `admitted_call` returned without entering `act`. **No claim was appended,
             # so no completion row is written** — ADR-0192 §1's placement relied upon
@@ -1475,12 +1484,6 @@ class WebSearchEgress:
             # forbids reporting as one. `_UpstreamWatchingGate` captures that where it
             # is unambiguous, at the call itself; see its docstring for why the
             # `Task.cancelling()` count and not a comparison against `expires_at`.
-            #
-            # **And a cancellation the gate absorbed outranks both**, because the
-            # count moving is the one fact that says this turn was cancelled at all;
-            # `admitted_call` cannot see it, having answered ADR-0029 §4's
-            # classification for the `TimeoutError` such a gate raises.
-            self._deliver_absorbed(admitting)
             if watched.upstream is not None:
                 return _refused(SearchRefusal.TRANSPORT_FAILED)
             return _refused(SearchRefusal.DEADLINE_EXPIRED)

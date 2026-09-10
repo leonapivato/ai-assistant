@@ -2170,3 +2170,109 @@ async def test_a_fault_with_nothing_cancelled_still_leaves_unchanged() -> None:
 
     with pytest.raises(ConnectionStoreError, match="the store is down"):
         await subject.searcher.search(call, timeout=A_BOUND)
+
+
+async def test_a_fault_that_replaces_this_seams_own_expiry_is_still_an_expiry() -> None:
+    """Round 4's blocker: the deadline's own cancellation, swallowed and replaced.
+
+    ``asyncio.Timeout`` calls ``uncancel`` on its way out **whatever** the exception
+    was, so a transport that catches the expiry's ``CancelledError`` and raises a
+    store fault instead leaves no trace in the cancellation count — and the
+    external-cancellation precedence therefore sees nothing. Letting the fault out
+    would degrade the turn under ADR-0226 §5 with the claim left open, where ADR-0241
+    §5 requires a completion carrying the declaration's ``interrupted_outcome``.
+
+    ``Timeout.expired()`` is this seam's own state and no callable can reset it, which
+    is what makes the deadline half tool-proof where the cancellation half is not.
+    This is ``invoke``'s ``_interruption(...) or internal_failure(...)`` one seam over,
+    in the same order and for the same reason.
+    """
+    transport = AbsorbingTransport(60.0, raises=ConnectionStoreError("conn-0001 could not be read"))
+    subject = await built(transport=transport)
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    outcome = await subject.searcher.search(call, timeout=_EXPIRING_BOUND)
+
+    assert transport.absorbed == 1, "the arrangement really did swallow the expiry"
+    assert outcome.refusal is SearchRefusal.DEADLINE_EXPIRED, (
+        "the fault the transport substituted does not become the turn's account of "
+        "what happened: this deadline fired, and that outranks it (ADR-0241 §5, §7)"
+    )
+    completions = [
+        row.invocation
+        for row in await subject.trail.export_invocations()
+        if row.invocation.completes is not None
+    ]
+    assert [row.outcome for row in completions] == [ToolOutcome.INDETERMINATE]
+    assert completions[0].incurred_cost is not None
+    assert completions[0].incurred_cost.basis is CostBasis.UNKNOWN
+
+
+async def test_a_gate_that_absorbs_a_cancellation_and_then_admits_still_delivers_it() -> None:
+    """Round 4's blocker: absorption followed by a **successful** admission.
+
+    The shape every other absorption arm misses. A gate suspended when the caller
+    cancels, which catches the ``CancelledError`` and then admits normally, leaves
+    ``admitted_call`` free to run the callable — and both the claim and ``act`` sample
+    their own baselines *after* the absorption, so neither sees anything. The search
+    then completes and this seam returns a value for a turn the executor cancelled,
+    which is the one thing ADR-0060 §1 says a method never does.
+
+    So the precedence is checked against the **pre-admission** baseline on every exit
+    from that frame, and not only where no outcome came back. The completion the call
+    reached still stands — a search that reached its answer was not interrupted in
+    ``interrupted_outcome``'s sense however the task ends (ADR-0241 §7) — and the
+    cancellation leaves afterwards.
+    """
+    gate = AbsorbingGate(admits=FakeAuditTrail())
+    subject = await built(channels=[answering(result())], gate=gate)
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    search = asyncio.ensure_future(subject.searcher.search(call, timeout=A_BOUND))
+    await settle()
+    assert gate.admissions == 1, "the admission was reached before the cancellation"
+    search.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await search
+
+    assert gate.absorbed == 1, "the arrangement really did swallow the cancellation"
+    completions = [
+        row.invocation
+        for row in await subject.trail.export_invocations()
+        if row.invocation.completes is not None
+    ]
+    assert [row.outcome for row in completions] == [ToolOutcome.SUCCEEDED], (
+        "the row carries the outcome the call actually reached (ADR-0241 §7's Arm 3b "
+        "clause), and the cancellation is delivered rather than answered with it"
+    )
+
+
+async def test_a_cancellation_pending_before_entry_is_not_read_as_invented() -> None:
+    """Round 4's blocker: the count's delta cannot tell a delivery from an invention.
+
+    ``Task.cancelling()`` is a lifetime figure, so a caller **already carrying** a
+    cancellation request when ``search`` is entered moves it by nothing — and a frame
+    that branched on the delta would read the cancellation the loop then delivered
+    during the claim as one a collaborator invented, and convert it into a fault.
+    ``consume.py``'s ``_driven`` states the distinction in terms: "a cancellation the
+    event loop **delivered** here is external whatever the delta says".
+
+    ``_claimed`` has already completed the claim and re-raised by the time it reaches
+    this seam (ADR-0192 §1), so what is owed here is to deliver it — and this arm is
+    what fails a frame that classifies instead.
+    """
+    subject = await built(channels=[answering(result())])
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    async def cancelled_search() -> None:
+        """Request this task's own cancellation, then search under it."""
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel()
+        await subject.searcher.search(call, timeout=A_BOUND)
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.ensure_future(cancelled_search())
+
+    assert subject.transport.attempts == (), "the cancellation landed before the send"

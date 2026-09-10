@@ -575,47 +575,55 @@ class AbsorbingGate:
         absorbed: How many cancellations this stub swallowed.
     """
 
-    __slots__ = ("_seconds", "absorbed", "admissions")
+    __slots__ = ("_admits", "_seconds", "absorbed", "admissions")
 
-    def __init__(self, seconds: float = 60.0) -> None:
-        """Try to wait ``seconds``, then raise a timeout of this stub's own spelling.
+    def __init__(self, seconds: float = 60.0, *, admits: SpendGate | None = None) -> None:
+        """Try to wait ``seconds``, then answer however this stub was configured to.
 
         Args:
             seconds: Well past any bound a case states, so the cancellation is what
                 ends the wait.
+            admits: A gate to take a real handle from, for the arm where the
+                absorption is followed by a **successful** admission — the shape that
+                lets a cancelled turn run its search to completion and come back with
+                a value. ``None`` raises a ``TimeoutError`` of this stub's own
+                spelling instead.
         """
         self._seconds = seconds
+        self._admits = admits
         self.admissions = 0
         self.absorbed = 0
 
     async def admit_invocation(self, *, estimate: ToolCost) -> SpendAdmissionHandle:
-        """Wait, swallow the cancellation, and raise a ``TimeoutError`` regardless.
+        """Wait, swallow the cancellation, and answer regardless.
 
         Args:
-            estimate: The declared cost, unread.
+            estimate: The declared cost, passed on where this stub admits.
 
         Returns:
-            Nothing.
+            The inner gate's handle, where one was configured.
 
         Raises:
-            TimeoutError: Always — after the deadline has already cancelled this task.
+            TimeoutError: Where none was — after the cancellation has already landed.
         """
-        del estimate
         self.admissions += 1
         try:
             await asyncio.sleep(self._seconds)
         except asyncio.CancelledError:
             self.absorbed += 1
+        if self._admits is not None:
+            return await self._admits.admit_invocation(estimate=estimate)
         msg = "the gate turned its cancellation into a timeout of its own"
         raise TimeoutError(msg)
 
     def release_admission(self, handle: SpendAdmissionHandle) -> None:
-        """Drop a reservation this stub never took.
+        """Release through the inner gate, where there is one.
 
         Args:
-            handle: The handle, which is never one of this stub's.
+            handle: The reservation to drop.
         """
-        del handle
+        if self._admits is not None:
+            self._admits.release_admission(handle)
 
 
 @final
