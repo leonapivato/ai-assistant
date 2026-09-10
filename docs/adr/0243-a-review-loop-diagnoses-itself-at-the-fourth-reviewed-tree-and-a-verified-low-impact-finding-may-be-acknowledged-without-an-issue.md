@@ -228,8 +228,9 @@ Handing a successor the printed figure of such a round would overstate its
 baseline by one and push its diagnosis a tree late, so §6 requires the recorded
 count.
 
-Four is chosen against seven so that the checkpoint precedes the handoff under
-every holder (§5), and because three rounds is what #1684 took to alternate twice.
+Four is chosen against seven so that the checkpoint ordinarily precedes the
+handoff (§5, which says what "ordinarily" excludes), and because three rounds is
+what #1684 took to alternate twice.
 
 ### 2. What the diagnosis classifies
 
@@ -311,18 +312,36 @@ refused and ADR-0138 §8 refused again; the exposure it leaves is stated in
 
 ### 5. How the checkpoint and ADR-0138 §1 relate
 
-> **Normative.** The checkpoint precedes the handoff: under every holder, four
-> substantively reviewed trees are reached before seven rounds of any required
-> lens are, so a holder that reaches ADR-0138 §1's rounds arm has already written
-> at least one diagnosis, and a holder that hands off on the churn arm before its
-> fourth tree writes none.
+> **Normative.** The checkpoint is not a precondition of the handoff and does not
+> gate it. Where a holder's substantively reviewed tree count reaches four, its
+> diagnosis is owed before it invokes a further round, and therefore before any
+> handoff it later takes. Where that count never reaches four, no diagnosis is
+> owed and the handoff comment says so (§6); a handoff is never delayed, refused
+> or excused by a missing diagnosis.
 
-Both counts are per holder and both restart at a handoff, and ADR-0138 §2 supplies
-the arithmetic that makes the first half unconditional: the persona-agnostic tree
-count "is an upper bound on each lens's count", so a lens reaching seven under a
-holder means that holder has recorded at least seven trees, and therefore passed
-four. The relation is one of order and not of dependence: neither mechanism
-conditions on the other, and §4's second clause says so.
+**In the ordinary case the checkpoint precedes the handoff, and that is the whole
+of what four buys against seven.** Where each round reviews a new tree with every
+lens the lane runs — which is every lane in ADR-0138's own table, and what
+`CONTRIBUTING.md` requires of a both-lens lane — the tree count and each lens's
+count advance together, so four is passed before seven is reached and the cheap
+intervention is available before the expensive one.
+
+**It is not a guarantee, and this clause deliberately does not claim to be one.**
+ADR-0138 §2's "upper bound on each lens's count" is a **branch-wide** property, and
+it does not survive the subtraction: at a handoff, §1's tree figure and §4's
+per-lens figures are baselined separately, so a successor's per-lens count can
+outrun its tree count. Both lenses found the same case on round 2 — a successor
+that spends its rounds re-reviewing trees an *optional* lens had already recorded
+advances a required lens's per-holder count while the distinct-tree count stands
+still, so ADR-0138 §1's rounds arm can fire on a holder that never reached four.
+Qualifying the clause is the right fix rather than reshaping either count: making
+§1 per-lens would put the checkpoint out of step with the only figure that is
+printed (§1), and making ADR-0138 §1 persona-agnostic is not this ADR's to do.
+What the case actually needs is what §6 already provides — a handoff comment that
+says no diagnosis was owed.
+
+The relation is one of order and not of dependence: neither mechanism conditions
+on the other, and §4's second clause says so.
 
 ### 6. A handoff carries the diagnosis
 
@@ -629,9 +648,10 @@ nothing yet says what the second diagnosis contains that the first did not.
   fourth to the coordinator instead, and `.claude/skills/dispatch-agents/SKILL.md`
   §4 already says what happens when it arrives.
 - **The checkpoint costs a comment, not a spin-up.** It fires at four and the
-  handoff at seven, so the cheap intervention is always available before the
-  expensive one, and a loop that the diagnosis fixes never reaches ADR-0138 §1 at
-  all.
+  handoff at seven, so on any loop that spends its rounds on new trees the cheap
+  intervention comes first, and a loop the diagnosis fixes never reaches ADR-0138
+  §1 at all. §5 says where that ordering is not guaranteed and why the clause does
+  not pretend otherwise.
 - **A true `nit` can leave the loop without becoming tracker debt.** The verdict
   says something the previous four could not, and requiring the consequence in
   writing means the record is more informative than the issue it replaces would

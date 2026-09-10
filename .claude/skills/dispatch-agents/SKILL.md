@@ -120,7 +120,8 @@ An under-specified brief is the largest source of rework. Each one carries:
   refusal on an ADR the PR still leaves standing `Proposed` (issue #1044).
 - **The diagnosis checkpoint, and that its adjudication exit comes to you.**
   ADR-0243 §§1–6: at the **fourth** substantively reviewed tree under a holder —
-  well before ADR-0138 §1's seventh round — the lane writes a comment classifying
+  ordinarily well before ADR-0138 §1's seventh round, though §5 does not guarantee
+  the ordering — the lane writes a comment classifying
   each open and recently-fixed finding (new independent defect, regression from an
   earlier fix in this loop, specification dispute, scope expansion) and names one
   next activity. Where anything is a **specification dispute**, another round is
