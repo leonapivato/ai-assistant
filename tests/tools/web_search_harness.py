@@ -69,7 +69,7 @@ if TYPE_CHECKING:
 
     from egress_transport_harness import Keyring
 
-    from ai_assistant.core.protocols import ByteChannel, SpendGate
+    from ai_assistant.core.protocols import ByteChannel, OutboundTransport, SpendGate
     from ai_assistant.core.types import (
         BoundEgressCall,
         FrozenJson,
@@ -945,6 +945,7 @@ async def built(  # noqa: PLR0913 — one knob per double a case arranges, and e
     | StallingTransport
     | RaisingTransport
     | AbsorbingTransport
+    | OutboundTransport
     | None = None,
     records: Records | ReprovisioningRecords | None = None,
     secrets: SuspendableKeyring | None = None,
@@ -965,7 +966,10 @@ async def built(  # noqa: PLR0913 — one knob per double a case arranges, and e
         channels: The far ends to serve, in order. Ignored where ``transport`` is
             supplied.
         transport: A transport of the case's own, for the two states the canonical
-            fake has no arrangement for — a held open and an interrupted one.
+            fake has no arrangement for — a held open and an interrupted one — and
+            for the arm that drives the **production** ``StreamOutboundTransport``
+            against a real origin, which is the one component ADR-0241 §12's
+            preamble does not name and which #2207 found substituted.
         records: The connection store's scripted answers; defaults to one active
             record that never moves.
         secrets: A keyring of the case's own, for the arms that hold a credential read
@@ -1002,14 +1006,14 @@ async def built(  # noqa: PLR0913 — one knob per double a case arranges, and e
         served = FakeOutboundTransport().serve(*channels)
         if refusal is not None:
             served.refuse_with(refusal)
-        capability = served  # type: ignore[assignment]  # the union is the arrangement's
+        capability = served
     store = Records(entry()) if records is None else records
     integration = build_web_search_integration(
         connection=REFERENCE,
         origin=origin,
         records=store,
         secrets=ring,
-        transport=capability,  # type: ignore[arg-type]  # each double satisfies the Protocol
+        transport=capability,
         ledger=recorder,
         gate=recorder if gate is None else gate,
         max_results=max_results,

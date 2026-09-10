@@ -1514,6 +1514,14 @@ async def test_a_search_that_never_answers_is_terminated_within_its_bound() -> N
     **The ledger is prompt here on purpose** (§12): §1's third clause says the bound
     does not reach either append, so an arm that stalled the store instead would be
     asserting a guarantee this ADR does not make. Arm 10 below asserts that negative.
+
+    **The transport is a double here, and that is not the whole arm** (#2207). A
+    double is the only thing that can put the stall at a plain cancellable await,
+    which is what makes this case about the searcher's own bound rather than about
+    the standard library's connect. It is also how this case passed while the
+    production seam held a real stalled origin for sixty seconds:
+    ``test_stalled_origin`` is the same arm over the production
+    ``StreamOutboundTransport`` and a real origin, and the two are read together.
     """
     transport = StallingTransport()
     subject = await built(transport=transport)
