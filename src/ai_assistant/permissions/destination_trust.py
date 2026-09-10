@@ -58,7 +58,10 @@ from typing import TYPE_CHECKING, Any, Final
 
 from pydantic import ValidationError
 
-from ai_assistant.core.errors import InvalidDestinationTrustError
+from ai_assistant.core.errors import (
+    DuplicateDestinationTrustError,
+    InvalidDestinationTrustError,
+)
 from ai_assistant.core.types import (
     DestinationTrust,
     DestinationTrustRecord,
@@ -519,9 +522,12 @@ class SqliteDestinationTrustStore:
         refusal and the append.
 
         Raises:
+            DuplicateDestinationTrustError: If it duplicates a **live** record's
+                destination set — the one ground ADR-0242 §2 discriminates, because
+                there the user's recourse is no act at all.
             InvalidDestinationTrustError: If the record does not satisfy its own
-                model, if its id is already recorded, if it duplicates a live record's
-                destination set, or if the database refuses the write. Pydantic's
+                model, if its id is already recorded, or if the database refuses the
+                write. Pydantic's
                 ``ValidationError`` is deliberately not allowed to escape:
                 ``CONTRIBUTING`` has this layer raise only from the ``AssistantError``
                 hierarchy.
@@ -562,8 +568,16 @@ class SqliteDestinationTrustStore:
         the record the user was shown would leave the other standing with the
         destination still reading ``USER_CHOSEN``.
 
+        **The refusal is a** :class:`~ai_assistant.core.errors.DuplicateDestinationTrustError`
+        **and the other two grounds keep the base class** (ADR-0242 §2, which supersedes
+        ADR-0238 §1's refusal clause in the type alone). This is the one ground on which
+        the user's recourse is *no act at all* — what they asked for is already true —
+        and a surface reads that from the type rather than by parsing a message or
+        reading the store back. The base class still catches every ground, so a caller
+        wanting one handler keeps one ``except InvalidDestinationTrustError``.
+
         Raises:
-            InvalidDestinationTrustError: If a live record names the same set.
+            DuplicateDestinationTrustError: If a live record names the same set.
         """
         for held in self._decoded(conn.execute(_LIVE).fetchall()):
             if held.destinations == record.destinations:
@@ -572,7 +586,7 @@ class SqliteDestinationTrustStore:
                     f"record {held.id!r} already names; revoking one would leave the other "
                     f"standing and the user would have revoked nothing (ADR-0238 §1)"
                 )
-                raise InvalidDestinationTrustError(msg)
+                raise DuplicateDestinationTrustError(msg)
 
     async def revoke(self, record_id: str, revoked_at: datetime) -> None:
         """Withdraw ``record_id``, prospectively and idempotently (ADR-0238 §1).

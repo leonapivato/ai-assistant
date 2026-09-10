@@ -72,6 +72,7 @@ from ai_assistant.orchestration import (
     ConnectionOperations,
     ConsolidationStage,
     ConversationLifecycle,
+    DestinationTrustOperations,
     Engine,
     GrantOperations,
     HeldSource,
@@ -1992,6 +1993,33 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 store=recipient_grants,
                 trail=trail,
                 policy=policy,
+                id_factory=_uuid,
+                clock=_utcnow,
+            ),
+            # The three destination-trust operations (ADR-0242 §2, §4), over the one
+            # store this root constructs.
+            #
+            # **The store's face reaches the engine and nothing else** (ADR-0242 §13,
+            # ADR-0238 §14). It is handed here and to `SearchFooting` above, and to no
+            # other subsystem: no `interfaces` module imports it, and `uv run
+            # lint-imports` is what keeps that true rather than this comment. A surface
+            # is given records by the three operations and reads no store, which is
+            # golden rule 3 — a renderer handed this face would hold `record`, `revoke`
+            # and `export`, and a remote client could not perform the read at all.
+            #
+            # **No policy and no trail write** (ADR-0242 §11). The act records no
+            # `PermissionDecision`, seeks no ruling and emits no audit event: it sends
+            # nothing, so there is no egress to rule on. The trail is passed **read-only
+            # in use** — the decision the act rides is read from it — and the record
+            # itself is the audit.
+            #
+            # **A separate clock from the recipient-grant operations' is not needed
+            # here and a separate object is**: both read `_utcnow`, and what ADR-0242 §4
+            # keeps apart is the two *stores*, so that no operation answers one
+            # vocabulary's question with the other's records.
+            destination_trust_operations=DestinationTrustOperations(
+                store=destination_trust,
+                trail=trail,
                 id_factory=_uuid,
                 clock=_utcnow,
             ),

@@ -602,8 +602,21 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     consumer lane with its own ratified decision, so ADR-0177 §1's thirty-one is
     unmoved once more, and ``resume``'s new argument is admitted by §1's fourth clause
     rather than by a change to the enumeration.
+
+    ADR-0242 §2's **three** take it to fifty-seven: the act that records destination
+    trust, the standing listing over it, and the revocation. **Three and not five**,
+    and §2 argues both absences: there is no ``trustable_decisions`` read because §1's
+    availability set is three conditions wide and ``grantable_decisions``' own rows
+    already satisfy every one of them a user is looking at, and there is no history
+    read beside the standing one because a trust record has no ceiling and no expiry —
+    so a record that is not live has been revoked and needs no act, where an *expired*
+    recipient grant occupies a slot and appears in no standing listing.
+
+    None of the three is a browser operation either: ADR-0242 §5 leaves the browser to
+    a later consumer lane with its own ratified decision and does not widen ADR-0177
+    §1's enumeration, so thirty-one is unmoved a third time.
     """
-    assert len(_method_names()) == 54
+    assert len(_method_names()) == 57
 
 
 def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> None:
@@ -1006,7 +1019,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (54, 33), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (57, 34), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

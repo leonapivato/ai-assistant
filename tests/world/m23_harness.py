@@ -110,6 +110,7 @@ from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.orchestration.connections import ConnectionOperations
 from ai_assistant.orchestration.consolidation import ConsolidationStage
 from ai_assistant.orchestration.conversations import ConversationLifecycle
+from ai_assistant.orchestration.destination_trust import DestinationTrustOperations
 from ai_assistant.orchestration.executor import StepExecutor
 from ai_assistant.orchestration.grants import GrantOperations
 from ai_assistant.orchestration.ingestion import IngestionStage
@@ -128,6 +129,7 @@ from ai_assistant.testing import (
     FakeContextProvider,
     FakeConversationStore,
     FakeDeferralStore,
+    FakeDestinationTrustStore,
     FakeFeedbackProcessor,
     FakeModelProvider,
     FakeObserver,
@@ -680,6 +682,13 @@ def build_world(
             trail=trail,
             policy=gate,
             id_factory=lambda: "recipient-grant-1",
+            clock=lambda: NOW,
+        ),
+        # The three destination-trust operations, over this harness's own trail.
+        destination_trust_operations=DestinationTrustOperations(
+            store=FakeDestinationTrustStore(),
+            trail=trail,
+            id_factory=lambda: "destination-trust-1",
             clock=lambda: NOW,
         ),
         connection_operations=ConnectionOperations(provisioner=FakeConnectionProvisioner()),

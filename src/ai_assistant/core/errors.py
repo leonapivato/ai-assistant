@@ -1482,6 +1482,74 @@ class InvalidDestinationTrustError(AssistantError):
     """
 
 
+class DuplicateDestinationTrustError(InvalidDestinationTrustError):
+    """A record duplicates a **live** record's destination set (ADR-0242 §2).
+
+    ADR-0242 §2 partially supersedes ADR-0238 §1's ``record`` refusal clause **in
+    the type of the refusal alone**: the third of that clause's three grounds gets
+    a subclass, because it is the one ground on which the user's recourse is *no
+    act at all*. The other two — a duplicate ``id`` and an empty destination set —
+    keep raising the base :class:`InvalidDestinationTrustError` unchanged, and so
+    does every read or write the store could not perform.
+
+    **The base class keeps every ground**, so a caller wanting one handler still
+    writes one ``except InvalidDestinationTrustError``. What the subclass buys is
+    the discrimination a surface needs and may not infer: ADR-0242 §2 has the
+    outcome of the act read "from the **type** of the refusal and from nothing
+    else" — no message parsed, no text matched, no
+    :meth:`~ai_assistant.core.protocols.AssistantEngine.standing_destination_trust`
+    read taken afterwards to work out which ground it was, and no count the caller
+    took itself.
+
+    **The argument is** :class:`DuplicateRecipientGrantError`'s **verbatim, one
+    store over** (ADR-0235 §4): "a user whose subject already stands needs **no**
+    act at all, because what they asked for is already true", and reading the store
+    back and constructing a different record "is what would give them a second
+    authorisation they think is one".
+
+    **Not the duplicate-id refusal**, which is a different fact about a different
+    field and keeps the base class: an id already recorded is a caller reusing an
+    identifier, not a user asking for something that already stands.
+    """
+
+
+class UntrustableDestinationError(AssistantError):
+    """The trust act may not ride this decision (ADR-0242 §1).
+
+    One class over every refusal of
+    :meth:`~ai_assistant.core.protocols.AssistantEngine.establish_destination_trust`,
+    and **the operation writes nothing to any store on any of them**. ADR-0242 §1
+    fixes exactly three availability conditions: the trail holds a decision with
+    that id; that decision's ``egress_binding`` is an
+    :class:`~ai_assistant.core.types.EgressBinding` — never ``None``, never an
+    :class:`~ai_assistant.core.types.OriginUnrecordedBinding`, never a
+    :class:`~ai_assistant.core.types.CoverageUnrecordedBinding`; and that binding's
+    ``planned_with_external_content`` is ``False``.
+
+    The message names which condition failed, **no lane branches on the message**,
+    and where more than one fails the first in that order is the one named, so the
+    refusal is deterministic across implementations.
+
+    **A new class and not** :class:`UngrantableActError` **reused** (ADR-0242 §1).
+    That class's ratified meaning is ADR-0235 §3's ordered seven, and a caller
+    catching it means *the recipient-grant act was unavailable*. The two acts have
+    different recourses, and ADR-0235 §7's two-vocabulary rule refuses one noun over
+    two records that cannot substitute for each other: "One noun over two records
+    that cannot substitute for each other is how a user comes to believe that
+    revoking one revoked the other."
+
+    **An** :class:`AssistantError` **and not a bare** ``ValueError``, for
+    :class:`UngrantableActError`'s own stated reason: a ``ValueError`` escapes a
+    command's ``except (AssistantError, TransportError)`` boundary as an uncaught
+    traceback with no controlled exit code, which ADR-0042 §7 forbids.
+
+    **It mints no validation rule of its own.** ``AssistantEngine``'s second
+    obligation already puts ``Identifier`` validation on every identifier argument
+    before any I/O, so a blank id is that rule's ``ValueError`` and never this class
+    (ADR-0242 §2).
+    """
+
+
 class UngrantableActError(AssistantError):
     """The establishing act was refused before any answer was recorded (ADR-0235 §3).
 

@@ -1245,7 +1245,72 @@ from ai_assistant.wire.errors import (
 #: **This move covers the shape going forward and repairs nothing already released**,
 #: on the chain every entry above it is on: #1956's window stays open, and this entry
 #: neither repairs it nor inherits it.
-PROTOCOL_VERSION: Final[int] = 33
+#:
+#: **34 since ADR-0242 §11**, and this bump carries **two independent ADR-0124 §9
+#: grounds**, either of which obliges it alone. §11 states both so that neither is
+#: read as unversioned.
+#:
+#: **The promoted method set gains three.** ADR-0242 §2 adds
+#: ``establish_destination_trust``, ``standing_destination_trust`` and
+#: ``revoke_destination_trust`` to :class:`~ai_assistant.core.protocols.AssistantEngine`
+#: — ADR-0124 §9's **first** limb, "any change to the promoted surface's method set".
+#: ``wire.surface``'s ``METHODS`` is derived from the Protocol by reflection, so a
+#: version 34 client sending one of the three to a version 33 hub reaches a method that
+#: build's engine surface does not declare and ``_dispatch`` closes the connection with
+#: no reply; the bump is what turns that into §3's message naming both versions. **The
+#: method set moves from fifty-four to fifty-seven.**
+#:
+#: **And a wire-carried ``core`` type gains a member.** ADR-0242 §9 adds
+#: ``search_not_serviced`` to :class:`~ai_assistant.core.types.TurnOutcome`, which
+#: crosses on **every** turn call's result payload — the **second** limb, and the entry
+#: at 17 decides it unchanged: ``TurnOutcome`` sets ``extra="forbid"``,
+#: ``wire.surface.return_adapter`` validates every result against the method's declared
+#: return annotation, and ``wire.codec``'s ``project`` renders a model by
+#: ``model_dump()``, which **includes** a ``None`` member rather than omitting it. So a
+#: version 34 hub emits ``"search_not_serviced": null`` on every ``converse``,
+#: ``converse_streaming`` and ``resume``, and a version 33 client fails
+#: ``extra_forbidden`` on it. The field is additive with a default, so the reverse
+#: direction decodes to the default rather than failing ``missing``, and one direction
+#: biting is all §9 asks for.
+#:
+#: **The number was read rather than assumed, and ADR-0242 §11 fixes none.** That
+#: section says so in terms — "This ADR fixes no number … the lane reads the constant
+#: *at the moment it lands* and moves it by one" — because ADR-0238's lane was
+#: scheduled to move it ahead of this one and a numeral written into a ratified ADR that
+#: the tree has moved past is the failure ADR-0226 §4's own successors had to correct.
+#: The constant read 33 when this lane landed, so it reads 34 here, and
+#: ``tests/core/test_engine_surface_closure.py`` pins the pair beside it.
+#:
+#: **ADR-0177 §1's browser enumeration does not move and stands at thirty-one**
+#: (ADR-0242 §5, §11). The browser is not reached by that decision: no gateway route,
+#: argument or call is added, ``RoutableOperation`` gains no member, and a browser
+#: surface for the act is a later consumer lane with its own ratified decision. A
+#: browser client at version 34 therefore receives a ``TurnOutcome`` field it renders
+#: nothing for, which ADR-0242 §9 admits by name for that one surface.
+#:
+#: **No row is minted in ADR-0087 §2c's scalar table**: ``project`` already renders
+#: every ``Enum`` as its ``value``, exactly as it renders the ``SearchRefusal`` and
+#: ``ReadKind`` members that cross today, and a
+#: :class:`~ai_assistant.core.types.DestinationTrustRecord` is a ``BaseModel`` rendered
+#: by ``model_dump()`` like every other nested model — its ``CanonicalDestination``
+#: members already cross inside every ``PermissionDecision``. **Nothing else under**
+#: ``wire/`` **changes** (ADR-0242 §11): the connect exchange gains no member, no
+#: existing frame's encoding changes, no :class:`FrameKind` is added, no codec entry is
+#: registered, and ``METHODS``, ``STREAMING_METHODS``, both adapters and the error
+#: mapping are derived from the Protocol. ``wire/errors.py`` derives an error code from
+#: the class name, so ``UntrustableDestinationError`` and
+#: ``DuplicateDestinationTrustError`` need no registration.
+#:
+#: **No stored-record version moves** (ADR-0242 §11): the decision adds no record
+#: shape, so ``ConversationExport.schema_version`` stays at **2**, ``Conversation``,
+#: ``ConversationTurn``, ``PermissionDecision``, ``RecipientGrant`` and
+#: ``DestinationTrustRecord`` are untouched, and the durable format of the trust store
+#: is ADR-0238's and is not moved here.
+#:
+#: **This move covers the shape going forward and repairs nothing already released**,
+#: on the chain every entry above it is on: #1956's window stays open, and this entry
+#: neither repairs it nor inherits it.
+PROTOCOL_VERSION: Final[int] = 34
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a
