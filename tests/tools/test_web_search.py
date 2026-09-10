@@ -46,8 +46,10 @@ from web_search_harness import (
     ORIGIN,
     QUERY,
     REPORTED_AT,
+    AbsorbingTransport,
     GatedTransport,
     InterruptingTransport,
+    RaisingGate,
     RaisingTransport,
     RefusingGate,
     ReprovisioningRecords,
@@ -89,6 +91,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.recovery import RecoveryScan
 from ai_assistant.testing import FakeAuditTrail, FakePlanStore
+from ai_assistant.testing.cancellation import settle
 from ai_assistant.tools import web_search
 from ai_assistant.tools.egress import TransportPinError
 from ai_assistant.tools.web_search import (
@@ -1882,3 +1885,131 @@ async def test_the_searcher_holds_no_deadline_of_its_own() -> None:
     assert not hasattr(web_search, "WEB_SEARCH_TIMEOUT")
     assert "WEB_SEARCH_TIMEOUT" not in web_search.__all__
     assert "timeout" not in inspect.signature(WebSearchEgress.__init__).parameters
+
+
+# --------------------------------------------------------------------------- #
+# what a searcher that trusts its return value gets wrong (round 1's blockers)  #
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_transport_that_absorbs_the_deadline_does_not_report_success() -> None:
+    """ADR-0241 §5 and §7 against a callable that swallows its own interruption.
+
+    Nothing forces a transport to let a cancellation through. One that catches the
+    deadline's and answers anyway leaves this frame holding a perfectly good outcome
+    and no exception — so a seam that read its classification off the return value
+    would record ``SUCCEEDED`` for a call that outran its bound, which is the
+    completion row §5 exists to stop being false.
+
+    The deadline half is **tool-proof**: ``Timeout.expired()`` is this seam's own
+    state and no callable can reset it, which is why the answer is read from the
+    deadline and the task rather than inferred from what came back (ADR-0029 §4's own
+    note, one seam over).
+    """
+    transport = AbsorbingTransport(60.0, answering(result()))
+    subject = await built(transport=transport)
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    outcome = await subject.searcher.search(call, timeout=_EXPIRING_BOUND)
+
+    assert transport.absorbed == 1, "the arrangement really did swallow the cancellation"
+    assert outcome.refusal is SearchRefusal.DEADLINE_EXPIRED
+    assert outcome.records == (), "and the answer it produced anyway is not carried"
+    completions = [
+        row.invocation
+        for row in await subject.trail.export_invocations()
+        if row.invocation.completes is not None
+    ]
+    assert [row.outcome for row in completions] == [ToolOutcome.INDETERMINATE], (
+        "the row says what ADR-0029 §4 computes for an expiry and never `SUCCEEDED`"
+    )
+
+
+async def test_a_transport_that_absorbs_an_outside_cancellation_still_delivers_it() -> None:
+    """ADR-0060 §1 through the same gap: a cancellation is never answered with a result.
+
+    The other half of the clause above, and the one ADR-0029 §4 keeps on the executor:
+    swallowing an external cancellation to answer with a value would break structured
+    concurrency and shutdown. The count is the discriminator — the callable absorbed
+    the exception but cannot lower ``Task.cancelling()`` — so the cancellation is
+    raised afresh here, and `consumed_call` completes the claim with
+    ``interrupted_outcome`` on the way past (ADR-0192 §3).
+    """
+    transport = AbsorbingTransport(60.0, answering(result()))
+    subject = await built(transport=transport)
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    search = asyncio.ensure_future(subject.searcher.search(call, timeout=A_BOUND))
+    # Cancelled once the open has demonstrably been reached, not merely once the task
+    # has been scheduled: a cancellation delivered before the transport is entered
+    # exercises none of the code that would absorb one. `settle` yields in turns
+    # rather than for a duration, so nothing here trades determinism for wall-clock.
+    await settle()
+    assert transport.attempts, "the open was reached before the cancellation"
+    search.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await search
+
+    assert transport.absorbed == 1, "the arrangement really did swallow the cancellation"
+    completions = [
+        row.invocation
+        for row in await subject.trail.export_invocations()
+        if row.invocation.completes is not None
+    ]
+    assert [row.outcome for row in completions] == [ToolOutcome.INDETERMINATE]
+
+
+async def test_an_upstream_timeout_from_the_gate_is_not_reported_as_an_expiry() -> None:
+    """ADR-0241 §7's provenance rule at the **admission**, not just at the call.
+
+    ``admitted_call`` answers ``expiry_failure`` for every ``TimeoutError`` out of
+    ``gate.admit_invocation`` — correctly, because at that frame the deadline is the
+    only thing that could have raised one. But the gate is a collaborator, and a gate
+    that raises Python's own ``TimeoutError`` of its own accord reaches the same
+    branch under a bound nothing has come near. Only the frame that **set** the
+    deadline can tell the two apart, and §7 requires it to: "a ``TimeoutError`` an
+    upstream library raises for its own reasons is not this seam's expiry".
+
+    So this asserts the negative that matters — not ``DEADLINE_EXPIRED`` — and that
+    the class it keeps is the one the tree already gave it (§4).
+    """
+    gate = RaisingGate(TimeoutError("the gate gave up on its own account"))
+    subject = await built(channels=[answering(result())], gate=gate)
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    outcome = await subject.searcher.search(call, timeout=A_BOUND)
+
+    assert gate.admissions == 1, "the gate was consulted and raised"
+    assert outcome.refusal is not SearchRefusal.DEADLINE_EXPIRED, (
+        "no deadline fired: the bound is thirty seconds and the gate raised at once"
+    )
+    assert outcome.refusal is SearchRefusal.TRANSPORT_FAILED
+    assert await subject.trail.export_invocations() == [], "and no claim was appended"
+
+
+async def test_a_bound_the_revalidation_exhausts_reaches_no_gate_and_no_channel() -> None:
+    """ADR-0241 §1: the bound covers **the revalidation**, and the window starts there.
+
+    §1 lists the stages the bound reaches and the revalidation is the first of them —
+    so a clock started after the checks would hand the admission and the callable a
+    *fresh* budget, which is ADR-0194 §3's own named failure one stage along ("an
+    implementation handing the admission its own fresh window and the callable another
+    … returns successfully at nearly twice the deadline the caller set").
+
+    A bound of one microsecond is exhausted by the pydantic round-trip
+    ``revalidated_call`` performs, so what this asserts is structural rather than a
+    race: the window was already closed when the checks finished, and **nothing after
+    them ran**. It is §5's before-the-claim exit, so no row is written either.
+    """
+    gate = RefusingGate()
+    subject = await built(channels=[answering(result())], gate=gate)
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    outcome = await subject.searcher.search(call, timeout=timedelta(microseconds=1))
+
+    assert outcome.refusal is SearchRefusal.DEADLINE_EXPIRED
+    assert gate.admissions == 0, "the gate was never consulted"
+    assert subject.keyring.reads == [], "no credential was read"
+    assert subject.transport.attempts == (), "no channel was opened"
+    assert await subject.trail.export_invocations() == [], "and no claim was appended"

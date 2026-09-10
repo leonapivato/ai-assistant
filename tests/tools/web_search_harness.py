@@ -379,6 +379,66 @@ class StallingTransport:
 
 
 @final
+class AbsorbingTransport:
+    """An ``OutboundTransport`` that swallows a cancellation and answers anyway.
+
+    **Nothing forces a callable to let an interruption through**, and this is the
+    shape that fails a seam which trusts what came back: the open is cancelled — by
+    the seam's own deadline, or from outside — and it catches the ``CancelledError``,
+    finishes, and hands back a perfectly good channel. A searcher reading its outcome
+    off the return value alone then records ``SUCCEEDED`` for a call that outran its
+    bound, or answers a cancelled turn with a result.
+
+    ADR-0029 §4 names the family and its own seam reads the state "from the task and
+    the timeout rather than inferred from what came back"; ADR-0241 §7's "the deadline
+    stops the waiting, not the work" is the same rule at this one. Round 1's blocker
+    on both lenses was exactly this gap, and this is the double that closes it.
+
+    Attributes:
+        attempts: Every endpoint an open was sought for, in order.
+        absorbed: How many cancellations this stub swallowed.
+    """
+
+    __slots__ = ("_channels", "_seconds", "absorbed", "attempts")
+
+    def __init__(self, seconds: float, *channels: FakeByteChannel) -> None:
+        """Try to wait ``seconds``, absorb any cancellation, then serve ``channels``.
+
+        Args:
+            seconds: How long the open would take if nothing interrupted it. Set well
+                past the bound a case states, so the cancellation is what ends the
+                wait.
+            channels: What each open hands back once it stops waiting.
+        """
+        self._seconds = seconds
+        self._channels = list(channels)
+        self.attempts: list[TransportEndpoint] = []
+        self.absorbed = 0
+
+    async def open_channel(self, endpoint: TransportEndpoint) -> ByteChannel:
+        """Wait, swallow whatever interrupts the wait, and answer regardless.
+
+        Args:
+            endpoint: Where the caller asked to connect.
+
+        Returns:
+            The next channel — which is the point: the call *looks* successful.
+
+        Raises:
+            TransportError: If the script is exhausted.
+        """
+        self.attempts.append(endpoint)
+        try:
+            await asyncio.sleep(self._seconds)
+        except asyncio.CancelledError:
+            self.absorbed += 1
+        if not self._channels:
+            msg = "this transport has no further channel to serve"
+            raise TransportError(msg)
+        return self._channels.pop(0)
+
+
+@final
 class RaisingTransport:
     """An ``OutboundTransport`` whose open raises whatever a case handed it.
 
@@ -420,6 +480,69 @@ class RaisingTransport:
         """
         self.attempts.append(endpoint)
         raise self._error
+
+
+@final
+class RaisingGate:
+    """A ``SpendGate`` whose admission raises whatever a case handed it.
+
+    ADR-0241 §7 forbids reporting a ``TimeoutError`` an upstream library raised for
+    its own reasons as this seam's expiry, and ``admitted_call`` answers
+    ``expiry_failure`` for **every** ``TimeoutError`` out of ``gate.admit_invocation``
+    — so the searcher, which owns the window, is the only party that can tell the two
+    apart. This is the double that makes that distinguishable: a gate that raises at
+    once, under a bound nothing has come near.
+
+    Attributes:
+        admissions: How many times an admission was sought.
+    """
+
+    __slots__ = ("_error", "admissions")
+
+    def __init__(self, error: BaseException) -> None:
+        """Raise ``error`` from every admission.
+
+        Args:
+            error: What the gate raises instead of admitting.
+        """
+        self._error = error
+        self.admissions = 0
+
+    async def admit_invocation(self, *, estimate: ToolCost) -> SpendAdmissionHandle:
+        """Record the attempt and raise.
+
+        Args:
+            estimate: The declared cost, unread.
+
+        Returns:
+            Nothing.
+
+        Raises:
+            BaseException: Whatever this stub was built with.
+        """
+        del estimate
+        self.admissions += 1
+        raise self._error
+
+    def release_admission(self, handle: SpendAdmissionHandle) -> None:
+        """Drop a reservation this stub never took.
+
+        Args:
+            handle: The handle, which is never one of this stub's.
+        """
+        del handle
+
+    async def totals(self, *, at: datetime) -> tuple[SpendTotal, ...]:
+        """The projection this stub does not keep.
+
+        Args:
+            at: The instant to project at.
+
+        Returns:
+            Nothing.
+        """
+        del at
+        return ()
 
 
 @final
@@ -681,6 +804,7 @@ class Built:
         | InterruptingTransport
         | StallingTransport
         | RaisingTransport
+        | AbsorbingTransport
     )
     keyring: Keyring | SuspendableKeyring
     records: Records | ReprovisioningRecords
@@ -727,6 +851,7 @@ async def built(  # noqa: PLR0913 — one knob per double a case arranges, and e
     | InterruptingTransport
     | StallingTransport
     | RaisingTransport
+    | AbsorbingTransport
     | None = None,
     records: Records | ReprovisioningRecords | None = None,
     secrets: SuspendableKeyring | None = None,
