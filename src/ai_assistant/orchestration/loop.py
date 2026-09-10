@@ -1401,13 +1401,16 @@ class LearningLoop:
             footing.conversation_episodes.update(
                 record.id for record in recent if MemoryKind(record.kind) is MemoryKind.EPISODIC
             )
-            # And then the rest of the supply, which the tail cannot answer for: ADR-0158
-            # §3's episodic supplement selects episodes on relevance, including this
-            # conversation's own — the ones that have fallen out of ADR-0074 §9's replay
-            # window are exactly what a long conversation reaches back for. Deciding
-            # those by the stage they arrived through would refuse a conversation its own
-            # past and leave §15 Arm 1b unreachable for it.
-            await footing.resolve_episodes(memories)
+            # The rest of the supply the tail cannot answer for — ADR-0158 §3's episodic
+            # supplement selects episodes on relevance, including this conversation's
+            # own, and the ones that have fallen out of ADR-0074 §9's replay window are
+            # exactly what a long conversation reaches back for — is placed **inside**
+            # the fold below rather than before it. §8 bounds its window at "one store
+            # write, with none of A's composition, transport or capture inside it", so an
+            # index lookup awaited between the admission and the fold would widen it; the
+            # fold interleaves the two so that no await ever separates a disqualifying
+            # fact from the write recording it.
+            #
             # ADR-0238 §8's **early** fold, on the turn's pre-servicing supply and
             # before the first planner call. "The moment ``orchestration`` admits to a
             # turn a recorded external span that was **not** minted by a ``WEB_SEARCH``

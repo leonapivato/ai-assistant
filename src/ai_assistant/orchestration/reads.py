@@ -1235,7 +1235,7 @@ class SearchFooting:
     :meth:`~ai_assistant.core.protocols.DestinationTrustStore.trust_of`, and
     ``ConversationStore``'s :meth:`admit_search`, :meth:`search_draw` and
     :meth:`observe_search`. The one further read it takes decides no part of the budget
-    and adds no member to any Protocol: :meth:`resolve_episodes` asks ADR-0074 §9's
+    and adds no member to any Protocol: :meth:`_place` asks ADR-0074 §9's
     ``turn_of_episode`` which conversation an episode belongs to, which is §2's
     population question and not §8's. It reads no ``Settings`` — §8 puts the bound in
     the caller's hands and this object *is* where the caller's judgement about it is
@@ -1282,8 +1282,8 @@ class SearchFooting:
     minted_user_chosen: set[str] = field(default_factory=set)
     #: The ids of ADR-0238 §2's **first** population alone: "episodes of this
     #: conversation that ``orchestration`` selected into the turn's supply". The loop
-    #: seeds it with the conversation tail and :meth:`resolve_episodes` adds every other
-    #: episode in the supply the index says is this conversation's.
+    #: seeds it with the conversation tail and :meth:`admitted` adds every other episode
+    #: in the supply the index says is this conversation's, through :meth:`_place`.
     #:
     #: **Membership is the index's fact and never the record's**, which is ADR-0074
     #: §10's own position: "conversation membership lives in this index and not as a
@@ -1344,7 +1344,7 @@ class SearchFooting:
 
         **Still blind to why a record is external** (§5). Nothing here asks what
         stamped a record: the third case is decided from *membership* — which turns the
-        conversation index records as this conversation's (:meth:`resolve_episodes`) —
+        conversation index records as this conversation's (:meth:`_place`) —
         and never from the cause of a stamp, which is what ADR-0223 §6 requires of any
         clause reaching ADR-0181 §5's floor. A stamped episode of some **other**
         conversation, and any ``MemoryRecord`` retrieval selected, fail this predicate
@@ -1368,8 +1368,8 @@ class SearchFooting:
             or record.id in self.conversation_episodes
         )
 
-    async def resolve_episodes(self, records: Sequence[MemoryRecord], /) -> None:
-        """Add every episode of **this** conversation in ``records`` to §2's first population.
+    async def _place(self, record: MemoryRecord, /) -> None:
+        """Ask the index which conversation one episode belongs to (§2's first population).
 
         **The tail is not the population; the index is.** The loop can name the
         conversation tail without a read, because
@@ -1383,12 +1383,6 @@ class SearchFooting:
         about. So membership is resolved where ADR-0074 §10 puts it: ``turn_of_episode``,
         which "the store owes both directions of" precisely so that no caller infers it.
 
-        **A read only for a record that would otherwise fail** :meth:`clean`. An episode
-        carrying no recorded external span passes on the first disjunct whatever the
-        index says, so asking about it would buy nothing — which is what keeps the cost
-        at zero for the turns that carry nothing tainted, and bounded by the supply's
-        stamped episodes otherwise.
-
         **Not one of ADR-0238's four store calls, and it is not a fifth budget member.**
         §8 adds three members to ``ConversationStore`` and rules that "a fourth is added
         by no lane without the ADR that decides it"; this adds none — ``turn_of_episode``
@@ -1396,32 +1390,37 @@ class SearchFooting:
         no-second-caller restraint is stated over the **trust** store and is untouched
         here.
 
-        **A store fault leaves the record out**, which is the fail-closed direction: an
-        episode this method could not place stays §2's second population and costs the
+        **A store fault leaves the record unplaced**, which is the fail-closed direction:
+        an episode this cannot place stays §2's second population and costs the
         conversation its footing, exactly as it does today. The turn is not failed for
         it, which is the posture :meth:`_fold` and ``ConversationLifecycle.history``
         already take toward this store.
 
         Args:
-            records: The turn's pre-servicing supply.
+            record: One stamped episode in view of this turn.
         """
-        for record in records:
-            if record.id in self.conversation_episodes or not rests_on_recorded_external_content(
-                record.provenance
-            ):
-                continue
-            if MemoryKind(record.kind) is not MemoryKind.EPISODIC:
-                continue
-            try:
-                turn = await self.conversations.turn_of_episode(record.id)
-            except AssistantError as exc:
-                # The class and nothing else, for the reason `_fold` states: this
-                # frame's locals carry the conversation's id and the deployment's
-                # destinations, both Tier 1 (ADR-0238 §11).
-                _log.warning("search_footing_membership_degraded", error=type(exc).__name__)
-                continue
-            if turn is not None and turn.conversation_id == self.conversation_id:
-                self.conversation_episodes.add(record.id)
+        try:
+            turn = await self.conversations.turn_of_episode(record.id)
+        except AssistantError as exc:
+            # The class and nothing else, for the reason `_fold` states: this frame's
+            # locals carry the conversation's id and the deployment's destinations, both
+            # Tier 1 (ADR-0238 §11).
+            _log.warning("search_footing_membership_degraded", error=type(exc).__name__)
+            return
+        if turn is not None and turn.conversation_id == self.conversation_id:
+            self.conversation_episodes.add(record.id)
+
+    async def _lower(self) -> None:
+        """Write §8's early ``False`` once, or do nothing.
+
+        §8's early fold "writes ``False`` and nothing else, it is idempotent, and
+        repeating it costs nothing" — so this guard buys a bounded number of store writes
+        rather than a property, and every caller may reach it as often as a fact arrives.
+        """
+        if self._lowered:
+            return
+        self._lowered = True
+        await self._fold(all_external_user_chosen=False)
 
     async def trusted(self) -> DestinationTrust:
         """What the store records about this deployment's search destination (§1).
@@ -1494,13 +1493,33 @@ class SearchFooting:
         leaves a flag that is *higher* than the truth for this conversation — which is
         the residue §8 names, bounded by the build-time read that follows it.
 
+        **The order below is the clause, not a detail, and it is why placing an episode
+        happens here rather than before.** §8 bounds the window it leaves at "one store
+        write, with none of A's composition, transport or capture inside it", and the
+        fold must land "as early as the fact exists". A record of any other external
+        origin is a fact that exists **now**, so it is folded before any index lookup is
+        awaited; a stamped episode is not a fact yet at all — whether it disqualifies the
+        conversation is what :meth:`_place` is about to ask — and each one that comes back
+        someone else's, or comes back unplaceable, is folded **before the next lookup
+        starts**. So no await ever sits between a disqualifying fact becoming known and
+        the write that records it, and a turn cancelled inside a lookup has already
+        written every ``False`` it owed.
+
         Args:
             records: The records just admitted to this turn.
         """
-        if self._lowered or all(self.clean(record) for record in records):
+        if self._lowered:
             return
-        self._lowered = True
-        await self._fold(all_external_user_chosen=False)
+        # Two passes over the supply and no store call yet, so the fold below is reached
+        # with nothing awaited between the fact and the write.
+        unclean = [record for record in records if not self.clean(record)]
+        pending = [record for record in unclean if MemoryKind(record.kind) is MemoryKind.EPISODIC]
+        if len(unclean) > len(pending):
+            await self._lower()
+        for record in pending:
+            await self._place(record)
+            if not self.clean(record):
+                await self._lower()
 
     async def observe(self, records: Sequence[MemoryRecord], /) -> None:
         """§8's capture fold, over the turn's **final** supply.

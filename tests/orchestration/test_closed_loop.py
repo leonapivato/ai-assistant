@@ -1750,3 +1750,134 @@ async def test_an_episode_belonging_to_no_conversation_is_refused() -> None:
     draw = await footing.conversations.search_draw(mine)
     assert draw is not None
     assert draw.all_external_user_chosen is False
+
+
+# --------------------------------------------------------------------------- #
+# §8's window is the write, and an index lookup may not be inside it            #
+# --------------------------------------------------------------------------- #
+
+
+class _BlockingMembership(FakeConversationStore):
+    """A conversation store whose ``turn_of_episode`` can be held open.
+
+    The membership lookup is the only await ADR-0238 §8's early fold has near it, so it
+    is the one place a widened window would be observable. Held rather than sequenced,
+    for Arm 6f2(iii)'s own reason: the arm is about the boundary and not about an order
+    two calls happened to take.
+    """
+
+    def __init__(self, *, block_from: int = 0, **knobs: Any) -> None:
+        super().__init__(**knobs)
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.lookups = 0
+        self._block_from = block_from
+
+    async def turn_of_episode(self, episode_id: str) -> Any:
+        """Answer freely until ``block_from``, then announce and wait to be let go."""
+        self.lookups += 1
+        if self.lookups > self._block_from:
+            self.entered.set()
+            await self.release.wait()
+        return await super().turn_of_episode(episode_id)
+
+
+async def test_a_turn_cancelled_inside_the_membership_lookup_has_already_folded() -> None:
+    """§8: the fold lands "as early as the fact exists", and a lookup is not before that.
+
+    §8 bounds the window it leaves at "one store write, with none of A's composition,
+    transport or capture inside it". A record of another external origin disqualifies the
+    conversation the moment it is admitted — nothing needs asking about it — so an index
+    lookup awaited between that admission and ``observe_search(False)`` would put an
+    unbounded wait inside a window §8 states as a single write, and a turn abandoned
+    there would leave a conversation reading clean that is not.
+
+    Driven by cancelling the turn while the lookup is held open, which is the shape that
+    tells a widened window from a narrow one: the supply carries **both** a foreign
+    external belief, whose fact exists now, and a stamped episode, whose fact does not
+    exist until the index answers.
+    """
+    ids = iter(("c-mine", "c-theirs"))
+    conversations = _BlockingMembership(now=_clock, new_id=lambda: next(ids))
+    mine = await conversations.start()
+    theirs = await conversations.start()
+    memory, _ = await _supplied_episode(conversations, theirs.id)
+    await memory.add(_external_belief("belief-foreign", "something a reader ingested"))
+    footing = _footing(conversations=conversations, conversation_id=mine.id, trusted=True)
+
+    turn = asyncio.ensure_future(
+        _loop(
+            planner=FakePlanner(now=_clock, read_request=_search()),
+            memory=memory,
+            search=_servicer(searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,)))),
+            footing=footing,
+            episodic_limit=5,
+        ).respond(_ASK, narrow=_bounded())
+    )
+    await asyncio.wait_for(conversations.entered.wait(), timeout=5)
+    turn.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await turn
+
+    draw = await conversations.search_draw(mine.id)
+    assert draw is not None
+    assert draw.all_external_user_chosen is False, (
+        "the belief's fact existed before the lookup began, so §8's False was already "
+        "written when the turn was abandoned inside it"
+    )
+
+
+async def test_an_episode_placed_elsewhere_is_folded_before_the_next_lookup() -> None:
+    """The same boundary on the other side: a fact the **first** lookup established.
+
+    Once ``turn_of_episode`` has answered that an episode belongs to another
+    conversation, that is a disqualifying fact and §8's "as early as the fact exists"
+    binds on it exactly as it binds on a retrieved belief. So the write lands **before**
+    the next lookup starts, and a turn abandoned inside that second lookup has already
+    recorded the first's answer.
+
+    An implementation that placed every episode and folded once at the end passes the
+    arm above whenever some other record was dirty from the start; this is the arm it
+    fails, and the two together are why the fold interleaves rather than batches.
+    """
+    ids = iter(("c-mine", "c-theirs"))
+    conversations = _BlockingMembership(now=_clock, new_id=lambda: next(ids), block_from=1)
+    mine = await conversations.start()
+    theirs = await conversations.start()
+    memory, _ = await _supplied_episode(conversations, theirs.id)
+    second = await conversations.append(theirs.id, occurred_at=_NOW)
+    await memory.add(
+        EpisodicMemory(
+            id=second.episode_id,
+            content="the bell tower in Porto again, we looked that up too",
+            occurred_at=_NOW,
+            provenance=Provenance(
+                source=MemorySource.OBSERVED,
+                confidence=0.9,
+                last_updated=_NOW,
+                derived_from_external=True,
+            ),
+        )
+    )
+    footing = _footing(conversations=conversations, conversation_id=mine.id, trusted=True)
+
+    turn = asyncio.ensure_future(
+        _loop(
+            planner=FakePlanner(now=_clock, read_request=_search()),
+            memory=memory,
+            search=_servicer(searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,)))),
+            footing=footing,
+            episodic_limit=5,
+        ).respond(_ASK, narrow=_bounded())
+    )
+    await asyncio.wait_for(conversations.entered.wait(), timeout=5)
+    turn.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await turn
+
+    assert conversations.lookups == 2, "the first answered and the second is the one held"
+    draw = await conversations.search_draw(mine.id)
+    assert draw is not None
+    assert draw.all_external_user_chosen is False, (
+        "the first lookup's answer was folded before the second lookup began"
+    )
