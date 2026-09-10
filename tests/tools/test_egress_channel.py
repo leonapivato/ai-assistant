@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import ssl
+from contextlib import suppress
 from typing import TYPE_CHECKING, Final, cast, final
 
 import pytest
@@ -288,14 +289,26 @@ class _Transport:
 
 @final
 class _Handoff:
-    """A suspension a cancellation does not reach, and that completes on release.
+    """An open that declines to be cancelled, and completes on release anyway.
 
     :class:`~ai_assistant.testing.cancellation.LoopSuspension` defers a
     cancellation and then re-raises it, which models work the caller's own task
-    owns. What is wanted here is the opposite: production *shields* the open, so
-    the open is not cancelled and finishes normally while the caller is already
-    gone. This is that shape, and it is the arrangement under which the release
-    being measured can only be production's.
+    owns. What is wanted here is the opposite: an open that reaches its streams
+    while the caller is already gone, because that is the one arrangement in which
+    the release being measured can only be ``open_channel``'s.
+
+    **It declines the cancellation on purpose, and CPython's opener does not**
+    (#2207). ``open_channel`` now cancels the open it was taken off, and an
+    interrupted ``asyncio.open_connection`` releases the socket or the transport
+    it had built — so against the real opener there is nothing left for production
+    to release, and a substitute that behaved like it would measure CPython's
+    cleanup rather than this seam's. What ``open_channel`` still owes is ADR-0060
+    §1's weaker, true form — "no seam can stop work that declines to be cancelled"
+    — and an open that returns its streams despite the cancel is exactly that
+    work. The task it runs in ends with a **result** rather than cancelled, since
+    the cancellation was delivered into a future it was awaiting rather than
+    latched as ``_must_cancel``, so the streams are there to be given back and
+    nobody but ``open_channel`` can give them.
     """
 
     def __init__(self) -> None:
@@ -304,9 +317,12 @@ class _Handoff:
         self._released = asyncio.Event()
 
     async def held(self) -> None:
-        """Announce arrival and wait, uncancellably from the caller's side."""
+        """Announce arrival and wait, declining every cancellation that lands."""
         self._entered.set()
-        await self._released.wait()
+        waiting = asyncio.ensure_future(self._released.wait())
+        while not waiting.done():
+            with suppress(asyncio.CancelledError):
+                await asyncio.wait((waiting,))
 
     async def reached(self) -> None:
         """Wait until the open has arrived at its suspension point."""
@@ -403,9 +419,11 @@ class _Sockets:
         gate, self.gate = self.gate, None
         if gate is not None:
             # Held *after* the streams exist and released into a normal return.
-            # It cleans nothing up on the caller's cancellation, deliberately: a
+            # It cleans nothing up and declines the cancellation, deliberately: a
             # substitute that tidied after itself would be the thing the
-            # conformance case measured.
+            # conformance case measured, and one that let the cancellation end it
+            # would leave the case with no orphan for production to release
+            # (:class:`_Handoff`).
             await gate.held()
         return asyncio.StreamReader(limit=TRANSPORT_OCTET_CEILING), writer
 

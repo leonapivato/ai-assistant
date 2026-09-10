@@ -713,17 +713,55 @@ class StreamOutboundTransport:
             # already held its cancellation, which is the orphan window read from
             # the caller's end rather than closed.
             #
-            # The open itself is deliberately not cancelled. Cancelling it would
-            # race its own establishment and leave *its* partial state to it,
-            # whereas letting it finish gives this method one thing to observe and
-            # one thing to close. So the wait is on work this method started and
-            # can observe completing, and it is **unbounded** — stated as such,
-            # which is the form ADR-0060 §1 requires. ADR-0029 §4's invocation
-            # deadline is what bounds the call as a whole (ADR-0191 §2).
+            # **The open is cancelled, and that is what bounds the deferral.** An
+            # earlier shape here waited the open out without cancelling it, on the
+            # worry that cancelling "would race its own establishment and leave
+            # *its* partial state to it". Read against CPython rather than against
+            # that worry, the opposite holds: an interrupted open releases what it
+            # had built, at both stages this method can be suspended in.
+            # ``asyncio.base_events._connect_sock`` wraps the whole of socket,
+            # bind and ``sock_connect`` in a bare ``except:`` that closes the
+            # socket, and ``_create_connection_transport`` wraps ``await waiter``
+            # — the TCP-to-TLS handshake — in a bare ``except:`` that calls
+            # ``transport.close()`` and re-raises (3.14.7, lines 1048-1056 and
+            # 1231-1235). A bare ``except`` catches ``CancelledError``, so
+            # cancelling the open is not a race against its establishment: it *is*
+            # the establishment's own release path. Nothing partial is left to it.
+            #
+            # Without the cancel the deferral was unbounded in fact as well as in
+            # word, and the operator-visible consequence was #2207: a real origin
+            # that completes the TCP connect and then stops answering holds this
+            # frame for ``asyncio``'s 60-second default ``ssl_handshake_timeout``,
+            # so a five-second ``search_call_deadline`` (ADR-0241 §1) fired on time
+            # and returned twelve times late.
+            #
+            # **No transport-level bound is introduced here, and ADR-0241 §13's
+            # deferral is untouched.** There is no connect timeout, no read timeout
+            # and no socket timeout: what bounds the wait is the caller's own
+            # cancellation, which is the thing ADR-0241 §1 delivers at the bound
+            # and which this seam was previously declining to pass on.
+            #
+            # The wait that follows is still owed, because the cancel only *asks*.
+            # An open already done when the cancellation landed keeps its streams,
+            # and one that declines to be cancelled and returns anyway is ADR-0060
+            # §1's weaker, true form — "no seam can stop work that declines to be
+            # cancelled". Either way this method observes it finishing and releases
+            # what it produced, which is the window rounds 2 to 4 pressed on.
             #
             # A further cancellation arriving during that wait is suppressed and
             # the wait resumed: the caller's cancellation is already in hand and
             # is what leaves below, and abandoning the wait is the orphan again.
+            #
+            # Cancelling it also makes the orphan path **quiet**. ``asyncio.shield``
+            # swaps a logging callback onto the inner future once the outer has
+            # been cancelled (``asyncio.tasks``' ``_outer_done_callback``), so an
+            # open that later fails on its own is reported to the loop's exception
+            # handler as "``ConnectionResetError`` exception in shielded future" —
+            # which #2207's recheck saw, and which names no caller and no endpoint.
+            # ``_log_on_exception`` returns early for a **cancelled** future
+            # (3.14.7, lines 914-916), so an open this method cancelled reports
+            # nothing.
+            opening.cancel()
             while not opening.done():
                 with suppress(asyncio.CancelledError):
                     await asyncio.wait((opening,))
