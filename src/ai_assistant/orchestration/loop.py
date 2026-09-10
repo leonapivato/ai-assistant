@@ -58,6 +58,7 @@ from ai_assistant.core.types import (
     MemoryRecord,
     MemorySource,
     Provenance,
+    SearchNotServiced,
     ShownFile,
     TurnResult,
 )
@@ -72,6 +73,7 @@ from ai_assistant.orchestration.reads import (
     StructuredFacts,
     TriggerOutcome,
     TurnReadAudit,
+    earliest,
     service_read_request,
 )
 from ai_assistant.orchestration.retrieval import assemble_by_band
@@ -160,6 +162,27 @@ class RespondedTurn:
             by the later one (ADR-0228 §13 item 14): a record the *first* hop reached
             still renders its reply in the prompt the turn finally assembles, and a
             record both hops reached appears once, at its first arrival's place.
+        search_not_serviced: ADR-0242 §7's carrier: which **class of act** would have
+            let a search this turn did not make happen, or ``None`` where every
+            servicing yielded and where the turn asked for no search — on which the
+            assembled prompt is byte-identical to what it is without ADR-0242.
+
+            **At most one member per turn, and the one earliest in ADR-0242 §8's
+            declared order** among the servicings that recorded a disposition. The
+            **order and not the encounter order** decides it: a member is never
+            overwritten by a later servicing's, and an implementation carrying the last
+            one it computed is wrong even where every individual mapping is right.
+
+            **A servicing that yields does not clear a member an earlier one produced**
+            (§7), because §6's eligibility is stated over the *presence* of a
+            disposition and a later success does not remove one. Nothing here makes the
+            carrier conditional on the turn's last servicing, on whether the supply
+            ended non-empty, or on whether the reply looks complete.
+
+            **Supplied and never inferred**, exactly as :attr:`hop_reached` and
+            :attr:`stopped_while_asking` are: it is computed at the servicing site from
+            three values that site holds, and this loop folds the computed members
+            rather than recomputing one.
     """
 
     turn: TurnResult
@@ -167,6 +190,7 @@ class RespondedTurn:
     plans: tuple[ActionPlan, ...] = ()
     stopped_while_asking: bool = False
     structured: StructuredFacts = field(default_factory=StructuredFacts)
+    search_not_serviced: SearchNotServiced | None = None
 
 
 #: ADR-0228 §3's bound: **at most two** calls to ``Planner.plan`` on one turn, so a
@@ -1335,6 +1359,11 @@ class LearningLoop:
         # because it is a fact about the answer being composed rather than about the
         # path taken to it.
         structured = StructuredFacts()
+        # ADR-0242 §7's carrier, ``None`` until a servicing records a disposition —
+        # which is the value every turn that did not fire, whose servicing was declined
+        # and whose planner asked for no search carries out of here, and on which §6's
+        # byte-identity guarantee holds.
+        search_not_serviced: SearchNotServiced | None = None
         if not bounded_audience:
             # ADR-0203 §1: between retrieval and planning, and applied to the
             # context as well as to the records — a facet no ADR has placed is
@@ -1509,6 +1538,13 @@ class LearningLoop:
             # reads and a sequence that quietly dropped one would be a different
             # promise from the one the contract makes.
             empty_reads += () if carried.empty_read is None else (carried.empty_read,)
+            # ADR-0242 §7's precedence fold. **By §8's declared order and not by
+            # encounter order**, so a turn recording `SPEND_REFUSED` and then
+            # `COMPOSER_DECLINED` and one recording them the other way round both carry
+            # `SPEND_EXHAUSTED` — the two directions a last-computed-wins and a
+            # first-computed-wins implementation respectively fail. A servicing that
+            # yielded contributes `None` and clears nothing.
+            search_not_serviced = earliest(search_not_serviced, carried.not_serviced)
             # ADR-0240 §8. The reach and the temporal facts are ORed across the
             # turn's servicings — §8's own clause for the first is "whether or not a
             # later read of the same turn did", and the second rests on the same
@@ -1604,6 +1640,11 @@ class LearningLoop:
             # the audit. This is ADR-0228 §10's rule and ADR-0227 §3's, applied to
             # three more facts for their own reason.
             structured=structured,
+            # ADR-0242 §7's carrier, on the same terms and for the same reason: computed
+            # at the servicing site, folded here by §8's declared order, and carried
+            # inside `orchestration` as data — no member on any Protocol, and nothing
+            # inferred at the render site.
+            search_not_serviced=search_not_serviced,
         )
 
     async def _planned(  # noqa: PLR0913 — the goal plus one keyword per thing the loop assembled for this call; ADR-0230 §3 and ADR-0240 §7 each add one, and the audit record rides beside them

@@ -72,8 +72,12 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     ActionPlan,
     ActionRequest,
+    CanonicalDestination,
     CostBasis,
     CurrentContext,
+    DestinationProtocol,
+    DestinationTrust,
+    DestinationTrustRecord,
     EpisodicMemory,
     FeedbackEvent,
     FeedbackKind,
@@ -982,6 +986,35 @@ async def _recipient_grant_operations(now: Clock) -> None:
     ).grantable_decisions(limit=1)
 
 
+async def _destination_trust_operations(now: Clock) -> None:
+    """The operations read the clock for the instant of the user's act (ADR-0242 §2, §4).
+
+    Driven through the **revocation**, which is the cheapest of the three reads to
+    reach: the act needs a decision on the trail carrying a whole ``EgressBinding``,
+    and the listing reads no clock at all. ADR-0242 §4 has the clock read *after* the
+    live match, so the record seeded here is what makes the reading happen.
+    """
+    await DestinationTrustOperations(
+        store=FakeDestinationTrustStore(
+            [
+                DestinationTrustRecord(
+                    id="t-1",
+                    destinations=(
+                        CanonicalDestination(
+                            protocol=DestinationProtocol.SMTP, canonical="alice@example.com"
+                        ),
+                    ),
+                    trust=DestinationTrust.USER_CHOSEN,
+                    established_at=_AWARE,
+                )
+            ]
+        ),
+        trail=FakeAuditTrail(),
+        id_factory=lambda: "t-2",
+        clock=now,
+    ).revoke_destination_trust("t-1")
+
+
 async def _fake_assistant_engine(now: Clock) -> None:
     """The canonical fake reads a clock of its own for the establishing act.
 
@@ -1092,6 +1125,10 @@ SEAMS = [
     # §4 gives the failure to the *stage*, because `core/errors.py` defines none for
     # this package.
     Seam("RecipientGrantOperations", _recipient_grant_operations, PlanningError),
+    # ADR-0242 §2 and §4's two clock reads — the trust record's ``established_at`` and
+    # the instant a revocation carries — behind one guard, and translated to
+    # `orchestration`'s own error for ``RecipientGrantOperations``' reason exactly.
+    Seam("DestinationTrustOperations", _destination_trust_operations, PlanningError),
     # The canonical fake's own reading of the same act, guarded at the **read**
     # because `recipient_grant_clock` is a public lever a consumer's test replaces —
     # so a wrap at construction would be discarded by the next assignment. It

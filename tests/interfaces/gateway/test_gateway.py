@@ -852,6 +852,27 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
     no change from ADR-0235 at all, which is the sequencing §9 chose. Nothing on
     this page can *set* ``remember_recipients_until`` either, so the member is
     ``None`` on every outcome this adapter will ever see.
+
+    **``search_not_serviced`` is ADR-0242 §9's member, and the decision taken here is
+    "not rendered" for the identical reason.** ADR-0242 §5 leaves ADR-0177 §1's
+    enumeration unwidened and assigns a browser surface for the trust act to "a later
+    consumer lane with its own ratified decision"; §9 then says in terms what this page
+    does until that lane: "the browser … renders neither the statement nor the reply's
+    absence of one, because it renders the turn exactly as it does today and the field
+    it now receives is one it ignores." So the member crosses the wire — it is on
+    ``TurnOutcome`` and this page decodes the whole outcome — and no panel reads it.
+
+    **The cost here is larger than ``recipient_grant``'s and is stated rather than
+    hidden** (ADR-0242's Consequences): a user on the browser can establish neither a
+    recipient grant nor destination trust, and now also receives a field the page says
+    nothing about — so a turn whose search did not happen reads on this page exactly
+    like one whose search was never asked for. That gap is named in §5 with the lane
+    that closes it, and it is the same gap ADR-0235 §9 opened.
+
+    **This assertion is the tripwire firing as designed**, which is what the test's own
+    name says: a member reaching the page unnoticed is what it exists to prevent, and a
+    lane that adds one names it here and states which way the decision went. Nothing
+    under ``src/ai_assistant/interfaces/gateway/`` changes for it.
     """
     assert set(TurnOutcome.model_fields) == {
         "turn",
@@ -862,6 +883,7 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
         "reply_degraded",
         "routed",
         "recipient_grant",
+        "search_not_serviced",
     }
 
 

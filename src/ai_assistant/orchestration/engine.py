@@ -144,6 +144,7 @@ from ai_assistant.core.types import (
     RoutedOperation,
     RoutedOperationRecord,
     RouteOutcome,
+    SearchNotServiced,
     SpeechFailure,
     SpokenAudioFormat,
     SpokenDelivery,
@@ -1521,6 +1522,7 @@ type _Composer = Callable[
         Sequence[str],
         bool,
         StructuredFacts,
+        SearchNotServiced | None,
     ],
     Awaitable[ComposedReply | None],
 ]
@@ -4045,6 +4047,7 @@ class Engine:
         hop_reached: Sequence[str],
         stopped_while_asking: bool,
         structured: StructuredFacts,
+        search_not_serviced: SearchNotServiced | None,
         *,
         supply: UnboundedAudienceSupply,
     ) -> ComposedReply | None:
@@ -4126,6 +4129,20 @@ class Engine:
                 and no read comes back empty. Accepted and passed on rather than
                 replaced with a default, for the same reason — one composer shape, and
                 no second statement of §5's scoping at this site.
+            search_not_serviced: ADR-0242 §7's carrier: which class of act would have
+                let a search this turn did not make happen. **Always ``None`` here**,
+                on the three carriers above's reason: ADR-0226 §5 declines to service a
+                read request on this operation, so no ``WEB_SEARCH`` ask is serviced
+                and no disposition is recorded. Accepted and passed on rather than
+                replaced with ``None``, for the same reason — one composer shape.
+
+                **A member reaching this pass would nonetheless be speakable**
+                (ADR-0242 §5): §8 fixes the vocabulary as one carrying no destination,
+                account, query, figure or command name, and that is what places it as
+                speakable rather than a judgement about any particular reply. What is
+                **withheld** on such a channel is a trust record, a canonical
+                destination set, a connection reference and a connected account's
+                identity — none of which any fragment carries.
             supply: The applier this call minted, read for the bare fact of whether
                 anything was held back. Bound by :meth:`converse_spoken` rather than
                 passed by :meth:`_run_turn`, which knows nothing of disclosure.
@@ -4154,6 +4171,13 @@ class Engine:
             # composers have one shape and a later lane cannot make them differ by
             # forgetting one (ADR-0240 §13 item 16).
             structured=structured,
+            # ADR-0242 §7's carrier, passed for the same reason and reaching the same
+            # default: ADR-0226 §5 declines to service a read request on a channel of
+            # unbounded audience, so no search is serviced on this pass and this value
+            # is `None`. **The member is nonetheless placed as speakable** where a
+            # bounded-audience pass produces one (ADR-0242 §5): §8 fixes it as a closed
+            # vocabulary carrying no destination, account, query, figure or command.
+            search_not_serviced=search_not_serviced,
         )
 
     async def resume(
@@ -7720,6 +7744,7 @@ class Engine:
             hop_reached: Sequence[str],
             stopped_while_asking: bool,
             structured: StructuredFacts,
+            search_not_serviced: SearchNotServiced | None,
         ) -> ComposedReply | None:
             return await self._compose_streaming(
                 turn,
@@ -7730,6 +7755,7 @@ class Engine:
                 hop_reached,
                 stopped_while_asking,
                 structured,
+                search_not_serviced,
             )
 
         async def compose_routed(
@@ -7764,6 +7790,7 @@ class Engine:
         hop_reached: Sequence[str],
         stopped_while_asking: bool,
         structured: StructuredFacts,
+        search_not_serviced: SearchNotServiced | None,
     ) -> ComposedReply | None:
         """Compose atomically, ignoring the conversation the streaming twin needs.
 
@@ -7793,6 +7820,7 @@ class Engine:
             hop_reached=hop_reached,
             stopped_while_asking=stopped_while_asking,
             structured=structured,
+            search_not_serviced=search_not_serviced,
         )
 
     async def _persist_plans(self, plans: Sequence[ActionPlan]) -> None:
@@ -7972,6 +8000,13 @@ class Engine:
         # never inferred here — not from the plan, not from the supply, and not from
         # the audit.
         structured = responded.structured
+        # ADR-0242 §7's carrier, threaded exactly as the three above are and **never
+        # inferred here** — not from the plan, not from the supply's length, not from
+        # the reply and not from the audit. One value, two consumers: the composing
+        # stage's fragment and the `TurnOutcome` field the surface renders a statement
+        # from, which is what makes those two the same member rather than two that
+        # agree (ADR-0242 §9).
+        search_not_serviced = responded.search_not_serviced
         # ADR-0205 §5: the fact travels with the episode it qualifies and never
         # without it. `turn.memories` is the supply as `narrow` returned it, so
         # intersecting here is what makes a withheld record's delivery unreachable by
@@ -8017,6 +8052,7 @@ class Engine:
                 hop_reached,
                 stopped_while_asking,
                 structured,
+                search_not_serviced,
             )
             return await self._capture(
                 conversation.id,
@@ -8035,6 +8071,9 @@ class Engine:
                 # own — the same one an otherwise identical pass with a step stamps.
                 derived_from_external=external,
                 spoken=spoken,
+                # ADR-0242 §9's field, folded in at the one place a ``TurnOutcome`` is
+                # built. It is the member the servicing site computed, by value.
+                search_not_serviced=search_not_serviced,
             )
         first = turn.plan.steps[0]
         # Admit-and-reserve *before* anything is persisted or driven, atomically
@@ -8101,6 +8140,7 @@ class Engine:
             hop_reached,
             stopped_while_asking,
             structured,
+            search_not_serviced,
         )
         return await self._capture(
             conversation.id,
@@ -8118,6 +8158,9 @@ class Engine:
             # ``SelectionOrigin`` carried to the egress seam on this very pass.
             derived_from_external=external,
             spoken=spoken,
+            # ADR-0242 §9's field, as on the branch above and for its reason: the same
+            # member, by value, and never a second computation.
+            search_not_serviced=search_not_serviced,
         )
 
     # --- ADR-0197's routing stage, driven --------------------------------
@@ -8854,6 +8897,7 @@ class Engine:
         hop_reached: Sequence[str] = (),
         stopped_while_asking: bool = False,
         structured: StructuredFacts | None = None,
+        search_not_serviced: SearchNotServiced | None = None,
     ) -> ComposedReply | None:
         """Compose this pass's answer, or decline to on the shapes that owe none.
 
@@ -8893,6 +8937,11 @@ class Engine:
         read, so it filtered on no axis and its last read was not empty. On such a pass
         the assembled prompt is byte-identical to what it is without ADR-0240.
 
+        **And ADR-0242 §7's carrier defaults to ``None``**, for the same reason again:
+        a pass that planned nothing serviced no search, so no disposition was recorded
+        and there is nothing about a lookup to say. On such a pass the assembled prompt
+        is byte-identical to what it is without ADR-0242 (§6).
+
         Returns:
             What the stage composed, or ``None`` where no answer was owed.
         """
@@ -8909,6 +8958,7 @@ class Engine:
             hop_reached=hop_reached,
             stopped_while_asking=stopped_while_asking,
             structured=structured,
+            search_not_serviced=search_not_serviced,
         )
 
     async def _compose_streaming(  # noqa: PLR0913 — the turn, the step, the conversation, the chunk queue, the delivery facts, the hop's reach, ADR-0228 §10's stop fact and ADR-0240 §8's three; each is a distinct input, as on :meth:`_compose`
@@ -8921,6 +8971,7 @@ class Engine:
         hop_reached: Sequence[str] = (),
         stopped_while_asking: bool = False,
         structured: StructuredFacts | None = None,
+        search_not_serviced: SearchNotServiced | None = None,
     ) -> ComposedReply | None:
         """Stream this pass's answer onto ``chunks``, and report what it composed.
 
@@ -8964,6 +9015,7 @@ class Engine:
             hop_reached=hop_reached,
             stopped_while_asking=stopped_while_asking,
             structured=structured,
+            search_not_serviced=search_not_serviced,
         )
         async with closing_stream(stream) as composing:
             async for produced in composing:
@@ -9507,6 +9559,7 @@ class Engine:
         utterance: str | None = None,
         spoken: _SpokenCapture | None = None,
         recipient_grant: RecipientGrantOutcome | None = None,
+        search_not_serviced: SearchNotServiced | None = None,
     ) -> TurnOutcome:
         """Record the exchange and fold what became of it into the outcome (§3, §9).
 
@@ -9651,6 +9704,15 @@ class Engine:
             reply_degraded=composed is not None and composed.degraded,
             routed=routed,
             recipient_grant=recipient_grant,
+            # ADR-0242 §9: **the same member ADR-0242 §7 computed, by value, and never
+            # a second computation.** The capture point is the one place a
+            # ``TurnOutcome`` is built, so folding the already-computed value in here is
+            # what keeps the reply's fragment and the surface's statement the same
+            # member. ``None`` on every pass that serviced no search and on every pass
+            # that serviced every search it asked for — every such ``converse``,
+            # ``converse_streaming`` and ``resume``, and ADR-0198 §1's restatement,
+            # which drives nothing and searches nothing.
+            search_not_serviced=search_not_serviced,
         )
 
     async def _learn(self, event: FeedbackEvent) -> LearnOutcome:
