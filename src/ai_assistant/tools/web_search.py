@@ -1487,14 +1487,27 @@ class WebSearchEgress:
             # (ADR-0060 §1). ADR-0194 §4's payload-free refusal is untouched: nothing
             # here catches, wraps or annotates one.
             #
-            # **A refusal is a ruling and stays one even where the window closed under
-            # it.** ADR-0241 §9 keeps the three bounds apart in the value an audit
-            # records, and §4's member is for a search that produced no answer at all;
-            # a ceiling the gate did cross is a fact an operator acts on, and reporting
-            # it as an expiry would hide it under the very collapse §9 exists to
-            # prevent. So this branch reads the cancellation and nothing else.
+            # **And this deadline having fired outranks the substituted refusal too**,
+            # exactly as it outranks a substituted fault in the branch below and inside
+            # `act` one stage down. A gate that swallows the expiry's cancellation and
+            # raises a spend class instead leaves no trace in the count —
+            # `asyncio.Timeout.__aexit__` calls `uncancel` on its way out whatever the
+            # exception was — so `watched.interrupted`, read from inside that context,
+            # is the only surviving record that the window closed. ADR-0241 §4 defines
+            # the member as the bound expiring *before the search produced an answer*,
+            # which is what happened, and §7 keys the classification on whether **this**
+            # deadline fired. §9 grants no precedence either way: it forbids collapsing
+            # two bounds or reporting one under the other's member, and answering a call
+            # that in fact ran out of time with `SPEND_REFUSED` would tell an operator
+            # their ceiling was crossed — a false operator fact of exactly the kind §9
+            # exists to prevent. `_deliver_absorbed` has already gone first, so what is
+            # left here can only be this window closing.
             self._deliver_absorbed(admitting)
-            return _refused(SearchRefusal.SPEND_REFUSED)
+            return _refused(
+                SearchRefusal.DEADLINE_EXPIRED
+                if watched.interrupted
+                else SearchRefusal.SPEND_REFUSED
+            )
         except Exception:
             # **An ordinary fault out of the admission is not evidence that nothing was
             # cancelled either.** A gate that catches the caller's cancellation and
