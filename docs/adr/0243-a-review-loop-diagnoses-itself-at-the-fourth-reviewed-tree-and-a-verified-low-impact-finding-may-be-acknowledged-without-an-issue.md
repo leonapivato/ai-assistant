@@ -1,6 +1,6 @@
 # 243. A review loop diagnoses itself at the fourth reviewed tree and chooses one next activity, and a verified low-impact finding may be acknowledged without an issue
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-10
 - **What this changes and what it does not.** It adds two obligations, both on
   the author's side of a review loop. A **dispatched lane** writes a diagnosis on
