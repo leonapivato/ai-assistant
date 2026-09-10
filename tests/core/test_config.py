@@ -1422,6 +1422,15 @@ def test_every_duration_setting_is_discovered() -> None:
         # can argue for. The ``bool`` guard is the difference between "keep forever"
         # and a one-second horizon that hides every entry on the next read.
         "transcript_archive_retention",
+        # ADR-0241 §3's per-call search deadline, acknowledged here for the reason
+        # every duration above is: joining this tuple is what subjects it to the
+        # parametrised guards below. It is **not** nullable, for ``hub_read_timeout``'s
+        # reason — ADR-0194 §1's "unset means unbounded" governs a *monetary* ceiling
+        # an operator chooses, and `WebSearcher.search` has no spelling for an
+        # unbounded call at all — so "off" is not an available value. The ``bool``
+        # guard is the difference between a thirty-second search and one that expires
+        # against every provider on the first request.
+        "search_call_deadline",
     }
 
 

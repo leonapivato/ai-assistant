@@ -67,6 +67,7 @@ from ai_assistant.core.errors import (
     SpendCeilingError,
     SpendUndeterminedError,
     ToolBindingError,
+    ToolError,
     TransportError,
 )
 from ai_assistant.core.types import (
@@ -91,7 +92,7 @@ from ai_assistant.core.types import (
     ToolResult,
 )
 from ai_assistant.tools.admission import admitted_call
-from ai_assistant.tools.consume import consumed_call
+from ai_assistant.tools.consume import consumed_call, pending_cancellations
 from ai_assistant.tools.egress import (
     BoundCallChangedError,
     HttpsRedirectRefusedError,
@@ -99,6 +100,7 @@ from ai_assistant.tools.egress import (
     MalformedHttpResponseError,
 )
 from ai_assistant.tools.egress_declaration import DESTINATION_KEYWORD, TIER_KEYWORD
+from ai_assistant.tools.invocation import expiry_failure
 from ai_assistant.tools.registry import checked_timeout, revalidated_call
 
 if TYPE_CHECKING:
@@ -254,12 +256,15 @@ mis-declaration ADR-0016 §1 and ADR-0148 §2 refuse.
 #
 # **So the constants below are this lane's documented adapter for one provider, the
 # Brave Search API**, and the origin is the only part of the request a deployment
-# configures. It is not behind a `Settings` field, and that is §5's own count rather
-# than an omission: "This decision adds exactly four `Settings` fields", every one of
-# them a bound, so a fifth naming a vendor would be this lane widening a normative
-# count. §19 defers "a second search provider" to the ADR that decides how several
-# outward sources are ordered; until then, replacing the adapter is replacing these
-# constants and `_provider_results`, in this one module.
+# configures. It is not behind a `Settings` field, and that is a judgement about what
+# a *vendor* is rather than an arithmetic one: ADR-0231 §5's "This decision adds
+# exactly four `Settings` fields" is a statement about what that ADR adds and closes
+# nothing over `Settings` (ADR-0241, Context) — a fifth field added by a later ADR
+# makes no sentence of §5 false, and ADR-0241 §3 adds one. What stays true is that a
+# field naming a vendor would be this module choosing an adapter through configuration
+# rather than in code. §19 defers "a second search provider" to the ADR that decides
+# how several outward sources are ordered; until then, replacing the adapter is
+# replacing these constants and `_provider_results`, in this one module.
 
 #: The provider's documented request path.
 _PROVIDER_PATH: Final = "/res/v1/web/search"
@@ -352,12 +357,6 @@ _BACKSLASH: Final = ord("\\")
 #: unescaped. Everything else this integration writes into one is percent-encoded
 #: (:func:`_percent_encoded`).
 _UNRESERVED: Final = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
-
-#: ADR-0029 §4's invocation deadline for one search, and the whole window ADR-0194 §3's
-#: admission shares with it. A module constant with a constructor override rather than
-#: a ``Settings`` field, for the adapter's reason above: §5 adds exactly four fields and
-#: every one of them is a bound on a quantity, which a deadline is not.
-WEB_SEARCH_TIMEOUT: Final = timedelta(seconds=30)
 
 #: ADR-0231 §5's ceiling on ``search_max_results``: "§10's figure is the ceiling and
 #: the setting narrows it, never widens it". Stated here as well as in ``Settings``
@@ -722,7 +721,9 @@ def _transcription(result: Mapping[str, FrozenJson], *, max_chars: int) -> str |
     return content
 
 
-def _result_of(outcome: SearchOutcome, definition: ToolDefinition) -> ToolResult:
+def _result_of(
+    outcome: SearchOutcome, definition: ToolDefinition, timeout: timedelta
+) -> ToolResult:
     """The invocation result ADR-0192's completion is written from.
 
     **A refusal is not always a failed invocation**, and the split is what makes the
@@ -733,13 +734,32 @@ def _result_of(outcome: SearchOutcome, definition: ToolDefinition) -> ToolResult
     calls, so they are ``FAILED``. ``SPEND_REFUSED`` reaches no claim at all and so
     reaches this function never.
 
+    **``DEADLINE_EXPIRED`` is neither, and that is the defect ADR-0241 §5 corrects.**
+    ADR-0029 §4's rule attaches to a deadline expiry and a cancellation and to nothing
+    else: the answer is the declaration's own ``interrupted_outcome``, which for
+    ``WEB_SEARCH`` — ``side_effecting`` with ``idempotency`` ``NONE`` — is
+    ``INDETERMINATE``. Recording ``FAILED`` would say *the call did not act* about a
+    search whose query may have left the machine and may have been served and billed,
+    which is the one direction ADR-0014 §4 refuses to guess in. It is read from **this
+    searcher's own registered declaration** and never from ``call.request.tool``
+    (ADR-0029 §4, ADR-0241 §5), and the classification is
+    :func:`~ai_assistant.tools.invocation.expiry_failure` — the invocation seam's own,
+    so the corpus has one statement of ADR-0029 §4's expiry shape and not two. Its
+    ``incurred_cost`` is left unset, which ``consumed_call`` maps to
+    :func:`~ai_assistant.tools.consume.unknown_cost`: ADR-0194 §2's estimate/reported
+    boundary binds, so no lane substitutes ``web_search_cost_per_call`` for it and none
+    treats an expiry as costing nothing (ADR-0241 §5).
+
     **The message is the seam's own and carries no content the seam did not author**
     (``ToolFailure``): a class name and a rule, never a provider's body, a status line,
     an origin or a query.
 
     Args:
         outcome: What the search produced.
-        definition: This searcher's declaration, whose ``id`` names the integration.
+        definition: This searcher's declaration, whose ``id`` names the integration
+            and whose ``interrupted_outcome`` classifies an expiry.
+        timeout: The bound the **caller** stated, which an expiry's message names
+            rather than whatever remained of it (ADR-0029 §4).
 
     Returns:
         The result, whose ``outcome`` and ``failure`` the completion transcribes.
@@ -747,6 +767,8 @@ def _result_of(outcome: SearchOutcome, definition: ToolDefinition) -> ToolResult
     refusal = outcome.refusal
     if refusal is None or refusal in _COMPLETED_REFUSALS:
         return ToolResult(outcome=ToolOutcome.SUCCEEDED)
+    if refusal is SearchRefusal.DEADLINE_EXPIRED:
+        return expiry_failure(definition, timeout)
     return ToolResult(
         outcome=ToolOutcome.FAILED,
         failure=ToolFailure(
@@ -965,7 +987,8 @@ class WebSearchEgress:
        observes** — the invoker's own consume, reached through the same
        :func:`~ai_assistant.tools.consume.consumed_call` the registry uses, so there
        is one implementation of it and not two.
-    4. Inside the claim, and inside ADR-0029 §4's deadline: the pin, ADR-0148 §6's
+    4. Inside the claim, and inside the deadline the **caller** stated as
+       :meth:`search`'s ``timeout`` (ADR-0241 §1): the pin, ADR-0148 §6's
        one-step credential read and its post-read discard, and the exchange — all of
        them :class:`~ai_assistant.tools.egress.WebSearchTransport`'s, at the seam
        ADR-0154 §1 designates. Then §10's transcription and minting, here.
@@ -981,11 +1004,22 @@ class WebSearchEgress:
     :meth:`search` is a fault that no :class:`SearchRefusal` member names: a call that
     does not survive revalidation, one carrying a definition this searcher did not
     register, one its decision does not authorise, one bound to another account or
-    another origin, and a ledger or trail fault. Each is
+    another origin, a ledger or trail fault, and a ``CancelledError`` the callable
+    invented with nothing cancelled (ADR-0241 §7). Each is
     :class:`~ai_assistant.core.errors.ToolBindingError`,
+    :class:`~ai_assistant.core.errors.ToolError`,
     :class:`~ai_assistant.tools.egress.TransportPinError` or one of ADR-0192's — the
     classes ``ToolInvoker.invoke`` raises for the same facts — and a servicer degrades
-    the turn on them exactly as ADR-0226 §5 requires it to degrade on anything else.
+    the turn on them exactly as ADR-0226 §5 requires it to degrade on anything else,
+    recording ADR-0241 §8's ``SEARCH_FAILED``.
+
+    **The deadline is the caller's and this class holds none** (ADR-0241 §1, §3).
+    :meth:`search` takes it as a required keyword with no default, so there is no
+    spelling here for an unbounded call and no configured figure a searcher could
+    disagree with its caller about. It covers the stages above and **not** the two
+    ledger appends, which ADR-0192 §3 pins unbounded by this seam: what the bound
+    buys is that the seam stops waiting on the work it owns, not a wall-clock total
+    for a :meth:`search` frame.
     """
 
     __slots__ = (
@@ -995,11 +1029,10 @@ class WebSearchEgress:
         "_max_result_chars",
         "_max_results",
         "_name",
-        "_timeout",
         "_transport",
     )
 
-    def __init__(  # noqa: PLR0913 — one parameter per collaborator ADR-0231 §6 and §15 name, plus the declaration §6's second check compares against, the identity §10 attests to, the two bounds §5 adds and the deadline §6 requires; each is one thing this searcher is handed rather than reaches for
+    def __init__(  # noqa: PLR0913 — one parameter per collaborator ADR-0231 §6 and §15 name, plus the declaration §6's second check compares against, the identity §10 attests to and the two bounds §5 adds; each is one thing this searcher is handed rather than reaches for
         self,
         *,
         transport: WebSearchTransport,
@@ -1009,7 +1042,6 @@ class WebSearchEgress:
         max_result_chars: int,
         declaration: ToolDefinition = WEB_SEARCH,
         name: str = WEB_SEARCH_SOURCE_NAME,
-        timeout: timedelta = WEB_SEARCH_TIMEOUT,
     ) -> None:
         """Bind a searcher to the seams it acts through.
 
@@ -1036,14 +1068,16 @@ class WebSearchEgress:
             name: The source instance every minted record is attested to (§10).
                 Non-blank and unchanged by ``Identifier``'s own validation, checked
                 here rather than at the first mint.
-            timeout: ADR-0029 §4's invocation deadline, which the admission and the
-                call share as one window (ADR-0194 §3). Strictly positive.
+
+        **No deadline is held here** (ADR-0241 §3). The bound arrives on every
+        :meth:`search` as the caller's own ``timeout``, and this class keeps no
+        second copy of it: a searcher holding one would be a searcher able to
+        disagree with its caller about the window it is running in.
 
         Raises:
-            ValueError: If ``name`` is blank or is a value ``Identifier`` would strip;
-                if either bound is not an exact ``int`` or is outside ADR-0231 §5's
-                domain for it; or if ``timeout`` is not a strictly positive
-                ``timedelta``. Each is a state this searcher could not act from,
+            ValueError: If ``name`` is blank or is a value ``Identifier`` would strip,
+                or if either bound is not an exact ``int`` or is outside ADR-0231 §5's
+                domain for it. Each is a state this searcher could not act from,
                 refused where it is configured rather than at an arbitrary later call.
         """
         if not name.strip() or name.strip() != name:
@@ -1063,7 +1097,6 @@ class WebSearchEgress:
         self._max_result_chars = max_result_chars
         self._declaration = declaration
         self._name = name
-        self._timeout = checked_timeout(timeout)
 
     @property
     def name(self) -> str:
@@ -1106,7 +1139,13 @@ class WebSearchEgress:
         }
         return ActionRequest(tool=self._declaration, parameters=parameters)
 
-    async def search(self, call: ToolCall, /) -> SearchOutcome:
+    async def search(  # noqa: C901 — one branch per exit ADR-0241 §4 and §7 distinguish: this deadline's expiry, an upstream `TimeoutError`, an external cancellation and an invented one
+        self,
+        call: ToolCall,
+        /,
+        *,
+        timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, §2); a caller wrapping this in `asyncio.timeout` cancels the searcher mid-await and cannot classify its own expiry
+    ) -> SearchOutcome:
         """Perform the authorised search, and mint what its answer transcribes.
 
         See the class docstring for the order and why it is the decision.
@@ -1114,11 +1153,28 @@ class WebSearchEgress:
         Args:
             call: The authorised call. Read only through the revalidated copy this
                 method makes of it, never as handed.
+            timeout: The caller's bound on this call (ADR-0241 §1). Checked
+                **first**, before the revalidation, before the credential read,
+                before the gate and before any channel — so a refused value reaches
+                no store, appends no claim and opens nothing. It covers the whole of
+                what follows *except* the two ledger appends, which ADR-0192 §3
+                leaves unbounded by this seam.
 
         Returns:
             One outcome carrying records or a refusal.
+            :attr:`~ai_assistant.core.types.SearchRefusal.DEADLINE_EXPIRED` where
+            **this** deadline fired, at either of the two places it can (ADR-0241
+            §4): inside or immediately after the spend admission, where no claim was
+            appended, and inside the call, where the completion carries the
+            declaration's ``interrupted_outcome`` and an ``UNKNOWN`` cost (§5).
 
         Raises:
+            ValueError: If ``timeout`` is not a ``timedelta`` or is not strictly
+                positive (ADR-0241 §1). Refused before anything is read.
+            ToolError: If the searcher's own callable raised a ``CancelledError``
+                with **nothing cancelled** — ADR-0031 §2's invented cancellation,
+                which ADR-0241 §7 makes a fault rather than a teardown, so it
+                reaches ADR-0226 §5's degradation and never ends the turn.
             ToolBindingError: If the call does not survive revalidation, carries a
                 definition unequal to this searcher's registered original, is not
                 authorised by its decision, or carries no egress binding. **No
@@ -1140,8 +1196,18 @@ class WebSearchEgress:
                 store outage asserts nothing about the call and is never converted
                 (ADR-0148 §6).
             CancelledError: Re-raised unchanged when this task is cancelled from
-                outside (ADR-0060).
+                outside (ADR-0060, ADR-0241 §7). Never converted into
+                ``DEADLINE_EXPIRED``: a cancellation this seam did not itself issue
+                is not this seam's expiry.
         """
+        # **First, and before the revalidation** (ADR-0241 §1): a `timeout` this
+        # searcher could not run under is refused before the call is revalidated,
+        # before the credential is read, before the spend gate is consulted and
+        # before any channel is opened. `checked_timeout` is ADR-0029 §4's own guard
+        # — one implementation of the rule, reached from both seams — and it returns
+        # a plain `timedelta` rebuilt from the base class's fields, so a subclass
+        # whose `total_seconds` raises decides nothing after the claim has landed.
+        duration = checked_timeout(timeout)
         checked = revalidated_call(call)
         if checked.request.tool != self._declaration:
             msg = (
@@ -1177,15 +1243,46 @@ class WebSearchEgress:
 
         async def act(remaining: timedelta) -> ToolResult:
             nonlocal outcome
+            entered_with = pending_cancellations()
+            deadline = asyncio.timeout(remaining.total_seconds())
             try:
-                async with asyncio.timeout(remaining.total_seconds()):
+                async with deadline:
                     outcome = await self._asked(binding, origin=origin, query=query)
+            except asyncio.CancelledError as cancellation:
+                if pending_cancellations() > entered_with:
+                    # An external cancellation: delivered onward unchanged, and
+                    # `consumed_call` completes the claim with the declaration's
+                    # `interrupted_outcome` and an `UNKNOWN` cost before it leaves
+                    # (ADR-0060 §1, ADR-0192 §3, ADR-0241 §7).
+                    raise
+                # ADR-0031 §2's invented cancellation — the count did not move, so
+                # nothing was cancelled and this is a fault the callable raised.
+                # ADR-0241 §7 says what it must *not* become: not a teardown that
+                # ends the turn, and not an outcome. So it leaves as an
+                # `AssistantError`, which is what reaches ADR-0226 §5's degradation
+                # and §8's `SEARCH_FAILED`. The claim is left open, exactly as it is
+                # for a `TransportPinError` raised at the same point — the honest
+                # state for a send that may have happened (§6).
+                msg = (
+                    f"{self._declaration.id}: the searcher raised a cancellation with "
+                    f"nothing cancelled, so the search did not complete"
+                )
+                raise ToolError(msg) from cancellation
             except TimeoutError:
-                # ADR-0029 §4's deadline, reached inside the claim: the completion
-                # below still lands, because a claim is owed one on every exit this
-                # frame observes (ADR-0192 §3).
-                outcome = _refused(SearchRefusal.TRANSPORT_FAILED)
-            return _result_of(outcome, self._declaration)
+                # **Classification keys on whether *this* deadline fired, never on
+                # the exception's type** (ADR-0241 §7). `Timeout.expired()` is the
+                # seam's own state and no callable can reset it; a `TimeoutError` an
+                # upstream library raised for its own reasons leaves it `False`, and
+                # that is the transport's failure rather than this seam's expiry.
+                #
+                # Either way the completion below still lands, because a claim is
+                # owed one on every exit this frame observes (ADR-0192 §3).
+                outcome = _refused(
+                    SearchRefusal.DEADLINE_EXPIRED
+                    if deadline.expired()
+                    else SearchRefusal.TRANSPORT_FAILED
+                )
+            return _result_of(outcome, self._declaration, duration)
 
         async def consume(remaining: timedelta) -> ToolResult:
             return await consumed_call(
@@ -1204,7 +1301,10 @@ class WebSearchEgress:
                 # searcher's own registered original.
                 estimate=checked.request.tool.cost,
                 definition=self._declaration,
-                timeout=self._timeout,
+                # ADR-0194 §3: the admission is awaited **inside** this deadline and
+                # `act` is handed what is left of it, so the two are one window and
+                # not two (ADR-0241 §1's admission clause, and §12's Arm 12).
+                timeout=duration,
                 act=consume,
             )
         except SpendCeilingError, SpendUndeterminedError:
@@ -1215,10 +1315,14 @@ class WebSearchEgress:
             return _refused(SearchRefusal.SPEND_REFUSED)
         if outcome is None:
             # `admitted_call` returned without entering `act`: the deadline expired
-            # inside or immediately after the admission (ADR-0029 §4). No claim was
-            # appended and no channel was opened, and the honest class is the one a
-            # deadline gets everywhere else here.
-            return _refused(SearchRefusal.TRANSPORT_FAILED)
+            # inside or immediately after the admission (ADR-0029 §4, ADR-0194 §3).
+            # **No claim was appended, so no completion row is written** — ADR-0192
+            # §1's placement relied upon and not moved, and inventing a row for a
+            # call that provably never ran would be the opposite error to the one
+            # ADR-0241 §5 corrects. The `ToolResult` `admitted_call` returned for
+            # that exit is dropped here for the same reason: nothing appended a claim
+            # for it to complete.
+            return _refused(SearchRefusal.DEADLINE_EXPIRED)
         return outcome
 
     async def _asked(self, binding: EgressBinding, *, origin: str, query: str) -> SearchOutcome:
@@ -1393,7 +1497,6 @@ __all__ = [
     "WEB_SEARCH",
     "WEB_SEARCH_ID",
     "WEB_SEARCH_SOURCE_NAME",
-    "WEB_SEARCH_TIMEOUT",
     "WebSearchEgress",
     "checked_search_cost",
 ]

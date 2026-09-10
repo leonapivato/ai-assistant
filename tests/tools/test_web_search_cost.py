@@ -75,6 +75,10 @@ CODE: Final = "USD"
 #: **this** grant rather than merely to have set the field.
 GRANT_ID: Final = "g-search"
 
+#: The bound every search here passes (ADR-0241 §1). Nothing in this file is about
+#: the deadline, so it is generous enough that no case reaches it by accident.
+_A_BOUND: Final = timedelta(seconds=30)
+
 
 def _at() -> datetime:
     return NOW
@@ -295,7 +299,7 @@ async def test_a_zero_figure_projects_zero_at_the_gate(*, figure: Decimal, admit
         subject.trail, proposal=await request(subject, tool=subject.declaration)
     )
 
-    outcome = await subject.searcher.search(call)
+    outcome = await subject.searcher.search(call, timeout=_A_BOUND)
 
     assert (outcome.refusal is None) is admitted
     if not admitted:
@@ -510,9 +514,17 @@ def test_the_search_disposition_enumeration_carries_no_member_for_a_cost() -> No
         "RULING_UNAVAILABLE",
         "SPEND_REFUSED",
         "TRANSPORT_FAILED",
+        # ADR-0241 §4's seventeenth, beside the member it was split out of: an
+        # elapsed-time bound firing, which is a bound to size or a provider to change
+        # where `TRANSPORT_FAILED` is an outage. It names a stage and no cost either.
+        "DEADLINE_EXPIRED",
         "PROVIDER_REFUSED",
         "RESPONSE_TOO_LARGE",
         "UNATTESTED",
+        # ADR-0241 §8's eighteenth, for a fault the searcher raised after the ruling
+        # (issue #2112). A stage, and no cost: a store, ledger or authorisation fault
+        # is not a ceiling, so ADR-0236 §5's collapse is untouched by it too.
+        "SEARCH_FAILED",
     ]
     assert not [member for member in SearchDisposition if "COST" in member.name]
 
@@ -617,7 +629,7 @@ async def test_a_figure_in_another_currency_rules_allow_and_is_refused_at_the_ga
     call = await authorised_search(
         subject.trail, proposal=await request(subject, tool=subject.declaration)
     )
-    outcome = await subject.searcher.search(call)
+    outcome = await subject.searcher.search(call, timeout=_A_BOUND)
 
     assert ruled.outcome is PermissionOutcome.ALLOW, "the policy reads a PER_CALL basis"
     assert ruled.authorised_by == GRANT_ID
@@ -649,7 +661,7 @@ async def _searched(subject: Built, *, decision_id: str) -> Any:
         proposal=await request(subject, tool=subject.declaration),
         decision_id=decision_id,
     )
-    return await subject.searcher.search(call)
+    return await subject.searcher.search(call, timeout=_A_BOUND)
 
 
 def _completions(rows: Any) -> list[ToolCost | None]:

@@ -3651,15 +3651,66 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- How long one search may take (ADR-0241 §1, §3) --------------------
+    # **The third of the three bounds this system puts on a search, and it is a
+    # different quantity from the other two** (ADR-0241 §9). The call allowance
+    # below counts provider calls per conversation; ADR-0194's ceilings over
+    # ADR-0236's declared figure bound monetary spend; this bounds **elapsed time**
+    # for one call, enforced inside `WebSearcher.search` and reported as
+    # `SearchRefusal.DEADLINE_EXPIRED`. No implementation collapses any two, derives
+    # one from another, or reports one under another's member.
+    #
+    # **A `Settings` field rather than the module constant it replaces, because a
+    # constant an operator cannot reach is a bound nobody can size** (§3). The tree
+    # held this figure in `tools/web_search.py` with a constructor override no
+    # composition root passed, so thirty seconds was not configurable in any
+    # deployment; a provider whose tail latency does not fit it was a code change.
+    # `WEB_SEARCH_TIMEOUT` and that override are both gone — the bound comes from one
+    # place, and a searcher holding a second one would be a searcher able to disagree
+    # with its caller about what window it is running in.
+    #
+    # **Thirty seconds, unchanged, and it is the figure the tree already ran.**
+    # ADR-0241 relocates a bound and reclassifies its expiry; it retunes nothing.
+    #
+    # **It ships with a value rather than meaning "unbounded" when unset** (§3), for
+    # `search_calls_per_conversation`'s reason below: ADR-0194 §1's "unset means
+    # unbounded" governs a monetary ceiling an operator chooses, and `search`'s
+    # parameter has no spelling for absent anyway.
+    #
+    # **`orchestration` reads it and passes it at the call** (§3). The composition
+    # root hands the value to `SearchServicer` — the one site holding the
+    # `WebSearcher` — and that site passes it as `timeout` on every `search`. No
+    # component below `orchestration` reads this field.
+    #
+    # **Deployment-wide and not per operation.** ADR-0228 §4 keys a planning budget
+    # on the operation because two operations of one audience have different latency
+    # tolerances, and §1 makes the bound a parameter precisely so a per-operation
+    # figure stays a later `Settings` or ADR decision rather than a Protocol change.
+    # ADR-0241 §13 defers that figure with its trigger.
+    search_call_deadline: _DurationSetting = Field(
+        default=timedelta(seconds=30),
+        gt=timedelta(0),
+        description=(
+            "How long one web search may take over the work "
+            "`WebSearcher.search` owns — the revalidation, the spend admission, "
+            "the credential read, the channel, the response read and the "
+            "transcription (ADR-0241 §1, §3). Strictly positive. It does **not** "
+            "bound either ledger append, which ADR-0192 §3 pins unbounded by that "
+            "seam. An expiry is `SearchRefusal.DEADLINE_EXPIRED` and spends the "
+            "conversation's admitted call like any other outcome."
+        ),
+    )
+
     # --- How much searching one conversation may do (ADR-0238 §8) ---------
     # **The one field ADR-0238 adds, and it bounds provider calls per conversation.**
     # Not time: §8 deletes an earlier revision's elapsed counter, claim handle and
     # settlement member outright and states that "no clause here states a
-    # per-conversation bound on wall-clock search time". Nothing in the corpus bounds
-    # a single servicing's duration — `WebSearcher.search` takes no timeout and no
-    # deadline, and ADR-0029 §4's `timeout` is `ToolInvoker.invoke`'s, which does not
-    # reach a seam ADR-0231 §5 ruled not a registered tool — so there is nothing to
-    # derive a per-conversation figure from. §16 defers the bound with its trigger.
+    # per-conversation bound on wall-clock search time". ADR-0241 §1 supplies the
+    # per-call quantity §8 recited as missing — `search_call_deadline` above — and
+    # ADR-0241 amends that premise and nothing §8 decided: this field still counts
+    # calls and not time, there is still no stored elapsed counter, provisional charge
+    # or claim handle, and a **per-conversation** bound on elapsed search time stays
+    # deferred (ADR-0238 §16, ADR-0241 §13) rather than derived from the two figures.
     #
     # **It ships with a value rather than meaning "unbounded" when unset.**
     # ADR-0194 §1's "unset means unbounded" governs a *monetary* ceiling an operator

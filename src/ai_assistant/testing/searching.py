@@ -25,7 +25,9 @@ needs to drive its own disposition (§13):
   content a test chose so that an assertion about a reply is not an assertion about
   a coincidence; and
 * a **refusal**, per query, into any :class:`SearchRefusal` member — so a consumer
-  can reach each of the five dispositions §13 carries across without a provider.
+  can reach each of the six dispositions §13 and ADR-0241 §4 carry across without a
+  provider. :attr:`SearchRefusal.DEADLINE_EXPIRED` is reachable that way *and* by
+  holding a call open past its bound, which is the honest route.
 
 **And a fourth, which is what makes the cancellation clause testable at all.**
 :meth:`search` runs inside a
@@ -35,6 +37,13 @@ arrived at an await. Without it the clause passes vacuously: a fake that complet
 immediately can only be cancelled before it starts, which exercises none of the code
 an implementation would use to catch a ``CancelledError`` during a provider call and
 convert it into a refusal.
+
+**The same lever is what makes ADR-0241 §1's deadline testable here.** A call held at
+that suspension and *not* released outlives whatever bound its caller stated, so the
+suite's deadline arm runs against this fake rather than being skipped — and the two
+cases stay distinguishable, because a cancellation delivered there still re-raises
+and an expiry there returns
+:attr:`~ai_assistant.core.types.SearchRefusal.DEADLINE_EXPIRED` (§7).
 
 **The two bounds are the fake's own, for the concrete searcher's reasons** (§17).
 ``SearchOutcome`` carries neither, so a suite reads them off the harness rather than
@@ -54,8 +63,9 @@ against; two of those three are unconstructable anyway, which is the point of
 
 from __future__ import annotations
 
+import asyncio
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Final, final
 from uuid import uuid4
@@ -501,26 +511,73 @@ class FakeWebSearcher:
         parameters: dict[str, FrozenJson] = {"origin": self._origin, "query": query}
         return ActionRequest(tool=self._declaration, parameters=parameters)
 
-    async def search(self, call: ToolCall, /) -> SearchOutcome:
-        """Return the scripted answer for the query ``call`` carries.
+    async def search(self, call: ToolCall, /, *, timeout: timedelta) -> SearchOutcome:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, §2); a caller wrapping this in `asyncio.timeout` cancels the searcher mid-await and cannot classify its own expiry
+        """Return the scripted answer for the query ``call`` carries, under ``timeout``.
+
+        **The bound is honoured and not merely accepted** (ADR-0241 §11). A fake that
+        took the parameter and ignored it would leave the suite's deadline arm running
+        against the production searcher alone — and the whole point of the parameter
+        being on the *contract* is that every ``WebSearcher`` this system wires is
+        bounded on the day it is written, the canonical fake included. So a call held
+        open by :meth:`suspend_next` past ``timeout`` comes back
+        :attr:`SearchRefusal.DEADLINE_EXPIRED`, which is what lets a consumer drive
+        its own ``deadline_expired`` disposition without a provider or a clock.
 
         Args:
             call: The authorised call. Its ``request.parameters["query"]`` is what
                 selects the scripted answer, so a test scripts by the query it
                 expects to have been composed.
+            timeout: The caller's bound on this call (ADR-0241 §1). **Required and
+                strictly positive**, checked here rather than at the suspension, so
+                a consumer that passed a value no deployment could pass is refused at
+                the call rather than answered.
 
         Returns:
             The outcome scripted for that query: its refusal where one was scripted,
-            :attr:`SearchRefusal.NO_RESULT` where every scripted content is beyond
-            this fake's content bound, and otherwise up to ``max_results`` records
-            carrying those contents in order.
+            :attr:`SearchRefusal.DEADLINE_EXPIRED` where ``timeout`` expired while
+            this fake was held open, :attr:`SearchRefusal.NO_RESULT` where every
+            scripted content is beyond this fake's content bound, and otherwise up to
+            ``max_results`` records carrying those contents in order.
 
         Raises:
+            ValueError: If ``timeout`` is not a ``timedelta`` or is not strictly
+                positive — ADR-0241 §1's guard, and this fake states it rather than
+                inheriting it, because "there is always a bound" is a claim about
+                every implementation. Refused **before** the call is recorded, so a
+                consumer asserting that a refused value reached nothing has the
+                absence of a row to assert over.
             CancelledError: Re-raised unchanged when a call armed by
                 :meth:`suspend_next` is cancelled from outside while suspended, and
                 converted into neither an outcome nor a refusal (ADR-0060, §17).
+                **Never converted into ``DEADLINE_EXPIRED``** (ADR-0241 §7): a
+                cancellation this fake did not itself issue is not its expiry.
         """
+        if not isinstance(timeout, timedelta) or timeout <= timedelta(0):
+            msg = f"timeout must be a strictly positive timedelta (ADR-0241 §1); got {timeout!r}"
+            raise ValueError(msg)
         self.searched.append(call)
+        try:
+            async with asyncio.timeout(timeout.total_seconds()):
+                return await self._answered(call)
+        except TimeoutError:
+            # This fake's own deadline, and only ever this one: nothing it awaits
+            # raises a `TimeoutError` of its own accord, so there is no second
+            # condition for `Timeout.expired()` to tell apart here.
+            return SearchOutcome(refusal=SearchRefusal.DEADLINE_EXPIRED)
+
+    async def _answered(self, call: ToolCall) -> SearchOutcome:
+        """The scripted outcome, from inside the modelled resource.
+
+        Split out of :meth:`search` so the bound wraps the suspension rather than
+        being checked around it: a fake that awaited its resource outside the
+        deadline would answer late and call it a success.
+
+        Args:
+            call: The authorised call, whose query selects the script.
+
+        Returns:
+            The outcome.
+        """
         async with self._resource.held():
             query = call.request.parameters.get("query")
             refusal = self._refusals.get(query) if isinstance(query, str) else None

@@ -61,8 +61,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from datetime import timedelta
+from typing import TYPE_CHECKING, Final
 
 import pytest
 from pydantic import ValidationError
@@ -79,6 +80,21 @@ if TYPE_CHECKING:
 #: A query a suite hands a subject where the words themselves do not matter. Every
 #: hook is free to ignore it and name its own.
 QUERY = "tallest building in porto"
+
+#: The bound every case here passes unless it is about the bound (ADR-0241 §1).
+#: Generous enough that no arrangement reaches it by accident, so a case that fails
+#: is failing on the clause it is about rather than on a machine's load.
+A_BOUND: Final = timedelta(seconds=30)
+
+#: The bound the deadline case sets, small enough that a real wait past it is a
+#: fraction of a second. A **real** duration and not a fake clock, because what
+#: ADR-0241 §12's Arm 1 asks for is that the search stops waiting, and a fake clock
+#: asserts nothing about that.
+_SHORT_BOUND: Final = timedelta(milliseconds=50)
+
+#: How long a case will wait for a subject to answer once it has been released.
+#: Failing here is a hang, and a hang is what this suite exists to catch.
+_WAIT_SECONDS: Final = 5.0
 
 #: What a failure of the result-count case means, in one place (ADR-0231 §5, §10). A
 #: searcher that minted more than it was configured for is one whose contribution to
@@ -106,10 +122,13 @@ class ScriptedSearch:
     Attributes:
         searcher: The subject, ready to be called.
         call: The authorised call that draws the prepared answer out of it.
+        timeout: The bound to pass at that call (ADR-0241 §1). Defaults to
+            :data:`A_BOUND`, which every answering arrangement fits inside.
     """
 
     searcher: WebSearcher
     call: ToolCall
+    timeout: timedelta = field(default=A_BOUND)
 
 
 @dataclass(frozen=True)
@@ -119,10 +138,17 @@ class ScriptedRefusal:
     Attributes:
         searcher: The subject, ready to be called.
         call: The authorised call that draws the prepared refusal out of it.
+        timeout: The bound to pass at that call. Defaults to :data:`A_BOUND`, and is
+            a field rather than a constant because one member — ADR-0241 §4's
+            :attr:`~ai_assistant.core.types.SearchRefusal.DEADLINE_EXPIRED` — is
+            reached by the bound itself expiring, so the harness that arranges a real
+            cause for it is the party that knows which bound reaches it. A harness
+            scripting that member directly leaves this alone.
     """
 
     searcher: WebSearcher
     call: ToolCall
+    timeout: timedelta = field(default=A_BOUND)
 
 
 @dataclass(frozen=True)
@@ -241,7 +267,7 @@ class WebSearcherContract:
     # --- the signatures are the seam (ADR-0231 §17) -------------------------
 
     @pytest.mark.parametrize("member", ["request", "search"])
-    def test_each_acting_member_takes_exactly_one_positional_parameter(
+    def test_each_acting_member_takes_exactly_one_positional_value_parameter(
         self, searcher: WebSearcher, member: str
     ) -> None:
         """§17: "Both value parameters are **positional-only**".
@@ -255,21 +281,144 @@ class WebSearcherContract:
         ``VAR_POSITIONAL`` and ``VAR_KEYWORD`` are refused for the same reason a
         second named parameter is: ``search(self, call, /, *args, **kwargs)`` is a
         caller able to widen the input, whatever its first parameter is called.
+
+        **This half is unchanged by ADR-0241 §1** — ``call`` stays positional-only,
+        and the duration it adds is keyword-only and is not a value parameter. The
+        no-keyword-parameters half, which this case used to assert of *both* members,
+        is now :meth:`test_request_takes_no_keyword_parameters`' alone; ``search``'s
+        own shape is :meth:`test_search_takes_one_keyword_only_parameter_named_timeout`.
         """
         parameters = [
             parameter
             for name, parameter in inspect.signature(
                 getattr(type(searcher), member)
             ).parameters.items()
-            if name != "self"
+            if name != "self" and parameter.kind is not inspect.Parameter.KEYWORD_ONLY
         ]
 
         assert [parameter.kind for parameter in parameters] == [
             inspect.Parameter.POSITIONAL_ONLY
         ], (
-            f"WebSearcher.{member} takes exactly one positional-only parameter and no "
-            f"keyword parameters (ADR-0231 §17). Got: {parameters!r}"
+            f"WebSearcher.{member} takes exactly one positional-only value parameter "
+            f"(ADR-0231 §17, ADR-0241 §1). Got: {parameters!r}"
         )
+
+    def test_request_takes_no_keyword_parameters(self, searcher: WebSearcher) -> None:
+        """§17's no-keyword clause, now over ``request`` alone (ADR-0241 §14).
+
+        ADR-0241 §1 gives ``search`` exactly one keyword-only parameter and moves
+        ADR-0231 §17's exact-signature declaration *for that member alone*;
+        ``request``'s signature is untouched, and this case is what keeps that true
+        rather than being relaxed alongside its sibling's.
+        """
+        parameters = [
+            parameter
+            for name, parameter in inspect.signature(type(searcher).request).parameters.items()
+            if name != "self"
+        ]
+
+        assert all(
+            parameter.kind is inspect.Parameter.POSITIONAL_ONLY for parameter in parameters
+        ), f"WebSearcher.request takes no keyword parameters (ADR-0231 §17). Got: {parameters!r}"
+
+    def test_search_takes_one_keyword_only_parameter_named_timeout(
+        self, searcher: WebSearcher
+    ) -> None:
+        """ADR-0241 §12's Arm 7: exactly one keyword-only parameter, named ``timeout``.
+
+        Checked against the **runtime** signature, so an implementation that grew a
+        second input fails here rather than at a review. Exactly one, because §1's
+        parameter "is a duration and nothing else": a searcher that added a second
+        keyword would be widening the seam ADR-0231 §17 closes, and one that made
+        ``timeout`` *optional* would be reintroducing the spelling for "unbounded"
+        that §1 says the contract does not have — which the default check below is
+        what catches.
+        """
+        keywords = [
+            parameter
+            for parameter in inspect.signature(type(searcher).search).parameters.values()
+            if parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        ]
+
+        assert [parameter.name for parameter in keywords] == ["timeout"], (
+            f"WebSearcher.search takes exactly one keyword-only parameter, named "
+            f"`timeout` (ADR-0241 §1). Got: {keywords!r}"
+        )
+        assert keywords[0].default is inspect.Parameter.empty, (
+            "`timeout` is required and has no default, so there is no spelling for "
+            f"an unbounded call (ADR-0241 §1). Got: {keywords[0].default!r}"
+        )
+
+    # --- the bound the caller states (ADR-0241 §1, §12's Arms 6 and 1) ------
+
+    @pytest.mark.parametrize(
+        "bound",
+        [
+            pytest.param(30, id="not-a-timedelta"),
+            pytest.param(None, id="none"),
+            pytest.param("30s", id="a-string"),
+            pytest.param(timedelta(0), id="zero"),
+            pytest.param(timedelta(seconds=-1), id="negative"),
+        ],
+    )
+    async def test_a_bound_outside_its_domain_is_refused(self, bound: object) -> None:
+        """ADR-0241 §12's Arm 6: a ``timeout`` no implementation could run under.
+
+        **A suite clause, because it is what makes "there is always a bound" true of
+        every ``WebSearcher`` this system ever wires** (§12). The annotation is not
+        the enforcement — the value crosses a Protocol boundary from a possibly
+        untyped caller — so each implementation checks it, and each is held to the
+        same domain here rather than to whatever its own constructor happened to
+        police.
+
+        Zero and a negative duration are refused rather than treated as instantly
+        expired, for ADR-0029 §4's reason: expiry is delivered at an await point, so
+        an implementation reading "expired" as "do not call" would be promising
+        something the event loop does not keep.
+
+        **What was *not* touched is each implementation's own arm**, not this one's:
+        §12 asks that nothing is revalidated, no credential is read, no gate is
+        consulted, no claim is appended and no channel is opened, and a generic suite
+        holds none of those doubles to look at.
+        """
+        subject = await self.searching(1)
+
+        with pytest.raises(ValueError, match=r"timeout|deadline"):
+            await subject.searcher.search(subject.call, timeout=bound)  # type: ignore[arg-type]  # the annotation is what this case ignores
+
+    async def test_a_search_held_past_its_bound_comes_back_as_an_expiry(self) -> None:
+        """ADR-0241 §1 and §4, at the one point a suite can hold a subject open.
+
+        Driven through the same lever ADR-0060's case uses, and for the same reason:
+        only the implementation knows where its suspension is, and a bound that
+        expires before the subject has demonstrably reached one exercises none of the
+        code that classifies an expiry.
+
+        **The wait is real and the bound is a real duration** (§12's Arm 1): a fake
+        clock would assert nothing about the property the milestone's acceptance
+        sentence names, which is that a deliberately stalled search is *terminated*.
+
+        **The release is what makes the answer observable, not what produces it.**
+        ``LoopSuspension`` defers a cancellation until the work it models has
+        finished — ADR-0054's shape, which the fake exists to reproduce — so the
+        deadline fires while the subject is held and the classification is delivered
+        once the modelled work lets go. That is ADR-0241 §7's "the deadline stops the
+        waiting, not the work" made observable rather than asserted.
+        """
+        subject = await self.gated()
+        gate = subject.arm()
+        call = asyncio.ensure_future(subject.searcher.search(subject.call, timeout=_SHORT_BOUND))
+        await gate.reached()
+
+        await asyncio.sleep(_SHORT_BOUND.total_seconds() * 3)
+        gate.release()
+
+        outcome = await asyncio.wait_for(call, _WAIT_SECONDS)
+        assert outcome.refusal is SearchRefusal.DEADLINE_EXPIRED, (
+            "a search whose bound expired is `DEADLINE_EXPIRED` and never "
+            f"`TRANSPORT_FAILED` (ADR-0241 §4). Got: {outcome.refusal!r}"
+        )
+        assert outcome.records == ()
 
     # --- what a request proposes (ADR-0231 §17) -----------------------------
 
@@ -359,7 +508,7 @@ class WebSearcherContract:
             await self.refusing(SearchRefusal.NO_RESULT),
         ):
             before = prepared.searcher.name
-            await prepared.searcher.search(prepared.call)
+            await prepared.searcher.search(prepared.call, timeout=prepared.timeout)
 
             assert before == prepared.searcher.name
             assert before.strip() == before
@@ -377,8 +526,8 @@ class WebSearcherContract:
         succeeding = await self.searching(1)
         refusing = await self.refusing(SearchRefusal.TRANSPORT_FAILED)
 
-        first = await succeeding.searcher.search(succeeding.call)
-        second = await refusing.searcher.search(refusing.call)
+        first = await succeeding.searcher.search(succeeding.call, timeout=succeeding.timeout)
+        second = await refusing.searcher.search(refusing.call, timeout=refusing.timeout)
 
         assert bool(first.records) != (first.refusal is not None)
         assert bool(second.records) != (second.refusal is not None)
@@ -394,7 +543,7 @@ class WebSearcherContract:
         bound = self.results_bound()
         subject = await self.searching(bound + 2)
 
-        outcome = await subject.searcher.search(subject.call)
+        outcome = await subject.searcher.search(subject.call, timeout=subject.timeout)
 
         assert len(outcome.records) <= bound, _OVER_THE_COUNT.format(
             bound=bound, count=len(outcome.records)
@@ -412,7 +561,7 @@ class WebSearcherContract:
         """
         subject = await self.searching(self.results_bound())
 
-        outcome = await subject.searcher.search(subject.call)
+        outcome = await subject.searcher.search(subject.call, timeout=subject.timeout)
 
         assert outcome.records
         for record in outcome.records:
@@ -438,7 +587,7 @@ class WebSearcherContract:
         that reached for a clock of its own fails at the value, not at a review.
         """
         subject = await self.searching(1)
-        outcome = await subject.searcher.search(subject.call)
+        outcome = await subject.searcher.search(subject.call, timeout=subject.timeout)
         assert outcome.reported_at is not None
 
         with pytest.raises(ValidationError):
@@ -462,7 +611,7 @@ class WebSearcherContract:
         """
         subject = await self.refusing(refusal)
 
-        outcome = await subject.searcher.search(subject.call)
+        outcome = await subject.searcher.search(subject.call, timeout=subject.timeout)
 
         assert outcome.refusal is refusal
         assert outcome.records == ()
@@ -480,7 +629,7 @@ class WebSearcherContract:
         """
         subject = await self.gated()
         gate = subject.arm()
-        call = asyncio.ensure_future(subject.searcher.search(subject.call))
+        call = asyncio.ensure_future(subject.searcher.search(subject.call, timeout=A_BOUND))
         await gate.reached()
 
         call.cancel()

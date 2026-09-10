@@ -170,6 +170,11 @@ if TYPE_CHECKING:
 
 _NOW: Final = datetime(2026, 9, 4, 10, 0, tzinfo=UTC)
 
+#: The bound this file's servicers are wired with (ADR-0241 §3). Generous, because
+#: no case here is about the deadline: `Settings.search_call_deadline`'s own default
+#: is thirty seconds and nothing below reaches even a fraction of it.
+_DEADLINE: Final = timedelta(seconds=30)
+
 #: The word the exit's search clause turns on. It is in the provider's snippet and in
 #: nothing the store holds, so a reply carrying it can only have come from the search.
 _DISTINCTIVE: Final = "quinoa-flavoured stroopwafel"
@@ -349,9 +354,9 @@ class _CostedSearcher:
         proposed = await self.inner.request(query)
         return None if proposed is None else proposed.model_copy(update={"tool": _COSTED})
 
-    async def search(self, call: ToolCall, /) -> SearchOutcome:
-        """Perform the authorised search."""
-        return await self.inner.search(call)
+    async def search(self, call: ToolCall, /, *, timeout: timedelta) -> SearchOutcome:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, §2)
+        """Perform the authorised search, under the bound its caller stated."""
+        return await self.inner.search(call, timeout=timeout)
 
 
 def _binder(*, definition: Any = _COSTED) -> FakeEgressBinder:
@@ -398,6 +403,7 @@ def _servicer(  # noqa: PLR0913 — one knob per contract ADR-0231 §6 names; th
         ),
         now=lambda: at,
         id_factory=lambda: f"d-{next(ids)}",
+        deadline=_DEADLINE,
     )
 
 
@@ -1038,12 +1044,19 @@ def test_the_three_vocabularies_are_closed_at_the_sizes_adr_0231_fixes() -> None
     **Sixteen, since ADR-0238 §11**, which supersedes §13's closure "in that clause's
     count alone": the fifteen it names, their values, their injective mapping, the
     no-message rule and its exclusion of ``NO_RESULT`` all stand entire, and one member
-    is added for a servicing ``admit_search`` refused. ADR-0241 §8 closes the
-    enumeration at **eighteen** and the two it adds are that lane's, not this one's.
+    is added for a servicing ``admit_search`` refused.
+
+    **Seven and eighteen, since ADR-0241.** §4 supersedes ADR-0231 §17's six "in that
+    count alone" — the six it names, their values, their lower-cased spellings, the
+    added-to-and-never-renamed rule and the raises-for-no-source-reason posture all
+    stand entire — and adds ``DEADLINE_EXPIRED``. §8 moves ADR-0238 §11's sixteen in
+    the same narrow way and adds ``DEADLINE_EXPIRED`` and ``SEARCH_FAILED``, closing
+    the disposition vocabulary at eighteen with "no lane reads this as licence to add
+    a nineteenth".
     """
     assert len(QueryRefusal) == 4
-    assert len(SearchRefusal) == 6
-    assert len(SearchDisposition) == 16
+    assert len(SearchRefusal) == 7
+    assert len(SearchDisposition) == 18
     assert all(member.value == member.name.lower() for member in SearchDisposition), (
         "each valued by its lower-cased name, as every closed vocabulary here is"
     )
@@ -1078,7 +1091,14 @@ def test_every_refusal_maps_to_a_distinct_disposition_and_no_result_maps_to_none
         # six above are: no refusal vocabulary supplies it, because the stage it names
         # runs **before** a composer or a searcher is reached at all.
         SearchDisposition.NOT_ADMITTED,
-    }, "and the seven members no refusal vocabulary supplies are the servicer's own stages"
+        # ADR-0241 §8's eighteenth, likewise the servicer's own: `SearchRefusal`
+        # crosses the seam and every member of it is a value `search` **returns**,
+        # where a fault at the send is a **raise** — "converting them into returns
+        # would give the seam a value for conditions its caller must be free to see as
+        # exceptions". `DEADLINE_EXPIRED` is *not* here, because §4 carries it across
+        # one for one like the rest.
+        SearchDisposition.SEARCH_FAILED,
+    }, "and the eight members no refusal vocabulary supplies are the servicer's own stages"
 
 
 # --------------------------------------------------------------------------- #
@@ -1793,11 +1813,13 @@ class _FaultingSearcher:
         """Propose the search, exactly as the fake it wraps does."""
         return await self.inner.request(query)
 
-    async def search(self, call: ToolCall, /) -> SearchOutcome:
+    async def search(self, call: ToolCall, /, *, timeout: timedelta) -> SearchOutcome:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, §2)
         """Raise the fault this searcher was built with.
 
         Args:
             call: The authorised call, unused.
+            timeout: The caller's bound, unused: this searcher never gets far enough
+                to run under one, which is the point of ADR-0241 §8's member.
 
         Raises:
             Exception: Whatever this fake was built with.
@@ -1828,6 +1850,14 @@ async def test_a_fault_the_searcher_raised_degrades_the_servicing(error: Excepti
     The other kinds' net is deliberately unwidened by this — ADR-0230 §4's fetch seam
     raises nothing, and the hop and the query raise ``MemoryStoreError`` — so a fault
     reaches the degradation only from the kind whose seam can produce one.
+
+    **And since ADR-0241 §8 it names itself in the audit too** (§12's Arm 8, issue
+    #2112). The degradation is unchanged and this is not a second mechanism: what
+    changed is that the field is no longer left empty, so a fault at the send stops
+    reading in a population exactly like a turn whose planner never asked for a search.
+    Both parametrisations are asserted to record the **same** member, because §8 rules
+    "one member and not a family" — a later lane splitting the store fault from the
+    authorisation one is moving a decision, not filling a gap.
     """
     memory = FakeMemoryStore(now=_clock)
     await memory.add(_belief("belief-1", "Porto has a river"))
@@ -1850,6 +1880,10 @@ async def test_a_fault_the_searcher_raised_degrades_the_servicing(error: Excepti
     assert entry["new"] == 0
     assert entry["returned"] == 0
     assert entry["kinds"] == (ReadKind.WEB_SEARCH.value,), "and the record says which kind"
+    assert entry["disposition"] == SearchDisposition.SEARCH_FAILED.value, (
+        "ADR-0241 §8: a fault the searcher raised after the ruling has a member of its "
+        "own, and it is one member for every fault class that reaches this seam"
+    )
 
 
 async def test_the_degradation_line_carries_the_class_and_no_tier_1_value(

@@ -30,8 +30,10 @@ declares, which is ADR-0092 §3's rule made testable rather than merely stated.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from collections.abc import Mapping
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
@@ -46,8 +48,11 @@ from web_search_harness import (
     REPORTED_AT,
     GatedTransport,
     InterruptingTransport,
+    RaisingTransport,
     RefusingGate,
     ReprovisioningRecords,
+    SlowGate,
+    StallingTransport,
     answering,
     authorised_search,
     body,
@@ -60,6 +65,7 @@ from web_search_harness import (
     suspendable,
 )
 from web_searcher_contract import (
+    A_BOUND,
     ConnectedAccount,
     GatedSearch,
     ScriptedRefusal,
@@ -71,16 +77,19 @@ from ai_assistant.core.errors import (
     AuthorisationSpentError,
     ConnectionStoreError,
     ToolBindingError,
+    ToolError,
     TransportError,
 )
 from ai_assistant.core.types import (
+    CostBasis,
     MemorySource,
     PermissionOutcome,
     SearchRefusal,
     ToolOutcome,
 )
 from ai_assistant.orchestration.recovery import RecoveryScan
-from ai_assistant.testing import FakePlanStore
+from ai_assistant.testing import FakeAuditTrail, FakePlanStore
+from ai_assistant.tools import web_search
 from ai_assistant.tools.egress import TransportPinError
 from ai_assistant.tools.web_search import (
     MAX_JSON_DEPTH,
@@ -98,11 +107,23 @@ pytestmark = pytest.mark.anyio
 #: characters rather than a paragraph. Nothing in the contract is a function of it.
 _SMALL_CONTENT_BOUND: Final = 64
 
+#: The bound a case sets when it wants the deadline to fire (ADR-0241 §1). Small
+#: enough that the wait is a fraction of a second and large enough that a loaded
+#: machine still reaches the stage under test before it expires.
+_EXPIRING_BOUND: Final = timedelta(milliseconds=200)
 
-async def _searched(**arrangement: Any) -> Any:
+#: How much longer than its bound an expiring search may take before the case calls
+#: it a hang. Generous, because what Arm 1 asserts is that the search **stops** —
+#: a tight figure would fail on a busy machine while asserting nothing more.
+_SLACK: Final = timedelta(seconds=5)
+
+
+async def _searched(*, timeout: timedelta = A_BOUND, **arrangement: Any) -> Any:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, §2)
     """Drive one authorised search over a subject arranged by ``arrangement``.
 
     Args:
+        timeout: The bound to pass (ADR-0241 §1). Defaults to a figure no case here
+            reaches by accident, so a case that fails is failing on its own clause.
         arrangement: Passed straight to ``web_search_harness.built``.
 
     Returns:
@@ -110,7 +131,7 @@ async def _searched(**arrangement: Any) -> Any:
     """
     subject = await built(**arrangement)
     call = await authorised_search(subject.trail, proposal=await request(subject))
-    return await subject.searcher.search(call), subject
+    return await subject.searcher.search(call, timeout=timeout), subject
 
 
 # --------------------------------------------------------------------------- #
@@ -155,7 +176,11 @@ class TestWebSearchEgressContract(WebSearcherContract):
 
     async def refusing(self, refusal: SearchRefusal) -> ScriptedRefusal:
         searcher, call = await self._refusing(refusal)
-        return ScriptedRefusal(searcher=searcher, call=call)
+        # ADR-0241 §4's member is the one a *bound* reaches rather than a script, so
+        # the arrangement below stalls the transport and this hook names the bound
+        # that expires against it. Every other member fits inside the suite's own.
+        bound = _EXPIRING_BOUND if refusal is SearchRefusal.DEADLINE_EXPIRED else A_BOUND
+        return ScriptedRefusal(searcher=searcher, call=call, timeout=bound)
 
     async def gated(self) -> GatedSearch:
         transport = GatedTransport(answering(result()))
@@ -202,6 +227,11 @@ class TestWebSearchEgressContract(WebSearcherContract):
             SearchRefusal.TRANSPORT_FAILED: {
                 "refusal": TransportError("this file connects to nothing")
             },
+            # A **real** stall and a real bound, not a scripted class: ADR-0241 §12's
+            # Arm 1 asks for "a stub origin that connects and never answers", so the
+            # member the suite parametrises over is reached the way a deployment
+            # reaches it.
+            SearchRefusal.DEADLINE_EXPIRED: {"transport": StallingTransport()},
             SearchRefusal.PROVIDER_REFUSED: {
                 "channels": [far_end(response(payload=b"not the documented shape"))]
             },
@@ -904,7 +934,7 @@ async def test_a_call_whose_parameters_were_rewritten_reaches_no_credential() ->
     call.request.__dict__["parameters"] = {"origin": ORIGIN, "query": "a question nobody asked"}
 
     with pytest.raises(ToolBindingError, match="not the call that was authorised"):
-        await subject.searcher.search(call)
+        await subject.searcher.search(call, timeout=A_BOUND)
 
     assert subject.keyring.reads == []
     assert subject.transport.attempts == ()
@@ -926,7 +956,7 @@ async def test_a_call_whose_definition_was_replaced_is_refused_against_the_regis
     call = await authorised_search(subject.trail, proposal=await request(subject, tool=weakened))
 
     with pytest.raises(ToolBindingError, match="not the one this searcher registered"):
-        await subject.searcher.search(call)
+        await subject.searcher.search(call, timeout=A_BOUND)
 
     assert subject.keyring.reads == []
     assert subject.transport.attempts == ()
@@ -970,7 +1000,7 @@ async def test_a_binding_for_another_account_reaches_no_credential(
     )
 
     with pytest.raises(TransportPinError, match=complaint):
-        await subject.searcher.search(call)
+        await subject.searcher.search(call, timeout=A_BOUND)
 
     assert subject.keyring.reads == []
     assert subject.transport.attempts == ()
@@ -991,7 +1021,7 @@ async def test_a_ruled_origin_that_is_not_the_registered_one_reaches_no_channel(
     )
 
     with pytest.raises(TransportPinError, match="not the one this integration is registered for"):
-        await subject.searcher.search(call)
+        await subject.searcher.search(call, timeout=A_BOUND)
 
     assert subject.keyring.reads == []
     assert subject.transport.attempts == ()
@@ -1008,7 +1038,7 @@ async def test_a_call_carrying_no_egress_binding_reaches_nothing() -> None:
     call = await authorised_search(subject.trail, proposal=await request(subject, unbound=True))
 
     with pytest.raises(ToolBindingError, match="carries no egress binding"):
-        await subject.searcher.search(call)
+        await subject.searcher.search(call, timeout=A_BOUND)
 
     assert subject.keyring.reads == []
     assert subject.transport.attempts == ()
@@ -1050,7 +1080,7 @@ async def test_an_account_that_moves_across_the_credential_read_sends_nothing(
     subject = await built(channels=[answering(result())], records=Records(*script))
     call = await authorised_search(subject.trail, proposal=await request(subject))
 
-    outcome = await subject.searcher.search(call)
+    outcome = await subject.searcher.search(call, timeout=A_BOUND)
 
     assert outcome.refusal is SearchRefusal.PROVIDER_REFUSED
     assert subject.keyring.reads == [SLOT], "the credential was read, and then discarded"
@@ -1070,7 +1100,7 @@ async def test_the_slot_asked_for_is_the_one_the_first_read_named() -> None:
     subject = await built(channels=[answering(result())], records=Records(entry(), successor))
     call = await authorised_search(subject.trail, proposal=await request(subject))
 
-    outcome = await subject.searcher.search(call)
+    outcome = await subject.searcher.search(call, timeout=A_BOUND)
 
     assert subject.keyring.reads == [SLOT]
     assert outcome.refusal is SearchRefusal.PROVIDER_REFUSED
@@ -1105,7 +1135,7 @@ async def test_an_account_that_moves_while_the_credential_read_is_suspended_send
     call = await authorised_search(subject.trail, proposal=await request(subject))
 
     gate = ring.suspend_next()
-    search = asyncio.ensure_future(subject.searcher.search(call))
+    search = asyncio.ensure_future(subject.searcher.search(call, timeout=A_BOUND))
     await gate.reached()
     await records._reprovision()
     gate.release()
@@ -1141,7 +1171,7 @@ async def test_no_suspension_is_offered_between_the_record_read_and_the_credenti
     # answers the question the clause asks: had the successor landed by the time the
     # credential was asked for?
     gate = ring.suspend_next()
-    search = asyncio.ensure_future(subject.searcher.search(call))
+    search = asyncio.ensure_future(subject.searcher.search(call, timeout=A_BOUND))
     await gate.reached()
     gate.release()
     outcome = await search
@@ -1164,7 +1194,7 @@ async def test_a_record_that_is_not_connectable_reaches_no_keyring_and_no_channe
     subject = await built(channels=[answering(result())], records=Records(entry(state=None)))
     call = await authorised_search(subject.trail, proposal=await request(subject))
 
-    outcome = await subject.searcher.search(call)
+    outcome = await subject.searcher.search(call, timeout=A_BOUND)
 
     assert outcome.refusal is SearchRefusal.PROVIDER_REFUSED
     assert subject.keyring.reads == []
@@ -1176,7 +1206,7 @@ async def test_a_keyring_holding_nothing_under_the_slot_sends_nothing() -> None:
     subject = await built(channels=[answering(result())], holds=None)
     call = await authorised_search(subject.trail, proposal=await request(subject))
 
-    outcome = await subject.searcher.search(call)
+    outcome = await subject.searcher.search(call, timeout=A_BOUND)
 
     assert outcome.refusal is SearchRefusal.PROVIDER_REFUSED
     assert subject.transport.attempts == ()
@@ -1195,7 +1225,7 @@ async def test_a_first_record_read_that_fails_is_not_converted() -> None:
     call = await authorised_search(subject.trail, proposal=await request(subject))
 
     with pytest.raises(ConnectionStoreError, match="the store is down"):
-        await subject.searcher.search(call)
+        await subject.searcher.search(call, timeout=A_BOUND)
 
     assert subject.keyring.reads == []
     assert subject.transport.attempts == ()
@@ -1271,7 +1301,7 @@ async def test_a_refused_admission_reaches_no_credential_no_channel_and_no_claim
     subject = await built(channels=[answering(result())], gate=gate)
     call = await authorised_search(subject.trail, proposal=await request(subject))
 
-    outcome = await subject.searcher.search(call)
+    outcome = await subject.searcher.search(call, timeout=A_BOUND)
 
     assert outcome.refusal is SearchRefusal.SPEND_REFUSED
     assert gate.admissions == 1, "the gate was consulted"
@@ -1293,7 +1323,7 @@ async def test_an_interruption_on_the_way_to_the_completion_leaves_the_claim_ope
     call = await authorised_search(subject.trail, proposal=await request(subject))
 
     with pytest.raises(KeyboardInterrupt):
-        await subject.searcher.search(call)
+        await subject.searcher.search(call, timeout=A_BOUND)
 
     rows = [row.invocation for row in await subject.trail.export_invocations()]
     assert len(rows) == 1, "the claim, and no completion for it"
@@ -1320,7 +1350,7 @@ async def test_an_interruption_on_the_way_to_the_completion_leaves_the_claim_ope
     # a second search under an authorisation the user gave once.
     opened = len(subject.transport.attempts)
     with pytest.raises(AuthorisationSpentError):
-        await subject.searcher.search(call)
+        await subject.searcher.search(call, timeout=A_BOUND)
 
     assert len(subject.transport.attempts) == opened, "and the refused claim opened nothing"
 
@@ -1456,3 +1486,399 @@ async def test_the_account_identity_is_never_read_out_of_the_binding_into_a_quer
     assert REFERENCE not in written
     assert CREDENTIAL in written, "the credential travels, in its own field"
     assert CREDENTIAL not in request_line, "and never in the request target"
+
+
+# --------------------------------------------------------------------------- #
+# ADR-0241 §12: the bound, where it reaches and where it deliberately does not
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_search_that_never_answers_is_terminated_within_its_bound() -> None:
+    """ADR-0241 §12's **Arm 1**, over the production searcher.
+
+    A stub origin that connects and never answers, a real bound and a real stall —
+    "because a fake clock would assert nothing about the property the acceptance
+    sentence names". What comes back is `DEADLINE_EXPIRED` and **not**
+    `TRANSPORT_FAILED`, which is the whole of §4: while one member carried both an
+    expiry and a refused connection, no mapping from it could apply ADR-0029 §4's
+    ``FAILED``-or-``INDETERMINATE`` rule to the first without applying it to the
+    second.
+
+    **The ledger is prompt here on purpose** (§12): §1's third clause says the bound
+    does not reach either append, so an arm that stalled the store instead would be
+    asserting a guarantee this ADR does not make. Arm 10 below asserts that negative.
+    """
+    transport = StallingTransport()
+    subject = await built(transport=transport)
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    started = asyncio.get_running_loop().time()
+    outcome = await subject.searcher.search(call, timeout=_EXPIRING_BOUND)
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert outcome.refusal is SearchRefusal.DEADLINE_EXPIRED
+    assert outcome.records == ()
+    assert elapsed < (_EXPIRING_BOUND + _SLACK).total_seconds(), (
+        "a deliberately stalled search is terminated within the declared bound"
+    )
+    assert transport.attempts, "and the arrangement really did reach the transport"
+
+
+async def test_an_expired_search_completes_indeterminate_with_an_unknown_cost() -> None:
+    """ADR-0241 §12's **Arm 2**, and the live defect §5 corrects.
+
+    ``WEB_SEARCH`` is ``side_effecting`` with ``idempotency`` ``NONE``, so its
+    ``interrupted_outcome`` is ``INDETERMINATE``. Recording ``FAILED`` — which is what
+    the tree wrote before this decision — says *the call did not act* about a search
+    whose query may have left the machine and may have been served and billed, the one
+    direction ADR-0014 §4 refuses to guess in.
+
+    **The arm asserts the outcome member and not merely that a row exists**, because
+    ``FAILED`` is what a row would have said before, and because a cancellation of the
+    same call already completed ``INDETERMINATE`` — the asymmetry §5 names as the bug.
+    """
+    subject = await built(transport=StallingTransport())
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    outcome = await subject.searcher.search(call, timeout=_EXPIRING_BOUND)
+
+    assert outcome.refusal is SearchRefusal.DEADLINE_EXPIRED
+    rows = [row.invocation for row in await subject.trail.export_invocations()]
+    completions = [row for row in rows if row.completes is not None]
+    assert len(rows) == 2, "one claim and one completion for it"
+    assert [row.outcome for row in completions] == [ToolOutcome.INDETERMINATE]
+    assert completions[0].incurred_cost is not None
+    assert completions[0].incurred_cost.basis is CostBasis.UNKNOWN, (
+        "ADR-0194 §2's estimate/reported boundary: no lane substitutes the declared "
+        "per-call figure for the figure nothing measured"
+    )
+
+
+async def test_an_expiry_inside_the_admission_writes_no_row_at_all() -> None:
+    """ADR-0241 §12's **Arm 2b**: the expiry that lands before the claim.
+
+    ADR-0192 §1's placement is relied upon and not moved — before the claim there is
+    no invocation row, and inventing one for a call that provably never ran would be
+    the opposite error to the one §5 corrects. So the servicing still reports
+    ``DEADLINE_EXPIRED`` and the ledger holds nothing.
+
+    The gate takes many times the bound, so the expiry lands *inside* the admission
+    with certainty rather than by arithmetic — which is what makes this arm different
+    from Arm 12 below, where the two stages split one bound between them.
+    """
+    subject = await built(
+        channels=[answering(result())],
+        gate=SlowGate(FakeAuditTrail(), _EXPIRING_BOUND.total_seconds() * 20),
+    )
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    outcome = await subject.searcher.search(call, timeout=_EXPIRING_BOUND)
+
+    assert outcome.refusal is SearchRefusal.DEADLINE_EXPIRED
+    assert await subject.trail.export_invocations() == [], "no claim, so no completion"
+    assert subject.keyring.reads == [], "and no credential was read"
+    assert subject.transport.attempts == (), "and no channel was opened"
+
+
+async def test_the_admission_and_the_call_share_one_window(anyio_backend: object) -> None:
+    """ADR-0241 §12's **Arm 12**: one window and not two.
+
+    ADR-0194 §3 names this failure in terms — "an implementation handing the admission
+    its own fresh window and the callable another passes every never-answering-gate
+    fixture and then returns successfully at nearly twice the deadline the caller
+    set". Neither Arm 1 nor Arm 2b sees it, because each stalls one stage past the
+    whole bound; this one splits the bound between the two stages so that only a
+    shared window expires.
+
+    The gate answers at three fifths of the bound and the transport would answer three
+    fifths later, so a searcher with one window expires and a searcher with two
+    succeeds at nearly twice the figure.
+    """
+    del anyio_backend
+    share = _EXPIRING_BOUND.total_seconds() * 0.6
+    subject = await built(
+        transport=StallingTransport(share, answering(result())),
+        gate=SlowGate(FakeAuditTrail(), share),
+    )
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    started = asyncio.get_running_loop().time()
+    outcome = await subject.searcher.search(call, timeout=_EXPIRING_BOUND)
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert outcome.refusal is SearchRefusal.DEADLINE_EXPIRED, (
+        "the admission and the callable share one budget, so the second stage is "
+        "handed what is left of the first's window and not a fresh one"
+    )
+    assert outcome.records == ()
+    assert elapsed < (_EXPIRING_BOUND * 2).total_seconds(), (
+        "and it expired at the single shared deadline rather than at the sum of two"
+    )
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        pytest.param(
+            TimeoutError("the library gave up on its own account"),
+            SearchRefusal.TRANSPORT_FAILED,
+            id="an-upstream-TimeoutError-is-the-transports-failure",
+        ),
+    ],
+)
+async def test_an_upstream_failure_inside_the_bound_is_not_this_seams_expiry(
+    error: BaseException, expected: SearchRefusal
+) -> None:
+    """ADR-0241 §12's **Arm 11**, first half, and §7's classification rule.
+
+    "Classification keys on whether *this* deadline expired, and never on catching an
+    exception type." The bound is long and nothing about it fired; what raised is the
+    transport, for its own reasons. An implementation that kept a broad
+    ``except TimeoutError`` and merely renamed its refusal member passes every other
+    arm here while reporting a deadline that never expired.
+    """
+    subject = await built(transport=RaisingTransport(error))
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    outcome = await subject.searcher.search(call, timeout=A_BOUND)
+
+    assert outcome.refusal is expected
+    assert outcome.refusal is not SearchRefusal.DEADLINE_EXPIRED
+
+
+async def test_a_cancellation_nobody_asked_for_is_a_fault_and_not_a_teardown() -> None:
+    """ADR-0241 §12's **Arm 11**, second half, and §7's second misclassification.
+
+    A ``CancelledError`` raised where no cancellation was requested is a fault the
+    searcher raised: ADR-0031 §2's case, which §7 says must reach ADR-0226 §5's
+    degradation and §8's ``SEARCH_FAILED`` — "**never** a teardown that ends the turn,
+    and never an outcome". So what leaves is an ``AssistantError``, which is what the
+    servicing site degrades on, and **not** a ``CancelledError`` the executor would
+    honour by tearing the turn down.
+
+    The count is the discriminator and not the class: nothing cancelled this task, so
+    ``Task.cancelling()`` never moved.
+    """
+    subject = await built(transport=RaisingTransport(asyncio.CancelledError()))
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    with pytest.raises(ToolError, match="cancellation with nothing cancelled"):
+        await subject.searcher.search(call, timeout=A_BOUND)
+
+
+@pytest.mark.parametrize(
+    "arrangement",
+    [
+        pytest.param(
+            {"refusal": TransportError("this file connects to nothing")},
+            id="a-destination-that-refuses-the-connection",
+        ),
+        pytest.param(
+            {"channels": [far_end(b"HTTP/1.1 200 OK\r\nContent-Length: 40\r\n\r\ntruncated")]},
+            id="a-channel-closed-mid-response",
+        ),
+    ],
+)
+async def test_transport_faileds_other_conditions_are_untouched(
+    arrangement: dict[str, Any],
+) -> None:
+    """ADR-0241 §12's **Arm 9**: §4 moved one condition and changed nothing else.
+
+    A refused connection and a channel closed mid-response each still return
+    ``TRANSPORT_FAILED`` and each still complete exactly as they do today — which is
+    what shows the split took the expiry out of that member and left its remaining
+    conditions, including the ones §13 records as an open question, exactly where they
+    were.
+    """
+    outcome, subject = await _searched(**arrangement)
+
+    assert outcome.refusal is SearchRefusal.TRANSPORT_FAILED
+    completions = [
+        row.invocation
+        for row in await subject.trail.export_invocations()
+        if row.invocation.completes is not None
+    ]
+    assert [row.outcome for row in completions] == [ToolOutcome.FAILED]
+
+
+async def test_the_bound_does_not_reach_the_claim_append() -> None:
+    """ADR-0241 §12's **Arm 10**, and the arm asserts the negative.
+
+    ADR-0192 §3 pins both ledger appends "unbounded by this seam" and gives the reason
+    a bound there would be a fiction: the audit store this corpus ships absorbs a
+    cancellation until its worker physically finishes (ADR-0054), so cancelling the
+    append returns nobody sooner. §1 therefore does **not** place its deadline over
+    either append — and this is the arm that fails a lane which "helpfully" wraps one
+    in it.
+
+    With the claim held for longer than the bound: ``search`` has **not** returned, no
+    ``DEADLINE_EXPIRED`` is minted and no channel is opened. Releasing the barrier lets
+    the call proceed normally.
+    """
+    subject = await built(channels=[answering(result())])
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+    barrier = subject.trail.suspend_next_operation()
+
+    search = asyncio.ensure_future(subject.searcher.search(call, timeout=_EXPIRING_BOUND))
+    await barrier.reached()
+    await asyncio.sleep(_EXPIRING_BOUND.total_seconds() * 3)
+
+    assert not search.done(), "the claim append is outside the bound, so nothing expired"
+    assert subject.transport.attempts == (), "and no channel was opened while it was held"
+
+    barrier.release()
+    outcome = await asyncio.wait_for(search, _SLACK.total_seconds())
+
+    assert outcome.refusal is None, "and the call then proceeds normally"
+    assert outcome.records
+
+
+async def test_the_bound_does_not_reach_the_completion_append() -> None:
+    """ADR-0241 §12's **Arm 10**, second half: the same, after the callable has run.
+
+    Held on the *completion* rather than the claim, which is the append a lane is most
+    likely to wrap because it is the one that runs while the caller is waiting for an
+    answer it already has.
+    """
+    transport = GatedTransport(answering(result()))
+    subject = await built(transport=transport)
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    exchange = transport.suspend_next()
+    search = asyncio.ensure_future(subject.searcher.search(call, timeout=_EXPIRING_BOUND))
+    await exchange.reached()
+    # The claim has landed and the callable is running, so the next operation this
+    # trail sees is the completion — armed here rather than before the search, which
+    # would have caught the claim instead.
+    completion = subject.trail.suspend_next_operation()
+    exchange.release()
+    await completion.reached()
+    await asyncio.sleep(_EXPIRING_BOUND.total_seconds() * 3)
+
+    assert not search.done(), "the completion append is outside the bound too"
+
+    completion.release()
+    outcome = await asyncio.wait_for(search, _SLACK.total_seconds())
+
+    assert outcome.refusal is None
+    assert outcome.records
+
+
+async def test_a_cancellation_after_the_answer_keeps_the_answers_row() -> None:
+    """ADR-0241 §12's **Arm 3b**, and §7's second cancellation clause.
+
+    §7's two cancellation clauses differ only in when the cancellation landed, and an
+    implementation that read the first as unconditional would rewrite a good row. Here
+    the provider returned successfully, the completion append is held on a barrier, and
+    the task is then cancelled: the row that lands carries **the outcome the call
+    actually reached** and that result's own cost — not ``interrupted_outcome`` and not
+    an ``UNKNOWN`` substituted for a figure the result carried — the append is not
+    abandoned, exactly one completion is written, and the cancellation leaves
+    afterwards.
+    """
+    transport = GatedTransport(answering(result()))
+    subject = await built(transport=transport)
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    exchange = transport.suspend_next()
+    search = asyncio.ensure_future(subject.searcher.search(call, timeout=A_BOUND))
+    await exchange.reached()
+    completion = subject.trail.suspend_next_operation()
+    exchange.release()
+    await completion.reached()
+
+    search.cancel()
+    completion.release()
+
+    with pytest.raises(asyncio.CancelledError):
+        await search
+
+    rows = [row.invocation for row in await subject.trail.export_invocations()]
+    completions = [row for row in rows if row.completes is not None]
+    assert len(completions) == 1, "exactly one completion, and the append was not abandoned"
+    assert completions[0].outcome is ToolOutcome.SUCCEEDED, (
+        "a search that reached its answer was not interrupted in `interrupted_outcome`'s "
+        "sense, however the task ends (ADR-0241 §7)"
+    )
+
+
+async def test_a_cancellation_mid_search_completes_the_claim_and_re_raises() -> None:
+    """ADR-0241 §12's **Arm 3**, over the production searcher.
+
+    §7 binds ADR-0060 §1 and ADR-0231 §17 entire and adds no clause to either: the
+    ``CancelledError`` is re-raised unchanged, no ``SearchOutcome`` is minted and no
+    refusal is returned. What §5's completion clause adds is that the claim is
+    completed with ``interrupted_outcome`` and an ``UNKNOWN`` cost **before** it
+    re-raises — one rule read at two exits rather than two rules.
+
+    And the authorisation stays spent: ADR-0238 §15's Arm 6d binds a cancellation
+    exactly as it binds a refused ruling, so a second claim under the same decision is
+    refused (ADR-0192 §1).
+    """
+    transport = GatedTransport(answering(result()))
+    subject = await built(transport=transport)
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    gate = transport.suspend_next()
+    search = asyncio.ensure_future(subject.searcher.search(call, timeout=A_BOUND))
+    await gate.reached()
+    search.cancel()
+    gate.release()
+
+    with pytest.raises(asyncio.CancelledError):
+        await search
+
+    rows = [row.invocation for row in await subject.trail.export_invocations()]
+    completions = [row for row in rows if row.completes is not None]
+    assert [row.outcome for row in completions] == [ToolOutcome.INDETERMINATE]
+    assert completions[0].incurred_cost is not None
+    assert completions[0].incurred_cost.basis is CostBasis.UNKNOWN
+
+    with pytest.raises(AuthorisationSpentError):
+        await subject.searcher.search(call, timeout=A_BOUND)
+
+
+@pytest.mark.parametrize(
+    "bound",
+    [
+        pytest.param(30, id="not-a-timedelta"),
+        pytest.param(None, id="none"),
+        pytest.param(timedelta(0), id="zero"),
+        pytest.param(timedelta(seconds=-1), id="negative"),
+    ],
+)
+async def test_a_bound_outside_its_domain_reaches_nothing(bound: object) -> None:
+    """ADR-0241 §12's **Arm 6**, in the half the shared suite cannot assert.
+
+    §1: a ``timeout`` that is not a ``timedelta``, or is not strictly positive, is
+    refused **before** the call is revalidated, before the credential is read, before
+    the spend gate is consulted and before any channel is opened — so a refused value
+    reaches no store, appends no claim and opens nothing. The suite pins the raise;
+    this pins that nothing happened, which is the half that needs the doubles.
+    """
+    gate = RefusingGate()
+    subject = await built(channels=[answering(result())], gate=gate)
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    with pytest.raises(ValueError, match="timeout"):
+        await subject.searcher.search(call, timeout=bound)
+
+    assert gate.admissions == 0, "the gate was not consulted"
+    assert subject.records.reads == [], "nothing was revalidated against the store"
+    assert subject.keyring.reads == [], "no credential was read"
+    assert subject.transport.attempts == (), "no channel was opened"
+    assert await subject.trail.export_invocations() == [], "no claim was appended"
+
+
+async def test_the_searcher_holds_no_deadline_of_its_own() -> None:
+    """ADR-0241 §3: ``WEB_SEARCH_TIMEOUT`` and the constructor override are both gone.
+
+    "The bound comes from one place — the value the caller passes — and a searcher
+    holding a second one would be a searcher able to disagree with its caller about
+    what window it is running in." Asserted over the module and the signature rather
+    than over a behaviour, because what the clause forbids is a *second source*, and a
+    second source that happened to agree would pass every behavioural arm here.
+    """
+    assert not hasattr(web_search, "WEB_SEARCH_TIMEOUT")
+    assert "WEB_SEARCH_TIMEOUT" not in web_search.__all__
+    assert "timeout" not in inspect.signature(WebSearchEgress.__init__).parameters

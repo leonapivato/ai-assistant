@@ -389,6 +389,7 @@ async def _search_servicer(now: Clock) -> None:
         trail=FakeAuditTrail(),
         now=now,
         id_factory=lambda: "d-1",
+        deadline=timedelta(seconds=30),
     ).service(
         "what is that bell tower in Porto",
         remaining=10,
