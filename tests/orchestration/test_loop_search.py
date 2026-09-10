@@ -40,12 +40,14 @@ something the substitution hides.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import itertools
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, final
 
 import pytest
 import structlog
@@ -96,6 +98,7 @@ from ai_assistant.core.types import (
     ReadKind,
     ReadRequest,
     Role,
+    SearchOutcome,
     SearchRefusal,
     SemanticMemory,
     SpanCoverage,
@@ -161,7 +164,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         Goal,
         MemoryRecord,
-        SearchOutcome,
         ShownFile,
         ToolCall,
     )
@@ -366,7 +368,7 @@ def _binder(*, definition: Any = _COSTED) -> FakeEgressBinder:
     return binder
 
 
-def _servicer(  # noqa: PLR0913 — one knob per contract ADR-0231 §6 names; that is what this is
+def _servicer(  # noqa: PLR0913 — one knob per contract ADR-0231 §6 names plus ADR-0241 §3's bound; that is what this is
     *,
     composer: Any = None,
     searcher: WebSearcher | None = None,
@@ -375,6 +377,7 @@ def _servicer(  # noqa: PLR0913 — one knob per contract ADR-0231 §6 names; th
     trail: AuditTrail | None = None,
     granted: bool = False,
     at: datetime = _NOW,
+    deadline: timedelta = _DEADLINE,
 ) -> SearchServicer:
     """A servicer over canonical fakes, granted or not.
 
@@ -403,7 +406,7 @@ def _servicer(  # noqa: PLR0913 — one knob per contract ADR-0231 §6 names; th
         ),
         now=lambda: at,
         id_factory=lambda: f"d-{next(ids)}",
-        deadline=_DEADLINE,
+        deadline=deadline,
     )
 
 
@@ -2000,4 +2003,279 @@ async def test_a_covering_grant_reaches_an_allow_only_on_a_declared_cost(
     assert ruled.outcome is expected
     assert (ruled.authorised_by == "g-search") is (expected is PermissionOutcome.ALLOW), (
         "route (b) names the grant where it is reached, and is not reached otherwise"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# ADR-0241 §12: the three bounds at the servicing site, and what each records   #
+# --------------------------------------------------------------------------- #
+
+#: The bound the arms below set when they want the deadline to fire. A **real**
+#: duration and a real stall, because ADR-0241 §12's Arm 1 asks for a search that is
+#: *terminated* and a fake clock asserts nothing about that.
+_EXPIRING: Final = timedelta(milliseconds=50)
+
+
+@final
+class _StallingSearcher:
+    """A conforming ``WebSearcher`` whose ``search`` outlives whatever bound it is given.
+
+    It is the canonical fake held at its own suspension point and never released,
+    written out here rather than driven through ``suspend_next`` because a turn runs
+    the servicing inside ``respond`` and a case has no frame in which to release it.
+    What it models is a provider that connects and never answers, which is the
+    arrangement ADR-0241 §12's Arm 1 names — and it **honours the bound**, so what
+    comes back is the classification and not a hang.
+    """
+
+    def __init__(self, inner: WebSearcher) -> None:
+        """Delegate everything but the waiting to ``inner``.
+
+        Args:
+            inner: The canonical fake behind whatever this file's other wrappers add,
+                so the binder, the policy and the trail see the subject they normally
+                do and this arm varies only the waiting.
+        """
+        self.inner = inner
+        self.searched: list[ToolCall] = []
+
+    @property
+    def name(self) -> str:
+        """The configured source this searcher serves."""
+        return self.inner.name
+
+    async def request(self, query: str, /) -> ActionRequest | None:
+        """Propose the search, exactly as the fake it wraps does."""
+        return await self.inner.request(query)
+
+    async def search(self, call: ToolCall, /, *, timeout: timedelta) -> SearchOutcome:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, §2)
+        """Wait past ``timeout`` and answer with the classification of that expiry.
+
+        Args:
+            call: The authorised call, recorded so a case can assert the send happened.
+            timeout: The caller's bound, which is what this waits past.
+
+        Returns:
+            ``DEADLINE_EXPIRED`` — returned and never raised (ADR-0241 §4).
+        """
+        self.searched.append(call)
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(timeout.total_seconds()):
+                await asyncio.sleep(timeout.total_seconds() * 100)
+        return SearchOutcome(refusal=SearchRefusal.DEADLINE_EXPIRED)
+
+
+async def test_a_stalled_search_records_its_own_disposition_and_still_answers() -> None:
+    """ADR-0241 §12's **Arm 1**, at the turn.
+
+    The searcher's own arm (``tests/tools/test_web_search.py``) pins that a stub origin
+    that connects and never answers is terminated within the bound and comes back
+    ``DEADLINE_EXPIRED`` rather than ``TRANSPORT_FAILED``. What this adds is the half
+    that lives here: §4's member is **carried across one for one** into the servicer's
+    own vocabulary, so the audit records ``deadline_expired`` and not the outage member
+    a slow provider used to be reported under.
+
+    **And the turn is not degraded.** An expiry is a *returned* refusal (§4, "returned
+    and never raised"), so the servicing resolves to a disposition and the reply is
+    composed from the supply the turn already had — which is the "useful result" half
+    of the milestone's acceptance sentence, and is why this arm asserts ``failed`` is
+    absent rather than true. ADR-0226 §5's degradation belongs to §8's
+    ``SEARCH_FAILED`` instead, which is a fault the searcher *raised*.
+
+    **The interruption account the reply owes is ADR-0242's and not this lane's**
+    (ADR-0241 §10, ADR-0242 §7 and §10): that ADR computes its carrier **from the
+    disposition this arm pins**, so what is assertable here is the input, and the
+    rendering is L2-impl's.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_belief("belief-1", "Porto has a river"))
+    searcher = _StallingSearcher(_CostedSearcher(FakeWebSearcher()))
+
+    with structlog.testing.capture_logs() as captured:
+        responded = await _loop(
+            planner=FakePlanner(now=_clock, read_request=_search()),
+            memory=memory,
+            search=_servicer(searcher=searcher, granted=True, deadline=_EXPIRING),
+        ).respond(_ASK, narrow=_bounded())
+
+    assert responded.turn is not None, "the turn completed rather than failing"
+    entry = _serviced(captured)
+    assert entry["disposition"] == SearchDisposition.DEADLINE_EXPIRED.value
+    assert entry["disposition"] != SearchDisposition.TRANSPORT_FAILED.value, (
+        "an outage and a slow provider are different operator facts (ADR-0241 §4)"
+    )
+    assert entry.get("failed") is not True, "an expiry is a disposition, not a degradation"
+    assert len(searcher.searched) == 1, "the send happened, and it is what timed out"
+    assert [one.id for one in responded.turn.memories] == ["belief-1"], (
+        "and the reply is composed from the supply the turn already had"
+    )
+
+
+async def test_the_admitted_call_of_an_expired_search_is_never_refunded() -> None:
+    """ADR-0241 §6, and ADR-0238 §15's Arm 6d binding one more outcome.
+
+    "An interrupted search spends the call ``admit_search`` admitted, and no path lowers
+    ``calls``." The reason is stronger than symmetry: a refund would be the one route
+    by which a **stalling** provider could reach the budget, handing it the ability to
+    make its own stalls free — which is precisely what ADR-0238 §12 rules out when it
+    says "a provider that stalls therefore cannot reach the budget at all".
+    """
+    footing = await _admitted(max_calls=8)
+    searcher = _StallingSearcher(_CostedSearcher(FakeWebSearcher()))
+
+    with structlog.testing.capture_logs() as captured:
+        await _loop(
+            planner=FakePlanner(now=_clock, read_request=_search()),
+            search=_servicer(searcher=searcher, granted=True, deadline=_EXPIRING),
+            footing=footing,
+        ).respond(_ASK, narrow=_bounded())
+
+    assert _serviced(captured)["calls"] == 1, "the admission counted the call it admitted"
+    draw = await footing.conversations.search_draw(footing.conversation_id)
+    assert draw is not None
+    assert draw.calls == 1, "and no path lowered it on account of the expiry"
+
+
+async def test_three_bounds_produce_three_dispositions_with_no_cross_talk() -> None:
+    """ADR-0241 §12's **Arm 5**, and §9's whole point.
+
+    "This system bounds three different quantities on a search, and they are distinct
+    in name, in mechanism and in the value an audit records" — the call allowance
+    (ADR-0238 §8's counter), the monetary ceiling (ADR-0194's, reported
+    ``spend_refused``) and the elapsed-time bound (§1's, reported
+    ``deadline_expired``). The tree's one live confusion was (c) wearing (a)'s and
+    (b)'s clothes in the audit while a broken channel wore (c)'s; this asserts the
+    three are told apart, which is what #2167 asks for in terms.
+
+    **And no cross-talk**: the exhausted conversation opens no channel at all, the
+    spend-refused call reaches the searcher and stops there, and the expired one
+    reaches neither the counter nor a ceiling for a second time.
+    """
+    exhausted = _CostedSearcher(FakeWebSearcher())
+    refused = _CostedSearcher(
+        FakeWebSearcher(refusals={DEFAULT_COMPOSED_QUERY: SearchRefusal.SPEND_REFUSED})
+    )
+    expired = _StallingSearcher(_CostedSearcher(FakeWebSearcher()))
+    dispositions = []
+
+    for wired, footing in (
+        (exhausted, await _admitted(max_calls=0)),
+        (refused, await _admitted(conversation_id="c-2")),
+        (expired, await _admitted(conversation_id="c-3")),
+    ):
+        with structlog.testing.capture_logs() as captured:
+            await _loop(
+                planner=FakePlanner(now=_clock, read_request=_search()),
+                search=_servicer(searcher=wired, granted=True, deadline=_EXPIRING),
+                footing=footing,
+            ).respond(_ASK, narrow=_bounded())
+        dispositions.append(_serviced(captured)["disposition"])
+
+    assert dispositions == [
+        SearchDisposition.NOT_ADMITTED.value,
+        SearchDisposition.SPEND_REFUSED.value,
+        SearchDisposition.DEADLINE_EXPIRED.value,
+    ], "one bound, one member, and no implementation reports one under another's"
+    assert len(set(dispositions)) == 3, "distinct in the value an audit records (§9)"
+    assert exhausted.inner.searched == [], (
+        "the exhausted conversation opened no channel — `admit_search` refuses before a "
+        "supply is constructed, a query composed or a ruling sought (ADR-0238 §8)"
+    )
+    assert len(refused.inner.searched) == 1, "the spend-refused call reached the seam"
+    assert len(expired.searched) == 1, "and so did the expired one, which is what timed out"
+
+
+@final
+class _ExpiringAfterTheFirstTurn:
+    """A conforming ``WebSearcher`` that answers once and then outlives its bound.
+
+    ADR-0241 §12's Arm 4 is a **two-turn** scenario — a conversation whose first turn
+    searched and answered and whose second turn's search expires — so what varies is
+    the turn and not the query, which neither the canonical fake's scripted refusals
+    nor its ``suspend_next`` can express from outside a ``respond``.
+
+    It honours the bound on the call it stalls rather than returning the member at
+    once, so the arm drives an expiry rather than a label.
+    """
+
+    def __init__(self, inner: WebSearcher) -> None:
+        """Answer through ``inner`` on the first call and expire thereafter.
+
+        Args:
+            inner: The searcher this stands in front of, wrappers included.
+        """
+        self._inner = inner
+        self.calls = 0
+
+    @property
+    def name(self) -> str:
+        """The configured source this searcher serves."""
+        return self._inner.name
+
+    async def request(self, query: str, /) -> ActionRequest | None:
+        """Propose the search, exactly as the searcher it wraps does."""
+        return await self._inner.request(query)
+
+    async def search(self, call: ToolCall, /, *, timeout: timedelta) -> SearchOutcome:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, §2)
+        """Answer the first call; wait past ``timeout`` on every one after it.
+
+        Args:
+            call: The authorised call.
+            timeout: The caller's bound.
+
+        Returns:
+            The inner searcher's outcome, or ``DEADLINE_EXPIRED``.
+        """
+        self.calls += 1
+        if self.calls == 1:
+            return await self._inner.search(call, timeout=timeout)
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(timeout.total_seconds()):
+                await asyncio.sleep(timeout.total_seconds() * 100)
+        return SearchOutcome(refusal=SearchRefusal.DEADLINE_EXPIRED)
+
+
+async def test_a_second_turn_whose_search_expires_answers_from_what_is_retained() -> None:
+    """ADR-0241 §12's **Arm 4**, read against ADR-0231 §16 exactly as §12 requires.
+
+    The pre-registered wording on #2178 — "the reply still answers from turn one's
+    records" — reads as retention, and retention is what ADR-0231 §16 forbids and
+    ADR-0238 §17 relies on: a minted record is supply for one turn, resolves in no
+    store, and "a second turn re-searches … because nothing was retained". §12 is
+    explicit that **no lane satisfies this arm by keeping turn one's minted records
+    alive**, so this asserts the opposite of the scenario's own words: turn one's
+    minted record is gone, and what the second turn answers from is what the
+    conversation actually retains — here the store's own beliefs, which is the tail's
+    role at this level.
+
+    **Two halves this arm does not carry, each named rather than quietly dropped.**
+    The captured episode is ADR-0221/ADR-0223's and is stamped by the engine, which is
+    where ``test_engine_capture_origin.py`` asserts it; this loop composes no capture
+    stage. And "**also** states the interruption" is ADR-0242's rendering, computed by
+    that ADR's §7 carrier **from the disposition this arm pins** and implemented by its
+    own lane (ADR-0241 §10, ADR-0242 §10).
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_belief("belief-1", "Porto has a river"))
+    searcher = _ExpiringAfterTheFirstTurn(_CostedSearcher(FakeWebSearcher(results=(_RESULT,))))
+    turns = _loop(
+        planner=FakePlanner(now=_clock, read_request=_search()),
+        memory=memory,
+        search=_servicer(searcher=searcher, granted=True, deadline=_EXPIRING),
+    )
+
+    first = await turns.respond(_ASK, narrow=_bounded())
+    with structlog.testing.capture_logs() as captured:
+        second = await turns.respond(_ASK, narrow=_bounded())
+
+    assert searcher.calls == 2, "both turns reached the seam — nothing was cached"
+    assert _DISTINCTIVE in _contents(first.turn.memories), "turn one really did yield"
+    assert _serviced(captured)["disposition"] == SearchDisposition.DEADLINE_EXPIRED.value
+    assert second.turn is not None, "and the second turn answered rather than failing"
+    assert _DISTINCTIVE not in _contents(second.turn.memories), (
+        "turn one's minted record resolves in no store and is not retained "
+        "(ADR-0231 §16), which is what §12 forbids a lane from closing with one"
+    )
+    assert [one.id for one in second.turn.memories] == ["belief-1"], (
+        "so the reply is composed from what the conversation actually retains"
     )
