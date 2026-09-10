@@ -755,6 +755,7 @@ class ComposingStage:
                     withheld=withheld,
                     deliveries=deliveries,
                     hop_reached=hop_reached,
+                    search_unserviced=search_not_serviced is not None,
                 ),
             ),
         )
@@ -1026,6 +1027,7 @@ class ComposingStage:
                     withheld=False,
                     deliveries=deliveries,
                     hop_reached=hop_reached,
+                    search_unserviced=search_not_serviced is not None,
                 ),
             ),
         )
@@ -1277,8 +1279,10 @@ something about it: there may be nothing for them to do."""
 #:
 #: **A mapping over eight written fragments is not a template over the enumeration**
 #: (ADR-0242 §13): every value here is a literal above, a ninth member joins nothing
-#: silently, and ``tests/orchestration/test_composing_search_not_serviced.py`` fails if
-#: the vocabulary and this table come apart.
+#: silently, and ``tests/orchestration/test_engine_search_not_serviced.py`` fails if the
+#: vocabulary and this table come apart — that module holds the arm, under the name
+#: ``test_the_quoted_fragments_are_the_eight_the_composing_stage_holds``. The file this
+#: comment named before #2213 has never existed.
 _SEARCH_NOT_SERVICED_PROMPTS: Final[Mapping[SearchNotServiced, str]] = MappingProxyType(
     {
         SearchNotServiced.SEARCH_DISABLED: _SEARCH_DISABLED_PROMPT,
@@ -1379,6 +1383,7 @@ def _render_request(  # noqa: PLR0913 — one parameter per block this prompt is
     withheld: bool,
     deliveries: Mapping[str, SpokenDelivery],
     hop_reached: Sequence[str] = (),
+    search_unserviced: bool = False,
 ) -> str:
     """Render the whole of what the stage was given into the user-turn prompt.
 
@@ -1417,6 +1422,10 @@ def _render_request(  # noqa: PLR0913 — one parameter per block this prompt is
             reached, in ADR-0229 §3's order (ADR-0227 §3) — each record a label named
             followed by that record's own evidence, deduplicated to the first
             occurrence.
+        search_unserviced: Whether this turn carries ADR-0242 §7's member at all, so
+            that the plan block can say it is an account of no lookup (#2213). The
+            **bare fact**: which member it is stays at :func:`_system_prompt`, and
+            this block never sees it.
 
     Returns:
         The user-turn prompt.
@@ -1438,7 +1447,7 @@ def _render_request(  # noqa: PLR0913 — one parameter per block this prompt is
         lines.append("")
         lines.append(_WITHHELD_LINE)
     lines.append("")
-    lines += _render_plan(turn.plan, step, undriven)
+    lines += _render_plan(turn.plan, step, undriven, search_unserviced=search_unserviced)
     lines.append("")
     lines += _render_step_account(step)
     return "\n".join(lines)
@@ -2210,8 +2219,59 @@ def _disposition_phrase(disposition: ExchangeDisposition) -> str:  # noqa: C901,
             assert_never(disposition)
 
 
+#: What the plan block says about itself on a turn that did not service a search
+#: (#2213). One line of this assembler's own text, appended to the block whichever
+#: shape the plan took.
+#:
+#: **Why the block needs it at all.** The plan is written against the capability
+#: vocabulary the planner was shown (ADR-0211 §1), and a lookup outside this system
+#: is on no such list: ADR-0226 §4 makes the read a ``ReadAsk`` and not a
+#: ``PlanStep``, "not selected against the capability vocabulary, not resolved to a
+#: tool", and ``planning.planner``'s own web-search block tells the planner that "a
+#: search runs no tool from the list above, names no capability, and is not a step".
+#: So a decline's ``rationale`` is an account of *acting*, and on a turn that also
+#: asked for a lookup it accounts for none of it — while :func:`_render_plan`'s
+#: "Nothing" line, read beside it, invites exactly that reading by naming the
+#: planner's rationale as the one thing that "says why".
+#:
+#: **The defect this closes is a reply that named a cause the system never had**
+#: (#2213). On the deployed hub a turn whose search was ruled on and refused came
+#: back saying "no capability available to me actually performs web retrieval" —
+#: false, since the servicing ran through admission and was refused — and the
+#: planner's own rationale, rendered verbatim two lines above, is where that
+#: sentence came from. :data:`_UNAVAILABLE_PROMPT` already forbids guessing at a
+#: reason; the model was not guessing, it was reading the block. This line says what
+#: that block is about and, by saying so, what it is not.
+#:
+#: **It asserts nothing about the search and carries none of ADR-0242 §7's forbidden
+#: items** — no destination, host, origin, provider name, connection reference,
+#: account identity, query, record, count, figure, duration, budget, ``Settings``
+#: field name, ``SearchDisposition`` value, id or command name. It does not say that
+#: no request was made, does not say a lookup would have succeeded, and promises
+#: nothing about what any act would change (ADR-0242 §9, ADR-0235 §8).
+#:
+#: **It does not contradict any of the eight fragments.** It forbids reading the
+#: *plan block* as a statement about what this assistant can look up; it does not
+#: forbid the model saying what its instruction told it — which matters for
+#: ``SEARCH_DISABLED``, whose fragment does say this installation makes no such
+#: lookups at all.
+_PLAN_IS_ABOUT_ACTING: Final = (
+    "  All of that is about acting, and about the capabilities this assistant was "
+    "offered for this turn. Looking something up outside this system is on no such "
+    "list — it is no capability, no step, and nothing the planner names — so nothing "
+    "above says whether a lookup was made, whether one could be, or why one did not "
+    "yield. Do not read it as saying that this assistant cannot look things up "
+    "outside itself, and do not offer it as the reason a lookup did not happen: your "
+    "instruction accounts for that, and it is the only account of it."
+)
+
+
 def _render_plan(
-    plan: ActionPlan, step: StepOutcome | None, undriven: Sequence[PlanStep]
+    plan: ActionPlan,
+    step: StepOutcome | None,
+    undriven: Sequence[PlanStep],
+    *,
+    search_unserviced: bool = False,
 ) -> list[str]:
     """Render what the assistant decided to do, marking what was never driven.
 
@@ -2259,12 +2319,34 @@ def _render_plan(
     deliberately indistinguishable here: ADR-0211 §5 keeps them out of the
     envelope's structure, so the rationale is the only place the difference is
     stated and this function has nothing else to read.
+
+    **On a turn that did not service a search the block closes on one more line of
+    this assembler's own text** (:data:`_PLAN_IS_ABOUT_ACTING`, #2213), saying that
+    everything above it is about acting and is therefore an account of no lookup.
+    It is appended **last** on both shapes, after the rationale and after the step
+    lines, because it is a statement about the block rather than a part of it — and
+    appended on both because a plan with steps names capabilities too.
+
+    Args:
+        plan: What the planner decided.
+        step: What became of the step the turn drove, or ``None``.
+        undriven: The plan's steps that were not driven at all (ADR-0170 §5).
+        search_unserviced: Whether this turn carries ADR-0242 §7's member at all —
+            **the bare fact and never the member**. This block is told *that* the
+            instruction accounts for a lookup and is never told which class of act
+            would have let it happen: the member selects one of §7's eight fragments
+            at one site (:func:`_system_prompt`) and reaches no second one, so
+            nothing here can come apart from that table or grow a ninth arm.
+            ``False`` on every turn carrying no member, where this function's output
+            is byte-identical to what it was before #2213 — which is ADR-0242 §6's
+            guarantee, unweakened by a second consumer of the same condition.
     """
     rationale = (
         []
         if plan.rationale is None
         else [f"  the planner's stated rationale: {_quoted_span(plan.rationale)}"]
     )
+    scope = [_PLAN_IS_ABOUT_ACTING] if search_unserviced else []
     if not plan.steps:
         return [
             "What the assistant decided to do:",
@@ -2272,6 +2354,7 @@ def _render_plan(
             "was taken. Only the planner's own rationale says why — do not supply a "
             "reason it did not state.",
             *rationale,
+            *scope,
         ]
     never_driven = {one.id for one in undriven}
     lines = ["What the assistant decided to do:", *rationale]
@@ -2286,7 +2369,7 @@ def _render_plan(
             f"  {index}. intent {_quoted_span(planned.intent)}, "
             f"capability {_quoted_span(planned.capability)} — {mark}"
         )
-    return lines
+    return lines + scope
 
 
 def _render_step_account(step: StepOutcome | None) -> list[str]:
