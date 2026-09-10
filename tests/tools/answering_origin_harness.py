@@ -238,6 +238,8 @@ class AnsweringOrigin:
         exhausted: Set the first time a request arrives past the script, so a case
             can wait for the arrangement to have actually reached the stall (or the
             hang-up) rather than asserting against a request still in flight.
+        released: Set by :meth:`release`, and what every held connection is waiting
+            on. Read rather than set by a case; :meth:`release` is the way to set it.
     """
 
     endpoint: TransportEndpoint
@@ -247,6 +249,24 @@ class AnsweringOrigin:
     requests: list[str] = field(default_factory=list)
     answered: int = 0
     exhausted: asyncio.Event = field(default_factory=asyncio.Event)
+    released: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def release(self) -> None:
+        """Let every held connection go, closing it, without stopping the origin.
+
+        **This is the only thing that ends a stall from outside, and a cancellation
+        is not.** A client suspended in its response read is waiting on octets this
+        origin has decided not to send; cancelling the client's own task asks the
+        client to stop waiting, which an implementation that defers or absorbs
+        cancellations is free to decline. Closing the connection is not a request —
+        the read ends because there is nothing left to read from.
+
+        That is what makes it the escape hatch a case's watchdog needs: a bound that
+        can only cancel is a bound that a cancellation-deferring regression outlives,
+        and the run hangs instead of failing. It is idempotent, and the context
+        manager calls it on the way out.
+        """
+        self.released.set()
 
 
 def _answer(results: Sequence[Mapping[str, Any]], *, date: str | None) -> bytes:
@@ -326,9 +346,10 @@ async def answering_origin(
             string before the origin exists.
 
     Yields:
-        The origin, already listening and already trusted by this process.
+        The origin, already listening and already trusted by this process. Every
+        connection it is still holding is released when the block ends, and a case
+        that needs one released earlier calls :meth:`AnsweringOrigin.release`.
     """
-    stop = asyncio.Event()
     origin: AnsweringOrigin | None = None
     served = _answer(results, date=date)
 
@@ -338,7 +359,7 @@ async def answering_origin(
         Args:
             reader: The read half, read exactly as far as the end of the request's
                 field section.
-            writer: The write half, closed when the block ends so that
+            writer: The write half, closed when the connection is released so that
                 ``Server.wait_closed`` has a handler to wait on that finishes.
         """
         assert origin is not None, "the handler cannot run before the yield below"
@@ -366,7 +387,12 @@ async def answering_origin(
                 # suspended in ``HttpsExchange._response`` — which is the stage
                 # ADR-0241 §1's cancellation has to reach and the one
                 # ``StalledOrigin`` cannot arrange.
-                await stop.wait()
+                #
+                # It ends when :meth:`AnsweringOrigin.release` is called — by a
+                # case's watchdog, or by this block on its way out — and the
+                # ``finally`` below then closes the connection, which is what ends
+                # the client's read whether or not the client can be cancelled.
+                await origin.released.wait()
         finally:
             with suppress(OSError):
                 writer.close()
@@ -386,9 +412,9 @@ async def answering_origin(
                 yield origin
         finally:
             # Released before the server is closed: ``Server.wait_closed`` waits
-            # for every handler task, and a handler still sitting on ``stop`` would
+            # for every handler task, and a handler still holding a connection would
             # hold the teardown for as long as this arrangement holds a client.
-            stop.set()
+            origin.release()
             server.close()
             await server.wait_closed()
 
