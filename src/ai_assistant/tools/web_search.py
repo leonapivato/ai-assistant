@@ -107,7 +107,13 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from ai_assistant.core.protocols import InvocationLedger, SpendGate
-    from ai_assistant.core.types import EgressBinding, FrozenJson, MemoryRecord, ToolCall
+    from ai_assistant.core.types import (
+        EgressBinding,
+        FrozenJson,
+        MemoryRecord,
+        SpendAdmissionHandle,
+        ToolCall,
+    )
     from ai_assistant.tools.egress import HttpsResponse, WebSearchTransport
 
 _log = structlog.get_logger(__name__)
@@ -951,6 +957,88 @@ def checked_search_cost(amount: Decimal | None, currency: str | None) -> ToolCos
 
 
 @final
+class _UpstreamWatchingGate:
+    """The injected ``SpendGate``, watched for a ``TimeoutError`` of its **own**.
+
+    ADR-0241 §7 forbids reporting as this seam's expiry a ``TimeoutError`` an upstream
+    party raised for its own reasons — and at the admission that question is not
+    answerable from where the answer is needed.
+    :func:`~ai_assistant.tools.admission.admitted_call` answers ADR-0029 §4's
+    classification for **every** ``TimeoutError`` out of ``admit_invocation``, which is
+    right at that frame: there, the deadline is the only thing that could raise one.
+    But the gate is a collaborator, and one that raises Python's own ``TimeoutError``
+    reaches the same branch under a bound nothing has come near.
+
+    **So the provenance is captured where it is unambiguous, at the call itself**,
+    rather than reconstructed afterwards from a clock. An earlier revision compared
+    ``loop.time()`` against the window's end, and that is a heuristic with a real gap:
+    a gate raising just short of the bound, plus the microseconds an unwinding costs,
+    reads as an expiry the timer never delivered.
+
+    **The discriminator is ADR-0031 §2's count and not the exception's class**, which
+    is the same instrument the rest of this seam uses. When the deadline fires it
+    *cancels this task*, so a gate that absorbs that cancellation and raises a
+    ``TimeoutError`` of its own arrives with the count moved — the deadline really did
+    fire, and the expiry is this seam's. A gate that raises with the count unmoved
+    raised for its own reasons, and its refusal keeps the class the tree already gives
+    it (§4).
+
+    Attributes:
+        upstream: The gate's own ``TimeoutError``, where one was raised with nothing
+            cancelled. ``None`` otherwise, which is every ordinary call.
+    """
+
+    __slots__ = ("_inner", "upstream")
+
+    def __init__(self, inner: SpendGate) -> None:
+        """Watch ``inner`` without deciding anything for it.
+
+        Args:
+            inner: The gate this searcher was wired with. Every member delegates, and
+                a refusal leaves as the gate raised it — ADR-0194 §4 makes both spend
+                classes payload-free where they are raised, and nothing here catches,
+                wraps or annotates one.
+        """
+        self._inner = inner
+        self.upstream: BaseException | None = None
+
+    async def admit_invocation(self, *, estimate: ToolCost) -> SpendAdmissionHandle:
+        """Admit through the inner gate, noting a ``TimeoutError`` it raised itself.
+
+        Args:
+            estimate: The pinned declaration's cost, passed through unread.
+
+        Returns:
+            The inner gate's handle.
+
+        Raises:
+            BaseException: Whatever the inner gate raised, unchanged.
+        """
+        entered_with = pending_cancellations()
+        try:
+            return await self._inner.admit_invocation(estimate=estimate)
+        except TimeoutError as upstream:
+            if pending_cancellations() == entered_with:
+                # Nothing cancelled this task, so no deadline delivered anything here:
+                # ADR-0031 §2's case, and ADR-0241 §7's "not this seam's expiry".
+                self.upstream = upstream
+            raise
+
+    def release_admission(self, handle: SpendAdmissionHandle) -> None:
+        """Release through the inner gate.
+
+        Args:
+            handle: The reservation to drop. Synchronous and non-raising, which is the
+                contract this delegates rather than reimplements (ADR-0194 §5).
+        """
+        self._inner.release_admission(handle)
+
+    # `SpendGate` declares exactly these two members (ADR-0194 §3, §5) — an invoker
+    # able to read a totals projection has acquired a permissions-owned history it
+    # has no use for — so this wrapper has exactly two to delegate.
+
+
+@final
 class WebSearchEgress:
     """Ask one connected search account a question, and mint what it answers.
 
@@ -1223,36 +1311,7 @@ class WebSearchEgress:
         # the whole of it.
         loop = asyncio.get_running_loop()
         expires_at = loop.time() + duration.total_seconds()
-        checked = revalidated_call(call)
-        if checked.request.tool != self._declaration:
-            msg = (
-                f"{self._declaration.id}: the definition carried by this call is not the "
-                f"one this searcher registered, so the thing about to run is not the "
-                f"thing declared (ADR-0029 §2, ADR-0231 §6)"
-            )
-            raise ToolBindingError(msg)
-        if not checked.decision.authorises(checked.request):
-            msg = (
-                f"{self._declaration.id}: decision {checked.decision.id!r} does not "
-                f"authorise this request, so the thing about to run is not the thing "
-                f"that was authorised (ADR-0029 §2, ADR-0231 §6)"
-            )
-            raise ToolBindingError(msg)
-        binding = checked.request.egress_binding
-        origin = checked.request.parameters.get(ORIGIN_ARGUMENT)
-        query = checked.request.parameters.get(QUERY_ARGUMENT)
-        if binding is None or not isinstance(origin, str) or not isinstance(query, str):
-            # The schema refuses a call carrying anything but the two strings, and
-            # revalidation re-ran it; ADR-0148 §8's third floor refuses an `ALLOW`
-            # with no binding. So this is unreachable through the seam that builds one
-            # — and it is checked anyway, because what would otherwise stand here is a
-            # `cast`, and the value it would assert about is the recipient.
-            msg = (
-                f"{self._declaration.id}: this call carries no egress binding, or its "
-                f"arguments are not the two strings its schema declares, so there is no "
-                f"authorised request to make (ADR-0148 §8, ADR-0231 §5)"
-            )
-            raise ToolBindingError(msg)
+        checked, binding, origin, query = self._authorised(call)
 
         outcome: SearchOutcome | None = None
 
@@ -1260,6 +1319,39 @@ class WebSearchEgress:
             nonlocal outcome
             entered_with = pending_cancellations()
             deadline = asyncio.timeout(remaining.total_seconds())
+
+            def absorbed_a_cancellation() -> None:
+                """Deliver an interruption the callable swallowed, before classifying.
+
+                **A pending external cancellation takes precedence over every
+                classification this frame could make**, on every path out of the
+                callable — an exception it raised as well as a value it returned.
+                ADR-0029 §4 keeps that on the executor and ADR-0060 §1 says a method
+                never absorbs one, so a transport that catches the cancellation and
+                then raises a ``TimeoutError`` of its own must not have that
+                ``TimeoutError`` answered with a refusal. This is
+                ``_interruption``'s first clause one seam over, and it is a function
+                rather than three copies because a path that forgot it is exactly
+                what round 2 found.
+
+                Freshly raised rather than re-raised: the original was consumed
+                inside the callable, and what matters is that the cancellation
+                reaches the executor rather than being answered with a result.
+                ``consumed_call`` still completes the claim with the declaration's
+                ``interrupted_outcome`` and an ``UNKNOWN`` cost on the way past
+                (ADR-0192 §3).
+
+                Raises:
+                    CancelledError: If a cancellation of the invoking task is still
+                        pending.
+                """
+                if pending_cancellations() > entered_with:
+                    swallowed = (
+                        f"{self._declaration.id}: the searcher absorbed the "
+                        f"cancellation of its invoking task"
+                    )
+                    raise asyncio.CancelledError(swallowed)
+
             try:
                 async with deadline:
                     outcome = await self._asked(binding, origin=origin, query=query)
@@ -1292,6 +1384,13 @@ class WebSearchEgress:
                 #
                 # Either way the completion below still lands, because a claim is
                 # owed one on every exit this frame observes (ADR-0192 §3).
+                #
+                # **And an external cancellation outranks both classes.** A transport
+                # that catches the task's own cancellation and raises a
+                # ``TimeoutError`` instead arrives here with the count still moved,
+                # and answering it with a refusal would be the absorption ADR-0060 §1
+                # says a method never performs.
+                absorbed_a_cancellation()
                 outcome = _refused(
                     SearchRefusal.DEADLINE_EXPIRED
                     if deadline.expired()
@@ -1306,17 +1405,7 @@ class WebSearchEgress:
                 # answer and no exception, and trusting that return would record
                 # `SUCCEEDED` for a call that outran its bound — the seam's worst
                 # available bug, and the one an implementation is most likely to have.
-                if pending_cancellations() > entered_with:
-                    # Freshly raised rather than re-raised: the original was consumed
-                    # inside the callable. What matters is that the cancellation
-                    # reaches the executor rather than being answered with a result
-                    # (ADR-0060 §1), and `consumed_call` still completes the claim
-                    # with `interrupted_outcome` on the way past (ADR-0192 §3).
-                    absorbed = (
-                        f"{self._declaration.id}: the searcher absorbed the "
-                        f"cancellation of its invoking task"
-                    )
-                    raise asyncio.CancelledError(absorbed)
+                absorbed_a_cancellation()
                 if deadline.expired():
                     # `Timeout.expired()` is this seam's own state and no callable can
                     # reset it, which is what makes the deadline half tool-proof where
@@ -1343,9 +1432,10 @@ class WebSearchEgress:
             # an expiry inside the admission is.
             return _refused(SearchRefusal.DEADLINE_EXPIRED)
 
+        watched = _UpstreamWatchingGate(self._gate)
         try:
             await admitted_call(
-                gate=self._gate,
+                gate=watched,
                 # Read off the revalidated, detached copy the checks above produced
                 # and never off the argument (ADR-0194 §3, §11) — and the second check
                 # has already established that copy's definition equals this
@@ -1375,18 +1465,78 @@ class WebSearchEgress:
             # `ToolResult` that frame returned for the exit is dropped here for the
             # same reason: nothing appended a claim for it to complete.
             #
-            # **And which exit it was is decided by this seam's own deadline, never by
-            # the exception `admitted_call` caught** (ADR-0241 §7). That frame answers
-            # `expiry_failure` for *every* `TimeoutError` out of `gate.admit_invocation`
-            # — including one the gate raised of its own accord, which is not this
-            # deadline firing and which §7 forbids reporting as one. The window is this
-            # frame's, so the question is answerable here and nowhere else: past
-            # `expires_at` the deadline fired, and short of it something upstream did,
-            # which keeps the class it has today (§4).
-            if loop.time() < expires_at:
+            # **And which exit it was is decided by provenance and never by a clock**
+            # (ADR-0241 §7). `admitted_call` answers `expiry_failure` for *every*
+            # `TimeoutError` out of `gate.admit_invocation` — including one the gate
+            # raised of its own accord, which is not this deadline firing and which §7
+            # forbids reporting as one. `_UpstreamWatchingGate` captures that where it
+            # is unambiguous, at the call itself; see its docstring for why the
+            # `Task.cancelling()` count and not a comparison against `expires_at`.
+            if watched.upstream is not None:
                 return _refused(SearchRefusal.TRANSPORT_FAILED)
             return _refused(SearchRefusal.DEADLINE_EXPIRED)
         return outcome
+
+    def _authorised(self, call: ToolCall) -> tuple[ToolCall, EgressBinding, str, str]:
+        """Run ADR-0029 §2's three checks, and hand back what survived them.
+
+        **Inside the caller's window and before anything else** (ADR-0231 §6,
+        ADR-0241 §1): the call is revalidated and detached, its definition is compared
+        for equality against this searcher's **own registered declaration** — the
+        authoritative original here, standing where ADR-0029 §2 puts the registry's —
+        and ``PermissionDecision.authorises`` is re-evaluated against that same copy.
+        Every later step reads what this returns and never the argument.
+
+        Synchronous throughout, which is what makes the ordering a fact rather than a
+        convention: there is no ``await`` here for a reprovisioning, a cancellation or
+        a second caller to be delivered at, so nothing observed by these checks can
+        move between them and the send.
+
+        Args:
+            call: The call as handed, read only through the copy this makes of it.
+
+        Returns:
+            The revalidated call, its binding, and the two arguments its schema
+            declares — each already narrowed, so no later frame carries a ``cast``.
+
+        Raises:
+            ToolBindingError: If the call does not survive revalidation, carries a
+                definition unequal to this searcher's registered original, is not
+                authorised by its decision, or carries no egress binding. **No
+                credential is read, no channel is opened, no admission is sought and
+                no claim is appended for any of them.**
+        """
+        checked = revalidated_call(call)
+        if checked.request.tool != self._declaration:
+            msg = (
+                f"{self._declaration.id}: the definition carried by this call is not the "
+                f"one this searcher registered, so the thing about to run is not the "
+                f"thing declared (ADR-0029 §2, ADR-0231 §6)"
+            )
+            raise ToolBindingError(msg)
+        if not checked.decision.authorises(checked.request):
+            msg = (
+                f"{self._declaration.id}: decision {checked.decision.id!r} does not "
+                f"authorise this request, so the thing about to run is not the thing "
+                f"that was authorised (ADR-0029 §2, ADR-0231 §6)"
+            )
+            raise ToolBindingError(msg)
+        binding = checked.request.egress_binding
+        origin = checked.request.parameters.get(ORIGIN_ARGUMENT)
+        query = checked.request.parameters.get(QUERY_ARGUMENT)
+        if binding is None or not isinstance(origin, str) or not isinstance(query, str):
+            # The schema refuses a call carrying anything but the two strings, and
+            # revalidation re-ran it; ADR-0148 §8's third floor refuses an `ALLOW`
+            # with no binding. So this is unreachable through the seam that builds one
+            # — and it is checked anyway, because what would otherwise stand here is a
+            # `cast`, and the value it would assert about is the recipient.
+            msg = (
+                f"{self._declaration.id}: this call carries no egress binding, or its "
+                f"arguments are not the two strings its schema declares, so there is no "
+                f"authorised request to make (ADR-0148 §8, ADR-0231 §5)"
+            )
+            raise ToolBindingError(msg)
+        return checked, binding, origin, query
 
     async def _asked(self, binding: EgressBinding, *, origin: str, query: str) -> SearchOutcome:
         """Make the one request through the seam, and read the answer under §10.
