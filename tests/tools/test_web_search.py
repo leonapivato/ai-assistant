@@ -46,6 +46,7 @@ from web_search_harness import (
     ORIGIN,
     QUERY,
     REPORTED_AT,
+    AbsorbingGate,
     AbsorbingTransport,
     GatedTransport,
     InterruptingTransport,
@@ -2013,3 +2014,72 @@ async def test_a_bound_the_revalidation_exhausts_reaches_no_gate_and_no_channel(
     assert subject.keyring.reads == [], "no credential was read"
     assert subject.transport.attempts == (), "no channel was opened"
     assert await subject.trail.export_invocations() == [], "and no claim was appended"
+
+
+async def test_a_transport_that_translates_a_cancellation_into_a_timeout_still_delivers_it() -> (
+    None
+):
+    """ADR-0060 §1 outranks every classification, on the exception path too.
+
+    Round 2's blocker, on both lenses. A transport that catches the task's own
+    ``CancelledError`` and raises a ``TimeoutError`` instead arrives at the seam's
+    expiry branch with the cancellation **still pending** — the count is a lifetime
+    figure only ``uncancel`` lowers, and no callable can call it on a caller's behalf.
+    A branch that classified before checking would answer a cancelled turn with a
+    returned refusal and complete the ledger ``FAILED``, which is the absorption
+    ADR-0060 §1 says a method never performs and the misclassification ADR-0241 §7
+    forbids.
+
+    So the check is on **every** path out of the callable and not only on the one that
+    returned a value, and this is the arm that fails an implementation which put it in
+    one place.
+    """
+    transport = AbsorbingTransport(
+        60.0, raises=TimeoutError("the transport turned the cancellation into a timeout")
+    )
+    subject = await built(transport=transport)
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    search = asyncio.ensure_future(subject.searcher.search(call, timeout=A_BOUND))
+    await settle()
+    assert transport.attempts, "the open was reached before the cancellation"
+    search.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await search
+
+    assert transport.absorbed == 1, "the arrangement really did swallow the cancellation"
+    completions = [
+        row.invocation
+        for row in await subject.trail.export_invocations()
+        if row.invocation.completes is not None
+    ]
+    assert [row.outcome for row in completions] == [ToolOutcome.INDETERMINATE], (
+        "the completion is the one ADR-0029 §4 computes for an interruption, and never "
+        "the `FAILED` a `TRANSPORT_FAILED` refusal would have written"
+    )
+
+
+async def test_a_gate_that_absorbs_the_deadline_is_still_this_seams_expiry() -> None:
+    """The other direction of ADR-0241 §7's provenance rule at the admission.
+
+    The pair to the arm above, and it is what stops that one being closed the lazy
+    way. Here the gate swallows the cancellation **this deadline delivered** and
+    raises a ``TimeoutError`` of its own spelling: an implementation that classified
+    on "the gate raised a ``TimeoutError``" alone would report a genuine expiry as an
+    upstream failure, and one that classified on a clock reading would get this right
+    and the arm above wrong.
+
+    What separates them is ADR-0031 §2's count, which the deadline moves and no
+    callable can lower — so this is an expiry, and no claim was appended for it (§5).
+    """
+    gate = AbsorbingGate()
+    subject = await built(channels=[answering(result())], gate=gate)
+    call = await authorised_search(subject.trail, proposal=await request(subject))
+
+    outcome = await subject.searcher.search(call, timeout=_EXPIRING_BOUND)
+
+    assert gate.absorbed == 1, "the arrangement really did swallow the deadline's cancellation"
+    assert outcome.refusal is SearchRefusal.DEADLINE_EXPIRED
+    assert await subject.trail.export_invocations() == [], "and no claim was appended"
+    assert subject.transport.attempts == (), "and no channel was opened"

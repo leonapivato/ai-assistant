@@ -399,19 +399,31 @@ class AbsorbingTransport:
         absorbed: How many cancellations this stub swallowed.
     """
 
-    __slots__ = ("_channels", "_seconds", "absorbed", "attempts")
+    __slots__ = ("_channels", "_raises", "_seconds", "absorbed", "attempts")
 
-    def __init__(self, seconds: float, *channels: FakeByteChannel) -> None:
-        """Try to wait ``seconds``, absorb any cancellation, then serve ``channels``.
+    def __init__(
+        self,
+        seconds: float,
+        *channels: FakeByteChannel,
+        raises: BaseException | None = None,
+    ) -> None:
+        """Try to wait ``seconds``, absorb any cancellation, then answer.
 
         Args:
             seconds: How long the open would take if nothing interrupted it. Set well
                 past the bound a case states, so the cancellation is what ends the
                 wait.
             channels: What each open hands back once it stops waiting.
+            raises: Raised **instead of** answering, once the cancellation has been
+                swallowed. The shape round 2 found: a transport that translates the
+                task's own cancellation into a ``TimeoutError`` of its own reaches the
+                seam's expiry branch with the cancellation still pending, and a branch
+                that classified before checking would answer a cancelled turn with a
+                refusal (ADR-0060 §1).
         """
         self._seconds = seconds
         self._channels = list(channels)
+        self._raises = raises
         self.attempts: list[TransportEndpoint] = []
         self.absorbed = 0
 
@@ -425,6 +437,7 @@ class AbsorbingTransport:
             The next channel — which is the point: the call *looks* successful.
 
         Raises:
+            BaseException: ``raises``, where a case supplied one.
             TransportError: If the script is exhausted.
         """
         self.attempts.append(endpoint)
@@ -432,6 +445,8 @@ class AbsorbingTransport:
             await asyncio.sleep(self._seconds)
         except asyncio.CancelledError:
             self.absorbed += 1
+        if self._raises is not None:
+            raise self._raises
         if not self._channels:
             msg = "this transport has no further channel to serve"
             raise TransportError(msg)
@@ -543,6 +558,64 @@ class RaisingGate:
         """
         del at
         return ()
+
+
+@final
+class AbsorbingGate:
+    """A ``SpendGate`` that swallows the deadline's cancellation and raises a timeout.
+
+    The admission's counterpart to :class:`AbsorbingTransport`, and the arm that keeps
+    the searcher's provenance rule honest in **both** directions: here the deadline
+    really did fire, so classifying by "the gate raised a ``TimeoutError``" alone would
+    report an expiry as an upstream failure. What separates the two is ADR-0031 §2's
+    count — the deadline cancels the task, and no callable can lower that.
+
+    Attributes:
+        admissions: How many times an admission was sought.
+        absorbed: How many cancellations this stub swallowed.
+    """
+
+    __slots__ = ("_seconds", "absorbed", "admissions")
+
+    def __init__(self, seconds: float = 60.0) -> None:
+        """Try to wait ``seconds``, then raise a timeout of this stub's own spelling.
+
+        Args:
+            seconds: Well past any bound a case states, so the cancellation is what
+                ends the wait.
+        """
+        self._seconds = seconds
+        self.admissions = 0
+        self.absorbed = 0
+
+    async def admit_invocation(self, *, estimate: ToolCost) -> SpendAdmissionHandle:
+        """Wait, swallow the cancellation, and raise a ``TimeoutError`` regardless.
+
+        Args:
+            estimate: The declared cost, unread.
+
+        Returns:
+            Nothing.
+
+        Raises:
+            TimeoutError: Always — after the deadline has already cancelled this task.
+        """
+        del estimate
+        self.admissions += 1
+        try:
+            await asyncio.sleep(self._seconds)
+        except asyncio.CancelledError:
+            self.absorbed += 1
+        msg = "the gate turned its cancellation into a timeout of its own"
+        raise TimeoutError(msg)
+
+    def release_admission(self, handle: SpendAdmissionHandle) -> None:
+        """Drop a reservation this stub never took.
+
+        Args:
+            handle: The handle, which is never one of this stub's.
+        """
+        del handle
 
 
 @final
