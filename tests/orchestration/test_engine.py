@@ -99,6 +99,7 @@ from ai_assistant.orchestration import (
     ComposingStage,
     ConnectionOperations,
     ConversationLifecycle,
+    DestinationTrustOperations,
     Engine,
     GrantOperations,
     HeldSource,
@@ -228,6 +229,33 @@ def _grant_operations(sources: Sequence[HeldSource] = ()) -> GrantOperations:
         store=FakeSourceGrantStore(),
         sources=sources,
         id_factory=_grant_ids(),
+        clock=lambda: AT,
+    )
+
+
+def _trust_ids() -> Callable[[], str]:
+    """Deterministic ids for the trust records an ``Engine`` mints under test."""
+    counter = count(1)
+    return lambda: f"trust-{next(counter)}"
+
+
+def _destination_trust_operations(
+    *,
+    store: FakeDestinationTrustStore | None = None,
+    trail: AuditTrail | None = None,
+) -> DestinationTrustOperations:
+    """The destination-trust collaborator every ``Engine`` needs (ADR-0242 §2).
+
+    Required rather than optional on the façade, on ``_recipient_grant_operations``'
+    reason exactly: the three methods are on the Protocol, so an engine that could be
+    built without them is one whose surface is conditionally present. Both seams
+    default to fresh fakes — an empty trust store and a trail nothing has been
+    recorded to — which is what a case not about the trust act wants.
+    """
+    return DestinationTrustOperations(
+        store=FakeDestinationTrustStore() if store is None else store,
+        trail=FakeAuditTrail() if trail is None else trail,
+        id_factory=_trust_ids(),
         clock=lambda: AT,
     )
 
@@ -824,6 +852,10 @@ class Harness:
         self.recipient_grants: RecipientGrantStore = (
             FakeRecipientGrantStore() if recipient_grants is None else recipient_grants
         )
+        #: The destination-trust store ADR-0242 §4's listing and revocation read and
+        #: write, held here so a case can seed it, revoke from it, or make its writes
+        #: fail — the states the trust act's own refusals are about.
+        self.destination_trust = FakeDestinationTrustStore()
         self.engine = Engine(
             composing=self.composing,
             grant_operations=_grant_operations(),
@@ -837,6 +869,15 @@ class Harness:
                 policy=self.policy,
                 id_factory=lambda: next(self.ids),
                 clock=self.clock,
+            ),
+            # The harness's own trail again (ADR-0242 §1): the trust act reads the
+            # decision it rides from the trail every other operation here records to,
+            # so a case cannot trust a decision `recent_decisions` cannot see.
+            destination_trust_operations=DestinationTrustOperations(
+                store=self.destination_trust,
+                trail=self.trail,
+                id_factory=_trust_ids(),
+                clock=lambda: AT,
             ),
             connection_operations=_connection_operations(),
             loop=loop,
@@ -1687,6 +1728,7 @@ def _fresh_facade(harness: Harness) -> Engine:
         composing=_composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),
+        destination_trust_operations=_destination_trust_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
@@ -1810,6 +1852,7 @@ async def test_a_recovered_entry_does_not_count_toward_the_confirmation_ceiling(
         composing=_composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),
+        destination_trust_operations=_destination_trust_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
@@ -1876,6 +1919,7 @@ async def test_an_in_process_park_resolved_elsewhere_is_reconciled_and_frees_the
         composing=_composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),
+        destination_trust_operations=_destination_trust_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
@@ -1934,6 +1978,7 @@ async def test_reconcile_keeps_a_concurrent_same_engine_converse_park() -> None:
         composing=_composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),
+        destination_trust_operations=_destination_trust_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
@@ -2079,6 +2124,7 @@ async def test_concurrent_recovery_does_not_prune_another_calls_returned_token()
         composing=_composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),
+        destination_trust_operations=_destination_trust_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
@@ -2848,6 +2894,7 @@ async def test_a_clock_at_the_start_of_the_calendar_does_not_break_the_sweep() -
         composing=_composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),
+        destination_trust_operations=_destination_trust_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
@@ -3289,6 +3336,7 @@ async def test_outstanding_confirmations_apply_backpressure_without_stranding() 
         composing=_composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),
+        destination_trust_operations=_destination_trust_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
@@ -3366,6 +3414,7 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
         composing=_composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),
+        destination_trust_operations=_destination_trust_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
@@ -3406,6 +3455,7 @@ async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
             composing=_composing(),
             grant_operations=_grant_operations(),
             recipient_grant_operations=_recipient_grant_operations(),
+            destination_trust_operations=_destination_trust_operations(),
             connection_operations=_connection_operations(),
             loop=harness.engine._loop,
             runner=harness.engine._runner,
@@ -3435,6 +3485,7 @@ async def test_a_non_integer_confirmation_ceiling_is_refused(bad: object) -> Non
             composing=_composing(),
             grant_operations=_grant_operations(),
             recipient_grant_operations=_recipient_grant_operations(),
+            destination_trust_operations=_destination_trust_operations(),
             connection_operations=_connection_operations(),
             loop=harness.engine._loop,
             runner=harness.engine._runner,

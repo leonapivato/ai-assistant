@@ -115,6 +115,7 @@ from ai_assistant.orchestration import (
     ConnectionOperations,
     ConsolidationStage,
     ConversationLifecycle,
+    DestinationTrustOperations,
     Engine,
     GrantOperations,
     IngestionStage,
@@ -584,6 +585,15 @@ async def _engine(now: Clock) -> None:
             trail=FakeAuditTrail(),
             policy=FakeActionPolicy(),
             id_factory=lambda: "recipient-grant-1",
+            clock=lambda: _AWARE,
+        ),
+        # The destination-trust operations read a clock of their own — the instant of
+        # the user's act, stamped on the record and on a revocation (ADR-0242 §2, §4)
+        # — so this module wires it from the same seam every other one here comes from.
+        destination_trust_operations=DestinationTrustOperations(
+            store=FakeDestinationTrustStore(),
+            trail=FakeAuditTrail(),
+            id_factory=lambda: "destination-trust-1",
             clock=lambda: _AWARE,
         ),
         # No clock seam of its own: a connection record carries no instant at all

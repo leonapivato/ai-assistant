@@ -43,6 +43,7 @@ from ai_assistant.orchestration import (
     ComposingStage,
     ConnectionOperations,
     ConversationLifecycle,
+    DestinationTrustOperations,
     Engine,
     GrantOperations,
     HeldSource,
@@ -64,6 +65,7 @@ from ai_assistant.testing import (
     FakeContextProvider,
     FakeConversationStore,
     FakeDeferralStore,
+    FakeDestinationTrustStore,
     FakeEgressBinder,
     FakeFeedbackProcessor,
     FakeMemoryPolicy,
@@ -122,6 +124,33 @@ def _grant_operations(sources: Sequence[HeldSource] = ()) -> GrantOperations:
         store=FakeSourceGrantStore(),
         sources=sources,
         id_factory=_grant_ids(),
+        clock=lambda: AT,
+    )
+
+
+def _trust_ids() -> Callable[[], str]:
+    """Deterministic ids for the trust records an ``Engine`` mints under test."""
+    counter = count(1)
+    return lambda: f"trust-{next(counter)}"
+
+
+def _destination_trust_operations(
+    *,
+    store: FakeDestinationTrustStore | None = None,
+    trail: AuditTrail | None = None,
+) -> DestinationTrustOperations:
+    """The destination-trust collaborator every ``Engine`` needs (ADR-0242 §2).
+
+    Required rather than optional on the façade, on ``_recipient_grant_operations``'
+    reason exactly: the three methods are on the Protocol, so an engine that could be
+    built without them is one whose surface is conditionally present. Both seams
+    default to fresh fakes — an empty trust store and a trail nothing has been
+    recorded to — which is what a case not about the trust act wants.
+    """
+    return DestinationTrustOperations(
+        store=FakeDestinationTrustStore() if store is None else store,
+        trail=FakeAuditTrail() if trail is None else trail,
+        id_factory=_trust_ids(),
         clock=lambda: AT,
     )
 
@@ -306,6 +335,7 @@ def _make_engine(
         composing=_composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),
+        destination_trust_operations=_destination_trust_operations(),
         connection_operations=_connection_operations(),
         loop=loop,
         runner=runner,

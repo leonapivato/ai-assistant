@@ -102,6 +102,7 @@ from ai_assistant.orchestration import (
     ComposingStage,
     ConnectionOperations,
     ConversationLifecycle,
+    DestinationTrustOperations,
     Engine,
     GrantOperations,
     HeldSource,
@@ -126,6 +127,7 @@ from ai_assistant.testing import (
     FakeContextProvider,
     FakeConversationStore,
     FakeDeferralStore,
+    FakeDestinationTrustStore,
     FakeEgressBinder,
     FakeFeedbackProcessor,
     FakeMemoryPolicy,
@@ -568,6 +570,16 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
             trail=audit,
             policy=FakeActionPolicy(),
             id_factory=_counter("recipient-grant"),
+            clock=lambda: AT,
+        ),
+        # The three destination-trust operations, over the **same** trail (ADR-0242
+        # §1): the decision the act rides is read from the trail every other operation
+        # here records to, so the suite cannot trust a row `recent_decisions` cannot
+        # see.
+        destination_trust_operations=DestinationTrustOperations(
+            store=FakeDestinationTrustStore(),
+            trail=audit,
+            id_factory=_counter("destination-trust"),
             clock=lambda: AT,
         ),
         # The canonical provisioner fake, which performs ADR-0148 §6's three writes

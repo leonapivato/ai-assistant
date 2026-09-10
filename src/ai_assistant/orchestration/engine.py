@@ -236,6 +236,7 @@ if TYPE_CHECKING:
         Conversation,
         ConversationDigest,
         DeferralAdmission,
+        DestinationTrustRecord,
         DurableIdentifier,
         EncodableText,
         FeedbackEvent,
@@ -275,6 +276,7 @@ if TYPE_CHECKING:
     )
     from ai_assistant.orchestration.conversations import ConversationLifecycle
     from ai_assistant.orchestration.delivery import DeliveryOutbox
+    from ai_assistant.orchestration.destination_trust import DestinationTrustOperations
     from ai_assistant.orchestration.grants import GrantOperations
     from ai_assistant.orchestration.ingestion import IngestionReport, IngestionStage
     from ai_assistant.orchestration.loop import LearningLoop
@@ -1906,6 +1908,7 @@ class Engine:
         questions: QuestionStage,
         grant_operations: GrantOperations,
         recipient_grant_operations: RecipientGrantOperations,
+        destination_trust_operations: DestinationTrustOperations,
         connection_operations: ConnectionOperations,
         calendar_ingestion: IngestionStage | None = None,
         email_ingestion: IngestionStage | None = None,
@@ -2174,6 +2177,27 @@ class Engine:
                 never one (ADR-0235 §7): one object over two stores that cannot
                 substitute for each other is the shape that invites a control
                 revoking across both.
+            destination_trust_operations: The three destination-trust operations
+                (ADR-0242 §2, §4) — the **only** object in this package holding a
+                :class:`~ai_assistant.core.protocols.DestinationTrustStore` face
+                beside the one servicing site ADR-0238 §14 wires. The façade
+                delegates ``establish_destination_trust``,
+                ``standing_destination_trust`` and ``revoke_destination_trust`` to
+                it, and no ``interfaces`` adapter holds the store: a surface is given
+                records by these three and reads none.
+
+                **Required, on ``grant_operations``' argument exactly**: these three
+                are ``AssistantEngine`` methods and the shared conformance suite runs
+                against this class, so an engine that could be built without them is
+                one whose surface is conditionally present.
+
+                **A third object and not members on
+                ``recipient_grant_operations``**, because destination trust and
+                recipient grants are two vocabularies and never one (ADR-0242 §4) and
+                the two acts are separate with neither implying the other (ADR-0238
+                §1). One object over both stores is what makes a control revoking
+                across both easy to write and a user's belief that revoking one
+                revoked the other easy to acquire.
             connection_operations: The five connection operations (ADR-0151 §1,
                 §10) — the **only** object in this package holding a
                 :class:`~ai_assistant.core.protocols.ConnectionProvisioner`. The
@@ -2500,6 +2524,7 @@ class Engine:
         self._questions = questions
         self._grants = grant_operations
         self._recipient_grants = recipient_grant_operations
+        self._destination_trust = destination_trust_operations
         self._connections = connection_operations
         self._calendar_ingestion = calendar_ingestion
         self._email_ingestion = email_ingestion
@@ -6647,6 +6672,95 @@ class Engine:
         return await self._tracked(
             self._recipient_grants.revoke_recipient_grant(named),
             "revoke_recipient_grant",
+            checked=True,
+        )
+
+    # --- the destination-trust surface (ADR-0242 §2, §4) --------------------
+
+    async def establish_destination_trust(
+        self, decision_id: DurableIdentifier
+    ) -> DestinationTrustRecord:
+        """Record the user's choice over a recorded decision's destinations (ADR-0242 §1).
+
+        Delegated whole; what this layer adds is the identifier validation, the
+        payload check, the drain tracking and the result measurement. The three
+        availability conditions, the transcription of the destination set and the
+        record's construction are the operations object's, and **no store is written
+        on any refusal**.
+
+        **A second question asked as a second question** (ADR-0238 §1): this is not
+        ``establish_recipient_grant`` with a flag, it records no answer to any
+        confirmation, and neither operation reads the other's store.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``decision_id`` is blank or unwritable.
+            UntrustableDestinationError: If the act may not ride this decision — any
+                of ADR-0242 §1's three conditions, the first that fails being the one
+                named.
+            DuplicateDestinationTrustError: If a live record already names this
+                destination set (ADR-0242 §2).
+            InvalidDestinationTrustError: If the trust store refused the record on any
+                other ground, or could not be written.
+            AuditError: If the permission trail cannot be read.
+            PlanningError: If the injected clock's reading is not conforming.
+            OversizedValueError: If the argument or the record exceeds the limit.
+        """
+        self._reject_if_closing()
+        named = identifier(decision_id, name="decision_id")
+        check_arguments(
+            "establish_destination_trust", max_bytes=self._max_payload_bytes, decision_id=named
+        )
+        return await self._tracked(
+            self._destination_trust.establish_destination_trust(named),
+            "establish_destination_trust",
+            checked=True,
+        )
+
+    async def standing_destination_trust(self) -> tuple[DestinationTrustRecord, ...]:
+        """List every destination-trust record that is live now (ADR-0242 §4).
+
+        Delegated whole. **It takes no ``limit``**, for ``standing_recipient_grants``'
+        reason one store over: a truncated answer to "what do I trust" is a false
+        answer rather than a partial one, so a live set that does not fit the frame is
+        an ``OversizedValueError`` and no set at all.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            InvalidDestinationTrustError: If the trust store cannot be read.
+            OversizedValueError: If the live set does not fit the contract limit.
+        """
+        self._reject_if_closing()
+        return await self._tracked(
+            self._destination_trust.standing_destination_trust(),
+            "standing_destination_trust",
+            checked=True,
+        )
+
+    async def revoke_destination_trust(self, record_id: DurableIdentifier) -> bool:
+        """Withdraw one destination-trust record, or report there was none (ADR-0242 §4).
+
+        **Never refused** for any count, budget or ceiling, and whole: there is no
+        partial withdrawal and no narrowing. A caller that lost a race to another
+        revocation is answered ``False``, which is the honest answer rather than a
+        swallowed error — the trust they asked to withdraw is withdrawn.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``record_id`` is blank or unwritable.
+            InvalidDestinationTrustError: If the trust store cannot be read or
+                written.
+            PlanningError: If the injected clock's reading is not conforming.
+            OversizedValueError: If the argument exceeds the limit.
+        """
+        self._reject_if_closing()
+        named = identifier(record_id, name="record_id")
+        check_arguments(
+            "revoke_destination_trust", max_bytes=self._max_payload_bytes, record_id=named
+        )
+        return await self._tracked(
+            self._destination_trust.revoke_destination_trust(named),
+            "revoke_destination_trust",
             checked=True,
         )
 

@@ -24,7 +24,10 @@ from typing import TYPE_CHECKING, final
 
 from pydantic import ValidationError
 
-from ai_assistant.core.errors import InvalidDestinationTrustError
+from ai_assistant.core.errors import (
+    DuplicateDestinationTrustError,
+    InvalidDestinationTrustError,
+)
 from ai_assistant.core.types import (
     DestinationTrust,
     DestinationTrustRecord,
@@ -171,9 +174,13 @@ class FakeDestinationTrustStore:
         §1 requires is obtained on a single event loop.
 
         Raises:
-            InvalidDestinationTrustError: If the record does not validate, if its id
-                is already recorded, or if it duplicates a live record's destination
-                set.
+            DuplicateDestinationTrustError: If it duplicates a **live** record's
+                destination set (ADR-0242 §2). The one ground on which the user's
+                recourse is no act at all, told apart by its **type** so that no
+                surface has to parse a message or read the store back.
+            InvalidDestinationTrustError: If the record does not validate or if its id
+                is already recorded. The base class still catches the duplicate-set
+                ground too, so a caller wanting one handler keeps one.
         """
         snapshot = _revalidated(record)
         if any(held.id == snapshot.id for held in self._records):
@@ -189,7 +196,7 @@ class FakeDestinationTrustStore:
                     f"record {held.id!r} already names; revoking one would leave the other "
                     f"standing and the user would have revoked nothing (ADR-0238 §1)"
                 )
-                raise InvalidDestinationTrustError(msg)
+                raise DuplicateDestinationTrustError(msg)
         self._records.append(snapshot)
         return snapshot.id
 
@@ -214,10 +221,12 @@ class FakeDestinationTrustStore:
         there is a lock at all.
 
         Raises:
+            DuplicateDestinationTrustError: If it duplicates a **live** record's
+                destination set (ADR-0242 §2) — the one ground on which the user's
+                recourse is no act at all, told apart by its type.
             InvalidDestinationTrustError: If a store fault is scripted
                 (:meth:`fail_writes`), if the record does not satisfy its own model,
-                if its id is already recorded, or if it duplicates a live record's
-                destination set.
+                or if its id is already recorded.
         """
         self._refuse_write()
         async with self._resource.held():

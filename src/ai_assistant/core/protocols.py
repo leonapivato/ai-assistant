@@ -12326,6 +12326,237 @@ class AssistantEngine(Protocol):
         """
         ...
 
+    # --- the destination-trust surface (ADR-0242 §2, §4) ---------------------
+    #
+    # **Three operations and not five**, and the two ADR-0235 has that are absent
+    # here are absent for a reason rather than by omission (ADR-0242 §2). There is no
+    # ``trustable_decisions`` read, because the availability set ADR-0242 §1 fixes is
+    # **three** conditions wide and :meth:`grantable_decisions`' own rows already
+    # satisfy every one of them a user is looking at — that listing exists, and
+    # ADR-0242 §5 makes it name both acts. And there is no history read beside the
+    # standing one, because the reason ADR-0235 §7 needed
+    # :meth:`recent_recipient_grants` does not arise: that member exists because a
+    # user at the ceiling could hold an *expired* grant occupying a slot, see it in no
+    # listing and have no id to revoke, and a trust record has **no ceiling and no
+    # expiry** — so a record not in the live listing is one that has been revoked and
+    # needs no act.
+    #
+    # **Destination trust and recipient grants are two vocabularies and never one**
+    # (ADR-0242 §4), as recipient grants and source grants already are (ADR-0235 §7).
+    # No operation, command, route, view or listing answers one with the other,
+    # presents a trust record among grants or the reverse, offers a control that
+    # revokes across both, or names a combined total. A surface may put them on one
+    # screen; what it may not do is answer either question with the other's records.
+    #
+    # **The names qualify with ``destination`` deliberately.** On this Protocol
+    # "grant" already names ``SourceGrant`` and "recipient grant" names
+    # ``RecipientGrant``, so ADR-0186 §1's naming rule — the shorter name is right
+    # only where the word has one referent on the surface — comes out the same way a
+    # third time (ADR-0242 §5).
+    #
+    # **The two acts are two acts** (ADR-0238 §1, ADR-0242 §1). A
+    # ``RecipientGrant`` decides *whether this system may talk to this party*; a
+    # ``DestinationTrustRecord`` decides *what class of payload it may compose for
+    # it*. Neither operation reads, consults or is influenced by the other's store,
+    # and no surface offers a single control, flag, prompt or keystroke performing
+    # both: "A deployment reaching ``USER_CHOSEN`` has a user who answered the second
+    # question **knowing it was a second question**".
+    #
+    # **The engine holds the** :class:`DestinationTrustStore` **face and no
+    # ``interfaces`` adapter holds it** (ADR-0242 §2), nor a
+    # :class:`RecipientGrantStore`, a :class:`RecipientGrants` or an
+    # :class:`AuditTrail`. A surface is given records by these operations and reads no
+    # store — golden rule 3, and ADR-0235 §4's clause read one store over: a renderer
+    # given the store face would hold ``record``, ``revoke`` and ``export``, and a
+    # remote client could not perform the read at all. ``app/composition.py`` stays
+    # the only place the concrete store is constructed (ADR-0238 §14).
+    #
+    # **Nothing a model steers reaches any of them** (ADR-0242 §1). No
+    # ``ToolDefinition`` binds one, no plan step reaches one, and no model-authored
+    # value becomes an argument to one: the act is a decision of the user made while
+    # looking at a recorded call.
+    #
+    # **Every one is cancellable under this module's cancellation clause
+    # (ADR-0060), observes no caller-owned container (ADR-0065), and returns a
+    # detached snapshot** — the tuple, the records in it, and everything mutable
+    # those reach (ADR-0018 §3), as every neighbouring promoted read does.
+
+    async def establish_destination_trust(
+        self, decision_id: DurableIdentifier
+    ) -> DestinationTrustRecord:
+        """Record that the user chose a recorded decision's destinations (ADR-0242 §1).
+
+        The act **rides a recorded** :class:`~ai_assistant.core.types.PermissionDecision`
+        and is offered on no other subject. The user names a decision from a listing
+        that already renders the canonical destination set ``core`` derived, and this
+        records a :class:`~ai_assistant.core.types.DestinationTrustRecord` over **that
+        binding's canonical destination set, transcribed by value**.
+
+        **It accepts no destination the user typed.** No caller passes a host, a
+        :class:`~ai_assistant.core.types.CanonicalDestination`, a destination set, a
+        ``trust``, an ``id`` or an instant, so there is no parameter through which a
+        subject could be substituted — ADR-0235 §4's clause read one act over, and
+        ADR-0021 §3's move of removing the capability rather than forbidding it.
+        ``trust`` is ``USER_CHOSEN`` because ADR-0238 §1 refuses a record asserting
+        anything else at construction; the record's ``id`` is minted by the engine and
+        its ``established_at`` is the engine's clock read at the instant of the act,
+        both as :class:`~ai_assistant.core.types.RecipientGrant`'s are, so that the
+        record is a complete value before it reaches any store.
+
+        **The act is available on a decision meeting all three of the following, and
+        is refused on any other** (ADR-0242 §1): the trail holds a decision with that
+        id; that decision's ``egress_binding`` is an
+        :class:`~ai_assistant.core.types.EgressBinding` — never ``None``, never an
+        :class:`~ai_assistant.core.types.OriginUnrecordedBinding`, never a
+        :class:`~ai_assistant.core.types.CoverageUnrecordedBinding`; and that
+        binding's ``planned_with_external_content`` is ``False``.
+
+        **Three and not ADR-0235 §3's seven**, and the four that are absent are absent
+        for one reason. The decision's **ruling**, whether the trail holds a decision
+        **resolving** it, its ``step_id`` and ``execution_id``, and its ``expires_at``
+        are **not** conditions of this act, and no lane adds them: ADR-0235 §3's
+        conditions over those fields exist because that act *seeks a ruling from*
+        ``ActionPolicy.resolve`` *and records an answer*, and this act seeks no ruling,
+        records no answer, sends nothing, resumes nothing and services nothing. **A
+        user may record trust from a decision they answered a month ago**, and that is
+        the point: it is what keeps the act reachable after the grant act has taken the
+        row out of :meth:`grantable_decisions`.
+
+        **The third condition is kept for a reason narrower and sharper than ADR-0235
+        §3's.** Trust is precisely what closes ADR-0238 §5's loop and lets a later
+        request be composed over what an earlier one returned, so trusting a
+        destination a model reached *from* external content is the loop closing on
+        itself: an injected page names a destination, the planner plans a call to it,
+        the call is refused and recorded, and the recorded row is then offered to the
+        user as something to trust. It is refused **at this operation** rather than
+        left to the store, because ``DestinationTrustStore.record`` does not consult a
+        binding and could not — ADR-0238 §1's five fields carry no tool, no account and
+        no call.
+
+        **The record carries no expiry and no surface offers one** (ADR-0242 §2).
+        ADR-0238 §1 fixes the record at exactly five fields with ``revoked_at`` the only
+        lifecycle member. **This is a real asymmetry with**
+        :class:`~ai_assistant.core.types.RecipientGrant` **and it is stated rather than
+        smoothed over**: a recipient grant ends at an instant the user chose, and
+        destination trust ends when the user revokes it.
+
+        **The act records no** :class:`~ai_assistant.core.types.PermissionDecision`,
+        **seeks no ruling and emits no audit event** (ADR-0242 §11). It sends nothing,
+        so there is no egress to rule on and nothing for the permission trail to hold;
+        **the record itself is the audit**, and ``DestinationTrustStore.export`` is what
+        answers every stored record, revoked ones included.
+
+        **The outcome is read from the type of the refusal and from nothing else**
+        (ADR-0242 §2). No caller parses a message, matches on its text, reads
+        :meth:`standing_destination_trust` after a refusal to work out which ground it
+        was, or infers the ground from a count it took itself — which is why
+        :class:`~ai_assistant.core.errors.DuplicateDestinationTrustError` exists instead
+        of a message convention.
+
+        Args:
+            decision_id: The recorded decision this act rides, from
+                :meth:`grantable_decisions` or :meth:`recent_decisions`. A
+                :data:`~ai_assistant.core.types.DurableIdentifier` and not a ``str``,
+                because it names a ``PermissionDecision.id`` which is one on the record
+                itself, so a client cannot make ``" id "`` and ``"id"`` disagree at the
+                seam. Undergoes :data:`~ai_assistant.core.types.Identifier` validation
+                before any I/O.
+
+        Returns:
+            A detached snapshot of the record the store accepted.
+
+        Raises:
+            ValueError: If ``decision_id`` is blank or has no UTF-8 encoding. Refused
+                locally, before any I/O.
+            UntrustableDestinationError: If any of the three availability conditions
+                fails. **Nothing is written to any store on any of them**, and where
+                more than one fails the first in the order above is the one named.
+            DuplicateDestinationTrustError: If a live record already names this
+                destination set — the ground on which the user's recourse is **no act
+                at all**, because what they asked for is already true.
+            InvalidDestinationTrustError: If the trust store refused the record on any
+                other ground, or could not be written.
+            AuditError: If the permission trail could not be read.
+        """
+        ...
+
+    async def standing_destination_trust(self) -> tuple[DestinationTrustRecord, ...]:
+        """Every destination-trust record that is live now (ADR-0242 §4).
+
+        Reads :meth:`DestinationTrustStore.live` — every record that is not revoked,
+        in the store's own order — and **takes no ``limit``**, for
+        :meth:`standing_recipient_grants`' and :meth:`connected_accounts`' stated
+        reason: a truncated answer to *"what do I trust"* is a false answer rather than
+        a partial one.
+
+        It composes, filters, projects, enriches and summarises nothing, and **reads no
+        other store**. In particular it does not annotate the set from a recipient
+        grant, a connection, a ``Settings`` value, an audit row or a search that
+        succeeded, and no surface derives liveness from anything but this read: a view
+        that has not taken it says the state is unread (ADR-0242 §4).
+
+        Returns:
+            A detached snapshot of every live record, in the store's own order.
+
+        Raises:
+            InvalidDestinationTrustError: If the trust store could not be read.
+        """
+        ...
+
+    async def revoke_destination_trust(self, record_id: DurableIdentifier) -> bool:
+        """Withdraw one destination-trust record, or report there was none (ADR-0242 §4).
+
+        Reads :meth:`DestinationTrustStore.live`; where no live record carries that id
+        it returns ``False``, **having written nothing**. Otherwise it calls
+        :meth:`DestinationTrustStore.revoke` with that id and the instant of the user's
+        act, and returns ``True``.
+
+        **It returns a ``bool`` and not a record**, because ADR-0238 §1 declares
+        ``revoke`` as taking a record ``id`` and the instant of the user's act and
+        declares no return — so a member returning a record would either author one,
+        which the engine may not do, or add a store member, which that section's
+        exact-surface clause forbids. :meth:`forget`, :meth:`forget_question` and
+        :meth:`dismiss_notification` are the shape on this Protocol.
+
+        **A concurrent revocation is lost gracefully, and the store's own idempotence
+        is what makes it free** (ADR-0242 §4). Two callers may both find the record
+        live and both call ``revoke``; ADR-0238 §1 makes that member *prospective and
+        idempotent*, so the second changes nothing and neither caller is told a
+        falsehood. ``False`` is the honest answer to a caller arriving after the record
+        is gone — by the time that call completes the store holds no live record with
+        that id, which is exactly what ``False`` means here — and **the user's recourse
+        succeeded**. No lane retries, revokes twice, or reports the loss as a fault.
+
+        **An** :class:`~ai_assistant.core.errors.InvalidDestinationTrustError` **raised
+        on any other ground propagates unchanged**, and no lane converts one into
+        ``False``. ADR-0238 §1's unknown-id refusal is not reachable after a successful
+        live match and is not a case this operation reports.
+
+        **Revocation is never refused** for any count, budget or ceiling, is **whole** —
+        no operation narrows a trust record, re-scopes one, extends one or edits one in
+        place — and is **prospective**: it takes effect for every later request and
+        rewrites no recorded decision, so a search already ruled ``ALLOW`` stays ruled
+        and a record already supplied to a composer is not retracted.
+
+        Args:
+            record_id: The id :meth:`standing_destination_trust` renders. A
+                :data:`~ai_assistant.core.types.DurableIdentifier` for
+                :meth:`establish_destination_trust`'s reason, and it undergoes
+                :data:`~ai_assistant.core.types.Identifier` validation before any I/O.
+
+        Returns:
+            ``True`` where a live record carried that id and was revoked, ``False``
+            where none did — in which case nothing was written.
+
+        Raises:
+            ValueError: If ``record_id`` is blank or has no UTF-8 encoding. Refused
+                locally, before any I/O.
+            InvalidDestinationTrustError: If the trust store could not be read or
+                written, on any ground other than the record having been revoked in the
+                interval.
+        """
+        ...
+
     # --- the connection surface (ADR-0151 §1) --------------------------------
     #
     # Five operations, and five is derived rather than preferred (ADR-0151 §1):

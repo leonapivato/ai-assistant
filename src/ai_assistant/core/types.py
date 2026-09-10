@@ -7156,6 +7156,174 @@ class SearchOutcome(BaseModel):
         return self
 
 
+class SearchNotServiced(StrEnum):
+    """What a user is told about a search their turn did not make (ADR-0242 §8).
+
+    A **closed** enumeration of exactly **eight** members, each valued by its
+    lower-cased name, declared in the order below — **which is also the precedence
+    order ADR-0242 §7 applies** where a turn holds more than one servicing that
+    recorded a disposition. The vocabulary is *added to and never renamed*, and no
+    implementation or later ADR adds a ninth member without the ADR that decides it
+    (ADR-0242 §8, §14).
+
+    **It is not** :class:`~ai_assistant.orchestration.reads.SearchDisposition`
+    **and neither is derivable from the other** (ADR-0242 §8). That vocabulary names
+    *the stage that produced the outcome*, for an operator reading an audit; this one
+    names *the act that would change it*, for the user reading a reply. The mapping
+    from one to the other is **total and non-injective, and that is the design rather
+    than a compromise**: two dispositions with one act behind them are one member, and
+    one disposition with two acts behind it is two members. No lane makes the mapping
+    injective, restores a stage name to it, or reports a ``SearchDisposition`` value to
+    a user — and ADR-0242 §11 keeps this vocabulary **out of the audit**, because a
+    member computed for a user is not a second spelling of a fact the audit already
+    records for an operator and writing both would make the two drift.
+
+    **It lives in ``core`` and** ``SearchDisposition`` **does not**, and the split is
+    the boundary rather than a preference: this member crosses the wire on
+    :attr:`TurnOutcome.search_not_serviced`, which is what makes a surface able to name
+    the act deterministically (ADR-0242 §9).
+
+    **A class and nothing else.** No member carries, and no rendering built from one
+    carries, a destination, a host, an origin, a provider name, a connection reference,
+    an account identity, a query or any fragment of one, a record, a count, a monetary
+    figure, a duration, a budget, a ``Settings`` field name, a ``SearchDisposition``
+    value, a record id or a decision id (ADR-0242 §7, §9). The whole value is one of
+    these members, so there is nowhere for one to sit.
+
+    **No member asserts *why* a ruling was not an ``ALLOW``** (ADR-0242 §8). A
+    ``CONFIRM`` does not establish that a recipient grant is missing — ADR-0236 §4
+    fixes the shipped default under which "no standing grant is consulted and no search
+    can be ``ALLOW``ed" whatever grants exist, and a configured ``deny_at_risk`` or
+    ``deny_at_reversibility`` supplies a second independent ground. Each member is
+    stated over what the servicing site's three permitted inputs **establish** and never
+    over a cause they do not.
+
+    **Eight members chosen by what the user can do.** Five name an act the user or the
+    operator can perform and each act is different; :attr:`DECLINED` and
+    :attr:`INTERRUPTED` name something that happened to the request rather than
+    something available; and :attr:`UNAVAILABLE` is the deliberate residue — one member
+    rather than thirteen because none of the situations behind it gives the user
+    anything to do.
+    """
+
+    SEARCH_DISABLED = "search_disabled"
+    """``admit_search`` refused, and the per-conversation bound is ``0`` (ADR-0242 §8).
+
+    ADR-0238 §8 defines a bound of ``0`` as "no search is serviced in any
+    conversation", so this is the deployment's own configuration and not this
+    conversation's allowance. **The discriminator against** :attr:`NOT_ADMITTED` **is
+    that** ``Settings`` **value** — constant across every turn and read from no record —
+    which is ADR-0236 §4's own move: "The two grounds are told apart from the
+    deployment's **own configuration** and never from a per-turn record."
+
+    A statement rendered for it names an operator setting and **no user act**, and does
+    not point at a new conversation: a deployment that has switched searching off is one
+    on which a new conversation would fare no better."""
+
+    NOT_ADMITTED = "not_admitted"
+    """``admit_search`` refused under a **positive** bound (ADR-0238 §8, §11).
+
+    **It asserts that the servicing was not admitted and does not assert that this
+    conversation's allowance was consumed** (ADR-0242 §8). ADR-0238 §14 makes
+    ``admit_search`` answer ``None`` on a conversation id that names nothing and on one
+    stamped deleted as well as on a bound that is reached, and the site cannot tell those
+    apart. What a statement for it says is that the search was not admitted **for this
+    conversation** and that the allowance is per conversation — the mechanism ADR-0238 §8
+    fixes — naming no quantity, no bound and no consumption, and promising nothing about
+    what a new conversation will do."""
+
+    SPEND_EXHAUSTED = "spend_exhausted"
+    """A monetary ceiling or an undetermined accounted total refused it.
+
+    ADR-0194, ADR-0236 and ADR-0238 §10 own the ceilings themselves; this member is the
+    rendering of an outcome those decisions produce and never a decision about one. A
+    statement for it names an operator setting and no user act, and it is **distinct
+    from** :attr:`NOT_ADMITTED` — an allowance of calls and a ceiling of money are two
+    facts with two different owners."""
+
+    DECLINED = "declined"
+    """The policy ruled ``DENY`` on the request (ADR-0242 §8).
+
+    Something that happened to the request rather than an act that is available: the
+    recourse is a threshold the operator set, and a statement for it says the search was
+    declined when it was ruled on and names no floor, threshold or ``Settings`` field."""
+
+    TRUST_MISSING = "trust_missing"
+    """A ``CONFIRM``, external footing, and ``trust_of`` answered ``UNCHOSEN``.
+
+    The three conditions are ADR-0242 §8's exactly: the policy ruled ``CONFIRM``, the
+    request's binding carried ``planned_with_external_content`` ``True``, **and** the
+    servicing site's ``trust_of`` read answered
+    :attr:`DestinationTrust.UNCHOSEN`.
+
+    **It rests on a value the site read and not on the ruling.** ``trust_of`` answering
+    ``UNCHOSEN`` establishes on its own that ADR-0238 §5's closed-loop condition cannot
+    be met for this destination and that the trust act is one the user has not
+    performed. It does **not** establish that trust is the *only* thing missing, and a
+    statement rendered for it may not say so (ADR-0242 §9).
+
+    **A statement for it names** ``assistant trust-destinations`` **with** ``assistant
+    decisions`` **as where the decision id is read**, and the difference from
+    ``assistant remember-recipients`` is load-bearing: the decision recording *this*
+    refusal carries ``planned_with_external_content`` ``True``, so ADR-0235 §3's seventh
+    condition excludes it from ``grantable_decisions`` and ADR-0242 §1's third condition
+    excludes it from the trust act, while the earlier decision the user granted from has
+    been resolved and left that listing too (ADR-0242 §9).
+
+    **And it says that recording trust changes what a *later* conversation may
+    compose.** ADR-0238 §5's recorded half is monotone over a conversation, so a trust
+    record established afterwards does not lift a conversation that has already read from
+    an ``UNCHOSEN`` destination — the same search retried in that conversation is refused
+    again, now as :attr:`UNAVAILABLE`."""
+
+    AUTHORISATION_AWAITED = "authorisation_awaited"
+    """A ``CONFIRM`` on a request whose binding carried a clean footing.
+
+    **It asserts exactly two things, both established** (ADR-0242 §8): that a ``CONFIRM``
+    was recorded rather than the search made, and that the decision it was recorded under
+    is one the establishing act **may ride** — its ruling is a ``CONFIRM``, it carries no
+    ``step_id`` and no ``execution_id``, nothing resolves it, and its binding is an
+    :class:`EgressBinding` whose ``planned_with_external_content`` is ``False``, which is
+    ADR-0235 §3's conditions satisfied by construction rather than by a read.
+
+    It asserts **nothing about which floor fired**, nothing about what grants stand, and
+    nothing about what answering will achieve. A statement for it names ``assistant
+    remember-recipients`` as the listing of decisions the user can still answer, and does
+    **not** say that no standing authorisation covers the recipients (ADR-0242 §9)."""
+
+    INTERRUPTED = "interrupted"
+    """The search was begun and stopped before it answered (ADR-0242 §10).
+
+    ADR-0241's ``DEADLINE_EXPIRED`` and that member alone. **ADR-0241 decides when a
+    search is interrupted; this vocabulary decides what the user is told about it**, and
+    a statement for it says the search was begun and stopped, naming no duration, no
+    bound and no ``Settings`` field."""
+
+    UNAVAILABLE = "unavailable"
+    """Every other way a servicing yields no records into the supply.
+
+    Including a request that reached the provider and whose response was then refused —
+    unattested, oversized, or refused by the provider — and including ADR-0241's
+    ``SEARCH_FAILED``, "the searcher itself raised a fault after the ruling", which is a
+    store, ledger or authorisation fault the user has no act for (ADR-0242 §10).
+
+    **And including a ``CONFIRM`` on external footing at a destination the user *has*
+    chosen** (ADR-0242 §8): the trust act is not the answer there, ADR-0238 §5's recorded
+    half is monotone so nothing established now repairs it, and the permitted inputs
+    cannot establish which of §5's conditions failed. **Naming an act that cannot help is
+    worse than naming none**, so this member is the fail-safe direction rather than a
+    guess.
+
+    **The default for a member nobody has mapped.** A ``SearchDisposition`` minted by a
+    later ADR maps here unless that ADR's own text maps it elsewhere, so an unmapped
+    member degrades to silence about the reason rather than to a wrong reason (ADR-0242
+    §8).
+
+    A statement for it says the lookup produced nothing the turn could use, **naming no
+    cause and no act** — and, for a response that was refused after it arrived, it does
+    **not** say that no request was made (ADR-0242 §6, §9)."""
+
+
 # --- planning: the step-status vocabulary (ADR-0014 §4) ----------------------
 # The statuses, and the sets drawn over them. Only the sets live here: the
 # transition *graph* is `planning`'s, because it is not intrinsic to the type
@@ -16824,6 +16992,42 @@ class TurnOutcome(BaseModel):
             request they made concludes it was granted — and it never derives the
             answer from a ``standing_recipient_grants`` read taken afterwards or
             from ``resume`` having returned normally.
+        search_not_serviced: Which class of act would have let a search this turn did
+            **not** make happen, or ``None`` where it serviced every search it asked
+            for and where it asked for none (ADR-0242 §9). ADR-0242 is the decision
+            that added it, as ADR-0235 is :attr:`recipient_grant`'s.
+
+            **It carries the same member the servicing site computed, by value, and
+            never a second computation** (ADR-0242 §7, §9). No surface derives it
+            from the plan, the supply's length, the reply, the audit or a store read
+            of its own, and no component recomputes it downstream.
+
+            **``None`` on every outcome of a turn that serviced no search or serviced
+            every search it asked for** — every such ``converse``,
+            ``converse_streaming`` and ``resume``, and ADR-0198 §1's
+            **restatement**, which drives nothing and searches nothing. That adds a
+            value to ADR-0198 §2's enumeration without changing any value it fixes.
+
+            **A widening rather than a change**, which is ADR-0197's move and
+            :attr:`recipient_grant`'s: ADR-0170 §4 fixes the three shapes on which
+            :attr:`reply` is ``None`` and the one on which :attr:`reply_degraded` is
+            ``True``, and a ``None``-defaulting member alters neither. In particular
+            **this fact does not set** :attr:`reply_degraded` (ADR-0242 §6): a turn
+            that could not search still composed the reply it composed.
+
+            **The field exists so that a surface names the act deterministically**,
+            and that is the whole of what it is for. A surface renders, beside the
+            reply and never in place of it, one **fixed statement per member**, and
+            the command name is in that statement and never in the model's reply:
+            a command name in a composed reply would reach a browser and a voice
+            channel where no terminal exists, and would be a string a model may
+            paraphrase, truncate or invent. The model says *what was not done* and
+            the surface says *what would enable it* (ADR-0242 §9).
+
+            **A surface that renders no statement for a member has not implemented
+            ADR-0242 §9**, and is not permissibly degraded — except the browser,
+            which until its own lane renders the turn exactly as it does today and
+            ignores this field (ADR-0242 §5, §9).
 
     Note:
         ADR-0085 §4's Group A table lists this type's four fields as promoted; the
@@ -16860,6 +17064,14 @@ class TurnOutcome(BaseModel):
     recipient_grant: RecipientGrantOutcome | None = Field(
         default=None,
         description="What became of a standing recipient request, if one was made (ADR-0235 §4).",
+    )
+    search_not_serviced: SearchNotServiced | None = Field(
+        default=None,
+        description=(
+            "Which class of act would have let a search this turn did not make happen, "
+            "or ``None`` where every search the turn asked for was serviced and where it "
+            "asked for none (ADR-0242 §9)."
+        ),
     )
 
     @model_validator(mode="after")

@@ -42,7 +42,10 @@ from typing import TYPE_CHECKING, Final, overload
 import pytest
 from recipient_builders import ALICE, BOB, account_member, member
 
-from ai_assistant.core.errors import InvalidDestinationTrustError
+from ai_assistant.core.errors import (
+    DuplicateDestinationTrustError,
+    InvalidDestinationTrustError,
+)
 from ai_assistant.core.protocols import DestinationTrustStore
 from ai_assistant.core.types import (
     BoundAccount,
@@ -332,6 +335,51 @@ class DestinationTrustStoreContract:
         await store.record(trust_record(ALICE, BOB, record_id="t-1"))
 
         await _refuses(store, trust_record(ALICE, BOB, record_id="t-2"))
+
+    async def test_a_live_duplicate_is_refused_by_the_discriminating_subclass(
+        self, store: DestinationTrustStore
+    ) -> None:
+        """ADR-0242 §2's one added ground: the **live-duplicate** refusal has a subclass.
+
+        The recourse on this ground is *no act at all* — what the user asked for is
+        already true — where the other two grounds leave them with a record to rebuild.
+        ADR-0242 §2 has the outcome read "from the **type** of the refusal and from
+        nothing else", so this is owed **at the suite**: a store raising the base class
+        here would pass every engine test against a different store and still make the
+        *already chosen* rendering unreachable, and the read-from-the-type clause
+        forbids repairing that by inference.
+        """
+        await store.record(trust_record(ALICE, BOB, record_id="t-1"))
+
+        before = len(await store.export())
+        with pytest.raises(DuplicateDestinationTrustError):
+            await store.record(trust_record(ALICE, BOB, record_id="t-2"))
+
+        assert len(await store.export()) == before
+        assert issubclass(DuplicateDestinationTrustError, InvalidDestinationTrustError)
+
+    async def test_the_other_two_record_grounds_keep_the_base_class(
+        self, store: DestinationTrustStore
+    ) -> None:
+        """ADR-0242 §2 moves ADR-0238 §1's refusal in its **type** and in nothing else.
+
+        A duplicate ``id`` is a caller reusing an identifier and an empty destination
+        set is a malformed subject; neither is a user asking for something that already
+        stands, so both keep :class:`InvalidDestinationTrustError` **exactly** — a store
+        raising the subclass on either would make *already chosen* the rendering for a
+        case where the user does have an act to perform.
+
+        The empty-set ground is driven through the one sequence that reaches the store
+        with it, because the record's own validator refuses an empty tuple at
+        construction (:class:`_ClearedAfterTheEmptinessCheck` is that sequence for
+        ``trust_of``; here it is the store's own refusal that is being typed).
+        """
+        await store.record(trust_record(ALICE, record_id="t-1"))
+
+        with pytest.raises(InvalidDestinationTrustError) as refused:
+            await store.record(trust_record(CAROL, record_id="t-1"))
+
+        assert not isinstance(refused.value, DuplicateDestinationTrustError)
 
     async def test_a_record_over_a_different_destination_set_is_admitted(
         self, store: DestinationTrustStore

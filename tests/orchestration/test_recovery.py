@@ -23,6 +23,7 @@ import pytest
 from test_engine import Harness
 from test_engine import _composing as composing
 from test_engine import _connection_operations as connection_operations
+from test_engine import _destination_trust_operations as destination_trust_operations
 from test_engine import _grant_operations as grant_operations
 from test_engine import _recipient_grant_operations as recipient_grant_operations
 
@@ -885,6 +886,7 @@ def engine_with(scan: RecoveryScan | None) -> Engine:
         composing=composing(),
         grant_operations=grant_operations(),
         recipient_grant_operations=recipient_grant_operations(),
+        destination_trust_operations=destination_trust_operations(),
         connection_operations=connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,

@@ -23,6 +23,7 @@ from test_engine import (
     Harness,
     _composing,
     _connection_operations,
+    _destination_trust_operations,
     _grant_operations,
     _recipient_grant_operations,
 )
@@ -70,6 +71,7 @@ def _wired(
         composing=_composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),
+        destination_trust_operations=_destination_trust_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,

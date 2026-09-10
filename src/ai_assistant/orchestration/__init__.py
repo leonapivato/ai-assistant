@@ -195,6 +195,7 @@ from ai_assistant.orchestration.conversations import (
     ConversationLifecycle,
     DataExport,
 )
+from ai_assistant.orchestration.destination_trust import DestinationTrustOperations
 from ai_assistant.orchestration.engine import (
     Engine,
     belief_from_record,
@@ -244,6 +245,7 @@ __all__ = [
     "ConsolidationStage",
     "ConversationLifecycle",
     "DataExport",
+    "DestinationTrustOperations",
     "Engine",
     "GrantOperations",
     "HeldSource",

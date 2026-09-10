@@ -51,6 +51,7 @@ from ai_assistant.core.errors import (
     UngrantableSourceError,
     UnknownContinuationError,
     UnknownConversationError,
+    UntrustableDestinationError,
 )
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
@@ -67,6 +68,8 @@ from ai_assistant.core.types import (
     ConversationDigest,
     ConversationSummary,
     CurrentContext,
+    DestinationTrust,
+    DestinationTrustRecord,
     Disposition,
     EgressBinding,
     ExecutionState,
@@ -152,6 +155,7 @@ from ai_assistant.orchestration.recipient_grants import (
 from ai_assistant.orchestration.speech import SPOKEN_PARK_SENTENCE
 from ai_assistant.testing.archive import FakeTranscriptArchive
 from ai_assistant.testing.connections import FakeConnectionProvisioner
+from ai_assistant.testing.destination_trust import FakeDestinationTrustStore
 from ai_assistant.testing.notifications import (
     FakeNotificationOutbox,
     FakeNotificationPolicy,
@@ -586,6 +590,20 @@ class FakeAssistantEngine:
         #: one (ADR-0235 §7) — one clock over two stores is the shape that invites a
         #: test to reason about one from the other.
         self.recipient_grant_clock: Callable[[], datetime] = lambda: _AT
+        #: What the user recorded about destinations (ADR-0238 §1), for ADR-0242 §2's
+        #: three operations. A **whole** ``DestinationTrustStore`` for
+        #: :attr:`recipient_grants`' reason one store over: the act needs ``record``,
+        #: the listing needs ``live`` and revocation needs ``revoke``, and the states a
+        #: consumer's test wants — a set already live, a store that cannot be written —
+        #: are facts about the store. Seed it with ``hold`` or arm it with
+        #: ``fail_writes``.
+        self.destination_trust = FakeDestinationTrustStore()
+        #: What stamps ``established_at`` on a trust record this engine mints, and the
+        #: instant a revocation carries. **Separate from**
+        #: :attr:`recipient_grant_clock` for ADR-0242 §4's two-vocabulary reason: one
+        #: clock over two stores is the shape that invites a test to reason about one
+        #: from the other.
+        self.destination_trust_clock: Callable[[], datetime] = lambda: _AT
         #: The recorded ``CONFIRM`` each park stands for, by handle, where a test
         #: has bound one with :meth:`hold_confirmation_decision`. ``Confirmation``
         #: carries the **reduced** ``ConfirmationEgress`` and not the binding
@@ -2339,6 +2357,104 @@ class FakeAssistantEngine:
                 return None
             raise
         return self._checked(record, "revoke_recipient_grant")
+
+    # --- the destination-trust surface (ADR-0242 §2, §4) --------------------
+
+    async def establish_destination_trust(
+        self, decision_id: DurableIdentifier
+    ) -> DestinationTrustRecord:
+        """Record the user's choice over a recorded decision's destinations (ADR-0242 §1).
+
+        **The real conditions, in ADR-0242 §1's own order**, against
+        :attr:`trail` — not a scripted outcome — so a consumer's test drives the same
+        three refusals the production engine raises and reads each from its type. The
+        destination set is transcribed from the binding's own
+        ``canonical_destination_set`` and never rebuilt here, and **nothing is written
+        on any refusal**.
+
+        Raises:
+            ValueError: If ``decision_id`` is blank or unwritable.
+            UntrustableDestinationError: If any of the three conditions fails.
+            DuplicateDestinationTrustError: If a live record already names this set.
+            InvalidDestinationTrustError: If the store refused or could not be written.
+        """
+        named = identifier(decision_id, name="decision_id")
+        check_arguments(
+            "establish_destination_trust", max_bytes=self._max_payload_bytes, decision_id=named
+        )
+        self.calls.append(("establish_destination_trust", {"decision_id": named}))
+        decision = await self.trail.get(named)
+        if decision is None:
+            msg = (
+                f"no decision {named!r} is recorded, so there is no destination set to "
+                f"transcribe and nothing was recorded (ADR-0242 §1)"
+            )
+            raise UntrustableDestinationError(msg)
+        binding = decision.egress_binding
+        if not isinstance(binding, EgressBinding):
+            msg = (
+                f"decision {named!r} records no whole egress binding, so the destination set "
+                f"this act would be over is not on the row; nothing was recorded (ADR-0242 §1)"
+            )
+            raise UntrustableDestinationError(msg)
+        if binding.planned_with_external_content:
+            msg = (
+                f"decision {named!r} records a call planned over recorded external content, "
+                f"and trust recorded from such a call is the loop closing on itself; nothing "
+                f"was recorded (ADR-0242 §1)"
+            )
+            raise UntrustableDestinationError(msg)
+        record = DestinationTrustRecord(
+            id=f"trust-{named}",
+            destinations=binding.canonical_destination_set,
+            trust=DestinationTrust.USER_CHOSEN,
+            established_at=self._destination_trust_now(),
+        )
+        await self.destination_trust.record(record)
+        return self._checked(record, "establish_destination_trust")
+
+    async def standing_destination_trust(self) -> tuple[DestinationTrustRecord, ...]:
+        """List every destination-trust record that is live now (ADR-0242 §4).
+
+        Read from :attr:`destination_trust` and from nothing else, so liveness is the
+        store's — no surface and no test derives it from a recipient grant, a
+        connection or a search that succeeded.
+        """
+        self.calls.append(("standing_destination_trust", {}))
+        return self._checked(
+            tuple(await self.destination_trust.live()), "standing_destination_trust"
+        )
+
+    async def revoke_destination_trust(self, record_id: DurableIdentifier) -> bool:
+        """Withdraw one destination-trust record, or answer there was none (ADR-0242 §4).
+
+        ``False`` where no live record carries the id, having written nothing, which
+        is also the honest answer to a caller that lost a race to another revocation.
+        """
+        named = identifier(record_id, name="record_id")
+        check_arguments(
+            "revoke_destination_trust", max_bytes=self._max_payload_bytes, record_id=named
+        )
+        self.calls.append(("revoke_destination_trust", {"record_id": named}))
+        if not any(held.id == named for held in await self.destination_trust.live()):
+            return False
+        await self.destination_trust.revoke(named, self._destination_trust_now())
+        return True
+
+    def _destination_trust_now(self) -> datetime:
+        """The guarded reading of :attr:`destination_trust_clock` (ADR-0026 §2, §4).
+
+        Raises:
+            PlanningError: If the reading is not a conforming one.
+        """
+        try:
+            return checked_clock(self.destination_trust_clock, owner="FakeAssistantEngine")()
+        except ClockReadingError as exc:
+            msg = (
+                f"the fake engine's destination-trust clock returned a non-conforming "
+                f"reading: {exc}"
+            )
+            raise PlanningError(msg) from exc
 
     async def _offerable_decision(self, decision_id: str) -> PermissionDecision:
         """Read the named decision and refuse it unless all seven conditions hold.
