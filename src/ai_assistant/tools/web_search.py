@@ -1156,17 +1156,23 @@ class WebSearchEgress:
             timeout: The caller's bound on this call (ADR-0241 §1). Checked
                 **first**, before the revalidation, before the credential read,
                 before the gate and before any channel — so a refused value reaches
-                no store, appends no claim and opens nothing. It covers the whole of
-                what follows *except* the two ledger appends, which ADR-0192 §3
-                leaves unbounded by this seam.
+                no store, appends no claim and opens nothing. The window it opens
+                starts there too, so the revalidation is inside it and the admission
+                is handed what is left. It covers the whole of what follows *except*
+                the two ledger appends, which ADR-0192 §3 leaves unbounded by this
+                seam.
 
         Returns:
             One outcome carrying records or a refusal.
             :attr:`~ai_assistant.core.types.SearchRefusal.DEADLINE_EXPIRED` where
-            **this** deadline fired, at either of the two places it can (ADR-0241
-            §4): inside or immediately after the spend admission, where no claim was
-            appended, and inside the call, where the completion carries the
-            declaration's ``interrupted_outcome`` and an ``UNKNOWN`` cost (§5).
+            **this** deadline fired, at any of the three places it can (ADR-0241
+            §4): during the revalidation and inside or immediately after the spend
+            admission, where no claim was appended and no row is written, and inside
+            the call, where the completion carries the declaration's
+            ``interrupted_outcome`` and an ``UNKNOWN`` cost (§5). An interruption the
+            callable **absorbed** is read off this frame's own deadline and its own
+            task rather than off what came back, so a transport that catches the
+            cancellation and answers anyway is not recorded as having succeeded.
 
         Raises:
             ValueError: If ``timeout`` is not a ``timedelta`` or is not strictly
@@ -1208,6 +1214,15 @@ class WebSearchEgress:
         # a plain `timedelta` rebuilt from the base class's fields, so a subclass
         # whose `total_seconds` raises decides nothing after the claim has landed.
         duration = checked_timeout(timeout)
+        # **And the window opens here, ahead of the revalidation** (ADR-0241 §1): the
+        # bound covers "the revalidation, ADR-0194 §3's spend admission, the credential
+        # read, the channel, the response read and the transcription", so a clock
+        # started after the checks would hand the admission and the callable a *fresh*
+        # budget — the same defect one stage along that ADR-0194 §3 names for the
+        # admission, and the reason `admitted_call` is handed what is left rather than
+        # the whole of it.
+        loop = asyncio.get_running_loop()
+        expires_at = loop.time() + duration.total_seconds()
         checked = revalidated_call(call)
         if checked.request.tool != self._declaration:
             msg = (
@@ -1282,6 +1297,31 @@ class WebSearchEgress:
                     if deadline.expired()
                     else SearchRefusal.TRANSPORT_FAILED
                 )
+            else:
+                # **The state is read from the task and the deadline rather than
+                # inferred from what came back** (ADR-0029 §4, and `_interruption`'s
+                # own clause one seam over). Nothing forces a callable to let an
+                # interruption through: a transport that catches this deadline's
+                # cancellation and returns a channel leaves the frame holding an
+                # answer and no exception, and trusting that return would record
+                # `SUCCEEDED` for a call that outran its bound — the seam's worst
+                # available bug, and the one an implementation is most likely to have.
+                if pending_cancellations() > entered_with:
+                    # Freshly raised rather than re-raised: the original was consumed
+                    # inside the callable. What matters is that the cancellation
+                    # reaches the executor rather than being answered with a result
+                    # (ADR-0060 §1), and `consumed_call` still completes the claim
+                    # with `interrupted_outcome` on the way past (ADR-0192 §3).
+                    absorbed = (
+                        f"{self._declaration.id}: the searcher absorbed the "
+                        f"cancellation of its invoking task"
+                    )
+                    raise asyncio.CancelledError(absorbed)
+                if deadline.expired():
+                    # `Timeout.expired()` is this seam's own state and no callable can
+                    # reset it, which is what makes the deadline half tool-proof where
+                    # the cancellation half above is not (ADR-0029 §4's own note).
+                    outcome = _refused(SearchRefusal.DEADLINE_EXPIRED)
             return _result_of(outcome, self._declaration, duration)
 
         async def consume(remaining: timedelta) -> ToolResult:
@@ -1291,6 +1331,17 @@ class WebSearchEgress:
                 decision=checked.decision,
                 act=lambda: act(remaining),
             )
+
+        remaining = expires_at - loop.time()
+        if remaining <= 0:
+            # The window closed while this frame was revalidating. `admitted_call`
+            # has the same branch one stage along and for the same reason: entering
+            # the next stage now would run it outside the deadline the caller set,
+            # and `checked_timeout` refuses a non-positive duration rather than
+            # accepting one and calling it expired. **No claim was appended and no
+            # channel was opened**, so this is §5's before-the-claim exit exactly as
+            # an expiry inside the admission is.
+            return _refused(SearchRefusal.DEADLINE_EXPIRED)
 
         try:
             await admitted_call(
@@ -1303,8 +1354,11 @@ class WebSearchEgress:
                 definition=self._declaration,
                 # ADR-0194 §3: the admission is awaited **inside** this deadline and
                 # `act` is handed what is left of it, so the two are one window and
-                # not two (ADR-0241 §1's admission clause, and §12's Arm 12).
-                timeout=duration,
+                # not two (ADR-0241 §1's admission clause, and §12's Arm 12). What is
+                # passed is what remains of the caller's budget after the revalidation
+                # — the same arithmetic `admitted_call` then performs between the gate
+                # and the callable, one stage earlier.
+                timeout=timedelta(seconds=remaining),
                 act=consume,
             )
         except SpendCeilingError, SpendUndeterminedError:
@@ -1314,14 +1368,23 @@ class WebSearchEgress:
             # the claim that has one, so nothing was read and no row was written.
             return _refused(SearchRefusal.SPEND_REFUSED)
         if outcome is None:
-            # `admitted_call` returned without entering `act`: the deadline expired
-            # inside or immediately after the admission (ADR-0029 §4, ADR-0194 §3).
-            # **No claim was appended, so no completion row is written** — ADR-0192
-            # §1's placement relied upon and not moved, and inventing a row for a
-            # call that provably never ran would be the opposite error to the one
-            # ADR-0241 §5 corrects. The `ToolResult` `admitted_call` returned for
-            # that exit is dropped here for the same reason: nothing appended a claim
-            # for it to complete.
+            # `admitted_call` returned without entering `act`. **No claim was appended,
+            # so no completion row is written** — ADR-0192 §1's placement relied upon
+            # and not moved, and inventing a row for a call that provably never ran
+            # would be the opposite error to the one ADR-0241 §5 corrects. The
+            # `ToolResult` that frame returned for the exit is dropped here for the
+            # same reason: nothing appended a claim for it to complete.
+            #
+            # **And which exit it was is decided by this seam's own deadline, never by
+            # the exception `admitted_call` caught** (ADR-0241 §7). That frame answers
+            # `expiry_failure` for *every* `TimeoutError` out of `gate.admit_invocation`
+            # — including one the gate raised of its own accord, which is not this
+            # deadline firing and which §7 forbids reporting as one. The window is this
+            # frame's, so the question is answerable here and nowhere else: past
+            # `expires_at` the deadline fired, and short of it something upstream did,
+            # which keeps the class it has today (§4).
+            if loop.time() < expires_at:
+                return _refused(SearchRefusal.TRANSPORT_FAILED)
             return _refused(SearchRefusal.DEADLINE_EXPIRED)
         return outcome
 
