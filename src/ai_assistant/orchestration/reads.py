@@ -80,6 +80,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import timedelta
 from enum import StrEnum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
@@ -273,12 +274,15 @@ class StopReason(StrEnum):
 
 
 class SearchDisposition(StrEnum):
-    """Why a ``WEB_SEARCH`` ask did not yield records (ADR-0231 §13).
+    """Why a ``WEB_SEARCH`` ask did not yield records (ADR-0231 §13, ADR-0241 §4, §8).
 
-    **A closed enumeration of exactly sixteen members, each valued by its
-    lower-cased name** — ADR-0231 §13's fifteen and ADR-0238 §11's
+    **A closed enumeration of exactly eighteen members, each valued by its
+    lower-cased name** — ADR-0231 §13's fifteen, ADR-0238 §11's
     :attr:`NOT_ADMITTED`, which supersedes that closure "in that clause's count
-    alone" and leaves every other clause of it standing — and never free text: the
+    alone" and leaves every other clause of it standing, and ADR-0241's
+    :attr:`DEADLINE_EXPIRED` and :attr:`SEARCH_FAILED`, which move ADR-0238 §11's
+    count in the same narrow way. **No lane reads that as licence to add a
+    nineteenth** — and never free text: the
     shape :class:`TriggerOutcome`,
     :class:`Servicing` and :class:`StopReason` already have in this module, and
     the reason :class:`~ai_assistant.orchestration.origin.SelectionOrigin` is not
@@ -414,7 +418,27 @@ class SearchDisposition(StrEnum):
     """:attr:`~ai_assistant.core.types.SearchRefusal.SPEND_REFUSED`, carried across."""
 
     TRANSPORT_FAILED = "transport_failed"
-    """:attr:`~ai_assistant.core.types.SearchRefusal.TRANSPORT_FAILED`, carried across."""
+    """:attr:`~ai_assistant.core.types.SearchRefusal.TRANSPORT_FAILED`, carried across.
+
+    An outage — a refused connection, a TLS failure, a channel closed mid-response,
+    a refused redirect. **No longer a slow provider**: ADR-0241 §4 moves an expiry of
+    the seam's own deadline out to :attr:`DEADLINE_EXPIRED`, because an operator
+    reading a population cannot act on one field that means both "the provider is
+    unreachable" and "the provider is slow" — the first is an outage and the second
+    is a bound to size or a provider to change."""
+
+    DEADLINE_EXPIRED = "deadline_expired"
+    """:attr:`~ai_assistant.core.types.SearchRefusal.DEADLINE_EXPIRED`, carried across.
+
+    **The seventeenth member** (ADR-0241 §4), carried one for one from the refusal so
+    the mapping stays injective and ADR-0231 §13's injectivity clause binds unchanged.
+    The elapsed-time bound fired: `Settings.search_call_deadline` expired before the
+    search answered.
+
+    **It carries no duration, no bound, no elapsed figure, no query and no origin.**
+    ADR-0231 §13's Tier 1 clause and ADR-0004 §5 bind without qualification, and a
+    duration in a per-turn event is a fact about the *system* that ADR-0228 §10 has
+    already refused to render."""
 
     PROVIDER_REFUSED = "provider_refused"
     """:attr:`~ai_assistant.core.types.SearchRefusal.PROVIDER_REFUSED`, carried across."""
@@ -427,6 +451,36 @@ class SearchDisposition(StrEnum):
 
     The response declared no instant this system could read as one, so §10 minted
     nothing rather than substituting a clock of its own (ADR-0092 §3)."""
+
+    SEARCH_FAILED = "search_failed"
+    """The searcher itself raised a fault after the ruling (ADR-0241 §8, issue #2112).
+
+    **The eighteenth member, and it closes the enumeration.** A connection record it
+    could not read, a ledger claim the trail refused, an authorisation already spent,
+    a cancellation it invented with nothing cancelled, or any other ``AssistantError``
+    escaping :meth:`~ai_assistant.core.protocols.WebSearcher.search`. Before it, the
+    send was the one stage with no member — every other one names a stage the
+    servicing reached — so the absence read as an omission every time someone opened
+    this vocabulary.
+
+    **One member and not a family**, on :attr:`BINDING_FAILED`'s own rule: it carries
+    no message, no exception type and no store detail, so there is nowhere in a Tier 2
+    event for one to sit (ADR-0231 §13, ADR-0004 §5). Splitting the send's faults into
+    a store one and an authorisation one would put an exception taxonomy into a field
+    §13 forbids an exception type in, and would grow every time a new fault class
+    reached the seam; ADR-0241 §13 defers the split with what fires it.
+
+    **It is a ``SearchDisposition`` member and not a ``SearchRefusal`` one** (§8).
+    Every ``SearchRefusal`` member is a value ``search`` *returns*; these faults are
+    raises, and converting them into returns would give the seam a value for
+    conditions its caller must be free to see as exceptions.
+
+    **ADR-0226 §5's degradation is unchanged and this is not a second mechanism**: the
+    servicing still fails all-or-nothing, the supply is left as planning saw it, every
+    count is zero, ``failed`` is true, and nothing raises out of the turn. The
+    ``read_request_degraded`` WARNING and its ``refused_by`` class name stay exactly
+    where they are — that line answers the per-occurrence question and this member
+    answers the population one."""
 
 
 #: §13's carry-across from the composing seam's vocabulary, **injective** so no two
@@ -446,7 +500,7 @@ QUERY_DISPOSITIONS: Final[Mapping[QueryRefusal, SearchDisposition]] = MappingPro
 )
 
 #: §13's carry-across from the search seam's vocabulary, **injective** for
-#: :data:`QUERY_DISPOSITIONS`' reason, over the five members that reach the servicer.
+#: :data:`QUERY_DISPOSITIONS`' reason, over the six members that reach the servicer.
 #:
 #: :attr:`~ai_assistant.core.types.SearchRefusal.NO_RESULT` is deliberately absent
 #: and maps to no disposition at all: a search that reached the provider and yielded
@@ -454,10 +508,15 @@ QUERY_DISPOSITIONS: Final[Mapping[QueryRefusal, SearchDisposition]] = MappingPro
 #: already records, "and calling it a disposition would double-count it". §18's item
 #: 9a asserts that absence over the enum itself, so a lane that adds an arm for it
 #: fails.
+#:
+#: ADR-0241 §4's :attr:`~ai_assistant.core.types.SearchRefusal.DEADLINE_EXPIRED` is
+#: carried across one for one like the rest, which is what keeps this mapping
+#: injective while the refusal vocabulary gains a seventh member.
 SEARCH_DISPOSITIONS: Final[Mapping[SearchRefusal, SearchDisposition]] = MappingProxyType(
     {
         SearchRefusal.SPEND_REFUSED: SearchDisposition.SPEND_REFUSED,
         SearchRefusal.TRANSPORT_FAILED: SearchDisposition.TRANSPORT_FAILED,
+        SearchRefusal.DEADLINE_EXPIRED: SearchDisposition.DEADLINE_EXPIRED,
         SearchRefusal.PROVIDER_REFUSED: SearchDisposition.PROVIDER_REFUSED,
         SearchRefusal.RESPONSE_TOO_LARGE: SearchDisposition.RESPONSE_TOO_LARGE,
         SearchRefusal.UNATTESTED: SearchDisposition.UNATTESTED,
@@ -799,12 +858,21 @@ class _ServicingFailedError(Exception):
     But the concrete searcher performs ``ToolInvoker.invoke``'s own machinery
     (ADR-0231 §6) and raises for the **faults** that machinery raises for — a
     connection record that could not be read (ADR-0148 §6's fail-closed limb), a
-    ledger claim the trail refused, an authorisation already spent. Those are not
-    source reasons and have no ``SearchRefusal`` member, and §13's vocabulary is
-    closed at fifteen with no member for them either. ADR-0226 §5 settles what
-    happens to them: "a servicing failure degrades the turn and never fails it",
-    all-or-nothing, "the records that did come back are discarded with the rest" —
-    which is exactly the record the ``finally`` below writes.
+    ledger claim the trail refused, an authorisation already spent, a cancellation
+    it invented with nothing cancelled (ADR-0241 §7). Those are not source reasons
+    and have no ``SearchRefusal`` member, and ADR-0231 §17 gives the seam none for
+    them: converting a raise into a return would hand the seam a value for
+    conditions its caller must be free to see as exceptions (ADR-0241 §8).
+    ADR-0226 §5 settles what happens to them: "a servicing failure degrades the
+    turn and never fails it", all-or-nothing, "the records that did come back are
+    discarded with the rest" — which is exactly the record the ``finally`` below
+    writes.
+
+    **What has changed since is the audit and not the degradation** (ADR-0241 §8,
+    issue #2112). §13's vocabulary was closed with no member for a fault at the
+    send; it now carries :attr:`SearchDisposition.SEARCH_FAILED`, which the
+    degradation site records. This class is unaffected: it is still how the fault
+    reaches that site without this frame holding the exception.
 
     Attributes:
         fault: The class name of the fault the seam raised.
@@ -1232,7 +1300,7 @@ class SearchServicer:
     root passes the same pair every other seam it wires reads.
     """
 
-    def __init__(  # noqa: PLR0913 — one parameter per contract ADR-0231 §6 names, plus the recorder's id and clock; the section fixes the list
+    def __init__(  # noqa: PLR0913 — one parameter per contract ADR-0231 §6 names, plus the recorder's id and clock and ADR-0241 §3's deadline; the two sections fix the list
         self,
         *,
         composer: QueryComposer,
@@ -1242,6 +1310,7 @@ class SearchServicer:
         trail: AuditTrail,
         now: Clock,
         id_factory: Callable[[], str],
+        deadline: timedelta,
     ) -> None:
         """Wire one search servicing from the contracts ADR-0231 §6 names.
 
@@ -1263,6 +1332,21 @@ class SearchServicer:
             now: The clock the recorded decision is stamped from, guarded once
                 here (ADR-0026 §4).
             id_factory: Mints the decision's id (ADR-0021 §3).
+            deadline: ``Settings.search_call_deadline`` — the bound this site passes
+                as ``timeout`` on **every** :meth:`WebSearcher.search` (ADR-0241 §3).
+                Read by the composition root and passed here rather than read below
+                ``orchestration``: the same construction ADR-0238 §12 gives the call
+                ceiling, so nothing a model produced, a request carried or a result
+                contained can reach the comparison, and no component raises, extends,
+                resets, suspends or re-reads it on account of a turn's content.
+                **Passed rather than defaulted**, for the clock's reason: a bound the
+                milestone's exit is stated over may not be inherited.
+
+        Raises:
+            ValueError: If ``deadline`` is not a strictly positive ``timedelta``.
+                ``Settings`` already refuses one at load; this is the guard at the
+                seam a test or a dynamically-wired caller can reach directly, and it
+                fires here rather than at the first search (ADR-0241 §1).
         """
         self._composer = composer
         self._searcher = searcher
@@ -1271,6 +1355,13 @@ class SearchServicer:
         self._trail = trail
         self._now = checked_clock(now, owner="SearchServicer")
         self._id_factory = id_factory
+        if not isinstance(deadline, timedelta) or deadline <= timedelta(0):
+            msg = (
+                f"deadline must be a strictly positive timedelta "
+                f"(ADR-0241 §1, §3); got {deadline!r}"
+            )
+            raise ValueError(msg)
+        self._deadline = deadline
 
     async def service(  # noqa: C901, PLR0911, PLR0913 — one exit per stage ADR-0231 §9 names as a decline (§13 requires the member to name the stage that produced it, so collapsing any pair would report one stage's outcome as another's), and one parameter per thing ADR-0238 §5's four conditions are decided from
         self,
@@ -1471,13 +1562,20 @@ class SearchServicer:
         # `ToolInvoker.invoke`'s guarantee obtained without `ToolInvoker` (§6).
         # It cannot refuse here: `recorded` equals the decision `from_request`
         # transcribed from this very request, and the outcome above is `ALLOW`.
-        result = await self._searcher.search(ToolCall(request=request, decision=recorded))
+        result = await self._searcher.search(
+            ToolCall(request=request, decision=recorded),
+            # ADR-0241 §3: this site passes the bound on **every** call, from the
+            # `Settings` value the composition root handed it. There is no spelling
+            # for "unbounded" at the seam and none is reached for here.
+            timeout=self._deadline,
+        )
         search_refusal = result.refusal
         if search_refusal is not None:
-            # §13: five of the six members are carried across one for one, and
-            # `NO_RESULT` maps to **none** — a search that reached the provider and
-            # yielded nothing is a completed servicing whose returned count is
-            # zero, which ADR-0226 §9 already records.
+            # §13: six of the seven members are carried across one for one
+            # (ADR-0241 §4 adds the sixth), and `NO_RESULT` maps to **none** — a
+            # search that reached the provider and yielded nothing is a completed
+            # servicing whose returned count is zero, which ADR-0226 §9 already
+            # records.
             return _Searched((), SEARCH_DISPOSITIONS.get(search_refusal))
         # ADR-0238 §2's third admissible population, recorded for **this turn** alone:
         # a record minted at a destination the user chose is one a later servicing of
@@ -2101,6 +2199,20 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
         # The searcher's own fault, arriving through the carrier rather than as
         # itself, so this frame never holds it (ADR-0004 §5).
         _degraded(failed.fault)
+        # **And it now has a member of its own** (ADR-0241 §8, issue #2112). Until
+        # that decision the field was left empty here, so a fault at the send read in
+        # a population exactly like a turn whose planner never asked for a search —
+        # the collapse §13's field exists to prevent. The class name stays on the
+        # WARNING above, which answers the per-occurrence question; this answers the
+        # population one, and it carries no message, no exception type and no store
+        # detail (§8, ADR-0004 §5).
+        #
+        # Assigned rather than folded in: `_serviced_search` is the only raiser of
+        # `_ServicingFailedError` and it raises *from inside* the servicing, so
+        # `searched` still holds the initial value no stage has written to. The
+        # counts are untouched — they are written through as each stage completes, so
+        # what actually happened before the fault survives (ADR-0238 §11).
+        searched = _Searched((), SearchDisposition.SEARCH_FAILED)
     finally:
         # One record, on every path out of this function — the completed servicing,
         # the degraded one, and the one a cancellation carried away — and the

@@ -17,14 +17,16 @@ exactly the narrowed runs that most want it.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Final
 
 import pytest
 from web_searcher_contract import (
+    A_BOUND,
     QUERY,
     ConnectedAccount,
     GatedSearch,
@@ -151,7 +153,7 @@ async def test_a_scripted_refusal_wins_over_a_scripted_answer() -> None:
     """
     searcher = FakeWebSearcher({QUERY: ("something",)}, refusals={QUERY: SearchRefusal.UNATTESTED})
 
-    outcome = await searcher.search(_authorised(searcher))
+    outcome = await searcher.search(_authorised(searcher), timeout=A_BOUND)
 
     assert outcome.refusal is SearchRefusal.UNATTESTED
 
@@ -160,8 +162,8 @@ async def test_the_query_the_call_carries_selects_the_scripted_answer() -> None:
     """A test scripts by the query it expects the composer to have written."""
     searcher = FakeWebSearcher({"porto": ("a porto result",)})
 
-    scripted = await searcher.search(_authorised(searcher, "porto"))
-    default = await searcher.search(_authorised(searcher, "lisbon"))
+    scripted = await searcher.search(_authorised(searcher, "porto"), timeout=A_BOUND)
+    default = await searcher.search(_authorised(searcher, "lisbon"), timeout=A_BOUND)
 
     assert [record.content for record in scripted.records] == ["a porto result"]
     assert [record.content for record in default.records] == [DEFAULT_SEARCH_CONTENT]
@@ -176,7 +178,7 @@ async def test_a_content_over_the_bound_is_dropped_and_its_siblings_are_minted()
     """
     searcher = FakeWebSearcher(results=("short", "x" * 200, "also short"), max_result_chars=64)
 
-    outcome = await searcher.search(_authorised(searcher))
+    outcome = await searcher.search(_authorised(searcher), timeout=A_BOUND)
 
     assert [record.content for record in outcome.records] == ["short", "also short"]
 
@@ -185,7 +187,7 @@ async def test_a_response_every_result_of_which_is_dropped_yields_no_result() ->
     """§10: "Where every result is dropped the search yields nothing"."""
     searcher = FakeWebSearcher(results=("x" * 200, "y" * 200), max_result_chars=64)
 
-    outcome = await searcher.search(_authorised(searcher))
+    outcome = await searcher.search(_authorised(searcher), timeout=A_BOUND)
 
     assert outcome.refusal is SearchRefusal.NO_RESULT
     assert outcome.records == ()
@@ -202,7 +204,7 @@ async def test_both_members_record_what_they_were_handed_on_entry() -> None:
     call = _authorised(searcher)
 
     await searcher.request(QUERY)
-    await searcher.search(call)
+    await searcher.search(call, timeout=A_BOUND)
 
     assert searcher.requested == [QUERY]
     assert searcher.searched == [call]
@@ -270,7 +272,7 @@ async def test_a_fake_at_the_ceiling_mints_exactly_that_many() -> None:
         max_results=DEFAULT_MAX_RESULTS,
     )
 
-    outcome = await searcher.search(_authorised(searcher))
+    outcome = await searcher.search(_authorised(searcher), timeout=A_BOUND)
 
     assert [record.content for record in outcome.records] == [
         f"result {index}" for index in range(DEFAULT_MAX_RESULTS)
@@ -560,3 +562,81 @@ async def test_an_unpriced_fake_with_no_account_still_answers_none() -> None:
 
     assert await searcher.request(QUERY) is None
     assert searcher.requested == [QUERY], "and the query is still recorded on entry"
+
+
+# --------------------------------------------------------------------------- #
+# the bound this fake is handed (ADR-0241 §1, §11)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "bound",
+    [
+        pytest.param(30, id="not-a-timedelta"),
+        pytest.param(None, id="none"),
+        pytest.param(timedelta(0), id="zero"),
+        pytest.param(timedelta(seconds=-1), id="negative"),
+    ],
+)
+async def test_a_bound_outside_its_domain_reaches_nothing(bound: object) -> None:
+    """ADR-0241 §12's Arm 6, in the half the shared suite cannot assert.
+
+    The suite pins the ``ValueError``; what it has no doubles to look at is that
+    nothing was touched. This fake's own record is exactly that instrument: the guard
+    runs **before** the call is appended to :attr:`FakeWebSearcher.searched`, so the
+    absence of a row is what "no store was read and no channel was opened" looks like
+    for an implementation that has neither.
+    """
+    searcher = FakeWebSearcher()
+    call = _authorised(searcher)
+
+    with pytest.raises(ValueError, match="timeout must be a strictly positive timedelta"):
+        await searcher.search(call, timeout=bound)  # type: ignore[arg-type]  # the annotation is what this case ignores
+
+    assert searcher.searched == []
+
+
+async def test_a_call_held_past_its_bound_expires_rather_than_hanging() -> None:
+    """§11: this fake **honours** the bound over a call held open by ``suspend_next``.
+
+    A fake that took the parameter and ignored it would leave the shared suite's
+    deadline arm running against the production searcher alone — and the whole point
+    of ADR-0241 §1 putting the bound on the *contract* is that every ``WebSearcher``
+    this system wires is bounded on the day it is written, this one included.
+
+    The call is still recorded, because the search happened: an expiry is an outcome
+    and not a call that was never made (ADR-0241 §4, §7).
+    """
+    searcher = FakeWebSearcher()
+    call = _authorised(searcher)
+    gate = searcher.suspend_next()
+    started = asyncio.ensure_future(searcher.search(call, timeout=timedelta(milliseconds=50)))
+    await gate.reached()
+
+    await asyncio.sleep(0.15)
+    gate.release()
+
+    outcome = await asyncio.wait_for(started, 5.0)
+    assert outcome.refusal is SearchRefusal.DEADLINE_EXPIRED
+    assert outcome.records == ()
+    assert searcher.searched == [call]
+
+
+async def test_a_cancellation_at_the_suspension_is_never_reported_as_an_expiry() -> None:
+    """ADR-0241 §7 at the fake: the two interruptions stay distinguishable.
+
+    The suite already asserts that a cancelled search re-raises; what this adds is
+    that wrapping the fake's answer in a deadline did not turn a cancellation into
+    ``DEADLINE_EXPIRED`` — the conversion ADR-0231 §17 forbids, reintroduced by the
+    machinery ADR-0241 §1 asked for.
+    """
+    searcher = FakeWebSearcher()
+    gate = searcher.suspend_next()
+    started = asyncio.ensure_future(searcher.search(_authorised(searcher), timeout=A_BOUND))
+    await gate.reached()
+
+    started.cancel()
+    gate.release()
+
+    with pytest.raises(asyncio.CancelledError):
+        await started

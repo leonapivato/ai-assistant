@@ -997,7 +997,7 @@ class _FaultingSearcher:
         """Delegate unchanged."""
         return await self._inner.request(query)
 
-    async def search(self, call: Any, /) -> Any:
+    async def search(self, call: Any, /, *, timeout: Any) -> Any:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, §2)
         """Raise the fault ADR-0226 §5's degradation is the ratified answer to."""
         raise ConnectionStoreError("conn-0001 could not be read")
 

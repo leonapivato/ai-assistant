@@ -6903,26 +6903,33 @@ class SearchSupply(BaseModel):
 
 
 class SearchRefusal(StrEnum):
-    """Why a search produced no record (ADR-0231 §10, §17).
+    """Why a search produced no record (ADR-0231 §10, §17; ADR-0241 §4).
 
-    A **closed** enumeration with exactly six members, each valued by its
-    lower-cased name. The vocabulary is **added to and never renamed**, and no
-    later lane adds a member without the ADR that decides it — ADR-0221 §5's
-    pattern for its own reason: a vocabulary that grows by implementation grows
-    without anyone having decided what the new member means.
+    A **closed** enumeration with exactly seven members, each valued by its
+    lower-cased name — ADR-0231 §17's six and ADR-0241 §4's
+    :attr:`DEADLINE_EXPIRED`, which supersedes that closure *"in that count
+    alone"* and leaves every other clause of it standing. The vocabulary is
+    **added to and never renamed**, and no later lane adds an eighth without the
+    ADR that decides it — ADR-0221 §5's pattern for its own reason: a vocabulary
+    that grows by implementation grows without anyone having decided what the new
+    member means.
 
     **Every member is returned and none is raised.**
     :meth:`~ai_assistant.core.protocols.WebSearcher.search` raises for no source
     reason, so a non-yield is a value the audit can count and the turn can ignore
     rather than an exception every call site must catch correctly. That is
     ADR-0230 §4's posture on the fetch seam and ADR-0231 §3's on the composing
-    one, and ADR-0231 adds no error class to ``core/errors.py`` for it.
+    one, and neither ADR-0231 nor ADR-0241 adds an error class to
+    ``core/errors.py`` for it. That holds for :attr:`DEADLINE_EXPIRED` too
+    (ADR-0241 §4): ``search``'s ``ValueError`` guard is about a ``timeout`` an
+    implementation could not run under and fires before anything is read, where an
+    expiry of a *valid* bound is an outcome.
 
-    **Five of the six are carried across one for one into the servicer's own
-    disposition** (ADR-0231 §13), and :attr:`NO_RESULT` deliberately is not: a
-    search that reached the provider and yielded nothing is a *completed*
-    servicing whose returned count is zero, which ADR-0226 §9 already records, and
-    calling it a disposition would double-count it.
+    **Six of the seven are carried across one for one into the servicer's own
+    disposition** (ADR-0231 §13, ADR-0241 §4), and :attr:`NO_RESULT` deliberately
+    is not: a search that reached the provider and yielded nothing is a
+    *completed* servicing whose returned count is zero, which ADR-0226 §9 already
+    records, and calling it a disposition would double-count it.
 
     **A refusal names a class and carries nothing else** — no query, no fragment
     of one, no origin, no address, no provider message, no exception type. The
@@ -6940,9 +6947,48 @@ class SearchRefusal(StrEnum):
     """The channel could not be opened, verified or continued (ADR-0191 §1).
 
     A statement about this system's own reach — a refused connection, a TLS
-    failure, a channel closed mid-response, an expired deadline — and never about
+    failure, a channel closed mid-response — and never about
     what the provider said, which is :attr:`PROVIDER_REFUSED`. A redirect belongs
-    here too: ADR-0231 §5 makes one a refusal and never a second request."""
+    here too: ADR-0231 §5 makes one a refusal and never a second request.
+
+    **It stopped covering an expiry of the seam's own deadline, and that is the
+    whole of what moved** (ADR-0241 §4). Its other conditions keep this member,
+    keep the meaning ADR-0231 §5 and ADR-0191 §1 gave them and keep the
+    ``ToolOutcome`` a completion records for them; no implementation returns this
+    for a deadline and no lane collapses the two back together. An **upstream**
+    ``TimeoutError`` raised inside the bound for the transport's own reasons is
+    still this member and never :attr:`DEADLINE_EXPIRED` (ADR-0241 §7).
+
+    **Nothing here asserts that any of those conditions disclosed nothing**
+    (ADR-0241 §4). A channel closed mid-response may well have carried the whole
+    query; what a completion should record for that is a separate question
+    ADR-0241 §13 files rather than answers."""
+
+    DEADLINE_EXPIRED = "deadline_expired"
+    """The bound the caller handed this call expired before it answered (§4).
+
+    ADR-0241 §1's ``timeout`` covers the seam's own work — the revalidation, the
+    spend admission, the credential read, the channel, the response read and the
+    transcription — and **not** either ledger append, which ADR-0192 §3 pins
+    unbounded by this seam. So this member says the seam stopped waiting on the
+    stages it owns; it does not say the provider stopped working, and **no caller
+    assumes the query did not leave** (ADR-0029 §4's cooperative limit).
+
+    **That is why it is a member and not a nicer label for
+    :attr:`TRANSPORT_FAILED`** (ADR-0241 §5). ADR-0029 §4's
+    ``FAILED``-or-``INDETERMINATE`` rule attaches to a deadline expiry or a
+    cancellation and to nothing else, and the seam is the only party that can
+    establish that its *own* deadline expired — so while one member carried both
+    an expiry and a refused connection, no mapping from it could apply that rule
+    to the first without applying it to the second. Where the expiry lands after
+    the ledger claim, the completion carries the declaration's
+    ``interrupted_outcome`` and an ``UNKNOWN`` incurred cost; where it lands
+    before one, there is no claim and no completion row is written.
+
+    **A disposition and never a retry** (ADR-0241 §6). An interrupted search
+    spends the call ADR-0238 §8's ``admit_search`` admitted and no path lowers the
+    draw, because a refund would hand a stalling provider the ability to make its
+    own stalls free."""
 
     PROVIDER_REFUSED = "provider_refused"
     """The provider answered, and its answer is not one a search can be read from.

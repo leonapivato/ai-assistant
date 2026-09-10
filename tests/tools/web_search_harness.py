@@ -324,6 +324,171 @@ class GatedTransport:
 
 
 @final
+class StallingTransport:
+    """An ``OutboundTransport`` that connects to nothing and never answers.
+
+    ADR-0241 §12's Arm 1 asks for "a stub origin that connects and never answers", and
+    it asks for a **real** stall rather than a fake clock, because what the milestone's
+    acceptance sentence names is that the search is *terminated* — a property a
+    controlled clock asserts nothing about.
+
+    **Ordinarily cancellable, unlike :class:`GatedTransport`.** That one models
+    ADR-0054's deferred-cancellation resource, which is what ADR-0060's case needs;
+    this one is a plain ``sleep``, so a deadline that fires unwinds it at once and a
+    case can assert the elapsed time rather than the arrangement's own release.
+
+    Attributes:
+        attempts: Every endpoint an open was sought for, in order.
+    """
+
+    __slots__ = ("_channels", "_seconds", "attempts")
+
+    def __init__(self, seconds: float = 3600.0, *channels: FakeByteChannel) -> None:
+        """Stall every open for ``seconds``, then serve ``channels`` in order.
+
+        Args:
+            seconds: How long an open takes. The default is long enough that no bound
+                a case sets could be met by waiting, which is Arm 1's never-answering
+                origin; a finite one is Arm 12's slow-but-answering one.
+            channels: What each open hands back once the stall elapses. With none, an
+                open that somehow outlives its bound refuses rather than hanging.
+        """
+        self._seconds = seconds
+        self._channels = list(channels)
+        self.attempts: list[TransportEndpoint] = []
+
+    async def open_channel(self, endpoint: TransportEndpoint) -> ByteChannel:
+        """Record the attempt, wait, and then answer if this stub was given one.
+
+        Args:
+            endpoint: Where the caller asked to connect.
+
+        Returns:
+            The next channel, where the stall elapsed and one was scripted.
+
+        Raises:
+            TransportError: Where the stall elapsed and none was, so a case that
+                mis-set its bound fails rather than hanging for an hour.
+        """
+        self.attempts.append(endpoint)
+        await asyncio.sleep(self._seconds)
+        if not self._channels:
+            msg = "this transport never answers"
+            raise TransportError(msg)
+        return self._channels.pop(0)
+
+
+@final
+class RaisingTransport:
+    """An ``OutboundTransport`` whose open raises whatever a case handed it.
+
+    ADR-0241 §12's Arm 11 needs the two **provenance misclassifications**, and neither
+    is reachable through :class:`FakeOutboundTransport`: one is Python's own
+    ``TimeoutError`` raised by an upstream library for its own reasons inside the
+    bound, and the other is a ``CancelledError`` invented where nothing was cancelled.
+    Both are ``BaseException``s a conforming transport never raises, which is exactly
+    why the arm exists — an implementation that kept a broad ``except TimeoutError``
+    and merely renamed its refusal member passes every other case in this file while
+    reporting a deadline that never expired.
+
+    Attributes:
+        attempts: Every endpoint an open was sought for, in order.
+    """
+
+    __slots__ = ("_error", "attempts")
+
+    def __init__(self, error: BaseException) -> None:
+        """Raise ``error`` from every open.
+
+        Args:
+            error: What the far end's stand-in raises instead of connecting.
+        """
+        self._error = error
+        self.attempts: list[TransportEndpoint] = []
+
+    async def open_channel(self, endpoint: TransportEndpoint) -> ByteChannel:
+        """Record the attempt and raise.
+
+        Args:
+            endpoint: Where the caller asked to connect.
+
+        Returns:
+            Nothing.
+
+        Raises:
+            BaseException: Whatever this stub was built with.
+        """
+        self.attempts.append(endpoint)
+        raise self._error
+
+
+@final
+class SlowGate:
+    """A ``SpendGate`` that takes a stated time to answer, and then admits.
+
+    ADR-0241 §12's Arm 12 — "the admission and the call are one window, not two" —
+    needs a gate that is *slow* rather than one that refuses or one that is held
+    open: an implementation handing the admission its own fresh window and the
+    callable another passes every never-answering-gate fixture and then returns
+    successfully at nearly twice the deadline the caller set (ADR-0194 §3).
+
+    It delegates the answer to a real gate, so what the arm varies is the elapsed
+    time and nothing about the spend arithmetic.
+
+    Attributes:
+        admissions: How many times an admission was sought.
+    """
+
+    __slots__ = ("_inner", "_seconds", "admissions")
+
+    def __init__(self, inner: Any, seconds: float) -> None:
+        """Answer through ``inner``, ``seconds`` later.
+
+        Args:
+            inner: The gate that actually decides. Typed loosely, because the object
+                a case passes is a ``FakeAuditTrail`` wearing four faces at once.
+            seconds: How long the admission takes.
+        """
+        self._inner = inner
+        self._seconds = seconds
+        self.admissions = 0
+
+    async def admit_invocation(self, *, estimate: ToolCost) -> SpendAdmissionHandle:
+        """Wait, then admit through the inner gate.
+
+        Args:
+            estimate: The declared cost, passed through unread.
+
+        Returns:
+            The inner gate's handle.
+        """
+        self.admissions += 1
+        await asyncio.sleep(self._seconds)
+        handle: SpendAdmissionHandle = await self._inner.admit_invocation(estimate=estimate)
+        return handle
+
+    def release_admission(self, handle: SpendAdmissionHandle) -> None:
+        """Release through the inner gate.
+
+        Args:
+            handle: The handle to release.
+        """
+        self._inner.release_admission(handle)
+
+    async def totals(self, *, at: datetime) -> tuple[SpendTotal, ...]:
+        """The inner gate's projection.
+
+        Args:
+            at: The instant to project at.
+
+        Returns:
+            Whatever the inner gate answers.
+        """
+        totals: tuple[SpendTotal, ...] = await self._inner.totals(at=at)
+        return totals
+
+
+@final
 class InterruptingTransport:
     """An ``OutboundTransport`` whose open raises ``KeyboardInterrupt``.
 
@@ -510,7 +675,13 @@ class Built:
     """
 
     integration: WebSearchIntegration
-    transport: FakeOutboundTransport | GatedTransport | InterruptingTransport
+    transport: (
+        FakeOutboundTransport
+        | GatedTransport
+        | InterruptingTransport
+        | StallingTransport
+        | RaisingTransport
+    )
     keyring: Keyring | SuspendableKeyring
     records: Records | ReprovisioningRecords
     trail: FakeAuditTrail
@@ -552,7 +723,11 @@ class Built:
 async def built(  # noqa: PLR0913 — one knob per double a case arranges, and each is set on its own
     *,
     channels: Sequence[FakeByteChannel] = (),
-    transport: GatedTransport | InterruptingTransport | None = None,
+    transport: GatedTransport
+    | InterruptingTransport
+    | StallingTransport
+    | RaisingTransport
+    | None = None,
     records: Records | ReprovisioningRecords | None = None,
     secrets: SuspendableKeyring | None = None,
     holds: str | None = CREDENTIAL,

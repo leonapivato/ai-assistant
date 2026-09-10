@@ -1495,6 +1495,18 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                     trail=trail,
                     now=_utcnow,
                     id_factory=_uuid,
+                    # **ADR-0241 §3's elapsed-time bound, read here and passed at
+                    # the call.** This root is where the field is read and the
+                    # servicing site is the one component holding the
+                    # `WebSearcher`, so nothing below `orchestration` reads it and
+                    # nothing above that site holds a duration on account of this
+                    # decision. Forwarding is an obligation and not a convenience,
+                    # exactly as the cost pair's is above — with the difference
+                    # that `search` takes the bound as a required keyword with no
+                    # default, so a root that failed to pass one would not
+                    # construct rather than searching under a figure no operator
+                    # can reach.
+                    deadline=settings.search_call_deadline,
                 )
             ),
             # Passed rather than defaulted, for the reason the ingestor's

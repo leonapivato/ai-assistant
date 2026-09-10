@@ -3343,8 +3343,9 @@ class WebSearcher(Protocol):
     on account of this decision.
 
     **Neither acting member raises for a source reason** (ADR-0231 §17). A refused
-    admission, a failed transport, a provider that answered something else, an
-    over-large response, an unattested one and an empty one are
+    admission, a failed transport, an expired deadline (ADR-0241 §4), a provider
+    that answered something else, an over-large response, an unattested one and an
+    empty one are
     :class:`~ai_assistant.core.types.SearchRefusal` members and never exceptions,
     for :class:`Fetcher`'s and :class:`QueryComposer`'s reason: a closed refusal
     enumeration makes the non-yield a value the audit can count and the turn can
@@ -3436,7 +3437,7 @@ class WebSearcher(Protocol):
         """
         ...
 
-    async def search(self, call: ToolCall, /) -> SearchOutcome:
+    async def search(self, call: ToolCall, /, *, timeout: timedelta) -> SearchOutcome:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, §2); a caller wrapping this in `asyncio.timeout` cancels the searcher mid-await and cannot classify its own expiry
         """Perform the authorised search, and mint what its answer transcribes.
 
         **It takes a ``ToolCall`` and never an ``ActionRequest``**, so an
@@ -3451,18 +3452,55 @@ class WebSearcher(Protocol):
         opened.
 
         **What else the implementation owes, in ADR-0231's own order**: the
-        invocation deadline of ADR-0029 §4; ADR-0194 §3's spend admission, after
-        those three checks and before the ledger claim, over the ``ToolCost`` on
-        the revalidated copy; ADR-0192's claim and completion around the send, on
-        every exit it observes; ADR-0148 §6's one-step credential read and its
-        post-read discard; and ADR-0231 §10's transcription and minting. None of
-        it is visible in this signature, which is why §6 states it.
+        invocation deadline ``timeout`` states (ADR-0241 §1); ADR-0194 §3's spend
+        admission, after those three checks and before the ledger claim, over the
+        ``ToolCost`` on the revalidated copy; ADR-0192's claim and completion
+        around the send, on every exit it observes; ADR-0148 §6's one-step
+        credential read and its post-read discard; and ADR-0231 §10's
+        transcription and minting. Only the deadline is visible in this signature,
+        which is why §6 states the rest.
+
+        **The bound is the caller's and there is no spelling for "unbounded"**
+        (ADR-0241 §1). ``timeout`` is required, has no default and admits no
+        ``None``, so every call declares one — ADR-0029 §4's rule at this seam
+        verbatim, and for its reason: a default would be ``core`` choosing a
+        policy and a nullable one would be a documented route to an unbounded
+        call. How long a turn may wait is a property of the turn, so the figure is
+        a parameter rather than a searcher's property.
+
+        **The deadline is enforced inside this member** (ADR-0241 §2), never by a
+        decorating ``WebSearcher`` a composition root interposes and never by a
+        caller wrapping this call in ``asyncio.timeout``. An outer cancellation
+        cannot classify its own expiry without performing the
+        cancellation-to-outcome conversion the clause below forbids, and it stands
+        outside the claim and the spend admission that an expiry has to account
+        for.
+
+        **The bound covers this seam's own work and not the send alone** — the
+        revalidation, ADR-0194 §3's spend admission, the credential read, the
+        channel, the response read and the transcription (ADR-0241 §1). It is
+        **not** placed over either ledger append: ADR-0192 §3 pins the claim and
+        the completion *"unbounded by this seam"*, and no lane closes that gap by
+        wrapping either append in this deadline. So the guarantee is the weaker,
+        true one — the seam stops waiting on the stages it owns — and no total is
+        claimed for a ``search`` frame.
+
+        **The parameter is a duration and nothing else, and no lane widens it**
+        (ADR-0241 §1): not a deadline instant, not a clock, not a budget object,
+        not a policy and not a carrier for a second value. ADR-0231 §17's clause
+        that no member of this Protocol takes a ``MemoryRecord``, a supply, a
+        ``MemoryStore``, an ``ActionPolicy``, an ``AuditTrail`` or a
+        ``RecipientGrants`` binds verbatim.
 
         Args:
             call: The authorised call, whose ``request`` carries this searcher's
                 declaration, the origin and the query, and whose ``decision`` is
                 the recorded ``ALLOW`` that authorises them. Read only through the
                 revalidated copy the implementation makes of it, never as handed.
+            timeout: How long this call may take over the stages above. **Required,
+                keyword-only, and strictly positive** (ADR-0241 §1). The
+                annotation is not the enforcement, so an implementation checks the
+                value: see ``Raises`` below.
 
         Returns:
             One outcome carrying records **or** a refusal, never both and never
@@ -3475,10 +3513,32 @@ class WebSearcher(Protocol):
             this searcher's :attr:`name` and whose ``reported_at`` is the instant
             **the provider's response declared** (ADR-0231 §10, ADR-0092 §3).
 
+            **An expiry of ``timeout`` is
+            :attr:`~ai_assistant.core.types.SearchRefusal.DEADLINE_EXPIRED`** and
+            never :attr:`~ai_assistant.core.types.SearchRefusal.TRANSPORT_FAILED`
+            (ADR-0241 §4): it is returned like every other member and raised for
+            no source reason. Classification keys on **this** deadline having
+            fired and never on catching an exception type, so a ``TimeoutError``
+            an upstream library raises for its own reasons inside the bound stays
+            ``TRANSPORT_FAILED`` (ADR-0241 §7).
+
         Raises:
+            ValueError: If ``timeout`` is not a ``timedelta``, or is not strictly
+                positive — refused **before** the call is revalidated, before the
+                credential is read, before the spend gate is consulted and before
+                any channel is opened, so a refused value reaches no store, appends
+                no claim and opens nothing (ADR-0241 §1). Zero and negative
+                durations are refused rather than treated as instantly expired, for
+                ADR-0029 §4's reason: expiry is delivered at an await point, so an
+                implementation reading "expired" as "do not call" would be making a
+                promise the event loop does not keep.
             CancelledError: Re-raised unchanged when the call is cancelled from
                 outside while suspended, and converted into neither an outcome nor
-                a refusal (ADR-0060, ADR-0231 §17).
+                a refusal (ADR-0060, ADR-0231 §17). **Unchanged by ADR-0241**
+                (§7): ``DEADLINE_EXPIRED`` is never returned for a cancellation the
+                seam did not itself issue, and a cancellation that interrupted the
+                call completes the ledger claim with the declaration's
+                ``interrupted_outcome`` and an ``UNKNOWN`` cost before it re-raises.
         """
         ...
 
