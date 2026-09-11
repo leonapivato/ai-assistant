@@ -1,6 +1,6 @@
 # 246. Reach does not bind at all on a search bound to a destination the user chose, and the supply's type refuses no placement
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-09-11
 - **Partially supersedes** [ADR-0245](0245-reach-is-audience-control-so-a-derived-owner-reach-record-composes-a-search-bound-to-a-destination-the-user-chose.md)
   — **§1's third clause in the two-facts rule it states; §2's third, fourth and fifth
