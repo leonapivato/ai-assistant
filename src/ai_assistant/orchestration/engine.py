@@ -6044,7 +6044,10 @@ class Engine:
                 self._read_parks.pop(handle, None)
         offered: list[Confirmation] = []
         for park in open_parks:
-            confirmation = await self._read_confirmation(park)
+            # The trail read belongs **here** and not on the parking turn's path: this
+            # operation already declares ``AuditError`` (ADR-0052 §1), and a park it did
+            # not write is one it holds no decision for.
+            confirmation = self._read_confirmation(park, await self._trail.get(park.decision_id))
             if confirmation is not None:
                 offered.append(confirmation)
         return tuple(offered)
@@ -8164,7 +8167,7 @@ class Engine:
         read_confirmation = (
             None
             if responded.parked_read is None
-            else await self._read_confirmation(responded.parked_read)
+            else self._read_confirmation(responded.parked_read, responded.parked_decision)
         )
         # ADR-0205 §5: the fact travels with the episode it qualifies and never
         # without it. `turn.memories` is the supply as `narrow` returned it, so
@@ -9534,6 +9537,11 @@ class Engine:
             goal,
             plan,
             records=answered.records,
+            # ADR-0238 §8's two folds are this pass's, over this conversation: a resumed
+            # turn admits records to it exactly as any other does, and a pass that
+            # folded neither would leave the flag standing over a supply that had just
+            # carried external content.
+            conversation_id=park.conversation_id,
             history=history.records,
             history_degraded=history.degraded,
             narrow=supply,
@@ -10401,7 +10409,9 @@ class Engine:
             read=None,
         )
 
-    async def _read_confirmation(self, park: ParkedRead) -> Confirmation | None:
+    def _read_confirmation(
+        self, park: ParkedRead, recorded: PermissionDecision | None
+    ) -> Confirmation | None:
         """Assemble the question one open park is holding (ADR-0244 §4, §5).
 
         **Three sources and no fourth.** ``parameters`` come from the park — the
@@ -10427,19 +10437,27 @@ class Engine:
         adapter constructs or interprets one, and a restart empties the table so the
         next call re-mints (ADR-0084 §7).
 
+        **It reads nothing, and on the parking turn's path that is ADR-0244 §1 rather
+        than an economy.** "The turn does not park, is not suspended and does not fail":
+        a trail read taken *after* the servicing has parked can raise between the park
+        and the reply, taking down a turn that had already composed its answer — the one
+        thing §1 states in terms that parking must not do. So the servicing site carries
+        the decision it already holds, and this method is handed it. The **enumeration**
+        path reads the trail for a park it did not write, which is a different seam:
+        ``pending_confirmations`` is not inside a turn and already declares
+        ``AuditError`` (ADR-0052 §1).
+
         Args:
             park: The open park whose question to render. Its three content fields are
                 present, which the type enforces.
+            recorded: The trail's own copy of the ``CONFIRM`` the park names, or
+                ``None`` where the trail no longer holds it.
 
         Returns:
-            The assembled confirmation, or ``None`` where the trail no longer holds the
-            decision it names — on which there is no question to put, because the
-            reason and the declaration live only in the trail (ADR-0042 §4).
-
-        Raises:
-            AuditError: If the trail could not be read.
+            The assembled confirmation, or ``None`` where there is no decision to build
+            it from — on which there is no question to put, because the reason and the
+            declaration live only in the trail (ADR-0042 §4).
         """
-        recorded = await self._trail.get(park.decision_id)
         if recorded is None or park.parameters is None:
             return None
         return Confirmation(

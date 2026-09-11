@@ -665,3 +665,92 @@ async def test_a_refused_resolving_append_is_returned_and_not_raised() -> None:
     assert outcome.turn is None, "nothing was dispatched"
     assert outcome.recipient_grant is None
     assert await engine.pending_confirmations() == (), "and the park stays spent"
+
+
+# --- ADR-0244 §5's eighth condition, on the fake that consumers are certified against
+
+
+async def test_a_read_park_excludes_its_decision_from_the_establishing_act() -> None:
+    """ADR-0244 §5's eighth condition, and ADR-0026 §7's reason for it being here.
+
+    "A decision a park holds is answered through ``resume``, and answering it is what
+    dispatches the read; the establishing act resumes nothing and services nothing" — so
+    offering both on one row would let a user perform the act that changes nothing about
+    this lookup while the lookup's own question stood unanswered beside it.
+
+    A fake that offered it would certify a consumer against an engine that refuses, and
+    the consumer's own screen would show the act beside the question.
+    """
+    engine = FakeAssistantEngine()
+    confirmed = _confirm(external=False)
+    await engine.trail.record(confirmed)
+    engine.park_read("h-1", query="bell tower porto")
+    engine.hold_confirmation_decision("h-1", confirmed)
+
+    assert await engine.grantable_decisions() == ()
+    with pytest.raises(UngrantableActError, match="parked read"):
+        await engine.establish_recipient_grant(confirmed.id, expires_at=LATER)
+
+
+async def test_the_exclusion_is_not_lifted_by_the_answer_that_spends_the_park() -> None:
+    """ADR-0244 §5: the condition is over **three** dispositions, not over an open park.
+
+    "A park that settles ``APPROVED`` or ``DENIED`` holds a resolution the answering
+    call has not yet recorded, and a decision that left this listing at the settlement
+    would be one the establishing act could resolve **first** — recording an ``ALLOW``
+    the user never gave that answer for. The transition ``OPEN`` → ``APPROVED`` →
+    (recorded) therefore never passes through a grantable state."
+
+    **Which of two refusals a consumer meets is not what this asserts**, and the
+    asymmetry is honest rather than hidden: this fake records the resolution inside the
+    answer, so ADR-0235 §3's **fourth** condition is what it reaches first, while a hub
+    whose process died between the two would reach §5's eighth. What both share, and
+    what §5's property actually is, is that the decision is **never offered** in
+    between — so that is what is asserted, over the listing and over the act alike.
+    """
+    engine = FakeAssistantEngine()
+    confirmed = _confirm(external=False)
+    await engine.trail.record(confirmed)
+    offered = engine.park_read("h-1", query="bell tower porto")
+    engine.hold_confirmation_decision("h-1", confirmed)
+    await engine.resume(offered.token, approved=False, timeout=PATIENT)
+
+    assert await engine.grantable_decisions() == (), "a DENIED park's decision stays out"
+    with pytest.raises(UngrantableActError):
+        await engine.establish_recipient_grant(confirmed.id, expires_at=LATER)
+
+
+async def test_a_cancelled_parks_decision_returns_to_the_listing() -> None:
+    """ADR-0244 §5: "a cancelled park's decision is therefore the one that returns".
+
+    A cancellation writes no resolution and never will, so the eighth condition stops
+    excluding it and ADR-0235 §3's seven govern the row — which they do, on a clean
+    binding whose deadline has not passed.
+    """
+    engine = FakeAssistantEngine()
+    confirmed = _confirm(external=False)
+    await engine.trail.record(confirmed)
+    offered = engine.park_read("h-1", query="bell tower porto")
+    engine.hold_confirmation_decision("h-1", confirmed)
+
+    assert await engine.cancel_read(offered.token) is ReadCancellation.WITHDRAWN
+
+    assert [row.id for row in await engine.grantable_decisions()] == [confirmed.id]
+    grant = await engine.establish_recipient_grant(confirmed.id, expires_at=LATER)
+    assert grant.established_by == confirmed.id
+
+
+async def test_a_decision_no_read_park_names_is_offered_as_it_always_was() -> None:
+    """The control: the exclusion is over **parked** decisions and nothing wider.
+
+    "No lane widens the exclusion to every park ever written", which would take a
+    capability away on the strength of a question nobody answered.
+    """
+    engine = FakeAssistantEngine()
+    confirmed = _confirm(external=False)
+    await engine.trail.record(confirmed)
+    engine.park_read("h-1", query="bell tower porto")
+
+    assert [row.id for row in await engine.grantable_decisions()] == [confirmed.id], (
+        "this park names no decision, so it excludes none"
+    )

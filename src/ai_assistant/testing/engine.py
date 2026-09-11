@@ -529,6 +529,12 @@ class FakeAssistantEngine:
         #: ``cancel_read`` — which is ADR-0244 §6's and §11's own rule. A handle in
         #: neither this set nor any park table is unknown, and raises.
         self._read_handles: set[str] = set()
+        #: The decision each **live** read park names, by handle (ADR-0244 §5). What
+        #: §5's eighth ``grantable_decisions`` condition is decided from: a decision a
+        #: park holds ``OPEN``, ``APPROVED`` or ``DENIED`` is not one the establishing
+        #: act may ride. A cancellation removes the entry, because a cancelled park's
+        #: decision is the one that returns to the listing.
+        self._read_decisions: dict[str, str] = {}
         #: The terminal fact each **settled** read park keeps, by handle (ADR-0244 §3,
         #: §9). ``EXPIRED`` where the deadline was what closed it, ``ALREADY_SETTLED``
         #: otherwise — because §9 states ``EXPIRED`` over the disposition "whether this
@@ -1171,6 +1177,14 @@ class FakeAssistantEngine:
             decision: The recorded ``CONFIRM``, as the trail holds it.
         """
         self._parked_decisions[handle] = decision
+        if handle in self.read_parked:
+            # **ADR-0244 §5's eighth condition becomes reachable the moment a read park
+            # names a decision.** A fake that bound one and went on offering it to
+            # ``grantable_decisions`` would certify a consumer against an engine that
+            # refuses — and against the very failure §5 exists to prevent, a user
+            # performing the act that changes nothing about this lookup while the
+            # lookup's own question stands unanswered beside it.
+            self._read_decisions[handle] = decision.id
 
     def _recipient_now(self) -> datetime:
         """The guarded reading of :attr:`recipient_grant_clock` (ADR-0026 §2, §4).
@@ -1733,6 +1747,11 @@ class FakeAssistantEngine:
             self.read_dispatching.discard(token.handle)
             return self._checked(ReadCancellation.INTERRUPTED, "cancel_read")
         if self.read_parked.pop(token.handle, None) is not None:
+            # **A cancelled park's decision is the one that returns to the listing**
+            # (ADR-0244 §5): a cancellation writes no resolution and never will, so §5's
+            # eighth condition stops excluding it and §3's seven govern the row.
+            self._read_decisions.pop(token.handle, None)
+            self.read_settled[token.handle] = ReadAnswerOutcome.ALREADY_SETTLED
             return self._checked(ReadCancellation.WITHDRAWN, "cancel_read")
         return self._checked(ReadCancellation.NOTHING_TO_CANCEL, "cancel_read")
 
@@ -2598,6 +2617,10 @@ class FakeAssistantEngine:
             if rides_an_establishing_act(row, now=now)
             and row.id not in resolved
             and (complete or oldest is None or row.decided_at > oldest)
+            # ADR-0244 §5's **eighth** condition, evaluated after §3's seven and in that
+            # position — so a decision a read park holds is answered through ``resume``
+            # and is not offered beside an act that resumes nothing.
+            and not self._park_excludes(str(row.id))
         ]
         return self._checked(tuple(offerable), "grantable_decisions")
 
@@ -2863,6 +2886,16 @@ class FakeAssistantEngine:
                 f"decision {decision_id!r} records a call planned over external content; you "
                 f"may approve such a call, and may not in that act make its recipients "
                 f"standing (ADR-0193 §2, §4; ADR-0235 §3)"
+            )
+            raise UngrantableActError(msg)
+        if self._park_excludes(decision_id):
+            # ADR-0244 §5's **eighth** condition, named exactly as the seven are and
+            # evaluated after them, so where more than one fails the first is the one
+            # named and the refusal is deterministic across implementations.
+            msg = (
+                f"decision {decision_id!r} is the question a parked read holds, or has just "
+                f"taken the answer to, so it is answered through resume rather than through "
+                f"this operation (ADR-0244 §5)"
             )
             raise UngrantableActError(msg)
         return confirmed
@@ -3490,6 +3523,31 @@ class FakeAssistantEngine:
         self.read_parked[handle] = confirmation
         self._read_handles.add(handle)
         return confirmation
+
+    def _park_excludes(self, decision_id: str) -> bool:
+        """Whether ADR-0244 §5's eighth condition excludes ``decision_id``.
+
+        **Stated over three dispositions and not over an open park**, which is §5's own
+        clause and the property it exists to have: a park that settles ``APPROVED`` or
+        ``DENIED`` holds a resolution the answering call has not yet recorded, so a
+        decision that left the listing at the settlement would be one the establishing
+        act could resolve **first** — recording an ``ALLOW`` the user never gave that
+        answer for.
+
+        A ``CANCELLED`` park's decision returns to the listing, because a cancellation
+        writes no resolution and never will; an ``EXPIRED`` one's stays out, refused by
+        ADR-0235 §3's **fifth** condition on the shared deadline rather than by this one.
+        This fake models the first two members it can reach — a question still open, and
+        one an answer took — and a cancellation removes the exclusion by removing the
+        decision from :attr:`_read_decisions`.
+
+        Args:
+            decision_id: The recorded ``CONFIRM`` under test.
+
+        Returns:
+            Whether a read park this engine holds excludes it.
+        """
+        return decision_id in self._read_decisions.values()
 
     def dispatching_read(self, handle: str) -> None:
         """Put a parked read's dispatch "in flight", so a cancellation can interrupt it.
