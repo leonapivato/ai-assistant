@@ -27,6 +27,13 @@ its declared parameters, so a future operation that lands with a positional-only
 parameter is covered on the day it lands rather than on the day a QA run finds it
 on a live hub. That is ``wire/surface.py``'s own principle — read the mapping off
 the Protocol rather than transcribing a table — applied to the test that guards it.
+
+**The four socket cases are marked ``integration`` and the two signature ones are
+not**, which is ``CONTRIBUTING.md`` → "Testing" applied as
+``tests/wire/test_client_overlay.py`` reads it: "a Unix socket is the filesystem".
+The split is real rather than cosmetic — the signature bindings need no socket, no
+temporary directory and no event loop, and would still run where binding one is
+forbidden.
 """
 
 from __future__ import annotations
@@ -117,6 +124,7 @@ def _parked() -> FakeAssistantEngine:
     return engine
 
 
+@pytest.mark.integration
 async def test_cancelling_an_open_park_over_the_wire_withdraws_it(tmp_path: Path) -> None:
     """#2243's reproduction, and ADR-0244 §11's first state.
 
@@ -138,6 +146,7 @@ async def test_cancelling_an_open_park_over_the_wire_withdraws_it(tmp_path: Path
     )
 
 
+@pytest.mark.integration
 async def test_cancelling_a_dispatched_read_over_the_wire_interrupts_it(tmp_path: Path) -> None:
     """ADR-0244 §11's second state: "cancelling a dispatched read cancels the task".
 
@@ -154,14 +163,23 @@ async def test_cancelling_a_dispatched_read_over_the_wire_interrupts_it(tmp_path
         )
 
 
+@pytest.mark.integration
 async def test_cancelling_a_settled_park_over_the_wire_reports_nothing_to_cancel(
     tmp_path: Path,
 ) -> None:
-    """ADR-0244 §11's third state, reached over one connection by cancelling twice.
+    """ADR-0244 §11's third state, reached by cancelling the same park twice.
 
-    **The second call is the subject and the first is the arrangement**, which also
-    makes this the binding that shows the connection survives a ``cancel_read`` at
-    all: a hub that dropped the socket on the first could not answer a second.
+    **The second call is the subject and the first is the arrangement**: what makes
+    the third member reachable is a park that has already been settled, and the only
+    way to settle one here is to cancel it.
+
+    **What this does *not* show is a connection surviving**, and the distinction is
+    worth stating because the opposite reading is the natural one. ``HubEngineClient``
+    runs each call "on a connection of its own" — connect, handshake, one request,
+    close — so a hub that hung up after answering the first would still answer the
+    second over a fresh socket. What a drop *does* change is the answer's kind: the
+    client reports the hub hung up rather than returning a member, which is what the
+    two assertions below rule out, once each.
     """
     async with _serving(_parked(), tmp_path / "hub.sock") as client:
         token = ContinuationToken(handle=_HANDLE)
@@ -170,7 +188,8 @@ async def test_cancelling_a_settled_park_over_the_wire_reports_nothing_to_cancel
         assert await client.cancel_read(token) is ReadCancellation.NOTHING_TO_CANCEL
 
 
-async def test_an_unknown_token_comes_back_as_a_refusal_and_not_a_dropped_socket(
+@pytest.mark.integration
+async def test_an_unknown_token_comes_back_as_a_refusal_and_not_a_transport_fault(
     tmp_path: Path,
 ) -> None:
     """ADR-0084 §7's refusal, over the wire, at the operation #2243 made unreachable.
@@ -179,7 +198,13 @@ async def test_an_unknown_token_comes_back_as_a_refusal_and_not_a_dropped_socket
     fix, because nothing got as far as the handle table. It is an ``AssistantError``,
     so it crosses as an ADR-0085 §10a error frame and is reconstructed here — which
     is the distinction the defect erased: a *refusal* the caller can render, rather
-    than a transport fault that says nothing about what happened.
+    than a transport fault that says nothing about what happened. A hub that dropped
+    this connection would raise ``HubUnavailableError`` here instead, which is
+    precisely what a user saw for every token before the fix.
+
+    **The second call is about the park, not the socket.** Each call gets its own
+    connection, so it says nothing about one staying open; what it says is that the
+    refusal was inert — the park it did not name is still there to be withdrawn.
     """
     async with _serving(_parked(), tmp_path / "hub.sock") as client:
         with pytest.raises(UnknownContinuationError):
@@ -187,7 +212,7 @@ async def test_an_unknown_token_comes_back_as_a_refusal_and_not_a_dropped_socket
 
         assert await client.cancel_read(ContinuationToken(handle=_HANDLE)) is (
             ReadCancellation.WITHDRAWN
-        ), "and the connection carried on, which a dropped socket would not have"
+        ), "the refused call settled nothing, so the park it did not name is still open"
 
 
 @pytest.mark.parametrize("method", sorted(METHODS))
