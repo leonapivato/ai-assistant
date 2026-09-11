@@ -24,6 +24,7 @@ would make one module answer two unrelated decisions.
 from __future__ import annotations
 
 import re
+import shlex
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from typing import TYPE_CHECKING, Final
@@ -283,7 +284,7 @@ async def test_a_turn_that_parked_a_read_renders_the_floor_the_query_and_what_a_
     # §13's one sentence, and no more than it.
     assert "Answering yes makes this one lookup, once, and nothing else." in rendered
     # §13's cancellation act, offered at the question, as a command that pastes.
-    assert "assistant cancel-read h-1" in rendered
+    assert "assistant cancel-read -- h-1" in rendered
     # §1: the turn did not park, so nothing is being collected here.
     assert "Nothing is being asked of you right now" in rendered
 
@@ -407,7 +408,7 @@ async def test_resume_answers_a_parked_read_and_says_it_was_made_once(
     assert code == 0
     assert "A lookup is waiting on your answer" in rendered
     assert QUERY in output.getvalue()
-    assert "you approved that lookup and it was made, once" in rendered
+    assert "your approval was acted on, once" in rendered
     assert [name for name, _ in engine.calls] == ["pending_confirmations", "resume"], (
         "one listing and one answer: no adapter reads a store (ADR-0244 §13)"
     )
@@ -463,9 +464,10 @@ async def test_an_expired_question_is_told_apart_from_one_that_was_answered(
     engine = _parked()
     engine.read_answers["h-1"] = ReadAnswerOutcome.EXPIRED
 
-    await cli._drive_resume(engine, timeout=PATIENT, approver=lambda _c: True)
+    code = await cli._drive_resume(engine, timeout=PATIENT, approver=lambda _c: True)
     rendered = _flat(output.getvalue())
 
+    assert code == 1, "the answer the user gave was not carried out"
     assert "ran out of time before it was answered" in rendered
     assert "It cannot be answered now" in rendered
     assert "had already been settled" not in rendered
@@ -488,11 +490,15 @@ async def test_a_refused_answer_says_the_lookup_was_not_made(
     engine = _parked()
     engine.read_answers["h-1"] = member
 
-    await cli._drive_resume(engine, timeout=PATIENT, approver=lambda _c: True)
+    code = await cli._drive_resume(engine, timeout=PATIENT, approver=lambda _c: True)
     rendered = _flat(output.getvalue())
 
+    assert code == 1, (
+        "the user's answer was not carried out, and two of these leave the question "
+        "standing — a caller must not read success off that run"
+    )
     assert fragment in rendered
-    assert "it was made, once" not in rendered
+    assert "your approval was acted on" not in rendered
 
 
 # --- the seven statements, as a closed vocabulary ---------------------------
@@ -756,7 +762,7 @@ async def test_the_standing_request_rides_a_reads_answer_and_is_relayed_unrounde
 
     assert code == 0
     assert "Recipients not remembered for this one" not in rendered
-    assert "you approved that lookup and it was made, once" in rendered
+    assert "your approval was acted on, once" in rendered
     assert "Remembered." in rendered, "the act rode the answer (ADR-0244 §5)"
     assert cli._decided_at(LATER) in rendered, (
         "until the instant the user chose, unrounded and unextended (ADR-0235 §1)"
@@ -781,7 +787,7 @@ async def test_a_read_planned_over_external_content_takes_the_answer_without_the
 
     assert code == 0
     assert "Recipients not remembered for this one" in rendered
-    assert "you approved that lookup and it was made, once" in rendered
+    assert "your approval was acted on, once" in rendered
     relayed = [arguments for name, arguments in engine.calls if name == "resume"]
     assert relayed == [{"token": "h-1", "approved": True}], (
         "the argument is absent rather than sent as a null (ADR-0085 §10)"
@@ -867,7 +873,7 @@ def test_the_offered_command_is_one_unbroken_line_at_an_ordinary_width(
     offered = [one for one in buffer.getvalue().splitlines() if "cancel-read" in one]
 
     assert len(offered) == 1, "the command is one display line, not folded across two"
-    assert f"assistant cancel-read {handle}" in offered[0]
+    assert f"assistant cancel-read -- {handle}" in offered[0]
 
 
 @pytest.mark.parametrize(
@@ -888,7 +894,7 @@ def test_a_handle_needing_quoting_is_offered_quoted(
     cli._render_read_terms(_question(handle))
     rendered = output.getvalue()
 
-    assert f"assistant cancel-read {expected}" in rendered
+    assert f"assistant cancel-read -- {expected}" in rendered
 
 
 def test_a_handle_the_terminal_cannot_show_withholds_the_command_and_says_so(
@@ -904,4 +910,118 @@ def test_a_handle_the_terminal_cannot_show_withholds_the_command_and_says_so(
 
     assert "Withdraw it with 'assistant cancel-read'." in rendered
     assert "Its handle" in rendered
-    assert "assistant cancel-read h" not in rendered
+    assert "assistant cancel-read --" not in rendered
+
+
+# --- round 3's three findings -----------------------------------------------
+
+
+def test_the_dispatched_statement_never_says_a_request_left_the_device(
+    output: StringIO,
+) -> None:
+    """Round 3, ``blocker``. ADR-0244 §8 names four ways a dispatched read yields
+    nothing and the first is reached before anything is sent: ADR-0231 §6's route puts
+    ADR-0029 §2's checks and ADR-0194's spend admission ahead of the send, so an
+    approved read on an exhausted ceiling comes back ``DISPATCHED`` beside a
+    ``SPEND_EXHAUSTED`` carrier. Driven as that pair, because the defect was one
+    statement contradicting another on the same screen rather than either alone."""
+    cli._render_turn(
+        TurnOutcome(
+            turn=None,
+            search_not_serviced=SearchNotServiced.SPEND_EXHAUSTED,
+            read_answer=ReadAnswerOutcome.DISPATCHED,
+        )
+    )
+    rendered = _flat(output.getvalue())
+
+    assert "a spending ceiling refused that lookup" in rendered
+    assert "your approval was acted on, once" in rendered
+    for forbidden in ("it was made", "was sent", "the request left", "it ran"):
+        assert forbidden not in rendered.lower()
+
+
+@pytest.mark.parametrize(
+    ("member", "unanswered"),
+    [
+        (one, one not in {ReadAnswerOutcome.DISPATCHED, ReadAnswerOutcome.DECLINED})
+        for one in _answers()
+    ],
+)
+def test_only_a_carried_out_answer_is_success(
+    member: ReadAnswerOutcome, unanswered: bool, output: StringIO
+) -> None:
+    """Round 3, ``major``, as #531's rule on this vocabulary.
+
+    ``DISPATCHED`` did what the yes asked for and ``DECLINED`` did what the no asked
+    for. The other five carried out neither, and ADR-0244 §6's availability clauses
+    precede the gate — so ``UNAVAILABLE_NOW`` and ``OPERATION_CHANGED``'s
+    subject-or-binding grounds leave the question **still open**. Parametrised over the
+    whole vocabulary so a member added later has to be classified rather than defaulting
+    into success.
+    """
+    assert cli._render_read_answer(member) is unanswered
+    assert cli._render_turn(TurnOutcome(turn=None, read_answer=member)) is unanswered
+
+
+def test_a_parked_question_does_not_fail_the_turn_that_raised_it(output: StringIO) -> None:
+    """ADR-0244 §1's other half, which the exit-code change must not break: "the turn
+    does not park, is not suspended and does not fail". A question is work still to do,
+    not work that went wrong, so ``ask`` exits as it would have with no read at all."""
+    assert not cli._render_turn(
+        TurnOutcome(
+            turn=None,
+            search_not_serviced=SearchNotServiced.ANSWER_AWAITED,
+            read_confirmation=_question(),
+        )
+    )
+
+
+async def test_an_unavailable_answer_leaves_the_question_standing_and_exits_non_zero(
+    output: StringIO,
+) -> None:
+    """Round 3, ``major``, end to end: the run that the reviewer's scenario produces.
+
+    ``UNAVAILABLE_NOW`` rules nothing and settles nothing, so the same question is
+    enumerable afterwards — and a zero exit there is exactly the claim
+    :func:`cli._drive_resume` refuses to let a caller make.
+    """
+    engine = _parked()
+    engine.read_answers["h-1"] = ReadAnswerOutcome.UNAVAILABLE_NOW
+
+    code = await cli._drive_resume(engine, timeout=PATIENT, approver=lambda _c: True)
+
+    assert code == 1
+    assert [one.token.handle for one in await engine.pending_confirmations()] == ["h-1"], (
+        "the question this answer did not settle is still there to be answered"
+    )
+
+
+def test_the_offered_command_withdraws_the_question_when_it_is_copied(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """Round 2 ``minor``, round 3 ``major``: the hint is checked by **running it**.
+
+    A handle beginning with a hyphen is admissible — ``Identifier`` requires
+    encodability and nothing more — and quoting does not stop Typer parsing one as an
+    option, so ``assistant cancel-read --help`` pastes as a command that prints help,
+    exits ``0`` and withdraws nothing. Asserting over the rendered string could never
+    have caught that, so this splits the displayed command as a shell would and invokes
+    it, then asserts the engine saw the exact handle.
+    """
+    handle = "--help"
+    engine = FakeAssistantEngine()
+    offered_question = engine.park_read(handle, query=QUERY, egress=_binding())
+    _wire(monkeypatch, engine)
+
+    cli._render_read_terms(offered_question)
+    line = next(one for one in output.getvalue().splitlines() if "cancel-read" in one)
+    argv = shlex.split(_flat(line).split("Withdraw it with: ", 1)[1])
+
+    result = CliRunner().invoke(cli.app, argv[1:])
+
+    assert argv[:2] == ["assistant", "cancel-read"]
+    assert result.exit_code == 0
+    assert ("cancel_read", {"token": handle}) in engine.calls, (
+        "the exact handle reached the engine, rather than being read as an option"
+    )
+    assert engine.read_parked == {}, "and the question is withdrawn"
