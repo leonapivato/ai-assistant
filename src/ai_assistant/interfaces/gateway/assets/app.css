@@ -269,14 +269,23 @@ button[disabled] {
  * condition placed *below* it would be read as an annotation on that answer rather
  * than as the reason there is no newer one.
  */
-.fault {
+.fault,
+.account {
   border: 1px solid var(--alarm);
   border-radius: 10px;
   padding: 0.8rem 1rem;
   color: var(--alarm);
 }
 
-.panel > .fault {
+/*
+ * An account of an act whose reply this browser never read, in the node that owns it
+ * rather than in the panel's fault slot (ADR-0177 §7's fourth clause, ADR-0244 §11).
+ * It is the same ink and the same frame as a fault, because that is what it reports;
+ * what it is not is a fault *slot*, which every listing read clears on its way in and
+ * which `#confirmations > .fault` is how the tests ask about.
+ */
+.panel > .fault,
+.panel > .account {
   margin: 0 0 0.9rem;
 }
 

@@ -1669,10 +1669,15 @@ async def test_an_unresolved_cancellation_is_never_reported_as_nothing_cancelled
     ADR-0139 §4's resolution-by-omission, announced about an act the owner performed.
 
     So both unresolved acts are reported as unresolved, and the ordering does not change
-    it. Where the act went first, its record is already there when the answer ends and
-    the combined sentence is written; where the answer went first, the act clears the
-    panel on its way in — a new act is beginning — and its own unresolved account stands
-    in the node no refresh reaches.
+    it. Each account is in the node that owns it and both are re-derived from the pair of
+    states whenever either act finishes, so whichever reply is lost second recomputes the
+    screen from everything the page knows rather than writing over what the first left
+    (adversarial review's round 8).
+
+    **Each press is waited out on its own act's node**, which is what the fix made
+    necessary: the answer's account now survives the act beginning, so waiting on the
+    panel as a whole would be satisfied by the sentence the *previous* press left there
+    and would assert over a screen the second reply had not reached.
 
     **Driven sequentially rather than concurrently**, because the page state the finding
     is about is what ``cancelled`` holds when an ending runs, and two failed requests
@@ -1709,25 +1714,42 @@ async def test_an_unresolved_cancellation_is_never_reported_as_nothing_cancelled
         presses = ["Cancel this lookup", "Yes, do it"]
         for label in presses if cancel_first else list(reversed(presses)):
             await row.locator("button", has_text=label).click()
-            await expect(drive.page.locator("#confirmations")).to_contain_text("is not known")
+            node = "#cancellation-said" if label == presses[0] else "#answer-said"
+            await expect(drive.page.locator(node)).to_be_visible()
 
         said = await drive.page.inner_text("#confirmations")
         assert "nothing was cancelled" not in said
-        # The act's own unresolved account is in the node no refresh reaches, whichever
-        # way round the two replies were lost.
+        # Both accounts are on screen, each in the node that owns it, whichever way round
+        # the two replies were lost — and the answer's is the one that says both acts went
+        # unanswered rather than one of the five that say nothing was cancelled.
         assert "cancellation" in await drive.page.inner_text("#cancellation-said")
+        assert "Neither of the two things asked about this park" in await drive.page.inner_text(
+            "#answer-said"
+        )
 
 
 @pytest.mark.parametrize(
-    ("member", "said"),
+    ("member", "said", "account"),
     [
-        (ReadCancellation.WITHDRAWN, "That question is withdrawn"),
-        (ReadCancellation.NOTHING_TO_CANCEL, "There was nothing here to cancel"),
+        (
+            ReadCancellation.WITHDRAWN,
+            "That question is withdrawn",
+            ("it withdrew a question that was still open", "may have been carried out"),
+        ),
+        (
+            ReadCancellation.NOTHING_TO_CANCEL,
+            "There was nothing here to cancel",
+            ("is not what ended it", "no answer was recorded for it"),
+        ),
     ],
     ids=["withdrawn", "nothing-to-cancel"],
 )
 async def test_an_act_that_ended_no_answer_hides_no_answers_unknown_outcome(
-    gateway_browser: Browser, tmp_path: Path, member: ReadCancellation, said: str
+    gateway_browser: Browser,
+    tmp_path: Path,
+    member: ReadCancellation,
+    said: str,
+    account: tuple[str, str],
 ) -> None:
     """Adversarial review's round 7, first finding, over both members it is about.
 
@@ -1740,15 +1762,27 @@ async def test_an_act_that_ended_no_answer_hides_no_answers_unknown_outcome(
     fourth clause owes a sentence for it.
 
     So both are on screen and neither is in place of the other — what the act did, in the
-    panel's own node, and what became of the answer, in the slot that owns it. What the
+    panel's own node, and what became of the answer, in the node that owns it. What the
     second one may not be is any of this page's five existing not-known sentences, because
     every one of them ends "nothing was cancelled".
+
+    **And the two members do not get the same sentence** (round 8's second finding).
+    ``WITHDRAWN`` settled an ``OPEN`` park ``CANCELLED`` and "nothing was ever sent"; §6's
+    one compare-and-swap is where that happened, and under it "neither party acts on a
+    park the other took", so the answer whose reply was lost returned ``ALREADY_SETTLED``
+    and cannot have dispatched. Saying "the action may have been carried out" there
+    contradicts, on one screen, the statement the act's own node is carrying two lines
+    above. ``NOTHING_TO_CANCEL`` settles no such thing — §11's last clause has a park
+    settled ``APPROVED`` whose dispatch is running in another process answering it — so
+    there the action may indeed have run, and the page may not say it did not.
 
     Args:
         gateway_browser: The one browser this run launched.
         tmp_path: The case's data directory.
         member: The answer the act comes back with.
         said: The fixed statement that member is rendered as.
+        account: What the answer's own account says beside it, and what for this member
+            it may **not** say.
     """
 
     released = asyncio.Event()
@@ -1794,8 +1828,93 @@ async def test_an_act_that_ended_no_answer_hides_no_answers_unknown_outcome(
 
         # The answer's own outcome is stated, and the act's answer is still there beside
         # it — two facts about two acts, neither hidden behind the other.
-        await expect(drive.page.locator("#confirmations")).to_contain_text("is not what ended it")
-        panel = await drive.page.inner_text("#confirmations")
-        assert "not known" in panel
-        assert "nothing was cancelled" not in panel
+        says, ruled_out = account
+        await expect(drive.page.locator("#answer-said")).to_contain_text(says)
+        stated = await drive.page.inner_text("#answer-said")
+        assert "not known" in stated
+        assert "nothing was cancelled" not in stated
+        # And what this member does not establish is not asserted about it.
+        assert ruled_out not in stated, stated
         assert said in await drive.page.inner_text("#cancellation-said")
+
+
+@pytest.mark.parametrize("answer_first", [True, False], ids=["answer-first", "cancel-first"])
+async def test_neither_replys_account_is_erased_by_the_other_whichever_lands_second(
+    gateway_browser: Browser, tmp_path: Path, answer_first: bool
+) -> None:
+    """Adversarial review's round 8, first finding, with the two replies released apart.
+
+    One park carries two acts and each of them starts the listing read that clears the
+    panel's fault slot on its way in. So an account written into that slot is erased by
+    whichever of the two replies lands second, and which one that is is the network's
+    choice — the finding names the ordering the branch had never been driven in: the
+    answer fails first and writes its unknown-outcome account, and the cancellation's
+    reply then arrives and clears it, leaving the screen saying only what the act did.
+    Both outcomes are unresolved facts and ADR-0177 §7's fourth clause owes a sentence for
+    each: "no front end resolves it by assuming either of the other two".
+
+    **Both requests are in flight together and are completed one at a time**, which is
+    what makes this a test of ordering rather than of a race. Each act's handler waits on
+    an event of its own, the case releases them in its own order, and the screen is read
+    after each release — so the second reply is processed against a page that has already
+    shown the first one's account, which is the state the finding is about.
+
+    The pairing is ``NOTHING_TO_CANCEL``: the park may be settled ``APPROVED`` with its
+    dispatch running in another process (ADR-0244 §11's last clause), so the act settles
+    nothing about the lost answer and the answer's own account is still owed whole.
+
+    Args:
+        gateway_browser: The one browser this run launched.
+        tmp_path: The case's data directory.
+        answer_first: Whether the answer's reply is completed before the act's.
+    """
+    answering = asyncio.Event()
+    withdrawing = asyncio.Event()
+
+    async def _cancels(token: ContinuationToken, /) -> ReadCancellation:
+        await withdrawing.wait()
+        return ReadCancellation.NOTHING_TO_CANCEL
+
+    async def _unreachable(
+        token: ContinuationToken,
+        /,
+        *,
+        approved: bool,
+        timeout: timedelta,  # noqa: ASYNC109 — the Protocol's own signature
+        remember_recipients_until: datetime | None = None,
+    ) -> TurnOutcome:
+        await answering.wait()
+        raise TransportError("the hub is not there")
+
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.read_parked["r-1"] = _read()
+        drive.engine._read_handles.add("r-1")
+        drive.engine.cancel_read = _cancels  # type: ignore[method-assign]
+        drive.engine.resume = _unreachable  # type: ignore[method-assign,assignment]
+
+        await drive.page.click("#confirmations-button")
+        await drive.page.wait_for_selector("#confirmation-list .confirmation-row")
+        row = drive.page.locator("#confirmation-list .confirmation-row").first
+        # The act is offered while an answer is out, which is deliberate and is the state
+        # ADR-0244 §11's `INTERRUPTED` is defined over — so the two really can be in
+        # flight together, and this is how they get there.
+        await row.locator("button", has_text="Yes, do it").click()
+        await row.locator("button", has_text="Cancel this lookup").click()
+
+        order = [(answering, "#answer-said"), (withdrawing, "#cancellation-said")]
+        for release, node in order if answer_first else list(reversed(order)):
+            release.set()
+            await expect(drive.page.locator(node)).to_be_visible()
+
+        # Both accounts stand, and the one that landed first is still there — which is the
+        # whole of the finding. Neither is in place of the other: what the act did, in the
+        # panel's own node, and what became of the answer, in the node that owns it.
+        await expect(drive.page.locator("#cancellation-said")).to_contain_text(
+            "There was nothing here to cancel"
+        )
+        stated = drive.page.locator("#answer-said")
+        await expect(stated).to_contain_text("is not known")
+        await expect(stated).to_contain_text("is not what ended it")
+        # And the answer's account is the one the pairing calls for rather than one of the
+        # five that end "nothing was cancelled" (adversarial review's round 6).
+        assert "nothing was cancelled" not in await stated.inner_text()
