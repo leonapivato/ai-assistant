@@ -25,6 +25,7 @@ binding, and the fake's helper fixes the first — which is
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -41,13 +42,18 @@ from ai_assistant.core.types import (
     DiscloserProvenance,
     EgressDestination,
     EgressSpan,
+    ReadAnswerOutcome,
+    ReadCancellation,
     ReadKind,
     SpanCoverage,
+    TurnOutcome,
 )
 from ai_assistant.interfaces.gateway.server import _confirmation_view
+from ai_assistant.wire.errors import TransportError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
+    from datetime import datetime, timedelta
     from pathlib import Path
 
     from browser_drive import Drive
@@ -1159,23 +1165,42 @@ async def test_pressing_the_act_withdraws_the_question_and_says_which_state_it_r
     nothing which this surface spends the most words preventing.
     """
     async with driving(gateway_browser, tmp_path) as drive:
-        drive.engine.read_parked["r-1"] = _read()
+        question = _read()
+        drive.engine.read_parked["r-1"] = question
         drive.engine._read_handles.add("r-1")
-
+        drive.engine.turn_outcome = TurnOutcome(
+            turn=None, conversation_id="c-1", read_confirmation=question
+        )
+        # The park on screen **twice**, which is this page's own arrangement and the
+        # state the act has to reach both of: a turn that parks renders its question with
+        # the answer, and the recovery listing renders the same park again.
+        await drive.page.fill("#utterance", "what did the survey say")
+        await drive.page.click("#ask-form button[type=submit]")
+        await expect(drive.page.locator("#answer-body")).to_contain_text(
+            "This lookup is parked until you answer it."
+        )
         await drive.page.click("#confirmations-button")
         await drive.page.wait_for_selector("#confirmation-list .confirmation-row")
-        row = drive.page.locator("#confirmation-list .confirmation-row").first
-        await row.locator("button", has_text="Cancel this lookup").click()
-        await expect(row).to_contain_text("That question is withdrawn")
+        listed = drive.page.locator("#confirmation-list .confirmation-row").first
+        await listed.locator("button", has_text="Cancel this lookup").click()
 
+        await expect(drive.page.locator("#confirmations")).to_contain_text(
+            "That question is withdrawn"
+        )
         assert [one for one in drive.engine.calls if one[0] == "cancel_read"] == [
             ("cancel_read", {"token": "r-1"})
         ]
         assert [one for one in drive.engine.calls if one[0] == "resume"] == []
-        await expect(row.locator("button", has_text="Yes, do it")).to_be_disabled()
-        await expect(row.locator("button", has_text="No")).to_be_disabled()
-        await expect(row.locator("button", has_text="Cancel this lookup")).to_be_disabled()
-        assert "no answer was recorded" in await row.inner_text()
+        # The question is no longer offered, because it is no longer a question — a row
+        # left in the listing would be a control over a park that is gone.
+        await expect(drive.page.locator("#confirmation-list .confirmation-row")).to_have_count(0)
+        # And the park's *other* row takes the same state, which is the registry's whole
+        # purpose: one park, two rows, and neither knows about the other.
+        answered = drive.page.locator("#answer-body .confirmation-row").first
+        await expect(answered.locator("button", has_text="Yes, do it")).to_be_disabled()
+        await expect(answered.locator("button", has_text="No")).to_be_disabled()
+        await expect(answered.locator("button", has_text="Cancel this lookup")).to_be_disabled()
+        assert "no answer was recorded" in await answered.inner_text()
 
 
 async def test_an_approved_read_renders_the_statement_for_the_member_it_came_back_with(
@@ -1204,3 +1229,154 @@ async def test_an_approved_read_renders_the_statement_for_the_member_it_came_bac
         assert [(name, held["token"], held["approved"]) for name, held in answered] == [
             ("resume", "r-1", True)
         ]
+
+
+# --- what the act says when its own reply is lost, or when it ended an answer ----
+#
+# Adversarial review, round 1. Both of these are about a cancellation whose result the
+# page must not lose or misreport, and neither is reachable from the text layer: what is
+# under test is which sentence is on the screen after two replies raced.
+
+
+async def _cancelled(drive: Drive) -> None:
+    """Open the listing and press the act on the one read's card."""
+    await drive.page.click("#confirmations-button")
+    await drive.page.wait_for_selector("#confirmation-list .confirmation-row")
+    row = drive.page.locator("#confirmation-list .confirmation-row").first
+    await row.locator("button", has_text="Cancel this lookup").click()
+
+
+async def test_a_cancellation_whose_reply_was_lost_says_the_outcome_is_not_known(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """ADR-0177 §7's third and fourth clauses, on the second mutating act this page has.
+
+    A hub the gateway cannot reach answers `502` and `hub-unreachable`, whose shared
+    sentence says "nothing was asked … nothing was queued" — a claim about whether the
+    hub *received* the request, and one ADR-0177 §7 forbids asserting of a mutating act.
+    The hub may already have withdrawn the question, so this page says the outcome is not
+    known and leaves the row as it was: the act is not recorded, and the control comes
+    back rather than settling on a state nothing established.
+    """
+
+    async def _unreachable(token: ContinuationToken, /) -> ReadCancellation:
+        raise TransportError("the hub is not there")
+
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.read_parked["r-1"] = _read()
+        drive.engine._read_handles.add("r-1")
+        drive.engine.cancel_read = _unreachable  # type: ignore[method-assign]
+
+        await _cancelled(drive)
+
+        await expect(drive.page.locator("#confirmations")).to_contain_text("is not known")
+        row = drive.page.locator("#confirmation-list .confirmation-row").first
+        await expect(row.locator("button", has_text="Cancel this lookup")).to_be_enabled()
+        await expect(row.locator("button", has_text="Yes, do it")).to_be_enabled()
+        assert "withdrawn" not in await row.inner_text()
+
+
+@pytest.mark.parametrize("cancel_first", [True, False], ids=["cancel-first", "answer-first"])
+async def test_the_act_that_ended_an_answer_is_what_the_page_says_either_way_round(
+    gateway_browser: Browser, tmp_path: Path, cancel_first: bool
+) -> None:
+    """ADR-0244 §11's `INTERRUPTED`, driven in both orderings of the two replies.
+
+    "What is cancelled is the ``resume`` call running the dispatch, and no ``TurnOutcome``
+    is produced for it. The cancellation is a teardown and is converted into neither an
+    outcome nor a refusal … **What tells the user is ``cancel_read``'s own answer, which is
+    the act they performed.**"
+
+    So the page ends with that answer on the screen whichever reply lands first, and the
+    orderings are the two halves of this case rather than one of them. Where the
+    cancellation lands first, the interrupted answer's own ending renders it instead of
+    "the outcome is not known" — which would be false twice over, because the page knows
+    why the answer ended and ``PARK_LOST``'s "nothing was cancelled" is the opposite of
+    what it just did. Where it lands second, it is written over whatever stood there.
+
+    **The listing is empty by then and the row is gone**, which is the whole reason the
+    statement is written at panel level: an interrupted answer re-reads the listing on
+    its way out, a park that is settled is not in it, and every row carrying the sentence
+    is detached.
+    """
+    released = asyncio.Event()
+
+    async def _hanging_resume(
+        token: ContinuationToken,
+        /,
+        *,
+        approved: bool,
+        timeout: timedelta,  # noqa: ASYNC109 — the Protocol's own signature
+        remember_recipients_until: datetime | None = None,
+    ) -> TurnOutcome:
+        await released.wait()
+        raise asyncio.CancelledError
+
+    async def _interrupt(token: ContinuationToken, /) -> ReadCancellation:
+        released.set()
+        return ReadCancellation.INTERRUPTED
+
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.read_parked["r-1"] = _read()
+        drive.engine._read_handles.add("r-1")
+        drive.engine.cancel_read = _interrupt  # type: ignore[method-assign]
+        if cancel_first:
+            drive.engine.resume = _hanging_resume  # type: ignore[method-assign,assignment]
+        else:
+            released.set()
+            drive.engine.resume = _hanging_resume  # type: ignore[method-assign,assignment]
+
+        await drive.page.click("#confirmations-button")
+        await drive.page.wait_for_selector("#confirmation-list .confirmation-row")
+        row = drive.page.locator("#confirmation-list .confirmation-row").first
+        await row.locator("button", has_text="Yes, do it").click()
+        if not cancel_first:
+            # The answer's own ending first, so the act's reply is the second to land.
+            await expect(drive.page.locator("#confirmations")).to_contain_text("is not known")
+        await row.locator("button", has_text="Cancel this lookup").click()
+
+        await expect(drive.page.locator("#confirmations")).to_contain_text(
+            "That lookup had already been sent, and it was stopped part-way."
+        )
+        assert "the request did not leave" in await drive.page.inner_text("#confirmations")
+
+
+async def test_a_refusal_that_left_the_question_standing_leaves_the_control_answerable(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """ADR-0244 §9's ``OPERATION_CHANGED``, at the control it would otherwise disable.
+
+    "Where the subject or the binding failed the park is still ``OPEN``" — and
+    ``pending_confirmations`` hands that question straight back. A page holding the
+    consent token spent over it renders a row the owner can see, can read a refusal
+    beside, and cannot act on: ``answerConfirmation`` returns early on a spent token, so
+    both controls submit nothing. That is the silent refusal this surface spends the most
+    words preventing, reached through the one door ADR-0244 opened.
+
+    Driven to the end rather than to the re-enabled control, because the claim is that
+    the question is answerable and not merely that a button looks it: the second answer
+    dispatches, and the fake's own tables are what say the park was still there to answer.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.read_parked["r-1"] = _read()
+        drive.engine._read_handles.add("r-1")
+        drive.engine.read_answers["r-1"] = ReadAnswerOutcome.OPERATION_CHANGED
+
+        await drive.page.click("#confirmations-button")
+        await drive.page.wait_for_selector("#confirmation-list .confirmation-row")
+        row = drive.page.locator("#confirmation-list .confirmation-row").first
+        await row.locator("button", has_text="Yes, do it").click()
+        await expect(drive.page.locator("#answer-body")).to_contain_text(
+            "What answering would have sent is not what you were shown"
+        )
+        await expect(row.locator("button", has_text="Yes, do it")).to_be_enabled()
+
+        del drive.engine.read_answers["r-1"]
+        await (
+            drive.page.locator("#confirmation-list .confirmation-row")
+            .first.locator("button", has_text="Yes, do it")
+            .click()
+        )
+
+        await expect(drive.page.locator("#answer-body")).to_contain_text("That lookup was made")
+        assert len([one for one in drive.engine.calls if one[0] == "resume"]) == 2

@@ -6344,11 +6344,14 @@ def test_one_answer_per_park_and_a_second_click_submits_nothing() -> None:
     answering = functions["answerConfirmation"]
     assert "if (spent.has(token)) {" in answering
     assert "spent.add(token);" in answering
-    # Given back on **one** path and one only: a refusal the gateway *answered*, which
-    # is a response this browser read. Every ending that read no reply keeps the token
+    # Given back on **two** paths and no third: a refusal the gateway *answered*, which
+    # is a response this browser read, and an answer whose own member says the question
+    # may still stand (ADR-0244 §9's ``OPERATION_CHANGED`` and ``UNAVAILABLE_NOW`` —
+    # adversarial review, round 1). Every ending that read no reply keeps the token
     # (:func:`test_an_abandoned_park_answer_does_not_give_the_token_back_on_the_act`),
     # and round 4's first blocker was that the rejection path did not.
-    assert answering.count("spent.delete(token);") == 1
+    assert answering.count("spent.delete(token);") == 2
+    assert "READ_ANSWERS_LEAVING_THE_QUESTION.has(body.outcome.read_answer)" in answering
     assert answering.index("if (body === null) {") < answering.index("spent.delete(token);")
 
 
@@ -6518,10 +6521,13 @@ def test_a_listing_read_never_re_offers_a_park_whose_answer_is_unaccounted_for()
     for named in ("offerApproval", "readPending", "renderConfirmation"):
         assert "spent.delete" not in functions[named], named
         assert "strand(" not in functions[named], named
-    # The token is given back in exactly two places, and each is an ending this page
+    # The token is given back in exactly three places, and each is an ending this page
     # reached by reading a response or failing to: ``strand``, for the four not-known
-    # endings, and the one arm that is known *not* to have landed.
-    assert len(re.findall(r"spent\.delete\(", script)) == 2
+    # endings; the one arm that is known *not* to have landed; and the one *answer* whose
+    # own member says the question may still stand (ADR-0244 §9). The third is still not
+    # a listing's evidence — it is the hub's own account of what that answer did, read
+    # off ``read_answer`` and off nothing the listing said.
+    assert len(re.findall(r"spent\.delete\(", script)) == 3
     assert "spent.delete(token);" in functions["answerConfirmation"]
     assert "spent.delete(token);" in functions["strand"]
     # Read as a use rather than as a mention, because ``_functions`` attributes the
@@ -6717,7 +6723,7 @@ def test_a_stalled_tidy_up_after_an_abandoned_answer_is_not_waited_on() -> None:
 
     assert "await readPending(false);" not in body
     assert "readPending(false);" in body
-    assert body.index("readPending(false);") < body.index('fault(lost, "confirmations")')
+    assert body.index("readPending(false);") < body.index("const lost = stopping.signal")
 
 
 def test_one_parks_two_rows_take_one_state_and_only_one_of_them_submits() -> None:
@@ -6815,10 +6821,15 @@ def test_a_refusal_the_gateway_answered_is_not_always_one_it_did_not_land() -> N
     # And exactly one call site passes it, asserted over the *shape* rather than over
     # the identifier: "noticed by" is owner-facing text this file renders for a
     # notification's producer, so a name search counts two unrelated functions.
-    # Two: ``relay``'s own trailing parameter, and the single call site that fills it.
-    assert len(re.findall(r"\bnoticed\b\s*\)", script)) == 2
+    # Three: ``relay``'s own trailing parameter and the two call sites that fill it.
+    # **The second is the cancellation act** (ADR-0244 §11, adversarial review's round 1),
+    # and it asks for the same reason: it mutates, so `FAULTS`'s "nothing was asked" is a
+    # claim about a request the hub may in fact have carried out, and the difference
+    # between two refusals is what decides whether this page may say the question stands.
+    assert len(re.findall(r"\bnoticed\b\s*\)", script)) == 3
     assert "async function relay(half, path, payload, panelId, stopping, noticed) {" in script
     assert "const noticed = (named) => {" in answering
+    assert "const noticed = (named) => {" in _functions(script)["cancelRead"]
     # **`act`'s own test, copied rather than re-derived**: a condition this page reads as
     # unknown, *or* a refusal carrying no readable condition at all. ``readBody``
     # normalises a truncated, malformed or proxy-substituted body to ``{}``, and an
@@ -6887,7 +6898,7 @@ def test_a_reply_this_page_cannot_render_resolves_nothing() -> None:
     assert "Array.isArray(outcome)" not in answering
     # The ending is the not-known one, in the order every other arm uses, and it follows
     # the failed render rather than standing anywhere else in the function.
-    failed = guarded[: guarded.index("readPending(true)")]
+    failed = guarded[: guarded.index("READ_ANSWERS_LEAVING_THE_QUESTION")]
     for step in (
         "strand(token);",
         "readPending(false);",
