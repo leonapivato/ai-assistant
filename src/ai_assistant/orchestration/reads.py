@@ -100,9 +100,7 @@ from ai_assistant.core.types import (
     ParkedReadDisposition,
     PermissionDecision,
     PermissionOutcome,
-    Placement,
     PlacementReach,
-    PlacementSetter,
     QueryRefusal,
     ReadKind,
     SearchNotServiced,
@@ -857,19 +855,24 @@ class ServicedRead:
             to the composer. Zero where the destination read ``UNCHOSEN``, where no
             ``WEB_SEARCH`` ask was made, and where the servicing was not admitted.
         withheld: ADR-0238 §11's second count: how many records §3's filter kept out of
-            that supply. **The definition is unchanged and what it measures is not**
-            (ADR-0245 §7): the filter is ``Placement.reach`` **and** ``Placement.set_by``
-            since ADR-0245 §1, so on a chosen destination this counts the records refused
-            for carrying an ``OWNER_ACT`` or ``PROPOSED`` narrowing. It stays zero where
-            the destination read ``UNCHOSEN``, because §2's trust clause emptied the
-            population rather than the filter. **No lane, surface or measurement reads
-            the fall in this number as fewer withholdings.**
-        supplied_narrowed: ADR-0245 §7's added count: how many of the records this
-            servicing **supplied** to the composer carry a reach that is not
-            :attr:`~ai_assistant.core.types.PlacementReach.ANYONE` — the class ADR-0245
-            §1 admitted and ``withheld`` no longer counts. A count and never an
-            identifier, on the same event under the same key at the same emission point
-            as the other three (ADR-0238 §11).
+            that supply. **The definition is unchanged and is now zero on every path**
+            (ADR-0246 §7). On a chosen destination ADR-0246 §1 leaves no placement
+            filter at all, so the filter withholds nothing; on an ``UNCHOSEN`` one the
+            whole population is withheld by §2's **trust clause** and not by the filter,
+            which is the zero this tree already wrote. **No lane deletes the field**
+            because §1 makes it constant — ADR-0238 §11's enumeration keeps four counts
+            — and **no lane, surface or measurement reads the fall in this number as
+            fewer withholdings**: a deployment that watched only it would see the system
+            withholding nothing and conclude nothing was flowing.
+        supplied_narrowed: ADR-0245 §7's added count, which ADR-0246 §7 keeps and
+            widens: how many of the records this servicing **supplied** to the composer
+            carry a reach that is not
+            :attr:`~ai_assistant.core.types.PlacementReach.ANYONE` — **now over every
+            setter**, an ``OWNER_ACT`` and a ``PROPOSED`` narrowing included. It is
+            where the truth is once ``withheld`` is constant, and no lane adds a fifth
+            count or a per-setter breakdown of it (ADR-0246 §7, §12). A count and never
+            an identifier, on the same event under the same key at the same emission
+            point as the other three (ADR-0238 §11).
         calls: ADR-0238 §11's third count: this conversation's ``calls`` as
             ``admit_search`` left them, and zero where no admission was granted.
             **A count and never an identifier** (§11): the conversation it is about is
@@ -1119,19 +1122,21 @@ class _SearchCounts:
 
     Attributes:
         supplied: How many records were supplied to the composer.
-        withheld: How many §3's filter kept out of that supply — which is
-            ``Placement.reach`` **and** ``Placement.set_by`` since ADR-0245 §1, so on a
-            chosen destination it counts the ``OWNER_ACT`` and ``PROPOSED`` narrowings
-            and nothing else. On an ``UNCHOSEN`` destination it stays **zero**, because
-            the whole population is withheld by §2's trust clause and not by the filter
-            (ADR-0245 §7).
-        supplied_narrowed: ADR-0245 §7's fourth count: how many of the records
-            *supplied* carry a ``placement.reach`` that is not
+        withheld: How many §3's filter kept out of that supply. **Zero on every path**
+            since ADR-0246 §1 (§7): on a chosen destination the filter withholds
+            nothing, and on an ``UNCHOSEN`` one the whole population is withheld by
+            §2's trust clause and not by the filter. Kept as a field rather than
+            deleted, because ADR-0238 §11's enumeration is four counts and removing one
+            would be a change to it — and because a constant zero is itself the honest
+            report of what the filter now does.
+        supplied_narrowed: ADR-0245 §7's fourth count, widened by ADR-0246 §7 over
+            **every** setter: how many of the records *supplied* carry a
+            ``placement.reach`` that is not
             :attr:`~ai_assistant.core.types.PlacementReach.ANYONE`. It exists because
-            ``withheld`` **falls** the day ADR-0245 lands, so without it the only number
-            that moved on a deployment's audit would show *less* withholding and nothing
-            at all about the class that now flows. A per-population figure rather than a
-            per-turn one (ADR-0226 §8), and a count like the other three.
+            ``withheld`` **falls** — to zero, and for the last time — so without it the
+            only number that moved on a deployment's audit would show *less* withholding
+            and nothing at all about the class that now flows. A per-population figure
+            rather than a per-turn one (ADR-0226 §8), and a count like the other three.
         calls: This conversation's ``calls`` as ``admit_search`` left them, and zero
             where no admission was granted.
     """
@@ -1937,7 +1942,13 @@ class SearchServicer:
         # answer decides only what may be composed over — §5 is explicit that "no clause
         # reads it as deciding what may be sent" — so it is read again below, at the
         # instant the request is built, and this value reaches no binding.
-        supply, counts.withheld, counts.supplied_narrowed = _search_supply(
+        # `counts.withheld` is left at its zero default and is not assigned here:
+        # ADR-0246 §1 leaves no placement filter to withhold anything on a chosen
+        # destination, and on an `UNCHOSEN` one §2's trust clause empties the
+        # population rather than the filter. **The field is not deleted** (ADR-0246
+        # §7) — ADR-0238 §11's enumeration keeps its four counts — and the number a
+        # deployment watches instead is `supplied_narrowed`.
+        supply, counts.supplied_narrowed = _search_supply(
             utterance,
             in_view,
             trusted=await footing.trusted() is DestinationTrust.USER_CHOSEN,
@@ -3052,8 +3063,9 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
             disposition=searched.disposition,
             # ADR-0238 §11's three and ADR-0245 §7's fourth, per turn and per
             # servicing: how many records were supplied to the composer, how many §3's
-            # filter withheld, how many of the supplied ones carry a narrowed reach, and
-            # this conversation's `calls` as the admission left them. **Counts only** —
+            # filter withheld — zero on every path since ADR-0246 §1 — how many of the
+            # supplied ones carry a narrowed reach, and this conversation's `calls` as
+            # the admission left them. **Counts only** —
             # no record id, no conversation id, no destination, no query text and no
             # fragment of one is anywhere in this record.
             supplied=counts.supplied,
@@ -3188,40 +3200,14 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
     )
 
 
-def _admitted_to_a_supply(placement: Placement) -> bool:
-    """Whether ADR-0245 §2 admits a record carrying ``placement`` to a supply.
-
-    **The authority is the type, and this is the count's copy of its rule.** ADR-0245
-    §3 keeps the refusal on :class:`~ai_assistant.core.types.SearchSupply` — "a caller
-    able to widen the read is a caller able to defeat the bound" — and keeps the trust
-    condition at this builder, unmoved. That division means the rule is asked twice: by
-    the validator, which refuses, and here, where ADR-0238 §11's counts are taken over
-    the population the builder holds. A supply this predicate got *wrong* in the
-    permissive direction would be refused at construction rather than sent, so what is
-    at stake here is the honesty of two numbers and never the exclusion itself.
-
-    Args:
-        placement: The record's placement, read exactly as ADR-0217 §1 defines it and
-            with no other axis consulted.
-
-    Returns:
-        Whether the pair is reach ``ANYONE``, or reach ``OWNER`` narrowed by
-        ``DERIVED``. An ``OWNER_ACT`` or ``PROPOSED`` narrowing is ``False`` on a
-        destination of any recorded trust (ADR-0245 §2).
-    """
-    return placement.reach is PlacementReach.ANYONE or (
-        placement.reach is PlacementReach.OWNER and placement.set_by is PlacementSetter.DERIVED
-    )
-
-
 def _search_supply(
     utterance: str,
     in_view: Sequence[MemoryRecord],
     *,
     trusted: bool,
     footing: SearchFooting,
-) -> tuple[SearchSupply, int, int]:
-    """Build ADR-0238 §2's supply for this servicing, and take §11's two supply counts.
+) -> tuple[SearchSupply, int]:
+    """Build ADR-0238 §2's supply for this servicing, and take §7's supplied-narrowed count.
 
     **One type, two admissible populations, and a recorded fact decides which**
     (ADR-0238 §2). Where the destination the servicing would bind to reads
@@ -3254,21 +3240,23 @@ def _search_supply(
     while a record of any other external origin is composed over and then **not sent**,
     rather than never composed at all.
 
-    **§3's filter is ``Placement.reach`` *and* ``Placement.set_by``, and no other
-    axis** (ADR-0245 §1, §2), each read exactly as ADR-0217 §1 defines it, with no
-    field, member, tag or band added by either decision. Reach is audience control —
-    a denotation of a set of **people** — and a search provider the owner named in a
-    recorded act is not a person this assistant talks to, so a record narrowed to the
-    owner **by the derivation** is admitted on a chosen destination. What stays
-    excluded is a narrowing the owner made by their own act and one a model proposed,
-    on a destination of any recorded trust. That is what gives ADR-0238 §2's
-    cross-turn promise a producer: the stamped episode a later turn retrieves carries
-    reach ``OWNER`` with setter ``DERIVED``, which is the record #2224 watched this
-    filter drop on every later turn while the composer declined.
+    **§3's filter reads no placement at all, on a chosen destination** (ADR-0246 §1).
+    Reach is audience control — ADR-0217 §1's denotation of a set of **people** — and
+    a search provider the owner named in a recorded act is not a person this
+    assistant talks to, so no record is withheld from this supply on its reach, on
+    its setter, or on any combination of the two, **whatever the setter**: a
+    derivation's narrowing, the owner's own act and a model's proposal are admitted
+    alike. What bounds the population is the membership test above and the trust read
+    below it, and nothing about the records' placements. That is what gives ADR-0238
+    §2's cross-turn promise a producer: the stamped episode a later turn retrieves
+    carries reach ``OWNER`` with setter ``DERIVED``, which is the record #2224 watched
+    ADR-0238 §3's filter drop on every later turn while the composer declined.
 
-    It is applied here so the counts §11 owes can be taken; the *refusal* is on the
-    type, so a lane that skipped this would build no supply at all rather than a
-    permissive one.
+    **Reach keeps its full force where a person listens** (ADR-0246 §1). ADR-0199
+    §3's classes, ADR-0203 §1's subtraction and ``orchestration/disclosure.py``'s four
+    reads are untouched: a record narrowed to the owner stays withheld from every
+    reply and every delivery whose audience is wider, exactly as it is today. What
+    ADR-0246 widens is one supply built for a party that is not a person.
 
     **No component decides exclusion by inspecting content** (§3), and nothing here
     reads a record's text, resembles it against anything, or asks a model about it.
@@ -3287,25 +3275,28 @@ def _search_supply(
         footing: This conversation's footing, for the one predicate above.
 
     Returns:
-        The supply, how many records §3's filter kept out of it, and how many of the
-        records it *supplied* carry a reach that is not ``ANYONE`` — ADR-0245 §7's
-        fourth count, which is the class this decision let through and the reason the
-        ``withheld`` number falls the day it lands.
+        The supply, and how many of the records it *supplied* carry a reach that is
+        not ``ANYONE`` — ADR-0245 §7's fourth count, which ADR-0246 §7 keeps and
+        widens over every setter. It is the one number that measures the class
+        ADR-0246 §1 lets through, it rises on the same deployment the day that
+        decision lands, and **no lane reads that rise as a defect**. There is no
+        withheld count to return: ADR-0238 §11's second count is structurally zero on
+        both branches below, and :class:`_SearchCounts` carries it at that value.
     """
     if not trusted:
-        # ADR-0238 §2's trust clause emptied the whole population, so §3's filter
-        # withheld nothing and supplied nothing — both counts stay **zero**, which is
-        # the value the tree already wrote for the first of them (ADR-0245 §7).
-        return SearchSupply(utterance=utterance), 0, 0
-    admissible = [
+        # ADR-0238 §2's trust clause empties the whole population — the supply carries
+        # the utterance and an empty `records`, and ADR-0231 §3's utterance-only
+        # property holds for that destination exactly as ratified. **The emptiness is
+        # the trust clause's and not a placement filter's** (ADR-0246 §11 Arm G), which
+        # is why the withheld count is zero here rather than the population's size.
+        return SearchSupply(utterance=utterance), 0
+    supplied = tuple(
         record
         for record in in_view
         if record.id in footing.selected or record.id in footing.minted_user_chosen
-    ]
-    supplied = tuple(record for record in admissible if _admitted_to_a_supply(record.placement))
+    )
     return (
         SearchSupply(utterance=utterance, records=supplied),
-        len(admissible) - len(supplied),
         sum(1 for record in supplied if record.placement.reach is not PlacementReach.ANYONE),
     )
 
@@ -4054,7 +4045,11 @@ def emit_read_audit(
                 # `supplied_narrowed` is the one ADR-0245 §7 adds, because the decision
                 # it implements makes `withheld` **fall** on a deployment that changed
                 # nothing: one count restores the symmetry between what the corpus gave
-                # up and what it can read back.
+                # up and what it can read back. Since ADR-0246 §1 `withheld` is zero on
+                # every path and `supplied_narrowed` counts every setter, so this pair
+                # is where "the last record-level exclusion is gone" is readable — and
+                # §7 forbids deleting the constant one in the same breath as it forbids
+                # a fifth.
                 "supplied": read.supplied,
                 "withheld": read.withheld,
                 "supplied_narrowed": read.supplied_narrowed,

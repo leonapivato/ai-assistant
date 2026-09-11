@@ -3177,25 +3177,33 @@ class QueryComposer(Protocol):
     was composed. Named for its product role, as every Protocol here is: the role is
     *writing the question this turn would ask the world*.
 
-    **One member, one positional argument, and that is still the safety claim — but
-    the claim now lives on the value** (ADR-0238 §2). ADR-0231 §3 gave this seam one
-    argument on ADR-0093 §10's ground, that "a caller able to widen the read is a
-    caller able to defeat the bound", so the property was decidable from the
-    declaration rather than kept by a rule. Widening what the one argument *carries*
-    does not weaken that argument; it **relocates** it, from the absence of a
-    parameter to the validator on the value. A caller holding a record outside
-    ADR-0245 §2's two admitted placements — reach ``ANYONE``, or reach ``OWNER``
-    narrowed by ``DERIVED`` — still has nothing to pass, because
-    :class:`~ai_assistant.core.types.SearchSupply` refuses it at construction. That
-    is ADR-0231 §3's mechanism surviving with only its content moved, which is the
-    whole of what ADR-0238 §2 does here; ADR-0245 §3 moves the predicate inside the
-    validator and leaves the relocation itself untouched.
+    **One member, one positional argument, and what bounds what it carries is the
+    construction site** (ADR-0238 §2). ADR-0231 §3 gave this seam one argument on
+    ADR-0093 §10's ground, that "a caller able to widen the read is a caller able to
+    defeat the bound", so the utterance-only property was decidable from the
+    declaration rather than kept by a rule. ADR-0238 §2 widened what the one argument
+    carries and put two bounds on it — §2's three populations, and that a non-empty
+    ``records`` is built only for a destination whose recorded trust is
+    ``USER_CHOSEN`` — **both of which are the one construction site's** and neither
+    of which a type can hold (ADR-0245 §3's third clause, ADR-0246 §3).
+
+    **And no placement is refused** (ADR-0246 §1, §3). Reach is audience control —
+    ADR-0217 §1's denotation of a set of **people** — and a search provider the owner
+    named in a recorded act is not a person this assistant talks to, so on a
+    destination the user chose no record is withheld from a supply on its reach, on
+    its setter, or on any combination of the two, whatever the setter. ADR-0245 §3's
+    ``AfterValidator`` on
+    :attr:`~ai_assistant.core.types.SearchSupply.records` is deleted with that
+    decision, so an implementation is handed the turn's own records and has no
+    placement to check. Reach keeps its full force where a person listens:
+    ``orchestration/disclosure.py`` withholds a narrowed record from every reply whose
+    audience is wider than the owner, exactly as it does today.
 
     **Why one value rather than three parameters** (§2). Three parameters would put
-    the bound back in the caller's hands — a supply site that passed the right
-    records would be conforming and one that passed the wrong ones would be a defect
-    nobody could see from the signature. One validating value moves the whole
-    question to a place a reviewer reads once.
+    the bound back in the caller's hands one member at a time — a supply site that
+    passed the right records would be conforming and one that passed the wrong ones
+    would be a defect nobody could see from the signature. One value names the whole
+    of what a composition may draw on in a place a reviewer reads once.
 
     **The parameter stays positional-only and stays the only one, this stays a
     single-member Protocol, and every other clause of ADR-0231 §3 binds entire and
@@ -3231,8 +3239,10 @@ class QueryComposer(Protocol):
     second exception beside ADR-0233 §9's. The replacement is *not* a new structural
     claim: it is a destination the user chose by name, a per-conversation budget and
     an audit. No lane reads this docstring as though the utterance-only property
-    survived a supply carrying records; what survives it is the per-record exclusion
-    above, which is a different and narrower guarantee. Where the supply's
+    survived a supply carrying records; what survives it is ADR-0238 §2's membership
+    bound — the three populations and the trust read, both held at the one
+    construction site — which is a different and narrower guarantee, and since
+    ADR-0246 §1 it is the whole of it. Where the supply's
     ``records`` is empty — every destination on a tree with no recorded trust —
     ADR-0231 §3's and §4's reasoning applies exactly as ratified, because the
     utterance is a value this system received from its user and obtained from no
@@ -3277,14 +3287,13 @@ class QueryComposer(Protocol):
         Args:
             supply: What this composition may be composed over (ADR-0238 §2) — the
                 turn's unrewritten utterance and, for a destination of recorded
-                trust ``USER_CHOSEN``, the records it may draw on. Every member of
-                ``records`` carries one of ADR-0245 §2's two admitted placements —
-                reach :attr:`~ai_assistant.core.types.PlacementReach.ANYONE`, or
-                reach :attr:`~ai_assistant.core.types.PlacementReach.OWNER` narrowed
-                by :attr:`~ai_assistant.core.types.PlacementSetter.DERIVED` — and any
-                other placement is refused at construction, so an implementation is
-                never handed an excluded record and has nothing to check. It is the
-                whole of what an implementation is given.
+                trust ``USER_CHOSEN``, the records it may draw on. Which records
+                those are is closed by §2's three populations at the one
+                construction site; **no member is refused on its placement**
+                (ADR-0246 §1, §3), so an implementation may be handed a record
+                narrowed to the owner by a derivation, by the owner's own act or by
+                a model's proposal, and has no placement to check. It is the whole
+                of what an implementation is given.
 
         Returns:
             One outcome carrying a query **or** a refusal, never both and never
