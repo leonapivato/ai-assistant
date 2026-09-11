@@ -1568,8 +1568,16 @@ async def test_the_acts_answer_is_taken_down_by_the_owners_own_press_and_by_noth
 
 @pytest.mark.parametrize(
     ("body", "shape"),
-    [('{"cancellation": null}', "a null member"), ("{}", "no member at all")],
-    ids=["null-member", "no-member"],
+    [
+        ('{"cancellation": null}', "a null member"),
+        ("{}", "no member at all"),
+        ('{"cancellation": ["withdrawn"]}', "an array whose string form spells a member"),
+        ('{"cancellation": [["interrupted"]]}', "a nested array of the same shape"),
+        ('{"cancellation": {"withdrawn": true}}', "an object"),
+        ('{"cancellation": "settled"}', "a string that is not one of the three"),
+        ('{"cancellation": "toString"}', "a string naming an inherited property"),
+    ],
+    ids=["null-member", "no-member", "array", "nested-array", "object", "unknown", "inherited"],
 )
 async def test_a_success_this_page_cannot_read_as_an_outcome_settles_nothing(
     gateway_browser: Browser, tmp_path: Path, body: str, shape: str
@@ -1588,6 +1596,14 @@ async def test_a_success_this_page_cannot_read_as_an_outcome_settles_nothing(
     is not known, every control stays exactly as it was, and pressing the act again
     really sends a second request — which is the whole of what "not the end of the act"
     means here.
+
+    **The array shapes are round 7's finding and are the reason the test is over shapes
+    rather than over two bodies.** A property key is a coerced one, so
+    ``Object.hasOwn(words, ["withdrawn"])`` asks for the key ``String(["withdrawn"])``,
+    which *is* ``"withdrawn"`` — the page announced a withdrawal, stored the array as a
+    settled state, disabled the controls and refused every later press. A nested array
+    spells the same thing. Requiring a string first is what closes the class, and the
+    object, the unknown string and the inherited-property name are the neighbours of it.
 
     Args:
         gateway_browser: The one browser this run launched.
@@ -1700,3 +1716,86 @@ async def test_an_unresolved_cancellation_is_never_reported_as_nothing_cancelled
         # The act's own unresolved account is in the node no refresh reaches, whichever
         # way round the two replies were lost.
         assert "cancellation" in await drive.page.inner_text("#cancellation-said")
+
+
+@pytest.mark.parametrize(
+    ("member", "said"),
+    [
+        (ReadCancellation.WITHDRAWN, "That question is withdrawn"),
+        (ReadCancellation.NOTHING_TO_CANCEL, "There was nothing here to cancel"),
+    ],
+    ids=["withdrawn", "nothing-to-cancel"],
+)
+async def test_an_act_that_ended_no_answer_hides_no_answers_unknown_outcome(
+    gateway_browser: Browser, tmp_path: Path, member: ReadCancellation, said: str
+) -> None:
+    """Adversarial review's round 7, first finding, over both members it is about.
+
+    ADR-0244 §11 gives ``cancel_read``'s answer the standing to be the whole of what
+    tells the user **for the dispatch it interrupted** — "what is cancelled is the
+    ``resume`` call running the dispatch, and no ``TurnOutcome`` is produced for it" — and
+    for that member alone. ``WITHDRAWN`` took a park that was still ``OPEN`` and
+    ``NOTHING_TO_CANCEL`` did nothing at all, so neither stopped the request whose reply
+    was then lost: that request's outcome is a second unresolved fact, and ADR-0177 §7's
+    fourth clause owes a sentence for it.
+
+    So both are on screen and neither is in place of the other — what the act did, in the
+    panel's own node, and what became of the answer, in the slot that owns it. What the
+    second one may not be is any of this page's five existing not-known sentences, because
+    every one of them ends "nothing was cancelled".
+
+    Args:
+        gateway_browser: The one browser this run launched.
+        tmp_path: The case's data directory.
+        member: The answer the act comes back with.
+        said: The fixed statement that member is rendered as.
+    """
+
+    released = asyncio.Event()
+
+    async def _cancels(token: ContinuationToken, /) -> ReadCancellation:
+        released.set()
+        return member
+
+    async def _unreachable(
+        token: ContinuationToken,
+        /,
+        *,
+        approved: bool,
+        timeout: timedelta,  # noqa: ASYNC109 — the Protocol's own signature
+        remember_recipients_until: datetime | None = None,
+    ) -> TurnOutcome:
+        await released.wait()
+        raise TransportError("the hub is not there")
+
+    async with driving(gateway_browser, tmp_path) as drive:
+        question = _read()
+        drive.engine.read_parked["r-1"] = question
+        drive.engine._read_handles.add("r-1")
+        drive.engine.cancel_read = _cancels  # type: ignore[method-assign]
+        drive.engine.resume = _unreachable  # type: ignore[method-assign,assignment]
+        drive.engine.turn_outcome = TurnOutcome(
+            turn=None, conversation_id="c-1", read_confirmation=question
+        )
+
+        await drive.page.fill("#utterance", "what did the survey say")
+        await drive.page.click("#ask-form button[type=submit]")
+        await expect(drive.page.locator("#answer-body")).to_contain_text(
+            "This lookup is parked until you answer it."
+        )
+        # The answer goes out first and is still out when the act is performed, which is
+        # the state the finding is about and the only one the act can be performed in:
+        # a settled cancellation leaves the pair disabled, so a page that let the two be
+        # pressed in sequence would not be this page.
+        row = drive.page.locator("#answer-body .confirmation-row").first
+        await row.locator("button", has_text="Yes, do it").click()
+        await row.locator("button", has_text="Cancel this lookup").click()
+        await expect(drive.page.locator("#cancellation-said")).to_contain_text(said)
+
+        # The answer's own outcome is stated, and the act's answer is still there beside
+        # it — two facts about two acts, neither hidden behind the other.
+        await expect(drive.page.locator("#confirmations")).to_contain_text("is not what ended it")
+        panel = await drive.page.inner_text("#confirmations")
+        assert "not known" in panel
+        assert "nothing was cancelled" not in panel
+        assert said in await drive.page.inner_text("#cancellation-said")

@@ -1363,8 +1363,16 @@ const CANCELLATION_UNRESOLVED = Symbol("cancellation-unresolved");
 //
 // `Object.hasOwn` rather than a truthiness test, for `cancellationWords`' reason: a value
 // naming an inherited property would otherwise pass as a member.
+//
+// **And `typeof` before it, because a property key is a coerced one** (adversarial
+// review's round 7). `Object.hasOwn(words, ["withdrawn"])` asks for the key
+// `String(["withdrawn"])`, which is `"withdrawn"` — so an array, and a nested array, and
+// anything else whose string form happens to spell a member, passed as one. Every value
+// `core` puts here is a `StrEnum` value, so restating that it arrived as a string is the
+// same thing every other shape test on this page is, and it refuses nothing a correct
+// gateway can send.
 function isCancellation(member) {
-  return Object.hasOwn(READ_CANCELLATION_WORDS, member);
+  return typeof member === "string" && Object.hasOwn(READ_CANCELLATION_WORDS, member);
 }
 
 // The same refusal as `READ_ANSWER_UNREADABLE`, one vocabulary over and for its reason.
@@ -1404,14 +1412,18 @@ const READ_ANSWERS_LEAVING_THE_QUESTION = new Set(["operation_changed", "unavail
 // as a function, and `line` would put its source text on the screen where a sentence
 // about the owner's own lookup belongs. The maps are the page's whole vocabulary, so
 // membership in one is exactly the question being asked.
+//
+// **And `typeof` before it, because a property key is a coerced one** (round 7): the
+// array `["dispatched"]` asks for the key `String(["dispatched"])` and would be rendered
+// as that member's statement. Every value `core` puts here is a `StrEnum` value.
 function readAnswerWords(member) {
-  return Object.hasOwn(READ_ANSWER_WORDS, member)
+  return typeof member === "string" && Object.hasOwn(READ_ANSWER_WORDS, member)
     ? READ_ANSWER_WORDS[member]
     : READ_ANSWER_UNREADABLE;
 }
 
 function cancellationWords(member) {
-  return Object.hasOwn(READ_CANCELLATION_WORDS, member)
+  return typeof member === "string" && Object.hasOwn(READ_CANCELLATION_WORDS, member)
     ? READ_CANCELLATION_WORDS[member]
     : READ_CANCELLATION_UNREADABLE;
 }
@@ -3738,7 +3750,17 @@ async function answerConfirmation(token, approved, stopping) {
     if (recorded === undefined) {
       return otherwise;
     }
-    return recorded === CANCELLATION_UNRESOLVED ? PARK_LOST_WHILE_CANCELLING : null;
+    if (recorded === CANCELLATION_UNRESOLVED) {
+      return PARK_LOST_WHILE_CANCELLING;
+    }
+    // **Only the member that ended this answer explains this ending** (adversarial
+    // review's round 7). ADR-0244 §11 gives `cancel_read`'s answer that standing for the
+    // dispatch it interrupted — "what is cancelled is the `resume` call running the
+    // dispatch, and no `TurnOutcome` is produced for it" — and for that member alone.
+    // `WITHDRAWN` took a park that was still `OPEN`, and `NOTHING_TO_CANCEL` did nothing
+    // at all; neither stopped this request, so its reply going unread is a second
+    // unresolved fact and ADR-0177 §7's fourth clause still owes a sentence for it.
+    return recorded === "interrupted" ? null : PARK_LOST_BESIDE_A_CANCELLATION;
   };
   // Claimed before the first `await`, so two clicks in one turn of the event loop —
   // the two rows of one park, or one row twice — cannot both get past the guard.
@@ -3977,6 +3999,26 @@ const PARK_LOST_WHILE_CANCELLING =
   "the answer, and the request to cancel the lookup. So neither outcome is known — the " +
   "action may have been carried out, and the cancellation may or may not have reached " +
   "it — and nothing was re-sent. " +
+  PARK_WHERE_NOW;
+
+// What this page says when an answer's reply went unread **beside** a cancellation whose
+// own answer is known (adversarial review's round 7).
+//
+// A `WITHDRAWN` took a park that was still open and a `NOTHING_TO_CANCEL` did nothing at
+// all, so neither of them stopped the request whose reply was lost: what became of that
+// request is not known, and ADR-0177 §7's fourth clause owes a sentence for it. What it
+// may not be is any of the five this page already has, because every one of them ends
+// "nothing was cancelled" — true until the owner asks for a cancellation and false from
+// that moment on, which is the clause round 6 closed one state over.
+//
+// **It does not restate what the act did**, which is the panel's own node's to say and
+// is already on the same screen (ADR-0244 §11). What this adds is the one fact the node
+// cannot carry: that the act was not what ended this answer.
+const PARK_LOST_BESIDE_A_CANCELLATION =
+  "The request carrying that answer got no reply this browser could read, so what became " +
+  "of it is not known: the action may have been carried out, with only the reply lost. " +
+  "The cancellation asked for on this park is not what ended it — what that did is said " +
+  "in this panel — and nothing was re-sent. " +
   PARK_WHERE_NOW;
 
 // One cancellation, relayed (ADR-0244 §11). The page performs the act and renders what

@@ -7757,6 +7757,8 @@ def test_the_cancellation_acts_own_answer_is_written_where_no_refresh_reaches_it
     # owe a sentence there — one that does not say "nothing was cancelled" (round 6).
     ending = functions["answerConfirmation"]
     assert "const recorded = cancelled.get(token);" in ending
-    assert (
-        "return recorded === CANCELLATION_UNRESOLVED ? PARK_LOST_WHILE_CANCELLING : null;" in ending
-    )
+    assert "return PARK_LOST_WHILE_CANCELLING;" in ending
+    # And only the member that ended the answer buys that silence: `WITHDRAWN` took a park
+    # that was still open and `NOTHING_TO_CANCEL` did nothing at all, so neither stopped
+    # the request whose reply was lost (round 7).
+    assert 'return recorded === "interrupted" ? null : PARK_LOST_BESIDE_A_CANCELLATION;' in ending
