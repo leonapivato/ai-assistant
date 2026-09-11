@@ -330,3 +330,226 @@ async def test_an_interrupted_dispatch_leaves_no_question_to_answer_again() -> N
     answered = await engine.resume(offered.token, approved=True, timeout=PATIENT)
     assert answered.read_answer is ReadAnswerOutcome.ALREADY_SETTLED
     assert answered.turn is None, "and nothing was dispatched a second time"
+
+
+@pytest.mark.parametrize("external", [False, True], ids=["clean_binding", "external_content"])
+async def test_an_ordinary_approval_runs_no_standing_grant_check(external: bool) -> None:
+    """ADR-0244 §5, ADR-0235 §2: **the act's conditions bind the act and nothing else.**
+
+    An ordinary approval requests no standing authority, so nothing about a grant may be
+    tested for it — a user must be able to approve a lookup without being told their
+    binding cannot carry a grant they never asked for. Driven over **both** binding
+    shapes, because it is the external-content one that a grant may never ride and the
+    one an implementation testing eligibility unconditionally would refuse: #2221's own
+    row, and the case this whole decision exists to make answerable.
+    """
+    engine = FakeAssistantEngine()
+    offered = engine.park_read("h-1", query="bell tower porto")
+    confirmed = _confirm(external=external)
+    await engine.trail.record(confirmed)
+    engine.hold_confirmation_decision("h-1", confirmed)
+
+    outcome = await engine.resume(offered.token, approved=True, timeout=PATIENT)
+
+    assert outcome.read_answer is ReadAnswerOutcome.DISPATCHED
+    assert outcome.recipient_grant is None, "no act was collected, so none is reported"
+    resolutions = [row for row in await engine.export_decisions() if row.resolves == confirmed.id]
+    assert len(resolutions) == 1, "and the answer **is** recorded"
+    assert resolutions[0].ruling.outcome is PermissionOutcome.ALLOW
+
+
+async def test_the_instant_the_expiry_was_checked_against_is_the_one_the_answer_carries() -> None:
+    """ADR-0235 §1: **one clock reading, used for both the comparison and the record.**
+
+    Two readings admit an expiry that passes the check and then fails against a later
+    one, and the cost is precisely the failure §1 exists to remove: the question is gone,
+    no resolution is recorded, and the user has nothing to retry. Driven with an
+    **advancing** clock, which a fixed-clock case cannot reach.
+    """
+    readings = iter(
+        [
+            datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC),
+            datetime(2026, 1, 1, 12, 0, 2, tzinfo=UTC),
+            datetime(2026, 1, 1, 12, 0, 4, tzinfo=UTC),
+        ]
+    )
+    engine = FakeAssistantEngine()
+    engine.recipient_grant_clock = lambda: next(readings)
+    offered = engine.park_read("h-1", query="bell tower porto")
+    confirmed = _confirm(external=False)
+    await engine.trail.record(confirmed)
+    engine.hold_confirmation_decision("h-1", confirmed)
+
+    outcome = await engine.resume(
+        offered.token,
+        approved=True,
+        timeout=PATIENT,
+        # After the first reading and before the second: an implementation reading twice
+        # passes the check and then refuses, with the question already consumed.
+        remember_recipients_until=datetime(2026, 1, 1, 12, 0, 1, tzinfo=UTC),
+    )
+
+    assert outcome.read_answer is ReadAnswerOutcome.DISPATCHED
+    assert outcome.recipient_grant is not None
+    assert outcome.recipient_grant.established is not None, "the act landed"
+
+
+@pytest.mark.parametrize(
+    "member", [ReadAnswerOutcome.UNAVAILABLE_NOW, ReadAnswerOutcome.OPERATION_CHANGED]
+)
+async def test_a_refusal_that_precedes_the_gate_leaves_the_question_standing(
+    member: ReadAnswerOutcome,
+) -> None:
+    """ADR-0244 §6: the availability clauses are taken **before** the gate.
+
+    §9 says it member by member — ``UNAVAILABLE_NOW`` is clause 2's and
+    ``OPERATION_CHANGED``'s first two grounds are clause 4's, and "a park spent on an
+    answer the subject check would have refused is an answer the user has to give again
+    for no reason". A fake that consumed the question on either would certify a consumer
+    against a recovery the hub does not have: the retry it was told to make would meet
+    ``ALREADY_SETTLED``, and the enumeration it falls back on would list nothing.
+    """
+    engine = FakeAssistantEngine()
+    offered = engine.park_read("h-1", query="bell tower porto")
+    engine.read_answers["h-1"] = member
+
+    refused = await engine.resume(offered.token, approved=True, timeout=PATIENT)
+
+    assert refused.read_answer is member
+    assert [one.token.handle for one in await engine.pending_confirmations()] == ["h-1"], (
+        "the question is still offered"
+    )
+
+    del engine.read_answers["h-1"]
+    retried = await engine.resume(offered.token, approved=True, timeout=PATIENT)
+
+    assert retried.read_answer is ReadAnswerOutcome.DISPATCHED, "and the retry answers it"
+
+
+# --- the whole read-answer surface, as one table ------------------------------
+#
+# **A probe rather than another arm** (ADR-0243 §1). Four review rounds found four
+# separate defects on this one path, and three of them were introduced by the previous
+# round's fix to it: each round pinned the arm it was about and left the neighbouring
+# cells unstated, so the next patch was free to move one. What follows states the whole
+# product at once — the park's state, the user's answer, the scripted member, whether a
+# decision is bound, whether an act was asked for and what its binding carries — as five
+# properties over every cell, so a change that moves any of them fails here rather than
+# in the round after next.
+
+
+_SCRIPTABLE: Final = tuple(ReadAnswerOutcome)
+
+
+@pytest.mark.parametrize("member", _SCRIPTABLE)
+@pytest.mark.parametrize("bound", [False, True], ids=["no_decision", "decision_bound"])
+async def test_the_read_answer_surface_holds_its_five_properties(
+    member: ReadAnswerOutcome, *, bound: bool
+) -> None:
+    """Five properties, over every scripted member and both binding states.
+
+    1. **The member returned is the member scripted**, on an approving answer over an
+       open park (ADR-0244 §9's deterministic order, held by the fake by construction).
+    2. **The question stands afterwards exactly where the member's ground precedes the
+       gate** (§6): ``UNAVAILABLE_NOW`` and ``OPERATION_CHANGED`` leave it, every other
+       member spends it.
+    3. **A resolution is recorded exactly for the three members that carry a ruling**
+       (§9), and only where a decision is bound for one to answer.
+    4. **The act's carrier is present exactly where a resolution was recorded**, because
+       ADR-0235 §4 makes every one of its members an assertion about a recorded answer.
+    5. **Nothing is dispatched on any member but** ``DISPATCHED``: the outcome carries no
+       turn and no reply, which is ADR-0170 §4's second shape (§9, §10).
+    """
+    engine = FakeAssistantEngine()
+    offered = engine.park_read("h-1", query="bell tower porto")
+    confirmed = _confirm(external=False)
+    if bound:
+        await engine.trail.record(confirmed)
+        engine.hold_confirmation_decision("h-1", confirmed)
+    engine.read_answers["h-1"] = member
+
+    # The act is asked for exactly where a decision is bound for it to ride: §2's first
+    # shape refuses an approving answer over a park with none, which is its own arm
+    # above, and the product here is about what the *answer* does.
+    outcome = await engine.resume(
+        offered.token,
+        approved=True,
+        timeout=PATIENT,
+        remember_recipients_until=LATER if bound else None,
+    )
+
+    spends = member not in {
+        ReadAnswerOutcome.UNAVAILABLE_NOW,
+        ReadAnswerOutcome.OPERATION_CHANGED,
+    }
+    rules = member in {
+        ReadAnswerOutcome.DISPATCHED,
+        ReadAnswerOutcome.DECLINED,
+        ReadAnswerOutcome.AUTHORITY_CHANGED,
+    }
+    listed = [one.token.handle for one in await engine.pending_confirmations()]
+    resolutions = [row for row in await engine.export_decisions() if row.resolves == confirmed.id]
+
+    assert outcome.read_answer is member, "1. the member returned is the member scripted"
+    assert listed == ([] if spends else ["h-1"]), (
+        "2. the question stands exactly where the member's ground precedes the gate"
+    )
+    assert len(resolutions) == (1 if rules and bound else 0), (
+        "3. a resolution is recorded exactly for the members that carry a ruling"
+    )
+    assert (outcome.recipient_grant is not None) == (rules and bound), (
+        "4. the act's carrier is present exactly where a resolution was recorded"
+    )
+    if member is not ReadAnswerOutcome.DISPATCHED:
+        assert outcome.turn is None, "5. nothing but DISPATCHED carries a turn"
+        assert outcome.reply is None, "5. nor a reply"
+
+
+@pytest.mark.parametrize("member", _SCRIPTABLE)
+async def test_a_declining_answer_reaches_declined_whatever_was_scripted(
+    member: ReadAnswerOutcome,
+) -> None:
+    """A refusal is the **user's** and not the deployment's (ADR-0042 §4, ADR-0244 §10).
+
+    "Only ``approved=False -> DENY`` is guaranteed", so a declining answer over an open
+    park is ``DECLINED`` whatever a case scripted for the approving one — and the
+    ``DENY`` is recorded exactly as it is today.
+    """
+    engine = FakeAssistantEngine()
+    offered = engine.park_read("h-1", query="bell tower porto")
+    confirmed = _confirm(external=False)
+    await engine.trail.record(confirmed)
+    engine.hold_confirmation_decision("h-1", confirmed)
+    engine.read_answers["h-1"] = member
+
+    outcome = await engine.resume(offered.token, approved=False, timeout=PATIENT)
+
+    assert outcome.read_answer is ReadAnswerOutcome.DECLINED
+    assert await engine.pending_confirmations() == (), "the park is spent either way"
+    resolutions = [row for row in await engine.export_decisions() if row.resolves == confirmed.id]
+    assert [row.ruling.outcome for row in resolutions] == [PermissionOutcome.DENY]
+
+
+@pytest.mark.parametrize("member", _SCRIPTABLE)
+@pytest.mark.parametrize("external", [False, True], ids=["clean_binding", "external_content"])
+async def test_an_ordinary_approval_is_unaffected_by_the_binding_or_the_script(
+    member: ReadAnswerOutcome, *, external: bool
+) -> None:
+    """The property the fourth round's defect broke, stated over the whole product.
+
+    An approval that asks for nothing standing tests nothing about a grant, whatever the
+    binding carries and whatever member the deployment reaches — which is ADR-0244 §5's
+    "the act still rides an answer" read the other way: what rides an answer is the act,
+    and an answer with no act rides nothing.
+    """
+    engine = FakeAssistantEngine()
+    offered = engine.park_read("h-1", query="bell tower porto")
+    confirmed = _confirm(external=external)
+    await engine.trail.record(confirmed)
+    engine.hold_confirmation_decision("h-1", confirmed)
+    engine.read_answers["h-1"] = member
+
+    outcome = await engine.resume(offered.token, approved=True, timeout=PATIENT)
+
+    assert outcome.read_answer is member, "the answer landed rather than being refused"
+    assert outcome.recipient_grant is None, "and no act was collected, so none is reported"
