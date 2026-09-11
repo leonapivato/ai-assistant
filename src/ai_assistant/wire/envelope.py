@@ -1310,7 +1310,78 @@ from ai_assistant.wire.errors import (
 #: **This move covers the shape going forward and repairs nothing already released**,
 #: on the chain every entry above it is on: #1956's window stays open, and this entry
 #: neither repairs it nor inherits it.
-PROTOCOL_VERSION: Final[int] = 34
+#:
+#: **35 since ADR-0244 §17**, which states the move up front rather than leaving the
+#: implementing lane to find it, and which meets ADR-0124 §9's rule **three times
+#: over**. §17 states all three so that none is read as unversioned, and each obliges
+#: the bump alone.
+#:
+#: **``Confirmation`` gains a *required* member and is ``extra="forbid"``.** ADR-0244
+#: §4 adds ``read: ReadKind | None``, required with no default, for ADR-0178 §1's own
+#: reason — "a defaulted field is what a lane forgets". ``wire.surface``'s
+#: ``return_adapter`` validates every result against the method's declared return
+#: annotation, so a version 34 peer handed a version 35 hub's
+#: ``pending_confirmations`` fails ``extra_forbidden`` on the new key, and a version 35
+#: peer handed a version 34 hub's fails ``missing`` on it — **both** directions bite,
+#: where every ``TurnOutcome`` entry above bites in one. That is ADR-0178 §6's
+#: reasoning for its own required member, unchanged.
+#:
+#: **``TurnOutcome`` gains two members a projection emits.** ADR-0244 §9 adds
+#: ``read_confirmation`` and ``read_answer``, which cross on **every** turn call's
+#: result payload — the second limb, decided unchanged by the entry at 17:
+#: ``TurnOutcome`` sets ``extra="forbid"`` and ``wire.codec``'s ``project`` renders a
+#: model by ``model_dump()``, which **includes** a ``None`` member rather than omitting
+#: it. So a version 35 hub emits ``"read_confirmation": null`` and ``"read_answer":
+#: null`` on every ``converse``, ``converse_streaming`` and ``resume``, and a version 34
+#: client fails ``extra_forbidden`` on the first of them. Both are additive with
+#: defaults, so the reverse direction decodes to the defaults rather than failing.
+#:
+#: **And the promoted method set gains one.** ADR-0244 §11 adds ``cancel_read`` to
+#: :class:`~ai_assistant.core.protocols.AssistantEngine` — ADR-0124 §9's **first**
+#: limb, "any change to the promoted surface's method set". ``wire.surface``'s
+#: ``METHODS`` is derived from the Protocol by reflection, so a version 35 client
+#: sending ``cancel_read`` to a version 34 hub reaches a method that build's engine
+#: surface does not declare and ``_dispatch`` closes the connection with no reply; the
+#: bump is what turns that into §3's message naming both versions. **The method set
+#: moves from fifty-seven to fifty-eight.** ADR-0244 §9 names this consequence in
+#: terms — the surface gains a method, "and that is the honest consequence rather than
+#: an oversight".
+#:
+#: **``SearchNotServiced`` gains a ninth member and that is not a fourth ground.**
+#: ADR-0244 §12 adds ``ANSWER_AWAITED`` at the head of the enumeration. ``project``
+#: renders every ``Enum`` as its ``value``, and the member is additive on a field that
+#: already crosses, so the ground it would rest on is the one the three above already
+#: carry; it is recorded here because a reader tracing why the number moved should find
+#: every wire-visible change of this decision in one place.
+#:
+#: **No stored-record version moves** (ADR-0244 §17). ``PlanExport.schema_version``
+#: stays where it is: no ``ActionPlan`` field, no ``ReadAsk`` field and no ``ReadKind``
+#: member is added, removed or re-typed by this decision — the plan a park persists is
+#: the plan the planner already returned, stored as a value and not re-shaped — so
+#: ADR-0039 §10's mechanism is not reached. ``ConversationExport.schema_version`` stays
+#: at **2**, and ``SearchDisposition``, ``SearchRefusal``, ``SearchOutcome``,
+#: ``QueryOutcome``, ``QueryRefusal``, ``ConfirmationEgress``, ``EgressBinding``,
+#: ``EgressSpan``, ``PermissionDecision`` and ``ActionRequest`` are each untouched.
+#:
+#: **No row is minted in ADR-0087 §2c's scalar table**: ``ParkedReadDisposition``,
+#: ``ReadAnswerOutcome`` and ``ReadCancellation`` are ``StrEnum``\ s, which ``project``
+#: already renders as their ``value``, and a :class:`~ai_assistant.core.types.ParkedRead`
+#: never crosses the wire at all — what a surface is handed is the ``Confirmation``
+#: assembled from it. **Nothing else under** ``wire/`` **changes**: the connect
+#: exchange gains no member, no existing frame's encoding changes, no
+#: :class:`FrameKind` is added, no codec entry is registered, and ``METHODS``,
+#: ``STREAMING_METHODS``, both adapters and the error mapping are derived from the
+#: Protocol. ADR-0244 mints **no** error class, so ``wire/errors.py`` needs no entry.
+#:
+#: **ADR-0177 §1's browser enumeration does not move and stands at thirty-one.**
+#: ADR-0244 §13 admits the browser for this kind, but that is Lane 4's own change: this
+#: lane adds no gateway route, argument or call, and ``RoutableOperation`` gains no
+#: member.
+#:
+#: **This move covers the shape going forward and repairs nothing already released**,
+#: on the chain every entry above it is on: #1956's window stays open, and this entry
+#: neither repairs it nor inherits it.
+PROTOCOL_VERSION: Final[int] = 35
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

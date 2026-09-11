@@ -1508,6 +1508,28 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                     # construct rather than searching under a figure no operator
                     # can reach.
                     deadline=settings.search_call_deadline,
+                    # **ADR-0244 §18's lane seam, and the one line Lane 2 replaces.**
+                    # Lane 1 lands the contract, the shared conformance suite, the
+                    # canonical fake and `orchestration`'s consumer; Lane 2 lands
+                    # `SqliteParkedReads` in `permissions/` and wires **one instance**
+                    # here, into the servicing site and the engine alike. Until it
+                    # does, `None` is stated rather than defaulted — the posture
+                    # `searcher` and `fetcher` already take at this seam — and ADR-0244
+                    # §1's third clause is the whole of what a servicing with no store
+                    # then is: no park exists, nothing is outstanding, and the
+                    # servicing is exactly what it is today.
+                    #
+                    # **A canonical fake is not wired here**, and would be the wrong
+                    # answer: `ai_assistant.testing` is test-only, and a composition
+                    # root holding one would give this deployment an in-memory store of
+                    # Tier 1 content that survives no restart and that ADR-0004 §2's
+                    # residency clause was never argued over.
+                    parked_reads=None,
+                    # ADR-0244 §3's one `Settings` field, read here and passed, exactly
+                    # as `deadline` above is: the park and the `CONFIRM` it holds the
+                    # question of are stamped from it in one computation, and nothing
+                    # below `orchestration` reads it.
+                    parked_read_ttl=settings.parked_read_ttl,
                 )
             ),
             # Passed rather than defaulted, for the reason the ingestor's

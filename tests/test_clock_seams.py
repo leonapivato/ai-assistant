@@ -395,6 +395,11 @@ async def _search_servicer(now: Clock) -> None:
         now=now,
         id_factory=lambda: "d-1",
         deadline=timedelta(seconds=30),
+        # This case is about the **clock** the servicer stamps its decision from, so it
+        # wires no park store: ADR-0244 §1's third clause makes a servicing with none
+        # exactly what it was, and the reading under test is unchanged either way.
+        parked_reads=None,
+        parked_read_ttl=timedelta(hours=24),
     ).service(
         "what is that bell tower in Porto",
         remaining=10,
@@ -402,6 +407,8 @@ async def _search_servicer(now: Clock) -> None:
         footing=footing,
         in_view=(),
         counts=_SearchCounts(),
+        goal=_goal(),
+        plan=_plan(),
     )
 
 

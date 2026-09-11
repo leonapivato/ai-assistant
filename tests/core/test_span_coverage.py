@@ -341,6 +341,7 @@ def test_the_confirmation_shape_carries_the_transcribed_state_across_the_wire() 
         reason="the policy wants a human answer",
         token=ContinuationToken(handle="h-1"),
         egress=egress,
+        read=None,
     )
 
     projected = project(confirmation)

@@ -171,6 +171,7 @@ def _confirmation(
             coverage=coverage,
             planned_with_external_content=False,
         ),
+        read=None,
     )
 
 

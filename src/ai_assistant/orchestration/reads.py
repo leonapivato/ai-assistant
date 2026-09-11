@@ -94,7 +94,10 @@ from ai_assistant.core.types import (
     ActionRequest,
     CarriedProvenance,
     DestinationTrust,
+    EgressBinding,
     MemoryKind,
+    ParkedRead,
+    ParkedReadDisposition,
     PermissionDecision,
     PermissionOutcome,
     Placement,
@@ -125,17 +128,22 @@ if TYPE_CHECKING:
         EgressBinder,
         Fetcher,
         MemoryStore,
+        ParkedReads,
         QueryComposer,
         WebSearcher,
     )
     from ai_assistant.core.types import (
+        ActionPlan,
         BoundEgressCall,
         CanonicalDestination,
         ConversationSearchDraw,
         FetchRefusal,
+        FrozenJsonMapping,
+        Goal,
         MemoryRecord,
         ReadAsk,
         ReadRequest,
+        SearchOutcome,
         SourceListing,
         SourceListingEntry,
         StructuredAsk,
@@ -607,14 +615,15 @@ class StructuredOutcome(StrEnum):
     did with them (ADR-0240 §6, §13 item 7)."""
 
 
-def not_serviced(  # noqa: PLR0911 — ADR-0242 §8's table has one arm per discriminated row, and collapsing them behind a mapping would hide the two rows a `Settings` value and a `trust_of` answer decide
+def not_serviced(  # noqa: PLR0911 — ADR-0242 §8's table has one arm per discriminated row, and collapsing them behind a mapping would hide the three rows a `Settings` value, a `trust_of` answer and a written park decide
     disposition: SearchDisposition | None,
     *,
     max_calls: int,
     planned_with_external_content: bool = False,
     trust: DestinationTrust = DestinationTrust.UNCHOSEN,
+    parked: bool = False,
 ) -> SearchNotServiced | None:
-    """ADR-0242 §8's mapping, computed **at the servicing site** and nowhere else.
+    """ADR-0242 §8's mapping as ADR-0244 §12 discriminates it, at the servicing site.
 
     **Total over all eighteen** :class:`SearchDisposition` **members and
     non-injective, and that is the design rather than a compromise** (ADR-0242 §8).
@@ -654,6 +663,12 @@ def not_serviced(  # noqa: PLR0911 — ADR-0242 §8's table has one arm per disc
             ``RULING_CONFIRM`` can have been recorded and the value is not read.
         trust: The build-time ``trust_of`` answer for this deployment's search
             destination, or ``UNCHOSEN`` where the servicing never reached that read.
+        parked: Whether this servicing **wrote a park** for the ``CONFIRM`` it
+            recorded (ADR-0244 §12). **A fact the site holds and not a store read**:
+            the site wrote the park, or its ``park`` answered ``False``, and that
+            boolean is the whole of the further input. No renderer, no adapter and no
+            composing stage reads ``ParkedReads`` to compute a member, and no component
+            recomputes the carrier downstream.
 
     Returns:
         The member this turn would carry for that disposition, or ``None`` where the
@@ -680,6 +695,16 @@ def not_serviced(  # noqa: PLR0911 — ADR-0242 §8's table has one arm per disc
         case SearchDisposition.RULING_DENY:
             return SearchNotServiced.DECLINED
         case SearchDisposition.RULING_CONFIRM:
+            if parked:
+                # ADR-0244 §12's first row: "`RULING_CONFIRM`, any binding, any
+                # `trust_of` answer, park written → `ANSWER_AWAITED`". The
+                # discrimination is **obligatory rather than cosmetic**: a parked
+                # decision is not one the establishing act may ride (§5's eighth
+                # condition), so reporting it as `AUTHORISATION_AWAITED` would falsify
+                # that member's own "asserts exactly two things, both established"
+                # clause — and `TRUST_MISSING`'s and `UNAVAILABLE`'s clauses are
+                # preserved by the same move.
+                return SearchNotServiced.ANSWER_AWAITED
             # §8's three-row split, and the finding that shapes the whole section:
             # `RULING_CONFIRM` is recorded both where no grant covers the recipients at
             # all and where a grant stands but the closed loop is not closed. Those have
@@ -1097,11 +1122,23 @@ class _Searched:
             user reading the reply. ADR-0242 §11 keeps this one **out** of the audit —
             a member computed for a user is not a second spelling of a fact the audit
             already records, and writing both would make the two drift.
+        parked_read: The ``OPEN`` :class:`ParkedRead` **this servicing wrote**, or
+            ``None`` where it wrote none (ADR-0244 §1, §2). Non-``None`` on exactly the
+            branch that recorded a ``CONFIRM`` **and** whose ``ParkedReads.park``
+            answered ``True``, which is the same boolean :attr:`not_serviced` was
+            discriminated by.
+
+            **It is carried and never re-read.** The engine assembles the turn's
+            ``TurnOutcome.read_confirmation`` from it and from the recorded decision,
+            so the question appears in the exchange that raised it; no render site
+            reads ``ParkedReads``, and no component recomputes it downstream (ADR-0242
+            §7, ADR-0244 §12).
     """
 
     records: tuple[MemoryRecord, ...]
     disposition: SearchDisposition | None
     not_serviced: SearchNotServiced | None = None
+    parked_read: ParkedRead | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1229,6 +1266,17 @@ class ServicedCarriers:
             disposition does: a servicing whose searcher raised after the ruling carries
             ``UNAVAILABLE`` here, and dropping it would report that turn as one whose
             planner never asked for a search.
+        parked_read: ADR-0244 §1's carrier: the ``OPEN`` park this servicing **wrote**,
+            or ``None`` where it wrote none. It travels beside :attr:`not_serviced`
+            because it is the same fact read the other way — the boolean that
+            discriminated the member, carried as the record it was discriminated by —
+            and the engine assembles the turn's ``TurnOutcome.read_confirmation`` from
+            it so that the question appears in the exchange that raised it (ADR-0244
+            §9).
+
+            **Carried as data and never re-read.** No render site, adapter or composing
+            stage reads ``ParkedReads``, and no component recomputes this downstream
+            (ADR-0242 §7, ADR-0244 §12, §13).
     """
 
     hop_reached: tuple[str, ...] = ()
@@ -1237,6 +1285,7 @@ class ServicedCarriers:
     label_filtered: bool = False
     window_filtered: bool = False
     not_serviced: SearchNotServiced | None = None
+    parked_read: ParkedRead | None = None
 
 
 @dataclass(slots=True)
@@ -1624,6 +1673,8 @@ class SearchServicer:
         now: Clock,
         id_factory: Callable[[], str],
         deadline: timedelta,
+        parked_reads: ParkedReads | None,
+        parked_read_ttl: timedelta,
     ) -> None:
         """Wire one search servicing from the contracts ADR-0231 §6 names.
 
@@ -1654,12 +1705,33 @@ class SearchServicer:
                 resets, suspends or re-reads it on account of a turn's content.
                 **Passed rather than defaulted**, for the clock's reason: a bound the
                 milestone's exit is stated over may not be inherited.
+            parked_reads: Where a recorded ``CONFIRM`` on this kind parks its question
+                (ADR-0244 §1, §3), or ``None`` where this deployment wires no such
+                store. **Passed rather than defaulted**, for ``searcher``'s reason one
+                contract over: a defaulted seam would let a later call site silently
+                park nothing and read, in every record this servicing writes, exactly
+                like a deployment that wired one.
+
+                ``None`` is **not an error and not a second disposition**: ADR-0244
+                §1's third clause already rules what a servicing that wrote no park
+                is — "the decision stands unresolved on the trail, the establishing act
+                may ride it where ADR-0235 §3's conditions hold, and §12's mapping gives
+                the turn the member it gives today" — and a store that refused, one that
+                raised, and one that is absent are the same state to this site.
+            parked_read_ttl: ``Settings.parked_read_ttl`` — the lifetime a park and the
+                ``CONFIRM`` it holds the question of **both** carry (ADR-0244 §3), read
+                by the composition root and passed here rather than read below
+                ``orchestration``, exactly as ``deadline`` is. One clock reading at the
+                ruling stamps ``decided_at``, the decision's ``expires_at`` and the
+                park's two instants, which is what makes ADR-0244 §5's and §10's
+                shared-deadline reasoning hold rather than approximately hold.
 
         Raises:
-            ValueError: If ``deadline`` is not a strictly positive ``timedelta``.
-                ``Settings`` already refuses one at load; this is the guard at the
-                seam a test or a dynamically-wired caller can reach directly, and it
-                fires here rather than at the first search (ADR-0241 §1).
+            ValueError: If ``deadline`` or ``parked_read_ttl`` is not a strictly
+                positive ``timedelta``. ``Settings`` already refuses either at load;
+                this is the guard at the seam a test or a dynamically-wired caller can
+                reach directly, and it fires here rather than at the first search
+                (ADR-0241 §1, ADR-0244 §3).
         """
         self._composer = composer
         self._searcher = searcher
@@ -1675,6 +1747,14 @@ class SearchServicer:
             )
             raise ValueError(msg)
         self._deadline = deadline
+        self._parked_reads = parked_reads
+        if not isinstance(parked_read_ttl, timedelta) or parked_read_ttl <= timedelta(0):
+            msg = (
+                f"parked_read_ttl must be a strictly positive timedelta "
+                f"(ADR-0244 §3); got {parked_read_ttl!r}"
+            )
+            raise ValueError(msg)
+        self._parked_read_ttl = parked_read_ttl
 
     async def service(  # noqa: C901, PLR0911, PLR0913 — one exit per stage ADR-0231 §9 names as a decline (§13 requires the member to name the stage that produced it, so collapsing any pair would report one stage's outcome as another's), and one parameter per thing ADR-0238 §5's four conditions are decided from
         self,
@@ -1685,6 +1765,8 @@ class SearchServicer:
         footing: SearchFooting,
         in_view: Sequence[MemoryRecord],
         counts: _SearchCounts,
+        goal: Goal,
+        plan: ActionPlan,
     ) -> _Searched:
         """Compose, bind, rule, record and send — in that order and no other (§11).
 
@@ -1747,6 +1829,16 @@ class SearchServicer:
             counts: ADR-0238 §11's three counts, **written** as each stage completes
                 rather than returned, so a fault the searcher raised after the ruling
                 leaves behind what actually happened.
+            goal: The :class:`Goal` **this turn** was planned against, persisted onto a
+                park so that ADR-0244 §8's continuation composes over the parked turn's
+                own objective rather than fabricating one. It reaches no composer, no
+                model call and no rendering of the question (ADR-0244 §2, §4, §16).
+            plan: The :class:`ActionPlan` the planner returned on the call this
+                servicing answers, persisted for the same reason and subject to the
+                same refusals. **Re-planning at resume would be the wrong kind of
+                cheap** — a model call between the user's *yes* and the read, a planner
+                free to ask for a different read, and a ``TurnResult`` whose plan is not
+                the plan the parked turn ran (ADR-0244 §2).
 
         Returns:
             The minted records, §13's disposition and ADR-0238 §11's three counts. The
@@ -1877,13 +1969,37 @@ class SearchServicer:
             # refusal (`AUTHORISATION_AWAITED`) from a follow-up's (`TRUST_MISSING`);
             # the disposition alone cannot, and an explanation derived from it would
             # send half of milestone 31's users to the wrong command (§8).
+            if outcome is PermissionOutcome.DENY:
+                return self._not_serviced(
+                    SearchDisposition.RULING_DENY,
+                    footing,
+                    planned_with_external_content=bound.binding.planned_with_external_content,
+                    trust=trust,
+                )
+            # **ADR-0244 §1: where a `WEB_SEARCH` servicing records a `CONFIRM`, the
+            # servicing site parks the read** — one `ParkedRead` naming the recorded
+            # decision, and no records into the supply. The disposition is still
+            # `RULING_CONFIRM`, because ADR-0231 §13 names **the stage that produced the
+            # outcome** and the stage is unchanged; what the park discriminates is what
+            # the *user* is told (§12).
+            #
+            # **The turn does not park, is not suspended and does not fail.** This
+            # returns to `service_read_request`, the remaining kinds are serviced in
+            # ADR-0231 §11's fixed order, and the turn composes and answers. ADR-0226
+            # §5 binds entire: what parks is the **read**.
+            #
+            # **Nothing is sent, opened, claimed or spent here** (§1). No channel, no
+            # credential, no `ToolCall`, no ledger claim, no minted record, and
+            # ADR-0194's spend admission is not reached — and the conversation's
+            # `admit_search` call, spent before the ruling, is **not refunded**
+            # (ADR-0238 §8).
+            park = await self._park(request, recorded, footing=footing, goal=goal, plan=plan)
             return self._not_serviced(
-                SearchDisposition.RULING_DENY
-                if outcome is PermissionOutcome.DENY
-                else SearchDisposition.RULING_CONFIRM,
+                SearchDisposition.RULING_CONFIRM,
                 footing,
                 planned_with_external_content=bound.binding.planned_with_external_content,
                 trust=trust,
+                park=park,
             )
         # ADR-0021 §1's `authorises` runs inside `ToolCall`'s own validator, so an
         # unauthorised search is unconstructable at the type level — which is
@@ -1914,6 +2030,156 @@ class SearchServicer:
             footing.minted_user_chosen.update(record.id for record in result.records)
         return _Searched(result.records, None, None)
 
+    # --- what ADR-0244 §6 and §7 reach this object for ----------------------
+    #
+    # **The answer path takes the same five contracts through the same holder**
+    # (ADR-0231 §5, §6; ADR-0244 §7, §16). A parked read's answer rebinds, rules,
+    # records and sends, and every one of those is a seam this object already holds
+    # by composition-root obligation — so the answer reaches them here rather than
+    # through a second holder of the binder, the policy, the trail or the searcher.
+    # That is what keeps ADR-0244 §16's "no second route, no second servicing site,
+    # no second asker" true of the implementation and not only of the prose, and it
+    # is why `ParkedReadOperations` holds this object instead of five contracts of
+    # its own.
+
+    async def recorded(self, decision_id: str) -> PermissionDecision | None:
+        """Read one recorded decision back, or answer that the trail holds none.
+
+        ADR-0244 §6's clause 3 reads the trail through the **same** instance this
+        servicing recorded into, which is the composition-root single-instance
+        obligation ADR-0192 §1 already states for the ledger: a second trail would
+        answer about rows this one never wrote.
+
+        Args:
+            decision_id: The recorded ``CONFIRM`` a park names.
+
+        Returns:
+            The trail's own copy, or ``None`` where it holds no such row.
+
+        Raises:
+            AssistantError: If the trail could not be read. **Not swallowed here**:
+                ADR-0244 §9 makes a *refusal* a returned member, and a trail this
+                process cannot read is not a refusal of the answer — it is a fault
+                the caller classifies.
+        """
+        return await self._trail.get(decision_id)
+
+    async def rebound(
+        self, confirmed: PermissionDecision, parameters: FrozenJsonMapping
+    ) -> BoundEgressCall | None:
+        """Derive the answer's binding afresh and refuse what the approval did not cover.
+
+        ADR-0152 §7's ``rebind``, reached at ADR-0244 §6's clause 4: it takes from the
+        approved binding nothing but each span's provenance and its
+        ``planned_with_external_content``, and **refuses unless the binding it derived
+        is equal to the recorded one**. **What the user was shown is what may be
+        sent**: a destination, an account identity or a payload description that moved
+        between the question and the answer is a refusal, not a send.
+
+        **Order 4 before 6 is ADR-0152 §7's, not a preference** (ADR-0244 §6): the
+        binding must be whole before the ruling that authorises the resumed call
+        (ADR-0148 §1), so this happens *before* ``ActionPolicy.resolve`` is reached.
+
+        Args:
+            confirmed: The recorded ``CONFIRM``, whose ``egress_binding`` is what the
+                derived one is checked against.
+            parameters: The park's own arguments, byte for byte as the ruling was taken
+                over them.
+
+        Returns:
+            The bound call, or ``None`` where the seam refused it or raised — the two
+            states ADR-0244 §9 reports under one member, because a binding that cannot
+            be derived and one that derives unequal are the same fact to the user:
+            **the operation is not the one they were asked about**.
+        """
+        approved = confirmed.egress_binding
+        if not isinstance(approved, EgressBinding):
+            # An **unrecorded-epoch** binding, refused here rather than inherited, on
+            # `RecipientGrantOperations._offerable`'s reasoning: `ActionPolicy.resolve`
+            # returns no `ALLOW` over either epoch, so the answer could not complete in
+            # any case, and refusing before the ruling keeps the park from being spent
+            # on a question no dispatch could follow. It is unreachable on this kind —
+            # ADR-0231 §5 registers the search at the egress seam and §9 declines the
+            # servicing where the binder returned nothing, so a `WEB_SEARCH` `CONFIRM`
+            # always carries a real binding (ADR-0244 §4) — and stated anyway, because
+            # the type admits it.
+            return None
+        try:
+            return await self._binder.rebind(
+                confirmed.tool, parameters=parameters, approved=approved
+            )
+        except AssistantError:
+            # ADR-0152 §6, §7's refusals arrive as `EgressBindingError`; the net is
+            # `_bound`'s one method up, for its reason.
+            return None
+
+    async def ruled_on_answer(
+        self, confirmed: PermissionDecision, *, approved: bool
+    ) -> PermissionDecision | None:
+        """Ask the policy the user's answer and record whatever it says (ADR-0244 §6).
+
+        **Its answer is recorded whatever it is** — the second obligation ADR-0235 §3
+        already relies on, and ADR-0004 §7's reason: a ruling the trail never sees is a
+        decision nobody can audit. On ``approved`` ``False`` the recorded answer is the
+        ``DENY`` the user asked for.
+
+        **A refused append is never raised out of the answer** (ADR-0244 §6). Clause 5
+        makes the already-resolved ground of ``InvalidResolutionError`` unreachable
+        through this path — the park's one answer was taken before the append was
+        attempted — so a refusal here is one of that class's other grounds, or a fault.
+        The answer is **not** recorded, the park stays spent, nothing is dispatched, and
+        the caller reports ``OPERATION_CHANGED``: a refusal on ``resume`` is a result.
+
+        Args:
+            confirmed: The recorded ``CONFIRM`` being answered.
+            approved: The user's own answer, relayed unchanged.
+
+        Returns:
+            The resolving decision as it was recorded, or ``None`` where the trail
+            refused the append or could not be read back.
+        """
+        ruling = await self._policy.resolve(confirmed.model_copy(deep=True), approved=approved)
+        answer = PermissionDecision.from_confirmation(
+            confirmed, ruling, id=self._id_factory(), decided_at=self._now()
+        )
+        try:
+            await self._trail.record(answer)
+        except AssistantError:
+            return None
+        return answer
+
+    async def dispatch(self, call: ToolCall) -> SearchOutcome:
+        """Run the approved read, by ADR-0231 §6's route unchanged (ADR-0244 §7).
+
+        **This object stays the one caller of** ``WebSearcher.search`` (ADR-0231 §11,
+        §17), which is what ADR-0244 §16's "no second route, no second servicing site,
+        no second asker" means for the implementation. The searcher performs ADR-0029
+        §2's three pre-execution checks in order, ADR-0194's spend admission, ADR-0192's
+        claim, the send and the completion — **each evaluated at the instant of the
+        dispatch and not at the instant of the park**, which is the whole of what
+        "re-checked" means (ADR-0244 §6).
+
+        **``QueryComposer`` is not called and no model call precedes the send**
+        (ADR-0244 §7, §16). The value the searcher is passed is the park's own
+        ``parameters`` — the ones the ruling was taken over and the ones the user read
+        — and ADR-0231 §11's "the only value ``WebSearcher.request`` is ever passed"
+        clause is satisfied by identity: what was composed in the parked turn is what is
+        sent, with no repair, extension, truncation or re-casing between them.
+
+        **The deadline is ``Settings.search_call_deadline``, passed on every call**
+        (ADR-0241 §3), exactly as :meth:`service` passes it: there is no spelling for
+        "unbounded" at this seam and none is reached for here.
+
+        Args:
+            call: The :class:`ToolCall` built over the **resolving** ``ALLOW``, whose
+                own validator has already run ADR-0021 §1's ``authorises`` — so an
+                unauthorised search is unconstructable at the type level.
+
+        Returns:
+            What the searcher answered: the minted records, or a refusal.
+        """
+        return await self._searcher.search(call, timeout=self._deadline)
+
     @staticmethod
     def _not_serviced(
         disposition: SearchDisposition | None,
@@ -1921,6 +2187,7 @@ class SearchServicer:
         *,
         planned_with_external_content: bool = False,
         trust: DestinationTrust = DestinationTrust.UNCHOSEN,
+        park: ParkedRead | None = None,
     ) -> _Searched:
         """One non-yield, carrying ADR-0231 §13's disposition and ADR-0242 §7's member.
 
@@ -1939,9 +2206,13 @@ class SearchServicer:
             planned_with_external_content: The binding's own fact, where this branch
                 built a request.
             trust: The build-time ``trust_of`` answer, where this branch reached it.
+            park: The park this branch wrote, or ``None`` where it wrote none. **The
+                discriminator is this branch's own boolean and not a store read**
+                (ADR-0242 §7, ADR-0244 §12): the site wrote the park or its ``park``
+                answered ``False``, and that is the whole of the further input.
 
         Returns:
-            The empty records, the disposition and the member.
+            The empty records, the disposition, the member and the park.
         """
         return _Searched(
             (),
@@ -1951,8 +2222,96 @@ class SearchServicer:
                 max_calls=footing.max_calls,
                 planned_with_external_content=planned_with_external_content,
                 trust=trust,
+                parked=park is not None,
             ),
+            park,
         )
+
+    async def _park(
+        self,
+        request: ActionRequest,
+        recorded: PermissionDecision,
+        *,
+        footing: SearchFooting,
+        goal: Goal,
+        plan: ActionPlan,
+    ) -> ParkedRead | None:
+        """Write the question this ``CONFIRM`` leaves standing, or answer that none was.
+
+        **A park is written only where the store accepted it** (ADR-0244 §1). Where
+        ``ParkedReads`` refused — this conversation already holds an ``OPEN`` park — or
+        raised, or where this deployment wired no store at all, **no park exists**,
+        nothing is outstanding, and the servicing is exactly what it is today: the
+        decision stands unresolved on the trail, the establishing act may ride it where
+        ADR-0235 §3's conditions hold, and ADR-0242 §8's mapping gives the turn the
+        member it gave before this decision. **A lane that reported a park it did not
+        write would tell the user to answer a question nothing holds**, which is the one
+        failure that clause is stated to prevent — so this returns the park it wrote and
+        never the park it built.
+
+        **The record carries the three content fields and nothing else of the call**
+        (ADR-0244 §2): no minted record, no result, no snippet, no title, no address, no
+        origin beyond the one ``parameters`` already states, no credential, no
+        ``SecretName``, no connection reference, no ``BoundAccount`` and no binding. The
+        binding, the account identity and the canonical destination set are the
+        **recorded decision's**, read through ``decision_id`` at the moment a
+        ``Confirmation`` is assembled (ADR-0178 §5).
+
+        **``parameters`` are the ruling's own, byte for byte**: they are the very
+        mapping of the :class:`ActionRequest` the ruling was taken over — this site's
+        own value, not a rebuild and not a copy from the trail, which holds only a
+        digest (ADR-0148 §6, ADR-0231 §13). So what is persisted is what the ruling was
+        taken over and what the user will be shown, and ADR-0244 §6's clause 4 can
+        check it back against ``parameters_digest`` at the answer.
+
+        **The deadline is the decision's own**, which is what ADR-0244 §5's and §10's
+        reasoning rests on: a park past its deadline names a decision past the same one,
+        so an ``EXPIRED`` park's decision is refused by ADR-0235 §3's **fifth**
+        condition rather than by §5's eighth.
+
+        Args:
+            request: The request the ruling was taken over, whose ``parameters`` are the
+                origin and the composed query byte for byte.
+            recorded: The trail's own copy of the ``CONFIRM`` just recorded. Its
+                ``expires_at`` is this park's, and its id is what the park names.
+            footing: This conversation's footing, for ``conversation_id`` alone — **no
+                store call is made through it here**.
+            goal: The parked turn's goal.
+            plan: The parked turn's plan.
+
+        Returns:
+            The park this call wrote, or ``None`` where none was written.
+        """
+        store = self._parked_reads
+        expires_at = recorded.expires_at
+        if store is None or expires_at is None:
+            # No store wired, so nothing holds a question and §1's third clause is the
+            # whole of what this servicing then is. `expires_at` is `None` on exactly
+            # the same condition — `_ruled` stamps it only where a store is wired — so
+            # the second limb is the first read from the decision rather than a second
+            # state.
+            return None
+        record = ParkedRead(
+            id=self._id_factory(),
+            conversation_id=footing.conversation_id,
+            decision_id=recorded.id,
+            parameters=request.parameters,
+            goal=goal,
+            plan=plan,
+            parked_at=recorded.decided_at,
+            expires_at=expires_at,
+            disposition=ParkedReadDisposition.OPEN,
+        )
+        try:
+            written = await store.park(record)
+        except AssistantError:
+            # §1: "Where `ParkedReads` refused **or raised**, no park exists". The net
+            # is `_bound`'s and `_ruled`'s, for their reason: a store fault at this
+            # stage is an operator's fact, the servicing declines rather than failing,
+            # and ADR-0244 mints no error class for a caller to handle differently.
+            _degraded(type(store).__name__)
+            return None
+        return record if written else None
 
     async def _bound(
         self,
@@ -2071,10 +2430,21 @@ class SearchServicer:
             # §13's `RULING_UNAVAILABLE`, first limb: "`ActionPolicy` raised". The
             # net is `_bound`'s, for its reason.
             return None
-        # One clock reading, stamping the record. `expires_at` is `None` on every
-        # outcome: ADR-0059 §1's lifetime is a property of a question somebody will
-        # answer, and §9 rules that a `CONFIRM` here "resolves in no turn" — so a
-        # deadline would describe an answerability this decision does not have.
+        # One clock reading, stamping the record — and, on a `CONFIRM` this deployment
+        # can park, the deadline the park and the decision **both** carry (ADR-0244 §3).
+        # "`expires_at` on the `ParkedRead` and on the recorded `CONFIRM` are both
+        # computed from it, once, at the instant the park is written", which is what
+        # makes §5's and §10's shared-deadline reasoning hold: a park past its deadline
+        # names a decision past the same one, so an `EXPIRED` park's decision is refused
+        # by ADR-0235 §3's **fifth** condition rather than by §5's eighth, and does not
+        # return to `grantable_decisions`.
+        #
+        # **`None` on every other outcome, and on every outcome of a deployment that
+        # wired no `ParkedReads`** — ADR-0231 §9's own reasoning, unrepealed for the
+        # case it was written about: a deadline is a property of a question somebody
+        # will answer, and where nothing can hold the question there is nobody to
+        # answer it. So a tree with no store behaves exactly as it does today, which is
+        # what ADR-0244 §18's lane order asks of this one.
         #
         # **A non-conforming reading propagates untranslated** (ADR-0026 §4), which is
         # `Fetcher`'s posture at the neighbouring seam and ADR-0230 §4's reason
@@ -2085,8 +2455,17 @@ class SearchServicer:
         # terms. No production turn reaches here on such a clock anyway:
         # `LearningLoop._goal_from` reads the same guarded seam before the planner is
         # called and raises `PlanningError` there.
+        decided_at = self._now()
         decision = PermissionDecision.from_request(
-            request, ruling, id=self._id_factory(), decided_at=self._now()
+            request,
+            ruling,
+            id=self._id_factory(),
+            decided_at=decided_at,
+            expires_at=(
+                decided_at + self._parked_read_ttl
+                if self._parked_reads is not None and ruling.outcome is PermissionOutcome.CONFIRM
+                else None
+            ),
         )
         try:
             await self._trail.record(decision)
@@ -2135,6 +2514,8 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
     search: SearchServicer | None,
     utterance: str,
     audit: TurnReadAudit,
+    goal: Goal,
+    plan: ActionPlan,
     footing: SearchFooting | None = None,
 ) -> ServicedCarriers:
     """Service one emission, once, into the fourth group (ADR-0226 §§2, 6, 7).
@@ -2331,6 +2712,15 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
             deduplication set and not a value any other kind reads: no store value,
             supply, tail, listing, rationale or record reaches the composing seam,
             which is what keeps ADR-0155 §3 from having a subject here.
+        goal: The :class:`Goal` this turn was planned against. It is read by **one**
+            kind and only on one branch — ADR-0244 §2's park, where a ``WEB_SEARCH``
+            servicing records a ``CONFIRM`` — and reaches no composer, no model call
+            and no other kind's servicing.
+        plan: The :class:`ActionPlan` the planner returned on the call this servicing
+            answers, read on the same one branch and for the same reason. **Passed
+            rather than reconstructed**: ADR-0244 §2 persists the plan the parked turn
+            actually ran, because re-deriving it at resume "would put a model call
+            between the user's *yes* and the read".
         audit: This turn's record. One :class:`ServicedRead` entry is appended to
             :attr:`TurnReadAudit.servicings` on every path out of this function, and
             :attr:`ServicedRead.records` is what the caller appends to the fourth
@@ -2446,6 +2836,8 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
             truncated=truncated,
             footing=footing,
             counts=counts,
+            goal=goal,
+            plan=plan,
         )
         await observed()
         if hop is not None:
@@ -2632,7 +3024,7 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
     # searcher raised — because `searched` is assigned on each of them and `carried` is
     # rebuilt only on the success path. It is what the servicing computed and is never
     # recomputed here.
-    return replace(carried, not_serviced=searched.not_serviced)
+    return replace(carried, not_serviced=searched.not_serviced, parked_read=searched.parked_read)
 
 
 def _admitted_to_a_supply(placement: Placement) -> bool:
@@ -2768,6 +3160,8 @@ async def _serviced_search(  # noqa: PLR0913 — the seam, the ask, the composer
     truncated: list[ReadKind],
     footing: SearchFooting | None,
     counts: _SearchCounts,
+    goal: Goal,
+    plan: ActionPlan,
 ) -> _Searched:
     """Service one ``WEB_SEARCH`` ask into the fourth group (ADR-0231 §9, §11).
 
@@ -2840,6 +3234,10 @@ async def _serviced_search(  # noqa: PLR0913 — the seam, the ask, the composer
             reaches it — ``app/composition.py`` wires the footing unconditionally —
             and the alternative, searching without spending a call, is the one thing
             §8 exists to make impossible.
+        goal: The goal this turn was planned against, persisted onto a park where this
+            servicing records a ``CONFIRM`` (ADR-0244 §2).
+        plan: The plan the planner returned on the call this servicing answers,
+            persisted for the same reason.
 
     Returns:
         The minted records, §13's disposition and ADR-0238 §11's three counts. The
@@ -2894,6 +3292,11 @@ async def _serviced_search(  # noqa: PLR0913 — the seam, the ask, the composer
             footing=footing,
             in_view=in_view,
             counts=counts,
+            # ADR-0244 §2: the two members the continuation would otherwise fabricate,
+            # handed to the one site that may write a park. They reach no composer and
+            # no model call, and a servicing that records no `CONFIRM` never reads them.
+            goal=goal,
+            plan=plan,
         )
     except AssistantError as exc:
         # ADR-0226 §5, and the reason :class:`_ServicingFailedError` exists.

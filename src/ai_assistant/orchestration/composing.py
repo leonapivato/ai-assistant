@@ -1168,15 +1168,17 @@ def _routed_prompt(
     )
 
 
-#: ADR-0242 §7's **eight** prompt fragments, one per
+#: ADR-0242 §7's eight prompt fragments and ADR-0244 §12's ninth, one per
 #: :class:`~ai_assistant.core.types.SearchNotServiced` member, **written out as
 #: literals** and interpolating nothing.
 #:
-#: **Eight literals and not a template over the enumeration** (ADR-0242 §13). Neither
-#: these nor the surface's eight statements are assembled from a member's value, its
+#: **Nine literals and not a template over the enumeration** (ADR-0242 §13). Neither
+#: these nor the surface's statements are assembled from a member's value, its
 #: name, a format string over the vocabulary, or a mapping a later member would silently
 #: join: "A member added without its two texts is a member with no rendering, and §8's
 #: closure at eight is what makes that a review question rather than a runtime one."
+#: ADR-0244 §12 is the ADR that clause provided for, and its member arrives here with
+#: its own written literal for exactly that reason.
 #:
 #: **Given on a turn in which at least one servicing recorded a**
 #: ``SearchDisposition`` **and on no other** (§6), so on every other turn the assembled
@@ -1206,6 +1208,16 @@ def _routed_prompt(
 #: stopped while asking and did not service a search carries both facts, each rendered
 #: by its own fragment, and neither substitutes for, suppresses or is derived from the
 #: other.
+_ANSWER_AWAITED_PROMPT: Final = """\
+While answering this you would have looked something up outside this system, and \
+instead of making that lookup it was put to this person as a question, which is \
+waiting on their answer. Say so plainly, in one short clause, and answer as well as \
+what you have allows. **Do not say that the lookup produced nothing** — it has not \
+been made, and nothing has come back either way. Do not say what the question was, do \
+not say what answering it would achieve, do not say that nothing else stands in the \
+way, and do not tell them where to answer it: you have not been told any of that."""
+
+
 _SEARCH_DISABLED_PROMPT: Final = """\
 While answering this you would have looked something up outside this system, and no \
 such lookup was made — this installation does not make them at all. Say so plainly, in \
@@ -1274,17 +1286,18 @@ at a reason, do not name anything or anyone, and do not tell the person to do \
 something about it: there may be nothing for them to do."""
 
 
-#: The eight, keyed by member, so that :func:`_system_prompt` picks one **literal**
+#: The nine, keyed by member, so that :func:`_system_prompt` picks one **literal**
 #: rather than assembling text.
 #:
-#: **A mapping over eight written fragments is not a template over the enumeration**
-#: (ADR-0242 §13): every value here is a literal above, a ninth member joins nothing
+#: **A mapping over nine written fragments is not a template over the enumeration**
+#: (ADR-0242 §13): every value here is a literal above, a tenth member joins nothing
 #: silently, and ``tests/orchestration/test_engine_search_not_serviced.py`` fails if the
 #: vocabulary and this table come apart — that module holds the arm, under the name
 #: ``test_the_quoted_fragments_are_the_eight_the_composing_stage_holds``. The file this
 #: comment named before #2213 has never existed.
 _SEARCH_NOT_SERVICED_PROMPTS: Final[Mapping[SearchNotServiced, str]] = MappingProxyType(
     {
+        SearchNotServiced.ANSWER_AWAITED: _ANSWER_AWAITED_PROMPT,
         SearchNotServiced.SEARCH_DISABLED: _SEARCH_DISABLED_PROMPT,
         SearchNotServiced.NOT_ADMITTED: _NOT_ADMITTED_PROMPT,
         SearchNotServiced.SPEND_EXHAUSTED: _SPEND_EXHAUSTED_PROMPT,

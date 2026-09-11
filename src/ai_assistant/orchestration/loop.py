@@ -90,7 +90,13 @@ if TYPE_CHECKING:
         Planner,
         ToolRegistry,
     )
-    from ai_assistant.core.types import ActionPlan, FeedbackEvent, ReadAsk, SourceListing
+    from ai_assistant.core.types import (
+        ActionPlan,
+        FeedbackEvent,
+        ParkedRead,
+        ReadAsk,
+        SourceListing,
+    )
     from ai_assistant.orchestration.writes import MemoryWriteStage, WriteOutcome
 
 _log = structlog.get_logger(__name__)
@@ -183,6 +189,16 @@ class RespondedTurn:
             :attr:`stopped_while_asking` are: it is computed at the servicing site from
             three values that site holds, and this loop folds the computed members
             rather than recomputing one.
+        parked_read: ADR-0244 §1's carrier: the ``OPEN`` park a servicing of **this
+            turn** wrote, or ``None`` where none did.
+
+            **At most one per turn, which is the store's rule rather than this loop's**
+            (ADR-0244 §3). A conversation holds at most one ``OPEN`` park, so a turn
+            whose second servicing records a ``CONFIRM`` after its first parked one has
+            its second ``park`` answered ``False`` and writes nothing — and this loop
+            therefore keeps the **first** park it was given rather than choosing between
+            two. It is supplied and never inferred, exactly as
+            :attr:`search_not_serviced` is.
     """
 
     turn: TurnResult
@@ -191,6 +207,7 @@ class RespondedTurn:
     stopped_while_asking: bool = False
     structured: StructuredFacts = field(default_factory=StructuredFacts)
     search_not_serviced: SearchNotServiced | None = None
+    parked_read: ParkedRead | None = None
 
 
 #: ADR-0228 §3's bound: **at most two** calls to ``Planner.plan`` on one turn, so a
@@ -1364,6 +1381,10 @@ class LearningLoop:
         # and whose planner asked for no search carries out of here, and on which §6's
         # byte-identity guarantee holds.
         search_not_serviced: SearchNotServiced | None = None
+        # ADR-0244 §1's carrier, ``None`` on every turn no servicing of which wrote a
+        # park — which is every turn on a deployment that wired no ``ParkedReads``, and
+        # every turn whose search was not ruled a ``CONFIRM``.
+        parked_read: ParkedRead | None = None
         if not bounded_audience:
             # ADR-0203 §1: between retrieval and planning, and applied to the
             # context as well as to the records — a facet no ADR has placed is
@@ -1539,6 +1560,13 @@ class LearningLoop:
                 # the same value the goal's statement was stripped from.
                 utterance=utterance,
                 audit=audit,
+                # ADR-0244 §2: the two members a park persists, handed to the one
+                # servicing site that may write one. `goal` is this turn's own and
+                # `plan` is the plan of the call this servicing answers — the plan the
+                # parked turn actually ran, which is what makes the continuation a
+                # continuation rather than a re-plan.
+                goal=goal,
+                plan=plan,
                 # ADR-0238: the one servicing site, handed the one footing. Everything
                 # this decision reads — the destination's trust, the conversation's
                 # call allowance and its stored flag — is read there and nowhere else.
@@ -1579,6 +1607,13 @@ class LearningLoop:
             # first-computed-wins implementation respectively fail. A servicing that
             # yielded contributes `None` and clears nothing.
             search_not_serviced = earliest(search_not_serviced, carried.not_serviced)
+            # ADR-0244 §1, §3: **the first park a servicing of this turn wrote, kept.**
+            # A second servicing's `park` cannot have answered `True` while this one
+            # stands — one `OPEN` park per conversation is the store's own indivisible
+            # rule — so `or` is the fold rather than a precedence decision, and a lane
+            # that assigned unconditionally would drop the question the user was
+            # actually shown.
+            parked_read = parked_read or carried.parked_read
             # ADR-0240 §8. The reach and the temporal facts are ORed across the
             # turn's servicings — §8's own clause for the first is "whether or not a
             # later read of the same turn did", and the second rests on the same
@@ -1679,6 +1714,101 @@ class LearningLoop:
             # inside `orchestration` as data — no member on any Protocol, and nothing
             # inferred at the render site.
             search_not_serviced=search_not_serviced,
+            # ADR-0244 §9: the park the turn wrote, carried to the engine so the
+            # question it raised appears in the exchange that raised it. Data inside
+            # `orchestration`, on ADR-0242 §7's terms: no member on any Protocol, and
+            # nothing re-read at the render site.
+            parked_read=parked_read,
+        )
+
+    async def resumed_read(  # noqa: PLR0913 — the parked turn's two persisted members, the read's records, and the three things every turn's supply is assembled against; each is a distinct fact and none is derivable from another
+        self,
+        goal: Goal,
+        plan: ActionPlan,
+        *,
+        records: Sequence[MemoryRecord],
+        history: Sequence[MemoryRecord] = (),
+        history_degraded: bool = False,
+        narrow: SupplyFilter | None = None,
+    ) -> TurnResult:
+        """Assemble the supply an approved read's continuation composes over (ADR-0244 §8).
+
+        **Two members are the parked turn's and two are the resumed turn's, and the
+        result does not pretend otherwise.** :attr:`TurnResult.goal` and
+        :attr:`TurnResult.plan` are ``goal`` and ``plan`` — read from the park, which
+        persisted them precisely so that this method does not fabricate them —
+        while :attr:`TurnResult.context` and :attr:`TurnResult.memories` are assembled
+        **here, at the instant of the resume**, by the ordinary pipeline. That is
+        ADR-0052 §3's own reason obeyed rather than overturned: it refuses to
+        *"fabricate a ``TurnResult`` with empty context and memories — which would
+        misrepresent what the turn saw"*, and what this decision does is persist the two
+        that would have been fabricated and assemble the other two for real. **No
+        implementation fills ``context`` or ``memories`` from a snapshot, a cache or an
+        archive of the parked turn**, and none reports the resumed turn's supply as the
+        parked turn's.
+
+        **The resumed turn plans nothing and services nothing else** (ADR-0244 §8). No
+        planner call is made, so no ``read_request`` arises, no other read kind is
+        serviced, ADR-0228 §2's revision is not reached, and no second search is
+        composed, ruled or parked. **A resume that found itself planning has left this
+        decision's fence**, and the absence of any call to :meth:`_planned` below is
+        where that is kept rather than asserted.
+
+        **The read's records are ADR-0226 §7's fourth group**, appended after the three
+        the pipeline assembles, in servicing order, **over the deduplicated union** and
+        constructed once: a record already in the supply keeps its place there and does
+        not appear twice. The budget is not consulted — ADR-0226 §6's ten bound a
+        turn's servicings and this pass performs none — and ADR-0231 §10's clauses bind
+        the records unchanged, so they carry their provenance and their attestation
+        exactly as they do on an unparked servicing.
+
+        **No ADR-0226 §9 record is written and no audit is emitted.** This pass makes
+        no emission, so §8's judgement is not reached and a record saying a turn fired
+        or did not would be a claim about a planner that was never called — which is
+        why this is not :meth:`respond`'s ``finally`` at a second entry point.
+        ADR-0244 §17 leaves ADR-0231 §13's audit binding entire: the resumed turn's own
+        servicing, of which there is none, records its own disposition in its own
+        turn's event.
+
+        Args:
+            goal: The parked turn's goal, read from the park.
+            plan: The parked turn's plan, read from the park.
+            records: The records the approved read minted, in the order it minted
+                them. Empty where the dispatched read yielded none — refused,
+                expired, interrupted or empty-handed — on which the turn still
+                composes (ADR-0244 §8).
+            history: The conversation's replay tail, as every turn is handed one.
+            history_degraded: Whether reading that tail degraded, reported on
+                :attr:`TurnResult.memory_degraded` beside retrieval's own answer
+                exactly as it is on an ordinary turn.
+            narrow: ADR-0203 §1's supply filter, applied once over the assembled
+                supply. A resume takes no ``ConversationalOperation`` and reaches no
+                planner, so there is no second position for it and ADR-0226 §7's
+                bounded-audience timing clause has no subject here.
+
+        Returns:
+            The resumed turn's result: the parked turn's goal and plan, this instant's
+            context and supply, and the approved read's records at the end of it.
+        """
+        recent = tuple(history)
+        context = await self._context.assemble()
+        retrieved, degraded = await self._retrieve(goal.statement)
+        preceding = recent + retrieved
+        supplement, supplement_read = await self._supplement(goal.statement, preceding=preceding)
+        memories = preceding + supplement
+        retrieved_ids = frozenset(record.id for record in retrieved) | supplement_read
+        context, memories = _narrowed(narrow, context, memories, retrieved_ids)
+        # ADR-0226 §7's deduplication, over the whole union and with the first
+        # occurrence keeping its place — the same rule the servicing site applies to a
+        # fourth group, applied here because this pass reaches no servicing site.
+        held = {record.id for record in memories}
+        fourth = tuple(record for record in records if record.id not in held)
+        return TurnResult(
+            goal=goal,
+            context=context,
+            memories=memories + fourth,
+            plan=plan,
+            memory_degraded=degraded or history_degraded,
         )
 
     async def _planned(  # noqa: PLR0913 — the goal plus one keyword per thing the loop assembled for this call; ADR-0230 §3 and ADR-0240 §7 each add one, and the audit record rides beside them

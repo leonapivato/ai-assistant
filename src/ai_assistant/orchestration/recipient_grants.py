@@ -36,7 +36,7 @@ decision of the user made while looking at a recorded call.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import structlog
 
@@ -53,6 +53,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     EgressBinding,
+    ParkedReadDisposition,
     PermissionDecision,
     PermissionOutcome,
     RecipientGrant,
@@ -66,15 +67,35 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import ActionPolicy, AuditTrail, RecipientGrantStore
     from ai_assistant.core.types import PermissionRuling
+    from ai_assistant.orchestration.parked_reads import ParkedReadOperations
     from ai_assistant.orchestration.runner import EstablishingAnswer
 
 _log = structlog.get_logger(__name__)
 
 
+#: ADR-0244 §5's eighth condition, as a set rather than a disjunction: the three
+#: dispositions on which a park excludes its decision from ``grantable_decisions``.
+#:
+#: **``CANCELLED`` and ``EXPIRED`` are deliberately absent.** Neither writes a
+#: resolution and neither ever will, so the condition stops excluding either; ADR-0235
+#: §3's seven then govern the row, and on an ``EXPIRED`` park the fifth of them fails on
+#: its own because the decision carries the same deadline the park does. So a
+#: **cancelled** park's decision is the one that returns to the listing, and an expired
+#: one's stays out — refused by a condition ADR-0244 does not touch rather than by this
+#: one.
+_PARK_EXCLUDES: Final = frozenset(
+    {
+        ParkedReadDisposition.OPEN,
+        ParkedReadDisposition.APPROVED,
+        ParkedReadDisposition.DENIED,
+    }
+)
+
+
 class RecipientGrantOperations:
     """The five recipient-grant operations, over one store, the trail and the policy."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — one parameter per contract these operations are answered against; ADR-0244 §5's eighth condition adds the sixth and none is derivable from another
         self,
         *,
         store: RecipientGrantStore,
@@ -82,6 +103,7 @@ class RecipientGrantOperations:
         policy: ActionPolicy,
         id_factory: Callable[[], str],
         clock: Callable[[], datetime],
+        parked_reads: ParkedReadOperations | None = None,
     ) -> None:
         """Wire the operations from the store, the trail, the policy, an id and a clock.
 
@@ -105,12 +127,24 @@ class RecipientGrantOperations:
                 :func:`~ai_assistant.core.clock.checked_clock` says to put it — "a
                 call site cannot forget" — so every reading below is aware, UTC and
                 localizable rather than checked three times or not at all.
+            parked_reads: ADR-0244's parked-read operations, which is where §5's
+                **eighth** availability condition is decided from, or ``None`` where
+                this deployment wires no parked-read store. **Read through the
+                ``ParkedReads`` contract and never from a concrete store** (golden
+                rule 1), which is why the member is on that contract rather than left
+                to an implementation — and why the exclusion survives a restart: the
+                row does, so the read does.
+
+                ``None`` excludes nothing, which is exactly right where no park can
+                exist: ADR-0244 §18's lane order lands the store in Lane 2, and until
+                it does no decision is one a park names.
         """
         self._store = store
         self._trail = trail
         self._policy = policy
         self._id_factory = id_factory
         self._clock = checked_clock(clock, owner="RecipientGrantOperations")
+        self._parked_reads = parked_reads
 
     # --- the offerable rows (ADR-0235 §3) ------------------------------------
 
@@ -158,7 +192,56 @@ class RecipientGrantOperations:
             and row.id not in resolved
             and (complete or oldest is None or row.decided_at > oldest)
         ]
-        return tuple(offerable)
+        # ADR-0244 §5's **eighth** condition, evaluated after §3's seven and in that
+        # position: the decision's id is not named by a ``ParkedRead`` whose disposition
+        # is ``OPEN``, ``APPROVED`` or ``DENIED``. One read per row that survived the
+        # seven, and none for a row that did not — which keeps the extra cost
+        # proportional to what is actually offerable.
+        return tuple([row for row in offerable if not await self._held_by_a_park(row.id)])
+
+    async def _held_by_a_park(self, decision_id: str) -> bool:
+        """Whether ADR-0244 §5's eighth condition excludes this decision.
+
+        **Stated over three dispositions and not over an open park, because the gate is
+        taken before the resolution is written** (ADR-0244 §5, §6). A park that settles
+        ``APPROVED`` or ``DENIED`` holds a resolution the answering call has not yet
+        recorded, and a decision that left this listing at the settlement would be one
+        the establishing act could resolve **first** — recording an ``ALLOW`` the user
+        never gave that answer for, and leaving the answering call's own append to fail.
+        The transition ``OPEN`` → ``APPROVED`` → (recorded) therefore never passes
+        through a grantable state, which is the property this clause exists to have.
+
+        **A park that was ``CANCELLED`` or ``EXPIRED`` does not exclude its decision,
+        and only the first of those makes the act reachable.** Neither disposition
+        writes a resolution and neither ever will, so this condition stops excluding
+        either; §3's seven then govern the row, and on an ``EXPIRED`` park the **fifth**
+        of them fails on its own — the decision carries the same ``expires_at`` the park
+        does (ADR-0244 §3) — so its decision stays out, refused by a condition ADR-0244
+        does not touch. **A cancelled park's decision is therefore the one that returns
+        to this listing**, where the other six conditions hold. **No lane widens the
+        exclusion to every park ever written**, which would take a capability away on
+        the strength of a question nobody answered.
+
+        **One question, one act, and the split is decided rather than incidental.** A
+        decision a park holds is answered through ``resume``, and answering it is what
+        dispatches the read; the establishing act "resumes nothing and services nothing"
+        (ADR-0235 §3), so offering both on one row would let a user perform the act that
+        changes nothing about this lookup while the lookup's own question stood
+        unanswered beside it.
+
+        Args:
+            decision_id: The recorded ``CONFIRM`` under test.
+
+        Returns:
+            Whether a park naming it stands ``OPEN``, ``APPROVED`` or ``DENIED``.
+
+        Raises:
+            AssistantError: If the parked-read store could not be read.
+        """
+        if self._parked_reads is None:
+            return False
+        park = await self._parked_reads.park_of_decision(decision_id)
+        return park is not None and park.disposition in _PARK_EXCLUDES
 
     # --- the act (ADR-0235 §3) -----------------------------------------------
 
@@ -454,6 +537,17 @@ class RecipientGrantOperations:
                 f"decision {decision_id!r} records a call planned over external content; you "
                 f"may approve such a call, and may not in that act make its recipients "
                 f"standing (ADR-0193 §2, §4; ADR-0235 §3)"
+            )
+            raise UngrantableActError(msg)
+        if await self._held_by_a_park(decision_id):
+            # ADR-0244 §5's **eighth** condition, evaluated after §3's seven and in that
+            # position, and named exactly as the seven are — so where more than one
+            # fails the first is the one named and the refusal is deterministic across
+            # implementations.
+            msg = (
+                f"decision {decision_id!r} is the question a parked read holds, or has just "
+                f"taken the answer to, so it is answered through resume rather than through "
+                f"this operation (ADR-0244 §5)"
             )
             raise UngrantableActError(msg)
         return confirmed

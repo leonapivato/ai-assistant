@@ -157,6 +157,7 @@ class TestNumbers:
             reason="external",
             token=ContinuationToken(handle="h-1"),
             egress=None,
+            read=None,
         )
         assert _encoded(confirmation.parameters) == expected
         assert len(canonical_payload(confirmation.parameters)) == size
@@ -346,6 +347,7 @@ class TestComposites:
             reason="external",
             token=ContinuationToken(handle="h-1"),
             egress=None,
+            read=None,
         )
         other = one.model_copy(update={"parameters": one.parameters})
         reordered = Confirmation(
@@ -355,6 +357,7 @@ class TestComposites:
             reason="external",
             token=ContinuationToken(handle="h-1"),
             egress=None,
+            read=None,
         )
         assert _encoded(one) == expected
         assert canonical_payload(one) == canonical_payload(reordered) == canonical_payload(other)

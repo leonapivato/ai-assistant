@@ -172,6 +172,7 @@ def test_an_egress_confirmation_survives_the_round_trip_a_client_actually_makes(
             ),
             coverage=SpanCoverage.NOT_COVERED,
         ),
+        read=None,
     )
     outcome = TurnOutcome(
         turn=None,
@@ -210,6 +211,7 @@ def test_a_non_egress_confirmation_crosses_as_an_explicit_null() -> None:
         reason="an unknown cost",
         token=ContinuationToken(handle="tok"),
         egress=None,
+        read=None,
     )
     payload = json.loads(canonical_payload(project(confirmation)))
     assert payload["egress"] is None

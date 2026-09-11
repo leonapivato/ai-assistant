@@ -7223,12 +7223,22 @@ class SearchOutcome(BaseModel):
 class SearchNotServiced(StrEnum):
     """What a user is told about a search their turn did not make (ADR-0242 §8).
 
-    A **closed** enumeration of exactly **eight** members, each valued by its
+    A **closed** enumeration of exactly **nine** members, each valued by its
     lower-cased name, declared in the order below — **which is also the precedence
     order ADR-0242 §7 applies** where a turn holds more than one servicing that
     recorded a disposition. The vocabulary is *added to and never renamed*, and no
-    implementation or later ADR adds a ninth member without the ADR that decides it
+    implementation or later ADR adds a tenth member without the ADR that decides it
     (ADR-0242 §8, §14).
+
+    **The ninth member is ADR-0244 §12's**, which is the ADR ADR-0242 §8 provided
+    for: that section closes the enumeration "at exactly **eight** members" while
+    ruling that "no implementation or later ADR adds a ninth member without the ADR
+    that decides it", and ADR-0244 is that ADR. :attr:`ANSWER_AWAITED` is declared
+    **first**, which is also its position in ADR-0242 §7's precedence order, and
+    inserting at the head leaves every existing pairwise order and every existing
+    value unchanged. The eight, their values, their declared order relative to one
+    another, the added-to-and-never-renamed rule, the totality of ADR-0242 §8's
+    mapping and its non-injectivity all stand entire.
 
     **It is not** :class:`~ai_assistant.orchestration.reads.SearchDisposition`
     **and neither is derivable from the other** (ADR-0242 §8). That vocabulary names
@@ -7268,7 +7278,53 @@ class SearchNotServiced(StrEnum):
     something available; and :attr:`UNAVAILABLE` is the deliberate residue — one member
     rather than thirteen because none of the situations behind it gives the user
     anything to do.
+
+    **And a ninth naming work the system is still holding** (ADR-0244 §12), which is
+    why it is declared first rather than appended: the other eight each name something
+    that already ended, and a member that lost the tie-break on a turn holding one of
+    those **and** an open park would leave the park unmentioned in the one place the
+    user reads — and an unmentioned park is one nobody answers.
     """
+
+    ANSWER_AWAITED = "answer_awaited"
+    """The search was put to the user as a question, the question is recorded and open,
+    and it awaits their answer (ADR-0244 §12).
+
+    **It asserts exactly two things, both established**: that a ``CONFIRM`` was recorded
+    rather than the search made, and that a
+    :class:`ParkedRead` holding that question is open. Both are known to the servicing
+    site by construction — the site wrote the park, or its ``park`` answered ``False``,
+    and that boolean is the whole of the further input — and **neither is read back from
+    a store** (ADR-0242 §7, ADR-0244 §12). No renderer, no adapter and no composing stage
+    reads ``ParkedReads`` to compute a member, and no component recomputes the carrier
+    downstream.
+
+    It asserts **nothing** about which floor fired, nothing about what grants or trust
+    records stand, nothing about what the read will return, and nothing about whether
+    approving it will produce an answer the user wants.
+
+    **It is what discriminates a parked** ``RULING_CONFIRM`` **from an unparked one**,
+    and the discrimination is obligatory rather than cosmetic (ADR-0244 §12).
+    :attr:`AUTHORISATION_AWAITED` "asserts exactly two things, both established", the
+    second being that the decision is one the establishing act **may ride** — and a
+    parked decision is not one, since ADR-0244 §5's eighth condition excludes it from
+    ``grantable_decisions``. Reporting a parked ``CONFIRM`` as
+    ``AUTHORISATION_AWAITED`` would therefore assert something false, and
+    :attr:`TRUST_MISSING`'s and :attr:`UNAVAILABLE`'s clauses are preserved by the same
+    move.
+
+    **Declared first, which is also its precedence position** (ADR-0242 §7). The insert
+    is at the head and changes no existing pairwise order, so every fold this
+    vocabulary already performs answers as it did — except on a turn that also holds an
+    open park, where this member is the one carried, which is the whole point of the
+    position.
+
+    A statement rendered for it says **a lookup awaits your answer** and never that the
+    lookup produced nothing — which is the literal issue #2221 records as false. It
+    carries no destination, host, origin, provider name, account identity, query or
+    fragment of one, record, count, monetary figure, duration, budget, ``Settings``
+    field name, ``SearchDisposition`` value, record id, decision id or command name, and
+    it does not say why a ruling was not an ``ALLOW`` (ADR-0242 §9, ADR-0244 §12)."""
 
     SEARCH_DISABLED = "search_disabled"
     """``admit_search`` refused, and the per-conversation bound is ``0`` (ADR-0242 §8).
@@ -7349,6 +7405,13 @@ class SearchNotServiced(StrEnum):
     ``step_id`` and no ``execution_id``, nothing resolves it, and its binding is an
     :class:`EgressBinding` whose ``planned_with_external_content`` is ``False``, which is
     ADR-0235 §3's conditions satisfied by construction rather than by a read.
+
+    **ADR-0244 §5's eighth condition is satisfied by construction too, and that is what
+    keeps this member's second assertion true** (ADR-0244 §12). The site carries this
+    member only where no park was written, so the decision's id is named by no
+    ``ParkedRead`` at all and the eighth condition cannot exclude it; where a park
+    **was** written the member is :attr:`ANSWER_AWAITED` instead. The clause is
+    therefore preserved by the discrimination rather than relaxed by it.
 
     It asserts **nothing about which floor fired**, nothing about what grants stand, and
     nothing about what answering will achieve. A statement for it names ``assistant
@@ -14987,6 +15050,45 @@ class Confirmation(BaseModel):
             here is what a lane forgets — an implementation that never wired the
             binding through would get a well-formed non-egress confirmation for
             free and its egress prompts would look correct.
+        read: The kind of read this question is about, or **absent** on a
+            confirmation about a plan step (ADR-0244 §4). ADR-0244 is the decision
+            that added it, as ADR-0178 §1 is :attr:`egress`'s.
+
+            **``read is not None`` is the discriminator**, in :attr:`egress`'s own
+            shape and for its reason: absence is the state and the type is what
+            expresses it. What it states is that **answering this question dispatches
+            a read rather than a plan step**, and nothing more — no lane reads it as a
+            warrant about what the read will return, whether it will run, or what the
+            reply will then say. A surface that cannot render a read's confirmation
+            may refuse *that* confirmation rather than every confirmation, exactly as
+            ADR-0178 §4's second clause already permits for :attr:`egress`.
+
+            **The exact query is already carried and no field is added for it**
+            (ADR-0244 §4). :attr:`parameters` is the search request's own argument
+            mapping — the origin and the composed query, byte for byte as the ruling
+            was taken over them — and it is what a surface renders. No lane adds a
+            summary, an abbreviation, a normalised form, a re-cased form, a truncation
+            or a paraphrase of the query to this type, and none renders one.
+
+            **A** :class:`ReadKind` **rather than a bare bool**, because the kinds are
+            already enumerated and the next one is coming: a bool would have to be
+            widened into an enum by the first ADR that parks a second kind, and
+            widening a wire-carried type is what ADR-0124 §9 charges a version for
+            (ADR-0244 §4, §20).
+
+            **One field rather than a nested value**, which is where this departs from
+            ADR-0178 §1 and why: that section chose one nested value over four
+            optional members because four *"admit fifteen partial states"*, and there
+            is one fact here with no partial state to reach. **Required with no
+            default**, which is what survives from §1 unchanged — ``Confirmation`` is
+            built at the engine's assembly sites, in the canonical fake and in every
+            test that builds one, and *"a defaulted field is what a lane forgets"*.
+
+            **The goal, the plan and the conversation's history are not part of the
+            question and no surface is given them** (ADR-0244 §4). What the user
+            judges is what would leave the device — the query, the destination in both
+            forms, the account identity and the payload description — which is
+            ADR-0148 §8's fourth clause and no more than it.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -15008,6 +15110,384 @@ class Confirmation(BaseModel):
             "recorded CONFIRM carries no egress binding (ADR-0178 §1, §4)."
         )
     )
+    read: ReadKind | None = Field(
+        description=(
+            "The kind of read answering this question dispatches, or absent on a "
+            "confirmation about a plan step (ADR-0244 §4)."
+        )
+    )
+
+
+class ParkedReadDisposition(StrEnum):
+    """The state of one parked read (ADR-0244 §2).
+
+    A **closed** enumeration of exactly **five** members, each valued by its
+    lower-cased name. :attr:`OPEN` is the only non-terminal member, the other four are
+    terminal, and **no transition leaves a terminal member**. The vocabulary is *added
+    to and never renamed*, on :class:`SearchNotServiced`'s own reason: a vocabulary
+    that grows by implementation grows without anyone deciding what the new member
+    means.
+
+    **What a disposition says is what the *user* did, and never what followed.**
+    :attr:`APPROVED` does **not** state that a ruling was recorded, that the read was
+    dispatched, that a request left the device or that any record came back (ADR-0244
+    §2): the answer's gate is taken **before** the policy is asked, so an ``APPROVED``
+    park beside no recorded resolution is a reachable and honest state. What happened
+    after the answer is the :class:`PermissionDecision` trail's and the invocation
+    ledger's to say, and **a lane reading a disposition as evidence of a send has read
+    the wrong record**.
+    """
+
+    OPEN = "open"
+    """The question stands and may be answered (ADR-0244 §2).
+
+    The only non-terminal member, and the only one on which the three content fields
+    of a :class:`ParkedRead` are present. **No terminal disposition is inferred from
+    silence** (ADR-0244 §10): a park is ``OPEN`` until something settles it, ``OPEN``
+    is never read as approval by any component, and there is no timeout, retry, sweep
+    or reclaim that dispatches a read the user did not answer."""
+
+    APPROVED = "approved"
+    """The user answered **yes** and the park's one answer was spent on that answer.
+
+    It records what the user said and asserts nothing about what followed (ADR-0244
+    §2). A dispatch a cancellation interrupted also leaves the park here and does not
+    re-open it: the question was answered, the call was made, and **no caller assumes
+    the query did not leave** (ADR-0244 §11)."""
+
+    DENIED = "denied"
+    """The user answered **no** and the park's one answer was spent on that.
+
+    A denial is a *ruling*: the ``DENY`` is recorded after the gate is taken, and the
+    parked turn's own reply stands unamended (ADR-0244 §10)."""
+
+    CANCELLED = "cancelled"
+    """The question was withdrawn without an answer (ADR-0244 §11).
+
+    **The whole difference from** :attr:`DENIED`: a denial is the user answering *no*
+    and is a ruling; a cancellation is the user withdrawing the question and is not
+    one. ``ActionPolicy.resolve`` is not called, no ruling is recorded, and the
+    decision on the trail stays the unresolved ``CONFIRM`` it was — which is why a
+    cancelled park's decision is the one that returns to ``grantable_decisions`` where
+    ADR-0235 §3's other six conditions hold (ADR-0244 §5)."""
+
+    EXPIRED = "expired"
+    """The deadline passed with no answer (ADR-0244 §10).
+
+    Settled by whatever operation next reads the park, which is safe precisely because
+    an expired park is refused as an answer at all: there is no live answerer for the
+    settlement to race (ADR-0244 §6). It records no ruling, and it **makes no decision
+    grantable** — ADR-0235 §3's fifth condition refuses the decision on its own, since
+    the decision carries the same ``expires_at`` the park does (ADR-0244 §5, §10)."""
+
+
+class ParkedRead(BaseModel):
+    """One recorded ``CONFIRM`` on a read, held as a question the user may answer.
+
+    ADR-0244 §2's record. A ``WEB_SEARCH`` servicing that records a ``CONFIRM`` writes
+    one of these and yields no records into the supply; **the turn does not park, is
+    not suspended and does not fail** (§1). What parks is the *read*, and the question
+    is offered by a surface after the turn has ended — which is what makes this
+    compatible with ADR-0226 §5, whose clause that no implementation *"raises out of
+    the turn, parks **it**, or puts a question to the user"* is obeyed rather than
+    moved.
+
+    **Its durable identity is the recorded decision, not a binding of two ids.**
+    ADR-0231 §6 rules ``PermissionDecision.step_id`` and ``execution_id`` both ``None``
+    on a ``WEB_SEARCH`` decision and forbids synthesising a step *"in order to satisfy
+    a clause written about steps"*, so ``AuditTrail.pending_confirmation``'s
+    ``(execution_id, step_id)`` query cannot reach one. :attr:`decision_id` is the key
+    a search already has, and it is the population ADR-0235 §3 already reads.
+
+    **Three fields carry Tier 1 content and that is stated here rather than
+    discovered.** :attr:`parameters` holds the composed query, :attr:`goal` the
+    objective minted from the utterance, and :attr:`plan` what the planner decided.
+    ADR-0004 §2's residency clause governs all three — an implementation persists
+    **locally only** — and what keeps the exposure bounded *in time* is that
+    settlement clears them in the same step that closes the question (ADR-0244 §3).
+    ADR-0004 §5's *"Tier 0/1 data must never be logged"* is untouched, and ADR-0231
+    §13's audit event gains none of it (ADR-0244 §17).
+
+    **What it carries none of** (ADR-0244 §2): no minted record, no result, no
+    snippet, no title, no address, no origin beyond the one :attr:`parameters` already
+    states, no credential, no ``SecretName``, no connection reference, no
+    ``BoundAccount`` and no binding. The binding, the account identity and the
+    canonical destination set are the **recorded decision's**, read through
+    :attr:`decision_id` at the moment a :class:`Confirmation` is assembled — exactly
+    as ADR-0178 §5 already rules for every other confirmation. **No field is added
+    here through which any of them could travel, and no lane copies one in.**
+
+    Attributes:
+        id: The park's own identifier, minted by the injected factory and **never by a
+            caller** (ADR-0244 §2).
+        conversation_id: The conversation the parked turn ran under. At most one
+            ``OPEN`` park per conversation, enforced by the store rather than by a
+            caller (ADR-0244 §3).
+        decision_id: The recorded ``CONFIRM`` this park holds the question of. **One
+            park names one decision**, which is what makes
+            ``ParkedReads.park_of_decision`` a single answer rather than a listing.
+        parameters: The search request's arguments **byte for byte as the ruling was
+            taken over them** — the origin and the composed query, and nothing else.
+            They are the ruling's own and are **checked against the recorded
+            ``CONFIRM``, not trusted from the store** (ADR-0244 §2): the request
+            rebuilt from them carries the decision's own ``tool``, hashes to its
+            ``parameters_digest``, and carries ``step_id`` and ``execution_id`` both
+            unset — the three facts a ``CONFIRM`` fixes about its subject — and the
+            answer is refused where any of them differs.
+
+            **``PermissionDecision.authorises`` is not that check and cannot be**: it
+            returns ``True`` only where the ruling is an ``ALLOW``, so it is ``False``
+            of every ``CONFIRM`` by construction. It is the check the **resolving**
+            ``ALLOW`` passes before a ``ToolCall`` is constructed and is re-evaluated
+            at the seam (ADR-0231 §6). The subject check here and the authorisation
+            check there are **two checks at two instants**, and a lane collapsing them
+            would refuse every parked read.
+        goal: The :class:`Goal` the parked turn was planned against.
+        plan: The :class:`ActionPlan` the planner returned on that turn.
+
+            **Persisted because the continuation composes over them and would
+            otherwise fabricate them** (ADR-0244 §2). ADR-0052 §3 refuses to
+            *"fabricate a ``TurnResult`` with empty context and memories — which would
+            misrepresent what the turn saw"*, and persisting these two is how that
+            reason is obeyed rather than overturned. **Re-planning at resume would be
+            the wrong kind of cheap**: it would put a model call between the user's
+            *yes* and the read, would let the planner ask for a **different** read — a
+            second question behind an answered one — and would produce a
+            ``TurnResult`` whose plan is not the plan the parked turn ran.
+
+            They are read at resume, are **never rendered to the user as part of the
+            question**, are never handed to the query composer, and are **never** a
+            route by which a model composes a new query (ADR-0244 §4, §16).
+        parked_at: The instant the park was written.
+        expires_at: The instant past which it is no longer answerable, **required with
+            no default** (ADR-0244 §2). Every park carries a deadline and there is no
+            spelling for one without: ``Settings.parked_read_ttl`` admits no disable
+            sentinel, for ``routed_confirmation_ttl``'s stated reason — a park nothing
+            can free is a durable row holding Tier 1 content that no act, no
+            enumeration and no reclaim would ever reach (ADR-0244 §3). This instant
+            and the recorded ``CONFIRM``'s own ``expires_at`` are computed from that
+            one setting, once, at the instant the park is written.
+        disposition: The park's state (ADR-0244 §2).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: DurableIdentifier = Field(description="The park's own identifier (ADR-0244 §2).")
+    conversation_id: Identifier = Field(description="The conversation the parked turn ran under.")
+    decision_id: DurableIdentifier = Field(
+        description="The recorded CONFIRM this park holds the question of."
+    )
+    parameters: FrozenJsonMapping | None = Field(
+        description=(
+            "The request's arguments byte for byte as the ruling was taken over them, "
+            "or absent on a terminal park (ADR-0244 §2, §3)."
+        )
+    )
+    goal: Goal | None = Field(
+        description="The parked turn's goal, or absent on a terminal park (ADR-0244 §2)."
+    )
+    plan: ActionPlan | None = Field(
+        description="The parked turn's plan, or absent on a terminal park (ADR-0244 §2)."
+    )
+    parked_at: UtcInstant = Field(description="The instant the park was written.")
+    expires_at: UtcInstant = Field(
+        description="The instant past which the question is no longer answerable."
+    )
+    disposition: ParkedReadDisposition = Field(description="The park's state (ADR-0244 §2).")
+
+    @model_validator(mode="after")
+    def _content_matches_the_disposition(self) -> ParkedRead:
+        """State ADR-0244 §2's two shapes, in both directions.
+
+        **The type is what expresses the two shapes rather than a rule to remember.** A
+        terminal park read back with a fabricated :class:`Goal` or an empty
+        :class:`ActionPlan` would misrepresent a record; one read back with its query
+        intact would breach ADR-0244 §3's retention rule in the one place a reader
+        would not look. So both halves are refused: an ``OPEN`` park carrying any of
+        the three as ``None``, and a terminal park carrying any of them at all.
+
+        **A settled park keeps its terminal facts and loses its content** (ADR-0244
+        §3). :attr:`id`, :attr:`conversation_id`, :attr:`decision_id`,
+        :attr:`parked_at`, :attr:`expires_at` and :attr:`disposition` survive
+        settlement; the three below do not, and no implementation retains a copy, a
+        digest of the query, a snapshot or an archive of them. **The content lives
+        exactly as long as the question does**, which is the whole of the retention
+        rule this decision states.
+
+        Raises:
+            ValueError: If the record describes a park that cannot exist.
+        """
+        content = {"parameters": self.parameters, "goal": self.goal, "plan": self.plan}
+        if self.disposition is ParkedReadDisposition.OPEN:
+            absent = sorted(name for name, value in content.items() if value is None)
+            if absent:
+                msg = (
+                    f"an open park carries its question: {', '.join(absent)} "
+                    f"{'is' if len(absent) == 1 else 'are'} absent, and a park with "
+                    f"nothing to dispatch is not one a user can answer (ADR-0244 §2)"
+                )
+                raise ValueError(msg)
+            return self
+        present = sorted(name for name, value in content.items() if value is not None)
+        if present:
+            msg = (
+                f"a {self.disposition} park has had its content cleared: "
+                f"{', '.join(present)} "
+                f"{'is' if len(present) == 1 else 'are'} still here, and the content "
+                f"lives exactly as long as the question does (ADR-0244 §2, §3)"
+            )
+            raise ValueError(msg)
+        return self
+
+
+class ReadAnswerOutcome(StrEnum):
+    """What became of an answer to a parked read (ADR-0244 §9).
+
+    A **closed** enumeration of exactly **seven** members, each valued by its
+    lower-cased name, *added to and never renamed*.
+
+    **Where more than one member is true, the first in the declared order is the one
+    carried** (ADR-0244 §9), so the answer is deterministic across implementations and
+    no lane branches on a message. The two members naming a closed park are ordered
+    ahead of the three change members because a park that is closed is not a question
+    any recheck could re-open; and :attr:`EXPIRED` is stated over the **disposition**
+    rather than over which call discovered it, so a park an enumeration settled and a
+    park this answer settled read the same to the user.
+
+    **Every refusal is returned and none is raised**, which is
+    ``AssistantEngineContract::test_a_refusal_is_a_result_and_not_an_exception``
+    binding at the seam it is stated over. ``resume`` raises
+    :class:`~ai_assistant.core.errors.UnknownContinuationError` for a token the engine
+    does not hold, exactly as it does today, and **ADR-0244 mints no error class**:
+    ADR-0235 §3's ``UngrantableActError`` is the shape for an operation whose *return*
+    is a grant and has no disposition to carry a refusal in, and ``resume`` has one.
+
+    **A class and nothing else.** No member carries, and no statement rendered for one
+    carries, a destination, a host, an origin, a provider name, an account identity, a
+    query or any fragment of one, a monetary figure, a budget, a threshold, a
+    ``Settings`` field name or a :class:`SearchNotServiced` or ``SearchDisposition``
+    value — ADR-0242 §9's bar, binding on this vocabulary as it binds on that one and
+    for the same reason. **It states what became of the answer and never why a ruling
+    went the way it did.**
+    """
+
+    DISPATCHED = "dispatched"
+    """The read ran; the outcome's ``turn`` and ``reply`` carry what it produced.
+
+    The one member on which ``TurnOutcome.turn`` is a real :class:`TurnResult` and the
+    reply is composed (ADR-0244 §8). Its ``goal`` and ``plan`` are **the parked
+    turn's**, read from the park; its ``context`` and ``memories`` are assembled at the
+    instant of the resume by the ordinary pipeline, with the approved read's minted
+    records appended as ADR-0226 §7's fourth group. **Two members are the parked turn's
+    and two are the resumed turn's, and the outcome does not pretend otherwise.**"""
+
+    DECLINED = "declined"
+    """The answer was no; the ``DENY`` is recorded and the park is ``DENIED``.
+
+    ``turn`` and ``reply`` are both ``None`` — ADR-0170 §4's second shape exactly
+    (ADR-0244 §10). Nothing is sent, no channel is opened, no claim is appended, and no
+    minted record exists."""
+
+    ALREADY_SETTLED = "already_settled"
+    """The park was answered, denied or cancelled before this answer arrived; nothing
+    was dispatched and the recorded answer stands (ADR-0244 §9).
+
+    **A duplicate answer dispatches nothing and says so**: a second ``resume`` on a
+    settled park's token consults no policy, opens no channel, records nothing and
+    mints nothing. ADR-0198 §§1-4's restatement governs a token whose *binding* the
+    engine settled and retains; this member governs a park whose settlement is durable,
+    and the two agree — **one answer, at most one dispatch, however many times a token
+    is presented** (ADR-0244 §6)."""
+
+    EXPIRED = "expired"
+    """The park's deadline passed with no answer, **whether this call settled it or an
+    earlier read did**; nothing was dispatched (ADR-0244 §9, §10)."""
+
+    AUTHORITY_CHANGED = "authority_changed"
+    """``ActionPolicy.resolve`` answered other than an ``ALLOW`` at the instant of the
+    answer; the ruling **is** recorded, nothing was dispatched, and the park is spent.
+
+    Reserved for an **approving** answer the policy refused (ADR-0244 §6): a denial's
+    recorded ``DENY`` is the answer the user asked for and is :attr:`DECLINED`. The
+    answer is recorded whatever it is, which is ADR-0004 §7's reason — a ruling the
+    trail never sees is a decision nobody can audit."""
+
+    OPERATION_CHANGED = "operation_changed"
+    """The rebuilt request is not the recorded ``CONFIRM``'s own subject, the binding
+    derived at the instant of the answer is not the one the ruling was taken over, or
+    the trail refused the resolving append; nothing was dispatched (ADR-0244 §9).
+
+    **What the user was shown is what may be sent**: a destination, an account identity
+    or a payload description that moved between the question and the answer is a
+    refusal, not a send (ADR-0244 §6, ADR-0152 §7).
+
+    **The park's state differs between the two grounds and the difference is
+    deliberate.** Where the subject or the binding failed the park is still ``OPEN`` —
+    the checks precede the gate — while a refused resolving append leaves it spent and
+    the answer unrecorded. A refused append is never raised out of ``resume``: the
+    already-resolved ground of ``InvalidResolutionError`` is unreachable through this
+    path, since the park's one answer was taken before the append was attempted."""
+
+    UNAVAILABLE_NOW = "unavailable_now"
+    """The conversation no longer exists or is stamped deleted, or
+    ``search_calls_per_conversation`` is ``0`` in this deployment; nothing was ruled and
+    nothing was dispatched (ADR-0244 §9).
+
+    ``admit_search`` is **not** called and no second call is drawn: the conversation's
+    call was admitted before the ruling and is consumed whatever the outcome, and
+    parking does not refund it (ADR-0238 §8, ADR-0244 §1, §6)."""
+
+
+class ReadCancellation(StrEnum):
+    """What ``AssistantEngine.cancel_read`` did (ADR-0244 §11).
+
+    A **closed** enumeration of exactly **three** members, each valued by its
+    lower-cased name, *added to and never renamed*.
+
+    **Two states, one operation, and the alternative was worse.** A separate
+    ``withdraw`` and ``interrupt`` would ask the caller to know which state the park is
+    in before it acts — a race by construction, since the state can change between the
+    read and the call. One operation whose answer *reports* which of the two happened
+    puts the discrimination where the atomicity already is, which is the park's own
+    compare-and-swap and the running task's own registry.
+
+    **Cancellation establishes nothing and forfeits nothing** (ADR-0244 §11). It
+    records no ruling, revokes no grant, writes no trust record, and does not refund
+    the conversation's spent ``admit_search`` call. A cancelled park frees the
+    conversation's one open-park slot and nothing else.
+    """
+
+    WITHDRAWN = "withdrawn"
+    """An ``OPEN`` park was settled ``CANCELLED`` and nothing was ever sent.
+
+    **The question is withdrawn and no answer is recorded** (ADR-0244 §11).
+    ``ActionPolicy.resolve`` is not called, no ruling is recorded, and the decision on
+    the trail stays the unresolved ``CONFIRM`` it was — which is the whole difference
+    from a denial. The park's content is cleared in the same step, so a cancellation
+    and a concurrent answer cannot both take effect."""
+
+    INTERRUPTED = "interrupted"
+    """A read this process had dispatched and had not completed was cancelled.
+
+    The seam's accounting is ADR-0241 §7's, unchanged: a cancellation that interrupted
+    the call completes the claim before it re-raises, with ``interrupted_outcome`` and
+    an ``UNKNOWN`` cost, and releases the channel. **What is cancelled is the ``resume``
+    call running the dispatch, and no ``TurnOutcome`` is produced for it** — the
+    cancellation is a teardown and is converted into neither an outcome nor a refusal,
+    and what tells the user is this answer, which is the act they performed.
+
+    **The park stays ``APPROVED`` and is not re-opened** (ADR-0244 §11): the question
+    was answered, the call was made, and no caller assumes the query did not leave."""
+
+    NOTHING_TO_CANCEL = "nothing_to_cancel"
+    """The park is settled and no dispatch of it is running here (ADR-0244 §11).
+
+    **A cancellation reaches only a dispatch running in the process that received
+    it.** There is no durable cancellation record, no cross-process signal and no
+    cancellation queue; a park settled ``APPROVED`` whose dispatch is running elsewhere
+    answers this, which is true of what this process can do — honest under ADR-0043's
+    one-resident-process-per-data-directory posture rather than in spite of it. The
+    general case is deferred by name to issue #2173's L7 obligation."""
 
 
 class Disposition(StrEnum):
@@ -17092,6 +17572,35 @@ class TurnOutcome(BaseModel):
             ADR-0242 §9**, and is not permissibly degraded — except the browser,
             which until its own lane renders the turn exactly as it does today and
             ignores this field (ADR-0242 §5, §9).
+        read_confirmation: The :class:`Confirmation` for a read **this turn parked**,
+            so the question appears in the exchange that raised it, or ``None`` on
+            every turn that parked no read (ADR-0244 §9). ADR-0244 is the decision
+            that added it, as ADR-0242 is :attr:`search_not_serviced`'s.
+
+            **The turn that carries it is not parked.** What parks is the *read*: the
+            turn composes, answers and returns, its :attr:`reply` is present and
+            ADR-0170 §4's three ``reply``-``None`` shapes are untouched. A surface
+            renders this question **beside** the reply and never in place of it.
+        read_answer: What became of an answer to a parked read, or ``None`` on every
+            outcome that answered none (ADR-0244 §9).
+
+            **Mutually exclusive with** :attr:`read_confirmation`, and the type states
+            it rather than the prose: a model validator refuses an outcome carrying
+            both.
+
+            **A widening rather than a change**, which is ADR-0197's move and
+            :attr:`recipient_grant`'s and :attr:`search_not_serviced`'s: a
+            ``None``-defaulting member alters neither ADR-0170 §4's three
+            ``reply``-``None`` shapes nor its one :attr:`reply_degraded` shape. The one
+            member on which a ``resume`` returns a **real** ``TurnResult`` and a
+            composed reply is :attr:`ReadAnswerOutcome.DISPATCHED`, which ADR-0244 §8
+            records as a partial supersession of ADR-0052 §3 scoped to exactly that
+            case.
+
+            **It states what became of the answer and never why a ruling went the way
+            it did**, and no statement rendered for a member carries a destination, a
+            query or any fragment of one, a figure, a budget, a ``Settings`` field name
+            or a ``SearchDisposition`` value (ADR-0242 §9's bar, ADR-0244 §9).
 
     Note:
         ADR-0085 §4's Group A table lists this type's four fields as promoted; the
@@ -17137,6 +17646,49 @@ class TurnOutcome(BaseModel):
             "asked for none (ADR-0242 §9)."
         ),
     )
+    read_confirmation: Confirmation | None = Field(
+        default=None,
+        description=(
+            "The confirmation for a read this turn parked, or ``None`` on every turn "
+            "that parked none (ADR-0244 §9)."
+        ),
+    )
+    read_answer: ReadAnswerOutcome | None = Field(
+        default=None,
+        description=(
+            "What became of an answer to a parked read, or ``None`` on every outcome "
+            "that answered none (ADR-0244 §9)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _at_most_one_read_fact(self) -> TurnOutcome:
+        """ADR-0244 §9: the two read members are mutually exclusive.
+
+        A ``converse`` or ``converse_streaming`` outcome may carry
+        :attr:`read_confirmation` and never :attr:`read_answer`; a ``resume``
+        answering a parked read carries the second and never the first; ADR-0198 §1's
+        restatement and ADR-0197 §7's routed park carry neither.
+
+        **Refused by the type rather than documented**, in
+        :meth:`StepOutcome._confirmation_matches_disposition`'s own spirit: a shape a
+        caller cannot reach is better refused than described. The two are two facts and
+        a turn holds at most one of them, which is also why they are two members rather
+        than one — collapsing them would give a single field a ``Confirmation`` on one
+        path and an enum on another, a union a client must discriminate before it can
+        render either.
+
+        Raises:
+            ValueError: If the outcome carries both.
+        """
+        if self.read_confirmation is not None and self.read_answer is not None:
+            msg = (
+                "an outcome carries the question a turn parked or what became of an "
+                "answer to one, never both: a turn that parked a read answered none, "
+                "and a resume answering one parks none (ADR-0244 §9)"
+            )
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _reply_matches_the_shape_of_the_pass(self) -> TurnOutcome:

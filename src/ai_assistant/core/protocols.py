@@ -176,6 +176,8 @@ if TYPE_CHECKING:
         ObservationOutcome,
         ObservationReport,
         ParkedBinding,
+        ParkedRead,
+        ParkedReadDisposition,
         PermissionDecision,
         PermissionRuling,
         Placement,
@@ -183,6 +185,7 @@ if TYPE_CHECKING:
         QueryOutcome,
         Question,
         ReadAsk,
+        ReadCancellation,
         RecipientGrant,
         RecordChunk,
         RecordedInvocation,
@@ -7365,6 +7368,241 @@ class RoutingTrail(Protocol):
 
 
 @runtime_checkable
+class ParkedReads(Protocol):
+    """The questions a recorded ``CONFIRM`` on a read left standing (ADR-0244 §3).
+
+    A durable store with **exactly seven members and no more**. No member is added, no
+    argument widened and no return changed by any later lane without the ADR that
+    decides it.
+
+    **A store of its own, where ADR-0238 §8 refused one — and the disanalogy is the
+    whole argument.** That section moved a per-conversation counter onto the
+    conversation record because a counter is not rediscoverable after a crash: it is
+    keyed by conversation id, has no terminal event, no deadline and no enumeration
+    that would ever visit it again. **A park has all four.** Its deadline closes the
+    failure mode a store would otherwise leave open, and putting a park on the
+    conversation record instead would breach that contract's own stated invariant —
+    :class:`ConversationStore` *"holds no content"*, and a park holds three content
+    fields — while giving one store two tiers of obligation.
+
+    **And** ``permissions/`` **is where the implementation belongs**, for the reason
+    :class:`SourceReadTrail`'s already is: ADR-0004 §7 charters that subsystem for
+    gating access to Tier 0/1 data *and* recording it, and a park is the unanswered
+    half of a recorded permission question, joined to the trail by
+    :attr:`~ai_assistant.core.types.ParkedRead.decision_id`. It is **not** the
+    :class:`AuditTrail`, for ADR-0097 §4's reason applied here: that trail's premise is
+    that its records are not fabricated and its invariants are stated over ``tool``,
+    ``parameters_digest``, ``step_id`` and ``execution_id`` — putting the query itself
+    into it would breach ADR-0148 §6's *"bound by digest, never stored"* in the one
+    store that clause is about.
+
+    A **Tier 1 local store** (ADR-0004 §7). ADR-0004 §2's residency clause governs it:
+    implementations persist locally only, under ``Settings.data_dir`` and owner-only,
+    and **none of this is ever written to a remote service**. ADR-0004 §5's *"Tier 0/1
+    data must never be logged"* binds without qualification, and the park's content is
+    the clearest Tier 1 in this decision.
+
+    **A settled park keeps its terminal facts and loses its content** (§3):
+    ``id``, ``conversation_id``, ``decision_id``, ``parked_at``, ``expires_at`` and
+    ``disposition`` survive settlement; ``parameters``, ``goal`` and ``plan`` do not,
+    and **no implementation retains a copy, a digest of the query, a snapshot or an
+    archive of them**. The content lives exactly as long as the question does, which
+    is the whole of the retention rule ADR-0244 states — ADR-0231 §16's *"nothing was
+    retained"* posture holds of a read that ran, because what the park held is gone the
+    moment the read is dispatched.
+
+    **Retention is the park's deadline and the conversation's lifecycle, and there is
+    no third rule** (ADR-0244 §15). ``Settings.parked_read_ttl`` bounds every park's
+    content in time; ADR-0074 §8's ``stamp_deleted``/``drop_if_eligible`` bound it by
+    the conversation, through the capture/lifecycle stage that calls
+    :meth:`drop_for_conversation` — *"the one layer that legitimately holds both handles
+    by injection"* (ADR-0074 §9). It reaches this store **through the Protocol and never
+    through a concrete one** (golden rule 1), which is why the member is here rather
+    than left to an implementation. **No lane adds a cross-store reconciliation walk, a
+    tombstone, a stamp of its own or a second lifecycle**, and no lane adds a background
+    task, a reclaim pass or a scheduler.
+
+    **ADR-0244 mints no error class** (§9). An implementation that cannot read or write
+    raises its own subsystem's failure, and every caller in ``orchestration`` treats a
+    raise from :meth:`park` exactly as ADR-0244 §1's third clause rules: **no park
+    exists**, nothing is outstanding, and the servicing is exactly what it is today.
+    """
+
+    async def park(self, record: ParkedRead, /) -> bool:
+        """Write an ``OPEN`` park, or answer ``False`` where one already stands.
+
+        **The read of the existing park and the write are one indivisible step**
+        (ADR-0244 §3). A conversation holds at most one ``OPEN`` park, and the
+        enforcement is the store's rather than a caller's for ``admit_search``'s own
+        reason (ADR-0238 §8): two turns of one conversation, two servicings of one
+        turn, and two engines over one data directory can none of them be admitted
+        against the same conversation's park.
+
+        **One park names one decision, and a second naming the same is refused** —
+        which is what makes :meth:`park_of_decision` a single answer rather than a
+        listing. It holds by construction as well as by rule, since one servicing
+        records one ``CONFIRM`` and writes at most one park for it; the clause is
+        stated so that an implementation cannot reach a state where two rows answer one
+        decision id.
+
+        **A servicing whose ``park`` answered ``False`` has written no park**, and
+        ADR-0244 §1's third clause governs what it then is: the decision stands
+        unresolved on the trail, the establishing act may ride it where ADR-0235 §3's
+        conditions hold, and the turn is told what it is told today. **A lane that
+        reported a park it did not write would tell the user to answer a question
+        nothing holds**, which is the one failure that clause is stated to prevent.
+
+        Args:
+            record: The park to write. Its ``disposition`` is
+                :attr:`~ai_assistant.core.types.ParkedReadDisposition.OPEN` and its
+                three content fields are present, which the type already enforces.
+
+        Returns:
+            ``True`` where this call wrote the park; ``False`` where this
+            conversation already holds an ``OPEN`` one, or where a park already names
+            this decision.
+
+        Raises:
+            AssistantError: If the store could not be written.
+        """
+        ...
+
+    async def get(self, park_id: str, /) -> ParkedRead | None:
+        """Return the park under that id, or ``None``.
+
+        Args:
+            park_id: The park's own identifier.
+
+        Returns:
+            The park, whatever its disposition, or ``None`` where no row holds that id.
+
+        Raises:
+            AssistantError: If the store could not be read.
+        """
+        ...
+
+    async def open_park(self, conversation_id: str, /) -> ParkedRead | None:
+        """Return this conversation's open park, or ``None``.
+
+        Args:
+            conversation_id: The conversation to read.
+
+        Returns:
+            The one park of that conversation whose disposition is ``OPEN``, or
+            ``None`` where it holds none.
+
+        Raises:
+            AssistantError: If the store could not be read.
+        """
+        ...
+
+    async def park_of_decision(self, decision_id: str, /) -> ParkedRead | None:
+        """Return the park naming that decision, **whatever its disposition**.
+
+        It is what ADR-0244 §5's eighth ``grantable_decisions`` condition is decided
+        from, **it survives a restart because the row does**, and it is a second read
+        rather than a widening of :meth:`get`: the token path holds a park id and the
+        listing path holds a decision id, and neither has the other's.
+
+        Args:
+            decision_id: The recorded ``CONFIRM`` to look for.
+
+        Returns:
+            The one park naming that decision, open or terminal, or ``None`` where no
+            park names it.
+
+        Raises:
+            AssistantError: If the store could not be read.
+        """
+        ...
+
+    async def outstanding(self) -> tuple[ParkedRead, ...]:
+        """Return every ``OPEN`` park, in ``parked_at`` order.
+
+        ADR-0244 §5's enumeration, which ``AssistantEngine.pending_confirmations``
+        reads beside ADR-0052 §1's parked steps. A tuple rather than a list, like every
+        other enumeration on a contract: a caller that mutated a returned page has
+        changed nothing about the store's state and may believe otherwise (ADR-0085
+        §3b).
+
+        **It lists expired parks too, and settling them is the caller's.** ADR-0244 §5
+        puts the settlement at the read rather than in a sweep of its own, so this
+        member reports what is ``OPEN`` and takes no view of the clock — a store that
+        read one would be deciding a lifetime the engine owns.
+
+        Returns:
+            Every open park, oldest first.
+
+        Raises:
+            AssistantError: If the store could not be read.
+        """
+        ...
+
+    async def settle(
+        self, park_id: str, /, *, disposition: ParkedReadDisposition, at: UtcInstant
+    ) -> bool:
+        """Move an ``OPEN`` park to a terminal member and clear its content.
+
+        **The resolve-once gate, and what makes a duplicate answer a no-op rather than
+        a second dispatch** (ADR-0244 §3, §6). The read, the comparison and the write
+        are **one indivisible step**, it answers ``True`` to the caller that moved the
+        park and ``False`` to every other, and ``settle`` on an already-terminal park
+        answers ``False`` and changes nothing.
+
+        **No lane reads a park, decides, and writes back**; no lane dispatches a read
+        before this has answered ``True`` for it; and a caller that lost the
+        compare-and-swap dispatches nothing, sends nothing and reports the settled
+        state. That is ADR-0044 §2(b)'s one-answer invariant — *"once **any**
+        confirmation for it is resolved, the binding is decided"* — restated for a
+        park, at the seam a read has instead of a binding of two ids.
+
+        **It clears ``parameters``, ``goal`` and ``plan`` in the same step that moves
+        the disposition**, which is what bounds the content in time rather than in
+        principle.
+
+        Args:
+            park_id: The park to settle.
+            disposition: The terminal member to move it to. ``OPEN`` is not a
+                settlement and an implementation refuses it.
+            at: The instant the settlement was taken, from the caller's clock.
+
+        Returns:
+            ``True`` where this call moved the park; ``False`` where it was already
+            terminal or no row holds that id.
+
+        Raises:
+            AssistantError: If the store could not be written.
+            ValueError: If ``disposition`` is ``OPEN``.
+        """
+        ...
+
+    async def drop_for_conversation(self, conversation_id: str, /) -> int:
+        """Remove **every** park of that conversation and answer how many rows went.
+
+        Open and terminal alike, content and terminal facts alike. It is the one
+        destructive member, it is the conversation deletion sequence's route, and it is
+        **idempotent**: a second call answers ``0`` (ADR-0244 §3).
+
+        **An open park stranded by a crash in that sequence is not an unrecoverable
+        orphan.** It carries its own ``expires_at``, :meth:`outstanding` enumerates it,
+        and ADR-0244 §10's expiry settles it and clears its content without any
+        reference to the conversation record. A **terminal** park stranded there holds
+        no content at all, so what is left is six scalar facts that the next deletion
+        call removes.
+
+        Args:
+            conversation_id: The conversation whose parks to remove.
+
+        Returns:
+            How many rows were removed.
+
+        Raises:
+            AssistantError: If the store could not be written.
+        """
+        ...
+
+
+@runtime_checkable
 class ConversationStore(Protocol):
     """The durable index of conversations and the turns under them (ADR-0074).
 
@@ -10869,6 +11107,71 @@ class AssistantEngine(Protocol):
                 that would stamp the answer. Raised **before any ruling is sought**,
                 so nothing is written, nothing is executed, and the step stays
                 durably parked and answerable without the standing request.
+        """
+        ...
+
+    async def cancel_read(self, token: ContinuationToken, /) -> ReadCancellation:
+        """Withdraw a parked read's question, or interrupt the read it dispatched.
+
+        ADR-0244 §11's one operation, and **the cancellation source #2217 names for
+        this operation kind alone**. It takes no other argument, no reason, no free
+        text and no deadline.
+
+        **Two states, one operation, and the alternative was worse.** A separate
+        ``withdraw`` and ``interrupt`` would ask the caller to know which state the
+        park is in before it acts — a race by construction, since the state can change
+        between the read and the call. One operation whose *answer* reports which of
+        the two happened puts the discrimination where the atomicity already is, which
+        is ``ParkedReads.settle`` and the running task's own registry.
+
+        **Cancelling an ``OPEN`` park withdraws the question and records no answer.**
+        ``ActionPolicy.resolve`` is not called, no ruling is recorded, and the decision
+        on the trail stays the unresolved ``CONFIRM`` it was — the whole difference
+        from a denial, which *is* a ruling. The park is settled ``CANCELLED`` and its
+        content is cleared in the same step, so a cancellation and a concurrent answer
+        cannot both take effect: it takes the same compare-and-swap ``resume`` takes,
+        so a cancellation that lost it answers
+        :attr:`~ai_assistant.core.types.ReadCancellation.NOTHING_TO_CANCEL` and an
+        answer that lost it returns
+        :attr:`~ai_assistant.core.types.ReadAnswerOutcome.ALREADY_SETTLED`. **Neither
+        party acts on a park the other took.**
+
+        **Cancelling a dispatched read cancels the task running it**, and the seam's
+        accounting is ADR-0241 §7's, unchanged: the claim is completed before the
+        cancellation re-raises, with ``interrupted_outcome`` and an ``UNKNOWN`` cost,
+        and the channel is released. ``CancelledError`` is re-raised and converted into
+        neither an outcome nor a refusal, so **no ``TurnOutcome`` is produced for the
+        interrupted ``resume``** and what tells the user is this answer. The park stays
+        ``APPROVED`` and is **not** re-opened: *"the deadline stops the waiting, not the
+        work"*, so no caller assumes the query did not leave, and the user's recourse is
+        to ask again.
+
+        **It reaches only a dispatch running in the process that received it.** There
+        is no durable cancellation record, no cross-process signal and no cancellation
+        queue; a park settled ``APPROVED`` whose dispatch is running elsewhere answers
+        ``NOTHING_TO_CANCEL``, which is true of what this process can do — honest under
+        ADR-0043's one-resident-process-per-data-directory posture rather than in spite
+        of it. The general case is deferred by name to #2173's L7 obligation, which
+        ADR-0244 leaves open.
+
+        **Cancellation establishes nothing and forfeits nothing.** It records no
+        ruling, revokes no grant, writes no trust record, and does **not** refund the
+        conversation's spent ``admit_search`` call (ADR-0238 §8). A cancelled park
+        frees the conversation's one open-park slot and nothing else.
+
+        Args:
+            token: The opaque continuation naming the park, as
+                :meth:`pending_confirmations` and the parking turn's
+                ``TurnOutcome.read_confirmation`` hand it back. Its contents are the
+                engine's; the adapter never inspects them.
+
+        Returns:
+            Which of ADR-0244 §11's three states this call reached.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            UnknownContinuationError: If ``token`` names no park this engine holds,
+                exactly as :meth:`resume` raises it for a token it does not hold.
         """
         ...
 
