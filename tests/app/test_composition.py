@@ -1749,6 +1749,9 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
     user reads it (§4). ADR-0238 §1's destination-trust store is the
     **fifteenth**, and §1 states the residency clause explicitly for ADR-0185
     §9's reason — "local and durable and … never written to a remote service".
+    ADR-0244 §3's parked-read store joins them on the same terms, and its §2 is where
+    its tier is stated: it holds the question a recorded ``CONFIRM`` left standing, and
+    a question is content.
 
     **The count in this docstring said "eight" while the list below named ten**,
     which is exactly the hazard ADR-0123's Context records — "the count in the most
@@ -1791,6 +1794,16 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
             # store's reason exactly: an entry holds the same candidate, so it holds
             # the same free text a producer wrote to be shown to a person.
             "outbox.db",
+            # ADR-0244 §3's parked-read store, which joins them on the same terms and
+            # is Tier 1 by its own §2: three of a park's nine fields are content — the
+            # composed query, the objective minted from the utterance, and the plan the
+            # planner returned on the parked turn. **A file of its own rather than a
+            # table in ``audit.db``**, for the reason §3 gives: that trail's premise is
+            # that its records are not fabricated and its invariants are stated over
+            # ``tool``, ``parameters_digest``, ``step_id`` and ``execution_id``, so
+            # putting the query itself into it would breach ADR-0148 §6's "bound by
+            # digest, never stored" in the one store that clause is about.
+            "parked_reads.db",
             "plans.db",
             # ADR-0185 §4's source-read trail, the eleventh and the tenth that is
             # Tier 1: a row names the source a read was about and the grant it ran
