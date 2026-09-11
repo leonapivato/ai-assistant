@@ -1329,6 +1329,30 @@ const READ_CANCELLATION_UNREADABLE =
   "is not reported here rather than reported as something it may not be. Press " +
   "Confirmations to read what is still waiting.";
 
+// The two `ReadAnswerOutcome` members after which the **question may still stand**
+// (ADR-0244 §9, adversarial review's round 1).
+//
+// §9 states it for `OPERATION_CHANGED` in terms — "where the subject or the binding
+// failed the park is still `OPEN` while a refused append leaves it spent and the answer
+// unrecorded" — and `UNAVAILABLE_NOW` is the member on which "nothing was ruled and
+// nothing was dispatched" at all. Every other member names a park that is closed: the
+// read ran, the answer was no, it was already settled, its deadline passed, or the
+// policy answered and "the park is spent".
+//
+// **So the consent token comes back for these two, and this is the one place on this
+// page where an *outcome* gives one back.** Keeping it spent is what `spent` is for
+// where an answer stands; over a question that may still be open it is a pair of
+// controls that submit nothing — `answerConfirmation` returns early on a spent token —
+// and that is the silent refusal this surface spends the most words preventing.
+//
+// **Giving it back is safe even where the park turned out to be spent**, which is the
+// half worth stating: a second answer on a settled park "sends nothing, records nothing
+// and returns `ALREADY_SETTLED`" (ADR-0244 §6), which this page renders as its own fixed
+// statement. So the worst case of guessing wrong in this direction is an honest sentence,
+// and the worst case of guessing wrong in the other is a question nobody can answer —
+// which is #1621's asymmetry, one vocabulary over.
+const READ_ANSWERS_LEAVING_THE_QUESTION = new Set(["operation_changed", "unavailable_now"]);
+
 // The sentence for one member, or the refusal above.
 //
 // **`Object.hasOwn` rather than a truthiness test on the lookup**, because a member
@@ -3634,8 +3658,21 @@ async function answerConfirmation(token, approved, stopping) {
     // sentence comes after it.
     strand(token);
     readPending(false);
+    // **Where this page cancelled the read itself, the outcome is known and this is
+    // what it is** (ADR-0244 §11, adversarial review's round 1). A dispatch this page
+    // interrupted ends with "no `TurnOutcome` … the cancellation is a teardown and is
+    // converted into neither an outcome nor a refusal", and "what tells the user is
+    // `cancel_read`'s own answer, which is the act they performed". So the not-known
+    // sentence would be false here twice over — the page knows why the answer ended, and
+    // `PARK_LOST`'s "nothing was cancelled" is the opposite of what it just did.
+    //
+    // **Either ordering of the two replies ends with the act's own answer on screen.**
+    // Where the cancellation landed first this branch renders it; where it lands second,
+    // `cancelRead` writes it over whatever stood here. Neither result is lost to the
+    // other's timing, which is the property the two orderings are tested for.
+    const recorded = cancelled.has(token) ? cancelled.get(token) : null;
     const lost = stopping.signal.aborted ? PARK_UNRESOLVED : PARK_LOST;
-    fault(lost, "confirmations");
+    fault(recorded === null ? lost : cancellationWords(recorded), "confirmations");
     return;
   }
   if (body === null) {
@@ -3727,6 +3764,14 @@ async function answerConfirmation(token, approved, stopping) {
     fault(PARK_REPLY_UNREADABLE, "confirmations");
     return;
   }
+  // **A refusal that left the question standing leaves the control answerable**
+  // (ADR-0244 §9). The park is not settled on these two members, and
+  // `pending_confirmations` hands the same question back — so a token held spent over it
+  // is a row the owner can see, can read a refusal beside, and cannot act on. The row's
+  // own `finally` calls `refreshParks`, so nothing here has to.
+  if (READ_ANSWERS_LEAVING_THE_QUESTION.has(body.outcome.read_answer)) {
+    spent.delete(token);
+  }
   // Read again, and **after** the guard on this token has done its work rather than
   // inside it: this is the best-effort tidy-up of what is left on screen, and no other
   // park's answer waits on it.
@@ -3797,15 +3842,40 @@ async function cancelRead(token) {
   }
   cancelling.add(token);
   refreshParks();
+  // What the gateway refused with, where it refused — `answerConfirmation`'s own device
+  // and for its reason, which reaches this act unchanged because this act mutates too
+  // (adversarial review, round 1). `relay` displays the condition and returns a bare
+  // `null`, and the difference between two refusals is what decides whether this page
+  // may say the question still stands.
+  let refusal = null;
+  const noticed = (named) => {
+    refusal = named;
+  };
   let lost = false;
+  let done = null;
   try {
-    // A refusal the gateway named comes back as a bare `null` having already been
-    // displayed by `relay`, and it is **not** recorded as a cancellation: a refused
-    // request is one the hub received and declined, so the park is untouched and the
-    // row stays exactly as answerable as it was.
-    const body = await relay(half, "/confirmation/cancel-read", { token }, "confirmations");
+    const body = await relay(
+      half,
+      "/confirmation/cancel-read",
+      { token },
+      "confirmations",
+      undefined,
+      noticed
+    );
     if (body !== null) {
-      cancelled.set(token, body.cancellation);
+      done = body.cancellation;
+      cancelled.set(token, done);
+    } else {
+      // **A refusal is not evidence that nothing was cancelled** (ADR-0177 §7's third
+      // and fourth clauses, ADR-0139 §4). The test is `act`'s and `answerConfirmation`'s,
+      // copied rather than re-derived: a condition this page reads as unknown, *or* a
+      // refusal carrying no condition it can read at all — `readBody` answers `{}` for a
+      // body that was truncated, malformed or replaced by a proxy, and an absent `fault`
+      // is the same nothing. Either way the hub may have withdrawn the question already,
+      // so this page says the outcome is not known rather than leaving `FAULTS`'s
+      // "nothing was asked" standing over a mutating act.
+      const named = refusal !== null && typeof refusal.fault === "string";
+      lost = !named || UNKNOWN_FAULTS.has(refusal.fault);
     }
   } catch (_) {
     // No response was read. `relay` keeps the rejection rather than swallowing it
@@ -3820,7 +3890,29 @@ async function cancelRead(token) {
   }
   if (lost) {
     fault(READ_CANCEL_LOST, "confirmations");
+    return;
   }
+  if (done === null) {
+    // A condition the gateway named and this page reads as a request the hub received
+    // and declined, which is known **not** to have landed. `relay` has displayed it, the
+    // park is untouched, and the row is as answerable and as cancellable as it was.
+    return;
+  }
+  // **The statement is written at panel level as well as on the rows, and it is written
+  // last** (adversarial review, round 1; ADR-0244 §11). A row is not a place this fact
+  // can be relied on to stay: the answer this cancellation interrupted fails at about
+  // the same moment, `answerConfirmation` re-reads the listing on its way out, and a
+  // park that is settled or withdrawn is not in the listing — so every row carrying the
+  // sentence is detached and `refreshParks` has nothing left to tell. §11 makes that the
+  // one thing the user must not lose: "what tells the user is `cancel_read`'s own
+  // answer, which is the act they performed".
+  //
+  // The tidy-up is **started and not waited on**, and the sentence comes after it, which
+  // is `answerConfirmation`'s own ordering and for its reason: `readPending` clears this
+  // panel's slot on its way in, so a sentence written before it would be wiped by the
+  // read it triggered.
+  readPending(false);
+  fault(cancellationWords(done), "confirmations");
 }
 
 async function startSession(event) {
