@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Final, assert_never, cast
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
+    AuditError,
     GrantError,
     InvalidGrantError,
     InvalidRecipientGrantError,
@@ -528,6 +529,12 @@ class FakeAssistantEngine:
         #: ``cancel_read`` — which is ADR-0244 §6's and §11's own rule. A handle in
         #: neither this set nor any park table is unknown, and raises.
         self._read_handles: set[str] = set()
+        #: The terminal fact each **settled** read park keeps, by handle (ADR-0244 §3,
+        #: §9). ``EXPIRED`` where the deadline was what closed it, ``ALREADY_SETTLED``
+        #: otherwise — because §9 states ``EXPIRED`` over the disposition "whether this
+        #: call settled it or an earlier read did", so a second answer to an expired
+        #: question reads the same to a user as the first.
+        self.read_settled: dict[str, ReadAnswerOutcome] = {}
         #: What each read park's answer will produce, by handle. ``DISPATCHED`` unless a
         #: test scripts otherwise, so a consumer can be driven through every member of
         #: :class:`~ai_assistant.core.types.ReadAnswerOutcome` without this fake having
@@ -1540,6 +1547,30 @@ class FakeAssistantEngine:
         # approval requests no standing authority, so nothing here may test one — a user
         # must be able to approve a lookup without also being told their binding cannot
         # carry a grant they never requested.
+        confirmation = self.read_parked.get(handle)
+        if confirmation is None:
+            # **A duplicate answer performs nothing and restates what was decided**
+            # (ADR-0244 §6): it consults no policy, opens no channel, records nothing and
+            # mints nothing — and, because it performs nothing, it touches **no other
+            # state either**. In particular a dispatch this process is running stays
+            # running and stays cancellable: repeated answers and cancellation are two
+            # operations over one park (§11), and a restatement that tore down the
+            # registry would let a double-clicked button make the act unreachable.
+            #
+            # **The member is the park's own terminal disposition**, which is why one is
+            # kept: §9 states ``EXPIRED`` over the disposition "whether this call settled
+            # it or an earlier read did", so a fake that only remembered *that* a question
+            # was gone would report a park an earlier read expired as merely settled — and
+            # a surface would render the wrong one of two fixed statements.
+            return TurnOutcome(
+                turn=None,
+                read_answer=self.read_settled.get(handle, ReadAnswerOutcome.ALREADY_SETTLED),
+            )
+        # **The act's two refusals, before anything is claimed or recorded** (ADR-0235
+        # §1, §2; ADR-0244 §5), and **only where an act was asked for**: an ordinary
+        # approval requests no standing authority, so nothing here may test one — a user
+        # must be able to approve a lookup without being told their binding cannot carry
+        # a grant they never requested.
         wants_act = remember_recipients_until is not None
         confirmed = self._parked_decisions.get(handle)
         # The **one** instant this answer carries (ADR-0235 §1): read once here, compared
@@ -1548,7 +1579,7 @@ class FakeAssistantEngine:
         # ``RecipientGrant.established_from``'s constructor, which is the failure that
         # clause exists to remove rather than to narrow.
         at = _AT
-        if wants_act and approved and handle in self.read_parked:
+        if wants_act and approved:
             if confirmed is None:
                 msg = (
                     "this token names a park this engine holds no recorded CONFIRM whose "
@@ -1564,19 +1595,17 @@ class FakeAssistantEngine:
         # §6): the availability clauses precede the gate, so a member whose ground is one
         # of them must leave the park exactly where it was.
         outcome = (
-            ReadAnswerOutcome.ALREADY_SETTLED
-            if handle not in self.read_parked
-            else ReadAnswerOutcome.DECLINED
+            ReadAnswerOutcome.DECLINED
             if not approved
             else self.read_answers.get(handle, ReadAnswerOutcome.DISPATCHED)
         )
-        confirmation = self.read_parked.get(handle)
         if outcome in _READ_OUTCOMES_THAT_SPEND_THE_PARK:
             # **The gate, taken before any resolution is recorded** (ADR-0244 §6): a
             # caller that lost it rules nothing and records nothing, and there is no
-            # window in which a settled decision stands beside an open question.
-            self.read_parked.pop(handle, None)
-            self.read_dispatching.discard(handle)
+            # window in which a settled decision stands beside an open question. The
+            # disposition is kept beside the eviction, which is §3's "a settled park keeps
+            # its terminal facts" at the one fact this fake can be asked about again.
+            self._settle_read(handle, outcome)
         grant: RecipientGrantOutcome | None = None
         if outcome in _READ_OUTCOMES_THAT_RULE and confirmed is not None:
             # **Only the outcomes ADR-0244 §9 says carry a ruling record one.**
@@ -1585,12 +1614,28 @@ class FakeAssistantEngine:
             # refused, whose ruling "**is** recorded". The other four state in terms that
             # nothing was ruled, so a fake writing a row for one would certify a consumer
             # against a trail no hub writes.
-            answer = await self._record_the_answer(
-                handle,
-                confirmed,
-                at=at,
-                approved=outcome is ReadAnswerOutcome.DISPATCHED,
-            )
+            try:
+                answer = await self._record_the_answer(
+                    handle,
+                    confirmed,
+                    at=at,
+                    approved=outcome is ReadAnswerOutcome.DISPATCHED,
+                )
+            except AuditError:
+                # **A refused resolving append is never raised out of a read's answer**
+                # (ADR-0244 §6): "it is **returned and not raised**, because a refusal on
+                # ``resume`` is a result". Clause 5 makes the already-resolved ground
+                # unreachable here — the park's one answer was taken above — so what this
+                # is is one of that class's other grounds, or a fault. The answer is not
+                # recorded, **the park stays spent**, nothing is dispatched, and the
+                # outcome is ``OPERATION_CHANGED``.
+                #
+                # The step path still propagates it, and the asymmetry is ADR-0244 §6
+                # rather than an inconsistency: a step's resume has a disposition it must
+                # author over a decision the trail would not hold, and a read's has a
+                # member for exactly this.
+                self._settle_read(handle, ReadAnswerOutcome.OPERATION_CHANGED)
+                return TurnOutcome(turn=None, read_answer=ReadAnswerOutcome.OPERATION_CHANGED)
             if wants_act:
                 assert remember_recipients_until is not None  # noqa: S101 — `wants_act` is the guard
                 grant = await self._establish_recipients(
@@ -1601,7 +1646,7 @@ class FakeAssistantEngine:
                         expires_at=remember_recipients_until,
                     ),
                 )
-        if outcome is not ReadAnswerOutcome.DISPATCHED or confirmation is None:
+        if outcome is not ReadAnswerOutcome.DISPATCHED:
             # ADR-0170 §4's second shape on every one of them: ``turn`` ``None``,
             # ``reply`` ``None`` (ADR-0244 §9, §10). Nothing is sent and the parked
             # turn's own reply stands.
@@ -1614,6 +1659,31 @@ class FakeAssistantEngine:
             reply="Here is what that lookup found.",
             recipient_grant=grant,
             read_answer=ReadAnswerOutcome.DISPATCHED,
+        )
+
+    def _settle_read(self, handle: str, outcome: ReadAnswerOutcome) -> None:
+        """Take the question and keep the one terminal fact a later answer reads.
+
+        ADR-0244 §3's "a settled park keeps its terminal facts and loses its content", at
+        the one fact this fake can be asked about again: §9 states ``EXPIRED`` over the
+        **disposition** rather than over which call discovered it, so a park an earlier
+        read expired must answer ``EXPIRED`` to every later one. Every other terminal
+        member reads as ``ALREADY_SETTLED``, which is what §9 says a second answer to an
+        answered, denied or cancelled park gets.
+
+        **It does not touch the dispatch registry** (ADR-0244 §11): what a settlement
+        ends is the *question*, and a read this process is running is a separate fact
+        that a cancellation still reaches.
+
+        Args:
+            handle: The park being settled.
+            outcome: The member this answer reached.
+        """
+        self.read_parked.pop(handle, None)
+        self.read_settled[handle] = (
+            ReadAnswerOutcome.EXPIRED
+            if outcome is ReadAnswerOutcome.EXPIRED
+            else ReadAnswerOutcome.ALREADY_SETTLED
         )
 
     @staticmethod
@@ -3441,7 +3511,7 @@ class FakeAssistantEngine:
         """
         self.read_dispatching.add(handle)
         self._read_handles.add(handle)
-        self.read_parked.pop(handle, None)
+        self._settle_read(handle, ReadAnswerOutcome.DISPATCHED)
 
     def park_routed(
         self, handle: str, *, operation: RoutableOperation, subject: RoutedListing

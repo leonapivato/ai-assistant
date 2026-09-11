@@ -553,3 +553,115 @@ async def test_an_ordinary_approval_is_unaffected_by_the_binding_or_the_script(
 
     assert outcome.read_answer is member, "the answer landed rather than being refused"
     assert outcome.recipient_grant is None, "and no act was collected, so none is reported"
+
+
+# --- the second answer, which is the axis round 5 found the table missing -----
+#
+# The table above states what the **first** answer does over the whole product; these
+# state what a **second** one does, which is the axis every one of round 5's findings
+# lived on. It is one axis rather than three arms for the diagnosis's own reason: three
+# arms would pin three cells and leave the rest free to move again.
+
+
+@pytest.mark.parametrize("member", _SCRIPTABLE)
+async def test_a_second_answer_restates_the_terminal_fact_and_performs_nothing(
+    member: ReadAnswerOutcome,
+) -> None:
+    """ADR-0244 §6 and §9, over every member the first answer could have reached.
+
+    **The member is the park's own terminal disposition**: §9 states ``EXPIRED`` over the
+    disposition "whether this call settled it or an earlier read did", and every other
+    terminal member reads as ``ALREADY_SETTLED`` — "the park was answered, denied or
+    cancelled before this answer arrived". A fake remembering only *that* a question was
+    gone would report an expired one as merely settled, and a surface would render the
+    wrong one of two fixed statements.
+
+    **And it performs nothing**: no policy is consulted, no channel opened, nothing
+    recorded and nothing minted, so the trail holds exactly what the first answer left.
+    """
+    engine = FakeAssistantEngine()
+    offered = engine.park_read("h-1", query="bell tower porto")
+    confirmed = _confirm(external=False)
+    await engine.trail.record(confirmed)
+    engine.hold_confirmation_decision("h-1", confirmed)
+    engine.read_answers["h-1"] = member
+    first = await engine.resume(offered.token, approved=True, timeout=PATIENT)
+    rows = len(await engine.export_decisions())
+    if first.read_answer not in _SETTLING:
+        pytest.skip(f"{member} leaves the question standing; the first-answer table has it")
+
+    second = await engine.resume(offered.token, approved=True, timeout=PATIENT)
+
+    assert second.read_answer is (
+        ReadAnswerOutcome.EXPIRED
+        if member is ReadAnswerOutcome.EXPIRED
+        else ReadAnswerOutcome.ALREADY_SETTLED
+    )
+    assert second.turn is None, "a duplicate answer performs nothing"
+    assert second.reply is None
+    assert second.recipient_grant is None
+    assert len(await engine.export_decisions()) == rows, "and records nothing further"
+
+
+#: The members that take the question, so the second-answer case knows which cells have
+#: a second answer to make. The complement is the first-answer table's subject.
+_SETTLING: Final = frozenset(
+    {
+        ReadAnswerOutcome.DISPATCHED,
+        ReadAnswerOutcome.DECLINED,
+        ReadAnswerOutcome.AUTHORITY_CHANGED,
+        ReadAnswerOutcome.EXPIRED,
+        ReadAnswerOutcome.ALREADY_SETTLED,
+    }
+)
+
+
+async def test_a_duplicate_answer_leaves_a_running_dispatch_cancellable() -> None:
+    """ADR-0244 §6 and §11: repeated answers and cancellation are two operations.
+
+    "A duplicate answer dispatches nothing and says so: it consults no policy, opens no
+    channel, records nothing and mints nothing" — and because it performs nothing it
+    touches no other state either. A restatement that tore down the dispatch registry
+    would let a double-clicked confirm button make the cancellation act unreachable, on
+    the one operation ADR-0244 §11 exists to provide.
+    """
+    engine = FakeAssistantEngine()
+    offered = engine.park_read("h-1", query="bell tower porto")
+    engine.dispatching_read("h-1")
+
+    duplicate = await engine.resume(offered.token, approved=True, timeout=PATIENT)
+
+    assert duplicate.read_answer is ReadAnswerOutcome.ALREADY_SETTLED
+    assert await engine.cancel_read(offered.token) is ReadCancellation.INTERRUPTED, (
+        "the running dispatch is still there to interrupt"
+    )
+
+
+async def test_a_refused_resolving_append_is_returned_and_not_raised() -> None:
+    """ADR-0244 §6: "**it is returned and not raised**, because a refusal on ``resume``
+    is a result (§9)".
+
+    Clause 5 makes ``InvalidResolutionError``'s already-resolved ground unreachable here —
+    the park's one answer was taken before the append was attempted — so what a refusal
+    is is one of that class's other grounds, or a fault. **The answer is not recorded, the
+    park stays spent, nothing is dispatched**, and the outcome is ``OPERATION_CHANGED``.
+
+    The step path still propagates an ``AuditError``, and the asymmetry is §6 rather than
+    an inconsistency: a step's resume has a disposition it would have to author over a
+    decision the trail would not hold, and a read's has a member for exactly this.
+    """
+    engine = FakeAssistantEngine()
+    offered = engine.park_read("h-1", query="bell tower porto")
+    # Bound to the park but **never recorded**, so the trail refuses the resolution on
+    # its own invariant — "the referenced decision is absent" — which is one of
+    # ``InvalidResolutionError``'s grounds other than the already-resolved one clause 5
+    # makes unreachable. A real refusal rather than an injected fault, so what is under
+    # test is the path and not a hook.
+    engine.hold_confirmation_decision("h-1", _confirm(external=False))
+
+    outcome = await engine.resume(offered.token, approved=True, timeout=PATIENT)
+
+    assert outcome.read_answer is ReadAnswerOutcome.OPERATION_CHANGED
+    assert outcome.turn is None, "nothing was dispatched"
+    assert outcome.recipient_grant is None
+    assert await engine.pending_confirmations() == (), "and the park stays spent"
