@@ -281,13 +281,19 @@ ADR-0231's own terms is that **nothing would resolve it**, and §6 below is the 
 
 > **Normative.** `core/types.py` gains **`ParkedReadDisposition`**, a `StrEnum` valued by
 > lower-cased member name and closed at exactly **five** members: `OPEN`, the question stands
-> and may be answered; `APPROVED`, the answer was yes and the read was dispatched; `DENIED`,
-> the question was answered and the resolving ruling was **not** an `ALLOW` — a user who said
-> no, and a policy that refused after one who said yes, are both this member, and **the trail
-> carries which**; `CANCELLED`, the question was withdrawn without an answer (§11); and
-> `EXPIRED`, the deadline passed with no answer. **`OPEN` is the only non-terminal member**,
-> the other four are terminal, and no transition leaves a terminal member. The vocabulary is
-> added to and never renamed.
+> and may be answered; `APPROVED`, the user answered **yes** and the park's one answer was
+> spent on that answer; `DENIED`, the user answered **no** and the park's one answer was spent
+> on that; `CANCELLED`, the question was withdrawn without an answer (§11); and `EXPIRED`, the
+> deadline passed with no answer. **`OPEN` is the only non-terminal member**, the other four
+> are terminal, and no transition leaves a terminal member. The vocabulary is added to and
+> never renamed.
+
+> **Normative.** **`APPROVED` records what the user said and asserts nothing about what
+> followed.** It does **not** state that a ruling was recorded, that the read was dispatched,
+> that a request left the device or that any record came back: §6 takes the gate before it
+> asks the policy, so an `APPROVED` park beside no recorded resolution is a reachable and
+> honest state. **What happened after the answer is the trail's and the ledger's to say**, and
+> a lane reading a disposition as evidence of a send has read the wrong record.
 
 > **Normative.** **A `ParkedRead` carries no minted record, no result, no snippet, no title,
 > no address, no origin beyond the one its `parameters` already state, no credential, no
@@ -479,11 +485,11 @@ wire-carried type is what ADR-0124 §9 charges a version for.
 > decision, `egress` by ADR-0178 §5, `read` the park's kind, and a continuation token
 > registered against the park's id. Its signature does not move.
 
-> **Normative.** **The enumeration reconciles before it offers.** A park whose `expires_at`
-> has passed, and one whose decision the trail already resolves, are each settled by §6's
-> reconciliation rather than listed — so `pending_confirmations` never offers a question that
-> cannot be answered, and the reconciliation happens at the read rather than in a sweep of its
-> own. **No lane adds a background task, a reclaim pass or a scheduler for either.**
+> **Normative.** **The enumeration settles an expired park rather than offering it**, so
+> `pending_confirmations` never offers a question that cannot be answered, and the settlement
+> happens at the read rather than in a sweep of its own. **It settles nothing else**: an
+> `OPEN` park that has not expired is offered, never closed, whatever any other record says
+> (§6's one-gate clause). **No lane adds a background task, a reclaim pass or a scheduler.**
 
 > **Normative.** **The token is re-minted from durable state and is opaque**, exactly as
 > ADR-0052 §1 rules for a step: durability comes from the handle being *"re-derivable from
@@ -525,7 +531,7 @@ content a live one carries"* so that *"a surface therefore needs one renderer, n
 read's confirmation is a third population of the same type, and a surface that already
 renders ADR-0178 §7's floor renders it with the one branch §4's discriminator gives it.
 
-### 6. The answer: `resume`, and the six things established at that instant
+### 6. The answer: `resume`, the one gate, and the six things established at that instant
 
 > **Normative.** A parked read is answered through **`AssistantEngine.resume`** and through
 > no second operation. Its signature does not move, `approved` carries the answer, and an
@@ -536,7 +542,7 @@ renders ADR-0178 §7's floor renders it with the one branch §4's discriminator 
 >
 > 1. **The park.** `get` answers a park, its `disposition` is `OPEN`, and `expires_at` is
 >    strictly after the clock's reading (ADR-0059 §1's comparison). An expired park is
->    settled `EXPIRED` and the answer is refused as stale (§9).
+>    settled `EXPIRED` and the answer is refused as stale (§10).
 > 2. **The conversation.** `search_draw` answers a draw for `conversation_id` — so a
 >    conversation that names nothing or is stamped deleted refuses (ADR-0238 §14) — and
 >    `Settings.search_calls_per_conversation` is not `0`, which ADR-0238 §8 defines as *"no
@@ -544,9 +550,7 @@ renders ADR-0178 §7's floor renders it with the one branch §4's discriminator 
 >    call is drawn**: the call was admitted before the ruling and consumed whatever the
 >    outcome (§1).
 > 3. **The decision.** The trail holds the decision `decision_id` names, its ruling is a
->    `CONFIRM`, no decision resolving it is recorded, and its own `expires_at` has not
->    passed. **Where a resolution *is* recorded, the park is reconciled rather than answered**
->    (below).
+>    `CONFIRM`, no decision resolving it is recorded, and its own `expires_at` has not passed.
 > 4. **The subject.** The request is rebuilt from the park's `parameters` and the searcher's
 >    own registered declaration, and it is the recorded `CONFIRM`'s **own subject**: the same
 >    `tool`, a `parameters_digest` equal to the decision's, and `step_id` and `execution_id`
@@ -557,20 +561,56 @@ renders ADR-0178 §7's floor renders it with the one branch §4's discriminator 
 >    is not this check** — it is `True` only of an `ALLOW` and is therefore `False` of every
 >    `CONFIRM` — and it is applied where it belongs, to the **resolving** decision, by
 >    `ToolCall`'s own validator and again at the seam (§7, ADR-0231 §6).
-> 5. **The ruling.** `ActionPolicy.resolve` is asked with the user's `approved`, and **its
+> 5. **The gate.** `settle` moves the park from `OPEN` to the member the **user's answer**
+>    names — `APPROVED` on `approved` `True`, `DENIED` on `False` — and answers `True` to
+>    exactly one caller. **Only that caller proceeds.** A caller answered `False` has not
+>    taken the park's one answer: it rules nothing, records nothing, sends nothing, and
+>    returns `ALREADY_SETTLED`.
+> 6. **The ruling.** `ActionPolicy.resolve` is asked with the user's `approved`, and **its
 >    answer is recorded whatever it is** — the second obligation ADR-0235 §3 already relies
 >    on, and ADR-0004 §7's reason: a ruling the trail never sees is a decision nobody can
->    audit. An answer other than `ALLOW` dispatches nothing, and §10 states what the park
->    then takes.
-> 6. **The park's settlement.** `settle` answers `True` for this caller, with `APPROVED` on
->    a recorded `ALLOW` and `DENIED` otherwise. **A `settle` that answered `False` dispatches
->    nothing**, sends nothing and reports the settled state; the recorded answer stands,
->    because it is a true record of what the user said.
+>    audit. An `ALLOW` dispatches (§7); any other answer dispatches nothing and is reported
+>    `AUTHORITY_CHANGED` (§9), with the park already spent.
 
-> **Normative.** **Order 4 before 5 is ADR-0152 §7's, not a preference.** The binding must be
+> **Normative.** **The gate is the park's compare-and-swap, and every settlement is taken by
+> the party about to act on it, before it acts.** An answer settles it (clause 5); a
+> cancellation settles it (§11); **nothing else settles an `OPEN` park on the strength of a
+> record it read** — not a second `resume`, not a store read, not a comparison of the trail
+> with the park, and not a reconciliation of any kind. That is what makes "one answer, at most
+> one dispatch" a property of one atomic write rather than of an agreement between several
+> readers.
+
+> **Normative.** **Expiry is the one settlement no party takes for itself, and it can take
+> nothing from anyone.** A park past its `expires_at` is settled `EXPIRED` by whatever
+> operation next reads it (§5, §10), which is safe precisely because clause 1 refuses to
+> answer such a park at all: there is no live answerer for the settlement to race. **No other
+> condition is given this treatment**, and a lane that settled an unexpired park from a record
+> it read has broken the clause above.
+
+> **Normative.** **The gate is taken before the resolution is recorded, and that order is
+> the decision rather than an accident.** Recording first and settling after leaves a window
+> in which a second party sees an answered decision beside an open park and has to guess
+> whether the first is still running — and any rule it follows there either strands the park
+> or takes the settlement away from a live dispatcher, so that an approved read dispatches
+> **zero** times. Settling first has no such window: a park the trail resolves was settled
+> before that resolution was written, so an `OPEN` park is never one somebody else has
+> answered.
+
+> **Normative.** **What the order costs is stated rather than hidden.** A process that dies
+> between clause 5 and clause 6 leaves a park `APPROVED` with **no** resolution recorded and
+> nothing sent: the user's answer was accepted, the question is closed, and the lookup did
+> not happen. **Nothing re-opens it** — the user's recourse is to ask again — and nothing is
+> unrecorded in ADR-0004 §7's sense, because no decision was taken: the policy was never
+> asked. That is a bounded loss of one answer, and it is preferred to the unbounded hazard
+> the other order carries, which is a send nobody authorised or a send made twice.
+
+> **Normative.** **Order 4 before 6 is ADR-0152 §7's, not a preference.** The binding must be
 > whole before the ruling that authorises the resumed call (ADR-0148 §1), so the rebind
 > happens *before* `resolve` is reached — *"which is the ruling that authorises the resumed
 > call, so it is §1's earliness on the second ruling exactly as `bind` is on the first"*.
+> Clause 5 sits between them because it is a gate on **acting** rather than a step of the
+> authorisation, and because a park spent on an answer the subject check would have refused
+> is an answer the user has to give again for no reason.
 
 > **Normative.** **Nothing else is consulted for authority.** No standing recipient grant is
 > read, established, extended or implied by an approval (§16); `trust_of` is not asked again
@@ -587,34 +627,18 @@ renders ADR-0178 §7's floor renders it with the one branch §4's discriminator 
 > of what "re-checked" means here.
 
 > **Normative.** **A duplicate answer dispatches nothing and says so.** A second `resume` on
-> a settled park's token is refused by clause 3 or clause 6 and reports the park's terminal
-> disposition; it opens no channel, records no second resolution — the trail's own
-> single-resolution index refuses one (ADR-0036 §2) — and mints nothing. ADR-0198 §§1–4's
+> a settled park's token is refused by clause 1 or clause 5 and returns `ALREADY_SETTLED`; it
+> consults no policy, opens no channel, records nothing and mints nothing. ADR-0198 §§1–4's
 > restatement governs a token whose *binding* this engine settled and retains; this clause
-> governs a park whose settlement is durable, and the two agree: **one answer, one dispatch,
-> however many times a token is presented.**
+> governs a park whose settlement is durable, and the two agree: **one answer, at most one
+> dispatch, however many times a token is presented.**
 
-> **Normative.** **An `OPEN` park whose decision the trail already resolves is reconciled,
-> never answered and never dispatched.** It is settled from the **recorded resolution** —
-> `APPROVED` where that resolution is an `ALLOW`, `DENIED` otherwise — and its content is
-> cleared in the same step. **The read is not dispatched on reconciliation**: a crash between
-> clause 5 and clause 6 is indistinguishable from a crash after the send, and re-dispatching
-> would risk the second call ADR-0044 §2's one-answer invariant admits none of. A `resume`
-> that finds this state returns `ALREADY_SETTLED`; an enumeration that finds it does not list
-> the park; the user's recourse is to ask again. **That durable state is named here rather
-> than discovered**, and it is the reason the resolution is written before the settlement
-> rather than after: an unrecorded answer the user gave is the failure ADR-0004 §7 is stated
-> against, and a settled park with no recorded answer could never be reconciled at all.
-
-> **Normative.** **A refused resolving append is reconciled and never raised out of
-> `resume`.** `AuditTrail.record` raises `InvalidResolutionError` where the confirmation
-> *"has already been resolved"*, among five other grounds, and **no lane branches on the
-> message**: the caller re-reads the trail instead. A resolution now standing is the
-> concurrent-answer case and reconciles by the clause above, returning `ALREADY_SETTLED`; no
-> resolution standing means the append was refused on one of the other grounds, the answer is
-> **not** recorded, the park is left `OPEN` for its deadline, and the outcome is
-> `OPERATION_CHANGED`. **Neither branch propagates the error**, because a refusal on `resume`
-> is a result and not an exception (§9).
+> **Normative.** **A refused resolving append is never raised out of `resume`.** Clause 5
+> makes the already-resolved ground of `InvalidResolutionError` unreachable through this
+> path — the park's one answer was taken before the append was attempted — so a refusal here
+> is one of that class's other grounds, or a fault. The answer is **not** recorded, the park
+> stays spent, nothing is dispatched, and the outcome is `OPERATION_CHANGED`. **It is
+> returned and not raised**, because a refusal on `resume` is a result (§9).
 
 ### 7. Approval runs that exact read once, by the route ADR-0231 §6 already fixed
 
@@ -640,13 +664,20 @@ renders ADR-0178 §7's floor renders it with the one branch §4's discriminator 
 > under ADR-0226 §6's budget of ten, and they resolve in no store: a park's approval changes
 > where a search happens in time and changes nothing about what a search **is**.
 
-> **Normative.** **The dispatch is one call.** `settle` is the gate (§3), so an approval that
-> raced another, a token presented twice, a restart between the settlement and the send, and
-> two engines over one data directory can none of them produce a second call. **A crash
-> between the settlement and the completion leaves the claim open**, and ADR-0231 §6's clause
-> governs it verbatim — such a claim states as its own state that the search may have reached
-> the provider, nothing reconciles it, and **no lane adds a recovery arm, completes it from
-> outside the seam or resolves it by guessing.**
+> **Normative.** **The dispatch is one call.** `settle` is the gate and it is taken before the
+> policy is asked (§6), so an approval that raced another, a token presented twice, a restart
+> between the answer and the send, and two engines over one data directory can none of them
+> produce a second call.
+
+> **Normative.** **Three crash states exist after the gate and each is named rather than
+> reconciled.** A crash **before the ledger claim** — between the settlement, the recorded
+> ruling and the claim — leaves **no invocation row at all**, which ADR-0192 §1 admits and
+> which nothing infers a send from. A crash **after the claim and before the completion**
+> leaves the claim **open**, and ADR-0231 §6's clause governs it verbatim: such a claim states
+> as its own state that the search may have reached the provider, nothing reconciles it, and
+> **no lane adds a recovery arm, completes it from outside the seam or resolves it by
+> guessing.** A crash **after the completion** leaves a finished row and a park already
+> terminal. In all three the park is spent and the user's recourse is to ask again.
 
 ### 8. The continuation: a resumed turn that composes over the approved read and says which is which
 
@@ -728,12 +759,13 @@ first one authorised.
 > 4. **`EXPIRED`** — the deadline passed before the answer arrived; the park is settled
 >    `EXPIRED` and nothing was dispatched.
 > 5. **`AUTHORITY_CHANGED`** — `ActionPolicy.resolve` answered other than an `ALLOW` at the
->    instant of the answer; the ruling **is** recorded and nothing was dispatched.
+>    instant of the answer; the ruling **is** recorded, nothing was dispatched, and the park is
+>    spent (§2).
 > 6. **`OPERATION_CHANGED`** — the rebuilt request is not the recorded `CONFIRM`'s own
 >    subject, the binding derived at the instant of the answer is not the one the ruling was
->    taken over, or the trail refused the resolving append on a ground other than the
->    confirmation already being resolved (§6); nothing was dispatched, and where the append
->    was refused the answer is not recorded either.
+>    taken over, or the trail refused the resolving append; nothing was dispatched, and where
+>    the subject or the binding failed the park is still `OPEN` while a refused append leaves
+>    it spent and the answer unrecorded (§6).
 > 7. **`UNAVAILABLE_NOW`** — the conversation no longer exists or is stamped deleted, or
 >    `search_calls_per_conversation` is `0` in this deployment; nothing was ruled and nothing
 >    was dispatched.
@@ -783,9 +815,6 @@ three `reply`-`None` shapes or its one `reply_degraded` shape.
 > it — an answer (returning `EXPIRED`), an enumeration (which does not list it), or the
 > conversation's own next servicing. The settlement clears the content (§3), records no
 > ruling, and the decision on the trail stays the unresolved `CONFIRM` it was.
-> **An expiry is the last reconciliation and never the first**: a park whose decision the
-> trail already resolves is settled from that resolution (§6) even where its deadline has
-> also passed, because calling an answered question unanswered would be false.
 
 > **Normative.** **An expired park's decision is not thereby made grantable, and it is not
 > thereby made ungrantable either.** ADR-0235 §3's seven conditions and §5's eighth decide
@@ -1018,11 +1047,12 @@ is, which is `settle` (§3) and the running task's own registry.
 > crash interrupted leaves the park `APPROVED` and its claim open, which ADR-0231 §6 already
 > rules is the honest state and not one to reconcile (§7).
 
-> **Normative.** **A crash between the recorded answer and the settlement is reconciled at
-> the next read** (§6): the park is settled from the resolution the trail holds, its content
-> is cleared, and the read is **not** dispatched. That is the one intermediate state this
-> mechanism has, it is durable, and it is resolved by reading two records that are already in
-> hand rather than by a recovery pass of its own.
+> **Normative.** **A crash between the answer and the ruling leaves a spent park and no
+> recorded decision, and nothing re-opens it** (§6). The park is terminal, its content is
+> cleared, nothing was sent, and the recovery is the user's: ask again. **There is no
+> intermediate state a restart has to resolve**, because the gate is taken before anything
+> else is written — which is the property settling first buys and the reason this section is
+> four sentences rather than a recovery protocol.
 
 > **Normative.** **ADR-0231 §16's minted-record clauses bind entire across a restart.** A
 > minted record's id *"is minted for one turn, rendered to no model, accepted from none, and
@@ -1213,15 +1243,18 @@ is, which is `settle` (§3) and the running task's own registry.
 >   exactly one `True`; a `settle` clears the three content fields in the same step that moves
 >   the disposition; and `drop_for_conversation` removes open and terminal rows alike and
 >   answers `0` the second time.
-> - **Arm 10 — the crash between the two writes.** With a resolving decision recorded and the
->   park still `OPEN`, the next `resume` and the next `pending_confirmations` each settle the
->   park from that resolution, clear its content, **dispatch nothing**, and answer
->   `ALREADY_SETTLED` / omit the park respectively. Driven by writing the two records in that
->   order and stopping between them, at the seam rather than through a real crash.
+> - **Arm 10 — the crash between the gate and the ruling.** With the park settled `APPROVED`
+>   and no resolution recorded, the next `resume` returns `ALREADY_SETTLED`, the next
+>   `pending_confirmations` does not list the park, **nothing is dispatched**, and no ruling
+>   appears in the trail. Driven by settling and stopping before `resolve`, at the seam rather
+>   than through a real crash.
 > - **Arm 11 — two concurrent answers, end to end.** Two `resume` calls on one token, both
->   past clause 3, produce **one** recorded resolution and **one** dispatch; the loser returns
->   `ALREADY_SETTLED` and **raises nothing**, which is the `InvalidResolutionError`
->   reconciliation of §6 rather than the store's compare-and-swap alone.
+>   past clause 4, produce **one** settlement, **one** recorded resolution and **one**
+>   dispatch; the loser returns `ALREADY_SETTLED`, consults no policy, records nothing and
+>   **raises nothing**. Held with the winner paused **after** its settlement and before its
+>   recorded ruling, so the arm fails an implementation in which the loser's path can act on a
+>   park the winner has taken. **A concurrent `pending_confirmations` during that pause
+>   dispatches nothing, settles nothing and does not list the park.**
 
 > **Normative.** **Arm 2's second half, Arm 9 and Arm 11 are the three this decision would be worthless
 > without**, and they are named here so that no lane treats them as optional: everything else
