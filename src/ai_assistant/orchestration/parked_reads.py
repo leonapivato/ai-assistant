@@ -468,6 +468,16 @@ class ParkedReadOperations:
             confirmed is None
             or confirmed.ruling.outcome is not PermissionOutcome.CONFIRM
             or (confirmed.expires_at is not None and confirmed.expires_at <= now)
+            # **"no decision resolving it is recorded"** is the third of clause 3's four
+            # conjuncts, and it is the one a park alone cannot establish. ADR-0244 §5's
+            # eighth condition keeps a *parked* decision out of `grantable_decisions`,
+            # but there is a window it does not cover: between the trail recording the
+            # `CONFIRM` and this servicing writing its park, no park names that decision
+            # and the establishing act may ride it. Without this read the answer would
+            # spend the park and consult the policy before the trail refused the second
+            # resolution — a question the user has to ask again, for a refusal that was
+            # already knowable.
+            or await search.resolution_of(park.decision_id) is not None
         ):
             # Each of these says the recorded operation is no longer the one the
             # question was about, which is what `OPERATION_CHANGED` names. **The park
@@ -632,7 +642,9 @@ class ParkedReadOperations:
         **It takes §6's gate and takes it the same way**: a cancellation that lost the
         compare-and-swap answers ``NOTHING_TO_CANCEL`` where the answer is already
         running or done, and an answer that lost it returns ``ALREADY_SETTLED``.
-        **Neither party acts on a park the other took.**
+        **Neither party acts on a park the other took** — so a cancellation that read
+        the park **open** and then lost the write interrupts nothing, however far the
+        winning answer has got.
 
         **Cancelling a dispatched read cancels the task running it**, and the seam's
         accounting is ADR-0241 §7's, unchanged: the claim is completed before the
@@ -658,8 +670,20 @@ class ParkedReadOperations:
         if park is not None and park.disposition is ParkedReadDisposition.OPEN:
             if await store.settle(park.id, disposition=ParkedReadDisposition.CANCELLED, at=now):
                 return ReadCancellation.WITHDRAWN
-            # Lost the gate to a concurrent answer, which is now running or done.
-            return self._interrupt(park_id)
+            # **A cancellation that lost the gate acts on nothing** (ADR-0244 §11):
+            # "a cancellation that lost it answers ``NOTHING_TO_CANCEL`` where the
+            # answer is already running or done", and **neither party acts on a park
+            # the other took**. Returned directly rather than falling through to the
+            # interrupt, because falling through is exactly the act the clause forbids:
+            # this call read the park **open**, so what it asked to withdraw was the
+            # *question*, and tearing down the answer somebody else's write had already
+            # taken would let a lost race stop a dispatch a won one authorised.
+            #
+            # **The discriminator is this call's own read and not the park's state
+            # afterwards**, which is what "decided by that write and by nothing else"
+            # means: a cancellation that read the park already ``APPROVED`` asked to
+            # stop a *dispatch* and reaches the interrupt below, and this one did not.
+            return ReadCancellation.NOTHING_TO_CANCEL
         return self._interrupt(park_id)
 
     def _interrupt(self, park_id: str) -> ReadCancellation:
