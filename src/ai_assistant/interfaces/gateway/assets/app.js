@@ -1302,6 +1302,13 @@ const READ_ANSWER_WORDS = {
 // seven, so this is reachable only from a gateway outside its own enumeration — and the
 // honest thing to say then is that this browser cannot report it, rather than a
 // sentence for one of the seven it might not be.
+//
+// **It is the vocabulary and not the decision** (adversarial review's round 9). A value
+// outside the enumeration is not a member §13's clause is about, and rendering a
+// sentence for it settled a park this page had not read an answer for — so
+// `renderReadAnswer` refuses such a value outright and `PARK_REPLY_UNREADABLE` is what
+// the owner reads. This stays because `readAnswerWords` stays total, which is
+// `READ_CANCELLATION_UNREADABLE`'s own position one vocabulary over.
 const READ_ANSWER_UNREADABLE =
   "What became of that answer arrived as something this browser has no words for, so it " +
   "is not reported here rather than reported as something it may not be. Press " +
@@ -1405,21 +1412,27 @@ const READ_CANCELLATION_UNREADABLE =
 // which is #1621's asymmetry, one vocabulary over.
 const READ_ANSWERS_LEAVING_THE_QUESTION = new Set(["operation_changed", "unavailable_now"]);
 
+// Whether a value is one of the seven members ADR-0244 §9 closes the enumeration at.
+//
+// **`isCancellation`'s test, one vocabulary over** (adversarial review's rounds 6 and
+// 9), and it is asked for that clause's reason: a value that is not one of the seven is
+// not an outcome this page has *read*, whatever sentence it could put on the screen
+// beside it. `Object.hasOwn` rather than a truthiness test, because a member naming an
+// inherited property would otherwise pass; `typeof` before it, because a property key is
+// a coerced one and `String(["dispatched"])` spells a member.
+function isReadAnswer(member) {
+  return typeof member === "string" && Object.hasOwn(READ_ANSWER_WORDS, member);
+}
+
 // The sentence for one member, or the refusal above.
 //
-// **`Object.hasOwn` rather than a truthiness test on the lookup**, because a member
-// naming an inherited property — `toString`, `constructor` — would otherwise come back
-// as a function, and `line` would put its source text on the screen where a sentence
-// about the owner's own lookup belongs. The maps are the page's whole vocabulary, so
-// membership in one is exactly the question being asked.
-//
-// **And `typeof` before it, because a property key is a coerced one** (round 7): the
-// array `["dispatched"]` asks for the key `String(["dispatched"])` and would be rendered
-// as that member's statement. Every value `core` puts here is a `StrEnum` value.
+// **The refusal is defensive and `renderReadAnswer` no longer reaches it**, which is
+// `cancellationWords`' own arrangement one vocabulary over: the decision about a value
+// that is not a member is taken by `isReadAnswer` before anything is rendered or
+// recorded, and this stays a total function over whatever it is handed so that a second
+// caller cannot put `undefined` on the screen.
 function readAnswerWords(member) {
-  return typeof member === "string" && Object.hasOwn(READ_ANSWER_WORDS, member)
-    ? READ_ANSWER_WORDS[member]
-    : READ_ANSWER_UNREADABLE;
+  return isReadAnswer(member) ? READ_ANSWER_WORDS[member] : READ_ANSWER_UNREADABLE;
 }
 
 function cancellationWords(member) {
@@ -1448,9 +1461,31 @@ function renderReadConfirmation(body, confirmation) {
 }
 
 // What became of an answer to a parked read (ADR-0244 §9, §13).
+//
+// **A value that is not one of the seven is an outcome this page could not read, and it
+// says so by refusing to render** (adversarial review's round 9). The sentence was the
+// easy half and was already here; the consequence was the defect. `answerConfirmation`
+// keeps a consent token spent on every reply it *renders* — that is what "the park has
+// been answered" means on this page — so a member outside ADR-0244 §9's enumeration used
+// to leave the pair disabled over a park that may well still be `OPEN`: a listing that
+// hands the question back beside a control that submits nothing, which is the silent
+// refusal this surface spends the most words preventing (#1536, ADR-0139 §4).
+//
+// **Reading it as `OPERATION_CHANGED` or `UNAVAILABLE_NOW` would be no better**: those
+// two are the members on which `READ_ANSWERS_LEAVING_THE_QUESTION` gives the token back
+// *because §9 says the park is still open*, and inferring one of them from a value that
+// is none of them is the guess ADR-0139 §4 refuses in the other direction.
+//
+// So it throws, and `couldRenderOutcome` is what answers for it — each caller's ending
+// is its own, and `answerConfirmation`'s is the one this is about: the token back, the
+// park's row given up, and `PARK_REPLY_UNREADABLE` beside it. That is the same ending a
+// `2xx` carrying no outcome at all reaches, which is what this is.
 function renderReadAnswer(body, member) {
   if (member === null || member === undefined) {
     return;
+  }
+  if (!isReadAnswer(member)) {
+    throw new TypeError("read_answer is not one of ADR-0244 §9's members");
   }
   line(body, readAnswerWords(member), "notice");
 }

@@ -7560,16 +7560,58 @@ def test_one_fixed_statement_per_read_answer_member_and_no_member_without_one() 
     **And the lookup is by ownership rather than by truthiness**, which is the arm a
     plain ``WORDS[member]`` leaves open: a member naming an inherited property —
     ``toString``, ``constructor`` — comes back as a function, and ``line`` would put its
-    source text on the screen where a sentence about the owner's own lookup belongs.
+    source text on the screen where a sentence about the owner's own lookup belongs. The
+    ``typeof`` in front of it is round 7's: a property key is a coerced one, so
+    ``["dispatched"]`` asks for the key ``String(["dispatched"])`` and spells a member.
     """
     script = _code("app.js")
     words = _map(script, "READ_ANSWER_WORDS")
     functions = _functions(script)
 
     assert _keys(words) == {member.value for member in ReadAnswerOutcome}
-    assert "Object.hasOwn(READ_ANSWER_WORDS, member)" in functions["readAnswerWords"]
+    assert (
+        'return typeof member === "string" && Object.hasOwn(READ_ANSWER_WORDS, member);'
+        in functions["isReadAnswer"]
+    )
+    assert "isReadAnswer(member)" in functions["readAnswerWords"]
     assert "READ_ANSWER_UNREADABLE" in functions["readAnswerWords"]
     assert "readAnswerWords(member)" in functions["renderReadAnswer"]
+
+
+def test_a_read_answer_outside_the_enumeration_is_not_an_answer_this_page_has_read() -> None:
+    """Adversarial review's round 9, which is round 6's finding one vocabulary over.
+
+    ADR-0244 §9 closes ``ReadAnswerOutcome`` at seven, so a value that is none of them is
+    a response this browser read and cannot read *as* an outcome. The page had a sentence
+    for it and that was the easy half; the consequence was the defect.
+    ``answerConfirmation`` keeps a consent token spent on every reply it **renders** —
+    that is what "that park has been answered from this page" means here — so a rendered
+    fallback left the pair disabled over a park ``pending_confirmations`` goes on handing
+    back, which is #1536's control that submits nothing.
+
+    **And the two members that give the token back are not a place to put it.**
+    ``READ_ANSWERS_LEAVING_THE_QUESTION`` releases it for ``OPERATION_CHANGED`` and
+    ``UNAVAILABLE_NOW`` *because §9 leaves the park open on them*; inferring one of those
+    from a value that is neither is ADR-0139 §4's inference in the other direction.
+
+    So the render refuses and ``couldRenderOutcome`` answers for it, which is the same
+    ending a ``2xx`` carrying no outcome at all reaches — the token back, the park's row
+    given up, and ``PARK_REPLY_UNREADABLE``. The shape test is ``isCancellation``'s,
+    stated once and shared between the reader and the vocabulary.
+    """
+    functions = _functions(_code("app.js"))
+
+    render = functions["renderReadAnswer"]
+    assert "if (!isReadAnswer(member)) {" in render
+    assert "throw new TypeError(" in render
+    # Refused before anything is written, so nothing half-said stands beside the ending.
+    assert render.index("isReadAnswer(member)") < render.index("line(body,")
+    # A `null` or an absent member is still not a refusal: an outcome that parked no read
+    # and answered none carries neither, and §9 makes the two mutually exclusive.
+    assert "if (member === null || member === undefined) {" in render
+    assert render.index("member === undefined") < render.index("isReadAnswer(member)")
+    # One test for the class, shared with the vocabulary rather than restated in it.
+    assert "isReadAnswer(member)" in functions["readAnswerWords"]
 
 
 def test_no_read_answer_statement_says_why_a_ruling_went_the_way_it_did() -> None:

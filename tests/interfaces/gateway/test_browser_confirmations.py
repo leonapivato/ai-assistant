@@ -48,7 +48,7 @@ from ai_assistant.core.types import (
     SpanCoverage,
     TurnOutcome,
 )
-from ai_assistant.interfaces.gateway.server import _confirmation_view
+from ai_assistant.interfaces.gateway.server import _confirmation_view, _outcome_view
 from ai_assistant.wire.errors import TransportError
 
 if TYPE_CHECKING:
@@ -1918,3 +1918,87 @@ async def test_neither_replys_account_is_erased_by_the_other_whichever_lands_sec
         # And the answer's account is the one the pairing calls for rather than one of the
         # five that end "nothing was cancelled" (adversarial review's round 6).
         assert "nothing was cancelled" not in await stated.inner_text()
+
+
+async def test_a_read_answer_outside_the_enumeration_resolves_no_park(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """Adversarial review's round 9, and it is round 6's finding one vocabulary over.
+
+    ADR-0244 §9 closes ``ReadAnswerOutcome`` at seven, so a ``2xx`` whose ``read_answer``
+    is none of them is a response this browser read and cannot read *as* an outcome — the
+    proxy-substituted or truncated-then-reassembled body ``PARK_REPLY_UNREADABLE`` exists
+    for. The sentence for it was the easy half and was already there; the consequence was
+    the defect. ``answerConfirmation`` keeps a consent token spent on every reply it
+    renders, which is what "that park has been answered from this page" means here — so a
+    rendered fallback left the pair **disabled** over a park the listing goes on handing
+    back. That is a control that submits nothing, which is #1536's silent refusal, and
+    reading the value as ``OPERATION_CHANGED`` instead would be ADR-0139 §4's inference in
+    the other direction.
+
+    So the render refuses, the ending is the one every other not-known arm takes — the
+    token back, the park's row given up, and the outcome reported as not known — and the
+    thing that makes it a fix rather than a sentence is the last assertion: pressing the
+    pair again really sends a second ``resume``.
+
+    **The body is the gateway's own with one member replaced**, built through
+    ``_outcome_view`` rather than hand-written, so the case is about that member and not
+    about a body that was malformed in some other way this page also refuses.
+
+    Args:
+        gateway_browser: The one browser this run launched.
+        tmp_path: The case's data directory.
+    """
+    answered: list[bool] = []
+
+    async def _answers(
+        token: ContinuationToken,
+        /,
+        *,
+        approved: bool,
+        timeout: timedelta,  # noqa: ASYNC109 — the Protocol's own signature
+        remember_recipients_until: datetime | None = None,
+    ) -> TurnOutcome:
+        answered.append(approved)
+        return TurnOutcome(
+            turn=None,
+            conversation_id="c-1",
+            read_answer=ReadAnswerOutcome.OPERATION_CHANGED,
+        )
+
+    view = _outcome_view(
+        TurnOutcome(
+            turn=None, conversation_id="c-1", read_answer=ReadAnswerOutcome.OPERATION_CHANGED
+        )
+    )
+    # The one member the case is about. An array whose string form spells a member is the
+    # shape round 7 found passing a coerced property key, which is why it is this and not
+    # an unknown word.
+    view["read_answer"] = ["operation_changed"]
+
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.read_parked["r-1"] = _read()
+        drive.engine._read_handles.add("r-1")
+        drive.engine.resume = _answers  # type: ignore[method-assign,assignment]
+
+        await drive.page.click("#confirmations-button")
+        await drive.page.wait_for_selector("#confirmation-list .confirmation-row")
+        await _substitute(drive, path="/confirmation/resume", body=json.dumps({"outcome": view}))
+        row = drive.page.locator("#confirmation-list .confirmation-row").first
+        await row.locator("button", has_text="Yes, do it").click()
+
+        stated = drive.page.locator("#answer-said")
+        await expect(stated).to_contain_text("could not read an outcome from")
+        await expect(stated).to_contain_text("what became of the park is not known")
+        # Nothing half-rendered is left standing beside it.
+        await expect(drive.page.locator("#answer")).to_be_hidden()
+        assert answered == [True]
+
+        # The park is still listed, the pair is answerable again, and pressing it really
+        # sends — which is the half a rendered sentence did not deliver.
+        again = drive.page.locator("#confirmation-list .confirmation-row").first
+        approve = again.locator("button", has_text="Yes, do it")
+        await expect(approve).to_be_enabled()
+        await approve.click()
+        await expect(stated).to_be_visible()
+        assert answered == [True, True]
