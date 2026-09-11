@@ -26,6 +26,7 @@ therefore does not count it. It is beside the layer, not in it.
 from __future__ import annotations
 
 import asyncio
+import errno
 import socket
 import sys
 import time
@@ -109,8 +110,24 @@ def _is_free(port: int) -> bool:
     """Report whether nothing is listening on ``port`` at this instant.
 
     Binding is the question rather than connecting: a listening socket refuses a
-    second ``bind`` even with ``SO_REUSEADDR``, so a bind that succeeds is a port the
-    gateway really let go of.
+    second ``bind`` whatever address it took and whatever options that bind carried,
+    so a bind that succeeds is a port the gateway really let go of.
+
+    **Asked through the allocator that handed the port out, rather than in this
+    module's own words** (issue #2204). This used to be a plain ``bind`` on loopback
+    with no ``SO_REUSEADDR``, which differs from
+    :func:`gateway_ports.is_bindable` by one clause: a port carrying nothing but an
+    earlier connection's ``TIME_WAIT`` fails the plain bind and passes the shared
+    one. Nothing is listening on such a port -- so the two rules disagreed about a
+    port on which the subject of these cases had done exactly what they assert.
+
+    That disagreement is reachable, and reached: ``free_port()`` cycles a block of
+    sixty-three, this package allocates several hundred ports in one process, and
+    ``TIME_WAIT`` outlives :data:`_RELEASE_PATIENCE` by an order of magnitude. So a
+    run of ``tests/interfaces/gateway/`` came round to ports earlier gateways had
+    accepted and closed connections on, and handed them here to be reported busy for
+    the whole window -- five cases red in the directory run, every one green alone,
+    and ``ss`` on a failing port showing ``TIME_WAIT`` rows and no listener at all.
 
     Args:
         port: The port to probe.
@@ -118,12 +135,31 @@ def _is_free(port: int) -> bool:
     Returns:
         Whether the bind succeeded.
     """
-    try:
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", port))
-    except OSError:
-        return False
-    return True
+    return gateway_ports.is_bindable(port)
+
+
+def _held_listener(port: int) -> socket.socket:
+    """Take ``port`` and listen on it the way a gateway of this package does.
+
+    ``SO_REUSEADDR`` and the wildcard address, which is what ``asyncio.start_server``
+    does on POSIX and what :func:`gateway_ports.is_bindable` probes with. A holder
+    standing in for a gateway that stranded its socket has to actually be one, and a
+    plain loopback ``bind`` is not: it is also refused outright by a port the
+    allocator would happily hand out, which is the ``Address already in use`` issue
+    #2204 records these cases raising on CI.
+
+    Args:
+        port: The port to take.
+
+    Returns:
+        The listening socket. Closing it is the caller's, and each caller here closes
+        it as part of what it is asserting.
+    """
+    held = socket.socket()
+    held.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    held.bind(("", port))
+    held.listen(1)
+    return held
 
 
 async def _becomes_free(port: int, *, within: float = _RELEASE_PATIENCE) -> bool:
@@ -239,9 +275,7 @@ async def test_a_port_released_after_the_first_probe_is_reported_free(
     pause anywhere that can reorder the two.
     """
     port = gateway_ports.free_port()
-    holder = socket.socket()
-    holder.bind(("127.0.0.1", port))
-    holder.listen(1)
+    holder = _held_listener(port)
     answers: list[bool] = []
     sample = _is_free
 
@@ -272,9 +306,7 @@ async def test_a_port_held_for_the_whole_window_is_reported_busy() -> None:
     written to catch, and nothing else in this module would notice.
     """
     port = gateway_ports.free_port()
-    with socket.socket() as holder:
-        holder.bind(("127.0.0.1", port))
-        holder.listen(1)
+    with _held_listener(port):
         assert not await _becomes_free(port, within=0.05)
 
 
@@ -308,6 +340,46 @@ async def test_a_port_that_is_already_free_is_answered_without_waiting() -> None
 
     assert free
     assert not slept, "the helper yielded to the loop on a port that was already free"
+
+
+@pytest.mark.integration
+async def test_a_port_carrying_only_a_closed_connection_is_reported_free() -> None:
+    """Issue #2204: a ``TIME_WAIT`` an earlier case left behind is not a gateway.
+
+    The discrimination the probe exists to make, and the one it used to get wrong.
+    Every other case here hands the probe a port that is either plainly listening or
+    plainly idle; a serial run of this package hands it a third thing -- a port with
+    no listener and a minute's worth of closed connections still on the kernel's
+    books -- and that is the only state the two rules ever disagreed about. Pinning
+    it here means the probe cannot quietly go back to the stricter one without a
+    case saying so, which is what let the disagreement stand until a directory run
+    found it.
+
+    The precondition is asserted rather than assumed, because the whole case rests on
+    it: a plain ``bind`` -- the rule this module used to carry -- is *refused* on this
+    port. So the port really is in the state that used to fail, and the ``True``
+    below is the change rather than an empty window. The refusal is matched on its
+    errno rather than on its text, which the C library translates.
+    """
+    port = gateway_ports.free_port()
+    listener = _held_listener(port)
+    client = socket.socket()
+    client.connect(("127.0.0.1", port))
+    accepted, _ = listener.accept()
+    # The local end closes first, which is what puts *this* port into ``TIME_WAIT``
+    # rather than the client's ephemeral one -- the same way round as a gateway that
+    # answered a request and hung up, which is how these ports acquire theirs.
+    accepted.close()
+    client.close()
+    listener.close()
+
+    refused = rf"\[Errno {errno.EADDRINUSE}\]"
+    with pytest.raises(OSError, match=refused), socket.socket() as plain:
+        plain.bind(("127.0.0.1", port))
+
+    assert await _becomes_free(port, within=0.0), (
+        f"a closed connection's TIME_WAIT on {port} was read as a listening gateway"
+    )
 
 
 def test_an_absent_browser_build_skips_naming_the_command_that_installs_it() -> None:
