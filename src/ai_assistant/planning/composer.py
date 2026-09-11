@@ -29,17 +29,21 @@ accounting by name.
 **Nothing here reads a store, and there is no parameter through which one could
 arrive.** This class holds a ``ModelProvider`` and a bound. It is handed one
 :class:`~ai_assistant.core.types.SearchSupply` — see
-:class:`~ai_assistant.core.protocols.QueryComposer` for why the safety claim now
-lives on that value rather than on the absence of a parameter (ADR-0238 §2).
+:class:`~ai_assistant.core.protocols.QueryComposer` for why what that value may
+carry is bounded at the site that builds it rather than here (ADR-0238 §2).
 
 **The supply's ``records`` reach the prompt, and what may be in them was decided
-before this module saw them** (ADR-0238 §2, §3). Every member is placed for
-:attr:`~ai_assistant.core.types.PlacementReach.ANYONE` — ``SearchSupply`` refuses any
-other reach at construction — and the population is closed by §2 at the servicing
-site, which is the one place a supply is built. So this module performs **no**
-filtering, no exclusion judgement and no reading of content: it has no fact to filter
-on that the value has not already been refused for, and ADR-0238 §3's second clause
-forbids deciding exclusion by inspecting content anywhere.
+before this module saw them** (ADR-0238 §2, §3). The population is closed by §2 at
+the servicing site — the one place a supply is built — to episodes of this
+conversation, the records the turn's retrieval and episodic supplement selected, and
+this turn's own minted ``WEB_SEARCH`` records, and a non-empty ``records`` is built
+only for a destination whose recorded trust is ``USER_CHOSEN``. **No member is
+refused on its placement** (ADR-0246 §1, §3): reach is audience control, so on such a
+destination a record narrowed to the owner reaches this prompt whether the narrowing
+was derived, made by the owner's own act or proposed by a model. So this module
+performs **no** filtering, no exclusion judgement and no reading of content: the
+population is not its question, and ADR-0238 §3's second clause forbids deciding
+exclusion by inspecting content anywhere.
 
 **A supply carrying records is built only for a destination the user chose** (§2), so
 the two admissible populations are one type and the servicing site decides which
