@@ -81,6 +81,7 @@ from ai_assistant.orchestration import (
     MemoryWriteStage,
     NotificationWriteStage,
     ObservationStage,
+    ParkedReadOperations,
     QuestionStage,
     RecipientGrantOperations,
     RecoveryScan,
@@ -95,6 +96,7 @@ from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
 from ai_assistant.permissions import (
     SqliteAuditTrail,
     SqliteDestinationTrustStore,
+    SqliteParkedReads,
     SqliteRecipientGrantStore,
     SqliteRoutingTrail,
     SqliteSourceGrantStore,
@@ -774,6 +776,30 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             path=directory / "destination_trust.db",
         )
         opened.append(destination_trust.close)
+        # **ADR-0244 §3's parked-read store, and this root is the only place it is
+        # constructed** (§18's Lane 2). One instance, handed to the servicing site that
+        # writes a park, to the operations that enumerate, answer and cancel one, and to
+        # the capture/lifecycle stage that drops a deleted conversation's — and to
+        # nothing else. Two would be two answers to one question: §3's one-open-park rule
+        # and its settle-once gate are the *store's* invariants, and a second handle over
+        # the same file would still hold them, but a second handle over a *different*
+        # file would let a token minted against one park be answered against another's
+        # absence.
+        #
+        # **It is a Tier 1 store and the first three of a park's nine fields are
+        # content** — the composed query, the objective minted from the utterance and the
+        # plan the planner returned (ADR-0244 §2) — so ADR-0004 §2's residency clause
+        # governs the file: under the data directory, owner-only, and never written to a
+        # remote service. The retention that bounds that exposure is the park's own
+        # deadline and this conversation's lifecycle, and there is no third rule (§15).
+        #
+        # **No ceiling, no clock and no `Settings` field reach the constructor.** The one
+        # field this decision adds is `parked_read_ttl`, and it is read where every other
+        # deployment value is read and passed to the servicing site below — `expires_at`
+        # is computed once, at the instant the park is written, and a store that read the
+        # setting would be computing a deadline `orchestration` owns.
+        parked_reads = SqliteParkedReads(path=directory / "parked_reads.db")
+        opened.append(parked_reads.close)
         # **The sole reader of ADR-0194 §1's four spend settings, and of the fifth
         # this mechanism depends on** (ADR-0194 §5, §11). The store takes explicit
         # values and never a `Settings` read, so this is the one place the two
@@ -1378,6 +1404,91 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # special case: ADR-0238 §1 answers `UNCHOSEN` for an empty sequence, and a
         # deployment with no account holds no `SearchServicer` and services no search.
         search_destinations = _search_destinations(settings.web_search_origin)
+        # **The search servicer, where this deployment connected an account**
+        # (ADR-0231 §11, §17's Lane 5). It is the loop's only route to the
+        # search seam and the seam's only caller: `search` above is handed to
+        # this object and to no other, so ADR-0231 §11's "no component outside
+        # `service_read_request` calls `request`" is a property of this wiring.
+        #
+        # **Whole or absent, never half.** `Settings` refuses one of the pair
+        # `web_search_connection`/`web_search_origin` without the other, so
+        # `search` above is a searcher or nothing, and this is a servicer or
+        # nothing with it. `None` is the ordinary case and never an error: a
+        # deployment with no account connected services no search on any of its
+        # turns, and ADR-0231 §13's disposition records that as the provisioning
+        # fact it is rather than as a fault — which is what makes "0% yield for
+        # this kind" a true statement about a configuration rather than a
+        # reading of a trigger.
+        #
+        # **The policy, the binder and the trail are the same objects the runner
+        # holds**, not second ones over the same rows. One `ThresholdActionPolicy`
+        # so a step's send and a turn's search are ruled under one set of
+        # thresholds and one `RecipientGrants` face (ADR-0193 §7); one
+        # `EgressBindingSeam` so both read one registration table (ADR-0152 §10);
+        # and one trail because ADR-0192 §1 requires the decision the searcher's
+        # own ledger claim is keyed on to equal the decision the store holds
+        # under that id — a second handle would refuse every claim under a
+        # ruling this servicer had just recorded.
+        #
+        # **The clock and the id factory are the recorder's** (ADR-0021 §3): the
+        # policy is withheld both, which is what leaves `decide` a genuine
+        # function of its argument, and they are the same `_utcnow` and `_uuid`
+        # every other seam this root wires reads.
+        search_servicer = (
+            None
+            if search is None
+            else SearchServicer(
+                # **The same model seam the planner and the routing stage reach
+                # through** — one provider, one router, one retry policy — and
+                # the bound the operator configured (ADR-0231 §5). What the
+                # composer is handed at each call is the turn's own utterance
+                # and nothing else; it holds no store, and its member has no
+                # parameter a record could arrive through (§3).
+                composer=ModelBackedQueryComposer(model, max_chars=settings.search_query_max_chars),
+                # The integration's **searcher** and never the integration:
+                # its `registration` is the binding seam's half of the same
+                # value and reached the seam above, and a servicer handed both
+                # would hold a registration table it has no use for.
+                searcher=search.searcher,
+                binder=binder,
+                policy=policy,
+                trail=trail,
+                now=_utcnow,
+                id_factory=_uuid,
+                # **ADR-0241 §3's elapsed-time bound, read here and passed at
+                # the call.** This root is where the field is read and the
+                # servicing site is the one component holding the
+                # `WebSearcher`, so nothing below `orchestration` reads it and
+                # nothing above that site holds a duration on account of this
+                # decision. Forwarding is an obligation and not a convenience,
+                # exactly as the cost pair's is above — with the difference
+                # that `search` takes the bound as a required keyword with no
+                # default, so a root that failed to pass one would not
+                # construct rather than searching under a figure no operator
+                # can reach.
+                deadline=settings.search_call_deadline,
+                # **Where a recorded `CONFIRM` on this kind parks its question**
+                # (ADR-0244 §1, §18's Lane 2). The **same instance**
+                # `ParkedReadOperations` and `ConversationLifecycle` are handed
+                # below — the servicing writes the park, the operations enumerate,
+                # answer and cancel it, and the deletion sequence drops it — because
+                # §3's one-open-park rule, its one-park-per-decision rule and its
+                # settle-once gate are the store's own and a second store would hold
+                # none of them about the first's rows.
+                #
+                # **Whole rather than narrowed**, unlike the trail one line up:
+                # ADR-0244 §3 closes this contract at seven members and the servicing
+                # calls exactly one of them, but the ADR mints no write-only face and
+                # inventing one here would be this layer deciding a contract's shape.
+                parked_reads=parked_reads,
+                # ADR-0244 §3's one `Settings` field, read here and passed, exactly
+                # as `deadline` above is: the park and the `CONFIRM` it holds the
+                # question of are stamped from it in one computation, and nothing
+                # below `orchestration` reads it.
+                parked_read_ttl=settings.parked_read_ttl,
+            )
+        )
+
         loop = LearningLoop(
             context=context,
             memory=memory,
@@ -1415,36 +1526,6 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # each pin the root's mount, and the one the loop read from would be the
             # one the ordered shutdown did not close (ADR-0042 §2).
             fetcher=fetcher,
-            # **The search servicer, where this deployment connected an account**
-            # (ADR-0231 §11, §17's Lane 5). It is the loop's only route to the
-            # search seam and the seam's only caller: `search` above is handed to
-            # this object and to no other, so ADR-0231 §11's "no component outside
-            # `service_read_request` calls `request`" is a property of this wiring.
-            #
-            # **Whole or absent, never half.** `Settings` refuses one of the pair
-            # `web_search_connection`/`web_search_origin` without the other, so
-            # `search` above is a searcher or nothing, and this is a servicer or
-            # nothing with it. `None` is the ordinary case and never an error: a
-            # deployment with no account connected services no search on any of its
-            # turns, and ADR-0231 §13's disposition records that as the provisioning
-            # fact it is rather than as a fault — which is what makes "0% yield for
-            # this kind" a true statement about a configuration rather than a
-            # reading of a trigger.
-            #
-            # **The policy, the binder and the trail are the same objects the runner
-            # holds**, not second ones over the same rows. One `ThresholdActionPolicy`
-            # so a step's send and a turn's search are ruled under one set of
-            # thresholds and one `RecipientGrants` face (ADR-0193 §7); one
-            # `EgressBindingSeam` so both read one registration table (ADR-0152 §10);
-            # and one trail because ADR-0192 §1 requires the decision the searcher's
-            # own ledger claim is keyed on to equal the decision the store holds
-            # under that id — a second handle would refuse every claim under a
-            # ruling this servicer had just recorded.
-            #
-            # **The clock and the id factory are the recorder's** (ADR-0021 §3): the
-            # policy is withheld both, which is what leaves `decide` a genuine
-            # function of its argument, and they are the same `_utcnow` and `_uuid`
-            # every other seam this root wires reads.
             # **ADR-0238's footing, built per turn from the conversation the turn runs
             # under** (§8, §14). It is wired **unconditionally**, not only where a
             # search account is connected, because §8's early fold is owed by every
@@ -1473,65 +1554,12 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 # 0 to 64 at load, and `0` means no search is serviced in any conversation.
                 max_calls=settings.search_calls_per_conversation,
             ),
-            search=(
-                None
-                if search is None
-                else SearchServicer(
-                    # **The same model seam the planner and the routing stage reach
-                    # through** — one provider, one router, one retry policy — and
-                    # the bound the operator configured (ADR-0231 §5). What the
-                    # composer is handed at each call is the turn's own utterance
-                    # and nothing else; it holds no store, and its member has no
-                    # parameter a record could arrive through (§3).
-                    composer=ModelBackedQueryComposer(
-                        model, max_chars=settings.search_query_max_chars
-                    ),
-                    # The integration's **searcher** and never the integration:
-                    # its `registration` is the binding seam's half of the same
-                    # value and reached the seam above, and a servicer handed both
-                    # would hold a registration table it has no use for.
-                    searcher=search.searcher,
-                    binder=binder,
-                    policy=policy,
-                    trail=trail,
-                    now=_utcnow,
-                    id_factory=_uuid,
-                    # **ADR-0241 §3's elapsed-time bound, read here and passed at
-                    # the call.** This root is where the field is read and the
-                    # servicing site is the one component holding the
-                    # `WebSearcher`, so nothing below `orchestration` reads it and
-                    # nothing above that site holds a duration on account of this
-                    # decision. Forwarding is an obligation and not a convenience,
-                    # exactly as the cost pair's is above — with the difference
-                    # that `search` takes the bound as a required keyword with no
-                    # default, so a root that failed to pass one would not
-                    # construct rather than searching under a figure no operator
-                    # can reach.
-                    deadline=settings.search_call_deadline,
-                    # **ADR-0244 §18's lane seam, and the one line Lane 2 replaces.**
-                    # Lane 1 lands the contract, the shared conformance suite, the
-                    # canonical fake and `orchestration`'s consumer; Lane 2 lands
-                    # `SqliteParkedReads` in `permissions/` and wires **one instance**
-                    # here, into the servicing site and the engine alike. Until it
-                    # does, `None` is stated rather than defaulted — the posture
-                    # `searcher` and `fetcher` already take at this seam — and ADR-0244
-                    # §1's third clause is the whole of what a servicing with no store
-                    # then is: no park exists, nothing is outstanding, and the
-                    # servicing is exactly what it is today.
-                    #
-                    # **A canonical fake is not wired here**, and would be the wrong
-                    # answer: `ai_assistant.testing` is test-only, and a composition
-                    # root holding one would give this deployment an in-memory store of
-                    # Tier 1 content that survives no restart and that ADR-0004 §2's
-                    # residency clause was never argued over.
-                    parked_reads=None,
-                    # ADR-0244 §3's one `Settings` field, read here and passed, exactly
-                    # as `deadline` above is: the park and the `CONFIRM` it holds the
-                    # question of are stamped from it in one computation, and nothing
-                    # below `orchestration` reads it.
-                    parked_read_ttl=settings.parked_read_ttl,
-                )
-            ),
+            # The servicer hoisted above, where this deployment connected an account.
+            # **The same object** `ParkedReadOperations` below is handed, and never a
+            # second servicer over the same seams: ADR-0244 §6 dispatches an approved
+            # read through the very object that parked its question, and two would
+            # hold two search budgets, two composers and two views of one park.
+            search=search_servicer,
             # Passed rather than defaulted, for the reason the ingestor's
             # ``conflict_limit`` is (ADR-0119 §9): this is the second cardinality
             # control, and its effective ``search`` limit is its own value —
@@ -1564,6 +1592,31 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # where the ADR puts it — an operator's surface, not a user's
             # (:data:`TOOL_PREFERENCE`, #1101).
             tool_preference=TOOL_PREFERENCE,
+        )
+        # **ADR-0244's parked-read operations, over the one store this root built** —
+        # the enumeration §5 reads, the answer §6 gates and the cancellation §11 takes.
+        # It is built here rather than inside `Engine`'s argument list because two
+        # holders need this very object: the engine, and the recipient-grant operations
+        # whose eighth availability condition (ADR-0235 §3, as ADR-0244 §5 supersedes it)
+        # is decided from `park_of_decision`. Two instances would each answer honestly
+        # about their own dispatches and disagree about which reads are in flight, which
+        # is §11's `INTERRUPTED`/`NOTHING_TO_CANCEL` split reduced to a coin toss.
+        #
+        # **The same `SearchServicer` the loop holds**, so §6's approved read is
+        # dispatched through the very object that parked its question; **the same
+        # `ConversationStore` the capture stage and the footing hold**, which is
+        # ADR-0238 §8's single-instance obligation reaching a third consumer; and the
+        # same `_utcnow` every other seam here reads, guarded on the way in.
+        #
+        # **`max_calls` is passed rather than read**, for the footing's reason: ADR-0238
+        # §8 puts "every judgement about what a bound is" in `orchestration`, and `0`
+        # means an answer that reached the dispatch is `UNAVAILABLE_NOW`.
+        parked_read_operations = ParkedReadOperations(
+            store=parked_reads,
+            conversations=conversations,
+            search=search_servicer,
+            max_calls=settings.search_calls_per_conversation,
+            clock=_utcnow,
         )
         engine = Engine(
             loop=loop,
@@ -1608,6 +1661,12 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # a `mypy --strict` failure rather than a review note. The façade is handed
             # no trail seam of any width, so this is the one position that names either.
             routing=RoutingStage(model=model, recorder=routing_trail),
+            # ADR-0244's parked-read operations, built above: the **same object** the
+            # recipient-grant operations below are handed, which is §18's "wired as one
+            # instance" and is asserted in `tests/app/test_composition_parked_reads.py`
+            # rather than left as a claim. There is no type that could say so — both
+            # parameters take the same class — so it is a property of *this* wiring.
+            parked_reads=parked_read_operations,
             # The two speech seams, each under the deadline decorator ADR-0200 §1
             # puts on the *wrapper* rather than in the seam, "so that it composes
             # over every implementation" (ADR-0118 §2). Wired **together**: half a
@@ -1682,6 +1741,14 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             conversations=ConversationLifecycle(
                 conversations=conversations,
                 memory=memory,
+                # The fourth durable store this stage spans, and the one it only ever
+                # destroys from (ADR-0244 §3): §8's deletion sequence drops a deleted
+                # conversation's parks through the Protocol, from "the one layer that
+                # legitimately holds both handles by injection" (ADR-0074 §9). The
+                # **same instance** the servicing writes into — a second would leave the
+                # user's standing question behind after they asked for the conversation
+                # to be destroyed.
+                parked_reads=parked_reads,
                 # The narrow seam, and the same object the `Engine` is given the wide
                 # face of just above: one archive, two views (ADR-0225 §10). Capture
                 # can append and destroy here and cannot read, which is §4's
@@ -2017,6 +2084,14 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 policy=policy,
                 id_factory=_uuid,
                 clock=_utcnow,
+                # **ADR-0235 §3's eighth availability condition, wired** (ADR-0244 §5).
+                # A decision whose question a park is holding, or has just taken the
+                # answer to, is answered through `resume` and not through a second act —
+                # so this object needs the park of a decision, and it is the **same**
+                # operations the engine holds rather than a second view. Left `None`,
+                # the condition would exclude nothing and the establishing act could
+                # resolve a `CONFIRM` a park had already been answered on.
+                parked_reads=parked_read_operations,
             ),
             # The three destination-trust operations (ADR-0242 §2, §4), over the one
             # store this root constructs.
@@ -2084,6 +2159,19 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 # liveness of a grant as evidence of trust", so neither store's close
                 # can make the other fail closed.
                 _as_async(destination_trust.close),
+                # And the parked-read store beside it: a Tier 1 store like the rest,
+                # joining the same ordered shutdown (ADR-0083 ruling 4, ADR-0042 §2,
+                # ADR-0244 §18). Registering it on the build-failure cleanup list alone
+                # would close it when the build *failed* and never when it succeeded,
+                # which is #1903 exactly — and here it would leave a `-wal` holding a
+                # standing question's composed query, objective and plan behind, which
+                # are the three Tier 1 fields ADR-0244 §3's retention rule is about.
+                #
+                # **Nothing constrains its position** among the stores: no store reads
+                # it and it reads none, and the façade drains in-flight work before any
+                # of these run — so a `resume` that settles a park and dispatches its
+                # read has already finished by the time this list is walked.
+                _as_async(parked_reads.close),
                 _as_async(plans.close),
                 _as_async(conversations.close),
                 # The transcript archive joins the same ordered shutdown as every
