@@ -295,6 +295,7 @@ from ai_assistant.core.types import (
     Belief,
     BeliefBand,
     ClassReach,
+    ContinuationToken,
     CostBasis,
     CoverageUnrecordedBinding,
     DestinationTrustRecord,
@@ -317,6 +318,8 @@ from ai_assistant.core.types import (
     QuestionState,
     QueueOutcome,
     QuietWindow,
+    ReadAnswerOutcome,
+    ReadCancellation,
     ReadOutcome,
     RecipientGrant,
     RecipientGrantNotEstablished,
@@ -1669,6 +1672,37 @@ def resume(
             ),
         )
     )
+    raise typer.Exit(code)
+
+
+@app.command("cancel-read")
+def cancel_read(
+    token: str = typer.Argument(
+        ...,
+        callback=_present_id,
+        help="The handle the waiting lookup printed beside its question.",
+    ),
+) -> None:
+    """Withdraw a lookup that is waiting on your answer, without answering it.
+
+    A lookup I wanted to make was put to you as a question rather than made, and the
+    question is recorded. This takes it away. **Nothing is sent, and no answer is
+    recorded either way** — withdrawing is not the same as saying no. Saying no is an
+    answer, and ``assistant resume`` is where you give one.
+
+    Give the handle printed beside the question. If that lookup had already been
+    approved and was running, this stops the waiting for it — but it had been made by
+    then, so I will not tell you the request never left. Asking again is a fresh
+    request, not the same question a second time.
+
+    This reaches a lookup running in the assistant that is answering you now, and does
+    not reach one running somewhere else. Where there is nothing to withdraw it says
+    so rather than pretending to have done something.
+
+    **This is not ``assistant reads``**, which lists what has been read from your own
+    sources. This one is about a single outward lookup that has not happened yet.
+    """
+    code = asyncio.run(_cancel_read(token))
     raise typer.Exit(code)
 
 
@@ -3592,6 +3626,24 @@ async def _resume_pending(
     )
 
 
+async def _cancel_read(handle: str) -> int:
+    """Obtain a client and withdraw one parked read's question (ADR-0244 §11).
+
+    :func:`_resume_pending`'s shape for the act that is *not* an answer, with the same
+    single error boundary over every stage that can fail (ADR-0042 §7). The handle
+    arrives non-blank and already stripped (:func:`_present_id`, ADR-0085 §3c);
+    whether it *names* a parked read this engine holds is the engine's question, and
+    one that does not comes back as its own typed refusal.
+    """
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_cancel_read(engine, handle)
+
+
 async def _learn_feedback(  # noqa: PLR0913 — one parameter per field of the event this builds, each a separate thing the user said
     content: str,
     *,
@@ -4572,6 +4624,59 @@ def _may_ride_an_establishing_act(confirmation: Confirmation) -> bool:
     return egress is not None and not egress.planned_with_external_content
 
 
+def _render_read_cancellation(outcome: ReadCancellation) -> None:
+    """ADR-0244 §11's statement for what ``cancel_read`` did.
+
+    **One fixed statement per member of a closed three-member vocabulary**, on
+    :func:`_render_read_answer`'s clause and for its reason: rendering a fixed
+    statement per enum member is presentation (ADR-0242 §9), nothing here reads a
+    store, joins a row or computes a member, and the value is the one the engine
+    returned.
+
+    **The withdrawal says it recorded no answer, because that is the whole difference
+    from a denial** (§11): "a denial is the user answering *no* and is a ruling; a
+    cancellation is the user withdrawing the question and is not one". A surface that
+    reported a withdrawal as a refusal would be describing a ruling the trail does not
+    hold, and would leave the user believing they had said no to something.
+
+    **The interruption does not say the query stayed here**, which is the clause most
+    easily got wrong in the comforting direction (§11): "a cancelled dispatch leaves
+    the park ``APPROVED`` and does not re-open it … **no caller assumes the query did
+    not leave**". What was stopped is the waiting; the request had been approved and
+    made. The recourse §11 names — asking again — is stated as a fresh request rather
+    than as a question that can be answered a second time.
+
+    **And the third is scoped to this process rather than to the world** (§11): "a
+    cancellation reaches only a dispatch running in the process that received it …
+    which is true of what this process can do". So it says *running here*, which is
+    honest under ADR-0043's one-resident-process posture rather than in spite of it,
+    and it does not promise that nothing anywhere is in flight.
+
+    Args:
+        outcome: Which of §11's three states the engine reached.
+    """
+    match outcome:
+        case ReadCancellation.WITHDRAWN:
+            _print(
+                "[bold]That question is withdrawn.[/] Nothing was sent and no answer "
+                "was recorded — withdrawing a question is not the same as saying no to "
+                "it, so nothing has ruled on that lookup either way."
+            )
+        case ReadCancellation.INTERRUPTED:
+            _print(
+                "[bold]That lookup was stopped while it was running.[/] It had been "
+                "approved and made, so I cannot tell you the request never left; what "
+                "was stopped is the waiting for what it would say. The question is not "
+                "re-opened, and asking again is a fresh request."
+            )
+        case ReadCancellation.NOTHING_TO_CANCEL:
+            _print(
+                "[yellow]There was nothing to withdraw.[/] That question is already "
+                "settled and no lookup of it is running here. Nothing was changed and "
+                "nothing was sent."
+            )
+
+
 def _render_act_not_offered() -> None:
     """Say why one card took the answer without the standing request (ADR-0235 §2)."""
     _print(
@@ -4579,6 +4684,53 @@ def _render_act_not_offered() -> None:
         "recipients can be made standing. Your answer was recorded as you gave "
         "it.[/]"
     )
+
+
+async def _drive_cancel_read(engine: AssistantEngine, handle: str) -> int:
+    """Withdraw one parked read's question, or stop the lookup it dispatched (§11).
+
+    **One call, and the adapter decides none of it.** Which of ADR-0244 §11's three
+    states the act reached is a fact about a durable row and a running task that only
+    the engine holds — the park's own compare-and-swap, and whether a dispatch is in
+    flight in that process — so this relays the handle, renders the member that comes
+    back, and computes nothing (golden rule 3, ADR-0042 §6). It reads no store, takes
+    no second call to find out what state the park was in, and never infers the answer
+    from a listing.
+
+    **The token is built from what the user typed and is interpreted by nothing.**
+    Parsing an argument into the engine's own request type is the adapter's job
+    (ADR-0042 §6), and it is the whole of what happens here: nothing branches on the
+    handle, derives it, or reads meaning into it — which is the clause
+    :class:`~ai_assistant.core.types.ContinuationToken` states over an adapter that
+    "branched on the token to decide allow/deny".
+
+    **An unknown handle is the engine's typed refusal and is rendered as one.**
+    ADR-0244 §11 gives ``cancel_read`` ``resume``'s own rule — a token this engine
+    does not hold raises
+    :class:`~ai_assistant.core.errors.UnknownContinuationError`, "**never** a denial"
+    (ADR-0084 §7) — and that class is an :class:`~ai_assistant.core.errors.AssistantError`,
+    so the shared boundary renders it and exits non-zero without a traceback.
+
+    **``NOTHING_TO_CANCEL`` exits non-zero, and that is #531's rule rather than a
+    verdict on the park.** The act performed nothing, and a scripted caller must not
+    read "the question was withdrawn" off a run in which nothing was withdrawn — the
+    same reason :func:`_drive_resume` exits non-zero for a card it left unanswered.
+    It says nothing about whether the *state* of the park is the one the user wanted.
+
+    Args:
+        engine: The façade to relay through.
+        handle: The opaque continuation handle, as the card printed it.
+
+    Returns:
+        The process exit code.
+    """
+    try:
+        cancelled = await engine.cancel_read(ContinuationToken(handle=handle))
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_read_cancellation(cancelled)
+    return _EXIT_ERROR if cancelled is ReadCancellation.NOTHING_TO_CANCEL else _EXIT_OK
 
 
 async def _drive_turn(  # noqa: PLR0913 — one parameter per seam a turn is driven through, and the two approvers are two card types
@@ -6786,6 +6938,15 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
     account is correct by construction, and nothing here resolves that disagreement
     in the reply's favour.
 
+    **A parked read rides here and is not a step** (ADR-0244 §1, §9). ``TurnOutcome``
+    gained two mutually exclusive members and both are rendered from this one site:
+    ``read_answer`` states what became of an answer to a question already put, and
+    ``read_confirmation`` is a question **this turn parked**, which appears in the
+    exchange that raised it. Neither is a plan step and neither touches the blocks
+    below: §1 is explicit that "the turn does not park, is not suspended and does not
+    fail", so the plan, the step account and the exit code this function computes are
+    exactly what they would have been had no read parked at all.
+
     Returns:
         Whether this turn's deterministic account says the system failed to do what
         was asked, which the caller folds into the process exit code (#531). On a
@@ -6807,6 +6968,14 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
     # `_render_recipient_grant_outcome`'s reason — it is about prose the user has by
     # then read. The model said what was not done; this says what would enable it.
     _render_search_not_serviced(outcome.search_not_serviced)
+    # ADR-0244 §9's two members, after the statement that introduces them and before
+    # the plan: `read_answer` is what became of an answer to a question already put,
+    # and `read_confirmation` is a question this turn has just raised. The type
+    # refuses an outcome carrying both, so the order between them is never read by a
+    # user — what the order fixes is that each sits after the reply it is about.
+    _render_read_answer(outcome.read_answer)
+    if outcome.read_confirmation is not None:
+        _render_parked_read(outcome.read_confirmation)
     routed = outcome.routed
     if routed is not None:
         # ADR-0197 §8: `routed` and `step` are never both present, and a routed pass
@@ -7026,6 +7195,122 @@ def _render_search_not_serviced(  # noqa: C901 — one arm per member of a close
             _print("[dim]Note: that lookup was begun and stopped.[/]")
         case SearchNotServiced.UNAVAILABLE:
             _print("[dim]Note: that lookup produced nothing this turn could use.[/]")
+
+
+def _render_read_answer(member: ReadAnswerOutcome | None) -> None:
+    """ADR-0244 §9's statement for what became of an answer to a parked read.
+
+    **One fixed statement per member, written out as a literal**, which is
+    :func:`_render_search_not_serviced`'s ratified shape one vocabulary over and is
+    §13's clause in terms: "A surface that renders no statement for a
+    ``ReadAnswerOutcome`` member it was given … has not implemented this section — it
+    is not permissibly degraded." So there is an arm for each of the seven, none is
+    assembled from a member's value or its name, and the enumeration's closure at
+    seven is what makes an eighth a review question rather than a silent blank.
+
+    **It states what became of the answer and never why a ruling went the way it
+    did** (§9). No statement carries a destination, a host, an origin, a provider
+    name, an account identity, a query or any fragment of one, a monetary figure, a
+    budget, a threshold, a ``Settings`` field name or a ``SearchNotServiced`` or
+    ``SearchDisposition`` value — ADR-0242 §9's bar, binding on this vocabulary as it
+    binds on that one and for the same reason.
+
+    **Three distinctions the wording is carrying, each of which the ADR states and
+    none of which a reader could recover from a shrug.**
+
+    :attr:`~ai_assistant.core.types.ReadAnswerOutcome.ALREADY_SETTLED` and
+    :attr:`~ai_assistant.core.types.ReadAnswerOutcome.EXPIRED` are two different
+    things and are never collapsed: one says an answer already stands, the other says
+    the question ran out of time with none. §10 is explicit that the expiry is a
+    settlement rather than a deletion precisely so a surface "can say *that lookup
+    expired* instead of *no such question*", and the pair is what that buys.
+
+    :attr:`~ai_assistant.core.types.ReadAnswerOutcome.AUTHORITY_CHANGED` says the
+    answer **was** recorded and :attr:`~ai_assistant.core.types.ReadAnswerOutcome.OPERATION_CHANGED`
+    does not say it was, because §9 makes the first one's ruling recorded and leaves
+    the second's park state split across its three grounds. Neither says which ground
+    fired: a member is not a diagnosis, and ADR-0235 §8's third clause bars a
+    statement asserting a cause the value does not establish.
+
+    :attr:`~ai_assistant.core.types.ReadAnswerOutcome.DISPATCHED` claims that the
+    lookup was **made**, not that it returned anything useful — §8's own split, where
+    the turn and the reply carry what it produced and this line does not describe
+    them.
+
+    **Silence where the member is absent** is an outcome that answered no parked read,
+    and the surface then says nothing about one at all.
+
+    Args:
+        member: What ``TurnOutcome.read_answer`` carried, or ``None``.
+    """
+    match member:
+        case None:
+            return
+        case ReadAnswerOutcome.DISPATCHED:
+            _print("[dim]Note: you approved that lookup and it was made, once.[/]")
+        case ReadAnswerOutcome.DECLINED:
+            _print(
+                "[dim]Note: that lookup was declined. Nothing was sent, your answer is "
+                "recorded, and the reply you already had stands unchanged.[/]"
+            )
+        case ReadAnswerOutcome.ALREADY_SETTLED:
+            _print(
+                "[dim]Note: that question had already been settled, so this answer "
+                "decided nothing — nothing was sent and nothing was recorded. What "
+                "stands is the answer that settled it.[/]"
+            )
+        case ReadAnswerOutcome.EXPIRED:
+            _print(
+                "[dim]Note: that question ran out of time before it was answered, so "
+                "nothing was sent and nothing was ruled. It cannot be answered now.[/]"
+            )
+        case ReadAnswerOutcome.AUTHORITY_CHANGED:
+            _print(
+                "[dim]Note: that lookup was not made. Your answer was recorded, but at "
+                "the moment you gave it the lookup was not one this system would "
+                "permit, and the question is spent.[/]"
+            )
+        case ReadAnswerOutcome.OPERATION_CHANGED:
+            _print(
+                "[dim]Note: that lookup was not made and nothing was sent. It could no "
+                "longer be carried out as the question you were shown described it, so "
+                "your answer was not applied to anything else.[/]"
+            )
+        case ReadAnswerOutcome.UNAVAILABLE_NOW:
+            _print(
+                "[dim]Note: that lookup cannot be made here now. Nothing was ruled, "
+                "nothing was recorded and nothing was sent.[/]"
+            )
+
+
+def _render_parked_read(confirmation: Confirmation) -> None:
+    """The question a turn parked, shown in the exchange that raised it (ADR-0244 §9).
+
+    **The turn did not park and no answer is collected here** (§1): "what parks is the
+    read, and the question is offered by a surface after the turn has ended". The
+    servicing returned, the remaining kinds were serviced, the reply composed and the
+    turn finished — so this renders the card and then says, in terms, that nothing is
+    being asked of the reader at this prompt. A card that looked like a question and
+    was followed by a shell prompt would read as one the user had somehow failed to
+    answer.
+
+    **It is the same card and the same floor** (§13): :func:`_render_confirmation`
+    renders ADR-0178 §7's floor entire and ADR-0244 §13's three additions, here as on
+    the ``resume`` path, from one implementation. A card :func:`_render_confirmation`
+    withheld is one this adds nothing to — the withheld rendering has already said
+    which value it could not show, and a trailer about answering it later would be a
+    line about a question the reader was never shown.
+
+    Args:
+        confirmation: What ``TurnOutcome.read_confirmation`` carried.
+    """
+    if not _render_confirmation(confirmation):
+        return
+    _print(
+        "[dim]Nothing is being asked of you right now: this turn is finished, and the "
+        "lookup was not made. The question is recorded and stays open until you answer "
+        "it or withdraw it.[/]"
+    )
 
 
 def _render_step(step: StepOutcome) -> bool:
@@ -10837,6 +11122,39 @@ def _egress_values(
     return tuple(located)
 
 
+def _read_parameters(confirmation: Confirmation) -> tuple[tuple[str, str], ...]:
+    """The question's own arguments as text, in the mapping's own order (ADR-0244 §13).
+
+    **This is the exact query, and there is no other field carrying it.** ADR-0244 §4
+    is explicit that ``Confirmation.parameters`` "is the search request's own argument
+    mapping — the origin and the composed query, byte for byte as the ruling was taken
+    over them — and it is what a surface renders", and that no lane adds a summary, an
+    abbreviation, a normalised form, a re-cased form, a truncation or a paraphrase of
+    it to the type.
+
+    **Every argument, and no key privileged.** This does not look for an argument
+    called ``query``, or for any other name: which key carries the composed query is
+    the searcher's own declaration, and an adapter that knew it would be reading a
+    tool's schema in ``interfaces/`` (golden rule 3) — and would silently render
+    nothing the day a second read kind spells it differently. So the whole mapping is
+    rendered, and §13's clause is discharged by construction rather than by the
+    adapter guessing right.
+
+    **The values come through** ``model_dump(mode="json")`` **and** :func:`_span_value_text`,
+    which is :func:`_egress_values`' own route to the same bytes: a JSON string is
+    itself, and anything else is written in the encoding ``core`` already counts it in.
+
+    Args:
+        confirmation: The parked read's question.
+
+    Returns:
+        One ``(key, value)`` pair per argument, in the mapping's order.
+    """
+    dumped = confirmation.model_dump(mode="json", include={"parameters"})
+    parameters = cast("Mapping[str, object]", dumped["parameters"])
+    return tuple((key, _span_value_text(value)) for key, value in parameters.items())
+
+
 def _render_egress_value(value: str) -> None:
     r"""Print one span's value whole, behind a gutter no adapter line carries.
 
@@ -10924,6 +11242,89 @@ def _render_egress_values(values: Sequence[tuple[str, str]]) -> None:
     for key, value in values:
         _print(f"    {key}:")
         _render_egress_value(value)
+
+
+def _render_read_arguments(asked: Sequence[tuple[str, str]]) -> None:
+    """The question's own arguments, whole — ADR-0244 §13's exact query.
+
+    **This block replaces the ``With:`` derivation on a read's card and is not an
+    addition beside it.** §13: "It renders the exact query, as
+    ``Confirmation.parameters`` carries it, and never a summary. No surface
+    abbreviates, elides, truncates, re-cases, normalises, re-wraps into a different
+    quoting, translates or paraphrases the query, and none renders a description of it
+    in its place." The one-line ``key = value`` form is a derivation — it is written
+    onto a line this adapter authored, so :func:`_safe` eats the value's newlines and a
+    long value reads as one long line — and ADR-0233 §8 permits a derivation *beside* a
+    value while forbidding one *in place of* it. On a step's card the value is beside
+    it, in the span block below; on a read's card the argument that is not a span has
+    no such block, so the whole form is printed here instead of the reduced one. **A
+    surface that showed the user less than what would leave the device has not put
+    ADR-0148 §8's question**, and that is this block's whole reason.
+
+    **Every argument, and no key privileged.** Nothing here looks for an argument called
+    ``query``, or for any other name: which key carries the composed query is the
+    searcher's own registered declaration, and an adapter that knew it would be reading
+    a tool's schema in ``interfaces/`` (golden rule 3) — and would render nothing the
+    day a second read kind spells it differently. The whole mapping is printed, so §13
+    is discharged by construction rather than by this adapter guessing right.
+
+    **It sits beside the span block below and the two are not one view twice.** They are
+    derived from two different values and answer two different questions: the spans are
+    what the *binding* recorded as leaving, which is what the ruling was taken over, and
+    these are the *request's* own arguments, which is what the question is about. They
+    coincide for a search whose query is its one disclosed span — a property of that
+    binding rather than a rule — and ADR-0178 §7 has already settled that two renderings
+    which coincide are not redundancy where they answer different questions.
+
+    **The values are behind** :data:`_VALUE_GUTTER`, by the same
+    :func:`_render_egress_value` that marks a span's value as data under ADR-0233 §8 and
+    for its reasons: the marker no line this card writes ever carries, and the wrapping
+    taken here rather than left to the console.
+
+    Args:
+        asked: The arguments as :func:`_read_parameters` located them.
+    """
+    _print("  What it would ask, whole:")
+    if not asked:
+        _print("    [dim](this question carries no argument at all)[/]")
+    for key, value in asked:
+        _print(f"    {_safe(key)}:")
+        _render_egress_value(value)
+
+
+def _render_read_terms(confirmation: Confirmation) -> None:
+    """What a yes does, and the act that is not an answer (ADR-0244 §13, §11).
+
+    **One sentence about what a yes does, and it says no more than that** (§13). No
+    line here states that the read will succeed, that the answer will change, that a
+    standing authorisation is being created, that the destination becomes trusted, or
+    that any later search is affected — ADR-0235 §8's third clause binding on this
+    rendering as it binds on that listing. "Once, and nothing else" is the *whole* of
+    the scope claim: it asserts nothing about what comes back.
+
+    **And the cancellation act, offered at the question rather than somewhere else**
+    (§13: the command line and the browser "each render the pending read, collect the
+    answer, and offer the cancellation act"). A user told only how to say yes or no has
+    not been offered the third thing they can do, and the handle is printed because it
+    is the argument ``assistant cancel-read`` takes. It is the engine's own opaque
+    handle, rendered as data like every other value on this card and interpreted by
+    nothing here (ADR-0042 §4).
+
+    **Withdrawing is named as not-an-answer**, because ADR-0244 §11 makes that the whole
+    difference between the two: "a denial is the user answering *no* and is a ruling; a
+    cancellation is the user withdrawing the question and is not one". A surface that
+    offered them as two spellings of *no* would be describing a ruling the act does not
+    record.
+
+    Args:
+        confirmation: The parked read's question, for the handle that answers it.
+    """
+    _print("  [bold]Answering yes makes this one lookup, once, and nothing else.[/]")
+    _print(
+        "  [dim]To withdraw the question instead of answering it, run 'assistant "
+        f"cancel-read {_safe(confirmation.token.handle)}'. Withdrawing is not the "
+        "same as saying no: it records no answer either way.[/]"
+    )
 
 
 def _render_confirmation_egress(
@@ -11014,6 +11415,25 @@ def _render_confirmation(confirmation: Confirmation) -> bool:
     :func:`_render_withheld_confirmation` names the tool and says which, renders no
     part of the payload, and the caller answers nothing.
 
+    **A read's question is the same card, one word changed and one block traded for
+    a fuller one** (ADR-0244 §4, §13). ``read is not None`` is the discriminator, in
+    ``egress``'s own shape and for its reason, and what it states is that answering
+    this question dispatches a read rather than a plan step — so the heading says
+    which; :func:`_render_read_arguments` prints the arguments whole where the
+    ``With:`` derivation would otherwise print them reduced, because §13's exact query
+    is one of them and a read's card has no other block that would render it whole;
+    and :func:`_render_read_terms` states what a yes does and offers the withdrawal.
+    **Being a read relaxes no clause of ADR-0178 §7's floor** (§13's first clause),
+    which is why none of this is a branch *around* the floor: the account, the
+    occurrences, both destination forms and the payload description are rendered by
+    the same :func:`_render_confirmation_egress` either way, from one implementation.
+
+    **The width check now guards the read block too.** It used to fire only where a
+    span had a value to mark, because that was the only content behind
+    :data:`_VALUE_GUTTER`; a read's arguments are behind the same gutter and carry
+    the same claim, so a terminal too narrow to mark them withholds the card for
+    ADR-0233 §8's reason rather than printing the query with no marker.
+
     Returns:
         Whether the confirmation was rendered. ``False`` withdraws the card under
         §8's second clause, and a caller that gets it collects no answer.
@@ -11028,25 +11448,36 @@ def _render_confirmation(confirmation: Confirmation) -> bool:
                 because=("the arguments it carries do not hold every value its description names"),
             )
             return False
-        if located and not _values_fit_this_terminal():
-            _render_withheld_confirmation(
-                confirmation,
-                because=(
-                    "this window is too narrow to mark the text as data, so run this "
-                    "again in a wider one"
-                ),
-            )
-            return False
         values = located
-    _print("\n[bold yellow]Confirmation required[/]")
+    asked: tuple[tuple[str, str], ...] = (
+        () if confirmation.read is None else _read_parameters(confirmation)
+    )
+    if (values or asked) and not _values_fit_this_terminal():
+        _render_withheld_confirmation(
+            confirmation,
+            because=(
+                "this window is too narrow to mark the text as data, so run this "
+                "again in a wider one"
+            ),
+        )
+        return False
+    _print(
+        "\n[bold yellow]A lookup is waiting on your answer[/]"
+        if confirmation.read is not None
+        else "\n[bold yellow]Confirmation required[/]"
+    )
     _print(f"  Tool: {_safe(confirmation.tool_id)} — {_safe(confirmation.tool_description)}")
-    if confirmation.parameters:
+    if confirmation.parameters and confirmation.read is None:
         _print("  With:")
         for key, raw in confirmation.parameters.items():
             _print(f"    {_safe(str(key))} = {_safe(str(raw))}")
+    elif confirmation.read is not None:
+        _render_read_arguments(asked)
     if egress is not None:
         _render_confirmation_egress(egress, values)
     _print(f"  Why: {_safe(confirmation.reason)}")
+    if confirmation.read is not None:
+        _render_read_terms(confirmation)
     return True
 
 
@@ -11148,10 +11579,35 @@ def _assume_yes(confirmation: Confirmation) -> bool | None:
     Args:
         confirmation: The parked action the flag was asked to answer.
 
+    **A read's question is refused on its own discriminator, and not as a side
+    effect of the one above** (ADR-0244 §4, §13). Both clauses of the paragraph
+    before this one apply to it unchanged — a flag typed before the request existed
+    answers more than one card and pre-selects an affirmative answer — and ADR-0244
+    §4 rules that a ``WEB_SEARCH`` park's ``egress`` is *always* present, so the
+    egress branch would in fact catch every one this hub can park. It is taken on
+    ``read`` anyway, because a refusal that holds only by way of another member's
+    value is one that changes meaning the day that member does, and because what is
+    true of this card is a fact about the **lookup** rather than about a waiting
+    step: the sentence says so, which the step's does not.
+
+    **Neither branch declines anything.** ``None`` leaves the question exactly where
+    it was — open, unanswered, its recorded decision untouched — which for a read is
+    ADR-0244 §10's "no terminal disposition is inferred from silence" at the one
+    surface that could have inferred one.
+
     Returns:
-        ``True`` where the confirmation carries no egress, and ``None`` where it
-        does — the question is left unanswered rather than answered by a flag.
+        ``True`` where the confirmation carries neither a read nor an egress, and
+        ``None`` where it carries either — the question is left unanswered rather
+        than answered by a flag.
     """
+    if confirmation.read is not None:
+        _print(
+            "[yellow]--yes does not answer this one.[/] It is a lookup that would "
+            "leave this device, so it is answered on a screen or not at all. Nothing "
+            "was sent and nothing was declined: the question is still open. Answer it "
+            "with [bold]assistant resume[/], run without [bold]--yes[/]."
+        )
+        return None
     if confirmation.egress is None:
         return True
     _print(
