@@ -1154,6 +1154,86 @@ async def test_a_bounded_turn_supplied_a_guarded_record_keeps_it_and_stamps_its_
     )
 
 
+# --- ADR-0246 §11 Arm H: reach still binds where a person listens -------------
+
+#: The narrowing the **owner** made by their own act (ADR-0217 §3) — the placement
+#: ADR-0246 §11's Arms D and H are both stated over, and the one that decision admits
+#: to a search supply built for a destination the user chose.
+_GUARDED: Final = Placement(
+    reach=PlacementReach.OWNER, set_by=PlacementSetter.OWNER_ACT, set_at=_AT
+)
+
+
+def test_a_guarded_record_is_withheld_from_a_channel_wider_than_the_owner() -> None:
+    """ADR-0246 §11's **Arm H**, over ``disclosure.py``'s production subtraction.
+
+    "With the same guarded record in view, the turn's **reply** on a channel whose
+    audience is wider than the owner does not carry it, exactly as it does not today.
+    The arm exists because §1's subtraction is the one thing a reader of this ADR might
+    believe it removed."
+
+    It did not. ADR-0246 §1's fourth clause: "**Reach keeps its full force everywhere
+    this system speaks to a person.** ADR-0217 §1's denotation and §2's placement,
+    ADR-0199 §3's classes, ADR-0203 §1's subtraction and ADR-0204 §2's derivation are
+    untouched by every clause of this ADR, which supersedes no word of any of them. A
+    record narrowed to the owner — by an act, a derivation or a proposal — stays
+    withheld from every reply and every delivery whose audience is wider, exactly as it
+    is today." What ADR-0246 widens is one supply built for a party that is **not a
+    person**; this is the other path, and it is unmoved.
+
+    Asserted over :func:`~ai_assistant.orchestration.disclosure.supply_for_unbounded_audience`
+    itself rather than over a restatement of it, and over all three setters, because a
+    lane deleting a placement predicate in ``core`` and ``orchestration`` is one
+    sed-substitution away from deleting this one too.
+    """
+    for placement in (
+        _GUARDED,
+        _NARROWED,
+        Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.PROPOSED, set_at=_AT),
+    ):
+        guarded = _belief("rec-2", _WITHHELD_CONTENT).model_copy(update={"placement": placement})
+
+        _, memories, withheld = _supply(_belief("rec-1", _SPEAKABLE_CONTENT), guarded)
+
+        assert withheld is True, f"{placement.set_by} is still a narrowing to the owner"
+        assert [one.id for one in memories] == ["rec-1"], (
+            "the guarded record is subtracted before the turn plans (ADR-0203 §1)"
+        )
+
+
+async def test_a_guarded_record_reaches_no_spoken_reply() -> None:
+    """Arm H at ADR-0199 §7's engine seam, which is where a person would hear it.
+
+    The span is not in the prompt at all, which is the stronger claim: withheld **at
+    supply** and never by a filter over composed prose (ADR-0199 §5). Driven through
+    ``converse_spoken`` — the operation whose output channel's audience is unbounded —
+    so what is asserted is the production path a roommate, a house cleaner or another
+    user of the hub actually stands in front of, and not a predicate called directly.
+
+    This is the same record ADR-0246 §11's Arm D watches reach a ``SearchSupply`` on a
+    chosen destination. Both are true at once, and that pair is the whole decision: a
+    provider the owner named is not a person this assistant talks to, and a person in
+    the room is.
+    """
+    model = FakeModelProvider(_ANSWER)
+    harness = _wired(model, transcriber=FakeSpeechTranscriber(transcripts=["what is on"]))
+    guarded = _belief("rec-2", _WITHHELD_CONTENT).model_copy(update={"placement": _GUARDED})
+    await _seed(harness, _belief("rec-1", _SPEAKABLE_CONTENT), guarded)
+
+    spoken = await harness.engine.converse_spoken(_RECORDING, plays=(_MP4,), timeout=PATIENT)
+
+    prompt = _messages(model, Role.USER)
+    assert _SPEAKABLE_CONTENT in prompt, "the unnarrowed record is there, so this is not vacuous"
+    assert _WITHHELD_CONTENT not in prompt, "ADR-0217 §2's subtraction, unmoved by ADR-0246 §1"
+    assert spoken.outcome is not None
+    assert _WITHHELD_CONTENT not in (spoken.outcome.reply or ""), "and no person hears it"
+    assert spoken.outcome.turn is not None
+    assert "rec-2" not in {one.id for one in spoken.outcome.turn.memories}, (
+        "and the turn ran over the subtracted supply — there is no wider turn anywhere "
+        "in the process (ADR-0203 §1)"
+    )
+
+
 async def test_a_streamed_turn_supplied_a_withheld_record_stamps_its_episode() -> None:
     """§8 case 1's third caller: ``converse_streaming`` (#1728).
 

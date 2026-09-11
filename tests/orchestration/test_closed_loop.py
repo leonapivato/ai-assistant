@@ -8,6 +8,16 @@ servicing site ADR-0231 §11 fixes — through ``LearningLoop``, over
 :class:`~ai_assistant.orchestration.reads.SearchServicer`, with the canonical fakes
 standing only where a *store* or a *provider* does.
 
+**ADR-0245 §11's arms and ADR-0246 §11's are here on the same ground**, each stated
+over the production type, the production builder and the production servicing path.
+ADR-0245's Arms A, C and E bind entire and are unchanged; its Arm B's exclusion limb,
+its Arm D entire and its Arm F's premise are superseded, and what stands in their place
+is ADR-0246 §11's Arms B', D, D', F' and G below. The ADR writes those names with a
+prime, which is rendered as a plain apostrophe here in this file because ruff refuses the
+ambiguous character in Python source. Arm H, the reply-side subtraction ADR-0246 §1
+leaves untouched, is in ``tests/orchestration/test_spoken_disclosure.py``, where
+``orchestration/disclosure.py``'s production path is already driven.
+
 **What is deliberately not here.** The arms the contract lane took at the store and the
 type — §15's 4, 6b's two store shapes, 6c4, 6c4b, 6d, 6g2, 6h, 6h2, 6h3, 7's
 ``Settings``-load half and 9 — are asserted in ``tests/memory/``,
@@ -25,7 +35,6 @@ from typing import TYPE_CHECKING, Any, Final, final
 
 import pytest
 import structlog
-from pydantic import ValidationError
 from test_engine import EGRESS_SCHEMA, SEARCH_DESTINATIONS, bound_binder, tool
 from test_loop_search import (
     _ASK,
@@ -132,14 +141,24 @@ def _owner_belief(record_id: str, content: str) -> SemanticMemory:
     )
 
 
-#: ADR-0245 §2's admitted narrowing: what ADR-0204 §2's evaluation writes through
-#: ADR-0217 §3 onto a record a turn derived over a supply holding external content.
+#: What ADR-0204 §2's evaluation writes through ADR-0217 §3 onto a record a turn
+#: derived over a supply holding external content. ADR-0245 §1 admitted this pair and
+#: ADR-0246 §11 Arm B' keeps that limb standing.
 _DERIVED: Final = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)
 
-#: The narrowing a **model** proposed (ADR-0217 §4), excluded by §2 on the same ground
-#: as the owner's own act: the ruling is about the derivation and named neither.
+#: The narrowing a **model** proposed (ADR-0217 §4) — the placement
+#: ``learning/observer.py``'s observation pass writes, which is what a *preference*
+#: carries. ADR-0245 §2 excluded it; ADR-0246 §1 admits it (§11 Arm D').
 _PROPOSED: Final = Placement(
     reach=PlacementReach.OWNER, set_by=PlacementSetter.PROPOSED, set_at=_NOW
+)
+
+#: The narrowing the owner made by **their own act** (ADR-0217 §3), which
+#: ``_owner_belief`` above writes. ADR-0245 §2 excluded it "because the system records
+#: the act and not its reason"; the owner has ruled that their guard sets reach and
+#: nothing else, so ADR-0246 §1 admits it (§11 Arm D).
+_GUARDED: Final = Placement(
+    reach=PlacementReach.OWNER, set_by=PlacementSetter.OWNER_ACT, set_at=_NOW
 )
 
 
@@ -151,6 +170,11 @@ def _derived_belief(record_id: str, content: str) -> SemanticMemory:
 def _proposed_belief(record_id: str, content: str) -> SemanticMemory:
     """A belief a model proposed narrowing to the owner (ADR-0217 §4)."""
     return _belief(record_id, content).model_copy(update={"placement": _PROPOSED})
+
+
+def _narrowed_belief(record_id: str, content: str, placement: Placement) -> SemanticMemory:
+    """A belief carrying whichever narrowing an arm names, and nothing else changed."""
+    return _belief(record_id, content).model_copy(update={"placement": placement})
 
 
 def _derived_episode(record_id: str = "episode-we-looked-that-up") -> EpisodicMemory:
@@ -381,49 +405,91 @@ async def test_a_result_asking_for_more_searches_raises_no_bound() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# ADR-0245 §11 Arm B's servicing half — the narrowed filter and its two counts #
+# ADR-0246 §11 Arm B' — the servicing site withholds on no placement at all    #
 # --------------------------------------------------------------------------- #
 
 
-async def test_the_two_excluded_narrowings_are_withheld_and_the_derived_one_is_not() -> None:
-    """ADR-0245 §11's **Arm B** at the servicing site; the type's own refusal is in
-    ``tests/core/test_search_supply.py``, where Arm B requires it ("the refusal is
-    asserted on the type directly, so that a builder that filtered correctly could not
-    make the arm pass").
+async def test_every_narrowing_is_supplied_and_the_withheld_count_stays_zero() -> None:
+    """ADR-0246 §11's **Arm B'**, at the servicing site, in the selection a result did
+    not influence; the case below it is the one a result did. The type's own half is in
+    ``tests/core/test_search_supply.py``.
 
-    Arm B replaces ADR-0238 §15's Arm 4, which was stated over ``OWNER`` in terms. What
-    the *site* owes is the pair of counts: "a record placed reach ``OWNER`` setter
-    ``OWNER_ACT``, and one placed reach ``OWNER`` setter ``PROPOSED`` … each reaches the
-    audit's withheld count; a record placed reach ``OWNER`` setter ``DERIVED`` … is
-    **admitted** and reaches the new supplied-narrowed count."
+    Arm B' keeps ADR-0245 §11 Arm B's ``DERIVED`` limb — "a record placed reach
+    ``OWNER`` setter ``DERIVED`` … is admitted and reaches the supplied-narrowed count"
+    — and **inverts** its ``OWNER_ACT`` and ``PROPOSED`` limb: "neither is refused by
+    ``SearchSupply`` at construction, in either selection, and neither reaches the
+    withheld count."
 
-    **Decided by ``Placement.reach`` and ``Placement.set_by`` and by nothing else**
-    (ADR-0245 §1, §3): no content is read, no resemblance is judged and no classifier is
-    consulted, so all four records here talk about the same subject in the same words.
+    **Decided by no placement at all** (ADR-0246 §1). Reach is audience control, and a
+    provider the owner named in a recorded act is not a person this assistant talks to,
+    so on a chosen destination no record is withheld on its reach, on its setter, or on
+    any combination of the two. No content is read either, and never was: all four
+    records here talk about the same subject in the same words, which is what says the
+    admission is not a judgement about them (ADR-0238 §3's second clause).
     """
     memory = FakeMemoryStore(now=_clock)
     await memory.add(_owner_belief("belief-guarded", "the guarded thing about Porto"))
     await memory.add(_proposed_belief("belief-proposed", "the proposed thing about Porto"))
     await memory.add(_derived_belief("belief-derived", "the derived thing about Porto"))
     await memory.add(_belief("belief-anyone", "the public thing about Porto"))
-    searcher = FakeWebSearcher(results=(_RESULT,))
 
     with structlog.testing.capture_logs() as captured:
         await _loop(
             planner=FakePlanner(now=_clock, read_request=_search()),
             memory=memory,
-            search=_servicer(searcher=_CostedSearcher(searcher), granted=True),
+            search=_servicer(
+                searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))), granted=True
+            ),
             footing=await _chosen_footing(),
         ).respond(_ASK, narrow=_bounded())
 
     serviced = _serviced(captured, 0)
-    assert serviced["withheld"] == 2, "the owner's own act and the model's proposal, both"
-    assert serviced["supplied"] == 2, "the derived narrowing and the unnarrowed record"
-    assert serviced["supplied_narrowed"] == 1, "exactly one of the two carries a narrowed reach"
-    assert all(
-        "guarded thing" not in received and "proposed thing" not in received
-        for received in searcher.requested
-    ), "no byte of either withheld record reached the query"
+    assert serviced["supplied"] == 4, "all four, whoever narrowed them and whether any did"
+    assert serviced["withheld"] == 0, "ADR-0246 §7: the filter withholds nothing"
+    assert serviced["supplied_narrowed"] == 3, (
+        "the three narrowed ones, counted over every setter (ADR-0246 §7)"
+    )
+
+
+async def test_a_selection_a_result_influenced_reaches_the_same_outcome() -> None:
+    """Arm B''s second selection: "in either selection", over the same three setters.
+
+    ADR-0245 §11's Arm B was satisfiable by one construction because the *type* refused
+    the two setters, so no selection could reach a different answer. With the refusal
+    gone the claim has to be driven: this is the **second** servicing of a refining turn
+    (ADR-0231 §16's within-turn life), whose ``in_view`` holds the records the first
+    servicing's provider minted and whose selection is therefore one a search result
+    influenced.
+
+    What bounds it is **membership and not placement** (ADR-0246 §8): ADR-0238 §2's
+    three populations are recorded by the loop from the supply it assembled, so a
+    result's content cannot add a record to them — and having added none, it changes no
+    placement either, because no search result, model output or provider message writes
+    a record's placement at all.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_owner_belief("belief-guarded", "the guarded thing about Porto"))
+    await memory.add(_proposed_belief("belief-proposed", "the proposed thing about Porto"))
+    await memory.add(_derived_belief("belief-derived", "the derived thing about Porto"))
+
+    with structlog.testing.capture_logs() as captured:
+        await _loop(
+            planner=_revising(),
+            memory=memory,
+            search=_servicer(
+                searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))),
+                granted=True,
+            ),
+            footing=await _chosen_footing(),
+        ).respond(_ASK, narrow=_bounded(), operation=_REVISING)
+
+    first, second = _serviced(captured, 0), _serviced(captured, 1)
+    assert second["supplied"] == first["supplied"] + 1, (
+        "the first servicing's minted record is in the second's view, so this selection "
+        "is one a search result influenced rather than a repeat of the case above"
+    )
+    assert second["withheld"] == 0, "no placement is refused in this selection either"
+    assert second["supplied_narrowed"] == 3, "all three narrowings, in the refining pass"
 
 
 # --------------------------------------------------------------------------- #
@@ -2085,23 +2151,25 @@ async def test_an_about_person_record_is_admitted_and_the_subject_axis_is_never_
 
 
 # --------------------------------------------------------------------------- #
-# ADR-0245 §11 Arm D — the owner's act survives every route into a supply      #
+# ADR-0246 §11 Arms D and D' — every route into a supply, every narrowing      #
 # --------------------------------------------------------------------------- #
 
 
 @final
-class _MintsGuarded:
-    """A provider whose minted records carry the owner's own narrowing.
+class _MintsNarrowed:
+    """A provider whose minted records carry a narrowing this test names.
 
     A ``WebSearcher`` is a **provider** seam, which is where ADR-0238 §15 admits a
-    double, and nothing in the production mint writes a guarded placement — so this is
-    the only way Arm D's third route can be driven at all. It is the conservative
-    direction: a record the provider itself narrowed is exactly the case "regardless of
-    why that record was selected" is stated over (ADR-0245 §8).
+    double, and nothing in the production mint writes a narrowed placement — so this is
+    the only way the third route of Arms D and D' can be driven at all. It is the
+    conservative direction: a record the provider itself narrowed is exactly the case
+    "regardless of why that record was selected" is stated over, and what bounds it is
+    membership rather than placement (ADR-0246 §8).
     """
 
-    def __init__(self, inner: WebSearcher) -> None:
+    def __init__(self, inner: WebSearcher, placement: Placement) -> None:
         self.inner = inner
+        self.placement = placement
 
     @property
     def name(self) -> str:
@@ -2113,59 +2181,79 @@ class _MintsGuarded:
         return await self.inner.request(query)
 
     async def search(self, call: ToolCall, /, *, timeout: timedelta) -> SearchOutcome:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, §2)
-        """Perform the search, then narrow every record it minted by the owner's act."""
+        """Perform the search, then narrow every record it minted."""
         outcome = await self.inner.search(call, timeout=timeout)
         if outcome.refusal is not None:
             return outcome
         return outcome.model_copy(
             update={
                 "records": tuple(
-                    record.model_copy(
-                        update={
-                            "placement": Placement(
-                                reach=PlacementReach.OWNER,
-                                set_by=PlacementSetter.OWNER_ACT,
-                                set_at=_NOW,
-                            )
-                        }
-                    )
+                    record.model_copy(update={"placement": self.placement})
                     for record in outcome.records
                 )
             }
         )
 
 
-async def test_a_guarded_record_is_refused_on_every_route_into_a_supply() -> None:
-    """ADR-0245 §11's **Arm D**, over all three of ADR-0238 §2's populations.
+#: Arm D's placement and Arm D''s, with the id each arm's fixtures take. ``OWNER_ACT``
+#: is the narrowing the owner made by their own act (ADR-0217 §3); ``PROPOSED`` is the
+#: one ``learning/observer.py``'s observation pass writes from the model's envelope
+#: (ADR-0217 §4), which is the placement a *preference* carries and the subject of
+#: ground 1 of the owner's ruling.
+_ARMS: Final = [
+    pytest.param(_GUARDED, "belief-guarded", id="owner_act"),
+    pytest.param(_PROPOSED, "belief-proposed", id="proposed"),
+]
 
-    "On a ``USER_CHOSEN`` destination, a guarded record is refused when the turn's
-    retrieval selected it, when the episodic supplement selected it, and when it arrived
-    as this turn's own minted ``WEB_SEARCH`` record."
 
-    §2's exclusion of ``OWNER_ACT`` is per-record and route-blind, which is what stops
-    the ruling's logic being extended by an implementation: the owner's act is "the one
-    setter the system does not compute", and "the system records the act and not its
-    reason". Driven over the three routes rather than one because each is a different
-    way into ``in_view`` and a builder could admit the population without admitting the
-    record.
+@pytest.mark.parametrize(("placement", "record_id"), _ARMS)
+async def test_a_narrowed_record_reaches_a_supply_by_every_route(
+    placement: Placement, record_id: str
+) -> None:
+    """ADR-0246 §11's **Arm D** and **Arm D'**, over all three of ADR-0238 §2's
+    populations, and this replaces ADR-0245 §11's Arm D entire.
+
+    Arm D: "On a ``USER_CHOSEN`` destination, a record placed reach ``OWNER`` setter
+    ``OWNER_ACT`` is **admitted** when the turn's retrieval selected it, when the
+    episodic supplement selected it, and when it arrived as this turn's own minted
+    ``WEB_SEARCH`` record; the supply's ``records`` contains it in each case, the
+    composer is handed it, and **the supply is constructed rather than refused**." Arm
+    D' is the same claim for the placement a model's proposal writes, "admitted on a
+    ``USER_CHOSEN`` destination by the same three routes … and reaches §7's
+    supplied-narrowed count".
+
+    Driven over the three routes rather than one because each is a different way into
+    ``in_view`` and a builder could admit the population without admitting the record.
+    The type's own half — that a ``SearchSupply`` carrying such a record is
+    **constructed**, "so that a lane which left the validator in place fails the arm
+    loudly" — is asserted at the end here as well as in
+    ``tests/core/test_search_supply.py``, over a supply mixing an admitted derived
+    narrowing with this arm's.
     """
     # Route 1 — the turn's own retrieval.
     memory = FakeMemoryStore(now=_clock)
-    await memory.add(_owner_belief("belief-guarded", "the guarded thing about Porto"))
+    await memory.add(_narrowed_belief(record_id, "the narrowed thing about Porto", placement))
+    composer = FakeQueryComposer()
 
     with structlog.testing.capture_logs() as captured:
         await _loop(
             planner=FakePlanner(now=_clock, read_request=_search()),
             memory=memory,
             search=_servicer(
-                searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))), granted=True
+                composer=composer,
+                searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))),
+                granted=True,
             ),
             footing=await _chosen_footing(),
         ).respond(_ASK, narrow=_bounded())
 
-    assert _serviced(captured, 0)["withheld"] == 1, "retrieval selected it and §3 refused it"
-    assert _serviced(captured, 0)["supplied"] == 0
-    assert _serviced(captured, 0)["supplied_narrowed"] == 0
+    assert _serviced(captured, 0)["supplied"] == 1, "retrieval selected it and nothing refused it"
+    assert _serviced(captured, 0)["withheld"] == 0
+    assert _serviced(captured, 0)["supplied_narrowed"] == 1
+    assert [one.id for supply in composer.supplies for one in supply.records] == [record_id], (
+        "and the composer was handed it — which is what 'the supply carries it' means "
+        "at the one seam that could fail to carry it"
+    )
 
     # Route 2 — ADR-0158 §3's episodic supplement, for a conversation whose own earlier
     # turn has fallen out of ADR-0074 §9's replay window.
@@ -2174,13 +2262,7 @@ async def test_a_guarded_record_is_refused_on_every_route_into_a_supply() -> Non
     supplemented = FakeMemoryStore(now=_clock)
     await supplemented.add(_belief("belief-porto", "the bell tower in Porto is worth the climb"))
     await supplemented.add(
-        _derived_episode(turn.episode_id).model_copy(
-            update={
-                "placement": Placement(
-                    reach=PlacementReach.OWNER, set_by=PlacementSetter.OWNER_ACT, set_at=_NOW
-                )
-            }
-        )
+        _derived_episode(turn.episode_id).model_copy(update={"placement": placement})
     )
     footing = _footing(conversations=conversations, conversation_id=mine, trusted=True)
 
@@ -2196,9 +2278,10 @@ async def test_a_guarded_record_is_refused_on_every_route_into_a_supply() -> Non
         ).respond(_ASK, narrow=_bounded())
 
     assert turn.episode_id in {record.id for record in responded.turn.memories}, (
-        "the supplement put it in front of the turn, so there was something to refuse"
+        "the supplement put it in front of the turn, so there was something to admit"
     )
-    assert _serviced(captured, 0)["withheld"] == 1, "the supplement's route is no wider"
+    assert _serviced(captured, 0)["withheld"] == 0, "the supplement's route refuses no more"
+    assert _serviced(captured, 0)["supplied_narrowed"] == 1, "and the episode is the narrowed one"
 
     # Route 3 — this turn's own minted `WEB_SEARCH` record, reaching the *second*
     # servicing of one turn (ADR-0238 §2's third population, ADR-0231 §16's within-turn
@@ -2207,24 +2290,83 @@ async def test_a_guarded_record_is_refused_on_every_route_into_a_supply() -> Non
         await _loop(
             planner=_revising(),
             search=_servicer(
-                searcher=_MintsGuarded(_CostedSearcher(FakeWebSearcher(results=(_RESULT,)))),
+                searcher=_MintsNarrowed(
+                    _CostedSearcher(FakeWebSearcher(results=(_RESULT,))), placement
+                ),
                 granted=True,
             ),
             footing=await _chosen_footing(),
         ).respond(_ASK, narrow=_bounded(), operation=_REVISING)
 
-    assert _serviced(captured, 1)["withheld"] == 1, "a minted record is refused like any other"
-    assert _serviced(captured, 1)["supplied"] == 0
-    assert _serviced(captured, 1)["supplied_narrowed"] == 0
+    assert _serviced(captured, 1)["supplied"] == 1, "a minted record is admitted like any other"
+    assert _serviced(captured, 1)["withheld"] == 0
+    assert _serviced(captured, 1)["supplied_narrowed"] == 1
 
-    # And the type refuses the **supply**, rather than pruning it: a builder that forgot
-    # to filter fails loudly at the one construction site instead of composing over a set
-    # its caller believes is something else.
-    with pytest.raises(ValidationError, match="1 of 2"):
-        SearchSupply(
-            utterance=_ASK,
-            records=(_derived_belief("b-1", "admitted"), _owner_belief("b-2", "guarded")),
-        )
+    # And the type **constructs** the supply rather than refusing it (ADR-0246 §3): a
+    # lane that deleted the builder's predicate and left the `AfterValidator` in place
+    # would pass every count above and fail here, which is the direction Arm D asks the
+    # assertion to fail in.
+    held = SearchSupply(
+        utterance=_ASK,
+        records=(
+            _derived_belief("b-1", "derived"),
+            _narrowed_belief("b-2", "narrowed", placement),
+        ),
+    )
+    assert [one.id for one in held.records] == ["b-1", "b-2"]
+
+
+# --------------------------------------------------------------------------- #
+# ADR-0246 §11 Arm G — the `UNCHOSEN` destination is unmoved                   #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(("placement", "record_id"), _ARMS)
+async def test_an_unchosen_destination_composes_over_nothing_by_the_trust_clause(
+    placement: Placement, record_id: str
+) -> None:
+    """ADR-0246 §11's **Arm G**, with every other fact identical to Arm D's route 1.
+
+    "With every other fact identical to Arm D's and the destination's trust record
+    absent, the supply carries the utterance and an empty ``records``, its withheld
+    count is zero, and the guarded record is not composed over."
+
+    **The arm asserts that the emptiness is ADR-0238 §2's trust clause and not a
+    placement filter**, "so a lane that deleted the trust branch along with the
+    validator fails it" — and the count is what says which: a filter that emptied the
+    population would have to report it withheld, and this reports zero because the
+    population never reached a filter (ADR-0246 §7). Nothing loosens here: §2's clause
+    that a non-empty ``records`` is built only for a destination whose recorded trust is
+    ``USER_CHOSEN`` binds entire, and ADR-0231 §3's utterance-only property holds for
+    this destination exactly as ratified.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_narrowed_belief(record_id, "the narrowed thing about Porto", placement))
+    composer = FakeQueryComposer()
+
+    with structlog.testing.capture_logs() as captured:
+        await _loop(
+            planner=FakePlanner(now=_clock, read_request=_search()),
+            memory=memory,
+            search=_servicer(
+                composer=composer,
+                searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))),
+                granted=True,
+            ),
+            footing=await _chosen_footing(trust=FakeDestinationTrustStore([])),
+        ).respond(_ASK, narrow=_bounded())
+
+    serviced = _serviced(captured, 0)
+    assert serviced["supplied"] == 0, "§2's trust clause emptied the whole population"
+    assert serviced["withheld"] == 0, (
+        "and it is the **trust clause** that emptied it, not a placement filter — which "
+        "is exactly what this count staying zero says (ADR-0246 §7, §11 Arm G)"
+    )
+    assert serviced["supplied_narrowed"] == 0
+    assert [supply.records for supply in composer.supplies] == [()], (
+        "the composer was handed the utterance and an empty `records` (ADR-0238 §2), so "
+        "the narrowed record was not composed over"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -2280,27 +2422,33 @@ async def test_a_revocation_between_turns_flips_the_supply_back_to_utterance_onl
 
 
 # --------------------------------------------------------------------------- #
-# ADR-0245 §11 Arm F — the two counts move in opposite directions              #
+# ADR-0246 §11 Arm F' — the audit's four counts, each at its true value        #
 # --------------------------------------------------------------------------- #
 
 
-async def test_the_audits_counts_move_in_opposite_directions_and_carry_no_identifier() -> None:
-    """ADR-0245 §11's **Arm F**, over one turn carrying one of each.
+async def test_the_audits_four_counts_are_true_and_carry_no_identifier() -> None:
+    """ADR-0246 §11's **Arm F'**, and this replaces ADR-0245 §11 Arm F in its premise.
 
-    "Over one turn carrying an admitted ``DERIVED`` narrowing and a refused ``OWNER_ACT``
-    one, the event records the supplied count, the withheld count, this turn's ``calls``
-    **and** the supplied-narrowed count §7 adds, each at its true value, and the event
-    carries **the ambient correlation identifier and no other identifier**."
+    Arm F was written over a turn "carrying an admitted ``DERIVED`` narrowing and a
+    **refused** ``OWNER_ACT`` one", which ADR-0246 §1 makes unreachable — so the arm is
+    restated over a turn carrying an admitted ``DERIVED`` narrowing **and** an admitted
+    ``OWNER_ACT`` one: "the event records the supplied count, the withheld count at
+    **zero**, this turn's ``calls`` and the supplied-narrowed count at **two**, each at
+    its true value, and carries **the ambient correlation identifier and no other
+    identifier**."
 
-    The last clause is ADR-0238 §11's own rule, "restated here so that the arm cannot be
-    satisfied by dropping the field §7 keeps": a record id, a conversation id, a
+    The last clause is ADR-0238 §11's own rule, "restated here so the arm cannot be
+    satisfied by dropping a field §7 keeps": a record id, a conversation id, a
     destination, a query or any fragment of one would each satisfy a naive reading of
-    "the counts are there" while breaking the rule the counts were admitted under.
+    "the counts are there" while breaking the rule the counts were admitted under. And
+    ``withheld`` is asserted **present and zero** rather than merely zero, because §7
+    forbids deleting the field in the same breath as it forbids a fifth: a deployment
+    that watched only it "would see the system withholding nothing and conclude nothing
+    was flowing", which is why ``supplied_narrowed`` is where the truth is.
     """
     memory = FakeMemoryStore(now=_clock)
     await memory.add(_owner_belief("belief-guarded", "the guarded thing about Porto"))
     await memory.add(_derived_belief("belief-derived", "the derived thing about Porto"))
-    searcher = FakeWebSearcher(results=(_RESULT,))
 
     with (
         structlog.testing.capture_logs() as captured,
@@ -2309,14 +2457,18 @@ async def test_the_audits_counts_move_in_opposite_directions_and_carry_no_identi
         await _loop(
             planner=FakePlanner(now=_clock, read_request=_search()),
             memory=memory,
-            search=_servicer(searcher=_CostedSearcher(searcher), granted=True),
+            search=_servicer(
+                searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))), granted=True
+            ),
             footing=await _chosen_footing(),
         ).respond(_ASK, narrow=_bounded())
 
     record = _record(captured)
     serviced = _serviced(captured, 0)
-    assert (serviced["supplied"], serviced["withheld"]) == (1, 1)
-    assert serviced["supplied_narrowed"] == 1, "the one supplied record is the narrowed one"
+    assert serviced["supplied"] == 2, "the derived narrowing and the owner's own act, both"
+    assert "withheld" in serviced, "ADR-0246 §7: no lane deletes the field"
+    assert serviced["withheld"] == 0, "and §1 leaves no filter to make it anything else"
+    assert serviced["supplied_narrowed"] == 2, "both supplied records carry a narrowed reach"
     assert serviced["calls"] == 1, "one admission, one draw"
     assert record["correlation_id"] == correlation, "the ambient identifier, and it is there"
     rendered = repr(record)

@@ -1,23 +1,36 @@
-"""``SearchSupply``: what one composition may be composed over (ADR-0238 §2; ADR-0245 §2).
+"""``SearchSupply``: what one composition may be composed over (ADR-0238 §2; ADR-0246 §3).
 
 ADR-0231 §3 gave ``QueryComposer.compose`` one positional argument and made the
 utterance-only property **decidable from the signature**, on ADR-0093 §10's ground
 that "a caller able to widen the read is a caller able to defeat the bound".
-ADR-0238 §2 keeps the one argument and moves the property onto the value, so the
-cases here are where that relocation is actually checked: a caller holding an
-excluded record still has nothing to pass, because the type refuses it.
+ADR-0238 §2 keeps the one argument and widens what it carries, putting two bounds on
+the population instead: §2's three populations, and that a non-empty ``records`` is
+built only for a destination whose recorded trust is ``USER_CHOSEN``. **Both are the
+one construction site's**, and ADR-0245 §3's third clause says in terms that the
+trust condition "is not a property this type can hold" — so what is checked here is
+what the type *is*, not a population it refuses.
 
-**ADR-0245 §11's Arm B is the negative arm this file carries, and it replaces
-ADR-0238 §15's Arm 4.** Reach is audience control (ADR-0245 §1), so the set the type
-admits is stated positively over two combinations and no more: reach ``ANYONE``, and
-reach ``OWNER`` narrowed by ``DERIVED``. A record placed reach ``OWNER`` setter
-``OWNER_ACT``, and one placed reach ``OWNER`` setter ``PROPOSED``, are each refused at
-construction — "in a selection a search result influenced and in one it did not", which
-is the same construction, so no selection an injected result influenced can reach a
-different outcome. **The refusal is asserted on the type directly, so that a builder
-that filtered correctly could not make the arm pass.** The audit halves — the withheld
-count and ADR-0245 §7's supplied-narrowed count — are the servicing site's and are in
-``tests/orchestration/test_closed_loop.py``.
+**ADR-0246 §11's Arms D, D' and B' are the arms this file carries, and they invert
+ADR-0245 §11's Arm B exclusion limb.** (The ADR writes those names with a prime,
+rendered as a plain apostrophe here because ruff refuses the ambiguous character in
+Python source.) Reach is audience control — ADR-0217 §1's
+denotation of a set of **people** — and a search provider the owner named in a
+recorded act is not a person this assistant talks to, so on a destination the user
+chose ``Placement.reach`` does not bind at all: no record is withheld on its reach,
+on its setter, or on any combination of the two, **whatever the setter** (ADR-0246
+§1). ADR-0245 §3's ``AfterValidator`` is deleted with that decision rather than kept
+as a predicate that cannot fail (§3), and the cases below are what fails loudly for a
+lane that left it in place.
+
+**The deletion hands nothing back to the caller** (ADR-0246 §3). What the validator
+ever enforced was the *placement* predicate; the two bounds that remain were never
+properties of the type. So no bound moves from the type to the caller — one bound
+ceases to exist and the other two stay exactly where ADR-0238 §2 put them.
+
+The audit halves — ``withheld`` at zero and ADR-0245 §7's supplied-narrowed count
+over every setter — are the servicing site's and are in
+``tests/orchestration/test_closed_loop.py``, with Arm H's reply-side subtraction in
+``tests/orchestration/test_spoken_disclosure.py``.
 """
 
 from __future__ import annotations
@@ -65,17 +78,20 @@ def episode(record_id: str = "e-1", *, placement: Placement | None = None) -> Ep
     )
 
 
-#: ADR-0245 §2's **excluded** narrowings: the one the owner made by their own act, and
-#: the one a model proposed. ADR-0217 §1's table forbids ``reach=OWNER`` with no setter,
-#: so a narrowed placement always names who narrowed it — and since ADR-0245 §1 the
-#: filter reads **both** fields, which is why these two are here and ``DERIVED`` is not.
-_EXCLUDED_PLACEMENTS: Final = [
-    Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.OWNER_ACT, set_at=_NOW),
-    Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.PROPOSED, set_at=_NOW),
-]
+#: The narrowing the owner made by their **own act** (ADR-0217 §3), and the one a
+#: model **proposed** (§4) — the two ADR-0245 §2 excluded by name and ADR-0246 §1
+#: admits. ADR-0217 §1's table forbids ``reach=OWNER`` with no setter, so a narrowed
+#: placement always names who narrowed it.
+_NARROWED_BY_THE_OWNER: Final = Placement(
+    reach=PlacementReach.OWNER, set_by=PlacementSetter.OWNER_ACT, set_at=_NOW
+)
+_NARROWED_BY_A_MODEL: Final = Placement(
+    reach=PlacementReach.OWNER, set_by=PlacementSetter.PROPOSED, set_at=_NOW
+)
+_ADMITTED_NARROWINGS: Final = [_NARROWED_BY_THE_OWNER, _NARROWED_BY_A_MODEL]
 
-#: ADR-0245 §2's second admitted combination — the placement a stamped episode of the
-#: conversation carries (ADR-0204 §2 on ADR-0217 §3), which is the record #2224 watched
+#: The narrowing ADR-0204 §2's evaluation writes through ADR-0217 §3 — the placement a
+#: stamped episode of the conversation carries, which is the record #2224 watched
 #: ADR-0238 §3's filter drop on every later turn.
 _DERIVED: Final = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)
 
@@ -88,7 +104,9 @@ def test_the_supply_carries_two_fields_and_no_third() -> None:
 
     Frozen and extra-forbidding, so a caller cannot smuggle a third value past the one
     parameter by attaching it to the value that parameter takes — which would be the
-    absent-parameter bound defeated one level down.
+    absent-parameter bound defeated one level down. ADR-0246 §3 keeps this entire:
+    "**`SearchSupply` keeps everything else ADR-0238 §2 gave it.** Exactly two fields
+    and a lane adds no third", and deleting the validator adds nothing back.
     """
     assert set(SearchSupply.model_fields) == {"utterance", "records"}
     assert SearchSupply.model_config.get("frozen") is True
@@ -104,7 +122,8 @@ def test_records_default_to_empty_which_is_the_ratified_population() -> None:
     Where the destination reads ``UNCHOSEN`` the supply carries the utterance and an
     empty ``records``, "and ADR-0231 §3's utterance-only property therefore holds for
     that destination exactly as ratified". A caller that supplies nothing therefore
-    composes exactly as this corpus composes today.
+    composes exactly as this corpus composes today. ADR-0246 §3 keeps the tuple
+    immutable and the default empty on that same ground.
     """
     assert SearchSupply(utterance=UTTERANCE).records == ()
 
@@ -119,52 +138,56 @@ def test_the_utterance_is_non_blank_and_encodable() -> None:
         SearchSupply(utterance="lone surrogate \ud800")
 
 
-# --- ADR-0245 §2, §3, §11's Arm B: the exclusion, on the type ---------------
+# --- ADR-0246 §11 Arms D, D', B': the type refuses no placement --------------
 
 
-@pytest.mark.parametrize("placement", _EXCLUDED_PLACEMENTS, ids=lambda p: str(p.set_by))
-def test_a_narrowing_the_owner_or_a_model_made_is_refused_at_construction(
+@pytest.mark.parametrize("placement", _ADMITTED_NARROWINGS, ids=lambda p: str(p.set_by))
+def test_a_narrowing_the_owner_or_a_model_made_is_carried_not_refused(
     placement: Placement,
 ) -> None:
-    """ADR-0245 §11's Arm B, and §3's "the refusal is on the type".
+    """ADR-0246 §11's **Arms D and D'**, on the type, and this inverts ADR-0245 §11 Arm B.
 
-    The two setters §2 excludes by name, on a destination of **any** recorded trust:
-    ``OWNER_ACT``, because "the system records the act and not its reason" and admitting
-    it would be deciding what the owner meant by it; and ``PROPOSED``, because the
-    ruling is about the *derivation* and a setter it did not name is not admitted by it.
+    Arm D: "the supply is constructed rather than refused — asserted on the type
+    directly, by constructing a ``SearchSupply`` carrying such a record, **so that a
+    lane which left the validator in place fails the arm loudly**". Arm D' is the same
+    claim for the placement ``learning/observer.py``'s observation pass writes, which
+    is the one a *preference* carries: ground 1 of the owner's ruling is about exactly
+    that preference silently dropping out of a follow-up query.
 
-    Evaluated **per record and regardless of why that record was selected**, which is
-    what keeps ADR-0245 §8's negative arm true over the narrowed excluded set: an
-    injected result cannot carry an excluded record into a query, because no selection a
-    result influenced can place one in a supply — the two selections are the same
-    construction, and this is it.
+    ADR-0245 §2 refused both by name — the owner's act because "the system records the
+    act and not its reason", and the proposal because "the ruling is about the
+    *derivation*". The owner has now ruled that the logic reaches both: their explicit
+    guard is defined by ADR-0217 §3 as setting reach and nothing else, and a guarded
+    record has never meant "local only", it has meant "not for other people".
     """
-    with pytest.raises(ValidationError, match="DERIVED"):
-        SearchSupply(utterance=UTTERANCE, records=(belief(placement=placement),))
+    held = SearchSupply(utterance=UTTERANCE, records=(belief(placement=placement),))
+
+    assert [record.id for record in held.records] == ["b-1"]
+    assert held.records[0].placement is placement
 
 
-@pytest.mark.parametrize("placement", _EXCLUDED_PLACEMENTS, ids=lambda p: str(p.set_by))
-def test_the_refusal_reaches_a_record_of_any_kind(placement: Placement) -> None:
+@pytest.mark.parametrize("placement", _ADMITTED_NARROWINGS, ids=lambda p: str(p.set_by))
+def test_the_admission_reaches_a_record_of_any_kind(placement: Placement) -> None:
     """§3: the fact is the ``Placement`` on ``MemoryBase``, so every kind carries it.
 
     An episode is the record ADR-0238 §2's *first* population is made of — "episodes of
-    this conversation that `orchestration` selected into the turn's supply" — so a filter
-    that only reached beliefs would let the population most likely to be narrowed
-    through untouched.
+    this conversation that `orchestration` selected into the turn's supply" — so a lane
+    that deleted the validator for beliefs alone, or kept a kind-specific check
+    somewhere, would leave the population most likely to be narrowed refused.
     """
-    with pytest.raises(ValidationError, match="DERIVED"):
-        SearchSupply(utterance=UTTERANCE, records=(episode(placement=placement),))
+    held = SearchSupply(utterance=UTTERANCE, records=(episode(placement=placement),))
+
+    assert [record.id for record in held.records] == ["e-1"]
 
 
-def test_a_derived_narrowing_is_admitted_and_that_is_the_decision() -> None:
-    """ADR-0245 §1, over both kinds, and it is the producer ADR-0238 §2 lacked.
+def test_a_derived_narrowing_is_admitted_and_that_limb_of_arm_b_stands() -> None:
+    """ADR-0246 §11's **Arm B'**: "Arm B's ``DERIVED`` limb stands."
 
-    "On such a supply a ``MemoryRecord`` whose ``placement.reach`` is
-    ``PlacementReach.OWNER`` and whose ``placement.set_by`` is
-    ``PlacementSetter.DERIVED`` is **admitted**, whichever of ADR-0238 §2's three
-    populations selected it." Stated here as well as at the servicing site because the
-    *type* is where ADR-0238 §3's first clause used to refuse it: a lane that fixed the
-    builder and left the validator alone would build no supply at all (#2224).
+    ADR-0245 §1 admitted this pair and ADR-0246 §1 does not disturb it — what §1 widens
+    is the *rest* of the field's range, and a decision that admitted every other setter
+    while quietly dropping this one would be a regression nothing else here would
+    catch. It is also the producer ADR-0238 §2's cross-turn promise needed: the stamped
+    episode a later turn retrieves carries exactly this pair (#2224).
     """
     held = SearchSupply(
         utterance=UTTERANCE,
@@ -175,73 +198,85 @@ def test_a_derived_narrowing_is_admitted_and_that_is_the_decision() -> None:
     assert all(record.placement.set_by is PlacementSetter.DERIVED for record in held.records)
 
 
-def test_the_admitted_set_is_two_combinations_and_the_type_admits_no_third() -> None:
-    """§2: "It admits no other combination."
+def test_every_placement_a_record_can_carry_reaches_a_supply() -> None:
+    """ADR-0246 §1: "there being no combination it refuses."
 
-    The positive statement of the rule, driven over every pair ADR-0217 §1's two reach
-    denotations and three setters can make — so a lane that widened the predicate to any
-    ``OWNER`` reach, or that read the setter without the reach, fails here rather than in
-    a scenario someone has to think of. ``reach=ANYONE`` with a narrowing setter is not
-    reachable through ``Placement``'s own table, which is why the sweep asks the type
-    what it admits rather than asserting a hand-written list.
+    ADR-0245 §11's Arm B asserted an admitted set of exactly two combinations; §1
+    supersedes that clause, so the sweep now asserts the **whole** range of pairs
+    ``Placement``'s own table can carry (ADR-0217 §1). Driven as a sweep rather than as
+    a list of cases so that a reach denotation a later ADR adds is admitted here on the
+    day it lands — ADR-0246 §12's last deferral states that answer in terms: "a later
+    denotation binds no more at a supply than ``OWNER`` does, because reach does not
+    bind there at all."
+
+    A pair ``Placement`` itself refuses is not this type's exclusion, which is why the
+    sweep asks what a placement can be built from rather than asserting a hand-written
+    list.
     """
-    admitted = {
+    constructible = {
         (reach, setter)
         for reach in PlacementReach
         for setter in (None, *PlacementSetter)
-        if _constructs(reach, setter)
+        if _placeable(reach, setter)
     }
 
-    assert admitted == {
-        # §2's first limb is stated over the **reach alone**, so an owner's act that
-        # widened a record back to ``ANYONE`` is admitted by it exactly as an unnarrowed
-        # record is: what §2 excludes is a *narrowing* the owner made, and this is not
-        # one (ADR-0217 §3's act may widen a ``PROPOSED`` or ``OWNER_ACT`` placement).
-        (PlacementReach.ANYONE, None),
-        (PlacementReach.ANYONE, PlacementSetter.OWNER_ACT),
-        # §2's second limb, which is the whole of what ADR-0245 decides.
-        (PlacementReach.OWNER, PlacementSetter.DERIVED),
-    }
+    assert {pair for pair in constructible if not _supplies(*pair)} == set(), (
+        "no placement a record can carry is refused by the supply (ADR-0246 §1, §3)"
+    )
+    assert (PlacementReach.OWNER, PlacementSetter.OWNER_ACT) in constructible, "Arm D's pair"
+    assert (PlacementReach.OWNER, PlacementSetter.PROPOSED) in constructible, "Arm D''s pair"
+    assert (PlacementReach.OWNER, PlacementSetter.DERIVED) in constructible, "Arm B''s pair"
 
 
-def _constructs(reach: PlacementReach, setter: PlacementSetter | None) -> bool:
-    """Whether a supply holding one record so placed can be constructed at all.
-
-    ``Placement`` refuses some pairs itself (ADR-0217 §1's table), and those are not the
-    supply's exclusions — so a pair the placement cannot carry counts as not admitted
-    here without the sweep having to know which of the two types refused it.
-    """
+def _placement(reach: PlacementReach, setter: PlacementSetter | None) -> Placement | None:
+    """One placement, or ``None`` where ADR-0217 §1's own table refuses the pair."""
     try:
-        placement = Placement(
-            reach=reach, set_by=setter, set_at=_NOW if setter is not None else None
-        )
+        return Placement(reach=reach, set_by=setter, set_at=_NOW if setter is not None else None)
     except ValidationError:
-        return False
+        return None
+
+
+def _placeable(reach: PlacementReach, setter: PlacementSetter | None) -> bool:
+    """Whether ADR-0217 §1's table admits this pair at all."""
+    return _placement(reach, setter) is not None
+
+
+def _supplies(reach: PlacementReach, setter: PlacementSetter | None) -> bool:
+    """Whether a supply holding one record so placed can be constructed."""
+    placement = _placement(reach, setter)
+    assert placement is not None
     try:
         SearchSupply(utterance=UTTERANCE, records=(belief(placement=placement),))
-    except ValidationError:
+    except ValidationError:  # pragma: no cover — ADR-0246 §3 leaves nothing to raise it
         return False
     return True
 
 
-def test_one_excluded_record_refuses_the_whole_supply() -> None:
-    """Not filtered out quietly: the *supply* is refused.
+def test_a_mixed_supply_is_carried_whole_and_nothing_is_dropped() -> None:
+    """ADR-0246 §3, and it is the shape ADR-0245 §11's Arm B refused.
 
-    A type that dropped the member would leave the caller believing it had composed
-    over a set it did not, which is the silence ADR-0128 §2 is about one seam over —
-    and it would put the withheld count §11's audit reads out of the servicing site's
-    reach.
+    ADR-0245's type refused the *whole* supply where one member was excluded, so that a
+    caller could not be left believing it had composed over a set it did not. With no
+    exclusion left there is nothing to refuse and nothing to drop: the four placements
+    a record can carry arrive together, in the order the builder gave them.
+
+    A type that had been "fixed" by pruning rather than by deleting the validator fails
+    here — which is the silence ADR-0128 §2 is about one seam over, and it would put
+    the supplied count the audit reads out of the servicing site's reach.
     """
-    narrowed = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.OWNER_ACT, set_at=_NOW)
+    supplied = (
+        belief("b-anyone"),
+        belief("b-derived", placement=_DERIVED),
+        belief("b-guarded", placement=_NARROWED_BY_THE_OWNER),
+        episode("e-proposed", placement=_NARROWED_BY_A_MODEL),
+    )
 
-    with pytest.raises(ValidationError, match="1 of 2"):
-        SearchSupply(
-            utterance=UTTERANCE,
-            records=(belief("b-1"), belief("b-2", placement=narrowed)),
-        )
+    held = SearchSupply(utterance=UTTERANCE, records=supplied)
+
+    assert held.records == supplied
 
 
-def test_records_placed_for_anyone_are_admitted_in_the_order_given() -> None:
+def test_records_are_carried_in_the_order_given() -> None:
     """The ordinary case, and the order is the caller's.
 
     §2 closes ``records`` to three populations but says nothing about their order —
@@ -257,11 +292,13 @@ def test_records_placed_for_anyone_are_admitted_in_the_order_given() -> None:
     assert [record.id for record in held.records] == ["e-1", "b-1", "b-2"]
 
 
-def test_the_default_placement_is_the_admitted_one() -> None:
-    """ADR-0217 §1's default reach is ``ANYONE``, so an unnarrowed record passes.
+def test_the_default_placement_reaches_a_supply_unchanged() -> None:
+    """ADR-0217 §1's default reach is ``ANYONE``, and the ordinary record is unmoved.
 
-    Stated because the refusal above would be indistinguishable from a type that
-    refused *everything*: this is the case that says the filter has a true branch.
+    Stated because every case above is about a *narrowed* record: this is the one that
+    says the population ADR-0231 §3 always carried composes exactly as it did, which is
+    ADR-0246 §1's honouring limb — "what it does is subtract a filter rather than read
+    a new fact".
     """
     assert Placement().reach is PlacementReach.ANYONE
     assert SearchSupply(utterance=UTTERANCE, records=(belief(),)).records[0].id == "b-1"

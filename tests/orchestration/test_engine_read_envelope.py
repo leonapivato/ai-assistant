@@ -659,8 +659,10 @@ async def test_no_identifier_the_hop_carried_reaches_a_prompt_a_log_or_the_audit
         # reports. The pin stays closed over both because neither can carry a value.
         # ADR-0238 §11's three added fields and ADR-0245 §7's fourth, each an ``int``.
         # How many records were supplied to the composer, how many §3's filter withheld
-        # from that supply, how many of the supplied ones carry a reach that is not
-        # ``ANYONE``, and this conversation's ``calls`` as ``admit_search`` left them.
+        # from that supply — zero on every path since ADR-0246 §1, and **kept** as a
+        # field rather than deleted because §7 forbids removing one of the four — how
+        # many of the supplied ones carry a reach that is not ``ANYONE``, and this
+        # conversation's ``calls`` as ``admit_search`` left them.
         # **Counts only** (§11): no record id, no conversation id, no destination, no
         # query text, no fragment or length of one, no title, no snippet and no provider
         # message — and, by §11's own last clause, **not the destination's recorded
