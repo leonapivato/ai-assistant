@@ -32,7 +32,10 @@ from ai_assistant.core.types import (
     MemoryKind,
     NotificationCondition,
     NotificationReach,
+    ReadAnswerOutcome,
+    ReadCancellation,
     RoutableOperation,
+    SearchNotServiced,
     SpanCoverage,
     SpokenAudioFormat,
 )
@@ -7446,3 +7449,215 @@ def test_a_press_interrupts_a_notification_and_reports_nothing_about_it() -> Non
     assert playing.count("episode: null") == 1
     assert playing.count("conversation: null") == 1
     assert "slot: null" in playing
+
+
+# --- ADR-0244 §13: what a read's question, its answer and its act may say ------
+
+
+def _map(script: str, name: str) -> str:
+    """One top-level ``const NAME = { ... };`` as its source text.
+
+    ``_vocabulary``' device, asked for by name rather than fixed to one map: the page
+    now carries three closed vocabularies keyed by a `core` enum, and a test that read
+    the whole file would be satisfied by a sentence declared anywhere in it.
+    """
+    opened = script.index(f"\nconst {name} = {{")
+    return script[opened : script.index("\n};", opened)]
+
+
+def _keys(block: str) -> set[str]:
+    """The top-level keys of one such map, and not the lines its sentences wrap onto.
+
+    Counting indented lines would count a wrapped sentence as a member, which is the
+    direction that makes a closure test pass vacuously: a map of three members whose
+    sentences run to nine lines would satisfy a count of nine.
+    """
+    return set(re.findall(r"^  (\w+):", block, re.MULTILINE))
+
+
+def test_a_reads_question_says_what_answering_yes_does_and_says_no_more() -> None:
+    """ADR-0244 §13's third Normative, which is one sentence and so is the page's.
+
+    "It says that answering *yes* dispatches this one read, and it says no more than
+    that. No surface states that the read will succeed, that the answer will change,
+    that a standing authorisation is being created, that the destination becomes
+    trusted, or that any later search is affected."
+
+    The five bars are asserted as absences over the sentence's own text, because each is
+    about what it must not say — and "this one" is checked in terms, since it is the word
+    that separates answering a question from establishing anything.
+
+    **It is rendered on the discriminator and on nothing else** (§4). A page branching on
+    ``tool_id`` would be deriving a fact `core` already carried, and would be wrong for
+    the next registered searcher rather than for this one.
+    """
+    script = _code("app.js")
+    said = _constant(script, "READ_DISPATCHES_ONE")
+    render = _functions(script)["renderConfirmation"]
+
+    assert "this one lookup" in said
+    for barred in ("succeed", "standing", "trust", "later", "next", "again", "will change"):
+        assert barred not in said, barred
+    assert "if (confirmation.read !== null) {" in render
+    assert "tool_id" not in render.split("renderParameters")[1]
+    # The floor is whole and on screen before there is anything to press (ADR-0178 §7,
+    # ADR-0233 §8), and this sentence sits with the reason rather than after the pair.
+    assert render.index("READ_DISPATCHES_ONE") < render.index("offerApproval(")
+
+
+def test_one_fixed_statement_per_read_answer_member_and_no_member_without_one() -> None:
+    """ADR-0244 §13's last clause, read off `core`'s own vocabulary.
+
+    "A surface that renders no statement for a ``ReadAnswerOutcome`` member it was given
+    … has not implemented this section — it is **not permissibly degraded**." So the map
+    is total over the enum and closed at its count, which is ``coverageWords``' own
+    arrangement: an eighth member fails here rather than reaching a person as a bare
+    identifier.
+
+    **And the lookup is by ownership rather than by truthiness**, which is the arm a
+    plain ``WORDS[member]`` leaves open: a member naming an inherited property —
+    ``toString``, ``constructor`` — comes back as a function, and ``line`` would put its
+    source text on the screen where a sentence about the owner's own lookup belongs.
+    """
+    script = _code("app.js")
+    words = _map(script, "READ_ANSWER_WORDS")
+    functions = _functions(script)
+
+    assert _keys(words) == {member.value for member in ReadAnswerOutcome}
+    assert "Object.hasOwn(READ_ANSWER_WORDS, member)" in functions["readAnswerWords"]
+    assert "READ_ANSWER_UNREADABLE" in functions["readAnswerWords"]
+    assert "readAnswerWords(member)" in functions["renderReadAnswer"]
+
+
+def test_no_read_answer_statement_says_why_a_ruling_went_the_way_it_did() -> None:
+    """ADR-0244 §9's bar, which is ADR-0242 §9's bar binding on a second vocabulary.
+
+    "No member carries, and no statement rendered for one carries, a destination, a
+    host, an origin, a provider name, an account identity, a query or any fragment of
+    one, a monetary figure, a budget, a threshold, a ``Settings`` field name or a
+    ``SearchDisposition`` value. … **It states what became of the answer and never why a
+    ruling went the way it did.**"
+
+    Asserted over the declared sentences as absences, because each is about what they
+    must not say. The two that come closest are worth naming: ``expired`` says a deadline
+    passed and gives no figure for it, and ``unavailable_now`` names neither of the two
+    states that reach it — a deleted conversation and a deployment whose per-conversation
+    allowance is zero.
+    """
+    words = _map(_code("app.js"), "READ_ANSWER_WORDS")
+
+    for barred in (
+        "search_calls_per_conversation",
+        "parked_read_ttl",
+        "conversation was deleted",
+        "budget",
+        "spend",
+        "$",
+        "destination",
+        "account",
+        "provider",
+        "query",
+        "seconds",
+        "minutes",
+    ):
+        assert barred not in words, barred
+
+
+def test_one_fixed_statement_per_read_cancellation_member_and_none_reads_as_a_denial() -> None:
+    """ADR-0244 §11, at the surface that performs the act.
+
+    Three members and three statements, total over the enum for the reason above. What
+    each must say is stated in §11 and each of the three has a clause of its own:
+
+    ``withdrawn`` records no answer — "``ActionPolicy.resolve`` is not called, no ruling
+    is recorded … which is the whole difference from a denial".
+
+    ``interrupted`` does **not** say the query stayed on the device: "the question was
+    answered, the call was made … **no caller assumes the query did not leave**. The
+    user's recourse is to ask again."
+
+    ``nothing_to_cancel`` is stated over this assistant and not over the world, because
+    "a park settled ``APPROVED`` whose dispatch is running elsewhere answers
+    ``NOTHING_TO_CANCEL``, which is true of what this process can do".
+    """
+    script = _code("app.js")
+    words = _map(script, "READ_CANCELLATION_WORDS")
+    functions = _functions(script)
+
+    assert _keys(words) == {member.value for member in ReadCancellation}
+    assert "Object.hasOwn(READ_CANCELLATION_WORDS, member)" in functions["cancellationWords"]
+    # None of the three reports a ruling, a grant, a trust record or a refund, because
+    # "cancellation establishes nothing and forfeits nothing".
+    for barred in ("denied", "declined", "ruling", "grant", "trust", "refund", "allowance"):
+        assert barred not in words, barred
+    assert "no answer was recorded" in words
+    assert "did not leave" in words
+    assert "in this assistant" in words
+
+
+def test_the_cancellation_act_is_offered_on_a_read_and_on_nothing_else() -> None:
+    """ADR-0244 §11: ``cancel_read`` is the cancellation source "**for this operation
+    kind alone**", and §4's discriminator is what a surface decides that from.
+
+    So the control is built on ``read !== null`` and not built at all otherwise — a
+    park of a plan step can never become a read, so a hidden control on its card would be
+    one that can never be shown and an act its token would be refused for. The routed
+    act's card passes ``null`` explicitly, because ADR-0197 §7's park is not a
+    ``Confirmation`` and carries no discriminator to read.
+
+    **And it stays enabled while an answer is out**, which is the only route to
+    ``INTERRUPTED``: that member is defined over "a read this process had dispatched and
+    had not completed", so a control disabled by an answer in flight would put the state
+    §11 names second out of reach of the surface §13 places the act on.
+    """
+    script = _code("app.js")
+    offer = _functions(script)["offerApproval"]
+
+    assert "const withdraw = read === null ? null : document.createElement" in offer
+    assert '"Cancel this lookup"' in offer
+    assert "withdraw.disabled = withdrawing || gone !== null;" in offer
+    assert "cancelRead(token)" in offer
+    assert "offerApproval(item, confirmation.token, confirmation.read);" in script
+    assert "offerApproval(item, card.token, null);" in script
+
+
+def test_the_page_renders_no_statement_for_any_search_not_serviced_member() -> None:
+    """ADR-0242 §9's browser deferral, which ADR-0244 leaves entire — a decision this
+    lane took rather than an omission it left.
+
+    §9's last clause is explicit about this surface: "the browser, until its own lane
+    (§5), renders neither the statement nor the reply's absence of one, because it
+    renders the turn exactly as it does today and the field it now receives is one it
+    ignores." ADR-0244 supersedes that ADR as to "§9's statement enumeration by **one
+    member**. **Nothing else in that ADR**", so the deferral binds and the enumeration
+    stays all-or-nothing: "a surface that renders **no** statement for a member is a
+    surface that has not implemented this section, not a permitted degradation".
+
+    A page rendering one of the nine is therefore the half-implemented surface §9
+    refuses, and one rendering all nine would mint browser wordings for eight members and
+    for three acts that exist only in a terminal. So it renders none, the member reaches
+    it through no route, and #2237 carries the lane that changes that.
+
+    This assertion is what stops the decision being quietly reversed: the member reaching
+    the page at all fails here, and whoever puts it there decides in this docstring
+    whether the page sees the whole vocabulary.
+
+    **Asserted over the route first**, because that is the only way a member can arrive:
+    ``search_not_serviced`` is the one field that carries it, and a page that never reads
+    it renders nothing for any of the nine however the words are spelled.
+
+    **And over the key form for the seven that are this enum's alone.** ``declined`` and
+    ``interrupted`` are values two of these vocabularies share — ``ReadAnswerOutcome`` has
+    the first and ``ReadCancellation`` the second — so a key of that name says nothing
+    about which enum it belongs to. The other seven are unambiguous, and a vocabulary
+    declared for one of them is what this would catch.
+    """
+    script = _code("app.js")
+    shared = {member.value for member in ReadAnswerOutcome} | {
+        member.value for member in ReadCancellation
+    }
+
+    assert "search_not_serviced" not in script
+    for member in SearchNotServiced:
+        if member.value not in shared:
+            assert f"\n  {member.value}:" not in script, member.value
