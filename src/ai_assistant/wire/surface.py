@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import inspect
 import typing
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import timedelta
 from functools import cache
 from typing import Any, Final, get_args, get_origin
@@ -115,6 +115,82 @@ def parameters(method: str) -> tuple[str, ...]:
         raise KeyError(method)
     signature = inspect.signature(getattr(AssistantEngine, method))
     return tuple(name for name in signature.parameters if name != "self")
+
+
+@cache
+def positional_only(method: str) -> tuple[str, ...]:
+    """The names of one method's positional-only arguments, in declaration order.
+
+    **A parameter's *kind* is part of the contract, not a detail of how it is
+    spelled**, and this module is where the wire learns that — for the reason the
+    header gives for everything else here: a transcribed list would be a second
+    vocabulary to keep in step with the first, and a Protocol that grew a
+    positional-only parameter would arrive with no mechanical signal that the
+    transport had been left behind.
+
+    That is not hypothetical. ADR-0244 §11 states ``cancel_read``'s signature with
+    the ``/``, the wire dispatched every promoted method by keyword splat, and the
+    operation was unreachable on a running hub for every token — the hub raised
+    ``TypeError``, which is not an ``AssistantError``, so the connection dropped
+    with no reply (#2243). Reading the kinds off the Protocol makes the call shape
+    total by construction, exactly as reading the annotations makes the argument
+    mapping total.
+
+    Args:
+        method: The method's name.
+
+    Returns:
+        The names of its positional-only parameters, ``self`` excluded, in the
+        order the signature declares them.
+
+    Raises:
+        KeyError: If the Protocol declares no such method.
+    """
+    signature = inspect.signature(getattr(AssistantEngine, method))
+    return tuple(
+        name
+        for name, parameter in signature.parameters.items()
+        if name != "self" and parameter.kind is inspect.Parameter.POSITIONAL_ONLY
+    )
+
+
+def call_shape(method: str, arguments: Mapping[str, Any]) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Split decoded arguments into the call shape the Protocol declares.
+
+    **Positional-only parameters are passed positionally and everything else by
+    name**, which is the narrowest rule that makes the surface callable as it is
+    written. Passing *every* parameter positionally would work too and would be
+    worse: it would silently tolerate an implementation whose parameter names had
+    drifted from the Protocol's, which is a divergence the wire should surface
+    rather than absorb.
+
+    **An argument the client did not send stays absent** (ADR-0085 §10), so no
+    default is filled in here: the engine applies its own declared default, which is
+    why a default like the page size is a contract clause rather than a signature
+    detail. The run of positional arguments therefore stops at the first
+    positional-only parameter the payload does not carry — and it can only stop at
+    the end, because every positional-only parameter on this surface is required.
+    ``tests/wire/test_cancel_read_dispatch.py`` pins that, so a lane that adds an
+    optional one is told here rather than by a hub calling a method with the wrong
+    argument in it.
+
+    Args:
+        method: The method being called.
+        arguments: The decoded arguments, by name.
+
+    Returns:
+        The positional arguments and the keyword arguments to call the method with.
+
+    Raises:
+        KeyError: If the Protocol declares no such method.
+    """
+    keyword = dict(arguments)
+    positional: list[Any] = []
+    for name in positional_only(method):
+        if name not in keyword:
+            break
+        positional.append(keyword.pop(name))
+    return tuple(positional), keyword
 
 
 @cache
