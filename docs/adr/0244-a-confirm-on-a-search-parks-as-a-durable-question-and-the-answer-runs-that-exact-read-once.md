@@ -342,7 +342,7 @@ continuation stays a continuation.
 ### 3. The store: `ParkedReads`, one open park per conversation, and content that lives exactly as long as the question
 
 > **Normative.** `core/protocols.py` gains **`ParkedReads`**, a durable store with exactly
-> these six members and no more:
+> these seven members and no more:
 >
 > - `async def park(self, record: ParkedRead, /) -> bool` — writes an `OPEN` park, or
 >   answers `False` where this conversation already holds one. The read of the existing park
@@ -351,6 +351,11 @@ continuation stays a continuation.
 >   `None`.
 > - `async def open_park(self, conversation_id: str, /) -> ParkedRead | None` — this
 >   conversation's open park, or `None`.
+> - `async def park_of_decision(self, decision_id: str, /) -> ParkedRead | None` — the park
+>   naming that decision, **whatever its disposition**, or `None` where no park names it. It is
+>   what §5's eighth condition is decided from, it survives a restart because the row does, and
+>   it is a second read rather than a widening of `get`: the token path holds a park id and the
+>   listing path holds a decision id, and neither has the other's.
 > - `async def outstanding(self) -> tuple[ParkedRead, ...]` — every `OPEN` park, in
 >   `parked_at` order, for §5's enumeration.
 > - `async def settle(self, park_id: str, /, *, disposition: ParkedReadDisposition, at:
@@ -370,6 +375,12 @@ continuation stays a continuation.
 > over one data directory can none of them be admitted against the same conversation's park.
 > A servicing whose `park` answered `False` has written no park, and §1's third clause
 > governs what it then is.
+
+> **Normative.** **One park names one decision, and `park` refuses a second naming the same**
+> — which is what makes `park_of_decision` a single answer rather than a listing. It holds by
+> construction as well as by rule, since one servicing records one `CONFIRM` and writes at most
+> one park for it, and the clause is stated so that an implementation cannot reach a state
+> where two rows answer one decision id.
 
 > **Normative.** **`settle` is the resolve-once gate, and it is what makes a duplicate
 > answer a no-op rather than a second dispatch.** No lane reads a park, decides, and writes
@@ -509,6 +520,9 @@ wire-carried type is what ADR-0124 §9 charges a version for.
 > named by a `ParkedRead` whose disposition is `OPEN`, `APPROVED` or `DENIED`** (ADR-0235 §3).
 > It is evaluated after §3's seven, in that position, and `UngrantableActError` names it
 > exactly as it names the others where the act is attempted on such a decision.
+> **The read that decides it is `ParkedReads.park_of_decision` (§3)**, which answers whatever
+> park names that decision, open or terminal, so the exclusion survives a restart and is taken
+> through the contract rather than from a concrete store (golden rule 1).
 
 > **Normative.** **The condition is stated over the three dispositions and not over an open
 > park, because the gate is taken before the resolution is written (§6).** A park that
@@ -1180,7 +1194,8 @@ is, which is `settle` (§3) and the running task's own registry.
 > and `read_answer`, `SearchNotServiced.ANSWER_AWAITED`, the `ParkedReads` Protocol,
 > `AssistantEngine.cancel_read`, `Settings.parked_read_ttl`); the **shared conformance suite**
 > for `ParkedReads`, stating §3's atomicity, its one-open-park rule, its settle-once answer,
-> its content-clearing settlement, its open-and-terminal shapes (§2) and its
+> its content-clearing settlement, its open-and-terminal shapes (§2), its one-park-per-decision
+> rule and `park_of_decision`'s answer across every disposition, and its
 > `drop_for_conversation` semantics;
 > the **canonical fake** in `ai_assistant.testing`; and
 > `orchestration`'s park, enumeration, answer, dispatch, continuation and cancellation —
@@ -1284,6 +1299,11 @@ is, which is `settle` (§3) and the running task's own registry.
 >   `establish_recipient_grant` on it raises `UngrantableActError` naming the eighth
 >   condition; the paused `resume` then records its own ruling and dispatches. The arm fails
 >   an implementation whose eighth condition is stated over an `OPEN` park alone.
+> - **Arm 14 — the exclusion survives a restart.** With a park settled `DENIED`, no resolution
+>   recorded, its deadline not passed and the engine rebuilt over the same durable state,
+>   `park_of_decision` answers that terminal row, `grantable_decisions` omits its decision, and
+>   `establish_recipient_grant` on it raises `UngrantableActError`. The arm fails an
+>   implementation holding the exclusion in memory.
 
 > **Normative.** **Arm 2's second half, Arm 9 and Arm 11 are the three this decision would be worthless
 > without**, and they are named here so that no lane treats them as optional: everything else
