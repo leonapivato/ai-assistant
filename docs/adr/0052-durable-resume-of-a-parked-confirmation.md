@@ -1,6 +1,6 @@
 # 52. Durable resume of a parked confirmation through the façade
 
-- Status: Partially superseded by ADR-0084 (§3's and the header's placement of the widened `TurnOutcome` outside contract surface) and ADR-0197 (§3's clause that the step "is what a resume is for, and it is always present", only as it reaches a resume whose `TurnOutcome` carries `routed`)
+- Status: Partially superseded by ADR-0084 (§3's and the header's placement of the widened `TurnOutcome` outside contract surface) and ADR-0197 (§3's clause that the step "is what a resume is for, and it is always present", only as it reaches a resume whose `TurnOutcome` carries `routed`) and ADR-0244 (§3's `TurnOutcome(turn=None, step=<resolution>)` sentence, as it reaches a resume answering a parked **read** alone: such a resume carries a real `TurnResult` and a composed reply and no `step`, a search having neither a step nor an execution; §3's reason is obeyed rather than overturned, the parked turn's goal and frozen plan being persisted instead of fabricated and its context and memories assembled afresh at the resume, and §1, §2, §4 and the rest of §3 bind entire — `TurnOutcome.turn` and `_Parked.turn` stay optional and a resume continuing a step returns exactly what it returns today)
 - Date: 2026-07-24
 - Partially superseded: 2026-07-31 by ADR-0084 — **two sentences placing
   `TurnOutcome` outside contract surface are false; every decision this ADR made
@@ -153,6 +153,34 @@
   Protocol (`AuditTrail`) into the façade, adds one façade method, and widens two
   of the façade's *own* `orchestration`-level DTOs (`TurnOutcome`, and the private
   `_Parked`). No subsystem boundary moves.
+
+- **Partially superseded: 2026-09-10 by [ADR-0244](0244-a-confirm-on-a-search-parks-as-a-durable-question-and-the-answer-runs-that-exact-read-once.md) — §3's
+  `TurnOutcome(turn=None, step=<resolution>)` sentence, as it reaches a resume answering a
+  parked **read**, and nothing else in this ADR.** §3 rules that *"A resume driven from a
+  recovered park returns `TurnOutcome(turn=None, step=<resolution>)`; the in-process path is
+  unchanged and still carries the real turn."* ADR-0244 §8 has an approved read's resume carry
+  a **real** `TurnResult` and a composed reply and **no** `step` at all — a search has neither
+  a step nor an execution (ADR-0231 §6), and the answer to its park dispatches the read and
+  composes over what it returned. A lane holding only this ADR would build the wrong outcome,
+  which is ADR-0070 §1's test on the supersession side, and it is the third scope recorded
+  against §3 beside ADR-0197 §13's routed pair and ADR-0198 §8's restatement.
+
+  **§3's own reason is obeyed rather than overturned, and that is why the scope is one
+  sentence.** §3 refuses to *"fabricate a `TurnResult` with empty context and memories — which
+  would misrepresent what the turn saw"*. ADR-0244 §2 **persists** the two members that would
+  otherwise be fabricated — the parked turn's `goal` and its frozen `plan` — and §8 assembles
+  `context` and `memories` afresh at the instant of the resume, with the approved read's
+  minted records as ADR-0226 §7's fourth group, and says in terms which two are the parked
+  turn's and which two are the resumed turn's. Nothing is filled from a snapshot, a cache or
+  an archive.
+
+  **What is not moved.** §1's recovery mechanism is what ADR-0244 §5 and §15 reuse at a second
+  population — enumerate durable state, re-mint a continuation, keep the handle opaque and
+  re-derivable — and §1's single-instance obligation on the composition root is the shape
+  ADR-0244's Lane 2 owes for its own store. §2's idempotent, bounded reconciliation binds, and
+  ADR-0244 §5 restates its no-ceiling-consult reasoning for a park that is already durable.
+  §4 is untouched. The rest of §3 binds entire: `TurnOutcome.turn` and `_Parked.turn` stay
+  optional, and a resume that continues a **step** returns exactly what it returns today.
 
 ## Context
 

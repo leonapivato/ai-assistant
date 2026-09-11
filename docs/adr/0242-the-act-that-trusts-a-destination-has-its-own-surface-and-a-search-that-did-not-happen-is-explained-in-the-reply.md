@@ -1,6 +1,6 @@
 # 242. The act that trusts a destination has its own surface, and a search that did not happen is explained in the reply
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0244 (§8's eight-member closure of `SearchNotServiced` in that count alone (the enumeration becomes nine with `ANSWER_AWAITED`, declared first; the eight members, their values, their order relative to one another, the added-to-and-never-renamed rule, the mapping's totality and its non-injectivity all stand), the three `RULING_CONFIRM` rows of §8's mapping table, which are discriminated by whether a park was written rather than re-pointed — obligatory, because a parked decision is not one the establishing act may ride and §8's `AUTHORISATION_AWAITED` clause asserts that it is — and §9's one-fixed-statement-per-member enumeration by the ninth member alone; every statement §9 fixes for the existing eight binds verbatim, §9's bars bind on the ninth, and §6's eligibility condition, §7's carrier, §9's `TurnOutcome` field and `SpokenTurn` clause, §§1–5 and §§10–18 are untouched)
 - Date: 2026-09-09
 - **Partially supersedes** [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
   — **§9's third clause, and nothing else in that ADR.** That clause reads *"The composing
@@ -54,6 +54,50 @@
   atomicity, `export`'s data right, and `trust_of`'s comparison-not-inference rule — as do
   §§2–18. In particular **§14's assignment of the surface is discharged rather than
   superseded**, and the Context section below argues why.
+
+- **Partially superseded: 2026-09-10 by [ADR-0244](0244-a-confirm-on-a-search-parks-as-a-durable-question-and-the-answer-runs-that-exact-read-once.md) — §8's
+  member count in that count alone, three rows of §8's mapping table, and §9's statement
+  enumeration by one member.** ADR-0244 makes a `CONFIRM` on a `WEB_SEARCH` decision a parked
+  question the user answers, which gives this vocabulary a state it did not have: a search
+  that has not happened **and is still going to be decided**.
+
+  **§8's closure at eight members, in that count alone.** §8 closes `SearchNotServiced` *"at
+  exactly **eight** members"* while providing in the same clause that *"no implementation or
+  later ADR adds a ninth member without the ADR that decides it"*. ADR-0244 §12 is that ADR
+  and adds **`ANSWER_AWAITED`**, so the enumeration becomes **nine**. **The eight members,
+  their values, their lower-cased spellings, their order relative to one another, the
+  added-to-and-never-renamed rule, the mapping's totality and its non-injectivity all stand
+  entire**, and the new member is declared **first**, which leaves every existing pairwise
+  precedence and every existing wire value unchanged.
+
+  **Three rows of §8's table, discriminated rather than re-pointed.** The three
+  `RULING_CONFIRM` rows gain one further input — whether the servicing site wrote a park —
+  and keep their present members where it did not. That discrimination is **obligatory rather
+  than cosmetic**, and §8's own text is why: `AUTHORISATION_AWAITED` *"asserts exactly two
+  things, both established"*, the second being that the decision *"is one the establishing act
+  **may ride**"*. ADR-0244 §5 adds an eighth condition to ADR-0235 §3 that excludes a parked
+  decision from that act, so reporting a parked `RULING_CONFIRM` as `AUTHORISATION_AWAITED`
+  would assert something false. `TRUST_MISSING`'s and `UNAVAILABLE`'s clauses are preserved by
+  the same move, and **every other row of the table is untouched** — the mapping stays total
+  over all eighteen `SearchDisposition` members and a later member still defaults to
+  `UNAVAILABLE`.
+
+  **§9's enumeration, by the ninth member alone.** §9 fixes *"one fixed statement per member"*
+  and enumerates eight; ADR-0244 §12 and §13 supply the ninth, which names `assistant resume`
+  as where the question is answered. **Every statement §9 fixes for the existing eight binds
+  verbatim**, and so do §9's bars on all of them: no statement says that performing the act it
+  names will make the next search happen, none says why a ruling was not an `ALLOW`, and none
+  carries a destination, a host, an origin, a provider name, an account identity, a query or
+  any fragment of one, a count, a monetary figure, a duration, a budget, a `Settings` field
+  name or a `SearchDisposition` value.
+
+  **What is not moved.** §6's eligibility condition — the disposition's presence and nothing
+  else — binds entire, and a parked servicing records `RULING_CONFIRM` exactly as it does
+  today. §7's carrier, its computed-at-the-servicing-site rule, its at-most-one-member-per-turn
+  rule, its precedence-decides-it rule and its fixed-fragment rule bind entire; ADR-0244 §12's
+  discriminator is one further value the site already holds and is not a store read. §9's
+  `TurnOutcome` field, its `SpokenTurn` clause and its no-statement-is-a-degradation clause
+  bind entire, and §§1–5, §10–§18 are untouched.
 
 ## Context
 

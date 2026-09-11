@@ -1,6 +1,6 @@
 # 231. The planner asks for a search, the turn's own words compose it, and the results come back as records
 
-- Status: Partially superseded by ADR-0235 (§9's second clause, in its second limb alone: a recorded `CONFIRM` on a `WEB_SEARCH` decision may be read from the trail and offered to a surface for the establishing act, as history and never as outstanding work; the limb's two siblings bind entire, so no lane resumes such a decision or treats it as outstanding work, and §9's first, third, fourth and fifth clauses, §19's entries and every other section of this ADR stand entire) and ADR-0238 (§3's argument-is-the-turn's-own-utterance clause, §4's first and second clauses, §12's second and third clauses, and §13's closure of `SearchDisposition` at exactly fifteen members in that count alone (the enumeration becomes sixteen; its members, their values, its injective mapping, its no-message rule and its exclusion of `SearchRefusal.NO_RESULT` all stand) — the composer's one positional-only parameter becomes a `SearchSupply`, which at a destination whose recorded trust is `USER_CHOSEN` may carry memory records, this conversation's episodes and its own prior results, so a search result may reach a later search request and a second search in a conversation that has read one may be ruled `ALLOW`; §3's one-parameter, one-member, no-store-seam-dependency and `planning`/`ModelProvider` clauses stand entire, the utterance-only content property still holds at every destination whose trust reads `UNCHOSEN`, §12's first and fourth clauses stand, and §1, §2, §5–§11, §13–§21 are untouched) and ADR-0241 (two scopes of §17 and nothing else in this ADR: the exact-signature declaration of `search`, which gains one keyword-only `timeout: timedelta` while `call` stays positional-only, `request`'s signature is untouched and the three-member closure and the no-store-no-supply-no-policy clause bind verbatim; and the closure of `SearchRefusal` at exactly six members in that count alone (the enumeration becomes seven; the six members, their values, the added-to-and-never-renamed rule and the raises-for-no-source-reason posture all stand). §5's four-field count is not moved, being scoped to what this ADR itself adds, and §13's disposition count is not recorded against again — the dated note below says why) and ADR-0242 (§9's third clause, and nothing else in this ADR: on a turn in which at least one search servicing did not reach a result the composing stage is given one member of a closed vocabulary and composes an answer that says so, so the assembled prompt on such a turn is no longer byte-identical to one where the planner asked for nothing; §9's first, second, fourth and fifth clauses bind entire — a search is still serviced only on a recorded ALLOW, the servicer still asks nothing and parks nothing, no lane weakens a declaration to reach an ALLOW, and the one route to an ALLOW is still the standing recipient grant §9 names — and §13's audit, §19's deferrals and every other section stand entire)
+- Status: Partially superseded by ADR-0235 (§9's second clause, in its second limb alone: a recorded `CONFIRM` on a `WEB_SEARCH` decision may be read from the trail and offered to a surface for the establishing act, as history and never as outstanding work; the limb's two siblings bind entire, so no lane resumes such a decision or treats it as outstanding work, and §9's first, third, fourth and fifth clauses, §19's entries and every other section of this ADR stand entire) and ADR-0238 (§3's argument-is-the-turn's-own-utterance clause, §4's first and second clauses, §12's second and third clauses, and §13's closure of `SearchDisposition` at exactly fifteen members in that count alone (the enumeration becomes sixteen; its members, their values, its injective mapping, its no-message rule and its exclusion of `SearchRefusal.NO_RESULT` all stand) — the composer's one positional-only parameter becomes a `SearchSupply`, which at a destination whose recorded trust is `USER_CHOSEN` may carry memory records, this conversation's episodes and its own prior results, so a search result may reach a later search request and a second search in a conversation that has read one may be ruled `ALLOW`; §3's one-parameter, one-member, no-store-seam-dependency and `planning`/`ModelProvider` clauses stand entire, the utterance-only content property still holds at every destination whose trust reads `UNCHOSEN`, §12's first and fourth clauses stand, and §1, §2, §5–§11, §13–§21 are untouched) and ADR-0241 (two scopes of §17 and nothing else in this ADR: the exact-signature declaration of `search`, which gains one keyword-only `timeout: timedelta` while `call` stays positional-only, `request`'s signature is untouched and the three-member closure and the no-store-no-supply-no-policy clause bind verbatim; and the closure of `SearchRefusal` at exactly six members in that count alone (the enumeration becomes seven; the six members, their values, the added-to-and-never-renamed rule and the raises-for-no-source-reason posture all stand). §5's four-field count is not moved, being scoped to what this ADR itself adds, and §13's disposition count is not recorded against again — the dated note below says why) and ADR-0242 (§9's third clause, and nothing else in this ADR: on a turn in which at least one search servicing did not reach a result the composing stage is given one member of a closed vocabulary and composes an answer that says so, so the assembled prompt on such a turn is no longer byte-identical to one where the planner asked for nothing; §9's first, second, fourth and fifth clauses bind entire — a search is still serviced only on a recorded ALLOW, the servicer still asks nothing and parks nothing, no lane weakens a declaration to reach an ALLOW, and the one route to an ALLOW is still the standing recipient grant §9 names — and §13's audit, §19's deferrals and every other section stand entire) and ADR-0244 (§9's second clause in three of its limbs, §9's fifth clause in its one-route limb, and §16's first clause in its any-store limb: a recorded `CONFIRM` on a `WEB_SEARCH` decision is parked as a durable question, offered to a surface, resumed and resolved, so the parks-nothing, resolves-in-no-turn and treats-it-as-outstanding-work limbs each move while the asks-the-user-nothing limb binds entire — what parks is the read and never the turn, and ADR-0226 §5 is obeyed rather than moved; the standing recipient grant is no longer the one route to an `ALLOW`, ADR-0148 §3's route (a) being reached by answering the park, while ADR-0193 §4 binds entire so no grant covers a request whose binding carries `planned_with_external_content` and an approval establishes nothing standing; and a durable park is written on account of a search, while §16's minted-record subject is untouched and its second, third, fourth and fifth clauses stand entire. §9's first, third and fourth clauses bind entire — serviced only on a recorded `ALLOW`, the composing stage told what ADR-0242 §6 tells it and no more, and no declaration weakened to reach an `ALLOW` — and §6's route, §11's servicing order and budget, §13's audit, §19's deferrals and every other section stand entire)
 - Date: 2026-09-04
 - **Partially superseded: 2026-09-09 by ADR-0241 — two scopes of §17, and nothing
   else in this ADR.** The owner amended milestone 31 on `track:planning`'s live record
@@ -341,6 +341,58 @@
   pair is **appended** to the existing pairs under ADR-0070 §4's accumulation rule and no
   existing pair is dropped or rewritten. Appended note per ADR-0070 §1; no text below is
   rewritten. Refs #2178, #2168, #1908.
+
+- **Partially superseded: 2026-09-10 by [ADR-0244](0244-a-confirm-on-a-search-parks-as-a-durable-question-and-the-answer-runs-that-exact-read-once.md) — three
+  clauses, each in named limbs, and nothing else in this ADR.** The milestone-31 QA re-probe
+  (#2206) found that on the owner's own store no search is ever made: ADR-0181 §5's lineage
+  floor makes a context-bearing search's binding carry `planned_with_external_content`, so
+  ADR-0193 §4 gives no grant over it and the ruling is a `CONFIRM` — which §9 resolves in no
+  turn. #2221 records the dead end and batch #2222 fixes its contract half.
+
+  **§9's second clause, in three of its limbs.** That clause closes *"**The servicer asks the
+  user nothing and parks nothing.** … A recorded `CONFIRM` on a `WEB_SEARCH` decision
+  **resolves in no turn**: no lane resumes it, offers it to an interface, or treats it as
+  outstanding work, and §19 defers the surface that would."* ADR-0244 §1 has the servicing
+  **park the read** and §6 has a lane **resume** it, so the *parks-nothing* limb, the
+  *resolves-in-no-turn* limb and the *treats-it-as-outstanding-work* limb each move. The
+  *offers-it-to-an-interface* limb was already ADR-0235's, for the establishing act alone;
+  a parked read's confirmation is the second thing it admits. **The asks-the-user-nothing
+  limb binds entire**, and so does ADR-0226 §5 behind it: the servicing puts no question
+  inside the turn, the turn composes from the supply it has and returns, and what parks is
+  the **read** and never the turn. A reader holding only this ADR would refuse the park —
+  ADR-0070 §1's test coming out on the supersession side.
+
+  **§9's fifth clause, in its one-route limb alone.** That clause closes *"The one route to an
+  `ALLOW` is ADR-0193's **standing recipient grant**"*. ADR-0244 §7 reaches an `ALLOW` by
+  **ADR-0148 §3's route (a)** — a recorded resolution of a `CONFIRM` about this request —
+  which this ADR itself named and closed only *"because it needs someone to ask, which
+  ADR-0226 §5 forbids the servicer doing"*. ADR-0244 supplies the asker; it opens no third
+  route. **The grant route is untouched and ADR-0193 §4 binds entire**, so no standing grant
+  covers a request whose binding carries `planned_with_external_content`, and an approval
+  establishes nothing standing.
+
+  **§16's first clause, in its any-store limb alone.** That clause closes *"**A minted record
+  is supply and never a store write.** No minted record is ingested, proposed, folded,
+  superseded or written to the `MemoryStore`, and nothing is written to any store on account
+  of a search."* ADR-0244 §3 writes a durable park on account of a search. **Its subject is
+  untouched**: the park holds no minted record, no result, no snippet and no address, nothing
+  reaches `MemoryWriter.ingest`, and §16's second, third, fourth and fifth clauses stand
+  entire — a minted record still resolves in no store, what persists is still the turn
+  through the path that already persists it, a second turn still re-searches, and retention by
+  address is still deferred. What the park holds is the **question**, and ADR-0244 §3 clears
+  its content in the same step that answers it.
+
+  **What is not moved, and each is stated because a reader would look for it.** §9's first
+  clause binds entire — a `WEB_SEARCH` request is serviced **only on a recorded `ALLOW`**, and
+  ADR-0244 §6 obeys it by seeking the resolving ruling before it dispatches. §9's third clause
+  is ADR-0242's to have moved and is not moved again. §9's fourth clause binds entire: no lane
+  makes a search reachable by weakening its declaration, and a park is the answer to a
+  `CONFIRM` rather than a way to stop one being produced. **§6 binds entire** — `step_id` and
+  `execution_id` stay `None`, no plan step, execution or claim is synthesised, and the route
+  to the send is unchanged — and it is what makes the park's key the recorded decision.
+  **§11's servicing order, its budget clauses and §13's audit stand entire**; a parked
+  servicing records `RULING_CONFIRM`, which is the member §13 already fixes for the stage that
+  produced it, and no field, event, key or emission point is added.
 
 ## Context
 
