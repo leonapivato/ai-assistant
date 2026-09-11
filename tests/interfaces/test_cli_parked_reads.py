@@ -287,6 +287,8 @@ async def test_a_turn_that_parked_a_read_renders_the_floor_the_query_and_what_a_
     assert "assistant cancel-read -- h-1" in rendered
     # §1: the turn did not park, so nothing is being collected here.
     assert "Nothing is being asked of you right now" in rendered
+    # §10: and the question can also run out of time, which two of three would deny.
+    assert "you answer it, you withdraw it, or it runs out of time" in rendered
 
 
 async def test_the_screen_beside_a_parked_read_never_says_the_lookup_produced_nothing(
