@@ -35,8 +35,9 @@
   — **§3's seven-condition closure in that count alone, and §8's first clause in its
   nowhere-else limb. Nothing else in that ADR.** §3 makes the establishing act available
   *"on a decision meeting **all seven** of the following"*; §5 below adds an **eighth** — the
-  decision is not one a parked read holds — because a decision whose question a park is
-  holding is answered through `resume` and not through a second act, which is §3's own third
+  decision's id is not named by a `ParkedRead` whose disposition is `OPEN`, `APPROVED` or
+  `DENIED` — because a decision whose question a park is holding, or has just taken the
+  answer to, is answered through `resume` and not through a second act, which is §3's own third
   clause read at a park that carries no `step_id` (*"no lane reaches this operation from a
   park by clearing either field"*). **The seven conditions themselves bind verbatim**, their
   order is unchanged, the eighth is tested after them, and `UngrantableActError` names it as
@@ -504,12 +505,25 @@ wire-carried type is what ADR-0124 §9 charges a version for.
 > deadline, and refusing to surface a park that already exists would strand it — ADR-0052
 > §2's own reason.
 
-> **Normative.** **`grantable_decisions` gains an eighth condition: the decision is not one
-> a parked read holds** (ADR-0235 §3). It is evaluated after §3's seven, in that position,
-> and `UngrantableActError` names it exactly as it names the others where the act is
-> attempted on such a decision. A park that has settled removes the condition's subject —
-> and where the settlement recorded a resolution, §3's fourth condition has already taken
-> the row out of the listing.
+> **Normative.** **`grantable_decisions` gains an eighth condition: the decision's id is not
+> named by a `ParkedRead` whose disposition is `OPEN`, `APPROVED` or `DENIED`** (ADR-0235 §3).
+> It is evaluated after §3's seven, in that position, and `UngrantableActError` names it
+> exactly as it names the others where the act is attempted on such a decision.
+
+> **Normative.** **The condition is stated over the three dispositions and not over an open
+> park, because the gate is taken before the resolution is written (§6).** A park that
+> settles `APPROVED` or `DENIED` holds a resolution the answering call has not yet recorded,
+> and a decision that left this listing at the settlement would be one the establishing act
+> could resolve **first** — recording an `ALLOW` the user never gave that answer for, and
+> leaving the answering call's own append to fail. The transition `OPEN` → `APPROVED` →
+> (recorded) therefore never passes through a grantable state, which is the property this
+> clause exists to have rather than an implementation note.
+
+> **Normative.** **A park that was `CANCELLED` or `EXPIRED` does not exclude its decision.**
+> Neither disposition writes a resolution and neither ever will, so the decision is an
+> unresolved `CONFIRM` exactly as §3's seven conditions find it, and the establishing act may
+> ride it where they hold. **No lane widens the exclusion to every park ever written**, which
+> would take a capability away on the strength of a question nobody answered.
 
 > **Normative.** **One question, one act, and the split is decided rather than incidental.**
 > A decision a park holds is answered through `resume`, and answering it is what dispatches
@@ -569,8 +583,11 @@ renders ADR-0178 §7's floor renders it with the one branch §4's discriminator 
 > 6. **The ruling.** `ActionPolicy.resolve` is asked with the user's `approved`, and **its
 >    answer is recorded whatever it is** — the second obligation ADR-0235 §3 already relies
 >    on, and ADR-0004 §7's reason: a ruling the trail never sees is a decision nobody can
->    audit. An `ALLOW` dispatches (§7); any other answer dispatches nothing and is reported
->    `AUTHORITY_CHANGED` (§9), with the park already spent.
+>    audit. On `approved` `True` an `ALLOW` dispatches (§7) and any other answer dispatches
+>    nothing and is `AUTHORITY_CHANGED`; on `approved` `False` the recorded answer is the
+>    `DENY` the user asked for and the outcome is `DECLINED` (§10). **The park is already
+>    spent either way**, and `AUTHORITY_CHANGED` is reserved for an approving answer the
+>    policy refused.
 
 > **Normative.** **The gate is the park's compare-and-swap, and every settlement is taken by
 > the party about to act on it, before it acts.** An answer settles it (clause 5); a
@@ -803,12 +820,14 @@ three `reply`-`None` shapes or its one `reply_degraded` shape.
 
 ### 10. Denial and expiry: terminal, recorded, and the sibling turn's reply stands
 
-> **Normative.** **A denial records a ruling and closes the park.** `resume` with `approved`
-> `False` takes §6's clauses 1–4, asks `ActionPolicy.resolve` with `approved` `False`,
-> records the `DENY` it returns, settles the park `DENIED`, and returns `read_answer`
-> `DECLINED` with `turn` `None` and `reply` `None` — ADR-0170 §4's second shape exactly.
-> **Nothing is sent, no channel is opened, no claim is appended, and no minted record
-> exists.**
+> **Normative.** **A denial takes the same gate in the same order.** `resume` with `approved`
+> `False` takes §6's clauses 1–4, **settles the park `DENIED` at clause 5**, and only then
+> asks `ActionPolicy.resolve` and records the `DENY`; it returns `read_answer` `DECLINED`
+> with `turn` `None` and `reply` `None` — ADR-0170 §4's second shape exactly. **A denial that
+> lost the gate rules nothing and records nothing** and returns `ALREADY_SETTLED`, exactly as
+> a losing approval does, so an approval and a denial racing one park cannot leave the park
+> saying one thing and the trail the other. **Nothing is sent, no channel is opened, no claim
+> is appended, and no minted record exists.**
 
 > **Normative.** **An expiry is settled and is never dispatched.** A park whose `expires_at`
 > is at or before the clock's reading is settled `EXPIRED` at the first operation that reads
@@ -817,10 +836,11 @@ three `reply`-`None` shapes or its one `reply_degraded` shape.
 > ruling, and the decision on the trail stays the unresolved `CONFIRM` it was.
 
 > **Normative.** **An expired park's decision is not thereby made grantable, and it is not
-> thereby made ungrantable either.** ADR-0235 §3's seven conditions and §5's eighth decide
-> that on their own terms: the eighth condition's subject is gone once the park is settled,
-> and the seven then govern the row exactly as they govern any other. **No lane infers a
-> recipient grant, a trust record or a policy change from an expiry.**
+> thereby made ungrantable either.** ADR-0235 §3's seven conditions decide it on their own
+> terms, and §5's eighth stops excluding it — an `EXPIRED` park writes no resolution and never
+> will (§5). **No lane infers a recipient grant, a trust record or a policy change from an
+> expiry**, and none reads the row's return to that listing as anything but the absence of a
+> question a park was holding.
 
 > **Normative.** **The parked turn's reply stands on every terminal disposition.** A denial,
 > an expiry and a cancellation each leave the earlier exchange exactly as it was: its reply
@@ -1255,6 +1275,15 @@ is, which is `settle` (§3) and the running task's own registry.
 >   recorded ruling, so the arm fails an implementation in which the loser's path can act on a
 >   park the winner has taken. **A concurrent `pending_confirmations` during that pause
 >   dispatches nothing, settles nothing and does not list the park.**
+> - **Arm 12 — an approval racing a denial.** One `resume` with `approved` `True` and one
+>   with `False` on one token produce **one** settlement, **one** recorded ruling, and a park
+>   whose disposition and the trail's recorded answer say the **same** thing; the loser
+>   returns `ALREADY_SETTLED` having consulted no policy, whichever of the two it is.
+> - **Arm 13 — the establishing act racing an answer.** With a `resume` paused after its
+>   settlement and before its recorded ruling, `grantable_decisions` omits that decision and
+>   `establish_recipient_grant` on it raises `UngrantableActError` naming the eighth
+>   condition; the paused `resume` then records its own ruling and dispatches. The arm fails
+>   an implementation whose eighth condition is stated over an `OPEN` park alone.
 
 > **Normative.** **Arm 2's second half, Arm 9 and Arm 11 are the three this decision would be worthless
 > without**, and they are named here so that no lane treats them as optional: everything else

@@ -1,6 +1,6 @@
 # 235. The establishing act rides an answer to a confirmation, live or recorded, and a refused search reaches the user as history and not as work
 
-- Status: Partially superseded by ADR-0242 (§8's first clause, and nothing else in this ADR: the message that a search was refused is no longer the `grantable_decisions` listing alone — §6 of the superseding ADR puts a statement that a lookup did not happen in the reply, composed by the model from a closed-vocabulary member, and its §9 puts a statement of the act that would enable it beside the reply on the surface; §8's second clause binds entire, so this is not a notification and no lane mints one, and §8's third clause binds entire, so neither the reply nor the statement beside it says that the turn would have answered differently, that a reply was incomplete, that a search would have succeeded, or that anything is owed; §§1-7 and §§9-14 are untouched, and §9's browser deferral and voice withholding are inherited rather than moved) and ADR-0244 (§3's seven-condition closure in that count alone and §8's first clause in its nowhere-else limb alone: an eighth condition is added — the decision is not one a parked read holds — the seven binding verbatim and in their order, because a parked read carries neither `step_id` nor `execution_id` and its answer is nonetheless the resuming one, which is what §3's third clause separated the populations by; and the question itself is now offered on a surface as a `Confirmation` the user may answer, beside the listing and the reply. §8's second and third clauses bind entire — this is not a notification, and nothing rendered says the turn would have answered differently, that a reply was incomplete, that a search would have succeeded, or that anything is owed — and §1, §2, §4–§7 and §§9–14 are untouched, §9's browser deferral and voice withholding staying with this act)
+- Status: Partially superseded by ADR-0242 (§8's first clause, and nothing else in this ADR: the message that a search was refused is no longer the `grantable_decisions` listing alone — §6 of the superseding ADR puts a statement that a lookup did not happen in the reply, composed by the model from a closed-vocabulary member, and its §9 puts a statement of the act that would enable it beside the reply on the surface; §8's second clause binds entire, so this is not a notification and no lane mints one, and §8's third clause binds entire, so neither the reply nor the statement beside it says that the turn would have answered differently, that a reply was incomplete, that a search would have succeeded, or that anything is owed; §§1-7 and §§9-14 are untouched, and §9's browser deferral and voice withholding are inherited rather than moved) and ADR-0244 (§3's seven-condition closure in that count alone and §8's first clause in its nowhere-else limb alone: an eighth condition is added — the decision's id is not named by a `ParkedRead` whose disposition is `OPEN`, `APPROVED` or `DENIED` — the seven binding verbatim and in their order, because a parked read carries neither `step_id` nor `execution_id` and its answer is nonetheless the resuming one, which is what §3's third clause separated the populations by; and the question itself is now offered on a surface as a `Confirmation` the user may answer, beside the listing and the reply. §8's second and third clauses bind entire — this is not a notification, and nothing rendered says the turn would have answered differently, that a reply was incomplete, that a search would have succeeded, or that anything is owed — and §1, §2, §4–§7 and §§9–14 are untouched, §9's browser deferral and voice withholding staying with this act)
 - Date: 2026-09-04
 - Decides: the establishing surface ADR-0193 §13 defers — which surfaces offer the
   act, where the act's `answer` comes from on each population it rides, what a
@@ -80,17 +80,21 @@
 
   **§3's seven-condition closure.** §3 makes the establishing act available *"on a decision
   meeting **all seven** of the following, and is refused on any other"*. ADR-0244 §5 adds an
-  **eighth**: the decision is not one a parked read holds. **The seven bind verbatim**, their
-  order is unchanged, the eighth is evaluated after them, and `UngrantableActError` names it
-  exactly as it names the others. The reason is §3's own third clause read at a population it
-  did not have — that clause keeps the two populations apart *"structurally rather than a rule
-  to remember"*, on the ground that a confirmation carrying a `step_id` or an `execution_id`
-  belongs to a step whose answer is the resuming one, and it ends *"no lane reaches this
-  operation from a park by clearing either field"*. A parked read carries **neither** field
-  and its answer **is** the resuming one, so the structural test no longer separates the
-  populations and the eighth condition restores what it was for. **The act is not removed from
-  this population**: a settled park's decision, and a `CONFIRM` no park was written for, each
-  stay subject to §3 on their own terms.
+  **eighth**: the decision's id is not named by a `ParkedRead` whose disposition is `OPEN`,
+  `APPROVED` or `DENIED`. **The seven bind verbatim**, their order is unchanged, the eighth is
+  evaluated after them, and `UngrantableActError` names it exactly as it names the others. The
+  reason is §3's own third clause read at a population it did not have — that clause keeps the
+  two populations apart *"structurally rather than a rule to remember"*, on the ground that a
+  confirmation carrying a `step_id` or an `execution_id` belongs to a step whose answer is the
+  resuming one, and it ends *"no lane reaches this operation from a park by clearing either
+  field"*. A parked read carries **neither** field and its answer **is** the resuming one, so
+  the structural test no longer separates the populations and the eighth condition restores
+  what it was for. It covers the two answered dispositions as well as the open one because
+  ADR-0244 §6 takes the park's gate **before** it records the resolution: a decision that left
+  this listing at the settlement would be one this act could resolve first, recording an
+  answer the user never gave. **The act is not removed from this population**: a park that was
+  `CANCELLED` or `EXPIRED` writes no resolution and never will, so its decision stays subject
+  to §3 on its own terms, as does a `CONFIRM` no park was written for.
 
   **§8's first clause, in its nowhere-else limb.** That clause closes *"The message that a
   search was refused is `grantable_decisions`' listing and the act offered beside it … and is
