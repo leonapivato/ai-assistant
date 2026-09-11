@@ -515,6 +515,11 @@ _STATEMENTS: Final = {
     ),
     SearchNotServiced.INTERRUPTED: ("begun and stopped",),
     SearchNotServiced.UNAVAILABLE: ("nothing this turn could use",),
+    SearchNotServiced.ANSWER_AWAITED: (
+        "waiting on your answer",
+        "assistant resume",
+        "assistant cancel-read",
+    ),
 }
 
 #: The members this surface does **not** yet render, each naming the lane that closes it.
@@ -525,21 +530,11 @@ _STATEMENTS: Final = {
 #: statement, and the partition assertion below is what stops this dict growing by
 #: accident.
 #:
-#: ``ANSWER_AWAITED`` is ADR-0244 §12's ninth member. §18 makes the order **1, then 2,
-#: then 3 and 4**, and puts "the ninth ``SearchNotServiced`` statement naming ``assistant
-#: resume``" in **Lane 3** — the command line — while the member itself, the servicing
-#: site that computes it and the prompt fragment the reply is composed from are Lane 1's.
-#: So between the two lanes this surface receives a member it says nothing about, which
-#: is the same window ADR-0235 §9 and ADR-0242 §5 each opened for the browser and which
-#: `tests/interfaces/gateway/test_gateway.py`'s own tripwire records one surface over.
-_DEFERRED_TO_A_LATER_LANE: Final = {
-    SearchNotServiced.ANSWER_AWAITED: (
-        "ADR-0244 §18 Lane 3: the command line's ninth statement, naming `assistant "
-        "resume`, lands with the rest of that surface's read obligations — the floor "
-        "for a read's confirmation, the exact query, the answer collected, the seven "
-        "`ReadAnswerOutcome` statements and the cancellation act"
-    ),
-}
+#: It is **empty again**: ``ANSWER_AWAITED`` was ADR-0244 §12's ninth member, deferred
+#: here between Lane 1 and Lane 3, and ADR-0244 §18's Lane 3 — the command line — has
+#: landed its statement along with the rest of that surface's read obligations. The
+#: partition below is what retires an entry rather than an editor's memory.
+_DEFERRED_TO_A_LATER_LANE: Final[dict[SearchNotServiced, str]] = {}
 
 
 def test_the_members_this_surface_defers_are_the_declared_ones() -> None:
