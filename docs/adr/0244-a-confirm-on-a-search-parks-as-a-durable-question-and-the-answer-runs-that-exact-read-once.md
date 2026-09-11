@@ -865,7 +865,7 @@ three `reply`-`None` shapes or its one `reply_degraded` shape.
 
 > **Normative.** **No terminal disposition is inferred from silence.** A park is `OPEN` until
 > something settles it, and `OPEN` is not read as approval by any component: the read is
-> dispatched by §6's clause 6 and by nothing else, and there is no timeout, retry, sweep or
+> dispatched by §6's clauses 5 and 6 together and by nothing else, and there is no timeout, retry, sweep or
 > reclaim that dispatches a read the user did not answer.
 
 **The expiry is a settlement rather than a deletion, and the difference is one the user can
@@ -894,6 +894,12 @@ states what was decided rather than refusing to say"*. So the terminal facts sur
 > denial is the user answering *no* and is a ruling; a cancellation is the user withdrawing
 > the question and is not one. The park is settled `CANCELLED` and its content is cleared in
 > the same step (§3), so a cancellation and a concurrent answer cannot both take effect.
+
+> **Normative.** **A cancellation takes §6's gate and takes it the same way.** It settles the
+> park `CANCELLED` through the one compare-and-swap, so a cancellation racing an answer is
+> decided by that write and by nothing else: a cancellation that lost it answers
+> `NOTHING_TO_CANCEL` where the answer is already running or done, and an answer that lost it
+> returns `ALREADY_SETTLED`. **Neither party acts on a park the other took.**
 
 > **Normative.** **Cancelling a dispatched read cancels the task running it, and the seam's
 > accounting is ADR-0241 §7's, unchanged.** *"A cancellation that interrupted the call
@@ -1242,14 +1248,14 @@ is, which is `settle` (§3) and the running task's own registry.
 >   `ANSWER_AWAITED` — says a lookup awaits an answer and does **not** say it produced
 >   nothing.
 > - **Arm 2 (scenario 2) — approve dispatches once.** A `resume` with `approved` `True` sends
->   exactly one request carrying the park's `parameters` byte for byte, records one resolving
->   `ALLOW`, settles the park `APPROVED`, and returns `read_answer` `DISPATCHED` with a
->   `TurnResult` whose fourth group holds the minted records and whose reply is composed over
->   them. A **second** `resume` on the same token sends nothing, records nothing and returns
->   `ALREADY_SETTLED`.
-> - **Arm 3 (scenario 3) — deny.** `approved` `False` records a `DENY`, settles the park
->   `DENIED`, opens no channel, and returns `DECLINED` with `turn` and `reply` `None`; the
->   parked turn's episode is unchanged.
+>   exactly one request carrying the park's `parameters` byte for byte, settles the park
+>   `APPROVED` **before** it records the one resolving `ALLOW`, and returns `read_answer`
+>   `DISPATCHED` with a `TurnResult` whose fourth group holds the minted records and whose
+>   reply is composed over them. A **second** `resume` on the same token sends nothing, records
+>   nothing and returns `ALREADY_SETTLED`.
+> - **Arm 3 (scenario 3) — deny.** `approved` `False` settles the park `DENIED` and then
+>   records a `DENY`, opens no channel, and returns `DECLINED` with `turn` and `reply`
+>   `None`; the parked turn's episode is unchanged.
 > - **Arm 4 (scenario 4) — restart.** With a park written and the engine rebuilt over the same
 >   durable state, `pending_confirmations` offers the **same** park with the same content and a
 >   freshly minted token, and an approval after the restart dispatches exactly once.
@@ -1271,8 +1277,8 @@ is, which is `settle` (§3) and the running task's own registry.
 >   whose `parameters` do not hash to its decision's digest dispatches nothing; a second park
 >   for one conversation is refused by the store and the servicing takes ADR-0242 §8's
 >   undiscriminated member; a step's confirmation is unchanged in every member and every
->   assembly site; and `grantable_decisions` omits a parked decision and lists it again once
->   the park is settled without a resolution.
+>   assembly site; and `grantable_decisions` omits a decision a park names `OPEN`, `APPROVED`
+>   or `DENIED` and lists it again once that park is `CANCELLED` or `EXPIRED` (§5).
 > - **Arm 9 (the store's own suite) — atomicity.** Two concurrent `park` calls for one
 >   conversation yield exactly one park; two concurrent `settle` calls for one park yield
 >   exactly one `True`; a `settle` clears the three content fields in the same step that moves
