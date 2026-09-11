@@ -270,6 +270,15 @@ ADR-0231's own terms is that **nothing would resolve it**, and §6 below is the 
 > no longer answerable (§3), **required with no default**; and `disposition`, a
 > `ParkedReadDisposition` naming the park's state.
 
+> **Normative.** **The three content fields are typed `| None` and a validator states when
+> each is present: all three on an `OPEN` park, none on a terminal one.** `parameters`, `goal`
+> and `plan` are the fields settlement clears (§3), and the type is what expresses the two
+> shapes rather than a rule to remember — a terminal park read back with a fabricated `Goal`
+> or an empty `ActionPlan` would misrepresent a record, and one read back with its query
+> intact would breach the retention rule in the one place a reader would not look. **A model
+> validator refuses both halves**: a park whose `disposition` is `OPEN` carrying any of the
+> three as `None`, and a terminal park carrying any of them at all.
+
 > **Normative.** `core/types.py` gains **`ParkedReadDisposition`**, a `StrEnum` valued by
 > lower-cased member name and closed at exactly **five** members: `OPEN`, the question stands
 > and may be answered; `APPROVED`, the answer was yes and the read was dispatched; `DENIED`,
@@ -289,13 +298,17 @@ ADR-0231's own terms is that **nothing would resolve it**, and §6 below is the 
 > **recorded** `PermissionDecision` the confirmation is about"*. No field is added to
 > `ParkedRead` through which any of them could travel, and no lane copies one into it.
 
-> **Normative.** **`parameters` are the ruling's own and are checked against it, not
-> trusted from it.** They hash to the recorded decision's `parameters_digest`, and §7's
-> dispatch re-evaluates `PermissionDecision.authorises` over the request rebuilt from them.
-> A park whose parameters do not authorise under its own decision is refused at resume with
-> that reason and dispatches nothing — so a park store that was edited, restored from a
-> stale copy or written by a defective implementation cannot put a query the policy never
-> ruled on onto the wire.
+> **Normative.** **`parameters` are the ruling's own and are checked against the recorded
+> `CONFIRM`, not trusted from the store.** The request rebuilt from them carries the
+> decision's own `tool`, hashes to its `parameters_digest`, and carries `step_id` and
+> `execution_id` both unset — the three facts a `CONFIRM` fixes about its subject
+> (ADR-0021 §1, ADR-0044 §1) — and §6's clause 4 refuses the answer where any of them
+> differs. **`PermissionDecision.authorises` is not the check here and cannot be**: it
+> returns `True` only where `ruling.outcome is PermissionOutcome.ALLOW`, so it is `False`
+> of every `CONFIRM` by construction; it is the check the **resolving `ALLOW`** passes
+> before a `ToolCall` is constructed and is re-evaluated at the seam (ADR-0231 §6), which
+> is where §7 applies it. **The subject check here and the authorisation check there are
+> two checks at two instants**, and a lane collapsing them would refuse every parked read.
 
 > **Normative.** **The `goal` and the `plan` are persisted because §8 composes over them
 > and would otherwise fabricate them.** They are read at resume, are never rendered to the
@@ -322,7 +335,7 @@ continuation stays a continuation.
 ### 3. The store: `ParkedReads`, one open park per conversation, and content that lives exactly as long as the question
 
 > **Normative.** `core/protocols.py` gains **`ParkedReads`**, a durable store with exactly
-> these five members and no more:
+> these six members and no more:
 >
 > - `async def park(self, record: ParkedRead, /) -> bool` — writes an `OPEN` park, or
 >   answers `False` where this conversation already holds one. The read of the existing park
@@ -339,6 +352,10 @@ continuation stays a continuation.
 >   moved it and `False` to every other. The read, the comparison and the write are one
 >   indivisible step, and `settle` on an already-terminal park answers `False` and changes
 >   nothing.
+> - `async def drop_for_conversation(self, conversation_id: str, /) -> int` — removes **every**
+>   park of that conversation, open or terminal, content and terminal facts alike, and answers
+>   how many rows it removed. It is the one destructive member, it is the conversation
+>   deletion sequence's route (below), and it is idempotent: a second call answers `0`.
 
 > **Normative.** **A conversation holds at most one `OPEN` park.** `park` enforces it, and
 > the enforcement is the store's rather than a caller's for `admit_search`'s own reason
@@ -372,13 +389,17 @@ continuation stays a continuation.
 > `expires_at` on the `ParkedRead` and on the recorded `CONFIRM` (§6) are both computed from
 > it, once, at the instant the park is written.
 
-> **Normative.** **The conversation's deletion sequence drops that conversation's parks**,
-> and it is the capture/lifecycle stage in `orchestration` that does it — *"the one layer
-> that legitimately holds both handles by injection"* (ADR-0074 §9). A park stranded by a
-> crash in that sequence is **not** an unrecoverable orphan: it carries its own `expires_at`,
-> `outstanding` enumerates it, and §10's expiry settles it and clears its content without any
-> reference to the conversation record. **No lane adds a cross-store reconciliation walk, a
-> tombstone, a stamp of its own or a second lifecycle.**
+> **Normative.** **The conversation's deletion sequence drops that conversation's parks
+> through `drop_for_conversation`**, and it is the capture/lifecycle stage in `orchestration`
+> that calls it — *"the one layer that legitimately holds both handles by injection"*
+> (ADR-0074 §9). **It reaches the store through the Protocol and never through a concrete
+> one** (golden rule 1), which is why the member is on the contract rather than left to an
+> implementation. An **open** park stranded by a crash in that sequence is **not** an
+> unrecoverable orphan: it carries its own `expires_at`, `outstanding` enumerates it, and
+> §10's expiry settles it and clears its content without any reference to the conversation
+> record. A **terminal** park stranded there holds no content at all (§3), so what is left is
+> six scalar facts that the next deletion call removes. **No lane adds a cross-store
+> reconciliation walk, a tombstone, a stamp of its own or a second lifecycle.**
 
 **A store of its own, where ADR-0238 §8 refused one — and the disanalogy is the whole
 argument.** That section moved a per-conversation counter **onto the conversation record**
@@ -458,6 +479,12 @@ wire-carried type is what ADR-0124 §9 charges a version for.
 > decision, `egress` by ADR-0178 §5, `read` the park's kind, and a continuation token
 > registered against the park's id. Its signature does not move.
 
+> **Normative.** **The enumeration reconciles before it offers.** A park whose `expires_at`
+> has passed, and one whose decision the trail already resolves, are each settled by §6's
+> reconciliation rather than listed — so `pending_confirmations` never offers a question that
+> cannot be answered, and the reconciliation happens at the read rather than in a sweep of its
+> own. **No lane adds a background task, a reclaim pass or a scheduler for either.**
+
 > **Normative.** **The token is re-minted from durable state and is opaque**, exactly as
 > ADR-0052 §1 rules for a step: durability comes from the handle being *"re-derivable from
 > durable state on demand"*, no adapter constructs or interprets one, and a restart empties
@@ -518,13 +545,18 @@ renders ADR-0178 §7's floor renders it with the one branch §4's discriminator 
 >    outcome (§1).
 > 3. **The decision.** The trail holds the decision `decision_id` names, its ruling is a
 >    `CONFIRM`, no decision resolving it is recorded, and its own `expires_at` has not
->    passed.
-> 4. **The binding.** The request is rebuilt from the park's `parameters` and the searcher's
->    own registered declaration, `PermissionDecision.authorises` holds over it, and
->    `EgressBinder.rebind` derives the binding afresh and **refuses unless it is equal to
->    the recorded one** (ADR-0152 §7). **What the user was shown is what may be sent**: a
->    destination, an account identity or a payload description that moved between the
->    question and the answer is a refusal, not a send.
+>    passed. **Where a resolution *is* recorded, the park is reconciled rather than answered**
+>    (below).
+> 4. **The subject.** The request is rebuilt from the park's `parameters` and the searcher's
+>    own registered declaration, and it is the recorded `CONFIRM`'s **own subject**: the same
+>    `tool`, a `parameters_digest` equal to the decision's, and `step_id` and `execution_id`
+>    both unset. `EgressBinder.rebind` then derives the binding afresh and **refuses unless it
+>    is equal to the recorded one** (ADR-0152 §7). **What the user was shown is what may be
+>    sent**: a destination, an account identity or a payload description that moved between
+>    the question and the answer is a refusal, not a send. **`PermissionDecision.authorises`
+>    is not this check** — it is `True` only of an `ALLOW` and is therefore `False` of every
+>    `CONFIRM` — and it is applied where it belongs, to the **resolving** decision, by
+>    `ToolCall`'s own validator and again at the seam (§7, ADR-0231 §6).
 > 5. **The ruling.** `ActionPolicy.resolve` is asked with the user's `approved`, and **its
 >    answer is recorded whatever it is** — the second obligation ADR-0235 §3 already relies
 >    on, and ADR-0004 §7's reason: a ruling the trail never sees is a decision nobody can
@@ -562,11 +594,34 @@ renders ADR-0178 §7's floor renders it with the one branch §4's discriminator 
 > governs a park whose settlement is durable, and the two agree: **one answer, one dispatch,
 > however many times a token is presented.**
 
+> **Normative.** **An `OPEN` park whose decision the trail already resolves is reconciled,
+> never answered and never dispatched.** It is settled from the **recorded resolution** —
+> `APPROVED` where that resolution is an `ALLOW`, `DENIED` otherwise — and its content is
+> cleared in the same step. **The read is not dispatched on reconciliation**: a crash between
+> clause 5 and clause 6 is indistinguishable from a crash after the send, and re-dispatching
+> would risk the second call ADR-0044 §2's one-answer invariant admits none of. A `resume`
+> that finds this state returns `ALREADY_SETTLED`; an enumeration that finds it does not list
+> the park; the user's recourse is to ask again. **That durable state is named here rather
+> than discovered**, and it is the reason the resolution is written before the settlement
+> rather than after: an unrecorded answer the user gave is the failure ADR-0004 §7 is stated
+> against, and a settled park with no recorded answer could never be reconciled at all.
+
+> **Normative.** **A refused resolving append is reconciled and never raised out of
+> `resume`.** `AuditTrail.record` raises `InvalidResolutionError` where the confirmation
+> *"has already been resolved"*, among five other grounds, and **no lane branches on the
+> message**: the caller re-reads the trail instead. A resolution now standing is the
+> concurrent-answer case and reconciles by the clause above, returning `ALREADY_SETTLED`; no
+> resolution standing means the append was refused on one of the other grounds, the answer is
+> **not** recorded, the park is left `OPEN` for its deadline, and the outcome is
+> `OPERATION_CHANGED`. **Neither branch propagates the error**, because a refusal on `resume`
+> is a result and not an exception (§9).
+
 ### 7. Approval runs that exact read once, by the route ADR-0231 §6 already fixed
 
 > **Normative.** On a recorded `ALLOW` and a park this caller settled, the read is dispatched
-> **by ADR-0231 §6's route, unchanged**: `orchestration` builds the `ToolCall` — unconstructable
-> unless the decision authorises the request — and hands it to `WebSearcher.search`, which
+> **by ADR-0231 §6's route, unchanged**: `orchestration` builds the `ToolCall` over the
+> **resolving `ALLOW`** — unconstructable unless that decision `authorises` the request — and
+> hands it to `WebSearcher.search`, which
 > performs ADR-0029 §2's three pre-execution checks in order, ADR-0194's spend admission,
 > ADR-0192's claim, the send and the completion. **No lane adds a second route, a second
 > servicing site, a second caller of `request` or a plan step.** ADR-0231 §6's last clause
@@ -674,9 +729,11 @@ first one authorised.
 >    `EXPIRED` and nothing was dispatched.
 > 5. **`AUTHORITY_CHANGED`** — `ActionPolicy.resolve` answered other than an `ALLOW` at the
 >    instant of the answer; the ruling **is** recorded and nothing was dispatched.
-> 6. **`OPERATION_CHANGED`** — the binding derived at the instant of the answer is not the
->    one the ruling was taken over, or the rebuilt request does not authorise under its own
->    decision; nothing was ruled and nothing was dispatched.
+> 6. **`OPERATION_CHANGED`** — the rebuilt request is not the recorded `CONFIRM`'s own
+>    subject, the binding derived at the instant of the answer is not the one the ruling was
+>    taken over, or the trail refused the resolving append on a ground other than the
+>    confirmation already being resolved (§6); nothing was dispatched, and where the append
+>    was refused the answer is not recorded either.
 > 7. **`UNAVAILABLE_NOW`** — the conversation no longer exists or is stamped deleted, or
 >    `search_calls_per_conversation` is `0` in this deployment; nothing was ruled and nothing
 >    was dispatched.
@@ -726,6 +783,9 @@ three `reply`-`None` shapes or its one `reply_degraded` shape.
 > it — an answer (returning `EXPIRED`), an enumeration (which does not list it), or the
 > conversation's own next servicing. The settlement clears the content (§3), records no
 > ruling, and the decision on the trail stays the unresolved `CONFIRM` it was.
+> **An expiry is the last reconciliation and never the first**: a park whose decision the
+> trail already resolves is settled from that resolution (§6) even where its deadline has
+> also passed, because calling an answered question unanswered would be false.
 
 > **Normative.** **An expired park's decision is not thereby made grantable, and it is not
 > thereby made ungrantable either.** ADR-0235 §3's seven conditions and §5's eighth decide
@@ -958,6 +1018,12 @@ is, which is `settle` (§3) and the running task's own registry.
 > crash interrupted leaves the park `APPROVED` and its claim open, which ADR-0231 §6 already
 > rules is the honest state and not one to reconcile (§7).
 
+> **Normative.** **A crash between the recorded answer and the settlement is reconciled at
+> the next read** (§6): the park is settled from the resolution the trail holds, its content
+> is cleared, and the read is **not** dispatched. That is the one intermediate state this
+> mechanism has, it is durable, and it is resolved by reading two records that are already in
+> hand rather than by a recovery pass of its own.
+
 > **Normative.** **ADR-0231 §16's minted-record clauses bind entire across a restart.** A
 > minted record's id *"is minted for one turn, rendered to no model, accepted from none, and
 > resolves in no store"*; a park holds none, a restart recovers none, and no lane makes the
@@ -1063,8 +1129,10 @@ is, which is `settle` (§3) and the running task's own registry.
 > `ReadAnswerOutcome`, `ReadCancellation`, `Confirmation.read`, `TurnOutcome.read_confirmation`
 > and `read_answer`, `SearchNotServiced.ANSWER_AWAITED`, the `ParkedReads` Protocol,
 > `AssistantEngine.cancel_read`, `Settings.parked_read_ttl`); the **shared conformance suite**
-> for `ParkedReads`, stating §3's atomicity, its one-open-park rule, its settle-once answer and
-> its content-clearing settlement; the **canonical fake** in `ai_assistant.testing`; and
+> for `ParkedReads`, stating §3's atomicity, its one-open-park rule, its settle-once answer,
+> its content-clearing settlement, its open-and-terminal shapes (§2) and its
+> `drop_for_conversation` semantics;
+> the **canonical fake** in `ai_assistant.testing`; and
 > `orchestration`'s park, enumeration, answer, dispatch, continuation and cancellation —
 > the consumer whose demands shape the contract, which is what ADR-0137 §2 means by primary.
 > `PROTOCOL_VERSION` 34 → 35 and the envelope log entry ride here, because a tree whose wire
@@ -1142,10 +1210,20 @@ is, which is `settle` (§3) and the running task's own registry.
 >   the park is settled without a resolution.
 > - **Arm 9 (the store's own suite) — atomicity.** Two concurrent `park` calls for one
 >   conversation yield exactly one park; two concurrent `settle` calls for one park yield
->   exactly one `True`; and a `settle` clears the three content fields in the same step that
->   moves the disposition.
+>   exactly one `True`; a `settle` clears the three content fields in the same step that moves
+>   the disposition; and `drop_for_conversation` removes open and terminal rows alike and
+>   answers `0` the second time.
+> - **Arm 10 — the crash between the two writes.** With a resolving decision recorded and the
+>   park still `OPEN`, the next `resume` and the next `pending_confirmations` each settle the
+>   park from that resolution, clear its content, **dispatch nothing**, and answer
+>   `ALREADY_SETTLED` / omit the park respectively. Driven by writing the two records in that
+>   order and stopping between them, at the seam rather than through a real crash.
+> - **Arm 11 — two concurrent answers, end to end.** Two `resume` calls on one token, both
+>   past clause 3, produce **one** recorded resolution and **one** dispatch; the loser returns
+>   `ALREADY_SETTLED` and **raises nothing**, which is the `InvalidResolutionError`
+>   reconciliation of §6 rather than the store's compare-and-swap alone.
 
-> **Normative.** **Arm 2's second half and Arm 9 are the two this decision would be worthless
+> **Normative.** **Arm 2's second half, Arm 9 and Arm 11 are the three this decision would be worthless
 > without**, and they are named here so that no lane treats them as optional: everything else
 > in this ADR is a way of arranging for exactly one call to leave the machine for one answer.
 
