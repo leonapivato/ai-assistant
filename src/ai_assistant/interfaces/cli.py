@@ -7353,6 +7353,16 @@ def _render_parked_read(confirmation: Confirmation) -> None:
     was followed by a shell prompt would read as one the user had somehow failed to
     answer.
 
+    **It names the third way the question can end, because two of three would be a
+    promise the record does not make.** A ``ParkedRead`` carries its own ``expires_at``
+    (ADR-0244 §2, §3), and §10 settles a park past it ``EXPIRED`` "at the first
+    operation that reads it — an answer, an enumeration … or the conversation's own
+    next servicing", which is reachable without the user doing anything at all: the
+    next ``assistant resume`` settles it and does not list it. A sentence offering only
+    *answer it or withdraw it* would therefore be false of a question nobody got back
+    to, and a user would be looking for a card that had already gone. Adversarial
+    review, round 5, ``minor``.
+
     **It is the same card and the same floor** (§13): :func:`_render_confirmation`
     renders ADR-0178 §7's floor entire and ADR-0244 §13's three additions, here as on
     the ``resume`` path, from one implementation. A card :func:`_render_confirmation`
@@ -7367,8 +7377,8 @@ def _render_parked_read(confirmation: Confirmation) -> None:
         return
     _print(
         "[dim]Nothing is being asked of you right now: this turn is finished, and the "
-        "lookup was not made. The question is recorded and stays open until you answer "
-        "it or withdraw it.[/]"
+        "lookup was not made. The question is recorded, and it stays open until you "
+        "answer it, you withdraw it, or it runs out of time.[/]"
     )
 
 
