@@ -1419,6 +1419,11 @@ async def test_a_declining_answer_reports_the_collected_act_as_declined() -> Non
 
     An act collected beside a declining answer carries ``DECLINED``: the ``DENY`` is
     recorded exactly as it is today and the recipient-grant store is never reached.
+
+    **The recorded ``DENY`` is asserted here rather than assumed**, because it is what
+    makes this arm the discriminator for the four below. §4 defines ``DECLINED`` over a
+    *recorded* non-``ALLOW`` answer, so an arm that only read the member would pass
+    equally against an implementation reporting it on a call that ruled nothing at all.
     """
     wired = _wired()
     parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
@@ -1436,6 +1441,133 @@ async def test_a_declining_answer_reports_the_collected_act_as_declined() -> Non
     assert outcome.recipient_grant.not_established is RecipientGrantNotEstablished.DECLINED
     assert outcome.recipient_grant.established is None
     assert await wired.engine.standing_recipient_grants() == ()
+    [resolution] = [row for row in await wired.trail.recent() if row.resolves]
+    assert resolution.ruling.outcome is PermissionOutcome.DENY, (
+        "the answer this member asserts was recorded"
+    )
+
+
+# --- ADR-0235 §4: the carrier is absent where nothing was ruled ----------------
+#
+# "``recipient_grant`` is ``None`` on **every** outcome of a call that performed no
+# establishing act", and ADR-0244 §9 gives four of its seven members no recorded
+# resolution at all. The arm above is the discriminator: a declining answer *did* rule,
+# so it keeps ``DECLINED``, and these four must not borrow it. Found by the round-8
+# adversarial review, which is the round that recorded the blocker these pin.
+
+
+async def test_a_second_answer_carrying_an_act_reports_no_carrier_at_all() -> None:
+    """``ALREADY_SETTLED`` beside an act: nothing was ruled, so nothing is asserted.
+
+    The user approved this lookup and made its recipients standing; a second press of
+    the same control, this time declining and asking again, consults no policy and
+    records nothing (ADR-0244 §6). Reporting ``DECLINED`` there would tell the user the
+    standing request they already hold had just been considered and refused — and the
+    grant from the first answer is still standing while they read it.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    token = parked.read_confirmation.token
+    first = await wired.engine.resume(
+        token,
+        approved=True,
+        timeout=PATIENT,
+        remember_recipients_until=wired.clock.now + timedelta(days=30),
+    )
+    assert first.read_answer is ReadAnswerOutcome.DISPATCHED
+    assert len(await wired.engine.standing_recipient_grants()) == 1
+    rows = len(await wired.trail.recent())
+
+    again = await wired.engine.resume(
+        token,
+        approved=False,
+        timeout=PATIENT,
+        remember_recipients_until=wired.clock.now + timedelta(days=30),
+    )
+
+    assert again.read_answer is ReadAnswerOutcome.ALREADY_SETTLED
+    assert again.recipient_grant is None, "no act was performed, so none is reported"
+    assert len(await wired.trail.recent()) == rows, "and nothing further was recorded"
+    assert len(await wired.engine.standing_recipient_grants()) == 1, "the first act stands"
+
+
+async def test_an_expired_park_answered_with_an_act_reports_no_carrier_at_all() -> None:
+    """``EXPIRED`` beside an act: the question lapsed, so no answer was ever given.
+
+    Clause 1 settles the park as stale and returns before the policy is asked
+    (ADR-0244 §6), so there is no resolution for ADR-0235 §4's ``DECLINED`` to be an
+    assertion about.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    wired.clock.advance(_TTL + timedelta(minutes=1))
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token,
+        approved=False,
+        timeout=PATIENT,
+        remember_recipients_until=wired.clock.now + timedelta(days=30),
+    )
+
+    assert outcome.read_answer is ReadAnswerOutcome.EXPIRED
+    assert outcome.recipient_grant is None
+    assert [row for row in await wired.trail.recent() if row.resolves] == [], "nothing ruled"
+    assert await wired.engine.standing_recipient_grants() == ()
+
+
+async def test_an_unavailable_deployment_answered_with_an_act_reports_no_carrier() -> None:
+    """``UNAVAILABLE_NOW`` beside an act: this deployment can rule on nothing.
+
+    ADR-0238 §8's bound of ``0``, read under a standing question. Clause 2 precedes the
+    gate and the policy alike, so the park is not spent and no answer is recorded.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    wired.engine._parked_reads._max_calls = 0
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token,
+        approved=False,
+        timeout=PATIENT,
+        remember_recipients_until=wired.clock.now + timedelta(days=30),
+    )
+
+    assert outcome.read_answer is ReadAnswerOutcome.UNAVAILABLE_NOW
+    assert outcome.recipient_grant is None
+    assert [row for row in await wired.trail.recent() if row.resolves] == [], "nothing ruled"
+    assert await wired.engine.standing_recipient_grants() == ()
+
+
+async def test_a_changed_operation_answered_with_an_act_reports_no_carrier() -> None:
+    """``OPERATION_CHANGED`` beside an act: the subject moved, so nothing was ruled on.
+
+    The fourth of the four, and the one that leaves the park ``OPEN`` — so a user told
+    their standing request had been declined would be reading that about a question
+    they can still answer.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    park = await _parked(wired)
+    servicer = wired.engine._loop._search
+    servicer._binder = _RefusingRebind(servicer._binder)
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token,
+        approved=False,
+        timeout=PATIENT,
+        remember_recipients_until=wired.clock.now + timedelta(days=30),
+    )
+
+    assert outcome.read_answer is ReadAnswerOutcome.OPERATION_CHANGED
+    assert outcome.recipient_grant is None
+    assert [row for row in await wired.trail.recent() if row.resolves] == [], "nothing ruled"
+    still_open = await wired.parks.get(park.id)
+    assert still_open is not None
+    assert still_open.disposition is ParkedReadDisposition.OPEN, "the park is not spent"
 
 
 async def test_an_act_on_an_external_content_binding_is_refused_before_the_gate() -> None:
