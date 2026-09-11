@@ -172,12 +172,19 @@ ADR-0238 §16 reserves to milestone 32's ADR.
 > a `ModelProvider` call inside `planning` and "the transport is not entered until
 > after the ruling" (ADR-0238 §15 Arm 5d) — and nothing here moves the boundary.
 
-> **Normative.** **The composition reaches no recipient the turn did not already
-> reach.** A `QueryComposer` holds a `ModelProvider` and nothing else that reads
-> (ADR-0231 §3, ADR-0238 §2), and on the only operations where a supply exists at all
-> (§2 below) the turn's planner is supplied the same records over the same seam. No
-> clause of this ADR puts a record in front of a party that the turn's own planning did
-> not already put it in front of.
+> **Normative.** **The composition reaches no party the turn's own model calls are not
+> already admitted to reach.** A `QueryComposer` holds a `ModelProvider` and nothing
+> else that reads (ADR-0231 §3, ADR-0238 §2), and on the only operations where a supply
+> exists at all (§2 below) the turn's planner is supplied the same records over the same
+> seam. **That is a statement about the admitted *set* and not about one endpoint**:
+> `RoutingProvider` tries its routes in order on each request and "A routable failure
+> advances to the next candidate" (ADR-0013 §2), so a composition may answer from a
+> route the same turn's planning did not reach. What bounds the set is ADR-0013 §6 — a
+> route list may contain "**only providers the user has explicitly configured**", and
+> "Falling back is not permission to reach a provider the user never chose" — which is
+> the bound the turn's planning already runs under, unchanged. **No clause of this ADR
+> adds a party to that set**, and none is read as promising per-call recipient
+> continuity across two model calls of one turn.
 
 **Why the channel question is already closed, mechanically, before this ADR runs.**
 ADR-0226 §5 rules that "**A read request is not serviced on an operation whose output
@@ -573,8 +580,10 @@ symmetry, and it is a per-population figure rather than a per-turn one (ADR-0226
 > **Normative.** **Arm F — the audit's two counts move in opposite directions and both
 > are asserted.** Over one turn carrying an admitted `DERIVED` narrowing and a refused
 > `OWNER_ACT` one, the event records the supplied count, the withheld count, this turn's
-> `calls` **and** the supplied-narrowed count §7 adds, each at its true value, with no
-> identifier of any kind in the event.
+> `calls` **and** the supplied-narrowed count §7 adds, each at its true value, and the
+> event carries **the ambient correlation identifier and no other identifier** — which
+> is ADR-0238 §11's own rule, restated here so that the arm cannot be satisfied by
+> dropping the field §7 keeps.
 
 ### 12. Deferred, by name, each with what fires it
 
@@ -619,8 +628,11 @@ is quoted and unnarrowed; ADR-0193's grant and ADR-0181 §5's floor are left sta
 the ruling point, which §1's fifth clause states in terms; ADR-0231 §3's composer
 signature and §11's byte-for-byte query clause are untouched.
 
-**ADR-0226 §5 is relied on and not amended.** §1's channel-scoping paragraph reads its
-clause exactly as it stands and adds no obligation to it.
+**ADR-0226 §5 and ADR-0013 §2 and §6 are relied on and not amended.** §1's
+channel-scoping paragraph reads ADR-0226 §5 exactly as it stands and adds no obligation
+to it; §1's sixth clause takes its bound from ADR-0013 §6's configured-set rule and
+reads ADR-0013 §2's per-request fallback as written rather than claiming continuity
+across it.
 
 ### 14. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
@@ -694,6 +706,11 @@ differently, or read one of its clauses more widely than it now holds?
 - **ADR-0193, ADR-0181 §5, ADR-0231 §3 and §11** — **no**. §1's fifth clause leaves each
   standing at the point it already governs, and §6 restates ADR-0231 §11's
   byte-for-byte clause rather than qualifying it.
+- **ADR-0013 §2 and §6** — **no**. §1's sixth clause reads §2's *"A routable failure
+  advances to the next candidate"* as written — which is why it is stated over the
+  admitted set rather than over one endpoint — and takes §6's *"only providers the user
+  has explicitly configured"* as its bound. It adds no obligation to either, states no
+  exception, and asks for no change to the routing contract.
 - **ADR-0124 §9** — **no**. §4 applies its rule and reaches its "no bump" answer; a rule
   applied is not a rule amended.
 
