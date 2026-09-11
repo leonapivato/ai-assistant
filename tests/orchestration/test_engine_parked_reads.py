@@ -1665,3 +1665,35 @@ async def test_an_answer_whose_decision_was_already_resolved_dispatches_nothing(
     still_open = await wired.parks.get(park.id)
     assert still_open is not None
     assert still_open.disposition is ParkedReadDisposition.OPEN, "and the park is not spent"
+
+
+async def test_an_answer_for_a_deleted_conversation_is_refused_as_unavailable() -> None:
+    """§19's Arm 6, third limb's other half, and ADR-0244 §6's clause 2.
+
+    "``search_draw`` answers a draw for ``conversation_id`` — so a conversation that
+    names nothing **or is stamped deleted** refuses (ADR-0238 §14)". Nothing is ruled and
+    nothing is dispatched, which is what ``UNAVAILABLE_NOW`` says; and the park is left
+    where it is, because clause 2 precedes the gate.
+
+    **The park's own rows are not what makes this refuse.** ADR-0244 §3 has the
+    conversation's deletion sequence drop its parks through ``drop_for_conversation`` —
+    Lane 2's wiring — so a deployment where that has not run yet still holds the
+    question, and clause 2 is what keeps it unanswerable. That is the state this case
+    drives: the conversation is stamped deleted and the park is still there.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    park = await _parked(wired)
+    assert await wired.engine._conversations._conversations.stamp_deleted(park.conversation_id)
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert outcome.read_answer is ReadAnswerOutcome.UNAVAILABLE_NOW
+    assert wired.searcher.searched == [], "nothing was dispatched"
+    assert [row for row in await wired.trail.recent() if row.resolves] == [], "nothing was ruled"
+    still_open = await wired.parks.get(park.id)
+    assert still_open is not None
+    assert still_open.disposition is ParkedReadDisposition.OPEN, "clause 2 precedes the gate"
