@@ -155,6 +155,11 @@ def _wired(*, composing: ComposingStage | None = None) -> _Wired:
             # from one shape is a collision rather than a case.
             id_factory=lambda: f"search-d-{next(decisions)}",
             deadline=_DEADLINE,
+            # ADR-0244 §18's lane seam: this module's cases are about ADR-0242 §8's
+            # **unparked** rows, which is the state a servicing with no store is in —
+            # §1's third clause, and the mapping this module already pins.
+            parked_reads=None,
+            parked_read_ttl=timedelta(hours=24),
         ),
         trail=trail,
         destination_trust=trust,

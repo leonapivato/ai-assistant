@@ -121,6 +121,7 @@ if TYPE_CHECKING:
         PermissionDecision,
         Placement,
         Question,
+        ReadCancellation,
         RecipientGrant,
         RecordedInvocation,
         ReplyChunk,
@@ -517,6 +518,22 @@ class HubClient:
             timeout=timeout,
             remember_recipients_until=until,
         )
+
+    async def cancel_read(self, token: ContinuationToken, /) -> ReadCancellation:
+        """Relay a withdrawal of a parked read's question (ADR-0244 §11).
+
+        **The client relays and decides nothing.** Which of the three states the call
+        reached is a fact about a row and a task only the hub holds — the park's own
+        compare-and-swap, and whether a dispatch is running in that process — so this
+        method carries the opaque token across and returns what came back.
+
+        Args:
+            token: The continuation the read's confirmation carried.
+
+        Returns:
+            Which of ADR-0244 §11's three states the hub reached.
+        """
+        return await self._call("cancel_read", token=token)  # type: ignore[no-any-return]
 
     async def learn(self, event: FeedbackEvent) -> LearnOutcome:
         """Hand one piece of feedback to memory.

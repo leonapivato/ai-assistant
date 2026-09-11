@@ -2491,6 +2491,37 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- The parked read's lifetime (ADR-0244 §3) -------------------------
+    # How long a `ParkedRead` stays answerable, and the one field that decision adds.
+    # `expires_at` on the park **and** on the recorded `CONFIRM` are both computed from
+    # it, once, at the instant the park is written — which is what makes ADR-0244 §5's
+    # and §10's shared-deadline reasoning hold: a park past its deadline names a
+    # decision past the same one, so an expired park's decision is refused by ADR-0235
+    # §3's fifth condition on its own rather than by §5's eighth.
+    #
+    # **It admits no disable sentinel**, unlike `confirmation_ttl` and for
+    # `routed_confirmation_ttl`'s stated reason one field further: a park nothing can
+    # free is a durable row holding **Tier 1 content** — the composed query, the goal
+    # and the plan — that no act, no enumeration and no reclaim would ever reach. So
+    # `None` is not a value this field accepts, and `gt=timedelta(0)` refuses a zero or
+    # negative lifetime at load rather than producing a question unanswerable the
+    # instant it is asked.
+    #
+    # **It expires a park and never approves one** (ADR-0244 §16). No `Settings` field,
+    # no deployment mode, no threshold, no environment variable and no composition-root
+    # argument answers a park on the user's behalf, and none makes a park answer itself
+    # after an interval. Parsed from an ISO-8601 duration or `HH:MM:SS` string in the
+    # environment (e.g. `ASSISTANT_PARKED_READ_TTL=PT24H`).
+    parked_read_ttl: _DurationSetting = Field(
+        default=timedelta(hours=24),
+        gt=timedelta(0),
+        description=(
+            "How long a parked read's question stays answerable before it expires and "
+            "its content is cleared (ADR-0244 §3). Positive and finite, with no "
+            "spelling for 'never'."
+        ),
+    )
+
     # --- Conversations (ADR-0074) ----------------------------------------
     # How long a captured episode is retained, and how long a deleted
     # conversation's tombstone outlives the deletion that stamped it. Both are

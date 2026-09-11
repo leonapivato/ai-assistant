@@ -565,6 +565,7 @@ def test_a_confirmation_sorts_its_parameters_however_it_was_built(
         reason="external",
         token=ContinuationToken(handle="h-1"),
         egress=None,
+        read=None,
     )
     expected = (
         b'{"egress":null,"parameters":{"Z":1,"body":"hi","to":"a@b"},"reason":"external",'
@@ -594,6 +595,7 @@ def test_the_vectors_reject_every_near_miss_measured_while_writing_the_adr() -> 
         reason="external",
         token=ContinuationToken(handle="h-1"),
         egress=None,
+        read=None,
     ).model_dump_json().encode() != canonical_payload(
         Confirmation(
             tool_id="t-1",
@@ -602,6 +604,7 @@ def test_the_vectors_reject_every_near_miss_measured_while_writing_the_adr() -> 
             reason="external",
             token=ContinuationToken(handle="h-1"),
             egress=None,
+            read=None,
         )
     )
     # 2. `json.dumps` without `sort_keys`.

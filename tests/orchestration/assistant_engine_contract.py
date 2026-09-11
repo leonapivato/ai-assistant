@@ -269,6 +269,7 @@ def spoken_step_park_outcome() -> TurnOutcome:
                 reason="it may disclose personal data off-device",
                 token=ContinuationToken(handle="park-1"),
                 egress=None,
+                read=None,
             ),
         ),
         conversation_id="c-park",

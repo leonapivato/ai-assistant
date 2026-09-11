@@ -87,6 +87,7 @@ from ai_assistant.core.types import (
     Disposition,
     EgressBinding,
     EpisodicMemory,
+    Goal,
     MemorySource,
     PermissionDecision,
     PermissionOutcome,
@@ -160,9 +161,13 @@ from ai_assistant.tools.web_search import WEB_SEARCH
 if TYPE_CHECKING:
     from collections.abc import Mapping, MutableMapping, Sequence
 
-    from ai_assistant.core.protocols import ActionPolicy, AuditTrail, WebSearcher
+    from ai_assistant.core.protocols import (
+        ActionPolicy,
+        AuditTrail,
+        ParkedReads,
+        WebSearcher,
+    )
     from ai_assistant.core.types import (
-        Goal,
         MemoryRecord,
         ShownFile,
         ToolCall,
@@ -171,6 +176,21 @@ if TYPE_CHECKING:
 
 
 _NOW: Final = datetime(2026, 9, 4, 10, 0, tzinfo=UTC)
+
+#: ADR-0244 §3's lifetime, as these cases run under it. Fixed rather than read from
+#: ``Settings`` so that a deployment default moving does not move what these assert.
+_PARKED_READ_TTL: Final = timedelta(hours=24)
+
+#: The goal and the plan a park persists (ADR-0244 §2). Passed on every
+#: ``service_read_request`` call because the servicing site takes them on every call and
+#: reads them only on the branch that writes a park — which is what makes "a servicing
+#: that records no ``CONFIRM`` never reads them" checkable rather than asserted.
+_PARK_GOAL: Final = Goal(
+    id="goal-1",
+    statement="what is that bell tower in Porto",
+    provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_NOW),
+    created_at=_NOW,
+)
 
 #: The bound this file's servicers are wired with (ADR-0241 §3). Generous, because
 #: no case here is about the deadline: `Settings.search_call_deadline`'s own default
@@ -378,6 +398,8 @@ def _servicer(  # noqa: PLR0913 — one knob per contract ADR-0231 §6 names plu
     granted: bool = False,
     at: datetime = _NOW,
     deadline: timedelta = _DEADLINE,
+    parked_reads: ParkedReads | None = None,
+    parked_read_ttl: timedelta = _PARKED_READ_TTL,
 ) -> SearchServicer:
     """A servicer over canonical fakes, granted or not.
 
@@ -407,6 +429,8 @@ def _servicer(  # noqa: PLR0913 — one knob per contract ADR-0231 §6 names plu
         now=lambda: at,
         id_factory=lambda: f"d-{next(ids)}",
         deadline=deadline,
+        parked_reads=parked_reads,
+        parked_read_ttl=parked_read_ttl,
     )
 
 
@@ -802,6 +826,8 @@ async def test_the_composers_model_is_shown_the_utterance_and_no_supply_span() -
         utterance=_ASK,
         audit=audit,
         footing=await _admitted(),
+        goal=_PARK_GOAL,
+        plan=ActionPlanFor(),
     )
 
     assert model.call_count == 1
@@ -839,6 +865,8 @@ async def test_the_searcher_receives_the_composers_output_byte_for_byte() -> Non
         utterance=_ASK,
         audit=TurnReadAudit(),
         footing=await _admitted(),
+        goal=_PARK_GOAL,
+        plan=ActionPlanFor(),
     )
 
     assert composer.utterances == [_ASK], "the composer saw the turn's own words"
@@ -875,6 +903,8 @@ async def test_a_refused_composition_reaches_the_searcher_not_at_all() -> None:
         utterance=_ASK,
         audit=audit,
         footing=await _admitted(),
+        goal=_PARK_GOAL,
+        plan=ActionPlanFor(),
     )
 
     assert inner.requested == [], "no request was proposed"
@@ -904,6 +934,8 @@ async def test_no_span_of_the_supply_reaches_any_value_the_searcher_received() -
         utterance=_ASK,
         audit=TurnReadAudit(),
         footing=await _admitted(),
+        goal=_PARK_GOAL,
+        plan=ActionPlanFor(),
     )
 
     assert inner.requested != [], "the searcher was reached at all"
@@ -988,6 +1020,8 @@ async def test_with_no_slot_remaining_nothing_is_composed_and_nothing_is_ruled_o
         footing=await _admitted(),
         in_view=(),
         counts=_SearchCounts(),
+        goal=_PARK_GOAL,
+        plan=ActionPlanFor(),
     )
 
     assert found.disposition is SearchDisposition.NO_BUDGET
@@ -1025,6 +1059,8 @@ async def test_the_budget_admits_the_records_that_fit_and_no_more() -> None:
         truncated=truncated,
         footing=await _admitted(),
         counts=_SearchCounts(),
+        goal=_PARK_GOAL,
+        plan=ActionPlanFor(),
     )
 
     assert searched.disposition is None, "the search yielded, so §13's field stays empty"
@@ -1540,6 +1576,8 @@ async def test_the_disposition_rides_on_a_failing_record_too() -> None:
         utterance=_ASK,
         audit=audit,
         footing=await _admitted(),
+        goal=_PARK_GOAL,
+        plan=ActionPlanFor(),
     )
 
     [entry] = audit.servicings
@@ -1933,6 +1971,8 @@ async def test_the_degradation_line_carries_the_class_and_no_tier_1_value(
         utterance=utterance,
         audit=TurnReadAudit(),
         footing=await _admitted(),
+        goal=_PARK_GOAL,
+        plan=ActionPlanFor(),
     )
 
     written = capsys.readouterr().out

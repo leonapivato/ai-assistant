@@ -74,6 +74,7 @@ from ai_assistant.testing.observation import (
     ObservationGate,
     ObservedBelief,
 )
+from ai_assistant.testing.parked_reads import FakeParkedReads
 from ai_assistant.testing.permissions import (
     FakeActionPolicy,
     FakeAuditTrail,
@@ -249,6 +250,7 @@ __all__ = [
     "FakeNotificationWriter",
     "FakeObserver",
     "FakeOutboundTransport",
+    "FakeParkedReads",
     "FakePlanStore",
     "FakePlanner",
     "FakeQueryComposer",

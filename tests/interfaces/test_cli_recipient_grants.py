@@ -399,6 +399,7 @@ def _plain_confirmation() -> Confirmation:
         reason="the policy wants a human answer",
         token=ContinuationToken(handle="plain-1"),
         egress=None,
+        read=None,
     )
 
 

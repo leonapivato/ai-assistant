@@ -133,11 +133,15 @@ from ai_assistant.core.types import (
     OperationConfirmation,
     OriginUnrecordedBinding,
     ParkedBinding,
+    ParkedRead,
     Placement,
     PlacementReach,
     PlacementSetter,
     QueuedQuestion,
     QueueOutcome,
+    ReadAnswerOutcome,
+    ReadCancellation,
+    ReadKind,
     ReplyChunk,
     RoutableOperation,
     RouteApproval,
@@ -282,6 +286,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.ingestion import IngestionReport, IngestionStage
     from ai_assistant.orchestration.loop import LearningLoop
     from ai_assistant.orchestration.observation import ObservationRunReport, ObservationStage
+    from ai_assistant.orchestration.parked_reads import ParkedReadOperations
     from ai_assistant.orchestration.questions import QuestionStage
     from ai_assistant.orchestration.recipient_grants import RecipientGrantOperations
     from ai_assistant.orchestration.recovery import RecoveryScan
@@ -1921,6 +1926,7 @@ class Engine:
         notification_outbox: DeliveryOutbox | None = None,
         recovery: RecoveryScan | None = None,
         routing: RoutingStage | None = None,
+        parked_reads: ParkedReadOperations | None = None,
         transcriber: SpeechTranscriber | None = None,
         synthesizer: SpeechSynthesizer | None = None,
         speakable_attested_sources: frozenset[str] = frozenset(),
@@ -2327,6 +2333,14 @@ class Engine:
                 ADR-0197 §9 puts the write-only ``RoutingRecorder`` on the *stage*, so the
                 façade never holds a trail seam of any width and cannot be wired into the
                 half-configured state where a stage could route without recording.
+            parked_reads: ADR-0244's parked-read operations — the enumeration, the
+                answer and the cancellation — or ``None`` where this deployment wired
+                none. **Passed rather than defaulted**, so a composition root states the
+                absence: an engine with none holds no questions, so
+                :meth:`pending_confirmations` lists no read park, :meth:`resume` finds
+                none behind a token, and :meth:`cancel_read` raises
+                ``UnknownContinuationError`` — which is exactly what is true of a
+                deployment on which no servicing ever writes one.
             transcriber: The speech-recognition seam ``converse_spoken`` transcribes
                 through (ADR-0200 §1, §2), already wrapped in whatever deadline
                 decorator the composition root wired (ADR-0118 §2) — ``None`` on a
@@ -2602,6 +2616,7 @@ class Engine:
             )
             raise ConfigurationError(msg)
         self._routing = routing
+        self._parked_reads = parked_reads
         self._transcriber = transcriber
         self._synthesizer = synthesizer
         self._speakable_attested_sources = frozenset(speakable_attested_sources)
@@ -2614,6 +2629,24 @@ class Engine:
         self._drain_timeout = drain_timeout
         self._parked: dict[str, _Parked] = {}
         self._routed_parks: dict[str, _RoutedPark] = {}
+        #: Continuation handle -> the id of the :class:`ParkedRead` it names
+        #: (ADR-0244 §5). A **third** population in one token space, beside the parked
+        #: steps and the routed parks, which is what lets ``resume`` and
+        #: ``cancel_read`` take an opaque token and nothing else.
+        #:
+        #: **Re-minted from durable state and never persisted** (ADR-0244 §5, §15;
+        #: ADR-0084 §7). A restart empties this table, ``pending_confirmations``
+        #: enumerates ``ParkedReads.outstanding`` and mints a fresh handle per open
+        #: park, and the park is the same park — named by the same decision and settled
+        #: by the same compare-and-swap. **Enumeration is idempotent**: a park already
+        #: named here reuses that handle rather than minting a second, which is
+        #: ADR-0052 §2's reconciliation at a second population.
+        #:
+        #: **It holds no ceiling slot** (ADR-0244 §5). ``max_outstanding_confirmations``
+        #: bounds the ``converse`` path's *new* in-process parks; what bounds read parks
+        #: is the store's one-open-park-per-conversation rule and their deadline, and
+        #: refusing to surface a park that already exists would strand it.
+        self._read_parks: dict[str, str] = {}
         #: The bindings this engine has **answered** and still retains, oldest
         #: settlement first (ADR-0198 §1, §4). Insertion order is settlement order —
         #: a handle settles at most once and a restatement never re-inserts — so the
@@ -4302,6 +4335,68 @@ class Engine:
             checked=True,
         )
 
+    async def cancel_read(self, token: ContinuationToken, /) -> ReadCancellation:
+        """Withdraw a parked read's question, or interrupt the read it dispatched.
+
+        ADR-0244 §11's one operation, for this operation kind alone (#2217). It takes
+        no other argument, no reason, no free text and no deadline.
+
+        **It takes the same compare-and-swap the answer takes**, so a cancellation
+        racing an answer is decided by that one write and by nothing else: a
+        cancellation that lost it answers ``NOTHING_TO_CANCEL`` where the answer is
+        already running or done, and an answer that lost it returns
+        ``ALREADY_SETTLED``. **Neither party acts on a park the other took.**
+
+        **Cancelling an open park records no answer.** ``ActionPolicy.resolve`` is not
+        called, no ruling is recorded, and the decision on the trail stays the
+        unresolved ``CONFIRM`` it was — the whole difference from a denial, which *is* a
+        ruling. Its decision therefore returns to ``grantable_decisions`` where
+        ADR-0235 §3's other six conditions hold (ADR-0244 §5).
+
+        **Cancelling a dispatched read cancels the task running it.** ADR-0241 §7's
+        accounting is unchanged and is the seam's: the claim is completed before the
+        cancellation re-raises, with ``interrupted_outcome`` and an ``UNKNOWN`` cost, and
+        the channel is released. The interrupted ``resume`` produces **no**
+        ``TurnOutcome`` at all — the cancellation is a teardown and is converted into
+        neither an outcome nor a refusal — and what tells the user is this answer, which
+        is the act they performed. **The park stays ``APPROVED``**: no caller assumes
+        the query did not leave, and the recourse is to ask again.
+
+        **It reaches only a dispatch running in this process**, and answers
+        ``NOTHING_TO_CANCEL`` otherwise, which is true of what this process can do.
+
+        Args:
+            token: The opaque continuation naming the park.
+
+        Returns:
+            Which of ADR-0244 §11's three states this call reached.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            UnknownContinuationError: If ``token`` names no park this engine holds.
+        """
+        self._reject_if_closing()
+        check_arguments("cancel_read", max_bytes=self._max_payload_bytes, token=token)
+        return await self._tracked(self._cancel_read(token), "cancel_read", checked=True)
+
+    async def _cancel_read(self, token: ContinuationToken) -> ReadCancellation:
+        """Resolve the handle and hand the park to the cancellation.
+
+        **Never a denial** (ADR-0084 §7): a handle naming no park is
+        ``UnknownContinuationError``, exactly as ``resume`` raises it, and never a
+        ``NOTHING_TO_CANCEL`` that would tell a caller its question was already gone.
+        """
+        park_id = self._read_parks.get(token.handle)
+        operations = self._parked_reads
+        if park_id is None or operations is None:
+            msg = (
+                "this token names no parked read in this engine; it may be from an "
+                "earlier run of the process, or it may name a parked step or a routed "
+                "operation, neither of which this operation cancels (ADR-0244 §11)"
+            )
+            raise UnknownContinuationError(msg)
+        return await operations.cancel(park_id)
+
     async def learn(self, event: FeedbackEvent) -> LearnOutcome:
         """Fold one piece of feedback back into memory (ADR-0042 §3; the correction leg).
 
@@ -5901,7 +5996,58 @@ class Engine:
                         )
                     )
             await self._reconcile(live)
-            return tuple(recovered)
+            return tuple(recovered) + await self._pending_read_confirmations()
+
+    async def _pending_read_confirmations(self) -> tuple[Confirmation, ...]:
+        """Enumerate the open read parks beside the parked steps (ADR-0244 §5).
+
+        **A second population in one operation, and that is what keeps one renderer.**
+        ADR-0178 §5's fourth clause already rules that "a recovered confirmation
+        carries the **same** egress content a live one carries" so that "a surface
+        therefore needs one renderer, not two"; a read's confirmation is a third
+        population of the same type, and a surface that already renders ADR-0178 §7's
+        floor renders it with the one branch ADR-0244 §4's discriminator gives it.
+
+        **The enumeration settles an expired park rather than offering it**, so this
+        never offers a question that cannot be answered and the settlement happens at
+        the read rather than in a sweep of its own (``ParkedReadOperations.outstanding``).
+        **It settles nothing else**: an open park that has not expired is offered, never
+        closed, whatever any other record says — ADR-0244 §6's one-gate clause.
+
+        **Idempotent and holding no ceiling slot.** A park already named by a handle
+        reuses that handle rather than minting a second (:meth:`_handle_for_park`), and
+        a read park neither consults nor occupies ``max_outstanding_confirmations``:
+        refusing to surface a park that already exists would strand it, which is
+        ADR-0052 §2's own reason.
+
+        **A park whose decision the trail no longer holds is omitted rather than
+        half-rendered.** The reason and the declaration live only in the trail (ADR-0042
+        §4), so there is no question to put; the park keeps its own deadline and the
+        expiry above is what eventually closes it.
+
+        **The handle table is reconciled against the store and not against this
+        snapshot.** A handle whose park the store no longer holds — dropped with its
+        conversation (ADR-0244 §3) — is evicted; a handle naming a **settled** park is
+        kept, because ADR-0244 §6 requires a second ``resume`` on such a token to return
+        ``ALREADY_SETTLED`` rather than meet ``UnknownContinuationError``.
+
+        Returns:
+            One confirmation per open, unexpired, renderable park, oldest first.
+        """
+        operations = self._parked_reads
+        if operations is None:
+            return ()
+        open_parks = await operations.outstanding()
+        live = {park.id for park in open_parks}
+        for handle, park_id in list(self._read_parks.items()):
+            if park_id not in live and await operations.get(park_id) is None:
+                self._read_parks.pop(handle, None)
+        offered: list[Confirmation] = []
+        for park in open_parks:
+            confirmation = await self._read_confirmation(park)
+            if confirmation is not None:
+                offered.append(confirmation)
+        return tuple(offered)
 
     async def _reconcile(self, live: set[tuple[str, str]]) -> None:
         """Evict every ``_parked`` entry whose durable binding is no longer pending (ADR-0052 §2).
@@ -8007,6 +8153,19 @@ class Engine:
         # from, which is what makes those two the same member rather than two that
         # agree (ADR-0242 §9).
         search_not_serviced = responded.search_not_serviced
+        # ADR-0244 §9: the question **this turn parked**, assembled once here so it
+        # appears in the exchange that raised it. Threaded exactly as the four carriers
+        # above are and never inferred: the servicing site wrote the park and carried
+        # it, and no render site reads ``ParkedReads``.
+        #
+        # **The turn that carries it is not parked** (§1). What parked is the *read*:
+        # this pass composes, answers and returns, its reply is present, and ADR-0170
+        # §4's three ``reply``-``None`` shapes are untouched.
+        read_confirmation = (
+            None
+            if responded.parked_read is None
+            else await self._read_confirmation(responded.parked_read)
+        )
         # ADR-0205 §5: the fact travels with the episode it qualifies and never
         # without it. `turn.memories` is the supply as `narrow` returned it, so
         # intersecting here is what makes a withheld record's delivery unreachable by
@@ -8074,6 +8233,8 @@ class Engine:
                 # ADR-0242 §9's field, folded in at the one place a ``TurnOutcome`` is
                 # built. It is the member the servicing site computed, by value.
                 search_not_serviced=search_not_serviced,
+                # ADR-0244 §9's first member, on the same terms.
+                read_confirmation=read_confirmation,
             )
         first = turn.plan.steps[0]
         # Admit-and-reserve *before* anything is persisted or driven, atomically
@@ -8161,6 +8322,11 @@ class Engine:
             # ADR-0242 §9's field, as on the branch above and for its reason: the same
             # member, by value, and never a second computation.
             search_not_serviced=search_not_serviced,
+            # ADR-0244 §9's first member, on the same terms. **A turn may park a read
+            # and drive a step**: the two are independent facts about one pass, and the
+            # outcome carries both — what ADR-0244 §9's validator refuses is a read
+            # *question* beside a read *answer*, never a question beside a step.
+            read_confirmation=read_confirmation,
         )
 
     # --- ADR-0197's routing stage, driven --------------------------------
@@ -9165,6 +9331,21 @@ class Engine:
                 "nothing was claimed and the operation may be asked for again (ADR-0235 §2)"
             )
             raise UngrantableActError(msg)
+        if token.handle in self._read_parks:
+            # ADR-0244 §6: **a parked read is answered through ``resume`` and through no
+            # second operation.** Taken first and returned from here, because every
+            # clause below this line is written about a parked *step* — the runner, the
+            # binding of two ids, the restatement table — and a read park has none of
+            # them (ADR-0231 §6 rules both ids ``None`` on a ``WEB_SEARCH`` decision).
+            #
+            # **``remember_recipients_until`` reaches it unchanged** (ADR-0244 §5):
+            # ADR-0235 §2's binding refusal governs, so a request whose binding carries
+            # ``planned_with_external_content`` establishes nothing, and this decision
+            # adds no clause to either. The act is performed after the answer is
+            # recorded and the call executed, exactly as it is on a step.
+            return await self._resume_read(
+                token, approved=approved, remember_recipients_until=remember_recipients_until
+            )
         answered = await self._answer_routed_park(token, approved=approved)
         if answered is not None:
             park, routed = answered
@@ -9210,6 +9391,141 @@ class Engine:
         composed = await self._compose(parked.turn, step, deliveries={})
         return await self._capture_resumption(
             parked, step, composed, recipient_grant=recipient_grant
+        )
+
+    async def _resume_read(
+        self,
+        token: ContinuationToken,
+        *,
+        approved: bool,
+        remember_recipients_until: UtcInstant | None = None,
+    ) -> TurnOutcome:
+        """Answer one parked read and, on an approval, run it (ADR-0244 §6, §7, §8).
+
+        **The answer's six establishments are taken by
+        :class:`~ai_assistant.orchestration.parked_reads.ParkedReadOperations`**, which
+        holds the gate, the ruling and the dispatch in one place; what this method owns
+        is the shape of the outcome those produce.
+
+        **On every member but** :attr:`ReadAnswerOutcome.DISPATCHED` **the outcome is
+        ADR-0170 §4's second shape**: ``turn`` ``None``, ``step`` ``None``, ``routed``
+        ``None``, ``reply`` ``None`` and ``reply_degraded`` ``False``, beside the member
+        that says what became of the answer. Nothing is composed, because there is no
+        supply to compose over, and nothing is captured, because no exchange happened —
+        a denial, an expiry and a settled park each leave the earlier exchange exactly
+        as it was, and **the parked turn's own reply stands and is not amended,
+        replaced, retracted or annotated** (ADR-0244 §10).
+
+        **On** ``DISPATCHED`` **the outcome is a resumed turn** (ADR-0244 §8): ``turn``
+        is a **real** ``TurnResult``, ``step`` is ``None``, ``routed`` is ``None``,
+        ``conversation_id`` is the park's, and ``reply`` is composed. Its ``goal`` and
+        ``plan`` are the parked turn's, read from the park; its ``context`` and
+        ``memories`` are assembled at this instant by the ordinary pipeline, with the
+        approved read's minted records appended as ADR-0226 §7's fourth group. That is
+        where ADR-0244 §8 **partially supersedes ADR-0052 §3**, scoped to exactly this
+        case: a reader holding only that section would return
+        ``TurnOutcome(turn=None, step=<resolution>)`` from a resume that in fact
+        composed an answer over records.
+
+        **The exchange is captured as a turn's exchange is captured** (ADR-0244 §8).
+        The resumed turn appends to the conversation, its episode is written through the
+        path that already writes one, ``capture_degraded`` reports a capture that did
+        not land, and ADR-0223 §1's ``derived_from_external`` stamping is computed over
+        the resumed turn's **final** supply, which carries the minted records. This adds
+        no capture, no writer and no second retention rule.
+
+        **The resumed turn plans nothing and services nothing else**, which
+        :meth:`~ai_assistant.orchestration.loop.LearningLoop.resumed_read` keeps by
+        making no planner call at all: no ``read_request`` arises, no other read kind is
+        serviced, ADR-0228 §2's revision is not reached, and no second search is
+        composed, ruled or parked.
+
+        Args:
+            token: The continuation naming the park.
+            approved: The user's own answer.
+            remember_recipients_until: The instant a standing recipient request names,
+                or ``None``. Reported on the outcome's ``recipient_grant`` exactly as it
+                is on a step's resume (ADR-0235 §4, §6).
+
+        Returns:
+            The answer's outcome, and on a dispatch the resumed turn that composed over
+            what it found.
+
+        Raises:
+            UnknownContinuationError: If the handle stopped naming a park between the
+                check and this call.
+        """
+        park_id = self._read_parks.get(token.handle)
+        operations = self._parked_reads
+        if park_id is None or operations is None:  # pragma: no cover — the caller checked
+            msg = (
+                "this token names no parked read in this engine; enumerate the "
+                "outstanding questions and present the token that comes back "
+                "(ADR-0244 §5)"
+            )
+            raise UnknownContinuationError(msg)
+        answered = await operations.answer(park_id, approved=approved)
+        park = answered.park
+        conversation_id = None if park is None else park.conversation_id
+        if answered.outcome is not ReadAnswerOutcome.DISPATCHED or park is None:
+            return TurnOutcome(
+                turn=None,
+                conversation_id=conversation_id,
+                read_answer=answered.outcome,
+            )
+        # The park as it stood when the gate was taken, which is where its `goal` and
+        # `plan` are: `settle` cleared them in the same step that closed the question
+        # (ADR-0244 §3), so a second read of the row would find them gone. That is the
+        # retention rule working, not a value to recover.
+        goal, plan = park.goal, park.plan
+        if goal is None or plan is None:  # pragma: no cover — an OPEN park carries both
+            msg = (
+                "a park answered from this engine carried no goal or plan, which its "
+                "own validator refuses on an open record (ADR-0244 §2)"
+            )
+            raise PlanningError(msg)
+        history = await self._conversations.history(park.conversation_id)
+        turn = await self._loop.resumed_read(
+            goal,
+            plan,
+            records=answered.records,
+            history=history.records,
+            history_degraded=history.degraded,
+        )
+        composed = await self._compose(
+            turn,
+            None,
+            deliveries=_paired_deliveries(history.deliveries, turn.memories),
+        )
+        recipient_grant = None
+        if remember_recipients_until is not None:
+            # ADR-0235 §2's act riding this answer. There is no `EstablishingAnswer` on
+            # this path — the act's own operation is the route for a decision no park
+            # holds (ADR-0235 §3), and ADR-0244 §5's eighth condition keeps a parked
+            # decision out of that listing — so what is reported is the declined
+            # outcome: the request was collected and this path establishes nothing.
+            recipient_grant = self._recipient_grants.declined()
+        return await self._capture(
+            park.conversation_id,
+            turn=turn,
+            step=None,
+            resumed=True,
+            composed=composed,
+            # ADR-0225 §1's first case: the pass carried a turn, so the user's own
+            # words are that turn's goal statement — the **parked** turn's, which is
+            # whose question this answer continues.
+            asked=goal.statement,
+            # ADR-0204 §2 is evaluated over this pass's own supply, and this pass
+            # retrieved one: `resumed_read` assembled it and applied the filter, so
+            # nothing was withheld from a rendering this episode carries.
+            supplied_withheld=False,
+            modality=Modality.TEXT,
+            # ADR-0223 §1: computed over the resumed turn's **final** supply, which
+            # carries the minted records — this pass's own disjunction and not the
+            # parked turn's.
+            derived_from_external=SelectionOrigin.over(turn.memories).planned_with_external_content,
+            recipient_grant=recipient_grant,
+            read_answer=answered.outcome,
         )
 
     async def _establish_recipients(
@@ -9560,6 +9876,8 @@ class Engine:
         spoken: _SpokenCapture | None = None,
         recipient_grant: RecipientGrantOutcome | None = None,
         search_not_serviced: SearchNotServiced | None = None,
+        read_confirmation: Confirmation | None = None,
+        read_answer: ReadAnswerOutcome | None = None,
     ) -> TurnOutcome:
         """Record the exchange and fold what became of it into the outcome (§3, §9).
 
@@ -9713,6 +10031,16 @@ class Engine:
             # ``converse_streaming`` and ``resume``, and ADR-0198 §1's restatement,
             # which drives nothing and searches nothing.
             search_not_serviced=search_not_serviced,
+            # ADR-0244 §9's two members, folded in at the one place a ``TurnOutcome``
+            # is built and **mutually exclusive** — the model validator refuses an
+            # outcome carrying both, and this method is handed at most one because a
+            # pass that parked a read answered none and a pass answering one parks
+            # none. The first is the question **this turn parked**, so it appears in
+            # the exchange that raised it; the second is what became of an answer.
+            # ``None`` on every other pass, ADR-0198 §1's restatement and ADR-0197 §7's
+            # routed park included.
+            read_confirmation=read_confirmation,
+            read_answer=read_answer,
         )
 
     async def _learn(self, event: FeedbackEvent) -> LearnOutcome:
@@ -9990,6 +10318,12 @@ class Engine:
             reason=recorded.ruling.reason,
             token=ContinuationToken(handle=handle),
             egress=_confirmation_egress(recorded),
+            # ADR-0244 §16: **existing action confirmations are byte-for-byte
+            # unchanged.** A confirmation about a plan step gains ``read`` ``None`` and
+            # nothing else, is assembled at the two sites ADR-0178 §5 names by the
+            # route it names, and is resumed exactly as it is today. No clause of
+            # ADR-0244 reaches a step's park.
+            read=None,
         )
 
     def _recovered_confirmation(
@@ -10016,7 +10350,95 @@ class Engine:
             reason=confirmed.ruling.reason,
             token=ContinuationToken(handle=handle),
             egress=_confirmation_egress(confirmed),
+            # ADR-0244 §16: a step's confirmation is unchanged in every member and at
+            # every assembly site, and gains ``read`` ``None``.
+            read=None,
         )
+
+    async def _read_confirmation(self, park: ParkedRead) -> Confirmation | None:
+        """Assemble the question one open park is holding (ADR-0244 §4, §5).
+
+        **Three sources and no fourth.** ``parameters`` come from the park — the
+        origin and the composed query byte for byte as the ruling was taken over them,
+        which is what a surface renders and what ADR-0244 §13 forbids abbreviating.
+        ``tool_id``, ``tool_description`` and ``reason`` come from the **recorded
+        decision**, which is where the searcher's own registered declaration was
+        transcribed at the moment of the ruling. ``egress`` is populated exactly as
+        ADR-0178 §5 rules — from that same recorded decision, at the assembly site,
+        from no store read of its own — and on a ``WEB_SEARCH`` park it is **always
+        present**, because ADR-0231 §5 registers the search at the egress seam and §9
+        declines the servicing where the binder returned nothing.
+
+        **The goal, the plan and the conversation's history are not part of the
+        question and no surface is given them** (ADR-0244 §4). The engine reads
+        ``goal`` and ``plan`` from the park for §8's continuation and puts neither
+        here. What the user judges is what would leave the device — the query, the
+        destination in both forms, the account identity and the payload description —
+        which is ADR-0148 §8's fourth clause and no more than it.
+
+        **The token is re-minted from durable state and is opaque** (ADR-0244 §5,
+        ADR-0052 §1): durability comes from the handle being re-derivable on demand, no
+        adapter constructs or interprets one, and a restart empties the table so the
+        next call re-mints (ADR-0084 §7).
+
+        Args:
+            park: The open park whose question to render. Its three content fields are
+                present, which the type enforces.
+
+        Returns:
+            The assembled confirmation, or ``None`` where the trail no longer holds the
+            decision it names — on which there is no question to put, because the
+            reason and the declaration live only in the trail (ADR-0042 §4).
+
+        Raises:
+            AuditError: If the trail could not be read.
+        """
+        recorded = await self._trail.get(park.decision_id)
+        if recorded is None or park.parameters is None:
+            return None
+        return Confirmation(
+            tool_id=recorded.tool.id,
+            tool_description=recorded.tool.description,
+            parameters=park.parameters,
+            reason=recorded.ruling.reason,
+            token=ContinuationToken(handle=self._handle_for_park(park.id)),
+            egress=_confirmation_egress(recorded),
+            # ADR-0244 §4: the discriminator, in ADR-0178 §4's shape. What it states is
+            # that **answering this question dispatches a read rather than a plan
+            # step**, and nothing more. ``WEB_SEARCH`` is the one kind this decision
+            # parks; §20 defers the rest by name with what fires them.
+            read=ReadKind.WEB_SEARCH,
+        )
+
+    def _handle_for_park(self, park_id: str) -> str:
+        """A continuation handle for one read park, reused if already held.
+
+        :meth:`_handle_for_binding`'s shape at ADR-0244 §5's population, and for
+        ADR-0052 §2's reason: "a park already named by a handle reuses that handle
+        rather than minting a second", so repeated enumerations yield stable tokens and
+        the table stays bounded by the number of distinct open parks.
+
+        **It reserves no ceiling slot and releases the one the mint takes** (ADR-0244
+        §5). ``max_outstanding_confirmations`` bounds the ``converse`` path's new
+        in-process parks; a read park is bounded by the store's own
+        one-open-park-per-conversation rule and by its deadline.
+
+        Runs to completion with no ``await`` from the lookup to the write, so the
+        mint-and-register is atomic against concurrency, as :meth:`_mint_handle` is.
+
+        Args:
+            park_id: The park's own identifier.
+
+        Returns:
+            The handle this engine answers that park under.
+        """
+        for existing, held in self._read_parks.items():
+            if held == park_id:
+                return existing
+        handle = self._mint_handle()
+        self._reserved.discard(handle)
+        self._read_parks[handle] = park_id
+        return handle
 
     def _handle_for_binding(self, execution_id: str, step_id: str) -> str:
         """A continuation handle for a recovered binding, reused if already held.

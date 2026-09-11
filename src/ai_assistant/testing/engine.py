@@ -93,6 +93,9 @@ from ai_assistant.core.types import (
     Provenance,
     Question,
     QuestionState,
+    ReadAnswerOutcome,
+    ReadCancellation,
+    ReadKind,
     RecipientGrant,
     RecipientGrantNotEstablished,
     RecipientGrantOutcome,
@@ -315,7 +318,7 @@ class FakeAssistantEngine:
             the question's own state.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0915 — one assignment per table this fake keeps, and each is a distinct population a `resume` presenting a handle is decided from; ADR-0244 §5 adds a fourth
         self,
         *,
         max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
@@ -461,6 +464,29 @@ class FakeAssistantEngine:
         #: present state left the next case open, so what is kept is the history.
         self._spent: set[str] = set()
         self.parked: dict[str, Confirmation] = {}
+        #: The **read** parks this engine holds, by handle (ADR-0244 §5). A fourth
+        #: table beside ``parked``, ``routed_parked`` and ``settled``, for their
+        #: reason: which table a handle is in is what decides what a ``resume``
+        #: presenting it gets. Populated by :meth:`park_read`, enumerated by
+        #: ``pending_confirmations`` beside the step parks, and emptied by the answer
+        #: or the cancellation that settles it.
+        self.read_parked: dict[str, Confirmation] = {}
+        #: The handles of read parks whose dispatch this engine is "running", for
+        #: ADR-0244 §11's second state. Public and mutable because ``INTERRUPTED`` is
+        #: otherwise unreachable on a fake that performs no real send, and a consumer
+        #: rendering that member needs a way to reach it.
+        self.read_dispatching: set[str] = set()
+        #: Every read-park handle this engine has ever held, so a token presented after
+        #: its park was answered, denied or cancelled is **answered rather than
+        #: refused** — ``ALREADY_SETTLED`` on ``resume`` and ``NOTHING_TO_CANCEL`` on
+        #: ``cancel_read`` — which is ADR-0244 §6's and §11's own rule. A handle in
+        #: neither this set nor any park table is unknown, and raises.
+        self._read_handles: set[str] = set()
+        #: What each read park's answer will produce, by handle. ``DISPATCHED`` unless a
+        #: test scripts otherwise, so a consumer can be driven through every member of
+        #: :class:`~ai_assistant.core.types.ReadAnswerOutcome` without this fake having
+        #: to reach the state each names.
+        self.read_answers: dict[str, ReadAnswerOutcome] = {}
         #: The bindings this engine has **answered** and still retains, by handle and
         #: oldest settlement first (ADR-0198 §1, §4). A third table beside ``parked``
         #: and ``routed_parked`` for their reason: which table a handle is in is what
@@ -944,6 +970,11 @@ class FakeAssistantEngine:
             remember_recipients_until=until,
         )
         self.calls.append(("resume", {"token": token.handle, "approved": approved}))
+        if token.handle in self._read_handles:
+            # **A parked read is answered through ``resume`` and through no second
+            # operation** (ADR-0244 §6), and taken first because every branch below is
+            # written about a parked step or a routed park.
+            return self._answer_read(token.handle, approved=approved)
         if token.handle in self.routed_parked:
             if remember_recipients_until is not None and approved:
                 # A routed park records no ``PermissionDecision`` and carries no
@@ -1407,6 +1438,97 @@ class FakeAssistantEngine:
         return self._checked(TurnOutcome(turn=None, step=restated), "resume")
 
     # --- the two accumulation legs ----------------------------------------
+
+    def _answer_read(self, handle: str, *, approved: bool) -> TurnOutcome:
+        """Answer one parked read, or restate that its question is spent (ADR-0244 §6, §9).
+
+        **One answer, at most one dispatch, however many times a token is presented.**
+        The park is removed at the answer, so a second ``resume`` on the same token
+        returns ``ALREADY_SETTLED``, consults nothing and mints nothing — which is the
+        clause ADR-0244 §6 states over a durable compare-and-swap, held here by the
+        table this fake keeps.
+
+        **The member a dispatching answer carries is scriptable** (:attr:`read_answers`),
+        because a fake that performs no real send cannot *reach* ``AUTHORITY_CHANGED``,
+        ``OPERATION_CHANGED`` or ``UNAVAILABLE_NOW`` — and a surface obliged to render a
+        fixed statement per member needs every member reachable (ADR-0244 §13).
+
+        Args:
+            handle: The continuation handle naming the park.
+            approved: The user's own answer.
+
+        Returns:
+            The outcome, carrying ``read_answer`` and never ``read_confirmation``.
+        """
+        confirmation = self.read_parked.pop(handle, None)
+        self.read_dispatching.discard(handle)
+        if confirmation is None:
+            return TurnOutcome(turn=None, read_answer=ReadAnswerOutcome.ALREADY_SETTLED)
+        if not approved:
+            # ADR-0170 §4's second shape exactly: ``turn`` ``None``, ``reply`` ``None``
+            # (ADR-0244 §10). Nothing is sent and the parked turn's own reply stands.
+            return TurnOutcome(turn=None, read_answer=ReadAnswerOutcome.DECLINED)
+        answer = self.read_answers.get(handle, ReadAnswerOutcome.DISPATCHED)
+        if answer is not ReadAnswerOutcome.DISPATCHED:
+            return TurnOutcome(turn=None, read_answer=answer)
+        # ADR-0244 §8: a resumed turn, not a step. ``turn`` is a real ``TurnResult``,
+        # ``step`` is ``None``, and the reply is composed — which is where §8 partially
+        # supersedes ADR-0052 §3's ``TurnOutcome(turn=None, step=<resolution>)``.
+        return TurnOutcome(
+            turn=self._read_turn(confirmation),
+            reply="Here is what that lookup found.",
+            read_answer=ReadAnswerOutcome.DISPATCHED,
+        )
+
+    @staticmethod
+    def _read_turn(confirmation: Confirmation) -> TurnResult:
+        """A resumed turn over the approved read, shaped as ADR-0244 §8 fixes it.
+
+        Two members would be the parked turn's and two the resumed turn's on a real
+        engine; this fake holds no parked turn, so it builds a coherent one rather than
+        pretending to have recovered it.
+        """
+        return _turn(str(confirmation.parameters.get("query", "the parked lookup")))
+
+    async def cancel_read(self, token: ContinuationToken, /) -> ReadCancellation:
+        """Withdraw a parked read's question, or interrupt the read it dispatched.
+
+        ADR-0244 §11's three states, and a token naming no read park this engine has
+        ever held raises ``UnknownContinuationError`` — **never a denial** (ADR-0084 §7),
+        and never a ``NOTHING_TO_CANCEL`` that would tell a caller its question was
+        already gone.
+
+        **Cancelling an open park records no answer**, which is the whole difference
+        from a denial: nothing here writes a ruling, and this fake's ``resume`` on the
+        same token afterwards returns ``ALREADY_SETTLED``.
+
+        Args:
+            token: The continuation naming the park.
+
+        Returns:
+            Which of ADR-0244 §11's three states this call reached.
+
+        Raises:
+            UnknownContinuationError: If the handle names no read park this engine holds
+                or has held.
+        """
+        check_arguments("cancel_read", max_bytes=self._max_payload_bytes, token=token)
+        self.calls.append(("cancel_read", {"token": token.handle}))
+        if token.handle not in self._read_handles:
+            msg = (
+                "this token names no parked read in this engine; it may name a parked "
+                "step or a routed operation, neither of which this operation cancels "
+                "(ADR-0244 §11)"
+            )
+            raise UnknownContinuationError(msg)
+        if token.handle in self.read_dispatching:
+            # **The park stays ``APPROVED`` and is not re-opened**: the question was
+            # answered, the call was made, and no caller assumes the query did not leave.
+            self.read_dispatching.discard(token.handle)
+            return self._checked(ReadCancellation.INTERRUPTED, "cancel_read")
+        if self.read_parked.pop(token.handle, None) is not None:
+            return self._checked(ReadCancellation.WITHDRAWN, "cancel_read")
+        return self._checked(ReadCancellation.NOTHING_TO_CANCEL, "cancel_read")
 
     async def learn(self, event: FeedbackEvent) -> LearnOutcome:
         """Fold one piece of feedback into memory, storing exactly one belief."""
@@ -2078,9 +2200,16 @@ class FakeAssistantEngine:
     # --- durable recovery --------------------------------------------------
 
     async def pending_confirmations(self) -> tuple[Confirmation, ...]:
-        """Hand back every park that is still answerable, with a resolvable token."""
+        """Hand back every park that is still answerable, with a resolvable token.
+
+        **Two populations in one operation** (ADR-0244 §5): the parked steps and the
+        open read parks, each carrying the discriminator ADR-0244 §4 gives it, so a
+        surface needs one renderer and not two (ADR-0178 §5).
+        """
         self.calls.append(("pending_confirmations", {}))
-        return self._checked(tuple(self.parked.values()), "pending_confirmations")
+        return self._checked(
+            (*self.parked.values(), *self.read_parked.values()), "pending_confirmations"
+        )
 
     # --- the grant surface (ADR-0102 §1) -----------------------------------
 
@@ -3093,8 +3222,67 @@ class FakeAssistantEngine:
                     coverage=egress.coverage,
                 )
             ),
+            # A step's confirmation, so ``read`` is absent (ADR-0244 §4, §16).
+            read=None,
         )
         self.parked[handle] = confirmation
+        return confirmation
+
+    def park_read(
+        self,
+        handle: str,
+        *,
+        query: str,
+        origin: str = "search.example",
+        egress: EgressBinding | None = None,
+    ) -> Confirmation:
+        """Park one **read** this engine will answer, and return its question (§4, §5).
+
+        The read twin of :meth:`park`, and it exists for that method's reason: a park is
+        reached inside a turn, so an implementation has to be handed to a suite that
+        drives one — and a surface lane needs a question to render without a search
+        account, a policy and a trail behind it.
+
+        **``parameters`` carry the exact query**, because ADR-0244 §13 makes that what a
+        surface renders and forbids a summary, an abbreviation, a truncation, a re-cased
+        form or a paraphrase of it. A fake whose question carried a placeholder would
+        certify a surface that renders one.
+
+        **``read`` is** :attr:`~ai_assistant.core.types.ReadKind.WEB_SEARCH`, which is
+        the one kind ADR-0244 parks; §20 defers the rest by name.
+
+        Args:
+            handle: The continuation handle this park is answered by.
+            query: The composed query, byte for byte as a ruling was taken over it.
+            origin: The origin the request names.
+            egress: The binding the ruling was taken over, reduced here exactly as
+                :meth:`park` reduces it. ``None`` builds a question with no egress
+                member, which ADR-0244 §4 says a real ``WEB_SEARCH`` park never has —
+                and which a surface must still not crash on.
+
+        Returns:
+            The parked read's confirmation.
+        """
+        confirmation = Confirmation(
+            tool_id="web_search",
+            tool_description="asks one connected search account a question",
+            parameters={"origin": origin, "query": query},
+            reason="this lookup would leave the device, so it is put to you as a question",
+            token=ContinuationToken(handle=handle),
+            egress=(
+                None
+                if egress is None
+                else ConfirmationEgress(
+                    account_identity=egress.account.identity,
+                    spans=egress.spans,
+                    planned_with_external_content=egress.planned_with_external_content,
+                    coverage=egress.coverage,
+                )
+            ),
+            read=ReadKind.WEB_SEARCH,
+        )
+        self.read_parked[handle] = confirmation
+        self._read_handles.add(handle)
         return confirmation
 
     def park_routed(

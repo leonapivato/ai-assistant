@@ -461,6 +461,7 @@ def test_confirmation_render_neutralises_control_sequences_and_markup(output: St
         reason="this discloses data off-device",
         token=ContinuationToken(handle="tok"),
         egress=None,
+        read=None,
     )
     cli._render_confirmation(confirmation)
     rendered = output.getvalue()
@@ -502,6 +503,7 @@ def _forging_confirmation(value: str) -> Confirmation:
         reason="this discloses data off-device",
         token=ContinuationToken(handle="tok"),
         egress=None,
+        read=None,
     )
 
 
@@ -835,6 +837,7 @@ def _egress_confirmation(
             planned_with_external_content=planned_with_external_content,
             coverage=coverage,
         ),
+        read=None,
     )
 
 
@@ -972,6 +975,7 @@ def test_a_non_egress_confirmation_renders_as_it_did_and_claims_nothing(
             reason="an unknown cost",
             token=ContinuationToken(handle="tok"),
             egress=None,
+            read=None,
         )
     )
     rendered = _flowed(output.getvalue())
@@ -1679,6 +1683,7 @@ def test_yes_answers_a_confirmation_that_carries_no_egress(output: StringIO) -> 
                 reason="an unknown cost",
                 token=ContinuationToken(handle="tok"),
                 egress=None,
+                read=None,
             )
         )
         is True
