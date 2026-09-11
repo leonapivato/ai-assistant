@@ -204,6 +204,34 @@ _AT = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
 #: nothing was ruled — a spent park, an expired one, a changed operation and a
 #: deployment that cannot answer — and a fake that wrote a row for one of them would
 #: certify a consumer against a trail no hub writes.
+#: The four :class:`~ai_assistant.core.types.ReadAnswerOutcome` members that **spend the
+#: park**, so this fake claims the question on exactly those and leaves it standing on
+#: the rest.
+#:
+#: ADR-0244 §6 puts the availability clauses **before** the gate, and §9 says so member
+#: by member: ``UNAVAILABLE_NOW`` is clause 2 and ``OPERATION_CHANGED``'s first two
+#: grounds are clause 4, both of which precede clause 5 — "a park spent on an answer the
+#: subject check would have refused is an answer the user has to give again for no
+#: reason". ``EXPIRED`` is here because §10 settles it, and ``ALREADY_SETTLED`` is here
+#: because the member *asserts* the question is gone: this fake reaches it by itself when
+#: the park is absent, and a consumer scripting it over an open one is asking for a state
+#: whose own report would contradict the table behind it.
+#:
+#: **``OPERATION_CHANGED`` is modelled on its first two grounds**, which §9 names first:
+#: its third — a refused resolving append — leaves the park spent, and a fake given one
+#: scripted member cannot be both. The open reading is the one a consumer must be able to
+#: drive a retry from, and a consumer that meets the spent reading against a hub meets
+#: ``ALREADY_SETTLED``, which every surface already handles.
+_READ_OUTCOMES_THAT_SPEND_THE_PARK: Final = frozenset(
+    {
+        ReadAnswerOutcome.DISPATCHED,
+        ReadAnswerOutcome.DECLINED,
+        ReadAnswerOutcome.AUTHORITY_CHANGED,
+        ReadAnswerOutcome.EXPIRED,
+        ReadAnswerOutcome.ALREADY_SETTLED,
+    }
+)
+
 _READ_OUTCOMES_THAT_RULE: Final = frozenset(
     {
         ReadAnswerOutcome.DISPATCHED,
@@ -1507,13 +1535,20 @@ class FakeAssistantEngine:
                 expiry is not strictly after the instant the answer would carry. Raised
                 **before the park is spent** (ADR-0235 §1, §2; ADR-0244 §5).
         """
-        # **The two refusals, before anything is claimed or recorded** (ADR-0235 §1, §2;
-        # ADR-0244 §5). They are preflight and nothing else: the act's *record* is
-        # written below, and only where the outcome this answer reaches has a ruling to
-        # attach it to.
-        wants_act = remember_recipients_until is not None and handle in self.read_parked
+        # **The act's two refusals, before anything is claimed or recorded** (ADR-0235
+        # §1, §2; ADR-0244 §5), and **only where an act was asked for**: an ordinary
+        # approval requests no standing authority, so nothing here may test one — a user
+        # must be able to approve a lookup without also being told their binding cannot
+        # carry a grant they never requested.
+        wants_act = remember_recipients_until is not None
         confirmed = self._parked_decisions.get(handle)
-        if wants_act and approved:
+        # The **one** instant this answer carries (ADR-0235 §1): read once here, compared
+        # against the chosen expiry here, and stamped on the record below. A second
+        # reading admits an expiry that passes the check and fails
+        # ``RecipientGrant.established_from``'s constructor, which is the failure that
+        # clause exists to remove rather than to narrow.
+        at = _AT
+        if wants_act and approved and handle in self.read_parked:
             if confirmed is None:
                 msg = (
                     "this token names a park this engine holds no recorded CONFIRM whose "
@@ -1524,48 +1559,50 @@ class FakeAssistantEngine:
                 raise UngrantableActError(msg)
             self._check_establishable(confirmed)
             assert remember_recipients_until is not None  # noqa: S101 — `wants_act` is the guard
-            self._establishing_instant(remember_recipients_until)
-        # **The park is claimed before any resolution is recorded** (ADR-0244 §6): the
-        # gate is taken first, so a caller that lost it rules nothing and records
-        # nothing, and there is no window in which a settled decision stands beside an
-        # open question.
-        confirmation = self.read_parked.pop(handle, None)
-        self.read_dispatching.discard(handle)
+            at = self._establishing_instant(remember_recipients_until)
+        # **What this answer reaches, decided before the question is claimed** (ADR-0244
+        # §6): the availability clauses precede the gate, so a member whose ground is one
+        # of them must leave the park exactly where it was.
         outcome = (
             ReadAnswerOutcome.ALREADY_SETTLED
-            if confirmation is None
+            if handle not in self.read_parked
             else ReadAnswerOutcome.DECLINED
             if not approved
             else self.read_answers.get(handle, ReadAnswerOutcome.DISPATCHED)
         )
-        # **Only the outcomes that ADR-0244 §9 says carry a ruling record one.**
-        # `AUTHORITY_CHANGED` is the answer "recorded whatever it is" and `DECLINED` is
-        # the `DENY` the user asked for; `DISPATCHED` is the resolving `ALLOW`. The other
-        # four state in terms that **nothing was ruled**, so a fake that recorded one
-        # would certify a consumer against a trail the hub never writes.
+        confirmation = self.read_parked.get(handle)
+        if outcome in _READ_OUTCOMES_THAT_SPEND_THE_PARK:
+            # **The gate, taken before any resolution is recorded** (ADR-0244 §6): a
+            # caller that lost it rules nothing and records nothing, and there is no
+            # window in which a settled decision stands beside an open question.
+            self.read_parked.pop(handle, None)
+            self.read_dispatching.discard(handle)
         grant: RecipientGrantOutcome | None = None
         if outcome in _READ_OUTCOMES_THAT_RULE and confirmed is not None:
-            collected = await self._collect_the_act(
+            # **Only the outcomes ADR-0244 §9 says carry a ruling record one.**
+            # ``DISPATCHED`` is the resolving ``ALLOW``, ``DECLINED`` is the ``DENY`` the
+            # user asked for, and ``AUTHORITY_CHANGED`` is the approving answer the policy
+            # refused, whose ruling "**is** recorded". The other four state in terms that
+            # nothing was ruled, so a fake writing a row for one would certify a consumer
+            # against a trail no hub writes.
+            answer = await self._record_the_answer(
                 handle,
-                remember_recipients_until if remember_recipients_until is not None else _AT,
-                # An `AUTHORITY_CHANGED` answer is an approving one the policy refused,
-                # so the ruling it records is not an `ALLOW` — which is what makes the
-                # act's carrier `DECLINED` rather than an established grant.
-                approved=approved and outcome is ReadAnswerOutcome.DISPATCHED,
+                confirmed,
+                at=at,
+                approved=outcome is ReadAnswerOutcome.DISPATCHED,
             )
-            if wants_act and collected is not None:
-                grant = await self._establish_recipients(handle, collected)
-        elif wants_act and outcome in _READ_OUTCOMES_THAT_RULE:
-            # An act collected on a park this fake holds no decision for: §2's first
-            # shape refuses an approving answer above, and a declining one records no
-            # resolution here either, so the act is reported absent (ADR-0235 §6).
-            grant = None
-        if confirmation is None:
-            return TurnOutcome(
-                turn=None, recipient_grant=grant, read_answer=ReadAnswerOutcome.ALREADY_SETTLED
-            )
-        if outcome is not ReadAnswerOutcome.DISPATCHED:
-            # ADR-0170 §4's second shape exactly on every one of them: ``turn`` ``None``,
+            if wants_act:
+                assert remember_recipients_until is not None  # noqa: S101 — `wants_act` is the guard
+                grant = await self._establish_recipients(
+                    handle,
+                    _CollectedAct(
+                        confirmed=confirmed,
+                        answer=answer,
+                        expires_at=remember_recipients_until,
+                    ),
+                )
+        if outcome is not ReadAnswerOutcome.DISPATCHED or confirmation is None:
+            # ADR-0170 §4's second shape on every one of them: ``turn`` ``None``,
             # ``reply`` ``None`` (ADR-0244 §9, §10). Nothing is sent and the parked
             # turn's own reply stands.
             return TurnOutcome(turn=None, recipient_grant=grant, read_answer=outcome)
