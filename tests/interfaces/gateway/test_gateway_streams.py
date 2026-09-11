@@ -978,12 +978,15 @@ async def test_an_operation_this_gateway_does_not_serve_reaches_nothing(
 def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() -> None:
     """ADR-0177 §1's enumeration, read off the router.
 
-    All **thirty-one** operations §1 admits are served here. Thirty are §1's own — the
-    CONFIRM pair joined those once ADR-0178's merge discharged §8's precondition — and
-    the thirty-first is ``converse_spoken``: ADR-0200 §12(a) partially supersedes §1's
-    enumeration for exactly that member, "the addition being ``converse_spoken`` and
-    nothing else", and §10 gives it the path. Every other clause of §1 binds the
-    thirty-first exactly as it binds the thirty. ``next_notification`` —
+    All **thirty-two** operations §1 admits are served here. Thirty are §1's own — the
+    CONFIRM pair joined those once ADR-0178's merge discharged §8's precondition — the
+    thirty-first is ``converse_spoken``, and the thirty-second is ``cancel_read``.
+    ADR-0200 §12(a) partially supersedes §1's enumeration for exactly the first of those,
+    "the addition being ``converse_spoken`` and nothing else", and §10 gives it the path;
+    ADR-0244 §13 adds the second in its own text — "the command line and the browser each
+    render the pending read, collect the answer, and **offer the cancellation act**" —
+    which is the route §1's third clause fixes for widening it. Every other clause of §1
+    binds both exactly as it binds the thirty. ``next_notification`` —
     the gateway's **own** poll — is none of them "because no browser request resolves
     to it: the gateway's own poll originates it under ADR-0175 §4, no browser request
     names it, and no browser argument reaches it" (§1's second clause, bound
@@ -1026,6 +1029,7 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
         "recent_connection_acts",
         "pending_confirmations",
         "resume",
+        "cancel_read",
         "delivery-stream",
     }
 

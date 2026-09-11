@@ -1042,7 +1042,22 @@ function renderOutcome(outcome, chosenAt, provenance) {
   // `resume` reached this page (#1404). `step` being present is the deterministic
   // account that a step was driven, which is exactly ADR-0170 §6's reason to trust it
   // over anything inferred.
-  if (outcome.steps.length === 0 && outcome.step === null && outcome.routed === null) {
+  //
+  // **And not a turn that put a lookup to the owner either** (ADR-0244 §9). A servicing
+  // that parks happens in context assembly and not in a plan step, so a turn carrying
+  // `read_confirmation` can reach here with no steps, no step account and no route —
+  // and "No action was needed." above a question the owner is being asked to answer is
+  // the same contradiction on one screen this guard already exists to prevent, one
+  // member over. `read_answer` is guarded for the identical reason: a `declined` answer
+  // carries `turn` and `reply` both `null` (ADR-0170 §4's second shape), so every term
+  // above it is empty on the one outcome that most plainly *did* something.
+  if (
+    outcome.steps.length === 0 &&
+    outcome.step === null &&
+    outcome.routed === null &&
+    outcome.read_confirmation === null &&
+    outcome.read_answer === null
+  ) {
     line(body, "No action was needed.", "notice");
   }
   const list = document.createElement("ol");
@@ -1061,6 +1076,13 @@ function renderOutcome(outcome, chosenAt, provenance) {
   // exactly that over a turn that had just destroyed a belief, which is why the
   // notice above is guarded on `step === null` **and** on there being no route.
   renderRouted(body, outcome.routed);
+  // ADR-0244 §9 makes the two mutually exclusive and a model validator refuses an
+  // outcome carrying both, so these two calls are one branch expressed as two — and
+  // they go **below** the reply and never in place of it, which is `renderRouted`'s own
+  // placement and ADR-0242 §9's "beside the reply and never in place of it" read at the
+  // members this surface is admitted for.
+  renderReadConfirmation(body, outcome.read_confirmation);
+  renderReadAnswer(body, outcome.read_answer);
   // `null` only where nothing could be resolved (a recovered park, a deleted
   // conversation), and the last known id is then kept rather than cleared: the
   // hub decides which conversation a turn ran under, and forgetting one on an
@@ -1224,6 +1246,135 @@ function renderStep(body, step) {
   line(body, `${tool} is '${step.status}'.${because}${kind}`, "failed");
 }
 
+// --- the parked read, its answer and its cancellation (ADR-0244 §9, §11, §13) ---
+//
+// **One fixed statement per member, and rendering one is presentation** (ADR-0244 §13,
+// ADR-0242 §9). Nothing below reads a store, joins a row, computes a member or composes
+// a reply: each map is a closed vocabulary keyed by the value `core` declared, and the
+// page's whole contribution is which sentence goes with which key.
+//
+// **Every statement says what became of the answer and never why a ruling went the way
+// it did** (ADR-0244 §9). None of them carries a destination, a host, an origin, a
+// provider name, an account identity, a query or any fragment of one, a monetary
+// figure, a budget, a threshold, a `Settings` field name or a `SearchDisposition`
+// value — ADR-0242 §9's bar, binding on this vocabulary as it binds on that one. The
+// two that come closest are the two worth naming: `expired` says a deadline passed and
+// gives no figure for it, and `unavailable_now` says the lookup cannot be answered here
+// now and names neither of the two states that reach it.
+const READ_ANSWER_WORDS = {
+  dispatched: "That lookup was made, and the answer on this screen carries what it produced.",
+  declined: "That lookup was not made. Your answer was no, and it is recorded.",
+  already_settled:
+    "That question had already been answered, denied or cancelled before this answer " +
+    "arrived. Nothing was sent, and the answer already recorded is the one that stands.",
+  expired:
+    "That question's deadline passed before it was answered, so nothing was sent and it " +
+    "can no longer be answered.",
+  authority_changed:
+    "Permission for that lookup was decided again when you answered, and it did not come " +
+    "back as a yes. Nothing was sent, that decision is recorded, and the question is spent.",
+  operation_changed:
+    "What answering would have sent is not what you were shown, so nothing was sent.",
+  unavailable_now:
+    "That lookup cannot be answered here now. Nothing was ruled and nothing was sent.",
+};
+
+// What the page says for a member it has no words for.
+//
+// **Not a bare identifier and not silence.** ADR-0244 §13 makes a surface that renders
+// no statement for a member it was given one that "has not implemented this section",
+// so silence is refused; and an enum value put on the screen as itself is the surface
+// reporting an internal vocabulary to a person, which is the failure `disclosureWords`
+// and `coverageWords` are both arranged to avoid. `ReadAnswerOutcome` is closed at
+// seven, so this is reachable only from a gateway outside its own enumeration — and the
+// honest thing to say then is that this browser cannot report it, rather than a
+// sentence for one of the seven it might not be.
+const READ_ANSWER_UNREADABLE =
+  "What became of that answer arrived as something this browser has no words for, so it " +
+  "is not reported here rather than reported as something it may not be. Press " +
+  "Confirmations to read what is still waiting.";
+
+// What ``cancel_read`` did, one statement per member (ADR-0244 §11).
+//
+// **A cancellation is not a denial and none of these says it is.** "A denial is the
+// user answering *no* and is a ruling; a cancellation is the user withdrawing the
+// question and is not one" — so `withdrawn` says no answer was recorded, and nothing
+// here reports a ruling, a grant, a trust record or a refunded allowance, because §11
+// says a cancellation "establishes nothing and forfeits nothing".
+//
+// **`interrupted` does not say the query stayed on the device**, which is the clause
+// most easily got wrong in the reassuring direction: "the question was answered, the
+// call was made, and ADR-0241 §7's 'the deadline stops the waiting, not the work'
+// posture applies to a cancellation just as it does to an expiry — **no caller assumes
+// the query did not leave**. The user's recourse is to ask again."
+//
+// **`nothing_to_cancel` is stated over this assistant and not over the world**, because
+// that is what it is true of: "a park settled `APPROVED` whose dispatch is running
+// elsewhere answers `NOTHING_TO_CANCEL`, which is true of what this process can do".
+const READ_CANCELLATION_WORDS = {
+  withdrawn:
+    "That question is withdrawn. Nothing was sent for it, and no answer was recorded.",
+  interrupted:
+    "That lookup had already been sent, and it was stopped part-way. Nothing here says " +
+    "the request did not leave, so ask again rather than treating it as never having " +
+    "happened.",
+  nothing_to_cancel:
+    "There was nothing here to cancel: that question is settled, and no lookup for it is " +
+    "running in this assistant.",
+};
+
+// The same refusal as `READ_ANSWER_UNREADABLE`, one vocabulary over and for its reason.
+const READ_CANCELLATION_UNREADABLE =
+  "What that cancellation did arrived as something this browser has no words for, so it " +
+  "is not reported here rather than reported as something it may not be. Press " +
+  "Confirmations to read what is still waiting.";
+
+// The sentence for one member, or the refusal above.
+//
+// **`Object.hasOwn` rather than a truthiness test on the lookup**, because a member
+// naming an inherited property — `toString`, `constructor` — would otherwise come back
+// as a function, and `line` would put its source text on the screen where a sentence
+// about the owner's own lookup belongs. The maps are the page's whole vocabulary, so
+// membership in one is exactly the question being asked.
+function readAnswerWords(member) {
+  return Object.hasOwn(READ_ANSWER_WORDS, member)
+    ? READ_ANSWER_WORDS[member]
+    : READ_ANSWER_UNREADABLE;
+}
+
+function cancellationWords(member) {
+  return Object.hasOwn(READ_CANCELLATION_WORDS, member)
+    ? READ_CANCELLATION_WORDS[member]
+    : READ_CANCELLATION_UNREADABLE;
+}
+
+// The question a turn parked, put in the exchange that raised it (ADR-0244 §9).
+//
+// `read_confirmation` is "the confirmation for a read **this turn parked**, so the
+// question appears in the exchange that raised it" — so it is rendered here, by the one
+// renderer, with ADR-0178 §7's floor entire and the exact query as `parameters` carries
+// it. **Being a read relaxes no clause of that floor** (§13), which is why there is one
+// `renderConfirmation` and not a second, thinner one for this kind.
+//
+// The lead-in mirrors `renderStep`'s own — it says the thing is parked until it is
+// answered and says nothing else, in particular nothing about what a lookup would
+// return or what the reply would then say.
+function renderReadConfirmation(body, confirmation) {
+  if (confirmation === null || confirmation === undefined) {
+    return;
+  }
+  line(body, "This lookup is parked until you answer it.", "notice");
+  renderConfirmation(body, confirmation);
+}
+
+// What became of an answer to a parked read (ADR-0244 §9, §13).
+function renderReadAnswer(body, member) {
+  if (member === null || member === undefined) {
+    return;
+  }
+  line(body, readAnswerWords(member), "notice");
+}
+
 // --- the CONFIRM prompt (ADR-0177 §8, ADR-0178 §7) ---------------------------
 //
 // **Everything below renders; nothing below derives.** The canonical destination set
@@ -1280,6 +1431,18 @@ const CONFIRMATION_NOT_WHOLE =
   "Part of what this confirmation would have to put on screen cannot be rendered " +
   "here, so it is not put to you at all: approving what is only partly shown would " +
   "be answering about something else.";
+
+// What answering *yes* does to a read's question, and the whole of what this surface
+// may say about it (ADR-0244 §13).
+//
+// The clause is one sentence and so is this: "It says that answering *yes* dispatches
+// this one read, and it says no more than that." The five things §13 then names are
+// each absent by construction — nothing here says the read will succeed, that the
+// answer will change, that a standing authorisation is being created, that the
+// destination becomes trusted, or that any later search is affected — and "this one"
+// is the load-bearing word, because it is what separates answering a question from
+// establishing anything.
+const READ_DISPATCHES_ONE = "Answering yes dispatches this one lookup and nothing else.";
 
 // Whether a parsed member is a JSON **object**, asked rather than substituted for.
 //
@@ -1414,6 +1577,15 @@ function readConfirmation(confirmation) {
     return false;
   }
   if (!confirmation.parameters.every(readParameter)) {
+    return false;
+  }
+  // `read` is ADR-0244 §4's discriminator and is read exactly as `egress` is, for the
+  // totality rule above: a member `renderConfirmation` dereferences is a member this
+  // function tests. A `null` the gateway wrote is the state — this question dispatches
+  // a plan step — and anything that is not that and not text is a member that did not
+  // arrive, which would reach `offerApproval` as a truthy value and put a cancellation
+  // control on a step's card that ADR-0244 §11 gives no operation to.
+  if (confirmation.read !== null && !isText(confirmation.read)) {
     return false;
   }
   // `egress` absent is **not** ADR-0178 §4's discriminator. The discriminator is a
@@ -1587,7 +1759,25 @@ function renderConfirmation(parent, confirmation) {
     renderEgress(item, confirmation.egress);
   }
   line(item, `Why you are being asked: ${confirmation.reason}`, "notice");
-  offerApproval(item, confirmation.token);
+  // **One sentence, and it says no more than ADR-0244 §13 lets it.** "It says that
+  // answering *yes* dispatches this one read, and it says no more than that. No surface
+  // states that the read will succeed, that the answer will change, that a standing
+  // authorisation is being created, that the destination becomes trusted, or that any
+  // later search is affected." So this arm adds exactly that clause and nothing that
+  // reads as a forecast, an assurance or a statement about a later lookup.
+  //
+  // **Rendered on the discriminator and never on the tool's name** (§4). What makes
+  // this a read is `read !== null`; a page branching on `tool_id` would be deriving a
+  // fact `core` already carried and would be wrong for the next registered searcher.
+  if (confirmation.read !== null) {
+    line(item, READ_DISPATCHES_ONE, "notice");
+  }
+  // The whole floor is above this line, at both widths, which is ADR-0233 §8's
+  // ordering clause and ADR-0178 §7's "before it collects the user's answer" read as an
+  // obligation on this renderer. The cancellation act rides the same call because it is
+  // a control over the same park (ADR-0244 §11) and the values precede it for the same
+  // reason they precede the pair.
+  offerApproval(item, confirmation.token, confirmation.read);
   parent.appendChild(item);
 }
 
@@ -2619,7 +2809,11 @@ function renderOperationConfirmation(parent, card) {
       "rather than looking for this in Confirmations, which does not hold it.",
     "hint"
   );
-  offerApproval(item, card.token);
+  // **`null`, because a routed act is not a read** (ADR-0244 §4, §11). `cancel_read`
+  // is "for this operation kind alone", and this card is ADR-0197 §7's routed park —
+  // not a `Confirmation` at all, so it carries no discriminator and gets no
+  // cancellation control.
+  offerApproval(item, card.token, null);
   parent.appendChild(item);
 }
 
@@ -2981,7 +3175,7 @@ function parkWords(mine, out, answered, stranded) {
   return stranded ? PARK_NOT_KNOWN : "";
 }
 
-function offerApproval(item, token) {
+function offerApproval(item, token, read) {
   // **Nothing *here* gives a token back, and that is still the rule** (#1536, and
   // adversarial review's round-7 blocker on #1612). A row built here is built from
   // `pending_confirmations`, or from a `Confirmation` a turn just returned, and an
@@ -3017,6 +3211,25 @@ function offerApproval(item, token) {
   stop.type = "button";
   stop.textContent = "Stop waiting";
   stop.hidden = true;
+  // **The cancellation act, offered on a read's question and on nothing else**
+  // (ADR-0244 §11, §13). `cancel_read` is "the cancellation source #2217 names, **for
+  // this operation kind alone**", so the control is built on `read !== null` — the
+  // discriminator §4 gives this page — and a step's park and a routed act's card get
+  // none. §13 places it on this surface by name: "The command line and the browser each
+  // render the pending read, collect the answer, and offer the cancellation act."
+  //
+  // **Not built at all rather than built hidden**, which is where it differs from
+  // `stop` above. A wait is a state every park can enter, so that control is one this
+  // row will need; a park of a plan step can never become a read, so a hidden
+  // `cancel_read` control on its card is a control that can never be shown and an act
+  // its token would be refused for. `test_every_control_on_the_page_meets_the_touch
+  // _floor` counts what a card carries, and a card carrying a control it cannot offer
+  // is a card whose count says something untrue about it.
+  const withdraw = read === null ? null : document.createElement("button");
+  if (withdraw !== null) {
+    withdraw.type = "button";
+    withdraw.textContent = "Cancel this lookup";
+  }
   const said = document.createElement("p");
   said.className = "hint";
   // **One answer per park, enforced here rather than discovered at the hub.** A
@@ -3049,10 +3262,27 @@ function offerApproval(item, token) {
     const out = answering.has(token);
     const answered = spent.has(token);
     const stranded = unresolved.has(token);
-    approve.disabled = out || answered;
-    decline.disabled = out || answered;
+    // **The park's newest fact and the highest-precedence one.** ADR-0244 §11 makes
+    // `cancel_read`'s own answer what tells the user — "the cancellation is a teardown
+    // and is converted into neither an outcome nor a refusal … What tells the user is
+    // `cancel_read`'s own answer, which is the act they performed" — and all three of
+    // its members leave the park unanswerable, so the pair goes with the sentence.
+    const gone = cancelled.has(token) ? cancelled.get(token) : null;
+    const withdrawing = cancelling.has(token);
+    approve.disabled = out || answered || gone !== null;
+    decline.disabled = out || answered || gone !== null;
+    // **Enabled while an answer is out, which is deliberate and is the only route to
+    // `INTERRUPTED`** (ADR-0244 §11, §19's Arm 7). A read this process has dispatched
+    // and not completed is cancelled by exactly this press, and the answer being in
+    // flight is the state that case is *defined* over — so the one fact that disables
+    // it is a cancellation already recorded or one already on its way. A race with the
+    // answer is decided by the park's own compare-and-swap and by nothing here:
+    // "neither party acts on a park the other took".
+    if (withdraw !== null) {
+      withdraw.disabled = withdrawing || gone !== null;
+    }
     stop.hidden = !waiting;
-    said.textContent = parkWords(waiting, out, answered, stranded);
+    said.textContent = rowWords(gone, withdrawing, parkWords(waiting, out, answered, stranded));
     said.hidden = said.textContent === "";
   };
   let stopping = null;
@@ -3090,9 +3320,33 @@ function offerApproval(item, token) {
   item.appendChild(approve);
   item.appendChild(decline);
   item.appendChild(stop);
+  if (withdraw !== null) {
+    withdraw.addEventListener("click", () => cancelRead(token));
+    item.appendChild(withdraw);
+  }
   item.appendChild(said);
   parkRows.add({ node: item, settle });
   settle();
+}
+
+// Which sentence a row that has been cancelled, or is being, carries.
+//
+// Held apart from `parkWords` rather than folded into it, because the two vocabularies
+// answer to different sections and are closed by different enumerations: `parkWords`
+// is this page's own account of what it did with a consent token, and
+// `cancellationWords` is one fixed statement per `ReadCancellation` member (ADR-0244
+// §11). Folding them would put a five-state page-local rule and a three-member `core`
+// vocabulary in one function, where a member added to either would have to be read
+// against the other's states.
+//
+// It takes the member and the flag rather than the token, which is `parkWords`' own
+// rule and for its reason: ADR-0177 §8 has the front end render the continuation
+// nowhere, so nothing that computes a text node takes one.
+function rowWords(cancellation, withdrawing, otherwise) {
+  if (cancellation !== null) {
+    return cancellationWords(cancellation);
+  }
+  return withdrawing ? READ_CANCEL_SENDING : otherwise;
 }
 
 // The one recovery route (ADR-0177 §8). A browser that has been closed and reopened,
@@ -3224,6 +3478,27 @@ const unresolved = new Set();
 // Adversarial review found the gap on round 1, in the shape the file already warns
 // about two comments up — one park is on screen twice.
 const answering = new Set();
+
+// The parks this page cancelled, each with what `cancel_read` answered (ADR-0244 §11).
+//
+// **A map rather than a set**, because the fact worth keeping is *which* of the three
+// states the act reached: all three leave the park unanswerable, and only the member
+// says whether the question was withdrawn before anything left, whether a lookup was
+// stopped part-way, or whether there was nothing here to cancel. A set would leave the
+// row saying one of those for all three.
+//
+// **It is not `spent`**, and the two must not be merged. `spent` is the guard that a
+// consent token is not answered twice and carries `PARK_ANSWERED`'s sentence with it —
+// "That park has been answered from this page" — which is exactly what a cancellation
+// is **not** (§11: "a denial is the user answering *no* and is a ruling; a cancellation
+// is the user withdrawing the question and is not one"). A cancelled row that reported
+// itself answered would be this page asserting a ruling nobody made.
+const cancelled = new Map();
+
+// The parks a cancellation is out on right now, which is `answering`'s fact one act
+// over and is kept for its reason: a second press must not start a second request, and
+// the row says which of the two things is happening rather than going quiet.
+const cancelling = new Set();
 
 // Every park row on screen, so one park's state reaches all of its rows.
 //
@@ -3468,6 +3743,84 @@ async function answerConfirmation(token, approved, stopping) {
   // Nothing here depends on the read: `renderOutcome` above has already put the answer
   // on screen, and what is left is which rows the listing still holds.
   readPending(true);
+}
+
+// Said while a cancellation is out, and it promises no deadline for the same reason
+// `PARK_WAITING` promises none: ADR-0244 §11 gives `cancel_read` "no other argument, no
+// reason, no free text and **no deadline**", and a page-side clock would be a second
+// figure that can disagree with the gateway's.
+const READ_CANCEL_SENDING = "Cancelling that lookup.";
+
+// What a cancellation this browser never read a reply for did, and — the whole of why
+// it is long — what it did not.
+//
+// ADR-0177 §7's fourth clause is the rule and it is indifferent to which act was out: a
+// failure of "the **browser's own** request to the gateway — the request was sent and no
+// response was read — is an outcome that is **not known**, whatever the gateway did",
+// and "no front end resolves it by assuming either of the other two". So this neither
+// says the question was withdrawn nor says it stands, and it re-sends nothing —
+// ADR-0168 §9's silent retry is exactly what a cancellation that "tidied up" after
+// itself would be.
+//
+// **And it does not say the lookup stayed on the device**, which is the reassuring
+// direction ADR-0244 §11 forbids in terms: where the park was `APPROVED` the call had
+// already been made, and "no caller assumes the query did not leave".
+const READ_CANCEL_LOST =
+  "The connection carrying that cancellation failed before this browser read a reply. " +
+  "What became of it is not known: nothing was re-sent, and nothing here says whether " +
+  "the question was withdrawn or whether a lookup had already been sent for it. Press " +
+  "Confirmations to read what is still waiting.";
+
+// One cancellation, relayed (ADR-0244 §11). The page performs the act and renders what
+// came back; it rules on nothing, records nothing and infers nothing.
+//
+// **The listing is deliberately not re-read afterwards**, which is the one place this
+// differs from `answerConfirmation` and it is not an oversight. An answer's account
+// lands in the answer panel, so that function can afford to drop the row it was pressed
+// from; a cancellation has no such panel, and `cancel_read`'s own answer is the whole of
+// what tells the user (§11). A re-read would detach the row carrying that sentence in
+// the same turn it was written, so the owner would press **Cancel this lookup** and
+// watch the question disappear with nothing said about it. The row stays, disabled and
+// saying which of the three states the act reached, and the sentence names Confirmations
+// as where to read what is still waiting.
+async function cancelRead(token) {
+  // The park's own guard, taken before the row's, for `answer`'s reason: a click on a
+  // row the registry has not reached yet must not start a second request either.
+  if (cancelling.has(token) || cancelled.has(token)) {
+    return;
+  }
+  fault(null, "confirmations");
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  cancelling.add(token);
+  refreshParks();
+  let lost = false;
+  try {
+    // A refusal the gateway named comes back as a bare `null` having already been
+    // displayed by `relay`, and it is **not** recorded as a cancellation: a refused
+    // request is one the hub received and declined, so the park is untouched and the
+    // row stays exactly as answerable as it was.
+    const body = await relay(half, "/confirmation/cancel-read", { token }, "confirmations");
+    if (body !== null) {
+      cancelled.set(token, body.cancellation);
+    }
+  } catch (_) {
+    // No response was read. `relay` keeps the rejection rather than swallowing it
+    // (round 8's blocker), and what reaches here is a request whose outcome is not
+    // known — so nothing is recorded, the control comes back, and the sentence says so.
+    lost = true;
+  } finally {
+    // Written before the refresh so a row settles on the fact this call established
+    // rather than on the one it is about to leave behind.
+    cancelling.delete(token);
+    refreshParks();
+  }
+  if (lost) {
+    fault(READ_CANCEL_LOST, "confirmations");
+  }
 }
 
 async function startSession(event) {

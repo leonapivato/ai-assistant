@@ -593,6 +593,13 @@ async def test_an_admitted_ask_round_trips_and_renders_what_the_hub_returned(
     that stops being carried is as much a defect as one that starts being carried
     unreviewed. Issue #1337 is that failure in the first direction — the answer was
     composed, returned over the wire, and dropped here.
+
+    **``read_confirmation`` and ``read_answer`` join it here** because ADR-0244 §13
+    admits this surface for that kind by name — "the command line and the browser each
+    render the pending read, collect the answer, and offer the cancellation act" — which
+    is the decision the roster assertion below was waiting on. ``search_not_serviced``
+    is still absent, and that too is a decision: see
+    ``test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed``.
     """
     cookie_half, header_half = await _start_session(harness)
     head, body = _ask(harness, header_half=header_half, cookie_half=cookie_half)
@@ -612,6 +619,8 @@ async def test_an_admitted_ask_round_trips_and_renders_what_the_hub_returned(
         "steps",
         "step",
         "routed",
+        "read_confirmation",
+        "read_answer",
     }
     assert [call[0] for call in harness.engine.calls] == ["converse"]
 
@@ -870,21 +879,27 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
     that closes it, and it is the same gap ADR-0235 §9 opened.
 
     **``read_confirmation`` and ``read_answer`` are ADR-0244 §9's members, and the
-    decision taken here is "not rendered" for the third time.** ADR-0244 §13 does admit
-    the browser for this kind — it "admits the browser for this kind rather than
-    inheriting ADR-0235 §9's deferral of it, because the batch this lane belongs to
-    states its exit over both surfaces" — but that is **Lane 4's** change, and §18 makes
-    the order 1, then 2, then 3 and 4. The lane this assertion is edited by is Lane 1,
-    which lands the contract and ``orchestration``'s consumer and touches no adapter. So
-    the two members cross the wire and no panel reads them, exactly as the two above do.
+    decision taken here is now "rendered".** ADR-0244 §13 admits the browser for this
+    kind — it "admits the browser for this kind rather than inheriting ADR-0235 §9's
+    deferral of it, because the batch this lane belongs to states its exit over both
+    surfaces" — and §18's Lane 4 is the lane that spends it. So ``_outcome_view`` carries
+    both, ``renderReadConfirmation`` puts the question on screen with ADR-0178 §7's floor
+    entire and the exact query, and ``renderReadAnswer`` renders one fixed statement per
+    ``ReadAnswerOutcome`` member. §13's last clause is what made both obligatory rather
+    than optional: a surface rendering no statement for a member it was given "has not
+    implemented this section" and "is not permissibly degraded".
 
-    **The cost is the same shape and is stated rather than hidden**: until Lane 4, a
-    user on the browser sees a parked read's question nowhere, and a turn that put a
-    lookup to them reads on this page like one that did not. ADR-0244 §13's last clause
-    is what closes it — "a surface that renders no statement for a
-    ``ReadAnswerOutcome`` member it was given, or that renders a read's confirmation
-    without §7's floor, has not implemented this section" — and it binds on Lane 4
-    rather than on this one.
+    **The entry above it is therefore the one that is still "not rendered", and the two
+    decisions do not contradict each other.** ADR-0244 §18 gives Lane 4 "the ninth
+    ``SearchNotServiced`` statement … at its own surface", and ADR-0242 §9's deferral of
+    *this* surface is untouched by ADR-0244's supersession, which reaches "§9's statement
+    enumeration by one member. **Nothing else in that ADR**". §9 is all-or-nothing over
+    the vocabulary — "a surface that renders **no** statement for a member is a surface
+    that has not implemented this section, not a permitted degradation" — so a page
+    rendering one of the nine is the half-implemented surface it refuses, and a page
+    rendering all nine would mint browser wordings for eight members and three
+    terminal-only acts no ratified decision gives this surface. It therefore renders none
+    of the nine, and #2237 carries the lane that changes that.
 
     **This assertion is the tripwire firing as designed**, which is what the test's own
     name says: a member reaching the page unnoticed is what it exists to prevent, and a

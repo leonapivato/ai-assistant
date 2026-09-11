@@ -5556,6 +5556,13 @@ def test_the_token_is_relayed_and_never_rendered_or_stored() -> None:
     cannot be answered is a card offering an approval that will fail. The rule it is
     part of is total over every member ``renderConfirmation`` dereferences, and the
     token is one of them.
+
+    **``cancelRead`` is the seventh** (ADR-0244 §11). It relays the handle to
+    ``/confirmation/cancel-read`` and keys two registries by it, exactly as
+    ``answerConfirmation`` keys three — §8's rule reaching the second act a park can
+    carry, unchanged and for its reason: the cancellation is "the act they performed",
+    and what the row says about it is computed by ``rowWords``, which takes the member
+    and not the handle.
     """
     script = _code("app.js")
     functions = _functions(script)
@@ -5567,6 +5574,7 @@ def test_the_token_is_relayed_and_never_rendered_or_stored() -> None:
         "answerConfirmation",
         "strand",
         "readConfirmation",
+        "cancelRead",
     }
     assert {name for name, body in functions.items() if "token" in body} == touching
     assert not re.search(r"textContent\s*=[^;]*token", script)
@@ -6252,13 +6260,27 @@ def test_a_resumed_park_is_not_reported_as_a_turn_that_planned_nothing() -> None
     have just destroyed a belief. Without the third conjunct the page would write "No
     action was needed." directly above "Done. That belief is destroyed.", which is
     #1404 reproduced against a surface #1404 could not reach.
+
+    **``read_confirmation`` and ``read_answer`` are the fourth and fifth, and the same
+    defect a third decision over** (ADR-0244 §9). A servicing that parks a read happens
+    in context assembly and not in a plan step, so a turn carrying the question can reach
+    this renderer with no steps, no step account and no route — and "No action was
+    needed." directly above a question the owner is being asked to answer is the same
+    contradiction on one screen. A ``declined`` answer is the sharper case: ADR-0170 §4's
+    second shape gives it ``turn`` and ``reply`` both ``null``, so every term of the
+    original condition is empty on an outcome that recorded a ``DENY``.
     """
     body = _functions(_code("app.js"))["renderOutcome"]
 
-    assert (
-        "if (outcome.steps.length === 0 && outcome.step === null && outcome.routed === null) {"
-        in body
-    )
+    for member in (
+        "outcome.steps.length === 0",
+        "outcome.step === null",
+        "outcome.routed === null",
+        "outcome.read_confirmation === null",
+        "outcome.read_answer === null",
+    ):
+        assert member in body, member
+    assert body.count('"No action was needed."') == 1
 
 
 def test_a_slower_listing_read_cannot_put_an_answered_park_back_on_screen() -> None:
@@ -6298,7 +6320,12 @@ def test_one_answer_per_park_and_a_second_click_submits_nothing() -> None:
     # as one wherever it came from (#1536).
     assert "const out = answering.has(token);" in offer
     assert "const answered = spent.has(token);" in offer
-    assert offer.count("disabled = out || answered;") == 2
+    # **A cancellation already recorded is the third fact that disables the pair**
+    # (ADR-0244 §11). All three of ``ReadCancellation``'s members leave the park
+    # unanswerable — the question withdrawn, a dispatch stopped part-way, or a park that
+    # was already settled — so a pair left enabled over one of them would be the silent
+    # refusal this surface spends the most words preventing.
+    assert offer.count("disabled = out || answered || gone !== null;") == 2
     assert "} finally {" in offer
     # The park is claimed before the row's own request, so a click on either row of one
     # park starts at most one ``resume``.
@@ -6520,20 +6547,33 @@ def test_a_row_holding_a_spent_token_never_offers_a_control_that_submits_nothing
     Closed at the render rather than at one path into it: the pair's enabled state is
     computed from ``spent``, so every route that leaves a token spent renders the row
     the same way and says which of the two things it means.
+
+    **``rowWords`` sits in front of it rather than inside it** (ADR-0244 §11). A park
+    this page cancelled, or is cancelling, carries a sentence from a different
+    enumeration — one fixed statement per ``ReadCancellation`` member — and folding a
+    three-member ``core`` vocabulary into a five-state page-local rule would leave a
+    member added to either having to be read against the other's states. Both take the
+    member or the flag and never the handle, which is §8's rule holding across the pair.
     """
     script = _code("app.js")
     offer = _functions(script)["offerApproval"]
     words = _functions(script)["parkWords"]
+    outer = _functions(script)["rowWords"]
 
     assert offer.rstrip().endswith("parkRows.add({ node: item, settle });\n  settle();\n}")
     assert "const answered = spent.has(token);" in offer
     assert "const stranded = unresolved.has(token);" in offer
-    assert "said.textContent = parkWords(waiting, out, answered, stranded);" in offer
+    assert (
+        "said.textContent = rowWords(gone, withdrawing, "
+        "parkWords(waiting, out, answered, stranded));" in offer
+    )
     assert 'said.hidden = said.textContent === "";' in offer
     # Total over the four states a row can be in, and it takes no token: ADR-0177 §8
     # has the front end render the continuation nowhere.
     assert "token" not in words
     assert words.count("return") == 4
+    assert "token" not in outer
+    assert outer.count("return") == 2
 
 
 def test_an_abandoned_park_answer_says_which_of_the_three_outcomes_it_got() -> None:
@@ -6693,6 +6733,13 @@ def test_one_parks_two_rows_take_one_state_and_only_one_of_them_submits() -> Non
     question ``abandonAsk`` asks of the answer panel and for its reason: ownership of
     what is on screen is a fact about *now*, and ``clearNode`` replaces a whole listing
     on every read.
+
+    **``cancelRead`` is the fourth caller and the park's state moves twice there too**
+    (ADR-0244 §11): once when the act goes out, so both rows say it is being cancelled
+    rather than one going quiet, and once at the ending, so both carry the statement for
+    the member that came back. A cancellation registered on one row and not the other
+    would leave the second offering a control over a park that is gone, which is the
+    round-1 finding this test is named for, one act over.
     """
     script = _code("app.js")
     functions = _functions(script)
@@ -6712,6 +6759,7 @@ def test_one_parks_two_rows_take_one_state_and_only_one_of_them_submits() -> Non
         "offerApproval",
         "readPending",
         "renderOutcome",
+        "cancelRead",
     }
     for name in ("readPending", "renderOutcome"):
         cleared = functions[name]
@@ -6890,11 +6938,12 @@ def test_a_park_whose_answer_went_unread_is_answerable_again_and_says_what_that_
     assert "not known" in said
     assert "Nothing was re-sent and nothing was cancelled." in said
     assert said.rstrip().endswith("PARK_ASK_AGAIN")
-    # The pair's enabled state is still computed from ``spent`` alone, so a row that is
-    # answerable again is answerable wherever it was built.
+    # The pair's enabled state is still computed from the park's own sets, so a row that
+    # is answerable again is answerable wherever it was built — and a cancellation this
+    # page recorded is the one further fact that keeps it disabled (ADR-0244 §11).
     offer = _functions(script)["offerApproval"]
     assert "const answered = spent.has(token);" in offer
-    assert offer.count("disabled = out || answered;") == 2
+    assert offer.count("disabled = out || answered || gone !== null;") == 2
 
 
 def test_a_refusal_of_a_second_answer_is_never_read_as_a_denial_of_the_first() -> None:
