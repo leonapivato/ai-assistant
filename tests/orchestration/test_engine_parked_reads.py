@@ -1,0 +1,1072 @@
+"""ADR-0244's parked read, driven through the **engine** (§19).
+
+The representative-input tests §18's last clause and §19 name, at the seams they are
+about. §18 is explicit that four of this decision's rulings are **deliberately not**
+suite clauses — "a generic conformance suite cannot see a wiring or the absence of a
+call" — and names the three that this module is the site for: that **no model call
+precedes a dispatch**, that **the value sent is the park's own ``parameters``**, and the
+arms §19 lists. ``tests/permissions/parked_reads_contract.py`` carries Arm 9, the
+store's own suite.
+
+**Driven through the engine rather than through the servicing site**, because every arm
+here is about something only the pipeline above that site has: the question is assembled
+at the capture point, the answer runs through ``resume``, the continuation is a turn, and
+``grantable_decisions`` is an engine operation. A loop-level case can reach none of them.
+
+**The pipeline is the real one.** The production ``ThresholdActionPolicy`` over the same
+recipient-grant store the engine's own act writes to, the real
+:class:`~ai_assistant.orchestration.reads.SearchServicer`, the canonical
+``FakeParkedReads`` wired as **one instance** into that servicer and the engine alike
+(ADR-0244 §18's Lane 2 obligation, held here by the case), and the capture point that is
+"the single place a ``TurnOutcome`` is built".
+"""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+from datetime import timedelta
+from itertools import count
+from typing import TYPE_CHECKING, Any, Final
+
+import pytest
+from test_engine import AT, PATIENT, Harness
+from test_engine_read_envelope import _AskingPlanner, _recorder
+from test_loop_search import _DEADLINE, _binder, _CostedSearcher, _search
+
+from ai_assistant.core.errors import UnknownContinuationError
+from ai_assistant.core.types import (
+    ContinuationToken,
+    ParkedReadDisposition,
+    PermissionOutcome,
+    ReadAnswerOutcome,
+    ReadCancellation,
+    ReadKind,
+    Role,
+    SearchNotServiced,
+)
+from ai_assistant.orchestration.reads import SearchServicer
+from ai_assistant.permissions.policy import ThresholdActionPolicy
+from ai_assistant.testing import (
+    FakeAuditTrail,
+    FakeMemoryStore,
+    FakeParkedReads,
+    FakeQueryComposer,
+    FakeRecipientGrantStore,
+    FakeWebSearcher,
+)
+
+if TYPE_CHECKING:
+    from ai_assistant.orchestration.composing import ComposingStage
+    from ai_assistant.testing import FakeModelProvider
+
+_ASKED: Final = "what has changed since we last spoke"
+
+#: ADR-0244 §3's lifetime for these cases. Long enough that nothing expires by accident;
+#: the expiry arms move the **clock** rather than shortening this, because ADR-0059 §1's
+#: comparison is against the clock's reading and a test advances it rather than waits.
+_TTL: Final = timedelta(hours=24)
+
+#: A distinctive clause of ADR-0244 §12's fixed fragment, quoted so the arm asserts the
+#: **fragment** reached the prompt rather than that two prompts differ.
+_AWAITING_FRAGMENT: Final = "waiting on an answer from this person before it can be made"
+
+#: The clause ADR-0242 §7's ``UNAVAILABLE`` fragment carries — the literal #2221 records
+#: as false, and the one ADR-0244 §12 exists to stop a parked turn saying.
+_PRODUCED_NOTHING: Final = "that lookup produced nothing this turn could use"
+
+
+@dataclass
+class _Wired:
+    """The engine and the stores it shares with the servicing site.
+
+    **One trail, one recipient-grant store and one parked-read store**, which is
+    ``app/composition.py``'s own discipline and what every arm here is stated over: the
+    ruling the search records is the row the park names, and the park the servicing wrote
+    is the one ``resume`` settles. A harness holding two of any of them can seed a state
+    and never *reach* it.
+    """
+
+    engine: Any
+    trail: FakeAuditTrail
+    parks: FakeParkedReads
+    searcher: FakeWebSearcher
+    composer: FakeQueryComposer
+    clock: _Clock
+
+
+class _Clock:
+    """An injected clock a case advances rather than waits on (ADR-0009, ADR-0059 §1)."""
+
+    def __init__(self) -> None:
+        self.now = AT
+
+    def __call__(self) -> Any:
+        return self.now
+
+    def advance(self, by: timedelta) -> None:
+        """Move the reading forward, so a deadline passes without a case sleeping."""
+        self.now += by
+
+
+def _wired(*, composing: ComposingStage | None = None, search_calls: int = 8) -> _Wired:
+    """The real pipeline over shared stores, with a parked-read store wired.
+
+    Nothing is seeded: no recipient grant, so the production policy rules ``CONFIRM`` on
+    the first search — which is the state #2221 records on the owner's own store and the
+    one every arm below starts from.
+    """
+    decisions = count(1)
+    clock = _Clock()
+    grants = FakeRecipientGrantStore(now=clock)
+    trail = FakeAuditTrail(recipient_grants=grants)
+    searcher = FakeWebSearcher(results=("a result about the bell tower",))
+    composer = FakeQueryComposer()
+    store = FakeParkedReads()
+    harness = Harness(
+        memory=FakeMemoryStore(now=clock),
+        planner=_AskingPlanner(_search()),
+        composing=composing,
+        now=clock,
+        search_calls=search_calls,
+        search=SearchServicer(
+            composer=composer,
+            searcher=_CostedSearcher(searcher),
+            binder=_binder(),
+            policy=ThresholdActionPolicy(grants=grants),
+            trail=trail,
+            now=clock,
+            # **A prefix of its own**, because the harness mints ``d-N`` for the answers
+            # its own operations record and the trail is append-only.
+            id_factory=lambda: f"search-d-{next(decisions)}",
+            deadline=_DEADLINE,
+            # ADR-0244 §18's one-instance obligation: the **same** object the engine
+            # answers through, so the park this servicing writes is the park that
+            # ``resume`` settles.
+            parked_reads=store,
+            parked_read_ttl=_TTL,
+        ),
+        parked_reads=store,
+        trail=trail,
+        recipient_grants=grants,
+    )
+    return _Wired(
+        engine=harness.engine,
+        trail=trail,
+        parks=store,
+        searcher=searcher,
+        composer=composer,
+        clock=clock,
+    )
+
+
+def _system_prompt(model: FakeModelProvider, ordinal: int = -1) -> str:
+    """The system message the production composing stage assembled, from the fake's record."""
+    assert model.calls
+    return next(one.content for one in model.calls[ordinal].messages if one.role is Role.SYSTEM)
+
+
+async def _parked(wired: _Wired) -> Any:
+    """The one open park this deployment holds, read through the contract."""
+    [held] = await wired.parks.outstanding()
+    return held
+
+
+# --- Arm 1: the question appears and nothing is sent --------------------------
+
+
+async def test_a_confirmed_search_writes_one_park_and_sends_nothing() -> None:
+    """§19's Arm 1 (#2222 scenario 1), and ADR-0244 §1 entire.
+
+    A servicing whose policy rules ``CONFIRM`` writes **one** park, opens no channel,
+    admits no record, and returns a turn whose ``read_confirmation`` carries the exact
+    query. **The turn does not park**: it composes and answers, so ``reply`` is present
+    and ADR-0170 §4's three ``reply``-``None`` shapes are untouched.
+    """
+    composing, model = _recorder()
+    wired = _wired(composing=composing)
+
+    outcome = await wired.engine.converse(_ASKED, timeout=PATIENT)
+
+    assert outcome.search_not_serviced is SearchNotServiced.ANSWER_AWAITED
+    assert outcome.read_confirmation is not None
+    assert outcome.read_confirmation.read is ReadKind.WEB_SEARCH
+    assert outcome.read_answer is None, "a turn that parked a read answered none"
+    assert outcome.reply is not None, "the turn composed and answered; what parked is the read"
+    assert wired.searcher.searched == [], "nothing was sent"
+    assert len(await wired.parks.outstanding()) == 1
+    prompt = _system_prompt(model)
+    assert _AWAITING_FRAGMENT in prompt
+    assert _PRODUCED_NOTHING not in prompt, "#2221's literal, which §12 exists to stop"
+
+
+async def test_the_question_carries_the_exact_query_and_the_destination() -> None:
+    """ADR-0244 §4, §13: the confirmation renders the query byte for byte.
+
+    "A surface that showed the user less than what would leave the device has not put
+    ADR-0148 §8's question", and what a surface renders is
+    :attr:`Confirmation.parameters` — so the arm is over the **parameters the ruling was
+    taken over**, not over a summary this lane could have minted beside them.
+    """
+    wired = _wired()
+
+    outcome = await wired.engine.converse(_ASKED, timeout=PATIENT)
+
+    confirmation = outcome.read_confirmation
+    assert confirmation is not None
+    park = await _parked(wired)
+    assert confirmation.parameters == park.parameters, "the park's own arguments, unaltered"
+    assert confirmation.egress is not None, "ADR-0244 §4: always present on a WEB_SEARCH park"
+    assert confirmation.egress.account_identity
+    assert confirmation.tool_id, "the searcher's own registered declaration, by value"
+    assert confirmation.reason, "the recorded CONFIRM's own reason (ADR-0042 §4)"
+
+
+async def test_the_park_names_the_recorded_confirm_and_carries_the_parked_turn() -> None:
+    """ADR-0244 §2: the park's durable identity is the **recorded decision**.
+
+    And the two members §8's continuation would otherwise fabricate are persisted: the
+    goal the turn was planned against, and the plan the planner returned.
+    """
+    wired = _wired()
+
+    await wired.engine.converse(_ASKED, timeout=PATIENT)
+
+    park = await _parked(wired)
+    recorded = await wired.trail.get(park.decision_id)
+    assert recorded is not None
+    assert recorded.ruling.outcome is PermissionOutcome.CONFIRM
+    assert recorded.step_id is None, "ADR-0231 §6: a WEB_SEARCH decision carries no step"
+    assert recorded.execution_id is None, "and no execution"
+    assert recorded.expires_at == park.expires_at, "ADR-0244 §3's shared deadline"
+    assert park.goal is not None, "the goal §8 would otherwise fabricate"
+    assert park.plan is not None, "and the plan"
+    assert park.disposition is ParkedReadDisposition.OPEN
+
+
+async def test_a_parked_decision_is_not_offered_to_the_establishing_act() -> None:
+    """§19's Arm 8, last clause, and ADR-0244 §5's **eighth** condition.
+
+    "A decision a park holds is answered through ``resume``, and answering it is what
+    dispatches the read; the establishing act resumes nothing and services nothing" — so
+    offering both on one row would let a user perform the act that changes nothing about
+    this lookup while the lookup's own question stood unanswered beside it.
+    """
+    wired = _wired()
+
+    await wired.engine.converse(_ASKED, timeout=PATIENT)
+
+    assert await wired.engine.grantable_decisions() == ()
+
+
+# --- Arm 2: approve dispatches once -------------------------------------------
+
+
+async def test_an_approval_dispatches_once_and_returns_a_composed_turn() -> None:
+    """§19's Arm 2 (#2222 scenario 2), and ADR-0244 §7 and §8.
+
+    One request carrying the park's ``parameters`` **byte for byte**; the park settled
+    ``APPROVED`` **before** the resolving ``ALLOW`` is recorded; and a ``TurnOutcome``
+    whose ``turn`` is a real ``TurnResult`` carrying the minted records and whose reply
+    is composed over them. That last is where ADR-0244 §8 partially supersedes ADR-0052
+    §3, which would have returned ``TurnOutcome(turn=None, step=<resolution>)``.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    park = await _parked(wired)
+    assert parked.read_confirmation is not None
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert outcome.read_answer is ReadAnswerOutcome.DISPATCHED
+    assert outcome.read_confirmation is None, "ADR-0244 §9's mutual exclusion"
+    assert outcome.turn is not None, "a real TurnResult, not a recovered park's None"
+    assert outcome.step is None, "a resumed read drives no step"
+    assert outcome.routed is None, "and takes no route"
+    assert outcome.reply is not None, "composed over the union (§8)"
+    assert outcome.conversation_id == park.conversation_id
+    [call] = wired.searcher.searched
+    assert call.request.parameters == park.parameters, "the park's own arguments, byte for byte"
+    assert outcome.turn.goal == park.goal, "the parked turn's goal, read from the park"
+    assert outcome.turn.plan == park.plan, "and the parked turn's plan"
+    assert [record.content for record in outcome.turn.memories[-1:]] == [
+        "a result about the bell tower"
+    ], "ADR-0226 §7's fourth group, appended in servicing order"
+
+
+async def test_the_gate_is_taken_before_the_resolution_is_recorded() -> None:
+    """ADR-0244 §6: **clause 5 before clause 6**, and that order is the decision.
+
+    Asserted over the trail's own ordering: the resolving decision names the park's
+    decision as what it resolves, and the park is terminal — so a reader finding an
+    ``OPEN`` park beside a recorded resolution has met the window settling-second opens,
+    which §6 says either strands the park or dispatches zero times.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    park = await _parked(wired)
+
+    await wired.engine.resume(parked.read_confirmation.token, approved=True, timeout=PATIENT)
+
+    settled = await wired.parks.get(park.id)
+    assert settled is not None
+    assert settled.disposition is ParkedReadDisposition.APPROVED
+    resolutions = [row for row in await wired.trail.recent() if row.resolves == park.decision_id]
+    assert len(resolutions) == 1
+    assert resolutions[0].ruling.outcome is PermissionOutcome.ALLOW
+
+
+async def test_the_settlement_clears_the_content_the_park_held() -> None:
+    """ADR-0244 §3: "the content lives exactly as long as the question does".
+
+    The retention rule, checked at the seam rather than in the store's own suite,
+    because what it is about here is that the **engine** reads ``goal`` and ``plan`` off
+    the park it settled rather than off a row the settlement has since cleared.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    park = await _parked(wired)
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    settled = await wired.parks.get(park.id)
+    assert settled is not None
+    assert settled.parameters is None, "the query is gone the moment the read is dispatched"
+    assert settled.goal is None, "and the goal"
+    assert settled.plan is None, "and the plan"
+    assert outcome.turn is not None, "and the continuation composed over them anyway"
+
+
+async def test_a_second_answer_dispatches_nothing_and_says_so() -> None:
+    """§19's Arm 2, second half — one of the three arms §19 names as load-bearing.
+
+    "One answer, at most one dispatch, however many times a token is presented." The
+    second call consults no policy, opens no channel, records nothing and mints nothing.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    token = parked.read_confirmation.token
+    await wired.engine.resume(token, approved=True, timeout=PATIENT)
+    sent = len(wired.searcher.searched)
+    rows = len(await wired.trail.recent())
+
+    again = await wired.engine.resume(token, approved=True, timeout=PATIENT)
+
+    assert again.read_answer is ReadAnswerOutcome.ALREADY_SETTLED
+    assert again.turn is None, "nothing was composed"
+    assert again.reply is None, "and nothing was answered"
+    assert len(wired.searcher.searched) == sent, "nothing further was sent"
+    assert len(await wired.trail.recent()) == rows, "and nothing further was recorded"
+
+
+async def test_no_model_call_precedes_the_dispatch() -> None:
+    """ADR-0244 §7, §16, and one of §18's four "deliberately not suite clauses".
+
+    "``QueryComposer`` is not called at resume, no model call precedes the send, and the
+    value passed to the searcher is the park's own ``parameters``." A generic suite
+    cannot see the *absence* of a call; this is the site where it can.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    composed_before = len(wired.composer.utterances)
+
+    await wired.engine.resume(parked.read_confirmation.token, approved=True, timeout=PATIENT)
+
+    assert len(wired.composer.utterances) == composed_before, (
+        "no query was composed at resume: what was composed in the parked turn is what is sent"
+    )
+
+
+# --- Arm 3: deny --------------------------------------------------------------
+
+
+async def test_a_denial_settles_the_park_records_a_deny_and_sends_nothing() -> None:
+    """§19's Arm 3 (#2222 scenario 3), and ADR-0244 §10.
+
+    ``turn`` and ``reply`` both ``None`` — ADR-0170 §4's second shape exactly — and the
+    parked turn's own reply stands: nothing rewrites it, and this outcome carries no
+    turn to replace it with.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    park = await _parked(wired)
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token, approved=False, timeout=PATIENT
+    )
+
+    assert outcome.read_answer is ReadAnswerOutcome.DECLINED
+    assert outcome.turn is None, "ADR-0170 §4's second shape"
+    assert outcome.reply is None, "and no prose beside it"
+    assert outcome.reply_degraded is False, "nothing was owed, so nothing degraded"
+    assert wired.searcher.searched == [], "no channel was opened"
+    settled = await wired.parks.get(park.id)
+    assert settled is not None
+    assert settled.disposition is ParkedReadDisposition.DENIED
+    resolutions = [row for row in await wired.trail.recent() if row.resolves == park.decision_id]
+    assert len(resolutions) == 1
+    assert resolutions[0].ruling.outcome is PermissionOutcome.DENY
+
+
+# --- Arm 5: expiry ------------------------------------------------------------
+
+
+async def test_an_expired_park_is_not_enumerated_and_answers_expired() -> None:
+    """§19's Arm 5 (#2222 scenario 5), in **both** of its halves.
+
+    Where the ``resume`` is the operation that settles it, and where an enumeration
+    settled it first — ADR-0244 §9 states ``EXPIRED`` over the **disposition** rather
+    than over which call discovered it, so the two read the same to the user.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    park = await _parked(wired)
+    wired.clock.advance(_TTL + timedelta(minutes=1))
+
+    listed = await wired.engine.pending_confirmations()
+
+    assert [one for one in listed if one.read is not None] == [], "not offered"
+    settled = await wired.parks.get(park.id)
+    assert settled is not None
+    assert settled.disposition is ParkedReadDisposition.EXPIRED
+    assert settled.parameters is None, "and its content was cleared"
+
+    answered = await wired.engine.resume(
+        parked.read_confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert answered.read_answer is ReadAnswerOutcome.EXPIRED
+    assert wired.searcher.searched == [], "nothing was dispatched"
+
+
+async def test_an_expiry_this_answer_discovers_reads_the_same_to_the_user() -> None:
+    """The other half of Arm 5: no enumeration ran, and the answer settles it itself."""
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    park = await _parked(wired)
+    wired.clock.advance(_TTL + timedelta(minutes=1))
+
+    answered = await wired.engine.resume(
+        parked.read_confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert answered.read_answer is ReadAnswerOutcome.EXPIRED
+    settled = await wired.parks.get(park.id)
+    assert settled is not None
+    assert settled.disposition is ParkedReadDisposition.EXPIRED
+    assert wired.searcher.searched == []
+
+
+async def test_an_expired_parks_decision_does_not_return_to_the_grantable_listing() -> None:
+    """ADR-0244 §5, §10: "an expiry makes no decision grantable".
+
+    §5's eighth condition stops excluding an ``EXPIRED`` park's decision, and ADR-0235
+    §3's **fifth** then refuses it on its own — the decision carries the same deadline
+    the park does — so the row does not return. **The arm fails an implementation that
+    stamped the park's deadline and not the decision's.**
+    """
+    wired = _wired()
+    await wired.engine.converse(_ASKED, timeout=PATIENT)
+    wired.clock.advance(_TTL + timedelta(minutes=1))
+    await wired.engine.pending_confirmations()
+
+    assert await wired.engine.grantable_decisions() == ()
+
+
+async def test_a_cancelled_parks_decision_does_return_to_the_grantable_listing() -> None:
+    """§19's Arm 8, and the discrimination ADR-0244 §5 draws between the two.
+
+    "A cancelled park's decision is therefore the one that returns to the listing", where
+    the other six conditions hold — because a cancellation writes no resolution and never
+    will, and nothing about the decision's own deadline has passed.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+
+    assert (
+        await wired.engine.cancel_read(parked.read_confirmation.token) is ReadCancellation.WITHDRAWN
+    )
+
+    assert len(await wired.engine.grantable_decisions()) == 1
+
+
+# --- Arm 6: the changed operation ---------------------------------------------
+
+
+async def test_a_deployment_at_zero_calls_refuses_the_answer_as_unavailable() -> None:
+    """§19's Arm 6, third limb, and ADR-0244 §6's clause 2.
+
+    ADR-0238 §8 defines a bound of ``0`` as "no search is serviced in any conversation",
+    and an answer reaching a deployment that has since switched searching off is refused
+    before any ruling: nothing was ruled and nothing was dispatched.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    # The deployment's own configuration, changed under a standing question — which is
+    # exactly the state §6's clause 2 is written for.
+    wired.engine._parked_reads._max_calls = 0
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert outcome.read_answer is ReadAnswerOutcome.UNAVAILABLE_NOW
+    assert wired.searcher.searched == []
+    assert [row for row in await wired.trail.recent() if row.resolves] == [], "nothing was ruled"
+
+
+# --- Arm 7: cancellation ------------------------------------------------------
+
+
+async def test_cancelling_an_open_park_withdraws_it_and_records_no_ruling() -> None:
+    """§19's Arm 7, first state, and ADR-0244 §11.
+
+    "The whole difference from a denial": a denial is the user answering *no* and is a
+    ruling; a cancellation is the user withdrawing the question and is not one.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    park = await _parked(wired)
+
+    assert (
+        await wired.engine.cancel_read(parked.read_confirmation.token) is ReadCancellation.WITHDRAWN
+    )
+
+    settled = await wired.parks.get(park.id)
+    assert settled is not None
+    assert settled.disposition is ParkedReadDisposition.CANCELLED
+    assert settled.parameters is None, "cleared in the same step"
+    assert [row for row in await wired.trail.recent() if row.resolves] == [], "no ruling recorded"
+    assert wired.searcher.searched == [], "and nothing was sent"
+
+
+async def test_cancelling_a_settled_park_answers_that_there_is_nothing_to_cancel() -> None:
+    """§19's Arm 7, third state: "on a settled park with nothing running"."""
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    await wired.engine.resume(parked.read_confirmation.token, approved=False, timeout=PATIENT)
+
+    assert (
+        await wired.engine.cancel_read(parked.read_confirmation.token)
+        is ReadCancellation.NOTHING_TO_CANCEL
+    )
+
+
+async def test_an_answer_after_a_cancellation_is_already_settled() -> None:
+    """ADR-0244 §11: **neither party acts on a park the other took.**
+
+    The cancellation took the gate, so the answer that follows rules nothing, records
+    nothing and sends nothing.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    await wired.engine.cancel_read(parked.read_confirmation.token)
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert outcome.read_answer is ReadAnswerOutcome.ALREADY_SETTLED
+    assert wired.searcher.searched == []
+
+
+async def test_an_unknown_token_is_refused_and_never_denied() -> None:
+    """ADR-0244 §11, ADR-0084 §7: an unknown token raises, exactly as ``resume`` does.
+
+    **Never a ``NOTHING_TO_CANCEL``**, which would tell a caller its question was already
+    gone when in fact this engine never held it.
+    """
+    wired = _wired()
+
+    with pytest.raises(UnknownContinuationError):
+        await wired.engine.cancel_read(ContinuationToken(handle="never-minted"))
+
+
+# --- Arm 4: restart -----------------------------------------------------------
+
+
+async def test_a_park_survives_a_restart_and_is_offered_with_a_fresh_token() -> None:
+    """§19's Arm 4 (#2222 scenario 4), and ADR-0244 §5 and §15.
+
+    "Nothing durable holds a token", so a restart empties the handle table and the next
+    ``pending_confirmations`` re-mints from durable state — and the park re-offered is
+    the **same** park, named by the same decision.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    park = await _parked(wired)
+    # A restart, modelled as this engine's own handle table emptying — which is what
+    # ADR-0084 §7 says a restart does to it, and what a second engine over the same
+    # durable state would meet.
+    wired.engine._read_parks.clear()
+
+    offered = [one for one in await wired.engine.pending_confirmations() if one.read is not None]
+
+    assert len(offered) == 1
+    assert offered[0].parameters == park.parameters, "the same content"
+    assert offered[0].token != parked.read_confirmation.token, "and a freshly minted token"
+
+    outcome = await wired.engine.resume(offered[0].token, approved=True, timeout=PATIENT)
+
+    assert outcome.read_answer is ReadAnswerOutcome.DISPATCHED
+    assert len(wired.searcher.searched) == 1, "exactly once, after the restart"
+
+
+async def test_enumeration_is_idempotent_and_reuses_the_handle_it_minted() -> None:
+    """ADR-0244 §5: "a park already named by a handle reuses that handle".
+
+    ADR-0052 §2's reconciliation at a second population, and what keeps a surface's token
+    stable across two listings.
+    """
+    wired = _wired()
+    await wired.engine.converse(_ASKED, timeout=PATIENT)
+
+    first = [one for one in await wired.engine.pending_confirmations() if one.read is not None]
+    second = [one for one in await wired.engine.pending_confirmations() if one.read is not None]
+
+    assert [one.token for one in first] == [one.token for one in second]
+
+
+# --- Arm 8: the refusal arms --------------------------------------------------
+
+
+async def test_a_second_park_for_one_conversation_takes_the_undiscriminated_member() -> None:
+    """§19's Arm 8, third clause, and ADR-0244 §1's third clause with §12's table.
+
+    "A second park for one conversation is refused by the store and the servicing takes
+    ADR-0242 §8's undiscriminated member." Driven by a second turn of the **same**
+    conversation while the first question stands — which is the state ADR-0244 §14 says
+    a conversation with an open park is in: it still converses, plans and services every
+    other read kind, and what it does not do is write a second park.
+    """
+    wired = _wired()
+    first = await wired.engine.converse(_ASKED, timeout=PATIENT)
+
+    second = await wired.engine.converse(
+        _ASKED, timeout=PATIENT, conversation_id=first.conversation_id
+    )
+
+    assert second.search_not_serviced is not SearchNotServiced.ANSWER_AWAITED
+    assert second.read_confirmation is None, "no park was written, so no question is reported"
+    assert len(await wired.parks.outstanding()) == 1, "still one open park"
+    assert second.reply is not None, "and the turn answered"
+
+
+# --- §14: a park blocks nothing ----------------------------------------------
+
+
+async def test_a_conversation_with_an_open_park_still_converses() -> None:
+    """ADR-0244 §14: "no lane blocks, queues, defers or fails a turn on account of an
+    open park", and a park holds no execution slot, step or claim.
+
+    Driven over a **second** conversation as well as the first, because §3's rule is
+    per conversation and §14's is per turn: what an open park bounds is that
+    conversation's next *park*, and nothing else about any turn anywhere.
+    """
+    wired = _wired()
+    first = await wired.engine.converse(_ASKED, timeout=PATIENT)
+
+    # The same utterance, because this harness's planner mints one goal id per
+    # deployment and a second statement under it is the audit hazard `save_goal`
+    # refuses. What the arm is about is the **conversation**, not the words.
+    second = await wired.engine.converse(_ASKED, timeout=PATIENT)
+
+    assert second.reply is not None, "a different conversation converses unaffected"
+    assert second.conversation_id != first.conversation_id
+    assert len(await wired.parks.outstanding()) == 2, "one open park each, and no more"
+
+
+# --- Arm 11: two concurrent answers ------------------------------------------
+
+
+async def test_two_concurrent_answers_produce_one_settlement_and_one_dispatch() -> None:
+    """§19's Arm 11 — one of the three arms §19 names as load-bearing.
+
+    "Two ``resume`` calls on one token produce **one** settlement, **one** recorded
+    resolution and **one** dispatch; the loser returns ``ALREADY_SETTLED``, consults no
+    policy, records nothing and **raises nothing**."
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    token = parked.read_confirmation.token
+    park = await _parked(wired)
+
+    outcomes = await asyncio.gather(
+        wired.engine.resume(token, approved=True, timeout=PATIENT),
+        wired.engine.resume(token, approved=True, timeout=PATIENT),
+    )
+
+    members = sorted(outcome.read_answer for outcome in outcomes)
+    assert members == sorted([ReadAnswerOutcome.ALREADY_SETTLED, ReadAnswerOutcome.DISPATCHED])
+    assert len(wired.searcher.searched) == 1, "one dispatch"
+    resolutions = [row for row in await wired.trail.recent() if row.resolves == park.decision_id]
+    assert len(resolutions) == 1, "one recorded resolution"
+
+
+async def test_an_approval_racing_a_denial_leaves_the_park_and_the_trail_agreeing() -> None:
+    """§19's Arm 12: one settlement, one recorded ruling, and the two say the same thing."""
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    token = parked.read_confirmation.token
+    park = await _parked(wired)
+
+    outcomes = await asyncio.gather(
+        wired.engine.resume(token, approved=True, timeout=PATIENT),
+        wired.engine.resume(token, approved=False, timeout=PATIENT),
+    )
+
+    assert sum(1 for one in outcomes if one.read_answer is ReadAnswerOutcome.ALREADY_SETTLED) == 1
+    settled = await wired.parks.get(park.id)
+    assert settled is not None
+    resolutions = [row for row in await wired.trail.recent() if row.resolves == park.decision_id]
+    assert len(resolutions) == 1
+    expected = (
+        PermissionOutcome.ALLOW
+        if settled.disposition is ParkedReadDisposition.APPROVED
+        else PermissionOutcome.DENY
+    )
+    assert resolutions[0].ruling.outcome is expected, (
+        "the park's disposition and the trail's recorded answer say the same thing"
+    )
+
+
+# --- Arm 6: the changed operation, the two limbs a wrapper reaches ------------
+
+
+class _RefusingResolution:
+    """A policy that rules as the production one does and **refuses the resolution**.
+
+    ADR-0244 §6's clause 6 in the state ``AUTHORITY_CHANGED`` is reserved for: an
+    approving answer the policy refused at the instant of the answer. It is reachable in
+    a real deployment — a threshold an operator lowered while the question stood — and
+    unreachable through this pipeline's own inputs, so the *policy* is what a case
+    varies rather than a `Settings` value the servicer does not read.
+    """
+
+    def __init__(self, inner: ThresholdActionPolicy) -> None:
+        self._inner = inner
+
+    async def decide(self, request: Any) -> Any:
+        return await self._inner.decide(request)
+
+    async def resolve(self, confirmed: Any, *, approved: bool) -> Any:
+        from ai_assistant.core.types import PermissionRuling  # noqa: PLC0415 — one class's subject
+
+        del confirmed, approved
+        return PermissionRuling(
+            outcome=PermissionOutcome.DENY,
+            reason="the thresholds moved while the question stood",
+        )
+
+
+class _RefusingRebind:
+    """A binder that binds as the real one does and **refuses every rebind**.
+
+    ADR-0152 §7's refusal, which ADR-0244 §6's clause 4 reaches: "a destination, an
+    account identity or a payload description that moved between the question and the
+    answer is a refusal, not a send". Nothing a case can pass through this pipeline moves
+    a destination under a standing question, so the seam is what a case varies.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    async def bind(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._inner.bind(*args, **kwargs)
+
+    async def rebind(self, *args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        return None
+
+
+async def test_a_policy_that_refuses_the_answer_records_it_and_dispatches_nothing() -> None:
+    """§19's Arm 6, second limb: ``AUTHORITY_CHANGED``, **with the answer recorded**.
+
+    ADR-0004 §7's reason: "a ruling the trail never sees is a decision nobody can audit".
+    The park is spent either way — the gate was taken before the policy was asked — and
+    nothing was dispatched.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    park = await _parked(wired)
+    servicer = wired.engine._loop._search
+    servicer._policy = _RefusingResolution(servicer._policy)
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert outcome.read_answer is ReadAnswerOutcome.AUTHORITY_CHANGED
+    assert wired.searcher.searched == [], "nothing was dispatched"
+    resolutions = [row for row in await wired.trail.recent() if row.resolves == park.decision_id]
+    assert len(resolutions) == 1, "the answer **is** recorded whatever it is"
+    assert resolutions[0].ruling.outcome is PermissionOutcome.DENY
+    settled = await wired.parks.get(park.id)
+    assert settled is not None
+    assert settled.disposition is ParkedReadDisposition.APPROVED, "the park is spent either way"
+
+
+async def test_a_binding_that_no_longer_derives_equal_refuses_with_no_ruling_recorded() -> None:
+    """§19's Arm 6, first limb: ``OPERATION_CHANGED`` and **no ruling recorded**.
+
+    Clause 4 precedes the gate, so the park is left ``OPEN``: "a park spent on an answer
+    the subject check would have refused is an answer the user has to give again for no
+    reason" (ADR-0244 §6).
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    park = await _parked(wired)
+    servicer = wired.engine._loop._search
+    servicer._binder = _RefusingRebind(servicer._binder)
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert outcome.read_answer is ReadAnswerOutcome.OPERATION_CHANGED
+    assert wired.searcher.searched == []
+    assert [row for row in await wired.trail.recent() if row.resolves] == [], "no ruling"
+    still_open = await wired.parks.get(park.id)
+    assert still_open is not None
+    assert still_open.disposition is ParkedReadDisposition.OPEN, "the park is not spent"
+
+
+async def test_a_park_whose_parameters_do_not_hash_to_the_digest_dispatches_nothing() -> None:
+    """§19's Arm 8, second clause, and ADR-0244 §2's parameter check.
+
+    "``parameters`` are the ruling's own and are **checked against the recorded
+    ``CONFIRM``, not trusted from the store**." Driven by dropping the park this
+    servicing wrote and writing one over the same decision whose arguments differ, which
+    is the state a tampered or a corrupted row is in.
+
+    **``PermissionDecision.authorises`` is not this check and cannot be**: it is ``True``
+    only of an ``ALLOW``, so it is ``False`` of every ``CONFIRM`` by construction — a lane
+    collapsing the two would refuse every parked read, which is why the digest comparison
+    is written out.
+    """
+    wired = _wired()
+    await wired.engine.converse(_ASKED, timeout=PATIENT)
+    park = await _parked(wired)
+    assert await wired.parks.drop_for_conversation(park.conversation_id) == 1
+    tampered = park.model_copy(
+        update={"parameters": {"origin": "search.example", "query": "something else entirely"}}
+    )
+    assert await wired.parks.park(tampered) is True
+    [offered] = [one for one in await wired.engine.pending_confirmations() if one.read]
+
+    outcome = await wired.engine.resume(offered.token, approved=True, timeout=PATIENT)
+
+    assert outcome.read_answer is ReadAnswerOutcome.OPERATION_CHANGED
+    assert wired.searcher.searched == [], "nothing was dispatched"
+    assert [row for row in await wired.trail.recent() if row.resolves] == [], "and nothing ruled"
+
+
+# --- Arms 10 and 14: the states a crash and a restart leave behind ------------
+
+
+async def test_a_park_settled_with_no_ruling_recorded_answers_already_settled() -> None:
+    """§19's Arm 10: the crash between the gate and the ruling.
+
+    "With the park settled ``APPROVED`` and no resolution recorded, the next ``resume``
+    returns ``ALREADY_SETTLED``, the next ``pending_confirmations`` does not list the
+    park, **nothing is dispatched**, and no ruling appears in the trail." Driven by
+    settling at the seam and stopping before ``resolve`` — the state ADR-0244 §6 admits
+    by name: "a bounded loss of one answer, preferred to the unbounded hazard the other
+    order carries".
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    park = await _parked(wired)
+    await wired.parks.settle(
+        park.id, disposition=ParkedReadDisposition.APPROVED, at=wired.clock.now
+    )
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert outcome.read_answer is ReadAnswerOutcome.ALREADY_SETTLED
+    assert wired.searcher.searched == [], "nothing was dispatched"
+    assert [row for row in await wired.trail.recent() if row.resolves] == [], "and no ruling"
+    assert [one for one in await wired.engine.pending_confirmations() if one.read] == []
+
+
+async def test_the_grantable_exclusion_survives_a_restart() -> None:
+    """§19's Arm 14: the exclusion is held by the **row**, not in memory.
+
+    "With a park settled ``DENIED``, no resolution recorded, its deadline not passed and
+    the engine rebuilt over the same durable state, ``park_of_decision`` answers that
+    terminal row, ``grantable_decisions`` omits its decision, and
+    ``establish_recipient_grant`` on it raises ``UngrantableActError``." **The arm fails
+    an implementation holding the exclusion in memory**, which is why the handle table is
+    cleared before the listing is asked.
+    """
+    from ai_assistant.core.errors import UngrantableActError  # noqa: PLC0415 — one arm's subject
+
+    wired = _wired()
+    await wired.engine.converse(_ASKED, timeout=PATIENT)
+    park = await _parked(wired)
+    await wired.parks.settle(park.id, disposition=ParkedReadDisposition.DENIED, at=wired.clock.now)
+    wired.engine._read_parks.clear()
+
+    held = await wired.parks.park_of_decision(park.decision_id)
+
+    assert held is not None
+    assert held.disposition is ParkedReadDisposition.DENIED
+    assert await wired.engine.grantable_decisions() == ()
+    with pytest.raises(UngrantableActError, match="parked read"):
+        await wired.engine.establish_recipient_grant(
+            park.decision_id, expires_at=wired.clock.now + timedelta(days=30)
+        )
+
+
+# --- Arms 7 and 13: what happens while an answer is in flight ----------------
+
+
+class _SuspendingResolution:
+    """A policy that holds its ``resolve`` open until a case releases it.
+
+    ADR-0244 §19's Arm 13 is stated over exactly this pause — "with a ``resume`` paused
+    **after** its settlement and before its recorded ruling" — because that is the window
+    §5's eighth condition exists to close: the park is already ``APPROVED`` and the trail
+    holds no resolution, so a condition stated over an *open* park alone would offer the
+    establishing act a decision the answering call is about to resolve.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.reached = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def decide(self, request: Any) -> Any:
+        return await self._inner.decide(request)
+
+    async def resolve(self, confirmed: Any, *, approved: bool) -> Any:
+        self.reached.set()
+        await self.release.wait()
+        return await self._inner.resolve(confirmed, approved=approved)
+
+
+class _SuspendingSearcher:
+    """A searcher that holds its ``search`` open until a case releases it.
+
+    ADR-0244 §19's Arm 7, second state: a dispatch **in flight**, which is the only state
+    ``INTERRUPTED`` names and which no synchronous fake can be in.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.reached = asyncio.Event()
+        self.release = asyncio.Event()
+
+    @property
+    def name(self) -> str:
+        return str(self._inner.name)
+
+    async def request(self, query: str, /) -> Any:
+        return await self._inner.request(query)
+
+    async def search(self, call: Any, /, *, timeout: timedelta) -> Any:  # noqa: ASYNC109 — the seam owns the deadline, as the contract declares it
+        self.reached.set()
+        await self.release.wait()
+        return await self._inner.search(call, timeout=timeout)
+
+
+async def test_the_establishing_act_is_refused_while_an_answer_is_between_gate_and_ruling() -> None:
+    """§19's Arm 13, and the property ADR-0244 §5's eighth condition exists to have.
+
+    **The arm fails an implementation whose eighth condition is stated over an ``OPEN``
+    park alone**: at the pause the park is ``APPROVED`` and no resolution is recorded, so
+    such an implementation would offer the act on a decision whose answer is mid-flight —
+    recording an ``ALLOW`` the user never gave that answer for, and leaving the answering
+    call's own append to fail.
+    """
+    from ai_assistant.core.errors import UngrantableActError  # noqa: PLC0415 — one arm's subject
+
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    park = await _parked(wired)
+    servicer = wired.engine._loop._search
+    paused = _SuspendingResolution(servicer._policy)
+    servicer._policy = paused
+    answering = asyncio.create_task(
+        wired.engine.resume(parked.read_confirmation.token, approved=True, timeout=PATIENT)
+    )
+    await paused.reached.wait()
+
+    settled = await wired.parks.get(park.id)
+    assert settled is not None
+    assert settled.disposition is ParkedReadDisposition.APPROVED, "the gate is already taken"
+    assert [row for row in await wired.trail.recent() if row.resolves] == [], "and no ruling yet"
+    assert await wired.engine.grantable_decisions() == ()
+    with pytest.raises(UngrantableActError, match="parked read"):
+        await wired.engine.establish_recipient_grant(
+            park.decision_id, expires_at=wired.clock.now + timedelta(days=30)
+        )
+    assert [one for one in await wired.engine.pending_confirmations() if one.read] == [], (
+        "a concurrent enumeration during the pause does not list the park"
+    )
+    assert wired.searcher.searched == [], "and dispatches nothing"
+
+    paused.release.set()
+    outcome = await answering
+
+    assert outcome.read_answer is ReadAnswerOutcome.DISPATCHED
+    assert len(wired.searcher.searched) == 1, "the paused answer then records its ruling and sends"
+
+
+async def test_cancelling_a_dispatch_in_flight_interrupts_it_and_leaves_the_park_approved() -> None:
+    """§19's Arm 7, second state, and ADR-0244 §11.
+
+    "What is cancelled is the ``resume`` call running the dispatch, and **no
+    ``TurnOutcome`` is produced for it**" — the cancellation is a teardown and is
+    converted into neither an outcome nor a refusal. "A cancelled dispatch leaves the
+    park ``APPROVED`` and does not re-open it": the question was answered, the call was
+    made, and **no caller assumes the query did not leave**.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    park = await _parked(wired)
+    servicer = wired.engine._loop._search
+    held = _SuspendingSearcher(servicer._searcher)
+    servicer._searcher = held
+    answering = asyncio.create_task(
+        wired.engine.resume(parked.read_confirmation.token, approved=True, timeout=PATIENT)
+    )
+    await held.reached.wait()
+
+    assert (
+        await wired.engine.cancel_read(parked.read_confirmation.token)
+        is ReadCancellation.INTERRUPTED
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await answering
+    settled = await wired.parks.get(park.id)
+    assert settled is not None
+    assert settled.disposition is ParkedReadDisposition.APPROVED, "not re-opened"
+    held.release.set()

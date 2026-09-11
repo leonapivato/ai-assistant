@@ -225,8 +225,24 @@ _NAMESPACE: Final = {
 #: and capture's narrow one — and nothing on this surface returns either or names
 #: one in an argument. What crosses is the three values above, on the seven methods
 #: ADR-0225 §14 adds and on no other.
+#:
+#: The two after those are ADR-0244 §9's and §11's — ``ReadAnswerOutcome``, which
+#: ``TurnOutcome.read_answer`` names, and ``ReadCancellation``, which ``cancel_read``
+#: returns. Both are closed ``StrEnum``\ s, so the walk terminates at each immediately.
+#:
+#: **``ParkedRead`` and ``ParkedReadDisposition`` are not here, and their absence is
+#: ADR-0244 §4 rather than an omission.** A park never crosses the wire: what a surface
+#: is handed is the ``Confirmation`` assembled from it, and §4 is explicit that "the
+#: goal, the plan and the conversation's history are not part of the question and no
+#: surface is given them". Nothing on this surface returns a ``ParkedRead`` or names
+#: one in an argument, so the walk is right not to reach it — which is the same split
+#: ADR-0225 §10 makes for the two archive Protocols one paragraph up. What ADR-0244
+#: does put on an already-promoted type is ``Confirmation.read``, whose ``ReadKind`` is
+#: already inside this closure through ``TurnResult.plan -> ActionPlan.read_request``.
 PROMOTED: Final[frozenset[str]] = frozenset(
     {
+        "ReadAnswerOutcome",
+        "ReadCancellation",
         "TranscriptArchiveSize",
         "TranscriptEntry",
         "TranscriptHit",
@@ -615,8 +631,21 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     None of the three is a browser operation either: ADR-0242 §5 leaves the browser to
     a later consumer lane with its own ratified decision and does not widen ADR-0177
     §1's enumeration, so thirty-one is unmoved a third time.
+
+    ADR-0244 §11's **one** takes it to fifty-eight: ``cancel_read``, the cancellation
+    source #2217 names **for this operation kind alone**. **One and not two**, and §11
+    argues the absence: a separate ``withdraw`` and ``interrupt`` "would ask the caller
+    to know which state the park is in before it acts — a race by construction, since
+    the state can change between the read and the call", so one operation *reports*
+    which of the two happened and puts the discrimination where the atomicity already
+    is. The answer to a parked read is **not** a second operation either: it rides
+    ``resume``, whose signature does not move (§6).
+
+    It is not a browser operation: ADR-0244 §13 admits the browser for this kind, but
+    that is Lane 4's own change and this surface is Lane 1's, so ADR-0177 §1's
+    thirty-one is unmoved a fourth time.
     """
-    assert len(_method_names()) == 57
+    assert len(_method_names()) == 58
 
 
 def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> None:
@@ -1011,6 +1040,15 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     ``Planner``, which is on neither promoted surface. §11 fixes no number either,
     and for the sharper reason that another lane had 31 → 32 already scheduled.
 
+    **35 is ADR-0244 §17**, and the method set moves with it — the **only** entry on
+    this pin since ADR-0242 §11 where both numbers move, and §17 states the move up
+    front rather than leaving the implementing lane to find it. It meets ADR-0124 §9
+    three times over: ``Confirmation`` gains a **required** member on an
+    ``extra="forbid"`` model (so **both** directions fail to decode, where every
+    ``TurnOutcome`` entry above fails in one), ``TurnOutcome`` gains two members a
+    projection emits, and ``AssistantEngine`` gains ``cancel_read``. §17 fixes no
+    numeral, for the reason every section above it does not.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1019,7 +1057,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (57, 34), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (58, 35), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

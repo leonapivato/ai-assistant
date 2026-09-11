@@ -29,7 +29,8 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from ai_assistant.core.clock import checked_clock
+from ai_assistant.core.clock import ClockReadingError, checked_clock
+from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
     ActionRequest,
     ParkedRead,
@@ -139,6 +140,33 @@ class ParkedReadOperations:
         self._clock = checked_clock(clock, owner="ParkedReadOperations")
         self._dispatches = _Dispatches()
 
+    def _now(self) -> datetime:
+        """The guarded clock's reading, as the reading stage's own error.
+
+        ``core/errors.py`` defines no error for `orchestration`, so ADR-0026 §4 gives
+        the failure to the **stage**: this is
+        :meth:`~ai_assistant.orchestration.recipient_grants.RecipientGrantOperations._now`'s
+        translation one seam over, and it is what makes the ``PlanningError`` each
+        operation below declares true rather than aspirational.
+
+        **The guard covers the reading and not the invocation** (ADR-0026 §2). An
+        exception the injected callable raises *itself* propagates unwrapped, and only a
+        :class:`~ai_assistant.core.clock.ClockReadingError` is translated — which is why
+        that class is distinct from a bare ``ValueError``.
+
+        Returns:
+            The instant every comparison and settlement here carries.
+
+        Raises:
+            PlanningError: If the injected clock's reading is not a conforming one —
+                naive, indeterminate, or outside the localizable range.
+        """
+        try:
+            return self._clock()
+        except ClockReadingError as exc:
+            msg = f"the parked-read operations' clock returned a non-conforming reading: {exc}"
+            raise PlanningError(msg) from exc
+
     # --- the enumeration (ADR-0244 §5) --------------------------------------
 
     async def outstanding(self) -> tuple[ParkedRead, ...]:
@@ -161,11 +189,12 @@ class ParkedReadOperations:
         Raises:
             AssistantError: If the store could not be read or an expiry could not be
                 written.
+            PlanningError: If the injected clock's reading is not conforming.
         """
         store = self._store
         if store is None:
             return ()
-        now = self._clock()
+        now = self._now()
         live: list[ParkedRead] = []
         for park in await store.outstanding():
             if park.expires_at <= now:
@@ -277,6 +306,7 @@ class ParkedReadOperations:
         Raises:
             AssistantError: If a store or the trail could not be read. A **refusal** is
                 returned rather than raised (ADR-0244 §9); a fault is not a refusal.
+            PlanningError: If the injected clock's reading is not conforming.
         """
         store = self._store
         search = self._search
@@ -284,7 +314,7 @@ class ParkedReadOperations:
             # No store holds questions, or no account can answer one. Nothing was ruled
             # and nothing was dispatched, which is what `UNAVAILABLE_NOW` says.
             return AnsweredRead(ReadAnswerOutcome.UNAVAILABLE_NOW)
-        now = self._clock()
+        now = self._now()
         # **Clause 1 — the park.**
         park = await store.get(park_id)
         if park is None:
@@ -457,11 +487,12 @@ class ParkedReadOperations:
 
         Raises:
             AssistantError: If the store could not be read or written.
+            PlanningError: If the injected clock's reading is not conforming.
         """
         store = self._store
         if store is None:
             return ReadCancellation.NOTHING_TO_CANCEL
-        now = self._clock()
+        now = self._now()
         park = await store.get(park_id)
         if park is not None and park.disposition is ParkedReadDisposition.OPEN:
             if await store.settle(park.id, disposition=ParkedReadDisposition.CANCELLED, at=now):

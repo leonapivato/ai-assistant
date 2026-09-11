@@ -568,8 +568,9 @@ def test_a_confirmation_sorts_its_parameters_however_it_was_built(
         read=None,
     )
     expected = (
-        b'{"egress":null,"parameters":{"Z":1,"body":"hi","to":"a@b"},"reason":"external",'
-        b'"token":{"handle":"h-1"},"tool_description":"send","tool_id":"t-1"}'
+        b'{"egress":null,"parameters":{"Z":1,"body":"hi","to":"a@b"},"read":null,'
+        b'"reason":"external","token":{"handle":"h-1"},"tool_description":"send",'
+        b'"tool_id":"t-1"}'
     )
     assert _both(confirmation) == expected
 

@@ -869,6 +869,23 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
     like one whose search was never asked for. That gap is named in §5 with the lane
     that closes it, and it is the same gap ADR-0235 §9 opened.
 
+    **``read_confirmation`` and ``read_answer`` are ADR-0244 §9's members, and the
+    decision taken here is "not rendered" for the third time.** ADR-0244 §13 does admit
+    the browser for this kind — it "admits the browser for this kind rather than
+    inheriting ADR-0235 §9's deferral of it, because the batch this lane belongs to
+    states its exit over both surfaces" — but that is **Lane 4's** change, and §18 makes
+    the order 1, then 2, then 3 and 4. The lane this assertion is edited by is Lane 1,
+    which lands the contract and ``orchestration``'s consumer and touches no adapter. So
+    the two members cross the wire and no panel reads them, exactly as the two above do.
+
+    **The cost is the same shape and is stated rather than hidden**: until Lane 4, a
+    user on the browser sees a parked read's question nowhere, and a turn that put a
+    lookup to them reads on this page like one that did not. ADR-0244 §13's last clause
+    is what closes it — "a surface that renders no statement for a
+    ``ReadAnswerOutcome`` member it was given, or that renders a read's confirmation
+    without §7's floor, has not implemented this section" — and it binds on Lane 4
+    rather than on this one.
+
     **This assertion is the tripwire firing as designed**, which is what the test's own
     name says: a member reaching the page unnoticed is what it exists to prevent, and a
     lane that adds one names it here and states which way the decision went. Nothing
@@ -884,6 +901,8 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
         "routed",
         "recipient_grant",
         "search_not_serviced",
+        "read_confirmation",
+        "read_answer",
     }
 
 
