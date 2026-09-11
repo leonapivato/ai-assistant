@@ -425,9 +425,10 @@ class ParkedReadOperations:
         """
         store = self._store
         search = self._search
-        if store is None or search is None:
-            # No store holds questions, or no account can answer one. Nothing was ruled
-            # and nothing was dispatched, which is what `UNAVAILABLE_NOW` says.
+        if store is None:
+            # No store holds questions at all, so there is no park to read and no
+            # clause of §6 has a subject. Nothing was ruled and nothing was dispatched,
+            # which is what `UNAVAILABLE_NOW` says.
             return AnsweredRead(ReadAnswerOutcome.UNAVAILABLE_NOW)
         now = self._now()
         # **Clause 1 — the park.**
@@ -455,7 +456,22 @@ class ParkedReadOperations:
             # there is no live answerer for the settlement to race.
             await store.settle(park.id, disposition=ParkedReadDisposition.EXPIRED, at=now)
             return AnsweredRead(ReadAnswerOutcome.EXPIRED, park)
-        # **Clause 2 — the conversation.**
+        # **Clause 2 — the conversation, and the deployment.**
+        #
+        # **Taken after clause 1 and not before it**, which is §6's stated order and not
+        # a preference: §9 puts the two members naming a **closed park** ahead of every
+        # change member "because a park that is closed is not a question any recheck
+        # could re-open", so a deployment fact read first would report a spent or
+        # expired park as `UNAVAILABLE_NOW` and — worse — would leave an expired one
+        # `OPEN` with its content standing, because the settlement above is what clears
+        # it. A deployment that disconnected its search account still owes the user the
+        # expiry of a question it can no longer answer.
+        if search is None:
+            # No account can answer one. §9 names two grounds for this member and this
+            # is a third of the same shape — nothing was ruled, nothing was dispatched,
+            # and it is true of what this deployment can do — where the two it names
+            # are per-conversation and per-`Settings`.
+            return AnsweredRead(ReadAnswerOutcome.UNAVAILABLE_NOW, park)
         draw = await self._conversations.search_draw(park.conversation_id)
         if draw is None or self._max_calls == 0:
             # `search_draw` answers `None` for an id that names nothing and for a
