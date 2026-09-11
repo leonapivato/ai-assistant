@@ -1461,3 +1461,97 @@ async def test_a_cancelled_answers_own_refusal_does_not_overwrite_the_acts_answe
         assert "That lookup had already been sent, and it was stopped part-way." in said
         assert "nothing was cancelled" not in said
         assert "is not known" not in said
+
+
+async def test_a_resume_that_answers_normally_does_not_take_the_acts_answer_off_the_screen(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """Adversarial review's round 3, and the third path into one defect.
+
+    A cancellation that wins ADR-0244 §6's gate leaves the outstanding answer to return
+    ``ALREADY_SETTLED`` — "neither party acts on a park the other took" — which is a
+    perfectly good outcome and takes none of the failure paths rounds 1 and 2 closed. The
+    page renders it and re-reads the listing, and that read is what used to clear the
+    panel slot the act's answer was written in.
+
+    So both facts are on the screen at once and neither is in place of the other: the
+    answer panel says what became of the answer, and the confirmations panel says what
+    the act did. ADR-0244 §11 makes the second the one that must not be lost — "what
+    tells the user is ``cancel_read``'s own answer, which is the act they performed" —
+    and it now lives in a node no listing read touches.
+
+    **Driven to the empty listing**, because that is the state the finding is about: the
+    question is gone, every row carrying the sentence with it, and the statement is still
+    there.
+    """
+    released = asyncio.Event()
+
+    async def _hanging_resume(
+        token: ContinuationToken,
+        /,
+        *,
+        approved: bool,
+        timeout: timedelta,  # noqa: ASYNC109 — the Protocol's own signature
+        remember_recipients_until: datetime | None = None,
+    ) -> TurnOutcome:
+        await released.wait()
+        return TurnOutcome(turn=None, read_answer=ReadAnswerOutcome.ALREADY_SETTLED)
+
+    async def _withdraw(token: ContinuationToken, /) -> ReadCancellation:
+        drive.engine.read_parked.pop("r-1", None)
+        return ReadCancellation.WITHDRAWN
+
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.read_parked["r-1"] = _read()
+        drive.engine._read_handles.add("r-1")
+        drive.engine.cancel_read = _withdraw  # type: ignore[method-assign]
+        drive.engine.resume = _hanging_resume  # type: ignore[method-assign,assignment]
+
+        await drive.page.click("#confirmations-button")
+        await drive.page.wait_for_selector("#confirmation-list .confirmation-row")
+        row = drive.page.locator("#confirmation-list .confirmation-row").first
+        await row.locator("button", has_text="Yes, do it").click()
+        await row.locator("button", has_text="Cancel this lookup").click()
+        await expect(drive.page.locator("#cancellation-said")).to_contain_text(
+            "That question is withdrawn"
+        )
+
+        listed = len([one for one in drive.engine.calls if one[0] == "pending_confirmations"])
+        released.set()
+        await _reached(drive, "pending_confirmations", above=listed)
+
+        await expect(drive.page.locator("#confirmation-list .confirmation-row")).to_have_count(0)
+        await expect(drive.page.locator("#cancellation-said")).to_be_visible()
+        assert "That question is withdrawn" in await drive.page.inner_text("#cancellation-said")
+        # Both facts, and neither in place of the other: what became of the answer is in
+        # the answer panel, what the act did is in the panel the act was performed from.
+        assert "had already been answered" in await drive.page.inner_text("#answer-body")
+
+
+async def test_the_acts_answer_is_taken_down_by_the_owners_own_press_and_by_nothing_else(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The other half of the node's rule, driven (ADR-0244 §11).
+
+    A statement that never went away would be as wrong as one swept by the next refresh:
+    it answers the question "what did that act do", and the moment the owner asks what is
+    waiting now is the moment it stops being the current answer. **What is waiting for
+    your answer** is that press, and it is the only thing besides a second act that
+    clears the node.
+    """
+
+    async def _withdraw(token: ContinuationToken, /) -> ReadCancellation:
+        drive.engine.read_parked.pop("r-1", None)
+        return ReadCancellation.WITHDRAWN
+
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.read_parked["r-1"] = _read()
+        drive.engine._read_handles.add("r-1")
+        drive.engine.cancel_read = _withdraw  # type: ignore[method-assign]
+
+        await _cancelled(drive)
+        await expect(drive.page.locator("#cancellation-said")).to_be_visible()
+
+        await drive.page.click("#confirmations-button")
+
+        await expect(drive.page.locator("#cancellation-said")).to_be_hidden()
