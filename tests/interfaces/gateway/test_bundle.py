@@ -7718,6 +7718,20 @@ def test_the_cancellation_acts_own_answer_is_written_where_no_refresh_reaches_it
 
     assert '<p id="cancellation-said" class="hint" hidden></p>' in _asset("index.html")
     assert 'const node = el("cancellation-said");' in functions["said"]
+    # **And the panel it is in is opened with it** (adversarial review, round 4). The
+    # panel really can be closed at this moment — a quiet read of an empty listing closes
+    # it, which is right while it says nothing, and the answer this act interrupted
+    # starts exactly that read — so a node unhidden inside it would be a statement nobody
+    # can read. Opening it here rather than leaving it to the listing read the act starts
+    # is what makes the statement's visibility independent of a request that may stall,
+    # which is the same reason the sentence is not written into that read's own slot.
+    #
+    # **Opened and never closed**, because taking the statement down is the owner's own
+    # press, and that press is a listing read whose own rules decide what the panel then
+    # shows. A `show(false)` here would close a panel holding answerable rows.
+    assert 'show("confirmations", true);' in functions["said"]
+    assert 'show("confirmations", false)' not in functions["said"]
+    assert functions["said"].index("node.hidden") < functions["said"].index('show("confirmations"')
     # Written by the act and by the owner's own press, and by nothing else. A third
     # writer is how the sentence starts being swept again.
     assert {name for name, body in functions.items() if "said(" in body} == {

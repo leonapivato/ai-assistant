@@ -1401,6 +1401,22 @@ function said(text) {
   const node = el("cancellation-said");
   node.textContent = text === null ? "" : text;
   node.hidden = text === null;
+  // **And the panel it is in is opened with it** (adversarial review, round 4). A node
+  // unhidden inside a hidden panel is a statement nobody can read, and the panel really
+  // can be closed at this moment: the answer this act interrupted ends first in one of
+  // the two orderings, its quiet read finds an empty listing, and a panel that said
+  // nothing is closed — correctly, because at that instant it said nothing. Opening it
+  // here rather than leaving it to the listing read this act starts is what makes the
+  // statement's visibility independent of a request that may stall, which is the same
+  // reason the sentence is not written into that read's own slot.
+  //
+  // **Only ever opened, never closed.** Taking the statement down is the owner's own
+  // press, and that press is a listing read whose own rules decide what the panel then
+  // shows — a closed panel over an empty listing, or the listing. A `show(false)` here
+  // would close a panel holding rows that are still answerable.
+  if (text !== null) {
+    show("confirmations", true);
+  }
 }
 
 // The question a turn parked, put in the exchange that raised it (ADR-0244 §9).
