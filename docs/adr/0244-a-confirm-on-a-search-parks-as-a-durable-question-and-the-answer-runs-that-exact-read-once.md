@@ -1,6 +1,6 @@
 # 244. A `CONFIRM` on a search parks as a durable question, and the answer runs that exact read once
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-10
 - **Partially supersedes** [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
   — **§9's second clause in three of its limbs, §9's fifth clause in its one-route limb,
