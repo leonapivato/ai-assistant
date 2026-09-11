@@ -1996,9 +1996,19 @@ async def test_a_read_answer_outside_the_enumeration_resolves_no_park(
 
         # The park is still listed, the pair is answerable again, and pressing it really
         # sends — which is the half a rendered sentence did not deliver.
+        #
+        # **The second press is waited out on the gateway's own body**, which is why the
+        # substitution stops first (adversarial review's round 10). The account from the
+        # first ending is still on screen, so a wait on *it* is satisfied before the
+        # second request has reached anything and the call count would be read against a
+        # request still in flight. The member's own statement appears only once a reply
+        # this page could read has been rendered, which is the state being asserted.
+        await _stop_substituting(drive)
         again = drive.page.locator("#confirmation-list .confirmation-row").first
         approve = again.locator("button", has_text="Yes, do it")
         await expect(approve).to_be_enabled()
         await approve.click()
-        await expect(stated).to_be_visible()
+        await expect(drive.page.locator("#answer-body")).to_contain_text(
+            "That answer was not carried through, so nothing was sent."
+        )
         assert answered == [True, True]
