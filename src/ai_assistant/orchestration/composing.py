@@ -1209,13 +1209,13 @@ def _routed_prompt(
 #: by its own fragment, and neither substitutes for, suppresses or is derived from the
 #: other.
 _ANSWER_AWAITED_PROMPT: Final = """\
-While answering this you would have looked something up outside this system, and \
-instead of making that lookup it was put to this person as a question, which is \
-waiting on their answer. Say so plainly, in one short clause, and answer as well as \
-what you have allows. **Do not say that the lookup produced nothing** — it has not \
-been made, and nothing has come back either way. Do not say what the question was, do \
-not say what answering it would achieve, do not say that nothing else stands in the \
-way, and do not tell them where to answer it: you have not been told any of that."""
+While answering this you would have looked something up outside this system, and that \
+lookup is waiting on an answer from this person before it can be made. Say so plainly, \
+in one short clause, and answer as well as what you have allows. **Do not say that the \
+lookup produced nothing** — it has not been made, and nothing has come back either \
+way. Do not say what it would have asked for or where, do not say what answering would \
+achieve, do not say that nothing else stands in the way, and do not tell them where to \
+answer: you have not been told any of that."""
 
 
 _SEARCH_DISABLED_PROMPT: Final = """\

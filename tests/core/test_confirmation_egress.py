@@ -114,8 +114,14 @@ def _reduced(binding: EgressBinding) -> ConfirmationEgress:
 # --- §1: the sixth member, required ------------------------------------------
 
 
-def test_confirmation_carries_exactly_six_fields_and_still_forbids_extras() -> None:
-    """ADR-0178 §1: one field added, none removed, ``extra="forbid"`` unchanged."""
+def test_confirmation_carries_exactly_the_declared_fields_and_still_forbids_extras() -> None:
+    """ADR-0178 §1: one field added, none removed, ``extra="forbid"`` unchanged.
+
+    **ADR-0244 §4 adds the seventh**, ``read``, and the set is spelled out rather than
+    counted so that a lane adding an eighth meets this arm rather than a model that
+    quietly grew. The count is deliberately not in the name: it has moved once, and a
+    figure in a test name is a claim that goes stale silently.
+    """
     assert set(Confirmation.model_fields) == {
         "tool_id",
         "tool_description",
@@ -123,6 +129,7 @@ def test_confirmation_carries_exactly_six_fields_and_still_forbids_extras() -> N
         "reason",
         "token",
         "egress",
+        "read",
     }
     with pytest.raises(ValidationError, match=r"extra_forbidden|Extra inputs"):
         Confirmation(
@@ -132,7 +139,27 @@ def test_confirmation_carries_exactly_six_fields_and_still_forbids_extras() -> N
             reason="external",
             token=ContinuationToken(handle="h-1"),
             egress=None,
+            read=None,
             recipients=(),  # type: ignore[call-arg]  # the point of the case
+        )
+
+
+def test_the_read_member_carries_no_default_so_every_site_states_it() -> None:
+    """ADR-0244 §4: the field is **required with no default**, for ADR-0178 §1's reason.
+
+    ``Confirmation`` is built at the engine's assembly sites, in the canonical fake and
+    in every test that builds one, and "a defaulted field is what a lane forgets" — an
+    implementation that never wired the discriminator through would get a well-formed
+    step confirmation for free and its read prompts would look correct.
+    """
+    with pytest.raises(ValidationError, match=r"read"):
+        Confirmation(  # type: ignore[call-arg]  # the point of the case
+            tool_id="t-1",
+            tool_description="send",
+            parameters={},
+            reason="external",
+            token=ContinuationToken(handle="h-1"),
+            egress=None,
         )
 
 

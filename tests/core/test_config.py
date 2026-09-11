@@ -1413,6 +1413,15 @@ def test_every_duration_setting_is_discovered() -> None:
         # a ceiling slot nothing can ever free. The ``bool`` guard is the difference
         # between a fifteen-minute card and one dead a second after it is rendered.
         "routed_confirmation_ttl",
+        # ADR-0244 §3's parked-read lifetime, acknowledged here for the reason every
+        # duration above is: joining this tuple is what subjects it to the parametrised
+        # guards below. It takes ``routed_confirmation_ttl``'s shape and not
+        # ``confirmation_ttl``'s — **no disable sentinel**, and for that field's stated
+        # reason one decision on: a park nothing can free is a durable row holding Tier
+        # 1 content that no act, no enumeration and no reclaim would ever reach. The
+        # ``bool`` guard is the difference between a day to answer and a question that
+        # expires the second after it is asked.
+        "parked_read_ttl",
         # ADR-0225 §6's archive horizon. Nullable, and its ``None`` is the
         # **default** rather than a sentinel an operator has to spell — the
         # deliberate opposite of ``episode_retention`` above, on the ground §6

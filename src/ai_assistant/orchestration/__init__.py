@@ -217,6 +217,7 @@ from ai_assistant.orchestration.observation import (
     observed_ruled,
     observed_unsupported,
 )
+from ai_assistant.orchestration.parked_reads import ParkedReadOperations
 from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
     ENVELOPE_RESERVE_BYTES,
@@ -256,6 +257,7 @@ __all__ = [
     "NotificationWriteStage",
     "ObservationRunReport",
     "ObservationStage",
+    "ParkedReadOperations",
     "QuestionStage",
     "RecipientGrantOperations",
     "RecoveryScan",

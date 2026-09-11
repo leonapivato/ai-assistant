@@ -61,6 +61,12 @@ _AWAITED_FRAGMENT: Final = "instead of making that lookup it was put to this per
 #: is told about no lookup at all. Written out rather than reached for through the
 #: composing module's private table, because what is asserted is what the prompt says.
 _FRAGMENTS: Final = (
+    # ADR-0244 §12's ninth member, first in the enumeration and first here. The
+    # discriminator against `_AWAITED_FRAGMENT` below is the whole point of the member:
+    # that one says a question is on record for the user to answer *through an act*,
+    # this one says a lookup is waiting on their answer — and neither says the lookup
+    # produced nothing, which is the literal #2221 records as false.
+    "waiting on an answer from this person before it can be made",
     "this installation does not make them at all",
     "no such lookup was made on this occasion",
     "a limit this installation is run under stood in the way",
@@ -425,12 +431,14 @@ async def _wired_through_to_trust(wired: _Wired) -> None:
     await wired.engine.establish_destination_trust(granted_from)
 
 
-def test_the_quoted_fragments_are_the_eight_the_composing_stage_holds() -> None:
+def test_the_quoted_fragments_are_the_ones_the_composing_stage_holds() -> None:
     """The clauses above are quotations, and this is what keeps them quotations.
 
-    ADR-0242 §13 fixes the fragments as **eight literals, one per member**, so a lane
-    editing one must edit the arm that reads it too — and a lane adding a ninth member
-    finds this arm rather than a prompt with nothing in it.
+    ADR-0242 §13 fixes the fragments as **literals, one per member**, so a lane editing
+    one must edit the arm that reads it too — and a lane adding a member finds this arm
+    rather than a prompt with nothing in it. ADR-0244 §12 is the lane that found it: the
+    count is read off the vocabulary rather than written out, so the assertion is that
+    the table and the enumeration **agree**, which is the property §13 is about.
     """
     from ai_assistant.orchestration import composing  # noqa: PLC0415 — one arm's subject
 

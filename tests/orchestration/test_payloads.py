@@ -337,8 +337,9 @@ class TestComposites:
         same bytes; ``model_dump_json()`` gives them two.
         """
         expected = (
-            '{"egress":null,"parameters":{"Z":1,"body":"hi","to":"a@b"},"reason":"external",'
-            '"token":{"handle":"h-1"},"tool_description":"send","tool_id":"t-1"}'
+            '{"egress":null,"parameters":{"Z":1,"body":"hi","to":"a@b"},"read":null,'
+            '"reason":"external","token":{"handle":"h-1"},"tool_description":"send",'
+            '"tool_id":"t-1"}'
         )
         one = Confirmation(
             tool_id="t-1",

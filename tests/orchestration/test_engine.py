@@ -126,6 +126,7 @@ from ai_assistant.orchestration.consolidation import ConsolidationReport
 from ai_assistant.orchestration.engine import ENGINE_SHUTTING_DOWN, DrainPhase
 from ai_assistant.orchestration.ingestion import IngestionReport
 from ai_assistant.orchestration.loop import LearningLoop
+from ai_assistant.orchestration.parked_reads import ParkedReadOperations
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.speech import DEFAULT_MAX_SPOKEN_AUDIO_BYTES
 from ai_assistant.testing import (
@@ -144,6 +145,7 @@ from ai_assistant.testing import (
     FakeMemoryWriter,
     FakeModelProvider,
     FakeObserver,
+    FakeParkedReads,
     FakePlanStore,
     FakeReader,
     FakeRecipientGrantStore,
@@ -595,6 +597,15 @@ class Harness:
         # every other case's deployment: no search account connected, so §13's
         # disposition for any `WEB_SEARCH` ask is `NOT_CONFIGURED`.
         search: SearchServicer | None = None,
+        # ADR-0244 §18's Lane 1 seam, so an engine-level case can drive a **parked**
+        # read end to end — which is the only level it can be driven at: the question is
+        # assembled at the capture point, the answer runs through `resume`, and the
+        # continuation is a turn. `None` is the default and is the deployment this lane
+        # ships: no store wired, so no servicing writes a park and §1's third clause is
+        # the whole of what every `CONFIRM` then is. A case wiring one passes the **same
+        # object** to the `SearchServicer` it builds, which is ADR-0244 §18's
+        # one-instance obligation held by the case rather than by this harness.
+        parked_reads: FakeParkedReads | None = None,
         observer: object | None = None,
         reader: object | None = None,
         email_reader: object | None = None,
@@ -857,6 +868,21 @@ class Harness:
         self.recipient_grants: RecipientGrantStore = (
             FakeRecipientGrantStore() if recipient_grants is None else recipient_grants
         )
+        #: ADR-0244 §3's store, kept so a case can read the park a servicing wrote, seed
+        #: one, or arm its writes to fail — the three states ADR-0244 §1's third clause
+        #: and §19's arms are about.
+        self.parked_reads = parked_reads
+        #: The operations the engine reaches it through (ADR-0244 §5, §6, §11), over the
+        #: **same** conversation index the footing and the capture stage hold: §6's
+        #: clause 2 reads a draw from it, and a second store over the same rows would
+        #: answer about a conversation this one never admitted.
+        self.parked_read_operations = ParkedReadOperations(
+            store=parked_reads,
+            conversations=self.conversation_store,
+            search=search,
+            max_calls=search_calls,
+            clock=self.clock,
+        )
         self.engine = Engine(
             composing=self.composing,
             grant_operations=_grant_operations(),
@@ -870,6 +896,10 @@ class Harness:
                 policy=self.policy,
                 id_factory=lambda: next(self.ids),
                 clock=self.clock,
+                # ADR-0244 §5's eighth condition, decided through the **same**
+                # operations the engine answers a park through — so a case that parks a
+                # read and then asks `grantable_decisions` sees one store and not two.
+                parked_reads=self.parked_read_operations,
             ),
             # The harness's own trail again (ADR-0242 §1): the trust act reads the
             # decision it rides from the trail every other operation here records to,
@@ -904,6 +934,11 @@ class Harness:
             # Defaulted per harness instance, so two harnesses are two engines.
             epoch_factory=(lambda: "epoch") if epoch_factory is None else epoch_factory,
             routing=self.routing,
+            # ADR-0244 §5, §6, §11: the enumeration, the answer and the cancellation,
+            # over the store above. Wired unconditionally, exactly as the composition
+            # root wires the operations object — what varies by deployment is the
+            # *store* behind it, which is `None` here unless a case wired one.
+            parked_reads=self.parked_read_operations,
             transcriber=self.transcriber,
             synthesizer=self.synthesizer,
             speakable_attested_sources=speakable_attested_sources,

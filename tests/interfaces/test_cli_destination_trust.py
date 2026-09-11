@@ -15,6 +15,7 @@ rendered bytes, because those are the system's own words".
 from __future__ import annotations
 
 import re
+from contextlib import redirect_stdout
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from typing import Final
@@ -516,18 +517,73 @@ _STATEMENTS: Final = {
     SearchNotServiced.UNAVAILABLE: ("nothing this turn could use",),
 }
 
+#: The members this surface does **not** yet render, each naming the lane that closes it.
+#:
+#: **Empty is the intended state**, and an entry here is a lane-ordering fact rather than
+#: a permitted degradation: ADR-0242 §9's clause — "a surface that renders no statement
+#: for a member has not implemented this section" — binds on whichever lane owes the
+#: statement, and the partition assertion below is what stops this dict growing by
+#: accident.
+#:
+#: ``ANSWER_AWAITED`` is ADR-0244 §12's ninth member. §18 makes the order **1, then 2,
+#: then 3 and 4**, and puts "the ninth ``SearchNotServiced`` statement naming ``assistant
+#: resume``" in **Lane 3** — the command line — while the member itself, the servicing
+#: site that computes it and the prompt fragment the reply is composed from are Lane 1's.
+#: So between the two lanes this surface receives a member it says nothing about, which
+#: is the same window ADR-0235 §9 and ADR-0242 §5 each opened for the browser and which
+#: `tests/interfaces/gateway/test_gateway.py`'s own tripwire records one surface over.
+_DEFERRED_TO_A_LATER_LANE: Final = {
+    SearchNotServiced.ANSWER_AWAITED: (
+        "ADR-0244 §18 Lane 3: the command line's ninth statement, naming `assistant "
+        "resume`, lands with the rest of that surface's read obligations — the floor "
+        "for a read's confirmation, the exact query, the answer collected, the seven "
+        "`ReadAnswerOutcome` statements and the cancellation act"
+    ),
+}
 
-@pytest.mark.parametrize("member", list(SearchNotServiced))
+
+def test_the_members_this_surface_defers_are_the_declared_ones() -> None:
+    """The partition, so a deferral cannot be added by an editor's convenience.
+
+    A member that renders nothing and is **not** named above is the failure ADR-0242 §9
+    is about; a member that renders something and *is* named above is a deferral somebody
+    forgot to retire. Both are caught here, which is what makes the parametrised case
+    below a narrowing of the vocabulary rather than a hole in it.
+    """
+    silent = set()
+    for member in SearchNotServiced:
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            cli._render_search_not_serviced(member)
+        if not _flat(buffer.getvalue()).strip():
+            silent.add(member)
+
+    assert silent == set(_DEFERRED_TO_A_LATER_LANE), (
+        "every member this surface renders nothing for is one a lane is recorded as "
+        "owing, and every member so recorded still renders nothing (ADR-0242 §9)"
+    )
+    assert set(_STATEMENTS) | set(_DEFERRED_TO_A_LATER_LANE) == set(SearchNotServiced), (
+        "and the two together are the whole vocabulary"
+    )
+
+
+@pytest.mark.parametrize(
+    "member", [one for one in SearchNotServiced if one not in _DEFERRED_TO_A_LATER_LANE]
+)
 def test_every_member_renders_a_statement(
     member: SearchNotServiced, monkeypatch: pytest.MonkeyPatch, output: StringIO
 ) -> None:
     """§9: "A surface that renders **no** statement for a member is a surface that has
     not implemented this section, not a permitted degradation."
 
-    Parametrised over the vocabulary itself, so a ninth member added without its
-    statement fails here rather than rendering nothing in a user's terminal — which is
-    what §13 means by "a member added without its two texts is a member with no
-    rendering".
+    Parametrised over the vocabulary itself, so a member added without its statement
+    fails here rather than rendering nothing in a user's terminal — which is what §13
+    means by "a member added without its two texts is a member with no rendering".
+
+    **Less the members a later lane owes** (:data:`_DEFERRED_TO_A_LATER_LANE`), whose
+    partition the case above pins: a narrowing that could quietly absorb a member is the
+    failure this case exists to catch, so the exclusion is a *named* list with a reason
+    per entry rather than a filter.
     """
     cli._render_search_not_serviced(member)
     rendered = _flat(output.getvalue())

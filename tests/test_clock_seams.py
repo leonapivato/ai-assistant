@@ -126,6 +126,7 @@ from ai_assistant.orchestration import (
     LearningLoop,
     MemoryWriteStage,
     ObservationStage,
+    ParkedReadOperations,
     QuestionStage,
     RecipientGrantOperations,
     SearchFooting,
@@ -171,6 +172,7 @@ from ai_assistant.testing import (
     FakeNotificationStore,
     FakeNotificationWriter,
     FakeObserver,
+    FakeParkedReads,
     FakePlanner,
     FakePlanStore,
     FakeQueryComposer,
@@ -993,6 +995,24 @@ async def _recipient_grant_operations(now: Clock) -> None:
     ).grantable_decisions(limit=1)
 
 
+async def _parked_read_operations(now: Clock) -> None:
+    """The operations read the clock to judge a park's lifetime (ADR-0244 §5, §6).
+
+    Driven through the **enumeration**, which is the cheapest of the three reads and the
+    one a surface reaches first: ADR-0244 §5 has it settle an expired park rather than
+    offering it, so the reading happens whether or not a park is outstanding. The other
+    two — the answer's clause-1 comparison and the cancellation's settlement instant —
+    are behind the same guard.
+    """
+    await ParkedReadOperations(
+        store=FakeParkedReads(),
+        conversations=FakeConversationStore(now=lambda: _AWARE),
+        search=None,
+        max_calls=8,
+        clock=now,
+    ).outstanding()
+
+
 async def _destination_trust_operations(now: Clock) -> None:
     """The operations read the clock for the instant of the user's act (ADR-0242 §2, §4).
 
@@ -1136,6 +1156,11 @@ SEAMS = [
     # the instant a revocation carries — behind one guard, and translated to
     # `orchestration`'s own error for ``RecipientGrantOperations``' reason exactly.
     Seam("DestinationTrustOperations", _destination_trust_operations, PlanningError),
+    # ADR-0244 §5, §6 and §11's three clock reads — the enumeration's expiry
+    # comparison, the answer's clause-1 comparison and the instant a settlement carries
+    # — behind one guard, and translated to `orchestration`'s own error for
+    # ``RecipientGrantOperations``' reason exactly.
+    Seam("ParkedReadOperations", _parked_read_operations, PlanningError),
     # The canonical fake's own reading of the same act, guarded at the **read**
     # because `recipient_grant_clock` is a public lever a consumer's test replaces —
     # so a wrap at construction would be discarded by the next assignment. It
