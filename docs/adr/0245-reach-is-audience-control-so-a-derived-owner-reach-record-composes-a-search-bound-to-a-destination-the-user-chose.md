@@ -1,6 +1,6 @@
 # 245. Reach is audience control, so a derived owner-reach record composes a search bound to a destination the user chose
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0246 (§1's third clause in the two-facts rule it states — no record-level fact keeps information out of a query bound to a destination of recorded trust `USER_CHOSEN`; §2's third, fourth and fifth clauses, so an `OWNER_ACT` and a `PROPOSED` narrowing are admitted and the positively-stated admitted set of two combinations ceases to describe what a supply admits; §3's first clause and its second clause in the limb presupposing a validator, `SearchSupply`'s `AfterValidator` and its predicate being deleted and the type refusing no placement; §7's second clause in the sentence naming what `withheld` counts on a chosen destination, that count now being zero on every path; §8's first and second clauses, replaced by arms over the budget and the destination; §9's first clause in its differing-outcome limb, ADR-0217 §3's two readings no longer differing in what a supply admits; §11 Arm B in its exclusion limb, Arm D entire and Arm F in its premise; and §12's fourth deferral in its exclusion half. Those scopes, and nothing else in this ADR — §12's second deferral is **discharged** by the ruling it named as its trigger and §10 by the lane that has landed; §1's other five clauses, §2's first, second and sixth clauses, §3's third and fourth clauses, §4, §5, §6, §7's first and third clauses, §8's third clause, §9's second and third clauses, §11 Arms A, C and E, §12's first and third deferrals, §13, §14 and §15 bind as written)
 - Date: 2026-09-11
 - **Partially supersedes** [ADR-0238](0238-a-destination-the-user-chose-may-be-told-what-the-turn-knows-and-the-searching-that-follows-runs-under-a-per-conversation-budget.md)
   — **§2's validator clause in the rule it states, §3's first clause, §11's
@@ -10,6 +10,70 @@
   entire, §2's remaining clauses bind entire and §2's cross-turn promise is relied on
   as written and made reachable, §3's second and third clauses bind **verbatim**, and
   §11's one-event/one-key/counts-only rules and §12's other five arms bind entire.
+
+- **Partially superseded: 2026-09-11 by [ADR-0246](0246-reach-does-not-bind-at-all-on-a-search-bound-to-a-destination-the-user-chose-and-the-supply-type-refuses-no-placement.md)
+  — the scopes named on the `Status` line above, and nothing else.** §12's second deferral
+  is **discharged** rather than superseded, and §10's obligations fell on the lane that has
+  landed.
+
+  **The instrument this ADR reserved is the one that was used.** §2's closing paragraph
+  ruled that "The ruling's *logic* — a provider is not a person the assistant talks to —
+  reaches `OWNER_ACT` and `PROPOSED` as readily as it reaches `DERIVED`", and that the
+  instrument for widening it is "one sentence of this section and an owner who was asked".
+  §12 named the trigger: "Fired by an owner ruling that addresses the explicit act, which
+  the 2026-09-11 ruling did not." The owner was asked and ruled the same day, on #2224's
+  successor thread, that the logic does reach both setters. ADR-0246 is that one sentence.
+
+  **The ruling, on three grounds.** A model's proposed narrowing answers a question about
+  *people* — ADR-0217 §4's judgement about whether the owner would want a belief repeated
+  where others hear — and says nothing about a provider; and beliefs are what "taking my
+  preferences into account" draws on, `learning/observer.py` stamping one reach `OWNER`
+  setter `PROPOSED` when the observation pass flags it, so under §2 a preference could
+  silently drop out of a follow-up query. The owner's explicit guard is defined by ADR-0217
+  §3 as setting reach and nothing else, and a guarded record has never meant "local only".
+  And "never leaves the machine" is an egress question that would be a **tier** with its own
+  act (ADR-0004 §1), not a reach — overloading `Placement.reach` with it would be the
+  category error ADR-0238 §3 made; ADR-0246 §12 defers that class by name.
+
+  **So on a `WEB_SEARCH` request bound to a destination of recorded trust `USER_CHOSEN`
+  under a recipient grant, `Placement.reach` does not bind at all**: no record is withheld
+  from the `SearchSupply` on reach or on setter, whatever the setter. The validator goes
+  with the rule — `core/types.py`'s `_placed_for_a_search_supply` and
+  `_admitted_to_a_supply` are deleted and `SearchSupply.records` becomes a plain
+  `tuple[MemoryRecord, ...]` — because what the validator ever enforced was the placement
+  predicate, §3's third clause already fixes the trust condition at the one construction
+  site, and a check that cannot fail asserts a rule the corpus no longer holds.
+
+  **What ADR-0246 does not loosen, and what it costs.** Reach keeps its full force on every
+  channel a person can perceive: ADR-0217 §1 and §2, ADR-0199 §3, ADR-0203 §1 and
+  `orchestration/disclosure.py` are untouched, and a guarded record stays unspeakable to a
+  roommate or another user of the hub exactly as today. ADR-0199 §3's Tier 0 floor is
+  untouched. On an `UNCHOSEN` destination nothing loosens — §2's second clause binds entire.
+  ADR-0238 §2's three populations, ADR-0193's grant, ADR-0181 §5's lineage floor and
+  ADR-0238 §5's closed-loop conditions are untouched and are what remains. The cost is
+  stated rather than hedged: **there is no per-record instrument left by which a user keeps
+  something out of a search query bound to a chosen destination**, and §5's dependency on
+  ADR-0238 §1's single recorded user act now carries the whole weight.
+
+  **The audit keeps four counts.** `withheld` keeps ADR-0238 §11's definition and is zero on
+  every path; the supplied-narrowed count §7 added keeps its definition and now counts every
+  setter, rising the day ADR-0246's lane lands. No fifth count and no per-setter breakdown,
+  which ADR-0246 §12 defers.
+
+  **What is relied upon as written.** §1's first, second, fourth, fifth and sixth clauses,
+  including ADR-0013 §6's configured-set bound and the statement about the admitted *set*
+  rather than one endpoint; §2's Tier 0 floor, its `UNCHOSEN` clause and its absent
+  `about_person` filter; §3's trust-stays-at-the-builder clause and its restatement of
+  ADR-0238 §3's second, third and fourth clauses; §4's `core`-surface and `PROTOCOL_VERSION`
+  findings, re-applied at ADR-0246's tree to the same answers; §5 entire, restated with its
+  weight named; §6's composer guidance, which ADR-0246 §10 leaves untouched and §12 defers
+  changing; §7's one-event rule and its supplied-narrowed count; §8's third clause; §9's
+  corridor and what would close it; §11 Arms A, C and E; §12's first and third deferrals;
+  and §15's marking, both-lens and ratification rules, which ADR-0246 follows too.
+
+  This ADR's `Status` line read `Accepted`, so it takes the leading `Partially superseded by`
+  token and `Accepted` is dropped, as `docs/adr/template.md` requires. Appended note per
+  ADR-0070 §1; no text below is rewritten. Refs #2227, #2224, #2178, #2168, #1908.
 
 ## Context
 
