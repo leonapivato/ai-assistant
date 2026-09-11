@@ -246,6 +246,28 @@
           would send from and where it would go. Answering one here is the same act as
           answering it at a terminal.
         </p>
+        <!--
+          What the cancellation act did (ADR-0244 §11), and it is **outside**
+          `confirmation-list` on purpose.
+
+          §11 makes `cancel_read`'s own answer the whole of what tells the user: "the
+          cancellation is a teardown and is converted into neither an outcome nor a
+          refusal … what tells the user is `cancel_read`'s own answer, which is the act
+          they performed". Every other place this page could say it is swept by
+          something: a row goes when the listing is re-read, and a park that was
+          withdrawn or settled is not in the listing; the panel's fault slot is cleared
+          by every listing read, and the answer this act interrupted starts one on its
+          way out, whether it ends in a rejected request, a refusal, a reply that cannot
+          be rendered, or a perfectly good `ALREADY_SETTLED` (§6).
+
+          So the act's answer gets a node of its own, which nothing but the act and the
+          owner's own press of **What is waiting for your answer** writes. It is a
+          statement and not a fault, and it survives the refresh the answer triggers —
+          adversarial review found the same result being wiped by a different path on
+          three consecutive rounds, and this is the place that ends the class rather
+          than the third guard against it.
+        -->
+        <p id="cancellation-said" class="hint" hidden></p>
         <div id="confirmation-list"></div>
       </section>
 

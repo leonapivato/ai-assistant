@@ -1385,6 +1385,24 @@ function cancellationWords(member) {
     : READ_CANCELLATION_UNREADABLE;
 }
 
+// Write what the cancellation act did, or take it down (ADR-0244 §11).
+//
+// **A statement and not a fault**, so it is not in `faultSlot`'s node: it reports an act
+// the owner performed and that succeeded, and `fault` is what this page says when
+// something went wrong. The practical difference is the one that matters here — every
+// listing read clears the fault slot on its way in, and the read this act's own ending
+// starts is the one that would clear it.
+//
+// **Written through a text node, like every other value on this page** (ADR-0168 §6).
+// The three sentences are this file's own and interpolate nothing, so there is no value
+// to neutralise; going through `textContent` anyway is what keeps that true of the next
+// sentence somebody adds.
+function said(text) {
+  const node = el("cancellation-said");
+  node.textContent = text === null ? "" : text;
+  node.hidden = text === null;
+}
+
 // The question a turn parked, put in the exchange that raised it (ADR-0244 §9).
 //
 // `read_confirmation` is "the confirmation for a read **this turn parked**, so the
@@ -3392,6 +3410,11 @@ function rowWords(cancellation, withdrawing, otherwise) {
 // loads and caches no token: `pending_confirmations` mints a fresh one per call, and a
 // remembered one names an entry in a handle table a restart emptied (ADR-0052 §1).
 async function listPending() {
+  // **The owner's own press is what takes the last act's statement down**, and it is the
+  // only thing that does. A cancellation's answer stays on screen until the person who
+  // performed it asks what is waiting now — which is the question that statement is the
+  // answer to, and the moment it stops being current.
+  said(null);
   await readPending(false);
 }
 
@@ -3434,7 +3457,15 @@ async function readPending(quiet) {
     // drift.
     refreshParks();
     if (body.confirmations.length === 0) {
-      if (quiet) {
+      // **A panel holding a statement the owner has not read yet is not an empty one**
+      // (ADR-0244 §11, adversarial review's round 3). A quiet read closes the panel
+      // because "an empty answer to a question nobody asked is a panel that says
+      // nothing" — and a cancellation's own answer is a thing it says. It is also the
+      // thing §11 makes the whole of what tells the user, and the read that would close
+      // the panel over it is the one the answer that act interrupted starts on its way
+      // out. So the quiet close asks whether the panel is silent rather than whether the
+      // listing is, which is what that clause meant all along.
+      if (quiet && el("cancellation-said").hidden) {
         show("confirmations", false);
         return;
       }
@@ -3613,8 +3644,8 @@ async function answerConfirmation(token, approved, stopping) {
   // inference from absence ADR-0139 §4 refuses. So the page reads its own history, which
   // is the one thing here that is actually about the earlier answer.
   const unaccounted = unresolved.has(token);
-  // **Where this page cancelled the read itself, the outcome is known and this is what
-  // it is** (ADR-0244 §11, adversarial review's rounds 1 and 2). A dispatch this page
+  // **Where this page cancelled the read itself, this call has no sentence of its own to
+  // write** (ADR-0244 §11, adversarial review's rounds 1 and 2). A dispatch this page
   // interrupted ends this call one of four ways — a rejected `fetch`, a refusal this
   // page classifies as unknown, a refusal it cannot classify at all, or a reply it
   // cannot render — and in production the *usual* one is a refusal: cancelling the
@@ -3624,15 +3655,17 @@ async function answerConfirmation(token, approved, stopping) {
   //
   // Each of those four sentences would be false here twice over: the page knows why the
   // answer ended, and each of them says "nothing was cancelled" — the opposite of what
-  // it had just done. §11 fixes what is said instead: "the cancellation is a teardown
-  // and is converted into neither an outcome nor a refusal … **what tells the user is
-  // `cancel_read`'s own answer, which is the act they performed**".
+  // it had just done. §11 fixes what is said instead, and it is said elsewhere: "the
+  // cancellation is a teardown and is converted into neither an outcome nor a refusal …
+  // **what tells the user is `cancel_read`'s own answer, which is the act they
+  // performed**" — which `cancelRead` has already written into the panel's own node, a
+  // node this function does not touch. So the honest thing here is silence rather than a
+  // second sentence about the same event.
   //
   // **Read at the ending rather than once at the top**, because the act's reply may land
   // at any point while this one is out; and **one closure rather than four copies**
   // (#1622's "one check, shared"), so a fifth ending cannot be written without it.
-  const ending = (otherwise) =>
-    cancelled.has(token) ? cancellationWords(cancelled.get(token)) : otherwise;
+  const ending = (otherwise) => (cancelled.has(token) ? null : otherwise);
   // Claimed before the first `await`, so two clicks in one turn of the event loop —
   // the two rows of one park, or one row twice — cannot both get past the guard.
   spent.add(token);
@@ -3876,6 +3909,8 @@ async function cancelRead(token) {
     return;
   }
   cancelling.add(token);
+  // A new act, so whatever the last one said is no longer what is happening.
+  said(null);
   refreshParks();
   // What the gateway refused with, where it refused — `answerConfirmation`'s own device
   // and for its reason, which reaches this act unchanged because this act mutates too
@@ -3933,21 +3968,21 @@ async function cancelRead(token) {
     // park is untouched, and the row is as answerable and as cancellable as it was.
     return;
   }
-  // **The statement is written at panel level as well as on the rows, and it is written
-  // last** (adversarial review, round 1; ADR-0244 §11). A row is not a place this fact
-  // can be relied on to stay: the answer this cancellation interrupted fails at about
-  // the same moment, `answerConfirmation` re-reads the listing on its way out, and a
-  // park that is settled or withdrawn is not in the listing — so every row carrying the
-  // sentence is detached and `refreshParks` has nothing left to tell. §11 makes that the
-  // one thing the user must not lose: "what tells the user is `cancel_read`'s own
-  // answer, which is the act they performed".
+  // **The statement goes in the panel's own node, which nothing else writes**
+  // (ADR-0244 §11; adversarial review, rounds 1, 2 and 3). §11 makes this the one thing
+  // the user must not lose — "what tells the user is `cancel_read`'s own answer, which
+  // is the act they performed" — and every other place this page could put it is swept
+  // by something: a row goes with the listing that is re-read the moment the answer this
+  // act interrupted ends, and the panel's fault slot is cleared by that read. Three
+  // rounds found the same result wiped by three different paths into that one read, so
+  // what this is is the place that ends the class rather than a third guard on the paths.
   //
-  // The tidy-up is **started and not waited on**, and the sentence comes after it, which
-  // is `answerConfirmation`'s own ordering and for its reason: `readPending` clears this
-  // panel's slot on its way in, so a sentence written before it would be wiped by the
-  // read it triggered.
+  // The tidy-up is **started and not waited on**, which is `answerConfirmation`'s own
+  // rule and for its reason: `readPending` reaches the same unbounded `relay`, and a
+  // stalled listing read must not hold this act's ending. Nothing here depends on it —
+  // the sentence is already written, in a node that read does not touch.
+  said(cancellationWords(done));
   readPending(false);
-  fault(cancellationWords(done), "confirmations");
 }
 
 async function startSession(event) {

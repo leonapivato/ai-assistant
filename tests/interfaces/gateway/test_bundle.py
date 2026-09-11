@@ -7691,3 +7691,50 @@ def test_the_page_renders_no_statement_for_any_search_not_serviced_member() -> N
     for member in SearchNotServiced:
         if member.value not in shared:
             assert f"\n  {member.value}:" not in script, member.value
+
+
+def test_the_cancellation_acts_own_answer_is_written_where_no_refresh_reaches_it() -> None:
+    """ADR-0244 §11, and the rule that ends what three review rounds kept finding.
+
+    "The cancellation is a teardown and is converted into neither an outcome nor a
+    refusal … **what tells the user is ``cancel_read``'s own answer, which is the act
+    they performed**." Every other place this page could put that answer is swept by
+    something, and each sweep was a separate finding over three consecutive rounds: a row
+    goes when the listing is re-read, and a withdrawn or settled park is not in the
+    listing; the panel's fault slot is cleared by every listing read; and a quiet read of
+    an empty listing closes the panel outright. The answer this act interrupts starts
+    exactly that read on its way out — whether it ends in a rejected request, a refusal
+    the page classifies as unknown, one it cannot classify, a reply it cannot render, or a
+    perfectly good ``ALREADY_SETTLED``.
+
+    So the placement is the fix rather than a guard on each path, and this is what pins
+    it: the node is its own, in the document rather than built by a renderer, and exactly
+    two things write it — the act, and the owner's own press of the button that asks what
+    is waiting now. ``readPending`` reads it and never writes it, which is what lets a
+    quiet close ask whether the *panel* is silent rather than whether the listing is.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+
+    assert '<p id="cancellation-said" class="hint" hidden></p>' in _asset("index.html")
+    assert 'const node = el("cancellation-said");' in functions["said"]
+    # Written by the act and by the owner's own press, and by nothing else. A third
+    # writer is how the sentence starts being swept again.
+    assert {name for name, body in functions.items() if "said(" in body} == {
+        "cancelRead",
+        "listPending",
+        "said",
+    }
+    assert "said(cancellationWords(done));" in functions["cancelRead"]
+    assert "said(null);" in functions["listPending"]
+    # `readPending` reads the node to decide whether the panel is silent, and writes
+    # nothing to it: a quiet read of an empty listing closes a panel that says nothing,
+    # and a panel holding this statement is not one.
+    assert 'if (quiet && el("cancellation-said").hidden) {' in functions["readPending"]
+    assert "said(" not in functions["readPending"]
+    # And the answer's own endings write no second sentence about the same event: the act
+    # has already said what happened, in a node they do not touch.
+    assert (
+        "const ending = (otherwise) => (cancelled.has(token) ? null : otherwise);"
+        in (functions["answerConfirmation"])
+    )
