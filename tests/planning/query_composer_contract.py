@@ -158,8 +158,11 @@ def _a_record_placed_for_anyone() -> MemoryRecord:
     """One belief a turn's retrieval could have selected, placed for ``ANYONE``.
 
     Built here rather than taken from a hook, because the *content* is immaterial: what
-    the case above needs is a member ``SearchSupply`` admits, and every implementation
-    must accept the same one.
+    the case above needs is one member of ADR-0238 §2's populations, and every
+    implementation must accept the same one. The unnarrowed placement is the ordinary
+    case rather than a required one — since ADR-0246 §1 a supply refuses no member on
+    its placement, and what a composer does with a narrowed record is no different from
+    what it does with this one.
     """
     return SemanticMemory(
         id="belief-for-the-supply",
@@ -257,9 +260,10 @@ class QueryComposerContract:
         """ADR-0238 §14: the check above, **restated over the new parameter type**.
 
         The kind check alone no longer carries the safety claim. ADR-0231 §3 made the
-        property decidable from the *absence* of a parameter; ADR-0238 §2 relocates it
-        onto the value the one parameter takes — "a caller holding an excluded record
-        still has nothing to pass, because the type refuses it". So what a suite must
+        property decidable from the *absence* of a parameter; ADR-0238 §2 widens what
+        the one parameter carries and puts the bound on the population instead — §2's
+        three populations and its trust read, both held at the one construction site,
+        and since ADR-0246 §3 the whole of it. So what a suite must
         also pin is that the parameter is that type, since a composer declaring
         ``compose(self, anything, /)`` would satisfy every clause above and accept a
         bare string, a mapping, or a list of records.
@@ -293,10 +297,11 @@ class QueryComposerContract:
         admissible populations two behaviours and put the servicing site's decision
         back in the composer's hands.
 
-        The records are ADR-0217-placed for ``ANYONE`` because
-        :class:`~ai_assistant.core.types.SearchSupply` refuses anything else at
-        construction — so there is no case here for an excluded record, and that is the
-        point.
+        The records are ADR-0217-placed for ``ANYONE`` because that is the ordinary
+        placement and this case is about the *population* rather than about any
+        record's placement: since ADR-0246 §1 a supply refuses no member on its
+        placement, so there is no excluded record for a case here to be about, and that
+        is the point.
         """
         subject = self.composing("porto portugal")
 

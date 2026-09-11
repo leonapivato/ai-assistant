@@ -281,12 +281,14 @@ class ModelBackedQueryComposer:
         is a value the audit can count and the turn can ignore.
 
         Args:
-            supply: What this composition may be composed over (ADR-0238 §2). Every
-                member of its ``records`` is already placed for ``ANYONE``, refused at
-                construction otherwise, so there is nothing here to check — and
-                ADR-0238 §3's second clause forbids this module checking anything
-                else, exclusion being decided by ``Placement.reach`` and never by a
-                reading of content.
+            supply: What this composition may be composed over (ADR-0238 §2). Which
+                records its ``records`` may hold was closed by §2's three populations
+                and the trust read at the one construction site, before this module
+                saw the value; **no member is refused on its placement** (ADR-0246 §1,
+                §3), so a record narrowed to the owner by a derivation, by the owner's
+                own act or by a model's proposal is an ordinary member here. There is
+                nothing for this module to check either way, and ADR-0238 §3's second
+                clause forbids it checking anything by a reading of content.
 
         Returns:
             An outcome carrying the composed query, or the one reason none was
