@@ -368,6 +368,28 @@ class SqliteParkedReads:
             msg = f"failed to open the parked-read store at {self._path!r}: {exc}"
             raise AssistantError(msg) from exc
         try:
+            # **Freed pages are overwritten, which is ADR-0244 §3's retention rule made
+            # true of the file and not only of the row.** §3 is stated over the content
+            # rather than over the record — "``parameters``, ``goal`` and ``plan`` do
+            # not [survive], and no implementation retains a copy, a digest of the
+            # query, a snapshot or an archive of them. **The content lives exactly as
+            # long as the question does**" — and a settlement that nulls three columns
+            # leaves their old bytes in the page SQLite marks free, where the whole
+            # composed query is recoverable by reading the file. So is a
+            # ``drop_for_conversation``. This store is the one in the tree whose ADR
+            # states a retention rule over named fields it clears **in place**, which is
+            # why it takes a pragma the family does not: nowhere else here does a
+            # store's contract promise that a value is gone while the row survives.
+            #
+            # **What it does and does not reach.** It covers the pages this connection
+            # frees, overflow pages included, for every byte this store ever wrote —
+            # set before the first statement, so no content predates it. It does not
+            # reach the rollback journal SQLite unlinks at commit, a filesystem
+            # snapshot, a copy-on-write clone or a device's wear levelling; ADR-0004
+            # §4's owner-only mode is where that question is answered and ADR-0099 §1's
+            # single-user model is what scopes it. **Run outside the transaction**: a
+            # pragma issued inside one is silently ignored by SQLite.
+            conn.execute("PRAGMA secure_delete = ON")
             # Restricted *before* the first statement, not after the schema is built:
             # SQLite copies the database file's mode onto every rollback journal it creates
             # for it, so a journal opened while the file still carried the process umask is

@@ -19,6 +19,7 @@ import json
 import sqlite3
 import stat
 import threading
+import time
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
@@ -701,3 +702,192 @@ async def test_a_cancelled_write_is_absorbed_and_its_work_still_lands(path: Path
         assert {held.id for held in await reopened.outstanding()} == {"park-1", "park-2"}
     finally:
         reopened.close()
+
+
+# --- the retention rule, held against the file (ADR-0244 §3) -----------------
+
+
+#: A query no other byte of this file or of SQLite's own pages could be. Long enough, in
+#: the second case, that SQLite spills the row onto **overflow** pages rather than
+#: keeping it inside the leaf — which is a second place freed content can be left behind
+#: and is why the parametrisation is not decoration.
+_NEEDLE: Final = b"heliotrope-belfry-quintessence"
+
+_SIZES: Final = {"one leaf page": 1, "several overflow pages": 800}
+
+
+def _asked(repeats: int) -> ParkedRead:
+    """An open park whose composed query is :data:`_NEEDLE` ``repeats`` times over."""
+    return park(
+        parameters={
+            "origin": "search.example",
+            "query": _NEEDLE.decode() * repeats,
+        }
+    )
+
+
+@pytest.mark.parametrize("repeats", list(_SIZES.values()), ids=list(_SIZES))
+async def test_a_settlement_leaves_no_trace_of_the_query_in_the_file(
+    path: Path, repeats: int
+) -> None:
+    """ADR-0244 §3's retention rule is about the **content**, not about the row.
+
+    "``parameters``, ``goal`` and ``plan`` do not [survive], and **no implementation
+    retains a copy, a digest of the query, a snapshot or an archive of them**. The
+    content lives exactly as long as the question does." A settlement that nulled three
+    columns and left their old bytes in the page SQLite marks free would satisfy every
+    assertion the shared suite can make — it reads decoded rows — while the whole
+    composed query stayed recoverable by reading the file, which is the one thing this
+    rule is stated to make untrue.
+
+    The first assertion is the anti-vacuity half: the bytes are genuinely there while the
+    question stands, so their absence afterwards is the settlement's doing and not the
+    needle's.
+    """
+    store = SqliteParkedReads(path=path)
+    await store.park(_asked(repeats))
+    store.close()
+    assert _NEEDLE in path.read_bytes(), (  # noqa: ASYNC240 — a read of a temporary file this case owns, not an I/O path the loop can be starved by
+        "the question is on disk while it stands"
+    )
+
+    reopened = SqliteParkedReads(path=path)
+    await reopened.settle("park-1", disposition=ParkedReadDisposition.APPROVED, at=LATER)
+    reopened.close()
+
+    assert _NEEDLE not in path.read_bytes()  # noqa: ASYNC240 — a synchronous read of a temporary file this case owns, not an I/O path the event loop can be starved by
+
+
+@pytest.mark.parametrize("repeats", list(_SIZES.values()), ids=list(_SIZES))
+async def test_a_conversations_deletion_leaves_no_trace_of_the_query_in_the_file(
+    path: Path, repeats: int
+) -> None:
+    """The same rule at the other destructive member (ADR-0244 §3, ADR-0004 §6).
+
+    ``drop_for_conversation`` is the conversation deletion sequence's route, so a user
+    who asked for a conversation to be destroyed and was told it was is the person this
+    assertion is about. A ``DELETE`` that merely unlinked the row would leave the query
+    they had been asked about sitting in the file.
+    """
+    store = SqliteParkedReads(path=path)
+    await store.park(_asked(repeats))
+    store.close()
+    assert _NEEDLE in path.read_bytes()  # noqa: ASYNC240 — a synchronous read of a temporary file this case owns, not an I/O path the event loop can be starved by
+
+    reopened = SqliteParkedReads(path=path)
+    assert await reopened.drop_for_conversation("conv-1") == 1
+    reopened.close()
+
+    assert _NEEDLE not in path.read_bytes()  # noqa: ASYNC240 — a synchronous read of a temporary file this case owns, not an I/O path the event loop can be starved by
+
+
+async def test_the_store_asks_sqlite_to_overwrite_what_it_frees(path: Path) -> None:
+    """The pragma itself, asserted where a lane could quietly drop it.
+
+    The two cases above would keep passing on a build whose ``SQLITE_SECURE_DELETE`` is
+    compiled **on** by default, so they are not on their own evidence that this store
+    asks for it. This is: the connection says so, whatever the build's default.
+    """
+    store = SqliteParkedReads(path=path)
+    try:
+        assert store._conn.execute("PRAGMA secure_delete").fetchone() == (1,)
+    finally:
+        store.close()
+
+
+# --- two connections genuinely contending (ADR-0244 §3) ----------------------
+
+
+#: How long the contended cases hold the write lock while both calls are in flight. Long
+#: enough that a store reaching SQLite would have finished, short enough to sit well
+#: inside the driver's five-second busy timeout — so a conforming store waits rather than
+#: raising, which is what the cases assert.
+_CONTENTION_SECONDS: Final = 0.25
+
+
+async def test_two_contending_connections_admit_exactly_one_park(path: Path) -> None:
+    """ADR-0244 §3's "two engines over one data directory", with the two genuinely overlapping.
+
+    ``test_two_handles_over_one_file_admit_exactly_one_park`` awaits each call before the
+    next begins, so it says only that a second connection *sees* a committed park —
+    which a deferred ``BEGIN`` would satisfy too. The property §3 actually states is
+    about the read the write depends on, and it is only reachable with both calls in
+    flight: two connections that each read no open park and then each inserted would
+    leave the user holding two questions where the store promised one.
+
+    **The overlap is arranged rather than hoped for.** A third, plain connection takes
+    the write lock first; both calls are launched against it and are asserted to be
+    *stuck* — which is what proves they are contending rather than passing one after the
+    other — and the lock is released only then. What a conforming store does from there
+    is wait out the contention and answer: exactly one ``True``, one ``False``, and
+    **no raise**, because ADR-0244 §1's third clause is written over that answer.
+    """
+    first = SqliteParkedReads(path=path)
+    second = SqliteParkedReads(path=path)
+    blocker = sqlite3.connect(path)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        calls = [
+            asyncio.ensure_future(first.park(park())),
+            asyncio.ensure_future(second.park(park(park_id="park-2", decision_id="decision-2"))),
+        ]
+        # Waited *off* the loop, so both workers genuinely reach SQLite and stall there.
+        await asyncio.to_thread(time.sleep, _CONTENTION_SECONDS)
+        assert not any(call.done() for call in calls), (
+            "neither call may complete while another connection holds the write lock"
+        )
+
+        blocker.rollback()
+        outcomes = await asyncio.gather(*calls)
+
+        assert sum(1 for outcome in outcomes if outcome) == 1
+        held = [row for row in (await first.get("park-1"), await first.get("park-2")) if row]
+        assert len(held) == 1
+    finally:
+        blocker.close()
+        first.close()
+        second.close()
+
+
+async def test_two_contending_connections_settle_one_park_exactly_once(path: Path) -> None:
+    """The resolve-once gate across two connections, arranged the same way.
+
+    ADR-0244 §19's Arm 9 second clause is one of the three "this decision would be
+    worthless without", and the shared suite reaches it only within one object — where
+    an :class:`asyncio.Lock` is doing the work. Here the two callers share no lock at
+    all, so what answers ``True`` to exactly one of them is the guarded ``UPDATE`` under
+    ``BEGIN IMMEDIATE``, and the loser "dispatches nothing, sends nothing and reports the
+    settled state" rather than raising.
+    """
+    first = SqliteParkedReads(path=path)
+    second = SqliteParkedReads(path=path)
+    await first.park(park())
+    blocker = sqlite3.connect(path)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        calls = [
+            asyncio.ensure_future(
+                first.settle("park-1", disposition=ParkedReadDisposition.APPROVED, at=LATER)
+            ),
+            asyncio.ensure_future(
+                second.settle("park-1", disposition=ParkedReadDisposition.DENIED, at=LATER)
+            ),
+        ]
+        await asyncio.to_thread(time.sleep, _CONTENTION_SECONDS)
+        assert not any(call.done() for call in calls)
+
+        blocker.rollback()
+        outcomes = await asyncio.gather(*calls)
+
+        assert sum(1 for outcome in outcomes if outcome) == 1
+        held = await second.get("park-1")
+        assert held is not None
+        assert held.disposition in {
+            ParkedReadDisposition.APPROVED,
+            ParkedReadDisposition.DENIED,
+        }
+        assert all(getattr(held, field) is None for field in ("parameters", "goal", "plan"))
+    finally:
+        blocker.close()
+        first.close()
+        second.close()
