@@ -121,7 +121,7 @@ def _region() -> tuple[int, int]:
     return max(_LOWEST_BLOCK_PORT, past - _REGION_SPAN), past
 
 
-def _is_bindable(port: int) -> bool:
+def is_bindable(port: int) -> bool:
     """Whether a listener could take ``port`` on every local address as this returns.
 
     Asked with ``SO_REUSEADDR`` set, because that is what ``asyncio.start_server``
@@ -133,6 +133,19 @@ def _is_bindable(port: int) -> bool:
     ``test_gateway_remote_listener.py`` binds one port on two addresses at once and
     needs it free on both. A wildcard probe answers the stronger question, so one
     helper serves every caller here.
+
+    **Public, because a second rule for the same question is a defect** (issue
+    #2204). ``test_browser_harness.py`` asked it in its own words -- a plain
+    ``bind`` on loopback with no ``SO_REUSEADDR`` -- which is a *stricter* rule than
+    this one by exactly the ``TIME_WAIT`` clause above. The block cycles, the
+    gateway package allocates several hundred ports per process against sixty-three
+    of them, and a minute of ``TIME_WAIT`` outlasts any wait a test would spend: so
+    the allocator handed out ports that module then reported busy for its whole
+    window, and five of its cases went red in a serial directory run while every one
+    of them passed alone. One rule, asked in one place, cannot come apart from
+    itself. Nothing is given up by sharing it: a *listening* socket is refused here
+    whatever address it took and whatever options its own bind carried, which is the
+    only thing those cases are about, and ``test_gateway_ports.py`` pins it.
 
     Args:
         port: The port to ask about.
@@ -295,7 +308,7 @@ class _Block:
             for _ in range(span):
                 candidate = base + 1 + self._offset % span
                 self._offset = (self._offset + 1) % span
-                if _is_bindable(candidate):
+                if is_bindable(candidate):
                     return candidate
         msg = (
             f"every port of this process's block ({base + 1}-{base + span}) is bound; "
