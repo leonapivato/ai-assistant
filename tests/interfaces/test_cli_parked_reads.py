@@ -282,7 +282,7 @@ async def test_a_turn_that_parked_a_read_renders_the_floor_the_query_and_what_a_
     assert QUERY in output.getvalue()
     # §13's one sentence, and no more than it.
     assert "Answering yes makes this one lookup, once, and nothing else." in rendered
-    # §13's cancellation act, offered at the question.
+    # §13's cancellation act, offered at the question, as a command that pastes.
     assert "assistant cancel-read h-1" in rendered
     # §1: the turn did not park, so nothing is being collected here.
     assert "Nothing is being asked of you right now" in rendered
@@ -429,6 +429,9 @@ async def test_a_second_answer_on_the_same_token_states_the_settled_question(
     assert settled.read_answer is ReadAnswerOutcome.ALREADY_SETTLED
     assert "had already been settled" in rendered
     assert "nothing was sent and nothing was recorded" in rendered
+    assert "the answer that settled it" not in rendered, (
+        "a withdrawal settles a park and records no answer (ADR-0244 §11)"
+    )
 
 
 # --- #2222 scenario 3 / Arm 3 ------------------------------------------------
@@ -632,8 +635,8 @@ async def test_cancelling_a_settled_question_says_there_was_nothing_to_withdraw(
     rendered = _flat(output.getvalue())
 
     assert code == 1
-    assert "There was nothing to withdraw." in rendered
-    assert "running here" in rendered
+    assert "There was nothing here for this to take." in rendered
+    assert "withdrew nothing and interrupted nothing" in rendered
 
 
 async def test_an_unknown_handle_is_a_typed_refusal_and_never_a_denial(
@@ -807,3 +810,98 @@ def test_the_question_is_rendered_after_the_reply_and_never_in_place_of_it(
 
     assert rendered.index("this turn was not recorded") < rendered.index("assistant resume")
     assert rendered.index("assistant resume") < rendered.index("A lookup is waiting on your answer")
+
+
+# --- round 1's three findings, each pinned where it would recur --------------
+
+
+def test_the_nothing_to_cancel_statement_claims_nothing_about_what_is_running(
+    output: StringIO,
+) -> None:
+    """Round 1, ``blocker``. ADR-0244 §11 returns this member on a race as well as on a
+    dead park: "a cancellation that lost it answers ``NOTHING_TO_CANCEL`` where the
+    answer is already running or done", and
+    ``test_a_cancellation_that_lost_the_gate_interrupts_nothing`` drives that with the
+    winning answer's dispatch held in flight. So a statement saying no lookup is
+    running is false on a reachable path, and this one says the opposite in terms."""
+    cli._render_read_cancellation(ReadCancellation.NOTHING_TO_CANCEL)
+    rendered = _flat(output.getvalue()).lower()
+
+    assert "no lookup is running" in rendered
+    assert "it does not tell you" in rendered
+    for forbidden in (
+        "no lookup of it is running here",
+        "nothing is running",
+        "already settled and",
+    ):
+        assert forbidden not in rendered
+
+
+def test_the_already_settled_statement_does_not_say_an_answer_stands(
+    output: StringIO,
+) -> None:
+    """Round 1, ``major``. §9 covers "answered, denied **or cancelled**" with one
+    member, and §11 says a cancellation "records no answer" — so naming *the answer
+    that settled it* is false for every park a withdrawal took."""
+    cli._render_read_answer(ReadAnswerOutcome.ALREADY_SETTLED)
+    rendered = _flat(output.getvalue()).lower()
+
+    assert "whatever settled it stands" in rendered
+    for forbidden in ("the answer that settled", "your earlier answer", "the answer stands"):
+        assert forbidden not in rendered
+
+
+def test_the_offered_command_is_one_unbroken_line_at_an_ordinary_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 1, ``major``, #1023's half: :func:`cli._print` folds at the console width
+    by inserting a real newline, so a hint wider than the screen pastes as **two**
+    commands — the verb with no argument, and the argument as a command of its own.
+    The offer therefore goes through :func:`cli._print_hint`, and this drives it at a
+    width an ordinary terminal has with a handle long enough to overflow it."""
+    buffer = StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, force_terminal=False, width=80))
+    handle = "h-" + "0123456789" * 8
+
+    cli._render_read_terms(_question(handle))
+    offered = [one for one in buffer.getvalue().splitlines() if "cancel-read" in one]
+
+    assert len(offered) == 1, "the command is one display line, not folded across two"
+    assert f"assistant cancel-read {handle}" in offered[0]
+
+
+@pytest.mark.parametrize(
+    ("handle", "expected"),
+    [
+        ("h 1", "'h 1'"),
+        ("h;rm -rf /", "'h;rm -rf /'"),
+        ("h'1", "'h'\"'\"'1'"),
+    ],
+)
+def test_a_handle_needing_quoting_is_offered_quoted(
+    handle: str, expected: str, output: StringIO
+) -> None:
+    """Round 1, ``major``, #984's half: ``ContinuationToken.handle`` is an
+    ``Identifier``, which requires encodability and nothing more — so an interior space
+    or a shell metacharacter is admissible, and an unquoted line is a *valid* command
+    against the wrong argument when pasted."""
+    cli._render_read_terms(_question(handle))
+    rendered = output.getvalue()
+
+    assert f"assistant cancel-read {expected}" in rendered
+
+
+def test_a_handle_the_terminal_cannot_show_withholds_the_command_and_says_so(
+    output: StringIO,
+) -> None:
+    """Round 1, ``major``, #1013's half: :func:`cli._safe` *replaces* a character a
+    terminal must not be handed, so a value carrying one renders — inside perfectly
+    correct quotes — as a command naming something that does not exist. A wrong command
+    is worse than no command, so the copyable line is withheld and the act is explained
+    instead. The question itself is not withdrawn by that."""
+    cli._render_read_terms(_question("h\x1b[2J1"))
+    rendered = _flat(output.getvalue())
+
+    assert "Withdraw it with 'assistant cancel-read'." in rendered
+    assert "Its handle" in rendered
+    assert "assistant cancel-read h" not in rendered

@@ -4646,11 +4646,16 @@ def _render_read_cancellation(outcome: ReadCancellation) -> None:
     made. The recourse §11 names — asking again — is stated as a fresh request rather
     than as a question that can be answered a second time.
 
-    **And the third is scoped to this process rather than to the world** (§11): "a
-    cancellation reaches only a dispatch running in the process that received it …
-    which is true of what this process can do". So it says *running here*, which is
-    honest under ADR-0043's one-resident-process posture rather than in spite of it,
-    and it does not promise that nothing anywhere is in flight.
+    **And the third states what the act took and makes no claim about what is
+    running.** The member's own sentence — "the park is settled and no dispatch of it
+    is running here" — is not the whole of when §11 returns it: "a cancellation that
+    lost it answers ``NOTHING_TO_CANCEL`` where the answer is already running or
+    done", and ``test_a_cancellation_that_lost_the_gate_interrupts_nothing`` drives
+    exactly that, with the winning answer's dispatch held **in flight**. A statement
+    saying no lookup is running would therefore be false on a reachable race, so this
+    one says what is established — the question is no longer open, and this act
+    withdrew and interrupted nothing — and says in terms that it is not a report about
+    what is in flight. Adversarial review, round 1, ``blocker``.
 
     Args:
         outcome: Which of §11's three states the engine reached.
@@ -4671,9 +4676,10 @@ def _render_read_cancellation(outcome: ReadCancellation) -> None:
             )
         case ReadCancellation.NOTHING_TO_CANCEL:
             _print(
-                "[yellow]There was nothing to withdraw.[/] That question is already "
-                "settled and no lookup of it is running here. Nothing was changed and "
-                "nothing was sent."
+                "[yellow]There was nothing here for this to take.[/] That question is "
+                "no longer open, so this withdrew nothing and interrupted nothing, and "
+                "whatever settled it stands unchanged. It does not tell you that no "
+                "lookup is running — only that this act took none."
             )
 
 
@@ -7237,6 +7243,16 @@ def _render_read_answer(member: ReadAnswerOutcome | None) -> None:
     the turn and the reply carry what it produced and this line does not describe
     them.
 
+    **And** :attr:`~ai_assistant.core.types.ReadAnswerOutcome.ALREADY_SETTLED` **does
+    not say an answer stands**, because one of the three states it covers records
+    none. §9 lists them as "answered, denied **or cancelled**", and §11 is explicit
+    that a cancellation "records no answer … no ruling is recorded, and the decision on
+    the trail stays the unresolved ``CONFIRM`` it was" — so a sentence naming *the
+    answer that settled it* would be false for every park a withdrawal took. What the
+    member establishes is that the question is closed and this call changed nothing,
+    and that is the whole of what the statement says. Adversarial review, round 1,
+    ``major``.
+
     **Silence where the member is absent** is an outcome that answered no parked read,
     and the surface then says nothing about one at all.
 
@@ -7256,8 +7272,8 @@ def _render_read_answer(member: ReadAnswerOutcome | None) -> None:
         case ReadAnswerOutcome.ALREADY_SETTLED:
             _print(
                 "[dim]Note: that question had already been settled, so this answer "
-                "decided nothing — nothing was sent and nothing was recorded. What "
-                "stands is the answer that settled it.[/]"
+                "decided nothing — nothing was sent and nothing was recorded. "
+                "Whatever settled it stands.[/]"
             )
         case ReadAnswerOutcome.EXPIRED:
             _print(
@@ -11307,8 +11323,18 @@ def _render_read_terms(confirmation: Confirmation) -> None:
     answer, and offer the cancellation act"). A user told only how to say yes or no has
     not been offered the third thing they can do, and the handle is printed because it
     is the argument ``assistant cancel-read`` takes. It is the engine's own opaque
-    handle, rendered as data like every other value on this card and interpreted by
-    nothing here (ADR-0042 §4).
+    handle, interpreted by nothing here (ADR-0042 §4).
+
+    **The offer goes through this surface's ratified hint idiom rather than through a
+    printed line of its own**, and all three of its parts are load-bearing here for the
+    reasons #984, #1013 and #1023 record. ``ContinuationToken.handle`` is an
+    ``Identifier``, which requires encodability and nothing more — so an interior space
+    is admissible and an unquoted line would name a different argument when pasted
+    (:func:`_argument`); a character :func:`_safe` replaces makes the displayed command
+    name something that does not exist, so the copyable line is withheld and the act is
+    explained instead (:func:`_uncopyable`); and :func:`_print` folds a long line at the
+    console width, which pastes as two commands, so the offer is written through
+    :func:`_print_hint`. Adversarial review, round 1, ``major``.
 
     **Withdrawing is named as not-an-answer**, because ADR-0244 §11 makes that the whole
     difference between the two: "a denial is the user answering *no* and is a ruling; a
@@ -11319,11 +11345,16 @@ def _render_read_terms(confirmation: Confirmation) -> None:
     Args:
         confirmation: The parked read's question, for the handle that answers it.
     """
+    handle = confirmation.token.handle
     _print("  [bold]Answering yes makes this one lookup, once, and nothing else.[/]")
     _print(
-        "  [dim]To withdraw the question instead of answering it, run 'assistant "
-        f"cancel-read {_safe(confirmation.token.handle)}'. Withdrawing is not the "
-        "same as saying no: it records no answer either way.[/]"
+        "  [dim]Withdrawing the question is the third thing you can do, and it is not "
+        "the same as saying no: it records no answer either way.[/]"
+    )
+    _print_hint(
+        f"  [dim]Withdraw it with:[/] assistant cancel-read {_argument(handle)}"
+        if _is_pasteable(handle)
+        else f"  [dim]Withdraw it with 'assistant cancel-read'.[/] {_uncopyable('Its handle')}"
     )
 
 
