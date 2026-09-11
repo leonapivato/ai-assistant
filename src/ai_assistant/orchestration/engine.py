@@ -9451,8 +9451,13 @@ class Engine:
                 it, unchanged** (ADR-0244 §5): §2's binding refusal and §1's expiry
                 refusal fire before the park's gate, so a refused act leaves the park
                 open and answerable without the standing request; and what became of a
-                collected act is reported on the outcome's ``recipient_grant`` exactly
-                as it is on a step's resume (ADR-0235 §4, §6).
+                collected act is reported on the outcome's ``recipient_grant``
+                (ADR-0235 §4, §6). **The carrier is absent on every member that
+                recorded no ruling** — ``ALREADY_SETTLED``, ``EXPIRED``,
+                ``UNAVAILABLE_NOW`` and ``OPERATION_CHANGED`` — because §4's
+                ``DECLINED`` asserts a *recorded* non-``ALLOW`` answer and none of them
+                has one; the three members ADR-0244 §9 gives a recorded resolution
+                carry it exactly as a step's resume does.
 
         Returns:
             The answer's outcome, and on a dispatch the resumed turn that composed over
@@ -9491,12 +9496,35 @@ class Engine:
         # carrier **whatever this answer reached**, and never raised. A user who asked
         # for one and is told nothing concludes it was granted (§4's second clause), so
         # this is read before the shapes below branch rather than inside the one that
-        # dispatched. `establishing` is `None` on every outcome that recorded no
-        # resolution, which is what `_establish_recipients`' declining arm is for.
-        recipient_grant = await self._establish_recipients(
-            answered.establishing,
-            approved=approved,
-            remember_recipients_until=remember_recipients_until,
+        # dispatched.
+        #
+        # **The carrier is reported from the recorded resolution and from nothing
+        # else**, which is where a read's answer differs from a step's and why
+        # :meth:`_establish_recipients` is not the road here. That method's declining
+        # arm reads `establishing is None` beside `approved=False` as "the runner
+        # recorded the `DENY` and merely collected no act", which is true on a step and
+        # true of exactly one of a read's seven members. On a read the same shape also
+        # covers `ALREADY_SETTLED`, `EXPIRED`, `UNAVAILABLE_NOW` and `OPERATION_CHANGED`,
+        # every one of which states in terms that **nothing was ruled at all** — and
+        # ADR-0235 §4 defines `DECLINED` over a *recorded* non-`ALLOW` answer, so
+        # reporting it there asserts something false: a user is told their standing
+        # request was considered and declined when no answer was given. §4's own rule
+        # for those is the absent carrier — "`recipient_grant` is `None` on **every**
+        # outcome of a call that performed no establishing act" — and a call refused
+        # before any ruling performed none.
+        #
+        # `establish_from_answer` is what keeps the **honest** `DECLINED`: it returns
+        # that member over a recorded non-`ALLOW` ruling without reaching the store,
+        # which is §4's own clause, so a genuine denial and a policy `DENY` on an
+        # approving answer both carry it exactly as before. The canonical fake already
+        # states this rule as "only the outcomes ADR-0244 §9 says carry a ruling record
+        # one" and this brings the engine to it.
+        recipient_grant = (
+            None
+            if remember_recipients_until is None or answered.establishing is None
+            else await self._recipient_grants.establish_from_answer(
+                answered.establishing, expires_at=remember_recipients_until
+            )
         )
         if answered.outcome is not ReadAnswerOutcome.DISPATCHED or park is None:
             return TurnOutcome(

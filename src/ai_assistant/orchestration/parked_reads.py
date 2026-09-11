@@ -153,6 +153,15 @@ class AnsweredRead:
             an answer where a park holds the confirmation**, and the pair is carried to
             the engine because ADR-0235 §12 puts the ``RecipientGrantStore``'s whole
             face on ``AssistantEngine`` and nowhere else.
+
+            **Its absence is what says no ruling was recorded**, and the engine reads
+            it that way: it is non-``None`` on all three members ADR-0244 §9 gives a
+            recorded resolution — ``DISPATCHED``, ``DECLINED`` and
+            ``AUTHORITY_CHANGED`` — whenever an act was collected, and ``None`` on the
+            four that state in terms that nothing was ruled. ADR-0235 §4 makes
+            ``DECLINED`` an assertion about a *recorded* non-``ALLOW`` ruling, so a
+            member reported over an absent pair would tell a user their standing
+            request was considered and declined by an answer nobody gave.
     """
 
     outcome: ReadAnswerOutcome
@@ -552,20 +561,29 @@ class ParkedReadOperations:
             # A refused append, returned and not raised (ADR-0244 §6, §9): the answer is
             # **not** recorded, the park stays spent, and nothing is dispatched.
             return AnsweredRead(ReadAnswerOutcome.OPERATION_CHANGED, park)
-        if not approved:
-            # The recorded answer is the `DENY` the user asked for, and the outcome is
-            # `DECLINED` — `turn` and `reply` both `None`, ADR-0170 §4's second shape
-            # exactly (ADR-0244 §10). Nothing is sent, no channel is opened, no claim is
-            # appended, and no minted record exists.
-            return AnsweredRead(ReadAnswerOutcome.DECLINED, park)
         # ADR-0235 §6: the act is reported on the carrier whatever the ruling was, and
         # the engine performs it — this object holds no ``RecipientGrantStore`` and
         # ADR-0235 §12 puts that face on ``AssistantEngine`` and nowhere else.
+        #
+        # **Built here, above the declining return, and so on every answer clause 6
+        # recorded** (ADR-0235 §4). `DECLINED` is defined over a **recorded** non-`ALLOW`
+        # ruling — "a declining answer, or a policy `DENY` on an approving one" — so a
+        # declining answer is one of that member's own two roads and carries the pair the
+        # carrier is read off, exactly as the policy's refusal below does. Leaving it
+        # `None` there made an **absent** pair ambiguous between "the user declined" and
+        # "nothing was ruled at all", and the engine resolved that ambiguity the wrong
+        # way for the four members that rule nothing.
         establishing = (
             None
             if remember_recipients_until is None
             else EstablishingAnswer(confirmed=confirmed, answer=answer)
         )
+        if not approved:
+            # The recorded answer is the `DENY` the user asked for, and the outcome is
+            # `DECLINED` — `turn` and `reply` both `None`, ADR-0170 §4's second shape
+            # exactly (ADR-0244 §10). Nothing is sent, no channel is opened, no claim is
+            # appended, and no minted record exists.
+            return AnsweredRead(ReadAnswerOutcome.DECLINED, park, establishing=establishing)
         if answer.ruling.outcome is not PermissionOutcome.ALLOW:
             # **Reserved for an approving answer the policy refused** (ADR-0244 §6). The
             # ruling **is** recorded — ADR-0004 §7's reason — nothing was dispatched, and
