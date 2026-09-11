@@ -242,3 +242,91 @@ async def test_every_read_answer_member_is_reachable_through_the_fake(
 
     assert outcome.read_answer is member
     assert outcome.read_confirmation is None, "ADR-0244 §9's mutual exclusion"
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        ReadAnswerOutcome.UNAVAILABLE_NOW,
+        ReadAnswerOutcome.OPERATION_CHANGED,
+        ReadAnswerOutcome.EXPIRED,
+    ],
+)
+async def test_an_outcome_that_rules_nothing_records_nothing_and_establishes_nothing(
+    member: ReadAnswerOutcome,
+) -> None:
+    """ADR-0244 §9: four members say in terms that **nothing was ruled**.
+
+    ``UNAVAILABLE_NOW`` — "nothing was ruled and nothing was dispatched";
+    ``OPERATION_CHANGED`` on its subject and binding grounds — "no ruling recorded";
+    ``EXPIRED`` — "the settlement records no ruling" (§10). A fake that recorded an
+    ``ALLOW`` and established a grant and *then* returned one of them would certify a
+    consumer against a trail no hub writes, and would tell a user a standing request
+    landed on an answer that was never given.
+    """
+    engine = FakeAssistantEngine()
+    offered = engine.park_read("h-1", query="bell tower porto")
+    confirmed = _confirm(external=False)
+    await engine.trail.record(confirmed)
+    engine.hold_confirmation_decision("h-1", confirmed)
+    engine.read_answers["h-1"] = member
+
+    outcome = await engine.resume(
+        offered.token, approved=True, timeout=PATIENT, remember_recipients_until=LATER
+    )
+
+    assert outcome.read_answer is member
+    assert outcome.recipient_grant is None, "no act landed on an answer nobody gave"
+    assert await engine.standing_recipient_grants() == ()
+    assert [row.id for row in await engine.export_decisions()] == [confirmed.id], (
+        "and the trail holds the CONFIRM alone: nothing resolved it"
+    )
+
+
+async def test_an_authority_changed_answer_records_its_ruling_and_declines_the_act() -> None:
+    """ADR-0244 §9's one member that rules **and** refuses.
+
+    "``ActionPolicy.resolve`` answered other than an ``ALLOW`` at the instant of the
+    answer; the ruling **is** recorded" — ADR-0004 §7's reason — "nothing was dispatched,
+    and the park is spent". A grant cannot be established from a ruling that is not an
+    ``ALLOW``, so the act's carrier is ``DECLINED`` (ADR-0235 §4).
+    """
+    engine = FakeAssistantEngine()
+    offered = engine.park_read("h-1", query="bell tower porto")
+    confirmed = _confirm(external=False)
+    await engine.trail.record(confirmed)
+    engine.hold_confirmation_decision("h-1", confirmed)
+    engine.read_answers["h-1"] = ReadAnswerOutcome.AUTHORITY_CHANGED
+
+    outcome = await engine.resume(
+        offered.token, approved=True, timeout=PATIENT, remember_recipients_until=LATER
+    )
+
+    assert outcome.read_answer is ReadAnswerOutcome.AUTHORITY_CHANGED
+    assert outcome.recipient_grant is not None
+    assert outcome.recipient_grant.established is None
+    assert outcome.recipient_grant.not_established is not None, "the act is reported declined"
+    resolutions = [row for row in await engine.export_decisions() if row.resolves == confirmed.id]
+    assert len(resolutions) == 1, "and the ruling **is** recorded"
+    assert resolutions[0].ruling.outcome is not PermissionOutcome.ALLOW
+
+
+async def test_an_interrupted_dispatch_leaves_no_question_to_answer_again() -> None:
+    """ADR-0244 §11: "a cancelled dispatch leaves the park ``APPROVED`` and does not
+    re-open it".
+
+    A dispatch is only ever reached **after** the park was settled, so a fake that left
+    the question listed would offer one already answered — and a consumer would read
+    ``INTERRUPTED`` beside a park it could answer a second time, which is the one state
+    §11 says is not reachable.
+    """
+    engine = FakeAssistantEngine()
+    offered = engine.park_read("h-1", query="bell tower porto")
+    engine.dispatching_read("h-1")
+
+    assert await engine.cancel_read(offered.token) is ReadCancellation.INTERRUPTED
+
+    assert await engine.pending_confirmations() == (), "the question is not offered again"
+    answered = await engine.resume(offered.token, approved=True, timeout=PATIENT)
+    assert answered.read_answer is ReadAnswerOutcome.ALREADY_SETTLED
+    assert answered.turn is None, "and nothing was dispatched a second time"

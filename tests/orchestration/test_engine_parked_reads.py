@@ -1593,17 +1593,28 @@ async def test_a_cancellation_that_lost_the_gate_interrupts_nothing() -> None:
     park = await _parked(wired)
     gate = _GatedSettle(wired.parks)
     wired.engine._parked_reads._store = gate
+    # The winning answer's **dispatch is held in flight**, which is what makes this case
+    # able to fail: released against a finished answer there is no task left to cancel,
+    # so a fall-through to the interrupt would find nothing and answer
+    # `NOTHING_TO_CANCEL` for the wrong reason.
+    held = _SuspendingSearcher(wired.engine._loop._search._searcher)
+    wired.engine._loop._search._searcher = held
     # The cancellation reads the park open and is then held at the write.
     cancelling = asyncio.create_task(wired.engine.cancel_read(token))
     await gate.reached.wait()
-
-    answered = await wired.engine.resume(token, approved=True, timeout=PATIENT)
+    answering = asyncio.create_task(wired.engine.resume(token, approved=True, timeout=PATIENT))
+    await held.reached.wait()
 
     gate.release.set()
     cancelled = await cancelling
 
-    assert answered.read_answer is ReadAnswerOutcome.DISPATCHED, "the answer took the park"
-    assert cancelled is ReadCancellation.NOTHING_TO_CANCEL, "and the cancellation took nothing"
+    assert cancelled is ReadCancellation.NOTHING_TO_CANCEL, "the cancellation took nothing"
+    held.release.set()
+    answered = await answering
+
+    assert answered.read_answer is ReadAnswerOutcome.DISPATCHED, (
+        "and the answer it lost to ran to completion rather than being torn down"
+    )
     assert len(wired.searcher.searched) == 1, "the dispatch the answer authorised stands"
     settled = await wired.parks.get(park.id)
     assert settled is not None
