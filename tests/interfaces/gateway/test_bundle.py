@@ -6880,7 +6880,10 @@ def test_a_reply_this_page_cannot_render_resolves_nothing() -> None:
     shared" reaching the site the rule was worked out on. The questions are the ones the
     inline ``try`` was pinned for and they are asked of the new shape: that the render is
     guarded rather than reached directly, and that the four statements of this surface's
-    own ending follow a render that failed and nothing else. What is no longer here is
+    own ending follow a render that failed and nothing else. The sentence goes through
+    ``ending`` because a read this page cancelled ends every one of these four ways and
+    ``cancel_read``'s own answer is what tells the user then (ADR-0244 §11). What is no
+    longer here is
     ``show("answer", false)`` — the guard hides the panel *and* clears it, which is what
     the ``try`` named as its intent and did not do.
     """
@@ -6902,13 +6905,13 @@ def test_a_reply_this_page_cannot_render_resolves_nothing() -> None:
     for step in (
         "strand(token);",
         "readPending(false);",
-        'fault(PARK_REPLY_UNREADABLE, "confirmations");',
+        'fault(ending(PARK_REPLY_UNREADABLE), "confirmations");',
     ):
         assert step in failed, step
     # In that order, because `readPending` clears this panel's fault on its way in and a
     # sentence written before it would be wiped by the tidy-up that follows it.
     assert failed.index("strand(token);") < failed.index("readPending(false);")
-    assert failed.index("readPending(false);") < failed.index("fault(PARK_REPLY_UNREADABLE")
+    assert failed.index("readPending(false);") < failed.index("fault(ending(PARK_REPLY")
     assert "spent.delete" not in failed
     # And the render is not reached again on the way out: the guard rendered it or it
     # took the branch above, so there is no second call to fall through to.
@@ -7572,6 +7575,22 @@ def test_no_read_answer_statement_says_why_a_ruling_went_the_way_it_did() -> Non
         "minutes",
     ):
         assert barred not in words, barred
+    # **And no statement names a member's cause** (adversarial review, round 2). §9 gives
+    # ``OPERATION_CHANGED`` three grounds — a rebuilt request that is not the recorded
+    # ``CONFIRM``'s own subject, a binding that no longer derives equal, **or a trail that
+    # refused the resolving append** — and a sentence saying that what would have been
+    # sent is not what was shown is true of two of them and false of the third. The
+    # surface is handed the member and nothing else (§13: "no adapter reads a store, joins
+    # a row, computes a member"), so it cannot tell the three apart and must not write a
+    # sentence that picks one. Asserted over that member's own statement, because this is
+    # the one member with more than one ground behind it.
+    changed = words[words.index("operation_changed:") + len("operation_changed:") :]
+    changed = changed[: changed.index("\n  unavailable_now:")]
+    for cause in ("binding", "shown", "subject", "trail", "changed", "append"):
+        assert cause not in changed, cause
+    # It does not say whether the question still stands either, for the same reason: §9
+    # leaves the park ``OPEN`` on two of those grounds and spent on the third.
+    assert "still open is not something this answer says" in changed
 
 
 def test_one_fixed_statement_per_read_cancellation_member_and_none_reads_as_a_denial() -> None:

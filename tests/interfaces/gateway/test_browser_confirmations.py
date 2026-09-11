@@ -1367,7 +1367,7 @@ async def test_a_refusal_that_left_the_question_standing_leaves_the_control_answ
         row = drive.page.locator("#confirmation-list .confirmation-row").first
         await row.locator("button", has_text="Yes, do it").click()
         await expect(drive.page.locator("#answer-body")).to_contain_text(
-            "What answering would have sent is not what you were shown"
+            "That answer was not carried through, so nothing was sent."
         )
         await expect(row.locator("button", has_text="Yes, do it")).to_be_enabled()
 
@@ -1380,3 +1380,84 @@ async def test_a_refusal_that_left_the_question_standing_leaves_the_control_answ
 
         await expect(drive.page.locator("#answer-body")).to_contain_text("That lookup was made")
         assert len([one for one in drive.engine.calls if one[0] == "resume"]) == 2
+
+
+async def _reached(drive: Drive, operation: str, *, above: int) -> None:
+    """Wait until the engine has been asked for ``operation`` more than ``above`` times.
+
+    The page's own response to a refusal it classifies as unknown is a listing read, so
+    counting that read at the engine is how a case knows the refusal has been processed —
+    a condition observed rather than a timeout waited out, which is ADR-0216 §7's rule
+    for driving this surface.
+
+    Args:
+        drive: The gateway, engine and page under test.
+        operation: The engine operation to count.
+        above: The count this must exceed.
+    """
+    for _ in range(200):
+        if len([one for one in drive.engine.calls if one[0] == operation]) > above:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"{operation} was never asked for more than {above} times")
+
+
+async def test_a_cancelled_answers_own_refusal_does_not_overwrite_the_acts_answer(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """Adversarial review's round 2, which is the production shape of round 1's blocker.
+
+    Cancelling the hub's ``resume`` closes the wire connection it was running on, the
+    client raises, and ``_relay_fault`` renders that as ``502 hub-unreachable`` — so the
+    interrupted answer usually ends at the page's **refusal** branch and not at its
+    rejected-``fetch`` branch. Both say "nothing was cancelled", and both would be
+    overwriting ``cancel_read``'s own answer with a sentence that is the opposite of what
+    the owner had just done (ADR-0244 §11).
+
+    **Driven in the order the finding names**: the act answers first, its question leaves
+    the listing, and only then does the answer's ``502`` arrive — with the refusal
+    observed at the engine rather than waited out, so the final statement is asserted
+    after both requests have been processed and not merely after a delay.
+    """
+    released = asyncio.Event()
+
+    async def _hanging_resume(
+        token: ContinuationToken,
+        /,
+        *,
+        approved: bool,
+        timeout: timedelta,  # noqa: ASYNC109 — the Protocol's own signature
+        remember_recipients_until: datetime | None = None,
+    ) -> TurnOutcome:
+        await released.wait()
+        raise TransportError("the connection carrying that resume was closed")
+
+    async def _interrupt(token: ContinuationToken, /) -> ReadCancellation:
+        # The park is settled ``APPROVED`` and is not re-opened (ADR-0244 §11), so the
+        # question leaves the listing — which is what takes every row carrying the act's
+        # answer off the screen and leaves the panel as the only place it can live.
+        drive.engine.read_parked.pop("r-1", None)
+        return ReadCancellation.INTERRUPTED
+
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.read_parked["r-1"] = _read()
+        drive.engine._read_handles.add("r-1")
+        drive.engine.cancel_read = _interrupt  # type: ignore[method-assign]
+        drive.engine.resume = _hanging_resume  # type: ignore[method-assign,assignment]
+
+        await drive.page.click("#confirmations-button")
+        await drive.page.wait_for_selector("#confirmation-list .confirmation-row")
+        row = drive.page.locator("#confirmation-list .confirmation-row").first
+        await row.locator("button", has_text="Yes, do it").click()
+        await row.locator("button", has_text="Cancel this lookup").click()
+        await expect(drive.page.locator("#confirmations")).to_contain_text("stopped part-way")
+        await expect(drive.page.locator("#confirmation-list .confirmation-row")).to_have_count(0)
+
+        listed = len([one for one in drive.engine.calls if one[0] == "pending_confirmations"])
+        released.set()
+        await _reached(drive, "pending_confirmations", above=listed)
+
+        said = await drive.page.inner_text("#confirmations")
+        assert "That lookup had already been sent, and it was stopped part-way." in said
+        assert "nothing was cancelled" not in said
+        assert "is not known" not in said

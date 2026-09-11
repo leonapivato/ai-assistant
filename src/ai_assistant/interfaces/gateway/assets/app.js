@@ -1261,6 +1261,18 @@ function renderStep(body, step) {
 // two that come closest are the two worth naming: `expired` says a deadline passed and
 // gives no figure for it, and `unavailable_now` says the lookup cannot be answered here
 // now and names neither of the two states that reach it.
+//
+// **And no statement names a member's *cause*, which is a second rule and is where an
+// earlier draft of `operation_changed` was wrong** (adversarial review, round 2). §9
+// gives that member three grounds — the rebuilt request is not the recorded `CONFIRM`'s
+// own subject, the binding derived at the instant of the answer is not the one the
+// ruling was taken over, **or the trail refused the resolving append** — and a sentence
+// saying that what would have been sent is not what was shown is true of two of them and
+// false of the third. The surface is given the member and nothing else (§13: "no adapter
+// reads a store, joins a row, computes a member"), so it cannot tell them apart and must
+// not write a sentence that picks one. The same rule is why `operation_changed` does not
+// say whether the question still stands: §9 leaves the park `OPEN` on two grounds and
+// spent on the third, and this page has not been told which.
 const READ_ANSWER_WORDS = {
   dispatched: "That lookup was made, and the answer on this screen carries what it produced.",
   declined: "That lookup was not made. Your answer was no, and it is recorded.",
@@ -1274,7 +1286,8 @@ const READ_ANSWER_WORDS = {
     "Permission for that lookup was decided again when you answered, and it did not come " +
     "back as a yes. Nothing was sent, that decision is recorded, and the question is spent.",
   operation_changed:
-    "What answering would have sent is not what you were shown, so nothing was sent.",
+    "That answer was not carried through, so nothing was sent. Whether the question is " +
+    "still open is not something this answer says.",
   unavailable_now:
     "That lookup cannot be answered here now. Nothing was ruled and nothing was sent.",
 };
@@ -3600,6 +3613,26 @@ async function answerConfirmation(token, approved, stopping) {
   // inference from absence ADR-0139 §4 refuses. So the page reads its own history, which
   // is the one thing here that is actually about the earlier answer.
   const unaccounted = unresolved.has(token);
+  // **Where this page cancelled the read itself, the outcome is known and this is what
+  // it is** (ADR-0244 §11, adversarial review's rounds 1 and 2). A dispatch this page
+  // interrupted ends this call one of four ways — a rejected `fetch`, a refusal this
+  // page classifies as unknown, a refusal it cannot classify at all, or a reply it
+  // cannot render — and in production the *usual* one is a refusal: cancelling the
+  // hub's `resume` closes the wire connection, the client raises, and `_relay_fault`
+  // writes `502 hub-unreachable`. So the rule belongs at every ending rather than at the
+  // one a fake happens to reach.
+  //
+  // Each of those four sentences would be false here twice over: the page knows why the
+  // answer ended, and each of them says "nothing was cancelled" — the opposite of what
+  // it had just done. §11 fixes what is said instead: "the cancellation is a teardown
+  // and is converted into neither an outcome nor a refusal … **what tells the user is
+  // `cancel_read`'s own answer, which is the act they performed**".
+  //
+  // **Read at the ending rather than once at the top**, because the act's reply may land
+  // at any point while this one is out; and **one closure rather than four copies**
+  // (#1622's "one check, shared"), so a fifth ending cannot be written without it.
+  const ending = (otherwise) =>
+    cancelled.has(token) ? cancellationWords(cancelled.get(token)) : otherwise;
   // Claimed before the first `await`, so two clicks in one turn of the event loop —
   // the two rows of one park, or one row twice — cannot both get past the guard.
   spent.add(token);
@@ -3670,9 +3703,8 @@ async function answerConfirmation(token, approved, stopping) {
     // Where the cancellation landed first this branch renders it; where it lands second,
     // `cancelRead` writes it over whatever stood here. Neither result is lost to the
     // other's timing, which is the property the two orderings are tested for.
-    const recorded = cancelled.has(token) ? cancelled.get(token) : null;
     const lost = stopping.signal.aborted ? PARK_UNRESOLVED : PARK_LOST;
-    fault(recorded === null ? lost : cancellationWords(recorded), "confirmations");
+    fault(ending(lost), "confirmations");
     return;
   }
   if (body === null) {
@@ -3701,7 +3733,10 @@ async function answerConfirmation(token, approved, stopping) {
     if (unaccounted || !named || UNKNOWN_FAULTS.has(refusal.fault)) {
       strand(token);
       readPending(false);
-      fault(unaccounted ? PARK_REFUSAL_AFTER_UNKNOWN : PARK_REFUSAL_NOT_KNOWN, "confirmations");
+      fault(
+        ending(unaccounted ? PARK_REFUSAL_AFTER_UNKNOWN : PARK_REFUSAL_NOT_KNOWN),
+        "confirmations"
+      );
       return;
     }
     // A condition the gateway named and this page reads as a request the hub received
@@ -3761,7 +3796,7 @@ async function answerConfirmation(token, approved, stopping) {
     // wiped by the tidy-up that follows it.
     strand(token);
     readPending(false);
-    fault(PARK_REPLY_UNREADABLE, "confirmations");
+    fault(ending(PARK_REPLY_UNREADABLE), "confirmations");
     return;
   }
   // **A refusal that left the question standing leaves the control answerable**
