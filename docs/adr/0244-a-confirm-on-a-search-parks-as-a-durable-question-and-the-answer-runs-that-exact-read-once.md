@@ -533,11 +533,18 @@ wire-carried type is what ADR-0124 §9 charges a version for.
 > (recorded) therefore never passes through a grantable state, which is the property this
 > clause exists to have rather than an implementation note.
 
-> **Normative.** **A park that was `CANCELLED` or `EXPIRED` does not exclude its decision.**
-> Neither disposition writes a resolution and neither ever will, so the decision is an
-> unresolved `CONFIRM` exactly as §3's seven conditions find it, and the establishing act may
-> ride it where they hold. **No lane widens the exclusion to every park ever written**, which
-> would take a capability away on the strength of a question nobody answered.
+> **Normative.** **A park that was `CANCELLED` or `EXPIRED` does not exclude its decision, and
+> only the first of those makes the act reachable.** Neither disposition writes a resolution
+> and neither ever will, so the eighth condition stops excluding either; §3's **seven** then
+> govern the row, and on an `EXPIRED` park the **fifth** of them fails on its own — the
+> decision carries the **same** `expires_at` the park does (§3), so a park past its deadline
+> names a decision past the same one, and a decision *"whose `expires_at` … is strictly after
+> the instant of the call"* is what §3 requires. **A cancelled park's decision is therefore
+> the one that returns to the listing**, where the other six conditions hold; an expired
+> park's stays out, refused by a condition this ADR does not touch rather than by the eighth.
+> **No lane widens the exclusion to every park ever written**, which would take a capability
+> away on the strength of a question nobody answered, and none reads this clause as relaxing
+> §3's fifth condition to put an expired decision back.
 
 > **Normative.** **One question, one act, and the split is decided rather than incidental.**
 > A decision a park holds is answered through `resume`, and answering it is what dispatches
@@ -785,10 +792,10 @@ first one authorised.
 > 1. **`DISPATCHED`** — the read ran; the outcome's `turn` and `reply` carry what it produced
 >    (§8).
 > 2. **`DECLINED`** — the answer was no; the `DENY` is recorded and the park is `DENIED`.
-> 3. **`ALREADY_SETTLED`** — the park was answered, denied, cancelled or expired before this
->    answer arrived; nothing was dispatched and the recorded answer stands.
-> 4. **`EXPIRED`** — the deadline passed before the answer arrived; the park is settled
->    `EXPIRED` and nothing was dispatched.
+> 3. **`ALREADY_SETTLED`** — the park was answered, denied or cancelled before this answer
+>    arrived; nothing was dispatched and the recorded answer stands.
+> 4. **`EXPIRED`** — the park's deadline passed with no answer, **whether this call settled it
+>    or an earlier read did** (§10); nothing was dispatched.
 > 5. **`AUTHORITY_CHANGED`** — `ActionPolicy.resolve` answered other than an `ALLOW` at the
 >    instant of the answer; the ruling **is** recorded, nothing was dispatched, and the park is
 >    spent (§2).
@@ -810,8 +817,10 @@ first one authorised.
 
 > **Normative.** **Where more than one member is true, the first in the order above is the
 > one carried**, so the answer is deterministic across implementations, and no lane branches
-> on a message. `ALREADY_SETTLED` and `EXPIRED` are ordered ahead of the three change members
-> because a park that is closed is not a question any recheck could re-open.
+> on a message. The two members naming a closed park are ordered ahead of the three change
+> members because a park that is closed is not a question any recheck could re-open, and
+> `EXPIRED` is stated over the **disposition** rather than over which call discovered it, so a
+> park an enumeration settled and a park this answer settled read the same to the user.
 
 > **Normative.** **`read_answer` states what became of the answer and never why a ruling went
 > the way it did.** No member carries, and no statement rendered for one carries, a
@@ -849,12 +858,12 @@ three `reply`-`None` shapes or its one `reply_degraded` shape.
 > conversation's own next servicing. The settlement clears the content (§3), records no
 > ruling, and the decision on the trail stays the unresolved `CONFIRM` it was.
 
-> **Normative.** **An expired park's decision is not thereby made grantable, and it is not
-> thereby made ungrantable either.** ADR-0235 §3's seven conditions decide it on their own
-> terms, and §5's eighth stops excluding it — an `EXPIRED` park writes no resolution and never
-> will (§5). **No lane infers a recipient grant, a trust record or a policy change from an
-> expiry**, and none reads the row's return to that listing as anything but the absence of a
-> question a park was holding.
+> **Normative.** **An expiry makes no decision grantable.** §5's eighth condition stops
+> excluding an `EXPIRED` park's decision, but ADR-0235 §3's **fifth** condition then refuses
+> it on its own — the decision carries the same deadline the park does (§3) — so the row does
+> **not** return to `grantable_decisions`, and this ADR touches no condition that would put it
+> there. **No lane infers a recipient grant, a trust record, a policy change or a relaxed
+> deadline from an expiry.**
 
 > **Normative.** **The parked turn's reply stands on every terminal disposition.** A denial,
 > an expiry and a cancellation each leave the earlier exchange exactly as it was: its reply
@@ -1261,7 +1270,8 @@ is, which is `settle` (§3) and the running task's own registry.
 >   freshly minted token, and an approval after the restart dispatches exactly once.
 > - **Arm 5 (scenario 5) — expiry.** A park past `expires_at` is not enumerated, is settled
 >   `EXPIRED` on the first operation that reads it, has its content cleared, and answers a later
->   `resume` with `EXPIRED` having dispatched nothing.
+>   `resume` with `EXPIRED` — **both** where that `resume` is the operation that settled it and
+>   where an enumeration settled it first — having dispatched nothing.
 > - **Arm 6 (scenario 6) — the changed operation, three arms.** A binding that no longer
 >   derives equal refuses with `OPERATION_CHANGED` and no ruling recorded; a
 >   `ActionPolicy.resolve` answering other than `ALLOW` refuses with `AUTHORITY_CHANGED` and
@@ -1278,7 +1288,9 @@ is, which is `settle` (§3) and the running task's own registry.
 >   for one conversation is refused by the store and the servicing takes ADR-0242 §8's
 >   undiscriminated member; a step's confirmation is unchanged in every member and every
 >   assembly site; and `grantable_decisions` omits a decision a park names `OPEN`, `APPROVED`
->   or `DENIED` and lists it again once that park is `CANCELLED` or `EXPIRED` (§5).
+>   or `DENIED`, lists it again once that park is `CANCELLED` and the other six conditions
+>   hold, and keeps it out after an `EXPIRED` one, which ADR-0235 §3's fifth condition refuses
+>   on the shared deadline (§5).
 > - **Arm 9 (the store's own suite) — atomicity.** Two concurrent `park` calls for one
 >   conversation yield exactly one park; two concurrent `settle` calls for one park yield
 >   exactly one `True`; a `settle` clears the three content fields in the same step that moves
