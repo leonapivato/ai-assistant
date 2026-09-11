@@ -6895,7 +6895,9 @@ def _render_reply(outcome: TurnOutcome, *, streamed: _StreamedReply | None = Non
     )
 
 
-def _render_search_not_serviced(member: SearchNotServiced | None) -> None:
+def _render_search_not_serviced(  # noqa: C901 — one arm per member of a closed nine-member vocabulary, and ADR-0242 §9 forbids the mapping that would collapse them
+    member: SearchNotServiced | None,
+) -> None:
     """ADR-0242 §9's statement for this turn, **beside the reply and never in place of it**.
 
     **One fixed statement per member, written out as a literal** (§9, §13). Neither
@@ -6955,6 +6957,22 @@ def _render_search_not_serviced(member: SearchNotServiced | None) -> None:
     or a ``SearchDisposition`` value (§9). §7's bar on the prompt fragments and this
     bar are one rule stated at the two render sites it has to hold at.
 
+    **The ninth statement names ``assistant resume``, which is ADR-0244 §18's own
+    assignment of it to this lane**, and it is the only one of the nine that names
+    work the system is still holding rather than something that already ended
+    (ADR-0244 §12). So it is the only one whose act *changes this same lookup*: the
+    other eight name an act that might make some later search go differently, and
+    this one names where the question already recorded is answered. It names the
+    withdrawal beside the answer because ADR-0244 §13 gives this surface both — "the
+    command line and the browser each render the pending read, collect the answer,
+    and offer the cancellation act" — and a user told only how to say yes or no has
+    not been offered the third thing they can do.
+
+    **It does not say the lookup produced nothing**, which is the literal #2221
+    records as false and ADR-0244 §12's whole subject: the lookup has not been made,
+    so nothing about a result is established, and the sentence says what is true —
+    that an answer is awaited.
+
     **Silence where the member is absent** is a turn that serviced no search or
     serviced every search it asked for, and the surface then says nothing about a
     lookup at all — which is §6's byte-identity guarantee at this render site.
@@ -6965,6 +6983,13 @@ def _render_search_not_serviced(member: SearchNotServiced | None) -> None:
     match member:
         case None:
             return
+        case SearchNotServiced.ANSWER_AWAITED:
+            _print(
+                "[dim]Note: that lookup is waiting on your answer. It was put to you "
+                "as a question rather than made, and the question is still open: "
+                "'assistant resume' is where you answer it, and 'assistant cancel-read' "
+                "withdraws it.[/]"
+            )
         case SearchNotServiced.SEARCH_DISABLED:
             _print(
                 "[dim]Note: looking things up outside this system is switched off in "
