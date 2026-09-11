@@ -41,7 +41,9 @@ from ai_assistant.core.types import (
     MemoryKind,
     MemorySource,
     ParkedReadDisposition,
+    PermissionDecision,
     PermissionOutcome,
+    PermissionRuling,
     Placement,
     PlacementReach,
     PlacementSetter,
@@ -716,46 +718,52 @@ async def test_two_concurrent_answers_produce_one_settlement_and_one_dispatch() 
     resolution and **one** dispatch; the loser returns ``ALREADY_SETTLED``, consults no
     policy, records nothing and **raises nothing**."
 
-    **Held with the winner paused after its settlement and before its recorded ruling**,
-    which §19 requires in terms and which a bare ``asyncio.gather`` does not produce: two
-    unsuspended answers over these fakes let the first settle *and record and dispatch*
-    before the second reads the park at all, so the loser never reaches the gate and the
-    case passes against an implementation whose losing path acts anyway. The pause is
-    what makes both callers past clause 4 with one settlement between them.
+    **Both callers reach clause 5, which is what §19 requires and what neither a bare
+    ``asyncio.gather`` nor a pause at the *ruling* produces.** Held at the **store's own
+    compare-and-swap**: the first ``settle`` to arrive is suspended inside it, so the
+    second caller passes clauses 1 to 4 over a park that is still ``OPEN``, reaches the gate
+    and takes it — and the first then loses the write it was holding. Two gate attempts,
+    one settlement, and a loser that arrived at clause 5 rather than bouncing off clause
+    1, which is the interleaving an implementation whose losing path acts anyway
+    survives every weaker construction of.
 
-    **The loser's "consults no policy" is asserted over a count**, not inferred from the
-    member: the paused policy records every ``resolve`` it is asked, and one is what one
-    settlement buys.
+    **"Consults no policy" is asserted over counts** rather than inferred from the
+    member: the gate records every attempt and the paused policy records every
+    ``resolve`` it is asked, and one of each is what one settlement buys.
     """
     wired = _wired()
     parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
     assert parked.read_confirmation is not None
     token = parked.read_confirmation.token
     park = await _parked(wired)
-    servicer = wired.engine._loop._search
-    paused = _SuspendingResolution(servicer._policy)
-    servicer._policy = paused
-    winner = asyncio.create_task(wired.engine.resume(token, approved=True, timeout=PATIENT))
-    await paused.reached.wait()
+    gate = _GatedSettle(wired.parks)
+    wired.engine._parked_reads._store = gate
+    counted = _SuspendingResolution(wired.engine._loop._search._policy)
+    counted.release.set()  # counted, not held: this case pauses at the gate instead
+    wired.engine._loop._search._policy = counted
+    held = asyncio.create_task(wired.engine.resume(token, approved=True, timeout=PATIENT))
+    await gate.reached.wait()
 
-    # The loser runs to completion while the winner is held between its settlement and
-    # its ruling, which is the window §19 Arm 11 is stated over.
-    loser = await wired.engine.resume(token, approved=True, timeout=PATIENT)
+    # The second caller passes clauses 1-4 over a park the first has read but not yet
+    # written, so it reaches the gate too — which is the state §19 Arm 11 is about.
+    second = await wired.engine.resume(token, approved=True, timeout=PATIENT)
 
-    assert loser.read_answer is ReadAnswerOutcome.ALREADY_SETTLED
-    assert loser.turn is None, "the loser composed nothing"
-    assert paused.resolutions == 1, "and consulted no policy of its own"
-    assert wired.searcher.searched == [], "nor dispatched while the winner was held"
-    assert [row for row in await wired.trail.recent() if row.resolves] == [], "nor recorded"
+    gate.release.set()
+    first = await held
 
-    paused.release.set()
-    won = await winner
-
-    assert won.read_answer is ReadAnswerOutcome.DISPATCHED
+    assert gate.attempts == 2, "both answers reached the compare-and-swap"
+    members = sorted(outcome.read_answer for outcome in (first, second) if outcome.read_answer)
+    assert members == sorted([ReadAnswerOutcome.ALREADY_SETTLED, ReadAnswerOutcome.DISPATCHED]), (
+        "exactly one of them took the park's one answer"
+    )
+    assert counted.resolutions == 1, "the loser consulted no policy"
     assert len(wired.searcher.searched) == 1, "one dispatch"
     resolutions = [row for row in await wired.trail.recent() if row.resolves == park.decision_id]
     assert len(resolutions) == 1, "one recorded resolution"
-    assert paused.resolutions == 1, "and one policy consultation across both callers"
+    loser = next(
+        one for one in (first, second) if one.read_answer is not ReadAnswerOutcome.DISPATCHED
+    )
+    assert loser.turn is None, "and the loser composed nothing"
 
 
 async def test_an_approval_racing_a_denial_leaves_the_park_and_the_trail_agreeing() -> None:
@@ -1251,6 +1259,15 @@ async def test_the_resumed_capture_records_this_passs_own_disclosure_evaluation(
     )
     parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
     assert parked.read_confirmation is not None
+    park = await _parked(wired)
+    assert park.parameters is not None
+    servicer = wired.engine._loop._search
+    # A refused dispatch, so the **retrieval** is the only thing that can have caused
+    # the narrowing — the sibling case below drives the other half over a yield.
+    servicer._searcher = _CostedSearcher(
+        FakeWebSearcher(refusals={str(park.parameters["query"]): SearchRefusal.DEADLINE_EXPIRED})
+    )
+    before = await _episode_ids(wired)
 
     outcome = await wired.engine.resume(
         parked.read_confirmation.token, approved=True, timeout=PATIENT
@@ -1260,7 +1277,7 @@ async def test_the_resumed_capture_records_this_passs_own_disclosure_evaluation(
     assert any(record.id == "secret-1" for record in outcome.turn.memories), (
         "the record reached the supply the reply was composed over (ADR-0204 §4)"
     )
-    episode = await _resumed_episode(wired)
+    episode = await _resumed_episode(wired, before)
     assert episode.placement.reach is PlacementReach.OWNER, (
         "and the capture derived the owner-only placement ADR-0217 §3 carries the "
         "evaluation on, so a later spoken turn cannot read this episode back"
@@ -1268,31 +1285,91 @@ async def test_the_resumed_capture_records_this_passs_own_disclosure_evaluation(
     assert episode.placement.set_by is PlacementSetter.DERIVED
 
 
-async def test_a_resumed_capture_over_a_clean_supply_records_no_withholding() -> None:
-    """The control: the mark comes from the supply and not from the path.
+async def test_the_approved_reads_own_records_are_what_narrow_the_resumed_capture() -> None:
+    """ADR-0226 §7's timing, on the supply half only the **fourth group** supplies.
 
-    Without it the case above would pass on an implementation that hardcoded ``True``,
-    which is the same class of error as hardcoding ``False`` and is caught the same way.
+    "One evaluation, over the turn's **final** supply — and on a turn that serviced a
+    request the supply is the deduplicated union of all four groups." Here the retrieval
+    carries nothing ADR-0199 §3 withholds, so the narrowing is caused **solely by the
+    records the approved read minted** — the half an implementation evaluating before it
+    appended them would miss, and the half that matters most: an unmarked episode over a
+    supply an approved read put external records into is #1708's laundering path reached
+    through a park.
     """
     wired = _wired()
     parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
     assert parked.read_confirmation is not None
+    before = await _episode_ids(wired)
 
-    await wired.engine.resume(parked.read_confirmation.token, approved=True, timeout=PATIENT)
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token, approved=True, timeout=PATIENT
+    )
 
-    episode = await _resumed_episode(wired)
+    assert outcome.turn is not None
+    assert any(record.content.startswith("a result") for record in outcome.turn.memories), (
+        "the read's records reached the supply the reply was composed over"
+    )
+    episode = await _resumed_episode(wired, before)
+    assert episode.placement.reach is PlacementReach.OWNER
+    assert episode.placement.set_by is PlacementSetter.DERIVED
+
+
+async def test_a_resumed_capture_over_a_supply_nothing_withholds_is_not_narrowed() -> None:
+    """The control for both cases above: the mark comes from the supply, not the path.
+
+    Without it each would pass on an implementation that hardcoded ``True``, which is
+    the same class of error as hardcoding ``False`` and is caught the same way. Driven
+    over a dispatch the searcher **refused**, because that is the one approved answer
+    whose final supply carries no minted record at all — and on which ADR-0244 §8 still
+    has the turn compose.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    park = await _parked(wired)
+    assert park.parameters is not None
+    servicer = wired.engine._loop._search
+    servicer._searcher = _CostedSearcher(
+        FakeWebSearcher(refusals={str(park.parameters["query"]): SearchRefusal.DEADLINE_EXPIRED})
+    )
+    before = await _episode_ids(wired)
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert outcome.turn is not None
+    assert not any(record.content.startswith("a result") for record in outcome.turn.memories), (
+        "the refusal minted nothing, so the fourth group is empty — what the supply "
+        "still holds is the conversation's own replay tail, which withholds nothing"
+    )
+    episode = await _resumed_episode(wired, before)
     assert episode.placement == Placement(), "nothing was withheld, so nothing is narrowed"
 
 
-async def _resumed_episode(wired: _Wired) -> Any:
-    """The episode the resumption captured — the newest one this conversation holds."""
-    episodes = [
-        record
+async def _episode_ids(wired: _Wired) -> frozenset[str]:
+    """Every episode this deployment holds right now, by id."""
+    return frozenset(
+        record.id
         for record in await wired.memory.export()
         if MemoryKind(record.kind) is MemoryKind.EPISODIC
+    )
+
+
+async def _resumed_episode(wired: _Wired, before: frozenset[str]) -> Any:
+    """The episode the resumption captured — the one that was not there before it.
+
+    Identified by difference rather than by position, because ``export`` fixes no order
+    and both episodes of this journey carry the same instant: a case reading the "last"
+    one would be asserting about whichever the store happened to yield second.
+    """
+    added = [
+        record
+        for record in await wired.memory.export()
+        if MemoryKind(record.kind) is MemoryKind.EPISODIC and record.id not in before
     ]
-    assert episodes, "the resumption was captured"
-    return episodes[-1]
+    assert len(added) == 1, "the resumption was captured, once"
+    return added[0]
 
 
 # --- ADR-0244 §5: the establishing act still rides this answer ---------------
@@ -1450,3 +1527,130 @@ async def test_the_next_servicing_settles_an_expired_park_and_writes_its_own() -
     assert second.search_not_serviced is SearchNotServiced.ANSWER_AWAITED
     [standing] = await wired.parks.outstanding()
     assert standing.id != stale.id
+
+
+class _GatedSettle:
+    """A ``ParkedReads`` whose **first** ``settle`` is held open inside the store.
+
+    ADR-0244 §19's Arm 11 is stated over two answers "both past clause 4", and the only
+    place that state is reachable is the compare-and-swap itself: pause anywhere later
+    and the first answer has already written, so the second bounces off clause 1's
+    terminal-state check and never reaches the gate at all. Holding the *write* is what
+    puts both callers inside it.
+
+    Every other member delegates, so what is under test is the engine's use of the gate
+    and not a second store's behaviour.
+    """
+
+    def __init__(self, inner: FakeParkedReads) -> None:
+        self._inner = inner
+        self.reached = asyncio.Event()
+        self.release = asyncio.Event()
+        #: How many callers reached the compare-and-swap. Two is the arm's whole point.
+        self.attempts = 0
+
+    async def park(self, record: Any, /) -> bool:
+        return await self._inner.park(record)
+
+    async def get(self, park_id: str, /) -> Any:
+        return await self._inner.get(park_id)
+
+    async def open_park(self, conversation_id: str, /) -> Any:
+        return await self._inner.open_park(conversation_id)
+
+    async def park_of_decision(self, decision_id: str, /) -> Any:
+        return await self._inner.park_of_decision(decision_id)
+
+    async def outstanding(self) -> Any:
+        return await self._inner.outstanding()
+
+    async def settle(self, park_id: str, /, *, disposition: ParkedReadDisposition, at: Any) -> bool:
+        self.attempts += 1
+        if self.attempts == 1:
+            self.reached.set()
+            await self.release.wait()
+        return await self._inner.settle(park_id, disposition=disposition, at=at)
+
+    async def drop_for_conversation(self, conversation_id: str, /) -> int:
+        return await self._inner.drop_for_conversation(conversation_id)
+
+
+async def test_a_cancellation_that_lost_the_gate_interrupts_nothing() -> None:
+    """ADR-0244 §11: **neither party acts on a park the other took**, in the direction
+    a fall-through would break.
+
+    "A cancellation that lost it answers ``NOTHING_TO_CANCEL`` where the answer is
+    already running or done." A cancellation that read the park **open** asked to
+    withdraw the *question*; losing the write means somebody else answered it, and
+    tearing down the dispatch that answer authorised would let a lost race stop a send
+    a won one had already made. The discriminator is this call's own read, which is what
+    "decided by that write and by nothing else" means.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    token = parked.read_confirmation.token
+    park = await _parked(wired)
+    gate = _GatedSettle(wired.parks)
+    wired.engine._parked_reads._store = gate
+    # The cancellation reads the park open and is then held at the write.
+    cancelling = asyncio.create_task(wired.engine.cancel_read(token))
+    await gate.reached.wait()
+
+    answered = await wired.engine.resume(token, approved=True, timeout=PATIENT)
+
+    gate.release.set()
+    cancelled = await cancelling
+
+    assert answered.read_answer is ReadAnswerOutcome.DISPATCHED, "the answer took the park"
+    assert cancelled is ReadCancellation.NOTHING_TO_CANCEL, "and the cancellation took nothing"
+    assert len(wired.searcher.searched) == 1, "the dispatch the answer authorised stands"
+    settled = await wired.parks.get(park.id)
+    assert settled is not None
+    assert settled.disposition is ParkedReadDisposition.APPROVED, "not CANCELLED"
+
+
+async def test_an_answer_whose_decision_was_already_resolved_dispatches_nothing() -> None:
+    """ADR-0244 §6's clause 3, third conjunct: "no decision resolving it is recorded".
+
+    The window it covers is real and narrow: between the trail recording the ``CONFIRM``
+    and the servicing writing its park, no park names that decision and §5's eighth
+    condition does not yet exclude it — so the establishing act may ride it. Without this
+    read the answer would spend the park and consult the policy before the trail refused
+    the second resolution: a question the user has to ask again, for a refusal that was
+    already knowable.
+
+    **The park is left ``OPEN``**, which is what §9 fixes for a clause that precedes the
+    gate — though a decision with a resolution is one no later answer can dispatch
+    either, so what the park keeps is its deadline rather than a second chance.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    park = await _parked(wired)
+    confirmed = await wired.trail.get(park.decision_id)
+    assert confirmed is not None
+    # The act riding that decision, performed through the engine's own operation while
+    # no park named it — which is the window this conjunct is stated over. Recorded
+    # directly here because §5's eighth condition now closes the door the window opens.
+    await wired.trail.record(
+        PermissionDecision.from_confirmation(
+            confirmed,
+            # A ``DENY``, because a resolving ``ALLOW`` must cite the confirmation it
+            # rests on (ADR-0021 §5) and what this case is about is the *existence* of a
+            # resolution rather than which way it went.
+            PermissionRuling(outcome=PermissionOutcome.DENY, reason="answered elsewhere"),
+            id="answered-elsewhere",
+            decided_at=wired.clock.now,
+        )
+    )
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert outcome.read_answer is ReadAnswerOutcome.OPERATION_CHANGED
+    assert wired.searcher.searched == [], "nothing was dispatched"
+    still_open = await wired.parks.get(park.id)
+    assert still_open is not None
+    assert still_open.disposition is ParkedReadDisposition.OPEN, "and the park is not spent"

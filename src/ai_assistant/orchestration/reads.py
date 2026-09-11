@@ -2107,6 +2107,37 @@ class SearchServicer:
         """
         return await self._trail.get(decision_id)
 
+    async def resolution_of(self, decision_id: str) -> PermissionDecision | None:
+        """The decision resolving ``decision_id``, or ``None`` — conclusively.
+
+        ADR-0244 §6's clause 3, third conjunct. **A whole read and never a bounded
+        one**, which is
+        :meth:`~ai_assistant.orchestration.recipient_grants.RecipientGrantOperations._resolution_of`'s
+        own reasoning at a second caller: this is a question about **one named
+        decision** and has no ``limit`` to widen, so the only conclusive answer
+        available on the declared contract is the whole read. A bounded scan would
+        report a confirmation resolved long enough ago that its answer has scrolled
+        past the window as unresolved, and the answer would then spend the park and
+        consult the policy before the trail refused the second resolution.
+
+        **The cost is stated rather than hidden**: it is a read of the whole trail on
+        the path a user's answer takes, and it is taken **before the gate** so that what
+        it buys is a park not spent. ADR-0244 §20 declines a durable, filtered or
+        indexed read of the trail for this decision's sake, and ADR-0235 §11 carries the
+        condition that would fire one.
+
+        Args:
+            decision_id: The recorded ``CONFIRM`` under test.
+
+        Returns:
+            The decision resolving it, or ``None`` where none does.
+
+        Raises:
+            AssistantError: If the trail could not be read.
+        """
+        rows = await self._trail.export()
+        return next((row for row in rows if row.resolves == decision_id), None)
+
     async def rebound(
         self, confirmed: PermissionDecision, parameters: FrozenJsonMapping
     ) -> BoundEgressCall | None:

@@ -1785,10 +1785,14 @@ class LearningLoop:
             history_degraded: Whether reading that tail degraded, reported on
                 :attr:`TurnResult.memory_degraded` beside retrieval's own answer
                 exactly as it is on an ordinary turn.
-            narrow: ADR-0203 §1's supply filter, applied once over the assembled
-                supply. A resume takes no ``ConversationalOperation`` and reaches no
-                planner, so there is no second position for it and ADR-0226 §7's
-                bounded-audience timing clause has no subject here.
+            narrow: ADR-0203 §1's supply filter, applied **once, over the turn's final
+                supply** — after the approved read's records have been appended, which
+                is ADR-0226 §7's timing clause and not a detail. A resume takes no
+                ``ConversationalOperation`` and reaches no planner, so unlike
+                :meth:`_turn` it has one position rather than two; what §7 fixes is
+                that the position is **after** the fourth group, and a pass that
+                evaluated before it would report a supply carrying external records as
+                one that withheld nothing.
 
         Returns:
             The resumed turn's result: the parked turn's goal and plan, this instant's
@@ -1801,16 +1805,27 @@ class LearningLoop:
         supplement, supplement_read = await self._supplement(goal.statement, preceding=preceding)
         memories = preceding + supplement
         retrieved_ids = frozenset(record.id for record in retrieved) | supplement_read
-        context, memories = _narrowed(narrow, context, memories, retrieved_ids)
         # ADR-0226 §6's budget and §7's deduplication, through the **one** function
         # that states them — so a resumed turn's fourth group is bounded and
         # deduplicated exactly as a servicing's is, and a second statement of the two
         # rules cannot drift from the first (ADR-0244 §7).
         fourth = admitted_fourth_group(records, held={record.id for record in memories})
+        # **ADR-0226 §7's timing, and it is the whole reason the filter is applied
+        # here rather than three lines up.** §7 partially supersedes ADR-0204 §2's
+        # timing clause: one evaluation, over the turn's **final** supply — which on a
+        # turn that carries a fourth group is the deduplicated union of all of it. A
+        # pass that evaluated before appending would capture an *unmarked* episode over
+        # a supply the approved read had put external records into, and "#1708's
+        # laundering path runs entirely through this channel's captures".
+        #
+        # **And nothing is narrowed to buy it** (§7): this is a bounded-audience
+        # operation, so the filter subtracts nothing and the records reach the
+        # composing stage exactly as the other three groups do.
+        context, memories = _narrowed(narrow, context, memories + fourth, retrieved_ids)
         return TurnResult(
             goal=goal,
             context=context,
-            memories=memories + fourth,
+            memories=memories,
             plan=plan,
             memory_degraded=degraded or history_degraded,
         )

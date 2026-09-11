@@ -974,7 +974,9 @@ class FakeAssistantEngine:
             # **A parked read is answered through ``resume`` and through no second
             # operation** (ADR-0244 §6), and taken first because every branch below is
             # written about a parked step or a routed park.
-            return self._answer_read(token.handle, approved=approved)
+            return await self._answer_read(
+                token.handle, approved=approved, remember_recipients_until=until
+            )
         if token.handle in self.routed_parked:
             if remember_recipients_until is not None and approved:
                 # A routed park records no ``PermissionDecision`` and carries no
@@ -1103,6 +1105,13 @@ class FakeAssistantEngine:
         asked about recipient grants. A test that wants it in the trail — which the
         establishing path needs, because the answer ``resolves`` it — records it
         there itself, exactly as it seeds every other row.
+
+        **It binds a read park exactly as it binds a step's** (ADR-0244 §5). The act
+        rides a read park's answer "exactly as ADR-0235 §2 rules it, unchanged", and a
+        read park this fake holds no decision for meets §2's binding refusal on its
+        first shape — there is no ``EgressBinding`` to transcribe from — so a consumer
+        driving the act's *successful* path over a parked read hands the decision over
+        here, as it does for a step.
 
         Args:
             handle: The continuation handle the park is answered by.
@@ -1439,7 +1448,13 @@ class FakeAssistantEngine:
 
     # --- the two accumulation legs ----------------------------------------
 
-    def _answer_read(self, handle: str, *, approved: bool) -> TurnOutcome:
+    async def _answer_read(
+        self,
+        handle: str,
+        *,
+        approved: bool,
+        remember_recipients_until: datetime | None,
+    ) -> TurnOutcome:
         """Answer one parked read, or restate that its question is spent (ADR-0244 §6, §9).
 
         **One answer, at most one dispatch, however many times a token is presented.**
@@ -1447,6 +1462,14 @@ class FakeAssistantEngine:
         returns ``ALREADY_SETTLED``, consults nothing and mints nothing — which is the
         clause ADR-0244 §6 states over a durable compare-and-swap, held here by the
         table this fake keeps.
+
+        **The establishing act rides this answer exactly as it rides a step's**
+        (ADR-0244 §5, ADR-0235 §2), and this fake performs the same two refusals through
+        the same helpers — **before the park is spent**, so a refused act leaves the
+        question standing and the same token answers it again without the argument. A
+        fake that ignored the argument would certify a consumer against an engine that
+        refuses it, which is exactly ADR-0026 §7's failure: the request would be
+        reported as landed on a binding no grant may cover.
 
         **The member a dispatching answer carries is scriptable** (:attr:`read_answers`),
         because a fake that performs no real send cannot *reach* ``AUTHORITY_CHANGED``,
@@ -1456,27 +1479,51 @@ class FakeAssistantEngine:
         Args:
             handle: The continuation handle naming the park.
             approved: The user's own answer.
+            remember_recipients_until: The instant a standing request names, or ``None``.
 
         Returns:
             The outcome, carrying ``read_answer`` and never ``read_confirmation``.
+
+        Raises:
+            UngrantableActError: If the act may not ride this park's confirmation, or the
+                expiry is not strictly after the instant the answer would carry. Raised
+                **before the park is spent** (ADR-0235 §1, §2; ADR-0244 §5).
         """
+        collected: _CollectedAct | None = None
+        if remember_recipients_until is not None and handle in self.read_parked:
+            # Refused **before** the park is popped, which is where this fake's read
+            # path meets the same ordering ADR-0235 §2 states for a step's: "nothing was
+            # claimed and the operation may be asked for again".
+            collected = await self._collect_the_act(
+                handle, remember_recipients_until, approved=approved
+            )
         confirmation = self.read_parked.pop(handle, None)
         self.read_dispatching.discard(handle)
+        grant = None if collected is None else await self._establish_recipients(handle, collected)
         if confirmation is None:
-            return TurnOutcome(turn=None, read_answer=ReadAnswerOutcome.ALREADY_SETTLED)
+            return TurnOutcome(
+                turn=None,
+                recipient_grant=grant,
+                read_answer=ReadAnswerOutcome.ALREADY_SETTLED,
+            )
         if not approved:
             # ADR-0170 §4's second shape exactly: ``turn`` ``None``, ``reply`` ``None``
             # (ADR-0244 §10). Nothing is sent and the parked turn's own reply stands.
-            return TurnOutcome(turn=None, read_answer=ReadAnswerOutcome.DECLINED)
+            return TurnOutcome(
+                turn=None,
+                recipient_grant=grant,
+                read_answer=ReadAnswerOutcome.DECLINED,
+            )
         answer = self.read_answers.get(handle, ReadAnswerOutcome.DISPATCHED)
         if answer is not ReadAnswerOutcome.DISPATCHED:
-            return TurnOutcome(turn=None, read_answer=answer)
+            return TurnOutcome(turn=None, recipient_grant=grant, read_answer=answer)
         # ADR-0244 §8: a resumed turn, not a step. ``turn`` is a real ``TurnResult``,
         # ``step`` is ``None``, and the reply is composed — which is where §8 partially
         # supersedes ADR-0052 §3's ``TurnOutcome(turn=None, step=<resolution>)``.
         return TurnOutcome(
             turn=self._read_turn(confirmation),
             reply="Here is what that lookup found.",
+            recipient_grant=grant,
             read_answer=ReadAnswerOutcome.DISPATCHED,
         )
 
@@ -3284,6 +3331,20 @@ class FakeAssistantEngine:
         self.read_parked[handle] = confirmation
         self._read_handles.add(handle)
         return confirmation
+
+    def dispatching_read(self, handle: str) -> None:
+        """Put a parked read's dispatch "in flight", so a cancellation can interrupt it.
+
+        A lever, for :meth:`park`'s own reason: this fake performs no real send, so
+        ADR-0244 §11's second state — a read this process had dispatched and had not
+        completed — is reachable through no sequence of surface calls, and a surface
+        rendering ``INTERRUPTED`` needs it reachable.
+
+        Args:
+            handle: The continuation handle naming the park.
+        """
+        self.read_dispatching.add(handle)
+        self._read_handles.add(handle)
 
     def park_routed(
         self, handle: str, *, operation: RoutableOperation, subject: RoutedListing
