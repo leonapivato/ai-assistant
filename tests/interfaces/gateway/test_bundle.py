@@ -6572,17 +6572,19 @@ def test_a_row_holding_a_spent_token_never_offers_a_control_that_submits_nothing
     assert offer.rstrip().endswith("parkRows.add({ node: item, settle });\n  settle();\n}")
     assert "const answered = spent.has(token);" in offer
     assert "const stranded = unresolved.has(token);" in offer
-    assert (
-        "said.textContent = rowWords(gone, withdrawing, "
-        "parkWords(waiting, out, answered, stranded));" in offer
-    )
+    assert "said.textContent = rowWords(" in offer
+    assert "parkWords(waiting, out, answered, stranded)" in offer
     assert 'said.hidden = said.textContent === "";' in offer
     # Total over the four states a row can be in, and it takes no token: ADR-0177 §8
     # has the front end render the continuation nowhere.
     assert "token" not in words
     assert words.count("return") == 4
     assert "token" not in outer
-    assert outer.count("return") == 2
+    # Four states: the act's own answer, the act in flight, an act whose reply went
+    # unread — where the row says nothing, because every sentence `parkWords` has for
+    # this state ends "nothing was cancelled" (round 6) — and the park's own account.
+    assert outer.count("return") == 3
+    assert 'return unread ? "" : otherwise;' in outer
 
 
 def test_an_abandoned_park_answer_says_which_of_the_three_outcomes_it_got() -> None:
@@ -7739,16 +7741,22 @@ def test_the_cancellation_acts_own_answer_is_written_where_no_refresh_reaches_it
         "listPending",
         "said",
     }
-    assert "said(cancellationWords(done));" in functions["cancelRead"]
+    assert (
+        "said(done === CANCELLATION_UNRESOLVED ? READ_CANCEL_LOST : cancellationWords(done));"
+        in functions["cancelRead"]
+    )
     assert "said(null);" in functions["listPending"]
     # `readPending` reads the node to decide whether the panel is silent, and writes
     # nothing to it: a quiet read of an empty listing closes a panel that says nothing,
     # and a panel holding this statement is not one.
     assert 'if (quiet && el("cancellation-said").hidden) {' in functions["readPending"]
     assert "said(" not in functions["readPending"]
-    # And the answer's own endings write no second sentence about the same event: the act
-    # has already said what happened, in a node they do not touch.
+    # And the answer's own endings write no second sentence about the same event where the
+    # act **settled**: it has already said what happened, in a node they do not touch. An
+    # act whose own reply went unread settles nothing and explains nothing, so they still
+    # owe a sentence there — one that does not say "nothing was cancelled" (round 6).
+    ending = functions["answerConfirmation"]
+    assert "const recorded = cancelled.get(token);" in ending
     assert (
-        "const ending = (otherwise) => (cancelled.has(token) ? null : otherwise);"
-        in (functions["answerConfirmation"])
+        "return recorded === CANCELLATION_UNRESOLVED ? PARK_LOST_WHILE_CANCELLING : null;" in ending
     )

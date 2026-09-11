@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from browser_drive import DESKTOP, PHONE, driving
 from playwright.async_api import expect
-from test_browser_answers import _substitute
+from test_browser_answers import _stop_substituting, _substitute
 
 from ai_assistant.core.types import (
     Confirmation,
@@ -1555,3 +1555,148 @@ async def test_the_acts_answer_is_taken_down_by_the_owners_own_press_and_by_noth
         await drive.page.click("#confirmations-button")
 
         await expect(drive.page.locator("#cancellation-said")).to_be_hidden()
+
+
+# --- an act whose own answer this page could not read (round 6) ----------------
+#
+# ADR-0177 §7's fourth clause reaching the second mutating act on a park: "the request
+# was sent and no response was read is an outcome that is **not known**, whatever the
+# gateway did", and "no front end resolves it by assuming either of the other two". A
+# cancellation in that state establishes none of ADR-0244 §11's three members, so it
+# settles nothing, disables nothing, and is not the end of the act.
+
+
+@pytest.mark.parametrize(
+    ("body", "shape"),
+    [('{"cancellation": null}', "a null member"), ("{}", "no member at all")],
+    ids=["null-member", "no-member"],
+)
+async def test_a_success_this_page_cannot_read_as_an_outcome_settles_nothing(
+    gateway_browser: Browser, tmp_path: Path, body: str, shape: str
+) -> None:
+    """Adversarial review's round 6, second finding, in both of its shapes.
+
+    A `200` carrying ``{"cancellation": null}`` or no member at all is a response this
+    browser read and cannot read *as* an outcome. Recording it as settled went wrong in
+    two opposite directions at once: the stored ``null`` left **Cancel this lookup**
+    enabled over a token ``cancelRead`` returns early on — a control that submits
+    nothing, which is the silent refusal this surface spends the most words preventing —
+    and the stored ``undefined`` disabled every control on the row over a state nothing
+    established.
+
+    So neither is settled. The act is recorded as unresolved, the page says the outcome
+    is not known, every control stays exactly as it was, and pressing the act again
+    really sends a second request — which is the whole of what "not the end of the act"
+    means here.
+
+    Args:
+        gateway_browser: The one browser this run launched.
+        tmp_path: The case's data directory.
+        body: The response body the gateway's own is replaced with.
+        shape: What that body is, for the case's name.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        question = _read()
+        drive.engine.read_parked["r-1"] = question
+        drive.engine._read_handles.add("r-1")
+        drive.engine.turn_outcome = TurnOutcome(
+            turn=None, conversation_id="c-1", read_confirmation=question
+        )
+        # Driven on the row a turn renders with its own answer, which is the row that
+        # survives the listing read this act starts — the park really is withdrawn at the
+        # hub whatever body the browser then reads, so the recovery listing has nothing
+        # left to render and the question's other row goes with it.
+        await drive.page.fill("#utterance", "what did the survey say")
+        await drive.page.click("#ask-form button[type=submit]")
+        await expect(drive.page.locator("#answer-body")).to_contain_text(
+            "This lookup is parked until you answer it."
+        )
+        row = drive.page.locator("#answer-body .confirmation-row").first
+        await _substitute(drive, path="/confirmation/cancel-read", body=body)
+        await row.locator("button", has_text="Cancel this lookup").click()
+
+        await expect(drive.page.locator("#cancellation-said")).to_contain_text("is not known")
+        # Nothing is settled, so nothing is disabled — and the act is still available.
+        await expect(row.locator("button", has_text="Cancel this lookup")).to_be_enabled()
+        await expect(row.locator("button", has_text="Yes, do it")).to_be_enabled()
+        await expect(row.locator("button", has_text="No")).to_be_enabled()
+        # The settled statement, and not the word — `READ_CANCEL_LOST` says the page
+        # cannot tell whether the question was withdrawn, which is the opposite claim.
+        said = await drive.page.inner_text("#cancellation-said")
+        assert "That question is withdrawn" not in said, shape
+
+        await _stop_substituting(drive)
+        await row.locator("button", has_text="Cancel this lookup").click()
+
+        # The second press really sends: a lost reply is not the end of the act. The hub
+        # had already taken the question on the first one, so what it answers now is the
+        # member that says so — which is the act working, not a second withdrawal.
+        await expect(drive.page.locator("#cancellation-said")).to_contain_text(
+            "There was nothing here to cancel"
+        )
+        assert [one for one in drive.engine.calls if one[0] == "cancel_read"] == [
+            ("cancel_read", {"token": "r-1"}),
+            ("cancel_read", {"token": "r-1"}),
+        ]
+
+
+@pytest.mark.parametrize("cancel_first", [True, False], ids=["cancel-first", "answer-first"])
+async def test_an_unresolved_cancellation_is_never_reported_as_nothing_cancelled(
+    gateway_browser: Browser, tmp_path: Path, cancel_first: bool
+) -> None:
+    """Adversarial review's round 6, first finding, in both response orderings.
+
+    A cancellation whose reply this browser never read leaves the answer's own endings
+    still owing a sentence — the act explains nothing, because nothing about it is known.
+    What they must not say is ``PARK_LOST``'s "Nothing was re-sent and nothing was
+    cancelled", which is false the moment a cancellation has been asked for: that is
+    ADR-0139 §4's resolution-by-omission, announced about an act the owner performed.
+
+    So both unresolved acts are reported as unresolved, and the ordering does not change
+    it. Where the act went first, its record is already there when the answer ends and
+    the combined sentence is written; where the answer went first, the act clears the
+    panel on its way in — a new act is beginning — and its own unresolved account stands
+    in the node no refresh reaches.
+
+    **Driven sequentially rather than concurrently**, because the page state the finding
+    is about is what ``cancelled`` holds when an ending runs, and two failed requests
+    reach that state without needing to be in flight together.
+
+    Args:
+        gateway_browser: The one browser this run launched.
+        tmp_path: The case's data directory.
+        cancel_first: Whether the act's reply is lost before the answer's or after.
+    """
+
+    async def _unreachable(token: ContinuationToken, /) -> ReadCancellation:
+        raise TransportError("the hub is not there")
+
+    async def _also_unreachable(
+        token: ContinuationToken,
+        /,
+        *,
+        approved: bool,
+        timeout: timedelta,  # noqa: ASYNC109 — the Protocol's own signature
+        remember_recipients_until: datetime | None = None,
+    ) -> TurnOutcome:
+        raise TransportError("the hub is not there")
+
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.read_parked["r-1"] = _read()
+        drive.engine._read_handles.add("r-1")
+        drive.engine.cancel_read = _unreachable  # type: ignore[method-assign]
+        drive.engine.resume = _also_unreachable  # type: ignore[method-assign,assignment]
+
+        await drive.page.click("#confirmations-button")
+        await drive.page.wait_for_selector("#confirmation-list .confirmation-row")
+        row = drive.page.locator("#confirmation-list .confirmation-row").first
+        presses = ["Cancel this lookup", "Yes, do it"]
+        for label in presses if cancel_first else list(reversed(presses)):
+            await row.locator("button", has_text=label).click()
+            await expect(drive.page.locator("#confirmations")).to_contain_text("is not known")
+
+        said = await drive.page.inner_text("#confirmations")
+        assert "nothing was cancelled" not in said
+        # The act's own unresolved account is in the node no refresh reaches, whichever
+        # way round the two replies were lost.
+        assert "cancellation" in await drive.page.inner_text("#cancellation-said")

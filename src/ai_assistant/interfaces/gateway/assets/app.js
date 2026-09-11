@@ -1336,6 +1336,37 @@ const READ_CANCELLATION_WORDS = {
     "running in this assistant.",
 };
 
+// A cancellation this page performed and never read an answer to (ADR-0177 §7's fourth
+// clause; adversarial review's round 6).
+//
+// **The third state `cancelled` has to carry, and it is not a member.** ADR-0244 §11
+// closes `ReadCancellation` at three, and every one of them is something the hub
+// *established*: the question withdrawn, a dispatch stopped, or nothing here to cancel.
+// An act whose reply this browser never read establishes none of them — "the request was
+// sent and no response was read is an outcome that is **not known**, whatever the gateway
+// did" — so recording one of the three for it would be the resolution ADR-0139 §4
+// forbids, and recording nothing at all loses the fact that an act went out, which is
+// what let the answer's own ending write "nothing was cancelled" over it.
+//
+// **A `Symbol` rather than a string**, because every other value this map holds is one of
+// `core`'s own enum values and a string sentinel is a tenth member waiting to collide
+// with one.
+const CANCELLATION_UNRESOLVED = Symbol("cancellation-unresolved");
+
+// Whether a value is one of the three members ADR-0244 §11 closes the enumeration at.
+//
+// **Asked of a `200`'s own member before anything is recorded** (round 6). A body
+// carrying `{"cancellation": null}`, or no member at all, is a response this page read
+// and cannot read *as* an outcome — and an earlier shape stored those as settled states,
+// which left the act's control enabled over a token `cancelRead` returned early on, or
+// disabled over a value nothing established. Neither is a state the hub reached.
+//
+// `Object.hasOwn` rather than a truthiness test, for `cancellationWords`' reason: a value
+// naming an inherited property would otherwise pass as a member.
+function isCancellation(member) {
+  return Object.hasOwn(READ_CANCELLATION_WORDS, member);
+}
+
 // The same refusal as `READ_ANSWER_UNREADABLE`, one vocabulary over and for its reason.
 const READ_CANCELLATION_UNREADABLE =
   "What that cancellation did arrived as something this browser has no words for, so it " +
@@ -3338,7 +3369,13 @@ function offerApproval(item, token, read) {
     // and is converted into neither an outcome nor a refusal … What tells the user is
     // `cancel_read`'s own answer, which is the act they performed" — and all three of
     // its members leave the park unanswerable, so the pair goes with the sentence.
-    const gone = cancelled.has(token) ? cancelled.get(token) : null;
+    // **A *settled* answer, and not merely a recorded act** (round 6). All three members
+    // leave the park unanswerable, so the pair goes with the sentence; an act whose reply
+    // this page never read establishes none of that, so it leaves every control exactly
+    // as it was and says so in the panel's own node instead.
+    const recorded = cancelled.get(token);
+    const gone =
+      recorded === undefined || recorded === CANCELLATION_UNRESOLVED ? null : recorded;
     const withdrawing = cancelling.has(token);
     approve.disabled = out || answered || gone !== null;
     decline.disabled = out || answered || gone !== null;
@@ -3353,7 +3390,12 @@ function offerApproval(item, token, read) {
       withdraw.disabled = withdrawing || gone !== null;
     }
     stop.hidden = !waiting;
-    said.textContent = rowWords(gone, withdrawing, parkWords(waiting, out, answered, stranded));
+    said.textContent = rowWords(
+      gone,
+      withdrawing,
+      recorded === CANCELLATION_UNRESOLVED,
+      parkWords(waiting, out, answered, stranded)
+    );
     said.hidden = said.textContent === "";
   };
   let stopping = null;
@@ -3413,11 +3455,21 @@ function offerApproval(item, token, read) {
 // It takes the member and the flag rather than the token, which is `parkWords`' own
 // rule and for its reason: ADR-0177 §8 has the front end render the continuation
 // nowhere, so nothing that computes a text node takes one.
-function rowWords(cancellation, withdrawing, otherwise) {
+function rowWords(cancellation, withdrawing, unread, otherwise) {
   if (cancellation !== null) {
     return cancellationWords(cancellation);
   }
-  return withdrawing ? READ_CANCEL_SENDING : otherwise;
+  if (withdrawing) {
+    return READ_CANCEL_SENDING;
+  }
+  // **A row says nothing while a cancellation of it is unaccounted for** (adversarial
+  // review's round 6). Every sentence `parkWords` has for a park whose answer went
+  // unread ends "Nothing was re-sent and nothing was cancelled" — true of this page's
+  // conduct until the owner asks for a cancellation, and false from that moment on. The
+  // account is not lost by the silence: the panel's own node carries what became of the
+  // act, and the fault slot carries `PARK_LOST_WHILE_CANCELLING` for the answer, so both
+  // unresolved acts are stated on the same screen and neither is stated twice.
+  return unread ? "" : otherwise;
 }
 
 // The one recovery route (ADR-0177 §8). A browser that has been closed and reopened,
@@ -3681,7 +3733,13 @@ async function answerConfirmation(token, approved, stopping) {
   // **Read at the ending rather than once at the top**, because the act's reply may land
   // at any point while this one is out; and **one closure rather than four copies**
   // (#1622's "one check, shared"), so a fifth ending cannot be written without it.
-  const ending = (otherwise) => (cancelled.has(token) ? null : otherwise);
+  const ending = (otherwise) => {
+    const recorded = cancelled.get(token);
+    if (recorded === undefined) {
+      return otherwise;
+    }
+    return recorded === CANCELLATION_UNRESOLVED ? PARK_LOST_WHILE_CANCELLING : null;
+  };
   // Claimed before the first `await`, so two clicks in one turn of the event loop —
   // the two rows of one park, or one row twice — cannot both get past the guard.
   spent.add(token);
@@ -3900,6 +3958,27 @@ const READ_CANCEL_LOST =
   "the question was withdrawn or whether a lookup had already been sent for it. Press " +
   "Confirmations to read what is still waiting.";
 
+// What this page says when **both** acts on one park went unanswered (ADR-0177 §7's
+// fourth clause; adversarial review's round 6).
+//
+// A cancellation whose reply this browser never read does not explain the answer it was
+// aimed at, so the answer's own endings still owe a sentence — but `PARK_LOST`'s is false
+// here, because it says "nothing was cancelled" and a cancellation was asked for. Neither
+// act is resolved, and §7 is that neither may be resolved by omission: "no front end
+// resolves it by assuming either of the other two".
+//
+// **One sentence for all four of those endings**, because what it has to say is the same
+// at each of them — two acts went out, no reply was read for either, and nothing was
+// re-sent. Which *way* the answer's reply was lost is the distinction `PARK_LOST`,
+// `PARK_UNRESOLVED`, `PARK_REFUSAL_NOT_KNOWN` and `PARK_REPLY_UNREADABLE` draw between
+// themselves, and it is not a distinction about the cancellation at all.
+const PARK_LOST_WHILE_CANCELLING =
+  "Neither of the two things asked about this park got a reply this browser could read: " +
+  "the answer, and the request to cancel the lookup. So neither outcome is known — the " +
+  "action may have been carried out, and the cancellation may or may not have reached " +
+  "it — and nothing was re-sent. " +
+  PARK_WHERE_NOW;
+
 // One cancellation, relayed (ADR-0244 §11). The page performs the act and renders what
 // came back; it rules on nothing, records nothing and infers nothing.
 //
@@ -3915,7 +3994,14 @@ const READ_CANCEL_LOST =
 async function cancelRead(token) {
   // The park's own guard, taken before the row's, for `answer`'s reason: a click on a
   // row the registry has not reached yet must not start a second request either.
-  if (cancelling.has(token) || cancelled.has(token)) {
+  //
+  // **A settled answer closes this act; an unresolved one does not** (round 6). What
+  // closes it is an answer the hub gave, so a park whose cancellation went unread is one
+  // the owner may ask about again — exactly as a park whose *answer* went unread is
+  // answerable again (#1621), and for that clause's reason. Reading `cancelled.has` here
+  // would make one lost reply the end of the act for the life of the page.
+  const held = cancelled.get(token);
+  if (cancelling.has(token) || (held !== undefined && held !== CANCELLATION_UNRESOLVED)) {
     return;
   }
   fault(null, "confirmations");
@@ -3937,7 +4023,11 @@ async function cancelRead(token) {
   const noticed = (named) => {
     refusal = named;
   };
-  let lost = false;
+  // What this act established, as one of exactly three things (ADR-0139 §4): a member the
+  // hub answered with, the unresolved sentinel, or `null` for a refusal that is known
+  // **not** to have landed. An earlier shape kept two variables and read `null` as both
+  // "a refusal" *and* "a `200` whose member was `null`" — one name with two meanings, and
+  // the second of them silently settled a park nothing had settled (round 6).
   let done = null;
   try {
     const body = await relay(
@@ -3949,8 +4039,13 @@ async function cancelRead(token) {
       noticed
     );
     if (body !== null) {
-      done = body.cancellation;
-      cancelled.set(token, done);
+      // **A `200` this page cannot read as one of the three establishes nothing**
+      // (round 6). `{"cancellation": null}` and a body with no member at all are both
+      // responses this browser read and cannot read *as* an outcome, and the act may
+      // well have been performed — so neither reading them as done nor reading them as
+      // never-sent is a conclusion this page has (ADR-0139 §4). They are the unresolved
+      // state, which leaves the control usable and says the outcome is not known.
+      done = isCancellation(body.cancellation) ? body.cancellation : CANCELLATION_UNRESOLVED;
     } else {
       // **A refusal is not evidence that nothing was cancelled** (ADR-0177 §7's third
       // and fourth clauses, ADR-0139 §4). The test is `act`'s and `answerConfirmation`'s,
@@ -3961,22 +4056,22 @@ async function cancelRead(token) {
       // so this page says the outcome is not known rather than leaving `FAULTS`'s
       // "nothing was asked" standing over a mutating act.
       const named = refusal !== null && typeof refusal.fault === "string";
-      lost = !named || UNKNOWN_FAULTS.has(refusal.fault);
+      done = !named || UNKNOWN_FAULTS.has(refusal.fault) ? CANCELLATION_UNRESOLVED : null;
     }
   } catch (_) {
     // No response was read. `relay` keeps the rejection rather than swallowing it
     // (round 8's blocker), and what reaches here is a request whose outcome is not
-    // known — so nothing is recorded, the control comes back, and the sentence says so.
-    lost = true;
+    // known — so nothing is *settled*, the control comes back, and the act is recorded
+    // as the unresolved thing it is rather than forgotten.
+    done = CANCELLATION_UNRESOLVED;
   } finally {
-    // Written before the refresh so a row settles on the fact this call established
-    // rather than on the one it is about to leave behind.
+    // Recorded before the refresh so every row of the park settles on what this call
+    // established rather than on the state it is leaving behind.
+    if (done !== null) {
+      cancelled.set(token, done);
+    }
     cancelling.delete(token);
     refreshParks();
-  }
-  if (lost) {
-    fault(READ_CANCEL_LOST, "confirmations");
-    return;
   }
   if (done === null) {
     // A condition the gateway named and this page reads as a request the hub received
@@ -3997,7 +4092,7 @@ async function cancelRead(token) {
   // rule and for its reason: `readPending` reaches the same unbounded `relay`, and a
   // stalled listing read must not hold this act's ending. Nothing here depends on it —
   // the sentence is already written, in a node that read does not touch.
-  said(cancellationWords(done));
+  said(done === CANCELLATION_UNRESOLVED ? READ_CANCEL_LOST : cancellationWords(done));
   readPending(false);
 }
 
