@@ -6949,9 +6949,17 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
     ``read_answer`` states what became of an answer to a question already put, and
     ``read_confirmation`` is a question **this turn parked**, which appears in the
     exchange that raised it. Neither is a plan step and neither touches the blocks
-    below: §1 is explicit that "the turn does not park, is not suspended and does not
-    fail", so the plan, the step account and the exit code this function computes are
-    exactly what they would have been had no read parked at all.
+    below.
+
+    **A parked question does not fail its turn, and a refused answer does fail its
+    resume.** §1 is explicit that "the turn does not park, is not suspended and does not
+    fail", so a turn carrying ``read_confirmation`` has the exit code it would have had
+    had no read parked at all — the question is work still to do, not work that went
+    wrong. An **answer**, though, was an instruction the user gave, and
+    :func:`_render_read_answer` reports the five members on which it was not carried
+    out; two of those leave the question standing, so a zero exit there would let a
+    script read "everything was resolved" off a run that resolved nothing. Adversarial
+    review, round 3, ``major``.
 
     Returns:
         Whether this turn's deterministic account says the system failed to do what
@@ -6979,7 +6987,7 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
     # and `read_confirmation` is a question this turn has just raised. The type
     # refuses an outcome carrying both, so the order between them is never read by a
     # user — what the order fixes is that each sits after the reply it is about.
-    _render_read_answer(outcome.read_answer)
+    unanswered = _render_read_answer(outcome.read_answer)
     if outcome.read_confirmation is not None:
         _render_parked_read(outcome.read_confirmation)
     routed = outcome.routed
@@ -6987,7 +6995,7 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
         # ADR-0197 §8: `routed` and `step` are never both present, and a routed pass
         # carries no turn — so there is no plan below and no step account, and the
         # routed account is the whole of what this turn deterministically did.
-        return _render_routed(routed)
+        return _render_routed(routed) or unanswered
     if turn is not None:
         plan = turn.plan
         if plan.rationale:
@@ -6999,8 +7007,8 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
 
     step = outcome.step
     if step is None or step.confirmation is not None:
-        return False
-    return _render_step(step)
+        return unanswered
+    return _render_step(step) or unanswered
 
 
 def _render_reply(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None) -> None:
@@ -7203,7 +7211,9 @@ def _render_search_not_serviced(  # noqa: C901 — one arm per member of a close
             _print("[dim]Note: that lookup produced nothing this turn could use.[/]")
 
 
-def _render_read_answer(member: ReadAnswerOutcome | None) -> None:
+def _render_read_answer(  # noqa: PLR0911 — one arm and one verdict per member of a closed seven-member vocabulary, and ADR-0242 §9 forbids the mapping that would collapse them
+    member: ReadAnswerOutcome | None,
+) -> bool:
     """ADR-0244 §9's statement for what became of an answer to a parked read.
 
     **One fixed statement per member, written out as a literal**, which is
@@ -7238,10 +7248,18 @@ def _render_read_answer(member: ReadAnswerOutcome | None) -> None:
     fired: a member is not a diagnosis, and ADR-0235 §8's third clause bars a
     statement asserting a cause the value does not establish.
 
-    :attr:`~ai_assistant.core.types.ReadAnswerOutcome.DISPATCHED` claims that the
-    lookup was **made**, not that it returned anything useful — §8's own split, where
-    the turn and the reply carry what it produced and this line does not describe
-    them.
+    :attr:`~ai_assistant.core.types.ReadAnswerOutcome.DISPATCHED` says the **answer**
+    was acted on and does **not** say a request left the device. §9 spells the member
+    "the read ran", but §8 names four ways a dispatched read yields nothing — "it was
+    **refused**, expired, interrupted or returned nothing" — and the first of those is
+    reached *before* anything is sent: ADR-0231 §6's route puts ADR-0029 §2's checks
+    and ADR-0194's spend admission ahead of the send, so an approved read on an
+    exhausted ceiling comes back ``DISPATCHED`` beside a ``SPEND_EXHAUSTED`` carrier.
+    A line saying it was *made* would then contradict the statement printed directly
+    above it on the same screen. What the member establishes is that the approval was
+    carried out once and cannot be again (§6), and that is what the statement says —
+    pointing at the reply and the carrier for what came of it rather than describing
+    them. Adversarial review, round 3, ``blocker``.
 
     **And** :attr:`~ai_assistant.core.types.ReadAnswerOutcome.ALREADY_SETTLED` **does
     not say an answer stands**, because one of the three states it covers records
@@ -7256,47 +7274,72 @@ def _render_read_answer(member: ReadAnswerOutcome | None) -> None:
     **Silence where the member is absent** is an outcome that answered no parked read,
     and the surface then says nothing about one at all.
 
+    **What it answers is also the exit code**, which is #531's rule read on this
+    vocabulary: only the two members on which the user's answer was carried out are
+    success. ``DISPATCHED`` did what the yes asked for and ``DECLINED`` did what the no
+    asked for; the other five carried out **neither**, and two of them leave the
+    question **still open** — ADR-0244 §6's availability clauses precede the gate, so
+    ``UNAVAILABLE_NOW`` and ``OPERATION_CHANGED``'s subject-or-binding grounds settle
+    nothing. A caller must not read "everything was resolved" off a run that left one
+    standing, which is :func:`_drive_resume`'s own clause for a card it could not put.
+    Adversarial review, round 3, ``major``.
+
     Args:
         member: What ``TurnOutcome.read_answer`` carried, or ``None``.
+
+    Returns:
+        Whether the user's answer was **not** carried out, which the caller folds into
+        the process exit code.
     """
     match member:
         case None:
-            return
+            return False
         case ReadAnswerOutcome.DISPATCHED:
-            _print("[dim]Note: you approved that lookup and it was made, once.[/]")
+            _print(
+                "[dim]Note: your approval was acted on, once, and it cannot be acted "
+                "on again. What that lookup did or did not turn up is said above, and "
+                "not here.[/]"
+            )
+            return False
         case ReadAnswerOutcome.DECLINED:
             _print(
                 "[dim]Note: that lookup was declined. Nothing was sent, your answer is "
                 "recorded, and the reply you already had stands unchanged.[/]"
             )
+            return False
         case ReadAnswerOutcome.ALREADY_SETTLED:
             _print(
                 "[dim]Note: that question had already been settled, so this answer "
                 "decided nothing — nothing was sent and nothing was recorded. "
                 "Whatever settled it stands.[/]"
             )
+            return True
         case ReadAnswerOutcome.EXPIRED:
             _print(
                 "[dim]Note: that question ran out of time before it was answered, so "
                 "nothing was sent and nothing was ruled. It cannot be answered now.[/]"
             )
+            return True
         case ReadAnswerOutcome.AUTHORITY_CHANGED:
             _print(
                 "[dim]Note: that lookup was not made. Your answer was recorded, but at "
                 "the moment you gave it the lookup was not one this system would "
                 "permit, and the question is spent.[/]"
             )
+            return True
         case ReadAnswerOutcome.OPERATION_CHANGED:
             _print(
                 "[dim]Note: that lookup was not made and nothing was sent. It could no "
                 "longer be carried out as the question you were shown described it, so "
                 "your answer was not applied to anything else.[/]"
             )
+            return True
         case ReadAnswerOutcome.UNAVAILABLE_NOW:
             _print(
                 "[dim]Note: that lookup cannot be made here now. Nothing was ruled, "
                 "nothing was recorded and nothing was sent.[/]"
             )
+            return True
 
 
 def _render_parked_read(confirmation: Confirmation) -> None:
@@ -11325,9 +11368,23 @@ def _render_read_terms(confirmation: Confirmation) -> None:
     is the argument ``assistant cancel-read`` takes. It is the engine's own opaque
     handle, interpreted by nothing here (ADR-0042 §4).
 
-    **The offer goes through this surface's ratified hint idiom rather than through a
-    printed line of its own**, and all three of its parts are load-bearing here for the
-    reasons #984, #1013 and #1023 record. ``ContinuationToken.handle`` is an
+    **And it carries** ``--`` **before the handle, which the idiom itself does not
+    supply.** :func:`_argument` answers "where does this argument end" and
+    :func:`_is_pasteable` "does this survive being displayed"; **neither answers "where
+    does the option list end"**, and quoting does not stop a shell's callee parsing a
+    leading hyphen as an option. ``Identifier`` requires encodability and nothing more,
+    so ``--help`` is an admissible handle and ``assistant cancel-read --help`` pastes as
+    a command that prints help, exits ``0`` and withdraws nothing — #984's failure ("a
+    valid command against the wrong argument") arriving through option parsing instead
+    of through word splitting. The separator is added here rather than inside
+    :func:`_argument` because **eight sibling hint sites on this surface have the same
+    gap** and changing the shared helper for one of them would be a cross-cutting
+    change this lane's fence does not hold; they are filed as #2240. Adversarial review,
+    round 2 ``minor``, round 3 ``major``.
+
+    **The rest of the offer goes through this surface's ratified hint idiom rather than
+    through a printed line of its own**, and all three of its parts are load-bearing
+    here for the reasons #984, #1013 and #1023 record. ``ContinuationToken.handle`` is an
     ``Identifier``, which requires encodability and nothing more — so an interior space
     is admissible and an unquoted line would name a different argument when pasted
     (:func:`_argument`); a character :func:`_safe` replaces makes the displayed command
@@ -11352,7 +11409,7 @@ def _render_read_terms(confirmation: Confirmation) -> None:
         "the same as saying no: it records no answer either way.[/]"
     )
     _print_hint(
-        f"  [dim]Withdraw it with:[/] assistant cancel-read {_argument(handle)}"
+        f"  [dim]Withdraw it with:[/] assistant cancel-read -- {_argument(handle)}"
         if _is_pasteable(handle)
         else f"  [dim]Withdraw it with 'assistant cancel-read'.[/] {_uncopyable('Its handle')}"
     )
