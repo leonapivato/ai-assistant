@@ -1,6 +1,6 @@
 # 238. A destination the user chose may be told what the turn knows, and the searching that follows runs under a per-conversation budget
 
-- Status: Partially superseded by ADR-0241 (§13's `core`-surface clause in one limb — `WebSearcher` gains one argument, `timeout: timedelta`, on `search`; `ActionPolicy`, `AuditTrail` and `MemoryStore` are untouched, `WebSearcher` gains no member and no widened return, and every other clause of §13 binds entire — and §11's closure of `SearchDisposition` at exactly sixteen members in that count alone, including its no-seventeenth sentence (the enumeration becomes eighteen: one member for a deadline expiry and one for a fault the searcher itself raised, #2112; its members, their values, the injectivity of every mapping into it, its no-message rule, its exclusion of `SearchRefusal.NO_RESULT` and its audit clauses all stand). Those two scopes, and nothing else in this ADR) and ADR-0242 (§1's `record` refusal clause, in the type of the refusal alone: the ground on which a record duplicates a live record's destination set raises `DuplicateDestinationTrustError`, a subclass, because it is the one ground on which the user's recourse is no act at all; the duplicate-`id` and empty-set grounds keep raising `InvalidDestinationTrustError` unchanged, the base class still catches all three, and no check is moved and no atomicity weakened; everything else of §1 stands entire — the two-member vocabulary, the fail-closed absence, the set-by-a-user-act-and-nothing-else clause, the record's five fields, the canonical-destination validator, the `UNCHOSEN` construction refusal, the five-member store surface with its no-member-added clause, `record`'s atomicity, `export`'s data right and `trust_of`'s comparison-not-inference rule — as do §§2-18, and §14's surface assignment is discharged rather than superseded)
+- Status: Partially superseded by ADR-0241 (§13's `core`-surface clause in one limb — `WebSearcher` gains one argument, `timeout: timedelta`, on `search`; `ActionPolicy`, `AuditTrail` and `MemoryStore` are untouched, `WebSearcher` gains no member and no widened return, and every other clause of §13 binds entire — and §11's closure of `SearchDisposition` at exactly sixteen members in that count alone, including its no-seventeenth sentence (the enumeration becomes eighteen: one member for a deadline expiry and one for a fault the searcher itself raised, #2112; its members, their values, the injectivity of every mapping into it, its no-message rule, its exclusion of `SearchRefusal.NO_RESULT` and its audit clauses all stand). Those two scopes, and nothing else in this ADR) and ADR-0242 (§1's `record` refusal clause, in the type of the refusal alone: the ground on which a record duplicates a live record's destination set raises `DuplicateDestinationTrustError`, a subclass, because it is the one ground on which the user's recourse is no act at all; the duplicate-`id` and empty-set grounds keep raising `InvalidDestinationTrustError` unchanged, the base class still catches all three, and no check is moved and no atomicity weakened; everything else of §1 stands entire — the two-member vocabulary, the fail-closed absence, the set-by-a-user-act-and-nothing-else clause, the record's five fields, the canonical-destination validator, the `UNCHOSEN` construction refusal, the five-member store surface with its no-member-added clause, `record`'s atomicity, `export`'s data right and `trust_of`'s comparison-not-inference rule — as do §§2-18, and §14's surface assignment is discharged rather than superseded) and ADR-0245 (§2's validator clause in the rule it states — a `SearchSupply` refuses a `records` member whose `placement` falls outside the two combinations the superseding ADR's §2 admits, rather than any member whose reach is not `PlacementReach.ANYONE`, its *"The refusal is on the type"* limb restated verbatim; §3's first clause, whose *"A record whose reach is `PlacementReach.OWNER` is not supplied to a `QueryComposer` on any conforming path"* ceases to be true of a `DERIVED` narrowing on a `USER_CHOSEN` destination and whose first sentence ceases to be exclusive, `Placement.set_by` deciding beside `Placement.reach`, its *"with no field, member, axis, tag or band added"* limb restated and honoured; §11's enumeration of what the record gains, in that enumeration alone, which takes a fourth count; §12's second clause in the rule it restates, its property and its per-record and regardless-of-selection limbs restated entire over the narrowed excluded set; and §15 Arm 4, replaced by that ADR's §11 Arm B. Those five scopes, and nothing else in this ADR — §1, §§4-10, §13, §14 and §§16-18 bind entire, §2's remaining clauses and its cross-turn promise are relied on as written and the promise is made reachable, §3's second, third and fourth clauses bind verbatim, and §11's and §12's remaining clauses bind entire)
 - Date: 2026-09-05
 - **Partially superseded and amended: 2026-09-09 by ADR-0241** — two scopes superseded,
   one amended, and nothing else in this ADR. §16 defers *"a per-conversation bound on
@@ -131,6 +131,76 @@
   This ADR's `Status` line read `Accepted`, so it takes the leading `Partially superseded by`
   token and `Accepted` is dropped, as `docs/adr/template.md` requires. Appended note per
   ADR-0070 §1; no text below is rewritten. Refs #2178, #2168, #1908.
+
+- **Partially superseded: 2026-09-11 by [ADR-0245](0245-reach-is-audience-control-so-a-derived-owner-reach-record-composes-a-search-bound-to-a-destination-the-user-chose.md)
+  — §2's validator clause in the rule it states, §3's first clause, §11's enumeration of what
+  the record gains in that enumeration alone, §12's second clause in the rule it restates, and
+  §15 Arm 4.** Those five scopes, and nothing else.
+
+  **The contradiction, driven rather than argued.** §2 rules that *"What a later turn has
+  instead is the captured episode … That is what resolves “find more about **that**” across
+  turns"*, and §3's first clause rules that *"A record whose reach is `PlacementReach.OWNER` is
+  not supplied to a `QueryComposer` on any conforming path"*. A stamped episode of a
+  conversation that has read a search result carries reach `OWNER` with setter `DERIVED`, so §3
+  withholds the record §2 names: #2224 drove it live at `8f40cf09`, read the placements out of
+  the store, and watched the audit's `withheld` climb one per turn while `supplied` stayed
+  zero, the composer declining on every later turn. §15 Arm 1b — milestone 31's own cross-turn
+  exit arm — therefore had no reachable producer. Both halves were normative and both were
+  implemented correctly, which is why the repair is an ADR and not a fix.
+
+  **The owner ruled the axis, on #2224 on 2026-09-11.** Reach and the withheld classes are
+  **audience control**: they protect the owner from people the assistant talks to — a
+  roommate, a house cleaner, another user of the hub — and not from a search provider the
+  owner chose and granted. §3 borrowed that axis to answer a provider-disclosure question the
+  recipient grant (ADR-0193), §1's destination trust and §5's closed loop already answer. So
+  ADR-0245 §1 admits, on a supply built for a destination whose recorded trust is
+  `USER_CHOSEN`, a record whose reach is `OWNER` **and** whose setter is `DERIVED` — the
+  conversation's own stamped episodes and the turn's retrieval-selected records included — and
+  §2's cross-turn promise is honoured rather than replaced.
+
+  **What ADR-0245 does not loosen.** ADR-0199 §3's Tier 0 floor, everywhere. Everything §3
+  excludes today on an `UNCHOSEN` destination, where §2's clause that a non-empty `records` is
+  built only for a `USER_CHOSEN` destination binds entire. A narrowing the owner made by their
+  own act (`PlacementSetter.OWNER_ACT`, ADR-0217 §7) and a narrowing a model proposed
+  (`PROPOSED`), both of which stay refused at construction on a destination of any trust —
+  ADR-0245 §2 states the ground and ADR-0245 §12 names what would fire a change. No
+  `about_person` filter is added at the supply, ADR-0217 §1's vocabulary clause keeping the
+  class-on-a-channel rule distinct from the record's placement.
+
+  **Where the enforcement stays, and what the version does.** The refusal stays on the type,
+  because §2's own argument for relocating ADR-0093 §10's bound — *"a caller able to widen the
+  read is a caller able to defeat the bound"* — is unweakened by changing one predicate inside
+  the validator and would be lost by moving the check to the builder. The validator reads
+  `Placement` and no destination fact, so `core` stays blind to trust; §2's `UNCHOSEN` branch
+  stays at the one construction site. No `core` member, Protocol member, error or `Settings`
+  field is added, and `PROTOCOL_VERSION` does **not** move: `SearchSupply` is named in no
+  module of `wire/` and none of `interfaces/`, so it crosses no frame (ADR-0124 §9).
+
+  **§11 takes one further count** — the number of records supplied to the composer whose reach
+  is not `ANYONE` — on §11's own ground that *"A deployment that has given up a structural
+  property owes itself a number"*: `withheld` now **falls** on the same deployment, and without
+  the new count nothing measures the class that flows. §11's one-event, one-key, counts-only,
+  no-identifier and no-trust-written clauses, and its `SearchDisposition` clause as ADR-0241
+  left it, are untouched.
+
+  **What is relied upon as written.** §1 entire, and ADR-0245 §5 quotes its
+  set-by-a-recorded-user-act clause and rules that any later loosening of it reopens that
+  decision outright. §2's two-population rule, single construction site, three-population
+  closure and cross-turn promise; §3's second clause (no exclusion by inspecting content), its
+  third (the one-bit residue, which ADR-0245 §9 extends in shape and closes in no part) and
+  its fourth (the `__dict__` bypass, no detachment obligation); §4's accounting of what
+  ADR-0231 §12 gave up, which ADR-0245 re-establishes in no form; §5's four closed-loop
+  conditions and its window, unmoved — ADR-0245's admission runs under §2's `trust_of` read
+  alone, and the grant, ADR-0181 §5's lineage floor and §5's conditions still decide whether
+  any byte leaves; §6's reach; §8's budget; §12's other five clauses; §13's `core` surface and
+  its move-the-version-in-the-same-change instruction; §14's obligations on this ADR's own
+  lane, which have landed; §15's other arms, of which Arm 1b gains a producer without its text
+  moving; and §16's deferrals, to which ADR-0245 adds nothing about an `UNCHOSEN` destination.
+
+  This line already carries the leading `Partially superseded by` token, so the five scopes are
+  added to it as one further pair and, under ADR-0082 §2, no amendment qualifier is written on
+  it — the §11 enumeration's record lives in this note. Appended note per ADR-0070 §1; no text
+  below is rewritten. Refs #2224, #2178, #2168, #1908.
 
 ## Context
 
