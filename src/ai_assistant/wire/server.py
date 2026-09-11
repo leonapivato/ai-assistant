@@ -58,6 +58,7 @@ from ai_assistant.wire.surface import (
     STREAMING_METHODS,
     argument_adapter,
     audio_bearing,
+    call_shape,
     chunk_type,
     parameters,
 )
@@ -985,6 +986,14 @@ async def _read_request(
 async def _dispatch(engine: AssistantEngine, frame: env.Envelope, *, limit: int) -> env.Envelope:
     """Run one request against the engine and render its answer as a frame.
 
+    **The call is shaped by the Protocol's own signature, not splatted as keywords**
+    (:func:`~ai_assistant.wire.surface.call_shape`). A keyword splat is only correct
+    for a surface whose parameters all accept a name, and ADR-0244 §11 put one on it
+    that does not — ``cancel_read``'s token is positional-only. The splat raised
+    ``TypeError``, which is not an ``AssistantError``, so it went straight past the
+    handler below and the connection closed with no reply: an act both surfaces
+    offered and neither could perform, for every token (#2243).
+
     Args:
         engine: The engine to call.
         frame: The request.
@@ -1007,9 +1016,9 @@ async def _dispatch(engine: AssistantEngine, frame: env.Envelope, *, limit: int)
     if method is None or method not in METHODS:
         msg = f"a request names {method!r}, which this build's engine surface does not declare"
         raise UndecodableFrameError(msg)
-    arguments = _decode_arguments(method, frame.payload)
+    positional, keyword = call_shape(method, _decode_arguments(method, frame.payload))
     try:
-        result = await getattr(engine, method)(**arguments)
+        result = await getattr(engine, method)(*positional, **keyword)
     except AssistantError as exc:
         return env.Envelope(
             kind=env.FrameKind.ERROR,
@@ -1067,7 +1076,7 @@ async def _dispatch_stream(  # noqa: PLR0913 — the engine, the request, the wr
     if method is None:  # pragma: no cover — `_read_request` admits only requests
         msg = "a streamed dispatch reached a frame that names no method"
         raise UndecodableFrameError(msg)
-    arguments = _decode_arguments(method, frame.payload)
+    positional, keyword = call_shape(method, _decode_arguments(method, frame.payload))
     chunk = chunk_type(method)
 
     async def emit(kind: env.FrameKind, payload: Any) -> None:
@@ -1084,7 +1093,7 @@ async def _dispatch_stream(  # noqa: PLR0913 — the engine, the request, the wr
             max_frame_bytes=limits.max_frame_bytes,
         )
 
-    started: AsyncIterator[Any] = getattr(engine, method)(**arguments)
+    started: AsyncIterator[Any] = getattr(engine, method)(*positional, **keyword)
     async with closing_stream(started) as values:
         try:
             async for value in values:
@@ -1117,7 +1126,10 @@ def _decode_arguments(method: str, payload: object) -> dict[str, Any]:
         payload: The request payload, as decoded.
 
     Returns:
-        The keyword arguments to call the engine with.
+        The arguments to call the engine with, by name.
+        :func:`~ai_assistant.wire.surface.call_shape` turns them into the call
+        shape the method's own signature declares — *what* the values are is
+        decided here, *how* they are passed is decided there.
 
     Raises:
         UndecodableFrameError: If the payload is not an object, names an argument
