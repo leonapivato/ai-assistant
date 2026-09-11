@@ -1259,17 +1259,21 @@ async def test_the_audit_copies_no_text_and_carries_only_the_correlation_id() ->
         # because no `STRUCTURED_READ` ask was emitted, and the outcome is the
         # `not_asked` member, which is what a completed servicing carrying no such ask
         # reports. The pin stays closed over both because neither can carry a value.
-        # ADR-0238 §11's **three** added fields, and each is an ``int``. How many
-        # records were supplied to the composer, how many ADR-0238 §3's filter withheld
-        # from that supply, and this conversation's ``calls`` as ``admit_search`` left
-        # them. **Counts only** (§11): no record id, no conversation id, no destination,
-        # no query text, no fragment or length of one, no title, no snippet and no
-        # provider message — and, by §11's own last clause, **not the destination's
-        # recorded trust either**, which is a durable fact about a configured account
-        # and not something a per-turn log reports. The pin stays closed over all three
-        # because none of them can carry a value that is not a number.
+        # ADR-0238 §11's three added fields and ADR-0245 §7's fourth, each an ``int``.
+        # How many records were supplied to the composer, how many §3's filter withheld
+        # from that supply, how many of the supplied ones carry a reach that is not
+        # ``ANYONE``, and this conversation's ``calls`` as ``admit_search`` left them.
+        # **Counts only** (§11): no record id, no conversation id, no destination, no
+        # query text, no fragment or length of one, no title, no snippet and no provider
+        # message — and, by §11's own last clause, **not the destination's recorded
+        # trust either**, which is a durable fact about a configured account and not
+        # something a per-turn log reports. The pin stays closed over all four because
+        # none of them can carry a value that is not a number. ``supplied_narrowed`` is
+        # pinned **here** as well as in its own arm because ADR-0245 §11's Arm F is
+        # explicit that the arm "cannot be satisfied by dropping the field §7 keeps".
         "supplied",
         "withheld",
+        "supplied_narrowed",
         "calls",
         "structured_axes",
         "structured",

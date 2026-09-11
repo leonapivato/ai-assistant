@@ -3180,11 +3180,13 @@ class QueryComposer(Protocol):
     caller able to defeat the bound", so the property was decidable from the
     declaration rather than kept by a rule. Widening what the one argument *carries*
     does not weaken that argument; it **relocates** it, from the absence of a
-    parameter to the validator on the value. A caller holding a record placed for
-    anyone but ``ANYONE`` still has nothing to pass, because
+    parameter to the validator on the value. A caller holding a record outside
+    ADR-0245 §2's two admitted placements — reach ``ANYONE``, or reach ``OWNER``
+    narrowed by ``DERIVED`` — still has nothing to pass, because
     :class:`~ai_assistant.core.types.SearchSupply` refuses it at construction. That
     is ADR-0231 §3's mechanism surviving with only its content moved, which is the
-    whole of what ADR-0238 §2 does here.
+    whole of what ADR-0238 §2 does here; ADR-0245 §3 moves the predicate inside the
+    validator and leaves the relocation itself untouched.
 
     **Why one value rather than three parameters** (§2). Three parameters would put
     the bound back in the caller's hands — a supply site that passed the right
@@ -3273,11 +3275,13 @@ class QueryComposer(Protocol):
             supply: What this composition may be composed over (ADR-0238 §2) — the
                 turn's unrewritten utterance and, for a destination of recorded
                 trust ``USER_CHOSEN``, the records it may draw on. Every member of
-                ``records`` is placed for
-                :attr:`~ai_assistant.core.types.PlacementReach.ANYONE`, refused at
-                construction otherwise, so an implementation is never handed an
-                excluded record and has nothing to check. It is the whole of what an
-                implementation is given.
+                ``records`` carries one of ADR-0245 §2's two admitted placements —
+                reach :attr:`~ai_assistant.core.types.PlacementReach.ANYONE`, or
+                reach :attr:`~ai_assistant.core.types.PlacementReach.OWNER` narrowed
+                by :attr:`~ai_assistant.core.types.PlacementSetter.DERIVED` — and any
+                other placement is refused at construction, so an implementation is
+                never handed an excluded record and has nothing to check. It is the
+                whole of what an implementation is given.
 
         Returns:
             One outcome carrying a query **or** a refusal, never both and never

@@ -6802,10 +6802,53 @@ class QueryOutcome(BaseModel):
 # value, so a caller holding an excluded record still has nothing to pass.
 
 
-def _reachable_by_anyone(
+def _admitted_to_a_supply(placement: Placement) -> bool:
+    """Whether ADR-0245 §2 admits a record carrying ``placement`` to a supply.
+
+    §2's admitted set stated positively and in one place, because
+    :func:`_placed_for_a_search_supply` below asks it per record and reads better
+    for not spelling a two-limbed disjunction inside a counting comprehension. It
+    reads ``Placement`` and nothing else (§3).
+
+    Args:
+        placement: The record's placement, read exactly as ADR-0217 §1 defines it.
+
+    Returns:
+        Whether the pair is reach ``ANYONE``, or reach ``OWNER`` narrowed by
+        ``DERIVED``. Every other pair — an ``OWNER_ACT`` or ``PROPOSED`` narrowing,
+        and any reach denotation a later ADR adds — is ``False``.
+    """
+    return placement.reach is PlacementReach.ANYONE or (
+        placement.reach is PlacementReach.OWNER and placement.set_by is PlacementSetter.DERIVED
+    )
+
+
+def _placed_for_a_search_supply(
     value: tuple[MemoryRecord, ...],
 ) -> tuple[MemoryRecord, ...]:
-    """Refuse any record whose ``placement.reach`` is not ``ANYONE`` (ADR-0238 §2, §3).
+    """Refuse any record outside ADR-0245 §2's two admitted placements.
+
+    **Reach is audience control, and a ``DERIVED`` narrowing does not withhold a
+    record from a supply built for a destination the user chose** (ADR-0245 §1).
+    ``Placement.reach`` denotes a set of **people** (ADR-0217 §1), and a search
+    provider the owner named in a recorded act is not a person this assistant talks
+    to — so the admitted set is stated positively over two combinations: reach
+    ``ANYONE``, and reach ``OWNER`` with setter ``DERIVED``. That supersedes ADR-0238
+    §3's first clause, whose sentence "A record whose reach is
+    ``PlacementReach.OWNER`` is not supplied to a ``QueryComposer`` on any conforming
+    path" ceases to be true of a derived narrowing, and it is what gives ADR-0238 §2's
+    cross-turn promise a producer: the stamped episode a later turn retrieves carries
+    exactly that pair, which is the record #2224 watched this filter drop.
+
+    **What stays excluded, by name** (ADR-0245 §2). A narrowing the owner made by
+    their own act — ``OWNER_ACT`` — because the system records the act and **not its
+    reason**, so admitting it would be deciding what the owner meant by it; and a
+    narrowing a model proposed — ``PROPOSED`` — because the ruling is about the
+    *derivation* and a setter it did not name is not admitted by it. Both are refused
+    on a destination of **any** recorded trust, and a reach denotation ADR-0217 §1
+    later adds is admitted by no clause until the ADR that adds it says so. ADR-0199
+    §3's Tier 0 floor is untouched, and no ``about_person`` filter is added here: a
+    record whose subject is stated is admitted or refused by its ``Placement`` alone.
 
     **The refusal is on the type, and that is the whole of what replaces the absent
     parameter.** ADR-0231 §3's safety claim rested on ADR-0093 §10's argument — "a
@@ -6815,19 +6858,30 @@ def _reachable_by_anyone(
     parameter to the validator on the value. No producer, decode, test double or
     later lane can construct a supply carrying an excluded record.
 
-    **The fact is ADR-0217 §1's placement and there is no new axis** (§3). It is read
-    exactly as ADR-0217 defines it, per record, and **regardless of why that record
-    was selected** — which is what makes ADR-0238 §12's negative arm true: no
-    selection an injected result influenced can place one here.
+    **It reads ``Placement`` and nothing else** (ADR-0245 §3). No destination, no
+    ``DestinationTrust``, no ``RecipientGrant``, no ``EgressBinding`` and no
+    conversation record, and it is passed none: ``core`` stays blind to trust. It can
+    be, because ADR-0238 §2 already decided the ``UNCHOSEN`` case at the one
+    construction site — a supply for such a destination carries an empty ``records``,
+    so a non-empty ``records`` implies the chosen path without the type knowing it.
+
+    **The fact is ADR-0217 §1's placement and there is no new axis** (ADR-0245 §1).
+    Two fields that decision already ships, read per record and **regardless of why
+    that record was selected** — which is what keeps ADR-0238 §12's negative arm true
+    over the narrowed excluded set (ADR-0245 §8): no selection an injected result
+    influenced can place an ``OWNER_ACT`` or ``PROPOSED`` narrowing here, and no
+    search result, model output or provider message writes a record's placement at
+    all.
 
     Raises:
-        ValueError: If any member's reach is not :attr:`PlacementReach.ANYONE`.
+        ValueError: If any member's placement is outside §2's two combinations.
     """
-    excluded = sum(1 for record in value if record.placement.reach is not PlacementReach.ANYONE)
+    excluded = sum(1 for record in value if not _admitted_to_a_supply(record.placement))
     if excluded:
         msg = (
-            f"a search supply carries only records placed for ANYONE; {excluded} of "
-            f"{len(value)} is not (ADR-0238 §2, §3, on ADR-0217 §1's reach)"
+            "a search supply carries only records placed for ANYONE, or narrowed to "
+            f"OWNER by a DERIVED narrowing; {excluded} of {len(value)} is neither "
+            "(ADR-0245 §2, §3, on ADR-0217 §1's reach and setter)"
         )
         raise ValueError(msg)
     return value
@@ -6883,16 +6937,26 @@ class SearchSupply(BaseModel):
             "ADR-0231 §3's argument, unchanged in everything but where it sits."
         )
     )
-    records: Annotated[tuple[MemoryRecord, ...], AfterValidator(_reachable_by_anyone)] = Field(
-        default=(),
-        description=(
-            "The records this composition may be composed over, empty by default "
-            "(ADR-0238 §2). **Every member is placed for "
-            ":attr:`PlacementReach.ANYONE`**, refused at construction otherwise "
-            "(:func:`_reachable_by_anyone`). The default is the empty tuple because "
-            "that is the value ADR-0231 §3's ratified population carries, so a caller "
-            "that supplies nothing composes exactly as this corpus composes today."
-        ),
+    records: Annotated[tuple[MemoryRecord, ...], AfterValidator(_placed_for_a_search_supply)] = (
+        Field(
+            default=(),
+            description=(
+                "The records this composition may be composed over, empty by default "
+                "(ADR-0238 §2). **Every member carries one of ADR-0245 §2's two admitted "
+                "placements** — reach :attr:`PlacementReach.ANYONE`, or reach "
+                ":attr:`PlacementReach.OWNER` narrowed by "
+                ":attr:`PlacementSetter.DERIVED` — and every other placement, an "
+                ":attr:`PlacementSetter.OWNER_ACT` or :attr:`PlacementSetter.PROPOSED` "
+                "narrowing included, is refused at construction "
+                "(:func:`_placed_for_a_search_supply`). Reach is audience control and a "
+                "derived narrowing does not withhold a record from a supply built for a "
+                "destination the user chose (ADR-0245 §1), which is what gives ADR-0238 "
+                "§2's cross-turn promise a producer. The default is the empty tuple "
+                "because that is the value ADR-0231 §3's ratified population carries, so "
+                "a caller that supplies nothing composes exactly as this corpus composes "
+                "today."
+            ),
+        )
     )
 
 

@@ -97,7 +97,9 @@ from ai_assistant.core.types import (
     MemoryKind,
     PermissionDecision,
     PermissionOutcome,
+    Placement,
     PlacementReach,
+    PlacementSetter,
     QueryRefusal,
     ReadKind,
     SearchNotServiced,
@@ -786,8 +788,20 @@ class ServicedRead:
         supplied: ADR-0238 §11's first count: how many records this servicing supplied
             to the composer. Zero where the destination read ``UNCHOSEN``, where no
             ``WEB_SEARCH`` ask was made, and where the servicing was not admitted.
-        withheld: ADR-0238 §11's second count: how many records §3's filter — which is
-            ``Placement.reach`` and no other axis — kept out of that supply.
+        withheld: ADR-0238 §11's second count: how many records §3's filter kept out of
+            that supply. **The definition is unchanged and what it measures is not**
+            (ADR-0245 §7): the filter is ``Placement.reach`` **and** ``Placement.set_by``
+            since ADR-0245 §1, so on a chosen destination this counts the records refused
+            for carrying an ``OWNER_ACT`` or ``PROPOSED`` narrowing. It stays zero where
+            the destination read ``UNCHOSEN``, because §2's trust clause emptied the
+            population rather than the filter. **No lane, surface or measurement reads
+            the fall in this number as fewer withholdings.**
+        supplied_narrowed: ADR-0245 §7's added count: how many of the records this
+            servicing **supplied** to the composer carry a reach that is not
+            :attr:`~ai_assistant.core.types.PlacementReach.ANYONE` — the class ADR-0245
+            §1 admitted and ``withheld`` no longer counts. A count and never an
+            identifier, on the same event under the same key at the same emission point
+            as the other three (ADR-0238 §11).
         calls: ADR-0238 §11's third count: this conversation's ``calls`` as
             ``admit_search`` left them, and zero where no admission was granted.
             **A count and never an identifier** (§11): the conversation it is about is
@@ -853,6 +867,7 @@ class ServicedRead:
     disposition: SearchDisposition | None = None
     supplied: int = 0
     withheld: int = 0
+    supplied_narrowed: int = 0
     calls: int = 0
     structured_axes: tuple[StructuredAxis, ...] = ()
     structured: StructuredOutcome | None = None
@@ -1024,7 +1039,7 @@ class _ServicingFailedError(Exception):
 
 @dataclass(slots=True)
 class _SearchCounts:
-    """ADR-0238 §11's three counts, written as each stage completes.
+    """ADR-0238 §11's counts as ADR-0245 §7 leaves them: four, written as stages complete.
 
     **Written rather than returned**, which is :class:`_Reads`'s own shape and is here
     for the same reason: a fault the searcher raised *after* the ruling unwinds past the
@@ -1036,14 +1051,26 @@ class _SearchCounts:
 
     Attributes:
         supplied: How many records were supplied to the composer.
-        withheld: How many ADR-0238 §3's filter kept out of that supply, which is
-            ``Placement.reach`` and no other axis.
+        withheld: How many §3's filter kept out of that supply — which is
+            ``Placement.reach`` **and** ``Placement.set_by`` since ADR-0245 §1, so on a
+            chosen destination it counts the ``OWNER_ACT`` and ``PROPOSED`` narrowings
+            and nothing else. On an ``UNCHOSEN`` destination it stays **zero**, because
+            the whole population is withheld by §2's trust clause and not by the filter
+            (ADR-0245 §7).
+        supplied_narrowed: ADR-0245 §7's fourth count: how many of the records
+            *supplied* carry a ``placement.reach`` that is not
+            :attr:`~ai_assistant.core.types.PlacementReach.ANYONE`. It exists because
+            ``withheld`` **falls** the day ADR-0245 lands, so without it the only number
+            that moved on a deployment's audit would show *less* withholding and nothing
+            at all about the class that now flows. A per-population figure rather than a
+            per-turn one (ADR-0226 §8), and a count like the other three.
         calls: This conversation's ``calls`` as ``admit_search`` left them, and zero
             where no admission was granted.
     """
 
     supplied: int = 0
     withheld: int = 0
+    supplied_narrowed: int = 0
     calls: int = 0
 
 
@@ -1754,7 +1781,7 @@ class SearchServicer:
         # answer decides only what may be composed over — §5 is explicit that "no clause
         # reads it as deciding what may be sent" — so it is read again below, at the
         # instant the request is built, and this value reaches no binding.
-        supply, counts.withheld = _search_supply(
+        supply, counts.withheld, counts.supplied_narrowed = _search_supply(
             utterance,
             in_view,
             trusted=await footing.trusted() is DestinationTrust.USER_CHOSEN,
@@ -2475,13 +2502,15 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
             labels_unresolved=unresolved,
             refusal=refusal,
             disposition=searched.disposition,
-            # ADR-0238 §11's three, per turn and per servicing: how many records were
-            # supplied to the composer, how many §3's filter withheld, and this
-            # conversation's `calls` as the admission left them. **Counts only** — no
-            # record id, no conversation id, no destination, no query text and no
+            # ADR-0238 §11's three and ADR-0245 §7's fourth, per turn and per
+            # servicing: how many records were supplied to the composer, how many §3's
+            # filter withheld, how many of the supplied ones carry a narrowed reach, and
+            # this conversation's `calls` as the admission left them. **Counts only** —
+            # no record id, no conversation id, no destination, no query text and no
             # fragment of one is anywhere in this record.
             supplied=counts.supplied,
             withheld=counts.withheld,
+            supplied_narrowed=counts.supplied_narrowed,
             calls=counts.calls,
             structured_axes=axes,
             # ADR-0240 §10: `None` until the branch above assigns one, and assigned
@@ -2585,6 +2614,7 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
                 disposition=searched.disposition,
                 supplied=counts.supplied,
                 withheld=counts.withheld,
+                supplied_narrowed=counts.supplied_narrowed,
                 calls=counts.calls,
                 # **The axes ride on the failing record and the outcome does not**
                 # (ADR-0240 §10), and the asymmetry is the point: "an ask that was
@@ -2605,14 +2635,40 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
     return replace(carried, not_serviced=searched.not_serviced)
 
 
+def _admitted_to_a_supply(placement: Placement) -> bool:
+    """Whether ADR-0245 §2 admits a record carrying ``placement`` to a supply.
+
+    **The authority is the type, and this is the count's copy of its rule.** ADR-0245
+    §3 keeps the refusal on :class:`~ai_assistant.core.types.SearchSupply` — "a caller
+    able to widen the read is a caller able to defeat the bound" — and keeps the trust
+    condition at this builder, unmoved. That division means the rule is asked twice: by
+    the validator, which refuses, and here, where ADR-0238 §11's counts are taken over
+    the population the builder holds. A supply this predicate got *wrong* in the
+    permissive direction would be refused at construction rather than sent, so what is
+    at stake here is the honesty of two numbers and never the exclusion itself.
+
+    Args:
+        placement: The record's placement, read exactly as ADR-0217 §1 defines it and
+            with no other axis consulted.
+
+    Returns:
+        Whether the pair is reach ``ANYONE``, or reach ``OWNER`` narrowed by
+        ``DERIVED``. An ``OWNER_ACT`` or ``PROPOSED`` narrowing is ``False`` on a
+        destination of any recorded trust (ADR-0245 §2).
+    """
+    return placement.reach is PlacementReach.ANYONE or (
+        placement.reach is PlacementReach.OWNER and placement.set_by is PlacementSetter.DERIVED
+    )
+
+
 def _search_supply(
     utterance: str,
     in_view: Sequence[MemoryRecord],
     *,
     trusted: bool,
     footing: SearchFooting,
-) -> tuple[SearchSupply, int]:
-    """Build ADR-0238 §2's supply for this servicing, and count what §3 withheld.
+) -> tuple[SearchSupply, int, int]:
+    """Build ADR-0238 §2's supply for this servicing, and take §11's two supply counts.
 
     **One type, two admissible populations, and a recorded fact decides which**
     (ADR-0238 §2). Where the destination the servicing would bind to reads
@@ -2645,13 +2701,28 @@ def _search_supply(
     while a record of any other external origin is composed over and then **not sent**,
     rather than never composed at all.
 
-    **§3's filter is ``Placement.reach`` and no other axis**, read exactly as ADR-0217
-    §1 defines it, with no field, member, tag or band added. It is applied here so the
-    count §11 owes can be taken; the *refusal* is on the type, so a lane that skipped
-    this would build no supply at all rather than a permissive one.
+    **§3's filter is ``Placement.reach`` *and* ``Placement.set_by``, and no other
+    axis** (ADR-0245 §1, §2), each read exactly as ADR-0217 §1 defines it, with no
+    field, member, tag or band added by either decision. Reach is audience control —
+    a denotation of a set of **people** — and a search provider the owner named in a
+    recorded act is not a person this assistant talks to, so a record narrowed to the
+    owner **by the derivation** is admitted on a chosen destination. What stays
+    excluded is a narrowing the owner made by their own act and one a model proposed,
+    on a destination of any recorded trust. That is what gives ADR-0238 §2's
+    cross-turn promise a producer: the stamped episode a later turn retrieves carries
+    reach ``OWNER`` with setter ``DERIVED``, which is the record #2224 watched this
+    filter drop on every later turn while the composer declined.
+
+    It is applied here so the counts §11 owes can be taken; the *refusal* is on the
+    type, so a lane that skipped this would build no supply at all rather than a
+    permissive one.
 
     **No component decides exclusion by inspecting content** (§3), and nothing here
     reads a record's text, resembles it against anything, or asks a model about it.
+    No ``about_person`` filter runs here either (ADR-0245 §2): ADR-0199 §3's classes
+    place a class as speakable *on a channel* and this places a record *for a set of
+    people*, and a supply exists at all only on an operation whose channel audience
+    is bounded (ADR-0226 §5).
 
     Args:
         utterance: The turn's own words, unrewritten.
@@ -2663,23 +2734,26 @@ def _search_supply(
         footing: This conversation's footing, for the one predicate above.
 
     Returns:
-        The supply, and how many records §3's filter kept out of it.
+        The supply, how many records §3's filter kept out of it, and how many of the
+        records it *supplied* carry a reach that is not ``ANYONE`` — ADR-0245 §7's
+        fourth count, which is the class this decision let through and the reason the
+        ``withheld`` number falls the day it lands.
     """
     if not trusted:
-        return SearchSupply(utterance=utterance), 0
+        # ADR-0238 §2's trust clause emptied the whole population, so §3's filter
+        # withheld nothing and supplied nothing — both counts stay **zero**, which is
+        # the value the tree already wrote for the first of them (ADR-0245 §7).
+        return SearchSupply(utterance=utterance), 0, 0
     admissible = [
         record
         for record in in_view
         if record.id in footing.selected or record.id in footing.minted_user_chosen
     ]
+    supplied = tuple(record for record in admissible if _admitted_to_a_supply(record.placement))
     return (
-        SearchSupply(
-            utterance=utterance,
-            records=tuple(
-                record for record in admissible if record.placement.reach is PlacementReach.ANYONE
-            ),
-        ),
-        sum(1 for record in admissible if record.placement.reach is not PlacementReach.ANYONE),
+        SearchSupply(utterance=utterance, records=supplied),
+        len(admissible) - len(supplied),
+        sum(1 for record in supplied if record.placement.reach is not PlacementReach.ANYONE),
     )
 
 
@@ -3406,14 +3480,20 @@ def emit_read_audit(
                 "labels_unresolved": read.labels_unresolved,
                 "refusal": None if read.refusal is None else read.refusal.value,
                 "disposition": None if read.disposition is None else read.disposition.value,
-                # ADR-0238 §11's three, on the one event and under the one key: no
-                # second audit, no second event key and no new emission point. Counts
-                # only, and the destination's recorded trust is deliberately **not**
-                # here — "a durable fact about a configured account, readable from the
-                # store that holds it, and a per-turn log is not where a deployment's
-                # standing configuration is reported".
+                # ADR-0238 §11's three and ADR-0245 §7's fourth, on the one event and
+                # under the one key: no second audit, no second event key and no new
+                # emission point. Counts only, and the destination's recorded trust is
+                # deliberately **not** here — "a durable fact about a configured
+                # account, readable from the store that holds it, and a per-turn log is
+                # not where a deployment's standing configuration is reported".
+                #
+                # `supplied_narrowed` is the one ADR-0245 §7 adds, because the decision
+                # it implements makes `withheld` **fall** on a deployment that changed
+                # nothing: one count restores the symmetry between what the corpus gave
+                # up and what it can read back.
                 "supplied": read.supplied,
                 "withheld": read.withheld,
+                "supplied_narrowed": read.supplied_narrowed,
                 "calls": read.calls,
                 "structured_axes": tuple(axis.value for axis in read.structured_axes),
                 "structured": None if read.structured is None else read.structured.value,
