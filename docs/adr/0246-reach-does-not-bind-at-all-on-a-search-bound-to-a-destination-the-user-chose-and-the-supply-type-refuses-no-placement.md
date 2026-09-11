@@ -202,12 +202,20 @@ last remnant of ADR-0238 §3's borrowed axis.
 
 **The composition reaches no party the turn's own model calls are not already admitted to
 reach.** ADR-0245 §1's sixth clause states this over the admitted *set* rather than over
-one endpoint, and it is unchanged by widening what a supply carries: the turn's planner is
-supplied the same records over the same seam, and `orchestration/disclosure.py`'s
-subtraction is applied at the *reply*, not at the plan. A guarded record already reaches a
-`ModelProvider` the owner configured, every turn it is retrieved. What this decision adds
-is that a second call of the same turn, to the same configured set, may be composed over
-it too.
+one endpoint, and it is unchanged by widening what a supply carries. The scoping is what
+makes it true, and it is the paragraph above's: a supply exists at all only on an
+operation whose output channel's audience is **bounded** (ADR-0226 §5), and on exactly
+those operations ADR-0210 §1's last clause rules that the evaluation is "over the whole
+supply as assembled and retrieved, first group included, with nothing subtracted from that
+turn". At `origin/main` `35a39aa6` that is `orchestration/disclosure.py`'s
+`_withheld_over_whole_supply`, the bounded channel's path, beside
+`supply_for_unbounded_audience`, which **does** subtract a narrowed record before the turn
+runs and governs the operations on which no supply is built at all. **So the claim is not
+that reach is subtracted late; it is that on the operations this decision touches it is
+not subtracted from the supply at all**, and a guarded record already reaches a
+`ModelProvider` the owner configured every turn it is retrieved there. What this decision
+adds is that a second call of the same turn, to the same configured set, may be composed
+over it too.
 
 **And the channel question is closed mechanically before this ADR runs.** ADR-0226 §5
 rules that "**A read request is not serviced on an operation whose output channel's
@@ -667,8 +675,9 @@ second and sixth clauses; §3's third and fourth clauses; §4; §5; §6; §7's f
 clauses; §8's third clause; §9's second and third clauses; §11 Arms A, C and E; §12's
 first and third deferrals; §13, §14 and §15.
 
-**No record is owed on ADR-0217, ADR-0199, ADR-0204, ADR-0004, ADR-0098, ADR-0193,
-ADR-0181, ADR-0231, ADR-0226, ADR-0013 or ADR-0124**, on ADR-0082 §1's test: every
+**No record is owed on ADR-0217, ADR-0199, ADR-0203, ADR-0204, ADR-0210, ADR-0004,
+ADR-0098, ADR-0193, ADR-0181, ADR-0231, ADR-0226, ADR-0013 or ADR-0124**, on ADR-0082 §1's
+test: every
 sentence each of them wrote stays true and none is read more widely. ADR-0217 §1's reach
 keeps its denotation and its vocabulary clause, and §3's setters, precedence and closing
 clause are read exactly as written — §9 declines their one ambiguity rather than resolving
@@ -793,9 +802,12 @@ differently, or read one of its clauses more widely than it now holds?
   read as written, §4's proposal is read as the judgement about people that it is, and §7's
   acts keep every effect ADR-0217 gives them. What §1 above changes is which *consumers*
   read the field, not what the field records or what any act writes into it.
-- **ADR-0199 §3, ADR-0203 §1, ADR-0204 §2 and §5** — **no**. The floor, the classes and
-  the subtraction at the reply are untouched and §1's fourth clause says so in terms; the
-  derivation and the ratchet are inputs and are not moved.
+- **ADR-0199 §3, ADR-0203 §1, ADR-0204 §2 and §5, ADR-0210 §1** — **no**, on all five.
+  The floor, the classes and the subtraction are untouched and §1's fourth clause says so in
+  terms; the derivation and the ratchet are inputs and are not moved; and ADR-0210 §1's two
+  clauses are **read** by §1's paragraph on the admitted set — the unbounded channel's
+  narrowing and the bounded channel's "nothing subtracted from that turn" — with no
+  obligation added to either and no exception stated to them.
 - **ADR-0004 §1, §2, §5** — **no**. The tiers are read as the axis on which a local-only
   class would sit, and nothing is added to, removed from or reinterpreted in them; §12
   defers the class rather than creating it.
