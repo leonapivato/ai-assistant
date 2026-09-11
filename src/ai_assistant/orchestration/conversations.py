@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import (
         ConversationStore,
         MemoryStore,
+        ParkedReads,
         TranscriptArchiveWriter,
     )
     from ai_assistant.core.types import (
@@ -234,6 +235,7 @@ class ConversationLifecycle:
         archive_enabled: bool,
         retention: timedelta | None,
         now: Clock = _utcnow,
+        parked_reads: ParkedReads | None = None,
     ) -> None:
         """Wire the stage from the three injected stores.
 
@@ -281,6 +283,22 @@ class ConversationLifecycle:
                 :func:`~ai_assistant.core.clock.checked_clock`, so a non-conforming
                 reading is this stage's own failure rather than a silently bad
                 timestamp.
+            parked_reads: The questions a recorded ``CONFIRM`` on a read left standing
+                (ADR-0244 §3), or ``None`` where this deployment wired no such store.
+                **Reached through the Protocol and never through a concrete one**
+                (golden rule 1), which is why ``drop_for_conversation`` is a member of
+                the contract rather than left to an implementation — and this stage is
+                where it is called from, being "the one layer that legitimately holds
+                both handles by injection" (ADR-0074 §9).
+
+                **Defaulted rather than required**, which is the one departure from
+                ``archive`` and ``retention`` above and takes
+                :class:`~ai_assistant.orchestration.recipient_grants.RecipientGrantOperations`'
+                choice for the same object one seam over. A stage with no archive cannot
+                carry out §8 at all; a stage with no park store carries it out exactly as
+                it did before this decision, because a deployment that wired none holds no
+                park for any conversation. ``None`` drops nothing because there is nothing
+                to drop.
         """
         self._conversations = conversations
         self._memory = memory
@@ -288,6 +306,7 @@ class ConversationLifecycle:
         self._archive_enabled = archive_enabled
         self._retention = retention
         self._clock = checked_clock(now, owner="ConversationLifecycle")
+        self._parked_reads = parked_reads
 
     # --- resolving the conversation a turn runs under (§2) -------------------
 
@@ -981,6 +1000,10 @@ class ConversationLifecycle:
         record and its index are still there, still naming every episode id
         involved, and :meth:`sweep_deletions` finishes it.
 
+        **Step 2 destroys this conversation's parked reads too** (ADR-0244 §3), through
+        ``ParkedReads.drop_for_conversation`` and never through a concrete store —
+        :meth:`_finish_deletion` carries the placement and its argument.
+
         Returns:
             ``True`` if this call stamped the conversation; ``False`` if it was
             already stamped or the id names nothing. Either way the sweep behind it
@@ -994,6 +1017,8 @@ class ConversationLifecycle:
             TranscriptArchiveError: If the transcript could not be destroyed, which
                 aborts step 2 before any episode is deleted (ADR-0225 §5). The
                 tombstone stands here too, for the same reason.
+            AssistantError: If this conversation's parked reads could not be dropped,
+                which aborts step 2 in the same place and for the same reason.
         """
         stamped = await self._conversations.stamp_deleted(conversation_id)
         try:
@@ -1069,6 +1094,28 @@ class ConversationLifecycle:
         episode deletions through to the drop rather than treating the zero as an
         error.
 
+        **The parked reads go second, and the position is argued rather than free**
+        (ADR-0244 §3). It is inside **step 2** and never after step 3, because
+        ``drop_if_eligible`` removes the record and its tombstone — after which nothing
+        enumerates this conversation again, and a park dropped there and interrupted
+        would be strandable with only its own deadline to free it. That is ADR-0238 §8's
+        stranding failure, the one ADR-0244 §3 contrasts a park against, and it is closed
+        here by running before the drop rather than by a reconciliation walk, a tombstone
+        of its own or a second lifecycle — none of which §3 admits.
+
+        It goes **after** the archive discard, which ADR-0225 §5 fixes as "the first
+        action of §8's step 2", and **before** the episode walk, which is the first thing
+        here that raises ``UnknownConversationError``: a call arriving for a conversation
+        another sweep already dropped would otherwise return through
+        :meth:`delete`'s own handler with the parks untouched, and this is the one route
+        to them ADR-0244 §3 names besides the deadline.
+
+        **An open park stranded by a crash anywhere in this sequence is not an
+        unrecoverable orphan** (ADR-0244 §3): it carries its own ``expires_at``,
+        ``outstanding`` enumerates it, and §10's expiry settles it and clears its content
+        with no reference to the conversation record. A terminal one holds no content at
+        all, so what is left is six scalar facts the next call removes.
+
         Returns:
             Whether the record was dropped. ``False`` while the grace still holds —
             the tombstone is deliberately kept alive past the deletion so a capture
@@ -1077,8 +1124,15 @@ class ConversationLifecycle:
         Raises:
             TranscriptArchiveError: If the transcript could not be destroyed. Nothing
                 below runs, and the tombstone stands.
+            AssistantError: If the parked-read store could not be written. Nothing below
+                runs and the tombstone stands, for the archive discard's own reason: the
+                residue of a partial failure has to be one the user can still reach and
+                destroy, and a park is reachable through the enumeration and self-clearing
+                on its deadline.
         """
         await self._archive.discard_conversation(conversation_id)
+        if self._parked_reads is not None:
+            await self._parked_reads.drop_for_conversation(conversation_id)
         cursor: str | None = None
         while True:
             batch = await self._conversations.episodes_to_purge(conversation_id, after_id=cursor)

@@ -22,18 +22,23 @@ from typing import TYPE_CHECKING
 import pytest
 
 from ai_assistant.core.errors import (
+    AssistantError,
     ConversationStoreError,
     MemoryStoreError,
     UnknownConversationError,
 )
 from ai_assistant.core.types import (
+    ActionPlan,
     Attestation,
     Capture,
     EpisodicMemory,
     ExchangeDisposition,
+    Goal,
     MemoryKind,
     MemorySource,
     Modality,
+    ParkedRead,
+    ParkedReadDisposition,
     Provenance,
     Validity,
 )
@@ -42,7 +47,12 @@ from ai_assistant.orchestration.conversations import (
     CAPTURE_CONFIDENCE,
     ConversationLifecycle,
 )
-from ai_assistant.testing import FakeConversationStore, FakeMemoryStore, FakeTranscriptArchiveWriter
+from ai_assistant.testing import (
+    FakeConversationStore,
+    FakeMemoryStore,
+    FakeParkedReads,
+    FakeTranscriptArchiveWriter,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -87,6 +97,7 @@ class Wiring:
         conversations: FakeConversationStore | None = None,
         archive: FakeTranscriptArchiveWriter | None = None,
         archive_enabled: bool = True,
+        parked_reads: FakeParkedReads | None = None,
     ) -> None:
         self.clock = clock if clock is not None else MovableClock()
         self.memory = memory if memory is not None else FakeMemoryStore(now=self.clock)
@@ -103,6 +114,10 @@ class Wiring:
         # ADR-0225 §10's narrow seam, held on the harness so a case can look at what
         # capture wrote: the seam itself carries no read, which is the point of it.
         self.archive = archive if archive is not None else FakeTranscriptArchiveWriter()
+        # ``None`` unless a case asks for one: ADR-0244 §18 lands the store in its own
+        # lane, and a stage wired without one carries out §8 exactly as it did before
+        # that decision — which is the arm below that holds the absence.
+        self.parked_reads = parked_reads
         self.stage = ConversationLifecycle(
             conversations=self.conversations,
             memory=self.memory,
@@ -110,6 +125,7 @@ class Wiring:
             now=self.clock,
             archive=self.archive,
             archive_enabled=archive_enabled,
+            parked_reads=parked_reads,
         )
 
 
@@ -776,6 +792,142 @@ async def test_deleting_something_that_is_already_gone_is_not_an_error() -> None
     wiring = Wiring()
 
     assert await wiring.stage.delete("nobody") is False
+
+
+# --- the parked reads a deletion takes with it (ADR-0244 §3) -------------
+
+
+def _park(park_id: str, conversation_id: str, decision_id: str) -> ParkedRead:
+    """An ``OPEN`` park of ``conversation_id``, with its three content fields present."""
+    return ParkedRead(
+        id=park_id,
+        conversation_id=conversation_id,
+        decision_id=decision_id,
+        parameters={"origin": "search.example", "query": "bell tower porto"},
+        goal=Goal(
+            id=f"goal-{park_id}",
+            statement="what is that bell tower in Porto",
+            provenance=Provenance(
+                source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
+            ),
+            created_at=AT,
+        ),
+        plan=ActionPlan(
+            id=f"plan-{park_id}",
+            goal_id=f"goal-{park_id}",
+            steps=(),
+            created_at=AT,
+            rationale="answer from what is already here, and look the tower up",
+        ),
+        parked_at=AT,
+        expires_at=AT + DAY,
+        disposition=ParkedReadDisposition.OPEN,
+    )
+
+
+async def test_a_deletion_drops_this_conversations_parks_and_no_others() -> None:
+    """ADR-0244 §3: the conversation's deletion sequence drops its parks.
+
+    "Every park of that conversation, open or terminal, content and terminal facts
+    alike" — a terminal one holds no content, so what a deletion removes there is six
+    scalar facts, and leaving them would let a decision stay excluded from
+    ``grantable_decisions`` (§5's eighth condition) for a conversation that no longer
+    exists. Another conversation's park is untouched, which is the half a store-wide
+    drop would break.
+    """
+    parks = FakeParkedReads()
+    wiring = Wiring(parked_reads=parks)
+    conversation_id, _ = await _capture_turns(wiring, 1)
+    other_id, _ = await _capture_turns(wiring, 1)
+    await parks.park(_park("park-1", conversation_id, "decision-1"))
+    await parks.settle("park-1", disposition=ParkedReadDisposition.DENIED, at=AT)
+    await parks.park(_park("park-2", conversation_id, "decision-2"))
+    await parks.park(_park("park-3", other_id, "decision-3"))
+
+    assert await wiring.stage.delete(conversation_id) is True
+
+    assert await parks.get("park-1") is None, "the terminal row went too"
+    assert await parks.get("park-2") is None
+    assert await parks.park_of_decision("decision-2") is None
+    assert (await parks.get("park-3")) is not None, "another conversation is untouched"
+
+
+async def test_the_parks_go_before_the_walk_that_refuses_an_unknown_conversation() -> None:
+    """The placement argument, asserted where it can be broken.
+
+    ``episodes_to_purge`` raises ``UnknownConversationError`` for an id naming nothing,
+    and :meth:`ConversationLifecycle.delete` treats that as a deletion another sweep
+    completed. A drop placed *after* the walk would therefore never run for such an id —
+    and this is the one route to a park ADR-0244 §3 names besides its deadline, so the
+    parks would be left to expire on their own after the record naming them was gone.
+    """
+    parks = FakeParkedReads()
+    wiring = Wiring(parked_reads=parks)
+    await parks.park(_park("park-1", "conversation-another-sweep-finished", "decision-1"))
+
+    assert await wiring.stage.delete("conversation-another-sweep-finished") is False
+
+    assert await parks.get("park-1") is None
+
+
+async def test_the_start_up_sweep_drops_the_parks_a_crashed_deletion_left() -> None:
+    """The drop is inside step 2, so the re-run carries it (ADR-0076, ADR-0244 §3).
+
+    A deletion interrupted after its stamp leaves the tombstone, and the sweep re-walks
+    the whole of step 2 — the parks included, because they are dropped there rather than
+    after the conditional drop. Placed after step 3 instead, the drop would be
+    unreachable to this sweep: ``drop_if_eligible`` removes the record and the tombstone
+    with it, and nothing enumerates the conversation again.
+    """
+    clock = MovableClock()
+    parks = FakeParkedReads()
+    wiring = Wiring(clock=clock, parked_reads=parks)
+    conversation_id, _ = await _capture_turns(wiring, 1)
+    await parks.park(_park("park-1", conversation_id, "decision-1"))
+    # The stamp with nothing after it: a process that died between §8's step 1 and its
+    # step 2, which is the state ADR-0076 exists to find.
+    assert await wiring.conversations.stamp_deleted(conversation_id) is True
+    clock.advance(GRACE)
+
+    assert await wiring.stage.sweep_deletions() == 1
+
+    assert await parks.get("park-1") is None
+
+
+async def test_a_park_store_fault_aborts_step_two_and_the_tombstone_stands() -> None:
+    """The residue of a partial failure is one the user can still reach and destroy.
+
+    The parks are dropped before any episode is deleted, so a store that cannot be
+    written leaves the episodes and the transcript exactly where ``forget`` and the next
+    sweep can still find them — ADR-0225 §5's rule, applied to the fourth store this
+    sequence spans. The tombstone stands, which is what makes the next sweep finish it.
+    """
+    parks = FakeParkedReads()
+    wiring = Wiring(parked_reads=parks)
+    conversation_id, episodes = await _capture_turns(wiring, 1)
+    parks.fail_writes()
+
+    with pytest.raises(AssistantError):
+        await wiring.stage.delete(conversation_id)
+
+    assert await wiring.memory.get(episodes[0]) is not None, "nothing below the drop ran"
+    assert await wiring.conversations.stamped_conversation_ids() == [conversation_id]
+
+
+async def test_a_stage_with_no_park_store_deletes_exactly_as_it_did_before() -> None:
+    """``None`` drops nothing because there is nothing to drop (ADR-0244 §18's lane order).
+
+    A deployment that wired no store holds no park for any conversation, so the sequence
+    is what it was before this decision — and the absence is an ordinary state rather
+    than a degradation.
+    """
+    wiring = Wiring()
+    conversation_id, episodes = await _capture_turns(wiring, 1)
+
+    assert await wiring.stage.delete(conversation_id) is True
+
+    assert await wiring.memory.get(episodes[0]) is None
+    assert await wiring.conversations.get(conversation_id) is None
 
 
 # --- the start-up sweep (ADR-0076) ---------------------------------------
