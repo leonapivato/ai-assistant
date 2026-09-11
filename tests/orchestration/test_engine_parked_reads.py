@@ -34,18 +34,28 @@ from test_engine import AT, PATIENT, Harness
 from test_engine_read_envelope import _AskingPlanner, _recorder
 from test_loop_search import _DEADLINE, _binder, _CostedSearcher, _search
 
-from ai_assistant.core.errors import UnknownContinuationError
+from ai_assistant.core.errors import UngrantableActError, UnknownContinuationError
 from ai_assistant.core.types import (
     ContinuationToken,
+    EgressBinding,
+    MemoryKind,
+    MemorySource,
     ParkedReadDisposition,
     PermissionOutcome,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
+    Provenance,
     ReadAnswerOutcome,
     ReadCancellation,
     ReadKind,
+    RecipientGrantNotEstablished,
     Role,
     SearchNotServiced,
+    SearchRefusal,
+    SemanticMemory,
 )
-from ai_assistant.orchestration.reads import SearchServicer
+from ai_assistant.orchestration.reads import SearchServicer, admitted_fourth_group
 from ai_assistant.permissions.policy import ThresholdActionPolicy
 from ai_assistant.testing import (
     FakeAuditTrail,
@@ -92,6 +102,7 @@ class _Wired:
     parks: FakeParkedReads
     searcher: FakeWebSearcher
     composer: FakeQueryComposer
+    memory: FakeMemoryStore
     clock: _Clock
 
 
@@ -123,8 +134,9 @@ def _wired(*, composing: ComposingStage | None = None, search_calls: int = 8) ->
     searcher = FakeWebSearcher(results=("a result about the bell tower",))
     composer = FakeQueryComposer()
     store = FakeParkedReads()
+    memory = FakeMemoryStore(now=clock)
     harness = Harness(
-        memory=FakeMemoryStore(now=clock),
+        memory=memory,
         planner=_AskingPlanner(_search()),
         composing=composing,
         now=clock,
@@ -156,6 +168,7 @@ def _wired(*, composing: ComposingStage | None = None, search_calls: int = 8) ->
         parks=store,
         searcher=searcher,
         composer=composer,
+        memory=memory,
         clock=clock,
     )
 
@@ -702,23 +715,47 @@ async def test_two_concurrent_answers_produce_one_settlement_and_one_dispatch() 
     "Two ``resume`` calls on one token produce **one** settlement, **one** recorded
     resolution and **one** dispatch; the loser returns ``ALREADY_SETTLED``, consults no
     policy, records nothing and **raises nothing**."
+
+    **Held with the winner paused after its settlement and before its recorded ruling**,
+    which §19 requires in terms and which a bare ``asyncio.gather`` does not produce: two
+    unsuspended answers over these fakes let the first settle *and record and dispatch*
+    before the second reads the park at all, so the loser never reaches the gate and the
+    case passes against an implementation whose losing path acts anyway. The pause is
+    what makes both callers past clause 4 with one settlement between them.
+
+    **The loser's "consults no policy" is asserted over a count**, not inferred from the
+    member: the paused policy records every ``resolve`` it is asked, and one is what one
+    settlement buys.
     """
     wired = _wired()
     parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
     assert parked.read_confirmation is not None
     token = parked.read_confirmation.token
     park = await _parked(wired)
+    servicer = wired.engine._loop._search
+    paused = _SuspendingResolution(servicer._policy)
+    servicer._policy = paused
+    winner = asyncio.create_task(wired.engine.resume(token, approved=True, timeout=PATIENT))
+    await paused.reached.wait()
 
-    outcomes = await asyncio.gather(
-        wired.engine.resume(token, approved=True, timeout=PATIENT),
-        wired.engine.resume(token, approved=True, timeout=PATIENT),
-    )
+    # The loser runs to completion while the winner is held between its settlement and
+    # its ruling, which is the window §19 Arm 11 is stated over.
+    loser = await wired.engine.resume(token, approved=True, timeout=PATIENT)
 
-    members = sorted(outcome.read_answer for outcome in outcomes)
-    assert members == sorted([ReadAnswerOutcome.ALREADY_SETTLED, ReadAnswerOutcome.DISPATCHED])
+    assert loser.read_answer is ReadAnswerOutcome.ALREADY_SETTLED
+    assert loser.turn is None, "the loser composed nothing"
+    assert paused.resolutions == 1, "and consulted no policy of its own"
+    assert wired.searcher.searched == [], "nor dispatched while the winner was held"
+    assert [row for row in await wired.trail.recent() if row.resolves] == [], "nor recorded"
+
+    paused.release.set()
+    won = await winner
+
+    assert won.read_answer is ReadAnswerOutcome.DISPATCHED
     assert len(wired.searcher.searched) == 1, "one dispatch"
     resolutions = [row for row in await wired.trail.recent() if row.resolves == park.decision_id]
     assert len(resolutions) == 1, "one recorded resolution"
+    assert paused.resolutions == 1, "and one policy consultation across both callers"
 
 
 async def test_an_approval_racing_a_denial_leaves_the_park_and_the_trail_agreeing() -> None:
@@ -923,8 +960,6 @@ async def test_the_grantable_exclusion_survives_a_restart() -> None:
     an implementation holding the exclusion in memory**, which is why the handle table is
     cleared before the listing is asked.
     """
-    from ai_assistant.core.errors import UngrantableActError  # noqa: PLC0415 — one arm's subject
-
     wired = _wired()
     await wired.engine.converse(_ASKED, timeout=PATIENT)
     park = await _parked(wired)
@@ -959,11 +994,15 @@ class _SuspendingResolution:
         self._inner = inner
         self.reached = asyncio.Event()
         self.release = asyncio.Event()
+        #: How many callers reached ``resolve``. The loser's "consults no policy" clause
+        #: is a statement about this number and not about the member it returned.
+        self.resolutions = 0
 
     async def decide(self, request: Any) -> Any:
         return await self._inner.decide(request)
 
     async def resolve(self, confirmed: Any, *, approved: bool) -> Any:
+        self.resolutions += 1
         self.reached.set()
         await self.release.wait()
         return await self._inner.resolve(confirmed, approved=approved)
@@ -1003,8 +1042,6 @@ async def test_the_establishing_act_is_refused_while_an_answer_is_between_gate_a
     recording an ``ALLOW`` the user never gave that answer for, and leaving the answering
     call's own append to fail.
     """
-    from ai_assistant.core.errors import UngrantableActError  # noqa: PLC0415 — one arm's subject
-
     wired = _wired()
     parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
     assert parked.read_confirmation is not None
@@ -1070,3 +1107,346 @@ async def test_cancelling_a_dispatch_in_flight_interrupts_it_and_leaves_the_park
     assert settled is not None
     assert settled.disposition is ParkedReadDisposition.APPROVED, "not re-opened"
     held.release.set()
+
+
+# --- what the continuation owes the turn it composes -------------------------
+
+
+async def test_a_refused_dispatch_carries_its_explanation_into_the_resumed_reply() -> None:
+    """ADR-0244 §8: the ordinary carrier on a resumed read that yielded nothing.
+
+    "Where the dispatched read yielded no records — it was refused, expired, interrupted
+    or returned nothing — the turn still composes, and **ADR-0242 §6's carrier gives the
+    composing stage its member exactly as it does on any other turn**."
+
+    ``DISPATCHED`` says what became of the *answer* and says nothing about what became of
+    the read, so a reply composed with no member would leave a user told the lookup ran
+    and shown nothing it produced — with no sentence saying why. The member is mapped at
+    the site that holds the refusal and carried from there as data.
+    """
+    composing, model = _recorder()
+    wired = _wired(composing=composing)
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    park = await _parked(wired)
+    assert park.parameters is not None
+    servicer = wired.engine._loop._search
+    servicer._searcher = _CostedSearcher(
+        FakeWebSearcher(refusals={str(park.parameters["query"]): SearchRefusal.DEADLINE_EXPIRED})
+    )
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert outcome.read_answer is ReadAnswerOutcome.DISPATCHED, "the answer was spent"
+    assert outcome.search_not_serviced is SearchNotServiced.INTERRUPTED, (
+        "and ADR-0241's DEADLINE_EXPIRED maps to the member whose statement says the "
+        "search was begun and stopped (ADR-0242 §10)"
+    )
+    assert outcome.reply is not None, "the turn still composed"
+    assert "begun and stopped" not in _system_prompt(model), "asserted over the fragment below"
+    assert "it was stopped before it came back" in _system_prompt(model)
+
+
+async def test_a_dispatch_that_yielded_carries_no_member_at_all() -> None:
+    """The control for the case above: a search that ran says nothing about not running.
+
+    ADR-0242 §6's eligibility is the presence of a disposition, and a yield has none —
+    "the assistant looked, and saying it did not would be false".
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert outcome.read_answer is ReadAnswerOutcome.DISPATCHED
+    assert outcome.search_not_serviced is None
+
+
+def test_the_resumed_fourth_group_is_bounded_and_deduplicated() -> None:
+    """ADR-0244 §7: the minted records are admitted under ADR-0226 §6's budget of ten.
+
+    "They are deduplicated and admitted under ADR-0226 §6's budget of ten", so an
+    eleventh admits nothing — and the deduplication is over the **whole union**, which
+    is the half a seen-set that never advances would fail: two records of one batch
+    sharing an id would otherwise both enter the supply the reply is composed over.
+
+    **Driven at the function that states the two rules rather than through the engine**,
+    because a dispatch cannot reach either bound: ADR-0231 §5 caps
+    ``Settings.search_max_results`` at three, so one approved read mints at most three
+    records and neither an eleventh nor a repeated id is constructible through the seam.
+    The rules are stated anyway — ADR-0244 §7 retains them by name — and this is the
+    site where a rule stated for a bound no input reaches can still be checked. The
+    engine-level case below asserts what the pipeline *can* show: that the union it
+    composes over holds each record once.
+    """
+    held = ("already-held",)
+
+    assert [
+        record.id
+        for record in admitted_fourth_group(tuple(_minted(f"r-{n}") for n in range(12)), held=held)
+    ] == [f"r-{n}" for n in range(10)], "ADR-0226 §6's budget of ten, and no eleventh"
+    assert admitted_fourth_group((_minted("already-held"),), held=held) == (), (
+        "a record the supply already holds keeps its place there and consumes no slot"
+    )
+    assert [
+        record.id for record in admitted_fourth_group((_minted("r-1"), _minted("r-1")), held=())
+    ] == ["r-1"], "and the seen set advances, so one batch's duplicate enters once"
+
+
+def _minted(record_id: str) -> SemanticMemory:
+    """A record shaped as a search mints one, for the admission rules alone."""
+    return SemanticMemory(
+        id=record_id,
+        content=f"a result under {record_id}",
+        fact=f"a result under {record_id}",
+        placement=Placement(),
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.6, last_updated=AT),
+    )
+
+
+async def test_the_resumed_union_holds_each_record_once() -> None:
+    """The engine-level half of the case above, over what a dispatch can reach."""
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert outcome.turn is not None
+    assert len({record.id for record in outcome.turn.memories}) == len(outcome.turn.memories)
+
+
+async def test_the_resumed_capture_records_this_passs_own_disclosure_evaluation() -> None:
+    """ADR-0204 §2 over the resumed turn's own supply, and ADR-0244 §8's ordinary capture.
+
+    **This pass's own value and not the parked turn's**, which is where a read resume
+    differs from a step's: a step's resolution renders the parked turn's goal and plan
+    from a pass that retrieves nothing, so §2's fourth clause has it carry the parked
+    turn's boolean; this pass retrieves a supply of its own and composes over it.
+
+    A hardcoded ``False`` here is #1708's laundering path arrived at through a park: the
+    episode would be captured unmarked, and a later spoken turn may read it back.
+    """
+    wired = _wired()
+    await wired.memory.add(
+        SemanticMemory(
+            id="secret-1",
+            # Shares the goal statement's own words, because the resumed turn's
+            # retrieval is the ordinary one and searches on that statement — which is
+            # itself ADR-0244 §8's "assembled at the instant of the resume by the
+            # ordinary pipeline" made visible.
+            content=f"{_ASKED}: the appointment on thursday",
+            fact="the appointment on thursday",
+            about_person="Sam",
+            placement=Placement(),
+            provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=AT),
+        )
+    )
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert outcome.turn is not None
+    assert any(record.id == "secret-1" for record in outcome.turn.memories), (
+        "the record reached the supply the reply was composed over (ADR-0204 §4)"
+    )
+    episode = await _resumed_episode(wired)
+    assert episode.placement.reach is PlacementReach.OWNER, (
+        "and the capture derived the owner-only placement ADR-0217 §3 carries the "
+        "evaluation on, so a later spoken turn cannot read this episode back"
+    )
+    assert episode.placement.set_by is PlacementSetter.DERIVED
+
+
+async def test_a_resumed_capture_over_a_clean_supply_records_no_withholding() -> None:
+    """The control: the mark comes from the supply and not from the path.
+
+    Without it the case above would pass on an implementation that hardcoded ``True``,
+    which is the same class of error as hardcoding ``False`` and is caught the same way.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+
+    await wired.engine.resume(parked.read_confirmation.token, approved=True, timeout=PATIENT)
+
+    episode = await _resumed_episode(wired)
+    assert episode.placement == Placement(), "nothing was withheld, so nothing is narrowed"
+
+
+async def _resumed_episode(wired: _Wired) -> Any:
+    """The episode the resumption captured — the newest one this conversation holds."""
+    episodes = [
+        record
+        for record in await wired.memory.export()
+        if MemoryKind(record.kind) is MemoryKind.EPISODIC
+    ]
+    assert episodes, "the resumption was captured"
+    return episodes[-1]
+
+
+# --- ADR-0244 §5: the establishing act still rides this answer ---------------
+
+
+async def test_an_approval_over_a_clean_binding_establishes_the_grant_it_was_asked_for() -> None:
+    """ADR-0244 §5: "the act still rides an answer where a park holds the confirmation".
+
+    ``resume``'s ``remember_recipients_until`` reaches a read park's answer **exactly as
+    ADR-0235 §2 rules it, unchanged**, and this decision adds no clause to either. An
+    implementation that reported every such request as declined would tell a user who
+    made one that it did not land, while the lookup it rode went out.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    park = await _parked(wired)
+    recorded = await wired.trail.get(park.decision_id)
+    assert recorded is not None
+    binding = recorded.egress_binding
+    assert isinstance(binding, EgressBinding)
+    assert binding.planned_with_external_content is False, (
+        "a first search over a supply nothing external reached, which is the row "
+        "ADR-0193 §4 leaves grantable"
+    )
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token,
+        approved=True,
+        timeout=PATIENT,
+        remember_recipients_until=wired.clock.now + timedelta(days=30),
+    )
+
+    assert outcome.read_answer is ReadAnswerOutcome.DISPATCHED
+    assert outcome.recipient_grant is not None
+    assert outcome.recipient_grant.not_established is None, "the act landed"
+    assert outcome.recipient_grant.established is not None
+    assert len(await wired.engine.standing_recipient_grants()) == 1
+
+
+async def test_a_declining_answer_reports_the_collected_act_as_declined() -> None:
+    """ADR-0235 §4's second state, unchanged at this population.
+
+    An act collected beside a declining answer carries ``DECLINED``: the ``DENY`` is
+    recorded exactly as it is today and the recipient-grant store is never reached.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token,
+        approved=False,
+        timeout=PATIENT,
+        remember_recipients_until=wired.clock.now + timedelta(days=30),
+    )
+
+    assert outcome.read_answer is ReadAnswerOutcome.DECLINED
+    assert outcome.recipient_grant is not None
+    assert outcome.recipient_grant.not_established is RecipientGrantNotEstablished.DECLINED
+    assert outcome.recipient_grant.established is None
+    assert await wired.engine.standing_recipient_grants() == ()
+
+
+async def test_an_act_on_an_external_content_binding_is_refused_before_the_gate() -> None:
+    """ADR-0235 §2's binding refusal, which ADR-0244 §5 preserves entire.
+
+    "A user answering such a confirmation may approve the call, and may not in that act
+    make its recipients standing" (ADR-0193 §2, §4). **Refused before the gate**, so
+    nothing is ruled, nothing is dispatched, and **the park stays open and answerable
+    without the standing request** — a park spent on a refused act is a question the user
+    has to answer again for no reason.
+    """
+    wired = _wired()
+    # A second turn of the same conversation, after the first has minted a record at a
+    # destination nobody chose: ADR-0181 §5's lineage floor then makes the next
+    # request's binding carry `planned_with_external_content`, which is #2221's own
+    # shape and the row ADR-0193 §4 covers with no grant.
+    first = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert first.read_confirmation is not None
+    await wired.engine.resume(first.read_confirmation.token, approved=True, timeout=PATIENT)
+    second = await wired.engine.converse(
+        _ASKED, timeout=PATIENT, conversation_id=first.conversation_id
+    )
+    assert second.read_confirmation is not None
+    park = await _parked(wired)
+
+    with pytest.raises(UngrantableActError, match="external content"):
+        await wired.engine.resume(
+            second.read_confirmation.token,
+            approved=True,
+            timeout=PATIENT,
+            remember_recipients_until=wired.clock.now + timedelta(days=30),
+        )
+
+    still_open = await wired.parks.get(park.id)
+    assert still_open is not None
+    assert still_open.disposition is ParkedReadDisposition.OPEN, "the park is not spent"
+    assert len(wired.searcher.searched) == 1, "and the second read was not dispatched"
+
+
+async def test_an_expiry_at_or_before_the_answers_instant_is_refused_before_the_gate() -> None:
+    """ADR-0235 §1's expiry refusal, compared against **the instant the answer carries**.
+
+    One clock reading is used for both the comparison and the record, which is §1's own
+    clause: two readings admit an expiry that passes the check and fails
+    ``RecipientGrant.established_from``'s constructor.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    park = await _parked(wired)
+
+    with pytest.raises(UngrantableActError, match="strictly after"):
+        await wired.engine.resume(
+            parked.read_confirmation.token,
+            approved=True,
+            timeout=PATIENT,
+            remember_recipients_until=wired.clock.now,
+        )
+
+    still_open = await wired.parks.get(park.id)
+    assert still_open is not None
+    assert still_open.disposition is ParkedReadDisposition.OPEN
+    assert wired.searcher.searched == []
+
+
+# --- ADR-0244 §10: the conversation's own next servicing settles an expiry ----
+
+
+async def test_the_next_servicing_settles_an_expired_park_and_writes_its_own() -> None:
+    """ADR-0244 §10's **third** reader, which no other case reaches.
+
+    "A park whose ``expires_at`` is at or before the clock's reading is settled
+    ``EXPIRED`` at the first operation that reads it — an answer, an enumeration, **or
+    the conversation's own next servicing**." Without it a park nobody enumerated and
+    nobody answered holds that conversation's one open slot past its own deadline,
+    spending an ``admit_search`` call per turn and offering no question for any of them.
+    """
+    wired = _wired()
+    first = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert first.read_confirmation is not None
+    stale = await _parked(wired)
+    wired.clock.advance(_TTL + timedelta(minutes=1))
+
+    second = await wired.engine.converse(
+        _ASKED, timeout=PATIENT, conversation_id=first.conversation_id
+    )
+
+    settled = await wired.parks.get(stale.id)
+    assert settled is not None
+    assert settled.disposition is ParkedReadDisposition.EXPIRED
+    assert settled.parameters is None, "and its content was cleared"
+    assert second.read_confirmation is not None, "the slot was free, so this turn parked"
+    assert second.search_not_serviced is SearchNotServiced.ANSWER_AWAITED
+    [standing] = await wired.parks.outstanding()
+    assert standing.id != stale.id
