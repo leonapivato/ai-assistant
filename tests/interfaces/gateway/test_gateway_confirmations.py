@@ -244,6 +244,12 @@ async def test_a_turn_that_parks_renders_the_confirmation_and_not_a_boolean() ->
     confirmation content reached the browser at all. All five content members cross
     now, and the boolean is gone rather than kept beside them — a page reading it
     would have a second, poorer way to ask the same question.
+
+    **``read`` is the sixth and it is ADR-0244 §4's discriminator**, absent here because
+    this is a step's confirmation and §4 gives it ``None`` on one. The member set is
+    asserted whole rather than by presence for ``_outcome_view``'s reason one level in:
+    the enumeration is a decision, so a member that starts crossing unreviewed is as much
+    a defect as one that stops.
     """
     async with _harness(_holding()) as one:
         view = await _view(one, _confirmation(_span("body")))
@@ -255,10 +261,12 @@ async def test_a_turn_that_parks_renders_the_confirmation_and_not_a_boolean() ->
             "parameters",
             "reason",
             "egress",
+            "read",
         }
         assert view["tool_id"] == "smtp"
         assert view["tool_description"] == "Send an email."
         assert view["reason"] == "this discloses data off-device"
+        assert view["read"] is None
         _, body = await one.whole("POST", "/ask", {"utterance": "again"})
         assert "awaiting_confirmation" not in body["outcome"]["step"], body
 
