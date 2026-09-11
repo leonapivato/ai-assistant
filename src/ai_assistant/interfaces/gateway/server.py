@@ -394,6 +394,19 @@ _OBSERVE_PATH: Final = "/observe"
 _CONFIRMATIONS_PATH: Final = "/confirmations"
 _RESUME_PATH: Final = "/confirmation/resume"
 
+#: ADR-0244 §11's cancellation act, which §13 places on this surface by name: "The
+#: command line and the browser each render the pending read, collect the answer, and
+#: offer the cancellation act". It widens ADR-0177 §1's enumeration in a ratified
+#: decision's own text, which is the route §1's third clause fixes.
+#:
+#: **``/confirmation/cancel-read`` rather than ``/confirmation/cancel``**, because the
+#: operation is for **one operation kind alone** (ADR-0244 §11) and the path is where a
+#: later kind would collide: a park of a plan step is cancelled by nothing here, and a
+#: path naming the act without naming what it acts on would be the shape a second
+#: cancellation reached by guessing. The verb comes last for :data:`_RESUME_PATH`'s own
+#: reason — the path names the thing acted on and then the act.
+_CANCEL_READ_PATH: Final = "/confirmation/cancel-read"
+
 #: ADR-0177 §10's notification review surface. Five paths for five operations, and
 #: **none of them is** :data:`_DELIVERIES_PATH`: what these operate on is the
 #: notification *record* (ADR-0130), where a delivery is what the gateway's own poll
@@ -459,6 +472,7 @@ _ASSISTANT_PATHS: Final[Mapping[tuple[str, str], str]] = {
     ("POST", _OBSERVE_PATH): "observe",
     ("POST", _CONFIRMATIONS_PATH): "pending_confirmations",
     ("POST", _RESUME_PATH): "resume",
+    ("POST", _CANCEL_READ_PATH): "cancel_read",
     ("POST", _NOTIFICATIONS_PATH): "notifications",
     ("POST", _DISMISS_NOTIFICATION_PATH): "dismiss_notification",
     ("POST", _FORGET_NOTIFICATION_PATH): "forget_notification",
@@ -1111,6 +1125,7 @@ class Gateway:
             _OBSERVE_PATH: self._observe,
             _CONFIRMATIONS_PATH: self._pending_confirmations,
             _RESUME_PATH: self._resume,
+            _CANCEL_READ_PATH: self._cancel_read,
             _NOTIFICATIONS_PATH: self._notifications,
             _DISMISS_NOTIFICATION_PATH: self._dismiss_notification,
             _FORGET_NOTIFICATION_PATH: self._forget_notification,
@@ -2812,6 +2827,32 @@ class Gateway:
         )
         return _rendered({"outcome": _outcome_view(outcome)})
 
+    async def _cancel_read(self, request: Request) -> Response:
+        """Withdraw one parked read, or interrupt a dispatch of it running here.
+
+        **Relay and render, exactly as :meth:`_resume` is** (golden rule 3, ADR-0042
+        §6). The browser supplies the token it was handed and nothing else — ADR-0244
+        §11 gives the operation "no other argument, no reason, no free text and no
+        deadline" — and the engine decides which of the three states it reached.
+
+        **This is not a denial and this adapter does not present it as one** (ADR-0244
+        §11). A denial is the user answering *no* and is a ruling; a cancellation is the
+        user withdrawing the question and is not one. Nothing here rules, records or
+        infers: what comes back is one member of a closed vocabulary, and the page
+        renders one fixed statement for it.
+
+        Args:
+            request: The admitted request, carrying ``token``.
+
+        Returns:
+            Which of :class:`~ai_assistant.core.types.ReadCancellation`'s three states
+            the act reached, as its own value.
+        """
+        cancelled = await self._relayed(
+            partial(self._engine.cancel_read, _token(_payload(request)))
+        )
+        return _rendered({"cancellation": cancelled.value})
+
     # --- ADR-0177 §10: the notification review surface --------------------
     #
     # Five operations on the notification **record** (ADR-0130 §7, §9) and none on a
@@ -4167,6 +4208,29 @@ def _outcome_view(outcome: TurnOutcome) -> dict[str, Any]:
     ``reply`` reached the CLI when ADR-0170 landed and did not reach this view
     until issue #1337 — a turn's answer was composed, returned, and dropped one
     layer short of the person who asked for it.
+
+    **``read_confirmation`` and ``read_answer`` cross because ADR-0244 §13 admits this
+    surface for this kind** — "the command line and the browser each render the pending
+    read, collect the answer, and offer the cancellation act" — rather than inheriting
+    ADR-0235 §9's deferral of the browser. The first is the question a turn parked, so
+    it appears in the exchange that raised it; the second is one member of a closed
+    seven, for which the page renders one fixed statement. §13's last clause is what
+    makes both obligatory rather than optional: a surface rendering no statement for a
+    member it was given "has not implemented this section" and "is not permissibly
+    degraded".
+
+    **``search_not_serviced`` is still not carried, and that is a decision rather than
+    an omission.** ADR-0242 §9's last clause is explicit about this surface — "the
+    browser, until its own lane (§5), renders neither the statement nor the reply's
+    absence of one, because it renders the turn exactly as it does today and the field
+    it now receives is one it ignores" — and ADR-0244's supersession of that ADR reaches
+    "§9's statement enumeration by one member. Nothing else in that ADR", leaving the
+    deferral entire. So the ninth member reaches this page through no route, the other
+    eight through no route either, and the all-or-nothing rule §9 states is met by
+    rendering none of the nine rather than one of them. What a browser user is told
+    instead is the reply the servicing composed and the question itself, which
+    ``read_confirmation`` now puts on the screen. Issue #2237 carries the browser's own
+    lane for the vocabulary.
     """
     turn = outcome.turn
     plan = None if turn is None else turn.plan
@@ -4181,6 +4245,12 @@ def _outcome_view(outcome: TurnOutcome) -> dict[str, Any]:
         "steps": [{"intent": one.intent, "capability": one.capability} for one in steps],
         "step": _step_view(outcome.step),
         "routed": _routed_view(outcome.routed),
+        "read_confirmation": (
+            None
+            if outcome.read_confirmation is None
+            else _confirmation_view(outcome.read_confirmation)
+        ),
+        "read_answer": None if outcome.read_answer is None else outcome.read_answer.value,
     }
 
 
@@ -4305,6 +4375,21 @@ def _confirmation_view(confirmation: Confirmation) -> dict[str, Any]:
     through a text node (ADR-0042 §4, ADR-0175 §9) — the new members included, because
     ``argument`` is a caller-influenced key (ADR-0150 §13) and a ``supplied`` form is a
     string a model produced.
+
+    **``read`` crosses because it is the discriminator and for no other reason**
+    (ADR-0244 §4). It states that answering this question dispatches a read rather than
+    a plan step, and nothing more: neither this view nor the page reads it as a warrant
+    about what the read will return, whether it will run, or what the reply will then
+    say. What the page does with it is render the one sentence ADR-0244 §13 obliges —
+    that answering *yes* dispatches this one read — and offer the cancellation act §11
+    gives this kind alone.
+
+    **No member is added for the query, because ``parameters`` already carries it**
+    (ADR-0244 §4). The search request's own argument mapping is the exact query, byte
+    for byte as the ruling was taken over it, and it crosses through
+    :func:`_parameter_views` exactly as a step's arguments do. Nothing here summarises,
+    abbreviates, normalises, re-cases, truncates or paraphrases it, and nothing adds a
+    description of it beside it.
     """
     return {
         "token": confirmation.token.handle,
@@ -4313,6 +4398,7 @@ def _confirmation_view(confirmation: Confirmation) -> dict[str, Any]:
         "parameters": _parameter_views(confirmation.parameters),
         "reason": confirmation.reason,
         "egress": None if confirmation.egress is None else _egress_view(confirmation.egress),
+        "read": None if confirmation.read is None else confirmation.read.value,
     }
 
 
