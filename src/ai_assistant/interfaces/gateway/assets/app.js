@@ -1428,40 +1428,6 @@ function cancellationWords(member) {
     : READ_CANCELLATION_UNREADABLE;
 }
 
-// Write what the cancellation act did, or take it down (ADR-0244 §11).
-//
-// **A statement and not a fault**, so it is not in `faultSlot`'s node: it reports an act
-// the owner performed and that succeeded, and `fault` is what this page says when
-// something went wrong. The practical difference is the one that matters here — every
-// listing read clears the fault slot on its way in, and the read this act's own ending
-// starts is the one that would clear it.
-//
-// **Written through a text node, like every other value on this page** (ADR-0168 §6).
-// The three sentences are this file's own and interpolate nothing, so there is no value
-// to neutralise; going through `textContent` anyway is what keeps that true of the next
-// sentence somebody adds.
-function said(text) {
-  const node = el("cancellation-said");
-  node.textContent = text === null ? "" : text;
-  node.hidden = text === null;
-  // **And the panel it is in is opened with it** (adversarial review, round 4). A node
-  // unhidden inside a hidden panel is a statement nobody can read, and the panel really
-  // can be closed at this moment: the answer this act interrupted ends first in one of
-  // the two orderings, its quiet read finds an empty listing, and a panel that said
-  // nothing is closed — correctly, because at that instant it said nothing. Opening it
-  // here rather than leaving it to the listing read this act starts is what makes the
-  // statement's visibility independent of a request that may stall, which is the same
-  // reason the sentence is not written into that read's own slot.
-  //
-  // **Only ever opened, never closed.** Taking the statement down is the owner's own
-  // press, and that press is a listing read whose own rules decide what the panel then
-  // shows — a closed panel over an empty listing, or the listing. A `show(false)` here
-  // would close a panel holding rows that are still answerable.
-  if (text !== null) {
-    show("confirmations", true);
-  }
-}
-
 // The question a turn parked, put in the exchange that raised it (ADR-0244 §9).
 //
 // `read_confirmation` is "the confirmation for a read **this turn parked**, so the
@@ -3478,9 +3444,9 @@ function rowWords(cancellation, withdrawing, unread, otherwise) {
   // review's round 6). Every sentence `parkWords` has for a park whose answer went
   // unread ends "Nothing was re-sent and nothing was cancelled" — true of this page's
   // conduct until the owner asks for a cancellation, and false from that moment on. The
-  // account is not lost by the silence: the panel's own node carries what became of the
-  // act, and the fault slot carries `PARK_LOST_WHILE_CANCELLING` for the answer, so both
-  // unresolved acts are stated on the same screen and neither is stated twice.
+  // account is not lost by the silence: the panel has a node for each act — what became
+  // of the act, and `PARK_LOST_WHILE_CANCELLING` for the answer — so both unresolved acts
+  // are stated on the same screen and neither is stated twice.
   return unread ? "" : otherwise;
 }
 
@@ -3490,11 +3456,12 @@ function rowWords(cancellation, withdrawing, unread, otherwise) {
 // loads and caches no token: `pending_confirmations` mints a fresh one per call, and a
 // remembered one names an entry in a handle table a restart emptied (ADR-0052 §1).
 async function listPending() {
-  // **The owner's own press is what takes the last act's statement down**, and it is the
-  // only thing that does. A cancellation's answer stays on screen until the person who
-  // performed it asks what is waiting now — which is the question that statement is the
-  // answer to, and the moment it stops being current.
-  said(null);
+  // **The owner's own press is what takes the two accounts down**, and it is the only
+  // thing that does. A cancellation's answer, and what became of an answer this page
+  // never read a reply for, both stay on screen until the person who performed them asks
+  // what is waiting now — which is the question they are answers to, and the moment they
+  // stop being current.
+  clearAccounts();
   await readPending(false);
 }
 
@@ -3538,14 +3505,15 @@ async function readPending(quiet) {
     refreshParks();
     if (body.confirmations.length === 0) {
       // **A panel holding a statement the owner has not read yet is not an empty one**
-      // (ADR-0244 §11, adversarial review's round 3). A quiet read closes the panel
-      // because "an empty answer to a question nobody asked is a panel that says
-      // nothing" — and a cancellation's own answer is a thing it says. It is also the
-      // thing §11 makes the whole of what tells the user, and the read that would close
-      // the panel over it is the one the answer that act interrupted starts on its way
-      // out. So the quiet close asks whether the panel is silent rather than whether the
-      // listing is, which is what that clause meant all along.
-      if (quiet && el("cancellation-said").hidden) {
+      // (ADR-0244 §11, adversarial review's round 3, and round 8 over the second node). A
+      // quiet read closes the panel because "an empty answer to a question nobody asked is
+      // a panel that says nothing" — and either account is a thing it says. One of them is
+      // what §11 makes the whole of what tells the user; the other is ADR-0177 §7's fourth
+      // clause about an answer this page sent. The read that would close the panel over
+      // them is the one each act starts on its way out. So the quiet close asks whether
+      // the panel is silent rather than whether the listing is, which is what that clause
+      // meant all along.
+      if (quiet && panelIsSilent()) {
         show("confirmations", false);
         return;
       }
@@ -3724,44 +3692,23 @@ async function answerConfirmation(token, approved, stopping) {
   // inference from absence ADR-0139 §4 refuses. So the page reads its own history, which
   // is the one thing here that is actually about the earlier answer.
   const unaccounted = unresolved.has(token);
-  // **Where this page cancelled the read itself, this call has no sentence of its own to
-  // write** (ADR-0244 §11, adversarial review's rounds 1 and 2). A dispatch this page
-  // interrupted ends this call one of four ways — a rejected `fetch`, a refusal this
-  // page classifies as unknown, a refusal it cannot classify at all, or a reply it
-  // cannot render — and in production the *usual* one is a refusal: cancelling the
-  // hub's `resume` closes the wire connection, the client raises, and `_relay_fault`
-  // writes `502 hub-unreachable`. So the rule belongs at every ending rather than at the
-  // one a fake happens to reach.
+  // **Where this page cancelled the read itself, what this call says about its own
+  // ending is not this call's alone to decide** (ADR-0244 §11, adversarial review's
+  // rounds 1, 2, 7 and 8). A dispatch this page interrupted ends this call one of four
+  // ways — a rejected `fetch`, a refusal this page classifies as unknown, a refusal it
+  // cannot classify at all, or a reply it cannot render — and in production the *usual*
+  // one is a refusal: cancelling the hub's `resume` closes the wire connection, the
+  // client raises, and `_relay_fault` writes `502 hub-unreachable`.
   //
-  // Each of those four sentences would be false here twice over: the page knows why the
-  // answer ended, and each of them says "nothing was cancelled" — the opposite of what
-  // it had just done. §11 fixes what is said instead, and it is said elsewhere: "the
-  // cancellation is a teardown and is converted into neither an outcome nor a refusal …
-  // **what tells the user is `cancel_read`'s own answer, which is the act they
-  // performed**" — which `cancelRead` has already written into the panel's own node, a
-  // node this function does not touch. So the honest thing here is silence rather than a
-  // second sentence about the same event.
-  //
-  // **Read at the ending rather than once at the top**, because the act's reply may land
-  // at any point while this one is out; and **one closure rather than four copies**
-  // (#1622's "one check, shared"), so a fifth ending cannot be written without it.
-  const ending = (otherwise) => {
-    const recorded = cancelled.get(token);
-    if (recorded === undefined) {
-      return otherwise;
-    }
-    if (recorded === CANCELLATION_UNRESOLVED) {
-      return PARK_LOST_WHILE_CANCELLING;
-    }
-    // **Only the member that ended this answer explains this ending** (adversarial
-    // review's round 7). ADR-0244 §11 gives `cancel_read`'s answer that standing for the
-    // dispatch it interrupted — "what is cancelled is the `resume` call running the
-    // dispatch, and no `TurnOutcome` is produced for it" — and for that member alone.
-    // `WITHDRAWN` took a park that was still `OPEN`, and `NOTHING_TO_CANCEL` did nothing
-    // at all; neither stopped this request, so its reply going unread is a second
-    // unresolved fact and ADR-0177 §7's fourth clause still owes a sentence for it.
-    return recorded === "interrupted" ? null : PARK_LOST_BESIDE_A_CANCELLATION;
-  };
+  // Each of those four sentences would be wrong beside a cancellation, and each is wrong
+  // in its own direction: all five say "nothing was cancelled", which is false from the
+  // moment the owner asks for one, and one member of `ReadCancellation` settles what
+  // became of this request outright. So this function records **which ending it
+  // reached** and nothing more, and `answerAccountWords` turns that into the sentence —
+  // re-deriving it whenever either act finishes, because the act's reply may land after
+  // this one's and would otherwise be composing with a sentence already on the screen.
+  // That is round 8's blocker, and it is why the composition is no longer a closure read
+  // once here.
   // Claimed before the first `await`, so two clicks in one turn of the event loop —
   // the two rows of one park, or one row twice — cannot both get past the guard.
   spent.add(token);
@@ -3815,25 +3762,28 @@ async function answerConfirmation(token, approved, stopping) {
     // **The tidy-up is started and not waited on**, which is the difference that
     // matters to the row: `readPending` reaches the same unbounded `relay`, so
     // awaiting it here would let one stalled read hold this pair disabled all over
-    // again — the failure being closed, one ordering over. It runs far enough to clear
-    // this panel's fault before the sentence below is written, which is why the
-    // sentence comes after it.
+    // again — the failure being closed, one ordering over.
+    //
+    // **And the account no longer has to come after it.** It used to, because it was
+    // written into the panel's fault slot and this read clears that slot on its way in;
+    // it is now written into a node of its own that no listing read touches, which is
+    // round 8's structural half. The order is kept because the row's state should settle
+    // before the sentence beside it, and nothing depends on it any more.
     strand(token);
     readPending(false);
-    // **Where this page cancelled the read itself, the outcome is known and this is
-    // what it is** (ADR-0244 §11, adversarial review's round 1). A dispatch this page
-    // interrupted ends with "no `TurnOutcome` … the cancellation is a teardown and is
-    // converted into neither an outcome nor a refusal", and "what tells the user is
-    // `cancel_read`'s own answer, which is the act they performed". So the not-known
-    // sentence would be false here twice over — the page knows why the answer ended, and
-    // `PARK_LOST`'s "nothing was cancelled" is the opposite of what it just did.
+    // **Which ending this was, and not what the screen should say about it** (ADR-0244
+    // §11, adversarial review's rounds 1 and 8). A dispatch this page interrupted ends
+    // with "no `TurnOutcome` … the cancellation is a teardown and is converted into
+    // neither an outcome nor a refusal", and "what tells the user is `cancel_read`'s own
+    // answer, which is the act they performed" — so `PARK_LOST`'s "nothing was
+    // cancelled" is the opposite of what the owner just did, and beside a `WITHDRAWN`
+    // its "the action may have been carried out" is false outright.
     //
-    // **Either ordering of the two replies ends with the act's own answer on screen.**
-    // Where the cancellation landed first this branch renders it; where it lands second,
-    // `cancelRead` writes it over whatever stood here. Neither result is lost to the
-    // other's timing, which is the property the two orderings are tested for.
-    const lost = stopping.signal.aborted ? PARK_UNRESOLVED : PARK_LOST;
-    fault(ending(lost), "confirmations");
+    // **Either ordering of the two replies ends with both accounts on screen**, because
+    // neither is written where the other's refresh reaches and both are re-derived from
+    // the pair of states whenever either act finishes. That is the property the two
+    // orderings are driven for.
+    recordAnswerAccount(token, stopping.signal.aborted ? PARK_UNRESOLVED : PARK_LOST);
     return;
   }
   if (body === null) {
@@ -3862,9 +3812,9 @@ async function answerConfirmation(token, approved, stopping) {
     if (unaccounted || !named || UNKNOWN_FAULTS.has(refusal.fault)) {
       strand(token);
       readPending(false);
-      fault(
-        ending(unaccounted ? PARK_REFUSAL_AFTER_UNKNOWN : PARK_REFUSAL_NOT_KNOWN),
-        "confirmations"
+      recordAnswerAccount(
+        token,
+        unaccounted ? PARK_REFUSAL_AFTER_UNKNOWN : PARK_REFUSAL_NOT_KNOWN
       );
       return;
     }
@@ -3920,12 +3870,10 @@ async function answerConfirmation(token, approved, stopping) {
     !couldRenderOutcome(body.outcome, chosenAt, unaccounted ? PARK_SETTLED_AFTER_UNKNOWN : null)
   ) {
     // The ending, in the order every other not-known arm of this function uses: the
-    // token back, the park's row given up, and only then the sentence — `readPending`
-    // clears this panel's fault on its way in, so a fault written before it would be
-    // wiped by the tidy-up that follows it.
+    // token back, the park's row given up, and only then the account.
     strand(token);
     readPending(false);
-    fault(ending(PARK_REPLY_UNREADABLE), "confirmations");
+    recordAnswerAccount(token, PARK_REPLY_UNREADABLE);
     return;
   }
   // **A refusal that left the question standing leaves the control answerable**
@@ -3951,6 +3899,15 @@ async function answerConfirmation(token, approved, stopping) {
   //
   // Nothing here depends on the read: `renderOutcome` above has already put the answer
   // on screen, and what is left is which rows the listing still holds.
+  //
+  // **And the account this page was owing for *this* park comes down here** (round 8).
+  // It was an account of an answer whose outcome was not known, and this page has now
+  // read one for the same park — so the node is no longer current, and the fact behind it
+  // is not lost: `unresolved` keeps it for the life of the page, and the caveat handed to
+  // `renderOutcome` above says on the same screen that the record shown may be the
+  // earlier answer. An account for a *different* park is untouched, which is the half the
+  // fault slot could not do.
+  releaseAnswerAccount(token);
   readPending(true);
 }
 
@@ -4021,6 +3978,221 @@ const PARK_LOST_BESIDE_A_CANCELLATION =
   "in this panel — and nothing was re-sent. " +
   PARK_WHERE_NOW;
 
+// What this page says when an answer's reply went unread beside a **confirmed
+// withdrawal** (adversarial review's round 8, second finding).
+//
+// `WITHDRAWN` is the one member of the three that settles what became of the lost
+// request, and it settles it in the direction the sentence above gets wrong. ADR-0244
+// §11 gives it as "an `OPEN` park was settled `CANCELLED` and **nothing was ever
+// sent**", with "the park's content … cleared in the same step, so a cancellation and a
+// concurrent answer cannot both take effect"; §6's one compare-and-swap is where that
+// happens, and under it "neither party acts on a park the other took", so the answer
+// whose reply was lost returned `ALREADY_SETTLED` and cannot have dispatched. Had it
+// dispatched first, the park would have been `APPROVED` at the act's swap and the act
+// would have answered `INTERRUPTED` or `NOTHING_TO_CANCEL` instead.
+//
+// **So "the action may have been carried out" is false here**, and saying it would be
+// this page contradicting, on one screen, the statement the act's own node is carrying
+// two lines above — "Nothing was sent for it, and no answer was recorded."
+//
+// **What is still not known is narrower and is still owed a sentence** (ADR-0177 §7's
+// fourth clause): the request went out and no reply was read, so what it *came back
+// with* is not known. That is all this says, and it says the rest of what the act
+// established rather than leaving the reader to pair the two nodes themselves.
+const PARK_LOST_BESIDE_A_WITHDRAWAL =
+  "The request carrying that answer got no reply this browser could read, so what it " +
+  "came back with is not known. What became of the park is known, and the cancellation " +
+  "is what says so: it withdrew a question that was still open, so nothing was sent for " +
+  "this park and no answer was recorded for it — whatever that request returned. What " +
+  "the cancellation did is said in this panel, and nothing was re-sent. " +
+  PARK_WHERE_NOW;
+
+// What this page says while an answer's reply is lost and the act is **still out**.
+//
+// The five sentences above all end "nothing was cancelled", which round 6 established
+// is false from the moment the owner asks for a cancellation — and it is false in this
+// window too, where the act has been sent and has not answered. The row beside it is
+// already saying `READ_CANCEL_SENDING`, so leaving one of the five here would put the
+// contradiction on one screen for as long as the act is in flight.
+//
+// **And it asserts nothing about the act**, which is the whole of what is not known
+// about it yet: a request that has not answered has established none of
+// `ReadCancellation`'s three members, and reading it as any of them is the resolution
+// ADR-0139 §4 forbids. When it does answer, this account is recomputed from what it
+// answered — which is what makes this a window rather than a state the page can be left
+// in.
+const PARK_LOST_WITH_THE_ACT_STILL_OUT =
+  "The request carrying that answer got no reply this browser could read, so what became " +
+  "of it is not known: the action may have been carried out, with only the reply lost. " +
+  "A request to cancel the lookup on this park is still out and has not been answered " +
+  "here, so nothing here says whether it reached anything or what it did. Nothing was " +
+  "re-sent. " +
+  PARK_WHERE_NOW;
+
+// --- the two accounts this panel owes, written from one pair of states ---------
+//
+// **One park now carries two acts, and the panel has to hold both accounts at once.**
+// The answer (`answerConfirmation`) and ADR-0244 §11's cancellation (`cancelRead`) can
+// be in flight together — that is not an edge case but the state `INTERRUPTED` is
+// *defined* over — and each of them starts the listing read that clears the panel's
+// fault slot on its way in. So an account written straight into that slot is erased by
+// whichever of the two replies lands second, and which one that is is the network's
+// choice.
+//
+// Adversarial review found seven orderings of that one fact over eight rounds. Round 3
+// moved the **act's** account into a node of its own, and no finding since has been
+// about losing it; every finding since has been about the **answer's** account, which
+// was still in the swept slot. An eighth ordering guard is what this replaces.
+//
+// **So the page holds the pair of states and derives both sentences from them**, rather
+// than writing a sentence at each ending and hoping nothing sweeps it. Recording either
+// state re-renders both nodes, so ordering cannot erase either account by construction:
+// whichever reply lands second recomputes the screen from everything the page knows,
+// including what the first one established.
+//
+// What is held is deliberately small — which park the unread answer was about and which
+// of its five endings it reached, and the text the last act produced. Everything else
+// the composition needs is already the page's durable per-park record (`cancelled`,
+// `cancelling`), which the rows are rendered from too, so the panel and the rows cannot
+// disagree about the same park.
+const ACCOUNTS = {
+  // `null`, or `{ token, sentence }`: the park whose answer of this page's own went
+  // unread, and the ending it reached, before any cancellation of the same park is
+  // taken into account.
+  answer: null,
+  // `null`, or the sentence the last cancellation act of this page produced. Text
+  // rather than a member, because `cancelRead` has three states to render from and
+  // only one of them is a member.
+  act: null,
+};
+
+// The sentence the answer's account reads as **now** — its own ending's, unless a
+// cancellation of the same park has something to say about it.
+//
+// This is the closure `answerConfirmation` used to compute once, at the ending, lifted
+// out so it is recomputed whenever either act finishes. That is round 8's blocker: the
+// ending is not the last moment at which the answer's account can change, because the
+// act's reply may land after it.
+//
+// **The states are read in the order of what is newest and most specific**: an act
+// still out says the least and is checked first, because a token can be `cancelling`
+// while an *earlier* act of this page's is recorded unresolved and the in-flight one is
+// the current fact. A settled member closes the act, so `cancelRead` refuses a second
+// one over it and the two cannot coexist.
+function answerAccountWords() {
+  const held = ACCOUNTS.answer;
+  if (held === null) {
+    return null;
+  }
+  if (cancelling.has(held.token)) {
+    return PARK_LOST_WITH_THE_ACT_STILL_OUT;
+  }
+  const recorded = cancelled.get(held.token);
+  if (recorded === undefined) {
+    return held.sentence;
+  }
+  if (recorded === CANCELLATION_UNRESOLVED) {
+    return PARK_LOST_WHILE_CANCELLING;
+  }
+  // **Only the member that ended this answer explains this ending** (round 7). ADR-0244
+  // §11 gives `cancel_read`'s answer that standing for the dispatch it interrupted —
+  // "what is cancelled is the `resume` call running the dispatch, and no `TurnOutcome`
+  // is produced for it" — and for that member alone, so there is nothing left here to
+  // say and the node stays down.
+  if (recorded === "interrupted") {
+    return null;
+  }
+  // And `WITHDRAWN` is the member that settles the lost request in the *other*
+  // direction (round 8): nothing was sent for this park at all. `NOTHING_TO_CANCEL`
+  // settles nothing — the park may be `APPROVED` with its dispatch running in another
+  // process (§11's last clause) — so it keeps the sentence that says so.
+  return recorded === "withdrawn"
+    ? PARK_LOST_BESIDE_A_WITHDRAWAL
+    : PARK_LOST_BESIDE_A_CANCELLATION;
+}
+
+// One account into its own node, or taken down.
+//
+// **A statement and not a fault**, so neither of these is `faultSlot`'s node: every
+// listing read clears that slot on its way in, and both acts start one at their ending.
+// The node carries the fault's ink where what it reports is an outcome that is not
+// known (`.account` in the stylesheet), which is a presentation and not a slot.
+//
+// **Written through a text node, like every other value on this page** (ADR-0168 §6).
+// The sentences are this file's own and interpolate nothing, so there is no value to
+// neutralise; going through `textContent` anyway is what keeps that true of the next
+// sentence somebody adds.
+//
+// **And the panel it is in is opened with it** (adversarial review, round 4). A node
+// unhidden inside a hidden panel is a statement nobody can read, and the panel really
+// can be closed at this moment: one act ends first, its quiet read finds an empty
+// listing, and a panel that said nothing is closed — correctly, because at that instant
+// it said nothing. Opening it here rather than leaving it to the listing read the act
+// starts is what makes the statement's visibility independent of a request that may
+// stall, which is the same reason it is not written into that read's own slot.
+//
+// **Only ever opened, never closed.** Taking a statement down is the owner's own press,
+// and that press is a listing read whose own rules decide what the panel then shows — a
+// closed panel over an empty listing, or the listing. A `show(false)` here would close a
+// panel holding rows that are still answerable.
+function writeAccount(nodeId, text) {
+  const node = el(nodeId);
+  node.textContent = text === null ? "" : text;
+  node.hidden = text === null;
+  if (text !== null) {
+    show("confirmations", true);
+  }
+}
+
+// Both nodes, from the pair of states, every time either act finishes. **One function
+// over both**, which is what makes reply ordering irrelevant rather than guarded
+// against: there is no path that writes one account without recomputing the other.
+function renderAccounts() {
+  writeAccount("cancellation-said", ACCOUNTS.act);
+  writeAccount("answer-said", answerAccountWords());
+}
+
+// Whether this panel is saying anything of its own, which is what a quiet read of an
+// empty listing has to ask before it closes the panel (round 3, now over both nodes).
+function panelIsSilent() {
+  return el("cancellation-said").hidden && el("answer-said").hidden;
+}
+
+// An answer of this page's own whose reply it never read, recorded with the park it was
+// about. The token is held to pair it with that park's cancellation and for nothing
+// else: it is compared, never rendered (ADR-0177 §8).
+function recordAnswerAccount(token, sentence) {
+  ACCOUNTS.answer = { token, sentence };
+  renderAccounts();
+}
+
+// **And taken down only by an answer for the same park that this page did read.** A
+// success elsewhere resolves nothing about this one, so the park is compared rather than
+// the account cleared wholesale — the account would otherwise be swept by the next park
+// answered, which is the class of defect this whole structure exists to end. Where the
+// park is the same, the fact is not lost either: `unresolved` keeps it for the life of
+// the page and `PARK_SETTLED_AFTER_UNKNOWN` is rendered with the outcome that replaced
+// this account.
+function releaseAnswerAccount(token) {
+  if (ACCOUNTS.answer !== null && ACCOUNTS.answer.token === token) {
+    ACCOUNTS.answer = null;
+    renderAccounts();
+  }
+}
+
+function recordActAccount(text) {
+  ACCOUNTS.act = text;
+  renderAccounts();
+}
+
+// Both, for the owner's own press of the button that asks what is waiting now — which is
+// the question both statements are answers to, and the moment they stop being current.
+function clearAccounts() {
+  ACCOUNTS.answer = null;
+  ACCOUNTS.act = null;
+  renderAccounts();
+}
+
 // One cancellation, relayed (ADR-0244 §11). The page performs the act and renders what
 // came back; it rules on nothing, records nothing and infers nothing.
 //
@@ -4053,8 +4225,13 @@ async function cancelRead(token) {
     return;
   }
   cancelling.add(token);
-  // A new act, so whatever the last one said is no longer what is happening.
-  said(null);
+  // A new act, so whatever the last one said is no longer what is happening — and the
+  // answer's account is re-derived in the same breath, because "nothing was cancelled"
+  // stopped being true of this page's conduct the moment this press landed. What the
+  // answer's account must *not* be is cleared here: a cancellation beginning establishes
+  // nothing about an answer whose reply went unread, and clearing it would be exactly
+  // ADR-0139 §4's resolution by omission (round 8's blocker, one path over).
+  recordActAccount(null);
   refreshParks();
   // What the gateway refused with, where it refused — `answerConfirmation`'s own device
   // and for its reason, which reaches this act unchanged because this act mutates too
@@ -4114,6 +4291,12 @@ async function cancelRead(token) {
     }
     cancelling.delete(token);
     refreshParks();
+    // **And the panel settles on it too, on every way out of this call** — including the
+    // named refusal below, which returns before the act has a statement of its own. The
+    // answer's account is derived from `cancelled` and `cancelling`, both of which have
+    // just moved, so re-deriving it here is what keeps the panel and the rows saying the
+    // same thing about the same park (round 8).
+    renderAccounts();
   }
   if (done === null) {
     // A condition the gateway named and this page reads as a request the hub received
@@ -4134,7 +4317,9 @@ async function cancelRead(token) {
   // rule and for its reason: `readPending` reaches the same unbounded `relay`, and a
   // stalled listing read must not hold this act's ending. Nothing here depends on it —
   // the sentence is already written, in a node that read does not touch.
-  said(done === CANCELLATION_UNRESOLVED ? READ_CANCEL_LOST : cancellationWords(done));
+  recordActAccount(
+    done === CANCELLATION_UNRESOLVED ? READ_CANCEL_LOST : cancellationWords(done)
+  );
   readPending(false);
 }
 

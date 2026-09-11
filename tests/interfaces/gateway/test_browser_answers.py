@@ -738,11 +738,15 @@ async def test_a_parks_answer_that_cannot_be_rendered_leaves_no_half_answer_behi
         )
         await approve.click()
 
-        said = await _fault(drive, panel="confirmations")
-        assert "could not read an outcome from" in said
-        assert "what became of the park is not known" in said
-        assert "the action may have been carried out" in said
-        assert _GATEWAY_GONE not in said
+        # The account is in the node that owns it and not in the panel's fault slot,
+        # which every listing read clears on its way in (adversarial review's round 8).
+        said = drive.page.locator("#answer-said")
+        await said.wait_for(state="visible")
+        stated = await said.inner_text()
+        assert "could not read an outcome from" in stated
+        assert "what became of the park is not known" in stated
+        assert "the action may have been carried out" in stated
+        assert _GATEWAY_GONE not in await drive.page.inner_text("#confirmations")
         # Nothing half-rendered left behind the hidden panel, which is what the fold
         # adds: the renderer had written two lines before it threw. Read as
         # ``textContent`` rather than through ``Drive.answer``, because a hidden node's

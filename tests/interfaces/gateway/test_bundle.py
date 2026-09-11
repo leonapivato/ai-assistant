@@ -5566,6 +5566,17 @@ def test_the_token_is_relayed_and_never_rendered_or_stored() -> None:
     carry, unchanged and for its reason: the cancellation is "the act they performed",
     and what the row says about it is computed by ``rowWords``, which takes the member
     and not the handle.
+
+    **The last three are the panel's two accounts** (adversarial review's round 8).
+    ``recordAnswerAccount`` and ``releaseAnswerAccount`` hold and drop the park an unread
+    answer was about, and ``answerAccountWords`` reads that park's cancellation back out
+    of ``cancelled`` and ``cancelling`` to decide what the account now says. All three
+    **compare** the handle and nothing else — it is a key into two registries and a
+    property of a page-held object, it reaches no text node, no attribute and no storage,
+    and ``writeAccount``, which is the only thing here that touches the DOM, never sees
+    it. That is ``strand``'s own relationship to §8 one act over: the token is how this
+    page knows which park it is talking about, and §8 forbids rendering it, not holding
+    it.
     """
     script = _code("app.js")
     functions = _functions(script)
@@ -5578,6 +5589,9 @@ def test_the_token_is_relayed_and_never_rendered_or_stored() -> None:
         "strand",
         "readConfirmation",
         "cancelRead",
+        "recordAnswerAccount",
+        "releaseAnswerAccount",
+        "answerAccountWords",
     }
     assert {name for name, body in functions.items() if "token" in body} == touching
     assert not re.search(r"textContent\s*=[^;]*token", script)
@@ -6454,7 +6468,10 @@ def test_an_abandoned_park_answer_asserts_no_outcome_and_offers_the_pair_again()
     assert "strand(token);" in caught
     assert "GATEWAY_GONE" not in caught
     assert caught.index("strand(token);") < caught.index("stopping.signal.aborted")
-    assert "const lost = stopping.signal.aborted ? PARK_UNRESOLVED : PARK_LOST;" in caught
+    assert (
+        "recordAnswerAccount(token, stopping.signal.aborted ? PARK_UNRESOLVED : PARK_LOST);"
+        in caught
+    )
     assert "unresolved" not in _functions(script)["relay"]
 
 
@@ -6713,8 +6730,14 @@ def test_a_stalled_tidy_up_after_an_abandoned_answer_is_not_waited_on() -> None:
     ``readPending`` reaches the same unbounded ``relay``, so awaiting it on the
     abandoned path would let one stalled read hold the pair disabled exactly as the
     stalled answer did — #1536 rebuilt inside its own fix. It is started and not waited
-    on, and it runs far enough to clear this panel's fault before the sentence is
-    written, which is why the sentence comes after it.
+    on.
+
+    **The order it is asserted in no longer carries the sentence's survival**
+    (adversarial review's round 8). It used to: the account was written into the panel's
+    fault slot and this read clears that slot on its way in. The account now has a node
+    of its own that no listing read touches, so what the order buys is only that the
+    row's state settles before the sentence beside it — and it is still pinned, because
+    an ending that wrote the account first would be one nobody had thought about.
 
     ``readPending``'s own unbounded ``relay`` is otherwise left alone, and that is the
     third question #1536 asks: it disables no control and claims no token, so a listing
@@ -6725,7 +6748,9 @@ def test_a_stalled_tidy_up_after_an_abandoned_answer_is_not_waited_on() -> None:
 
     assert "await readPending(false);" not in body
     assert "readPending(false);" in body
-    assert body.index("readPending(false);") < body.index("const lost = stopping.signal")
+    assert body.index("readPending(false);") < body.index(
+        "recordAnswerAccount(token, stopping.signal"
+    )
 
 
 def test_one_parks_two_rows_take_one_state_and_only_one_of_them_submits() -> None:
@@ -6881,11 +6906,12 @@ def test_a_reply_this_page_cannot_render_resolves_nothing() -> None:
     **Said through ``couldRenderOutcome`` since #2006**, which is #1622's "one check,
     shared" reaching the site the rule was worked out on. The questions are the ones the
     inline ``try`` was pinned for and they are asked of the new shape: that the render is
-    guarded rather than reached directly, and that the four statements of this surface's
-    own ending follow a render that failed and nothing else. The sentence goes through
-    ``ending`` because a read this page cancelled ends every one of these four ways and
-    ``cancel_read``'s own answer is what tells the user then (ADR-0244 §11). What is no
-    longer here is
+    guarded rather than reached directly, and that the three statements of this surface's
+    own ending follow a render that failed and nothing else. The ending **records which
+    ending it was** rather than choosing a sentence, because a read this page cancelled
+    ends every one of these four ways and what the screen then owes depends on what
+    ``cancel_read`` answered — which may not have happened yet (ADR-0244 §11, round 8).
+    What is no longer here is
     ``show("answer", false)`` — the guard hides the panel *and* clears it, which is what
     the ``try`` named as its intent and did not do.
     """
@@ -6907,13 +6933,14 @@ def test_a_reply_this_page_cannot_render_resolves_nothing() -> None:
     for step in (
         "strand(token);",
         "readPending(false);",
-        'fault(ending(PARK_REPLY_UNREADABLE), "confirmations");',
+        "recordAnswerAccount(token, PARK_REPLY_UNREADABLE);",
     ):
         assert step in failed, step
-    # In that order, because `readPending` clears this panel's fault on its way in and a
-    # sentence written before it would be wiped by the tidy-up that follows it.
+    # In the order every other arm uses, so the row's state settles before the sentence
+    # beside it. The account's *survival* no longer turns on this: it is written into a
+    # node of its own that `readPending` does not touch (round 8).
     assert failed.index("strand(token);") < failed.index("readPending(false);")
-    assert failed.index("readPending(false);") < failed.index("fault(ending(PARK_REPLY")
+    assert failed.index("readPending(false);") < failed.index("recordAnswerAccount(token, PARK_")
     assert "spent.delete" not in failed
     # And the render is not reached again on the way out: the guard rendered it or it
     # took the branch above, so there is no second call to fall through to.
@@ -7695,70 +7722,198 @@ def test_the_page_renders_no_statement_for_any_search_not_serviced_member() -> N
             assert f"\n  {member.value}:" not in script, member.value
 
 
-def test_the_cancellation_acts_own_answer_is_written_where_no_refresh_reaches_it() -> None:
-    """ADR-0244 §11, and the rule that ends what three review rounds kept finding.
+def test_both_accounts_a_park_owes_are_written_where_no_refresh_reaches_them() -> None:
+    """ADR-0244 §11 and ADR-0177 §7, and the rule that ends what eight review rounds kept
+    finding.
 
-    "The cancellation is a teardown and is converted into neither an outcome nor a
-    refusal … **what tells the user is ``cancel_read``'s own answer, which is the act
-    they performed**." Every other place this page could put that answer is swept by
-    something, and each sweep was a separate finding over three consecutive rounds: a row
-    goes when the listing is re-read, and a withdrawn or settled park is not in the
+    **One park carries two acts and the panel owes an account of each.** The answer is
+    ADR-0177 §7's fourth clause — "the request was sent and no response was read" is an
+    outcome that is **not known** — and the cancellation is §11's: "the cancellation is a
+    teardown and is converted into neither an outcome nor a refusal … **what tells the
+    user is ``cancel_read``'s own answer, which is the act they performed**". The two can
+    be in flight together, which is not an edge case but the state ``INTERRUPTED`` is
+    defined over.
+
+    **Every other place either account could go is swept, and each sweep was a finding.**
+    A row goes when the listing is re-read, and a withdrawn or settled park is not in the
     listing; the panel's fault slot is cleared by every listing read; and a quiet read of
-    an empty listing closes the panel outright. The answer this act interrupts starts
-    exactly that read on its way out — whether it ends in a rejected request, a refusal
-    the page classifies as unknown, one it cannot classify, a reply it cannot render, or a
-    perfectly good ``ALREADY_SETTLED``.
+    an empty listing closes the panel outright. *Both* acts start exactly that read on
+    their way out — the answer whether it ends in a rejected request, a refusal the page
+    classifies as unknown, one it cannot classify, a reply it cannot render or a perfectly
+    good ``ALREADY_SETTLED``; the act on every one of its three states. So whichever reply
+    lands second erases the first one's account, and which one that is is the network's
+    choice.
 
-    So the placement is the fix rather than a guard on each path, and this is what pins
-    it: the node is its own, in the document rather than built by a renderer, and exactly
-    two things write it — the act, and the owner's own press of the button that asks what
-    is waiting now. ``readPending`` reads it and never writes it, which is what lets a
-    quiet close ask whether the *panel* is silent rather than whether the listing is.
+    Round 3 moved the **act's** account into a node of its own and no finding since was
+    about losing it; rounds 6, 7 and 8 were all about the **answer's**, which was still in
+    the swept slot. So the placement is the fix for both rather than a ninth guard on a
+    ninth path, and this is what pins it: each account has its own node, in the document
+    rather than built by a renderer; both are written by one function over the pair of
+    states, so no path writes one without recomputing the other; and the only things that
+    reach them are that function and the owner's own press of the button that asks what is
+    waiting now. ``readPending`` reads them and writes neither, which is what lets a quiet
+    close ask whether the *panel* is silent rather than whether the listing is.
     """
     script = _code("app.js")
     functions = _functions(script)
+    document = _asset("index.html")
 
-    assert '<p id="cancellation-said" class="hint" hidden></p>' in _asset("index.html")
-    assert 'const node = el("cancellation-said");' in functions["said"]
-    # **And the panel it is in is opened with it** (adversarial review, round 4). The
-    # panel really can be closed at this moment — a quiet read of an empty listing closes
-    # it, which is right while it says nothing, and the answer this act interrupted
-    # starts exactly that read — so a node unhidden inside it would be a statement nobody
-    # can read. Opening it here rather than leaving it to the listing read the act starts
-    # is what makes the statement's visibility independent of a request that may stall,
-    # which is the same reason the sentence is not written into that read's own slot.
+    # A node each, in the document. The act's is a statement about something that
+    # succeeded; the answer's carries the fault's ink because what it reports is an
+    # outcome that is not known — and it is deliberately not `.fault`, which is the class
+    # naming the swept slot.
+    assert '<p id="cancellation-said" class="hint" hidden></p>' in document
+    assert '<p id="answer-said" class="account" hidden></p>' in document
+    # One writer for the pair, reached by node id: the only place either node's
+    # `textContent` and `hidden` are set.
+    assert "const node = el(nodeId);" in functions["writeAccount"]
+    assert {
+        name
+        for name, body in functions.items()
+        if 'el("cancellation-said")' in body or 'el("answer-said")' in body
+    } == {"panelIsSilent"}
+    assert 'writeAccount("cancellation-said", ACCOUNTS.act);' in functions["renderAccounts"]
+    assert 'writeAccount("answer-said", answerAccountWords());' in functions["renderAccounts"]
+    # **And the panel each node is in is opened with it** (adversarial review, round 4).
+    # The panel really can be closed at this moment — a quiet read of an empty listing
+    # closes it, which is right while it says nothing, and either act starts exactly that
+    # read — so a node unhidden inside it would be a statement nobody can read.
     #
-    # **Opened and never closed**, because taking the statement down is the owner's own
+    # **Opened and never closed**, because taking a statement down is the owner's own
     # press, and that press is a listing read whose own rules decide what the panel then
     # shows. A `show(false)` here would close a panel holding answerable rows.
-    assert 'show("confirmations", true);' in functions["said"]
-    assert 'show("confirmations", false)' not in functions["said"]
-    assert functions["said"].index("node.hidden") < functions["said"].index('show("confirmations"')
-    # Written by the act and by the owner's own press, and by nothing else. A third
-    # writer is how the sentence starts being swept again.
-    assert {name for name, body in functions.items() if "said(" in body} == {
+    assert 'show("confirmations", true);' in functions["writeAccount"]
+    assert 'show("confirmations", false)' not in functions["writeAccount"]
+    assert functions["writeAccount"].index("node.hidden") < functions["writeAccount"].index(
+        'show("confirmations"'
+    )
+    # Every writer of either account goes through the one render, so a path that moved one
+    # state without recomputing the other cannot be added quietly. This is round 8's fix:
+    # ordering is irrelevant by construction rather than guarded against per path.
+    for name in (
+        "recordAnswerAccount",
+        "releaseAnswerAccount",
+        "recordActAccount",
+        "clearAccounts",
+    ):
+        assert "renderAccounts();" in functions[name], name
+    assert {name for name, body in functions.items() if "ACCOUNTS." in body} == {
+        "answerAccountWords",
+        "recordAnswerAccount",
+        "releaseAnswerAccount",
+        "recordActAccount",
+        "clearAccounts",
+        "renderAccounts",
+    }
+    # Written by the two acts and by the owner's own press, and by nothing else. A third
+    # writer is how a sentence starts being swept again.
+    assert {name for name, body in functions.items() if "recordActAccount(" in body} == {
         "cancelRead",
+        "recordActAccount",
+    }
+    assert {name for name, body in functions.items() if "recordAnswerAccount(" in body} == {
+        "answerConfirmation",
+        "recordAnswerAccount",
+    }
+    assert {name for name, body in functions.items() if "clearAccounts(" in body} == {
         "listPending",
-        "said",
+        "clearAccounts",
     }
     assert (
-        "said(done === CANCELLATION_UNRESOLVED ? READ_CANCEL_LOST : cancellationWords(done));"
-        in functions["cancelRead"]
+        "recordActAccount(\n    done === CANCELLATION_UNRESOLVED "
+        "? READ_CANCEL_LOST : cancellationWords(done)\n  );" in functions["cancelRead"]
     )
-    assert "said(null);" in functions["listPending"]
-    # `readPending` reads the node to decide whether the panel is silent, and writes
-    # nothing to it: a quiet read of an empty listing closes a panel that says nothing,
-    # and a panel holding this statement is not one.
-    assert 'if (quiet && el("cancellation-said").hidden) {' in functions["readPending"]
-    assert "said(" not in functions["readPending"]
-    # And the answer's own endings write no second sentence about the same event where the
-    # act **settled**: it has already said what happened, in a node they do not touch. An
-    # act whose own reply went unread settles nothing and explains nothing, so they still
-    # owe a sentence there — one that does not say "nothing was cancelled" (round 6).
-    ending = functions["answerConfirmation"]
-    assert "const recorded = cancelled.get(token);" in ending
-    assert "return PARK_LOST_WHILE_CANCELLING;" in ending
-    # And only the member that ended the answer buys that silence: `WITHDRAWN` took a park
-    # that was still open and `NOTHING_TO_CANCEL` did nothing at all, so neither stopped
-    # the request whose reply was lost (round 7).
-    assert 'return recorded === "interrupted" ? null : PARK_LOST_BESIDE_A_CANCELLATION;' in ending
+    # The act's ending recomputes both accounts on **every** way out, including the named
+    # refusal it returns from before it has a statement of its own: `cancelled` and
+    # `cancelling` have just moved, and the answer's account is derived from them.
+    assert "renderAccounts();" in functions["cancelRead"]
+    assert "clearAccounts();" in functions["listPending"]
+    # `readPending` reads both nodes to decide whether the panel is silent, and writes
+    # neither: a quiet read of an empty listing closes a panel that says nothing, and a
+    # panel holding either account is not one.
+    assert "if (quiet && panelIsSilent()) {" in functions["readPending"]
+    assert (
+        'return el("cancellation-said").hidden && el("answer-said").hidden;'
+        in functions["panelIsSilent"]
+    )
+    for name in ("readPending", "listPending"):
+        assert "writeAccount(" not in functions[name], name
+
+    # --- what the answer's account says, over the pair of states ----------------
+    #
+    # The answer's ending records **which ending it reached** and nothing more; this is
+    # where that becomes a sentence, and it is re-run whenever either act finishes. Round
+    # 8's blocker is exactly that the ending is not the last moment the answer's account
+    # can change, because the act's reply may land after it.
+    words = functions["answerAccountWords"]
+    assert "const recorded = cancelled.get(held.token);" in words
+    # An act still out says the least and is asked about first. The row beside it already
+    # reads `READ_CANCEL_SENDING`, so a sentence ending "nothing was cancelled" would put
+    # the contradiction round 6 closed on one screen for as long as the act is in flight.
+    assert "if (cancelling.has(held.token)) {" in words
+    assert words.index("cancelling.has(held.token)") < words.index("cancelled.get(held.token)")
+    assert "return PARK_LOST_WITH_THE_ACT_STILL_OUT;" in words
+    # Two acts out, neither answered: neither may be resolved by omission, and `PARK_LOST`
+    # says "nothing was cancelled" (round 6).
+    assert "return PARK_LOST_WHILE_CANCELLING;" in words
+    # Only the member that ended the answer explains this ending (round 7) — and of the
+    # two that did not, only `WITHDRAWN` settles what became of the lost request (round
+    # 8). `NOTHING_TO_CANCEL` settles nothing: the park may be `APPROVED` with its
+    # dispatch running in another process.
+    assert 'if (recorded === "interrupted") {\n    return null;\n  }' in words
+    assert (
+        'return recorded === "withdrawn"\n'
+        "    ? PARK_LOST_BESIDE_A_WITHDRAWAL\n"
+        "    : PARK_LOST_BESIDE_A_CANCELLATION;" in words
+    )
+
+
+def test_a_withdrawal_does_not_leave_the_page_saying_the_action_may_have_run() -> None:
+    """Adversarial review's round 8, second finding, at the text layer.
+
+    ``WITHDRAWN`` is the one member of ``ReadCancellation`` that settles what became of a
+    concurrent answer whose reply this browser never read. ADR-0244 §11 gives it as "an
+    ``OPEN`` park was settled ``CANCELLED`` and **nothing was ever sent**", with "the
+    park's content … cleared in the same step, so a cancellation and a concurrent answer
+    cannot both take effect"; §6's one compare-and-swap is where that happens, and under
+    it "neither party acts on a park the other took", so the lost answer returned
+    ``ALREADY_SETTLED`` and cannot have dispatched. Had it dispatched first the park would
+    have been ``APPROVED`` at the act's swap, and the act would have answered
+    ``INTERRUPTED`` or ``NOTHING_TO_CANCEL`` instead.
+
+    So the sentence for that pairing may not say the action may have been carried out —
+    it would contradict, on one screen, the ``WITHDRAWN`` statement two nodes above:
+    "Nothing was sent for it, and no answer was recorded." What is still owed is ADR-0177
+    §7's fourth clause, narrower: the request went out and no reply was read, so what it
+    *came back with* is not known.
+
+    ``NOTHING_TO_CANCEL`` establishes none of that — §11's last clause has a park settled
+    ``APPROVED`` whose dispatch is running elsewhere answering it — so it keeps the
+    sentence that says the action may have run.
+    """
+    script = _code("app.js")
+
+    withdrawn = _constant(script, "PARK_LOST_BESIDE_A_WITHDRAWAL")
+    assert "may have been carried out" not in withdrawn
+    assert "nothing was sent for " in withdrawn
+    assert "no answer was recorded for it" in withdrawn
+    # It is still an account of a request whose reply was not read (ADR-0177 §7).
+    assert "no reply this browser could read" in withdrawn
+    assert "is not known" in withdrawn
+    # And it neither re-sends nor says "nothing was cancelled", which is false the moment
+    # a cancellation is asked for (round 6).
+    assert "nothing was re-sent" in withdrawn
+    assert "nothing was cancelled" not in withdrawn
+    assert withdrawn.rstrip().endswith("PARK_WHERE_NOW")
+
+    beside = _constant(script, "PARK_LOST_BESIDE_A_CANCELLATION")
+    assert "may have been carried out" in beside
+    assert "nothing was cancelled" not in beside
+
+    # The in-flight window has its own sentence for the same reason, and it asserts
+    # nothing about an act that has not answered (ADR-0139 §4).
+    out = _constant(script, "PARK_LOST_WITH_THE_ACT_STILL_OUT")
+    assert "still out and has not been answered" in out
+    assert "nothing was cancelled" not in out
+    assert "withdrawn" not in out
+    assert out.rstrip().endswith("PARK_WHERE_NOW")
