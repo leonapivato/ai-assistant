@@ -9444,8 +9444,12 @@ class Engine:
             token: The continuation naming the park.
             approved: The user's own answer.
             remember_recipients_until: The instant a standing recipient request names,
-                or ``None``. Reported on the outcome's ``recipient_grant`` exactly as it
-                is on a step's resume (ADR-0235 §4, §6).
+                or ``None``. **The act rides this answer exactly as ADR-0235 §2 rules
+                it, unchanged** (ADR-0244 §5): §2's binding refusal and §1's expiry
+                refusal fire before the park's gate, so a refused act leaves the park
+                open and answerable without the standing request; and what became of a
+                collected act is reported on the outcome's ``recipient_grant`` exactly
+                as it is on a step's resume (ADR-0235 §4, §6).
 
         Returns:
             The answer's outcome, and on a dispatch the resumed turn that composed over
@@ -9454,6 +9458,11 @@ class Engine:
         Raises:
             UnknownContinuationError: If the handle stopped naming a park between the
                 check and this call.
+            UngrantableActError: If ``remember_recipients_until`` was supplied beside
+                ``approved`` ``True`` and the act may not ride this park's confirmation,
+                or the instant is not strictly after the one the answer would carry.
+                Raised **before the gate**, so nothing is ruled, nothing is dispatched,
+                and the park stays open and answerable (ADR-0235 §1, §2; ADR-0244 §5).
         """
         park_id = self._read_parks.get(token.handle)
         operations = self._parked_reads
@@ -9464,13 +9473,33 @@ class Engine:
                 "(ADR-0244 §5)"
             )
             raise UnknownContinuationError(msg)
-        answered = await operations.answer(park_id, approved=approved)
+        answered = await operations.answer(
+            park_id,
+            approved=approved,
+            # ADR-0244 §5, ADR-0235 §2: the act rides this answer exactly as it rides a
+            # step's, and its two refusals fire **before** the gate — so a refused act
+            # leaves the park open and answerable without the standing request, rather
+            # than spending the user's one answer on a request that could never land.
+            remember_recipients_until=remember_recipients_until,
+        )
         park = answered.park
         conversation_id = None if park is None else park.conversation_id
+        # ADR-0235 §6: what became of a collected standing request is reported on the
+        # carrier **whatever this answer reached**, and never raised. A user who asked
+        # for one and is told nothing concludes it was granted (§4's second clause), so
+        # this is read before the shapes below branch rather than inside the one that
+        # dispatched. `establishing` is `None` on every outcome that recorded no
+        # resolution, which is what `_establish_recipients`' declining arm is for.
+        recipient_grant = await self._establish_recipients(
+            answered.establishing,
+            approved=approved,
+            remember_recipients_until=remember_recipients_until,
+        )
         if answered.outcome is not ReadAnswerOutcome.DISPATCHED or park is None:
             return TurnOutcome(
                 turn=None,
                 conversation_id=conversation_id,
+                recipient_grant=recipient_grant,
                 read_answer=answered.outcome,
             )
         # The park as it stood when the gate was taken, which is where its `goal` and
@@ -9485,26 +9514,40 @@ class Engine:
             )
             raise PlanningError(msg)
         history = await self._conversations.history(park.conversation_id)
+        # **ADR-0204 §2's evaluation, on this pass's own supply** (ADR-0244 §8's "the
+        # exchange is captured as a turn's exchange is captured"). A resume is a
+        # bounded-audience operation exactly as `converse` is, so it mints the same
+        # applier: the evaluation is made on every conversational operation and
+        # subtracted on none but a spoken one, and what its capture records is whether
+        # content ADR-0199 §3 withholds stood in *this* turn's warrant.
+        #
+        # **This pass's own value and not the parked turn's**, which is where a read
+        # resume differs from a step's. A step's resolution renders the *parked* turn's
+        # goal and plan from a pass that retrieves nothing, so ADR-0204 §2's fourth
+        # clause has that pass carry the parked turn's boolean; this pass retrieves a
+        # supply of its own and composes over it, so the value it records is the one it
+        # computed — and a hardcoded `False` here would state that nothing was withheld
+        # from a rendering that may have been assembled over material ADR-0199 §3 holds
+        # back.
+        supply = BoundedAudienceSupply(speakable_attested_sources=self._speakable_attested_sources)
         turn = await self._loop.resumed_read(
             goal,
             plan,
             records=answered.records,
             history=history.records,
             history_degraded=history.degraded,
+            narrow=supply,
         )
         composed = await self._compose(
             turn,
             None,
             deliveries=_paired_deliveries(history.deliveries, turn.memories),
+            # ADR-0244 §8: "where the dispatched read yielded no records … the turn
+            # still composes, and ADR-0242 §6's carrier gives the composing stage its
+            # member exactly as it does on any other turn". The member is the one the
+            # dispatch computed, by value and never a second computation.
+            search_not_serviced=answered.not_serviced,
         )
-        recipient_grant = None
-        if remember_recipients_until is not None:
-            # ADR-0235 §2's act riding this answer. There is no `EstablishingAnswer` on
-            # this path — the act's own operation is the route for a decision no park
-            # holds (ADR-0235 §3), and ADR-0244 §5's eighth condition keeps a parked
-            # decision out of that listing — so what is reported is the declined
-            # outcome: the request was collected and this path establishes nothing.
-            recipient_grant = self._recipient_grants.declined()
         return await self._capture(
             park.conversation_id,
             turn=turn,
@@ -9515,16 +9558,19 @@ class Engine:
             # words are that turn's goal statement — the **parked** turn's, which is
             # whose question this answer continues.
             asked=goal.statement,
-            # ADR-0204 §2 is evaluated over this pass's own supply, and this pass
-            # retrieved one: `resumed_read` assembled it and applied the filter, so
-            # nothing was withheld from a rendering this episode carries.
-            supplied_withheld=False,
+            # ADR-0204 §2's evaluation, read off the one applier this pass minted and
+            # never recomputed: the value the capture records is the one the filter
+            # returned over the supply the reply was composed from.
+            supplied_withheld=supply.withheld,
             modality=Modality.TEXT,
             # ADR-0223 §1: computed over the resumed turn's **final** supply, which
             # carries the minted records — this pass's own disjunction and not the
             # parked turn's.
             derived_from_external=SelectionOrigin.over(turn.memories).planned_with_external_content,
             recipient_grant=recipient_grant,
+            # ADR-0242 §9's field, on the resumed turn exactly as on any other: the
+            # member the dispatch computed, by value.
+            search_not_serviced=answered.not_serviced,
             read_answer=answered.outcome,
         )
 

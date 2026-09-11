@@ -117,7 +117,8 @@ from ai_assistant.orchestration.origin import SelectionOrigin
 from ai_assistant.orchestration.retrieval import assemble_by_band
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Collection, Mapping, Sequence
+    from datetime import datetime
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
@@ -613,6 +614,48 @@ class StructuredOutcome(StrEnum):
     RETURNED_RECORDS = "returned_records"
     """The store call ran and returned at least one record, whatever the union then
     did with them (ADR-0240 §6, §13 item 7)."""
+
+
+def admitted_fourth_group(
+    records: Sequence[MemoryRecord], *, held: Collection[str]
+) -> tuple[MemoryRecord, ...]:
+    """ADR-0226 §6's budget and §7's deduplication, over one kind's records.
+
+    **The one place a fourth group is built outside** :func:`service_read_request`
+    (ADR-0244 §7, §8). An approved read's continuation appends the records the dispatch
+    minted to a supply assembled at the instant of the resume, and ADR-0244 §7 retains
+    ADR-0226 §6's budget and §7's deduplication over them unchanged: "they are
+    deduplicated and admitted under ADR-0226 §6's budget of ten". A resumed turn
+    performs no servicing, so :class:`_Union` has nothing else to account for there —
+    what it needs is this function's two rules and not that class's counts.
+
+    **The seen set grows with every admission**, which is §7's deduplication "over the
+    whole union and not only against the pre-servicing supply": two records of one batch
+    sharing an id enter once, and the second consumes no slot. A caller seeding from the
+    supply alone would satisfy the narrower clause and still render one record twice.
+
+    **The budget is not a parameter, and that is ADR-0226 §6 rather than an
+    inflexibility.** §6 fixes it at ten and rules that "no configuration, setting or
+    later lane makes the count configurable without the ADR that decides it", so the
+    figure is read from :data:`READ_BUDGET` here exactly as it is at the servicing site.
+
+    Args:
+        records: The candidates, in the order the kind that produced them minted them.
+        held: The ids the supply already holds. Read, never written.
+
+    Returns:
+        What ADR-0226 §6 and §7 admit, in the order given.
+    """
+    seen = set(held)
+    admitted: list[MemoryRecord] = []
+    for record in records:
+        if len(admitted) >= READ_BUDGET:
+            break
+        if record.id in seen:
+            continue
+        seen.add(record.id)
+        admitted.append(record)
+    return tuple(admitted)
 
 
 def not_serviced(  # noqa: PLR0911 — ADR-0242 §8's table has one arm per discriminated row, and collapsing them behind a mapping would hide the three rows a `Settings` value, a `trust_of` answer and a written park decide
@@ -2114,7 +2157,7 @@ class SearchServicer:
             return None
 
     async def ruled_on_answer(
-        self, confirmed: PermissionDecision, *, approved: bool
+        self, confirmed: PermissionDecision, *, approved: bool, at: datetime
     ) -> PermissionDecision | None:
         """Ask the policy the user's answer and record whatever it says (ADR-0244 §6).
 
@@ -2130,9 +2173,16 @@ class SearchServicer:
         The answer is **not** recorded, the park stays spent, nothing is dispatched, and
         the caller reports ``OPERATION_CHANGED``: a refusal on ``resume`` is a result.
 
+        **The instant is the caller's and is not read again here** (ADR-0235 §1). The
+        answer's ``decided_at`` is the reading ADR-0244 §6's clause 1 took, which is
+        what lets an establishing act's expiry be compared against *the instant the
+        answer will carry* rather than against a second reading that has since moved —
+        the failure §1 exists to remove rather than to narrow.
+
         Args:
             confirmed: The recorded ``CONFIRM`` being answered.
             approved: The user's own answer, relayed unchanged.
+            at: The instant this answer carries, taken by the caller.
 
         Returns:
             The resolving decision as it was recorded, or ``None`` where the trail
@@ -2140,7 +2190,7 @@ class SearchServicer:
         """
         ruling = await self._policy.resolve(confirmed.model_copy(deep=True), approved=approved)
         answer = PermissionDecision.from_confirmation(
-            confirmed, ruling, id=self._id_factory(), decided_at=self._now()
+            confirmed, ruling, id=self._id_factory(), decided_at=at
         )
         try:
             await self._trail.record(answer)
@@ -2291,6 +2341,18 @@ class SearchServicer:
             # the second limb is the first read from the decision rather than a second
             # state.
             return None
+        # **ADR-0244 §10's third reader.** "A park whose `expires_at` is at or before
+        # the clock's reading is settled `EXPIRED` at the first operation that reads it
+        # — an answer, an enumeration, **or the conversation's own next servicing**."
+        # This is that servicing, and without it a park nobody enumerated and nobody
+        # answered would hold the conversation's one open slot past its own deadline —
+        # spending an `admit_search` call per turn and offering no question for it.
+        #
+        # **It settles nothing else** (§6's one-gate clause): an open park that has not
+        # expired is left exactly where it is, and the servicing's own `park` below is
+        # then refused by §3's one-open-park rule, which is §1's third clause and not a
+        # second expiry.
+        await self._expire_open_park(store, footing.conversation_id, now=recorded.decided_at)
         record = ParkedRead(
             id=self._id_factory(),
             conversation_id=footing.conversation_id,
@@ -2312,6 +2374,37 @@ class SearchServicer:
             _degraded(type(store).__name__)
             return None
         return record if written else None
+
+    @staticmethod
+    async def _expire_open_park(store: ParkedReads, conversation_id: str, *, now: datetime) -> None:
+        """Settle this conversation's open park where its deadline has passed (§10).
+
+        **Safe precisely because §6's clause 1 refuses to answer such a park at all**
+        (ADR-0244 §6): "expiry is the one settlement no party takes for itself, and it
+        can take nothing from anyone" — there is no live answerer for this settlement to
+        race, which is why the servicing may take it while a `resume` may not take any
+        other.
+
+        **The clock reading is the ruling's own**, threaded from `_ruled` rather than
+        read again: one reading stamps the decision, its deadline, this comparison and
+        the park below, which is what ADR-0244 §3's "computed from it, once, at the
+        instant the park is written" asks for.
+
+        Args:
+            store: This deployment's parked-read store.
+            conversation_id: The conversation whose open park to test.
+            now: The instant to compare against, ADR-0059 §1's comparison.
+        """
+        try:
+            standing = await store.open_park(conversation_id)
+            if standing is not None and standing.expires_at <= now:
+                await store.settle(standing.id, disposition=ParkedReadDisposition.EXPIRED, at=now)
+        except AssistantError:
+            # A store fault here is §1's third clause reached one step early: no park is
+            # settled, the write below is refused by the standing row, and the servicing
+            # is what it is today. Reported as this stage's own Tier 2 degradation, as
+            # every other store fault at this site is.
+            _degraded(type(store).__name__)
 
     async def _bound(
         self,

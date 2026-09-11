@@ -30,9 +30,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
-from ai_assistant.core.errors import PlanningError
+from ai_assistant.core.errors import PlanningError, UngrantableActError
 from ai_assistant.core.types import (
     ActionRequest,
+    EgressBinding,
     ParkedRead,
     ParkedReadDisposition,
     PermissionOutcome,
@@ -40,14 +41,82 @@ from ai_assistant.core.types import (
     ReadCancellation,
     ToolCall,
 )
+from ai_assistant.orchestration.reads import SEARCH_DISPOSITIONS, not_serviced
+from ai_assistant.orchestration.runner import EstablishingAnswer
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from datetime import datetime
 
     from ai_assistant.core.protocols import ConversationStore, ParkedReads
-    from ai_assistant.core.types import MemoryRecord
+    from ai_assistant.core.types import MemoryRecord, PermissionDecision, SearchNotServiced
     from ai_assistant.orchestration.reads import SearchServicer
+
+
+def _refuse_an_ungrantable_act(confirmed: PermissionDecision) -> None:
+    """Refuse an establishing act on a binding it may not ride (ADR-0235 §2).
+
+    :meth:`~ai_assistant.orchestration.runner.StepRunner`'s own refusal at a second
+    population, and stated here rather than shared because the two reach it through
+    different objects: ADR-0244 §5 rules that ``remember_recipients_until`` "reaches a
+    read park's answer **exactly as ADR-0235 §2 rules it, unchanged**", which is a
+    statement about the conditions and not about the code path.
+
+    **Both shapes reach one refusal, and the non-``EgressBinding`` arm is the one a
+    roster would omit** — it is the arm that would otherwise record an ``ALLOW`` and
+    dispatch the read before ``RecipientGrant.established_from`` refused a binding that
+    is not there.
+
+    Args:
+        confirmed: The recorded ``CONFIRM`` the answer would ride.
+
+    Raises:
+        UngrantableActError: If the confirmation's ``egress_binding`` is not an
+            :class:`~ai_assistant.core.types.EgressBinding`, or is one carrying
+            ``planned_with_external_content``.
+    """
+    binding = confirmed.egress_binding
+    if not isinstance(binding, EgressBinding):
+        msg = (
+            f"decision {confirmed.id!r} records no egress call whose recipients could be "
+            f"made standing, so this answer cannot establish a recipient grant; the park "
+            f"is unaffected and may still be answered (ADR-0235 §2, ADR-0244 §5)"
+        )
+        raise UngrantableActError(msg)
+    if binding.planned_with_external_content:
+        msg = (
+            f"decision {confirmed.id!r} records a lookup planned over external content; a "
+            f"user answering such a question may approve the lookup, and may not in that "
+            f"act make its recipients standing (ADR-0193 §2, §4; ADR-0235 §2, ADR-0244 §5)"
+        )
+        raise UngrantableActError(msg)
+
+
+def _refuse_a_stale_expiry(remember_recipients_until: datetime, *, at: datetime) -> None:
+    """Refuse an expiry that is not strictly after the instant the answer carries (§1).
+
+    **One clock reading, used for both the comparison and the record** (ADR-0235 §1):
+    ``at`` is the reading ADR-0244 §6's clause 1 took and the one the resolving answer
+    will be stamped with, so an expiry that passes here cannot fail
+    ``RecipientGrant.established_from``'s constructor — which is the failure that clause
+    exists to remove rather than to narrow.
+
+    Args:
+        remember_recipients_until: The instant the user chose.
+        at: The instant the answer will carry.
+
+    Raises:
+        UngrantableActError: If the chosen instant is at or before ``at``. The message
+            **names the instant it was compared against**.
+    """
+    if remember_recipients_until <= at:
+        msg = (
+            f"a standing recipient grant expires strictly after the answer that "
+            f"establishes it; {remember_recipients_until.isoformat()} is at or before "
+            f"{at.isoformat()}, the instant this answer would carry, so nothing was "
+            f"recorded and the park may still be answered (ADR-0235 §1, ADR-0244 §5)"
+        )
+        raise UngrantableActError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,11 +136,30 @@ class AnsweredRead:
             every member but :attr:`ReadAnswerOutcome.DISPATCHED`, and empty on that one
             too where the read was refused, expired, interrupted or returned nothing —
             on which the turn still composes (ADR-0244 §8).
+        not_serviced: ADR-0242 §7's carrier for a dispatch that yielded nothing, or
+            ``None`` where the read yielded or none was dispatched. **ADR-0244 §8
+            requires the ordinary carrier on this path** — "where the dispatched read
+            yielded no records … the turn still composes, and ADR-0242 §6's carrier
+            gives the composing stage its member exactly as it does on any other turn"
+            — so the refusal is mapped at the site that holds it and carried from there
+            to the composing stage as data, never recomputed downstream.
+
+            :attr:`ReadAnswerOutcome.DISPATCHED` says what became of the *answer* and
+            does not say what became of the read; a reply composed with no member would
+            leave a user told a lookup ran and shown nothing it produced.
+        establishing: The two records a standing recipient grant is transcribed from,
+            where this answer collected an establishing act and recorded a resolution,
+            or ``None`` otherwise (ADR-0235 §2, §6; ADR-0244 §5). **The act still rides
+            an answer where a park holds the confirmation**, and the pair is carried to
+            the engine because ADR-0235 §12 puts the ``RecipientGrantStore``'s whole
+            face on ``AssistantEngine`` and nowhere else.
     """
 
     outcome: ReadAnswerOutcome
     park: ParkedRead | None = None
     records: tuple[MemoryRecord, ...] = ()
+    not_serviced: SearchNotServiced | None = None
+    establishing: EstablishingAnswer | None = None
 
 
 @dataclass(slots=True)
@@ -259,7 +347,11 @@ class ParkedReadOperations:
     # --- the answer (ADR-0244 §6, §7, §10) ----------------------------------
 
     async def answer(  # noqa: C901, PLR0911, PLR0912 — one exit per clause ADR-0244 §6 states, in §6's own order, so that §9's "the first member in the declared order" holds by construction rather than by a fold; collapsing any pair would report one clause's refusal under another's member
-        self, park_id: str, *, approved: bool
+        self,
+        park_id: str,
+        *,
+        approved: bool,
+        remember_recipients_until: datetime | None = None,
     ) -> AnsweredRead:
         """Take ADR-0244 §6's six establishments and dispatch where every one holds.
 
@@ -296,16 +388,39 @@ class ParkedReadOperations:
         the authority**, and it is ADR-0148 §3's route (a) — a recorded resolution of a
         ``CONFIRM`` about this request — and no other.
 
+        **The establishing act still rides this answer** (ADR-0244 §5, ADR-0235 §2, §6),
+        and this decision adds no clause to either. Its **two refusals fire before the
+        gate**, which is ADR-0235 §1's and §2's own placement — "raised before any ruling
+        is sought, so nothing is written and the step stays parked and answerable
+        without the standing request" — read at a park: a park spent on a refused act is
+        a question the user has to answer again for no reason. **One clock reading is
+        used for both the expiry comparison and the answer it is compared against**,
+        which is §1's clause exactly: two readings admit an expiry that passes the check
+        and fails ``RecipientGrant.established_from``'s constructor.
+
         Args:
             park_id: The park the presented token names.
             approved: The user's own answer, relayed unchanged.
+            remember_recipients_until: The instant the user asked this call's recipients
+                be remembered until, supplied **in the same act** as the answer, or
+                ``None`` — the ordinary outcome — for a user who approved a lookup and
+                asked for nothing standing. Honoured only beside ``approved`` ``True``
+                and only on a resolving ``ALLOW`` (ADR-0235 §1).
 
         Returns:
-            The member, the park as it stood at the answer, and what the read minted.
+            The member, the park as it stood at the answer, what the read minted, why it
+            minted nothing where it did, and the pair an establishing act is transcribed
+            from where one was collected.
 
         Raises:
             AssistantError: If a store or the trail could not be read. A **refusal** is
                 returned rather than raised (ADR-0244 §9); a fault is not a refusal.
+            UngrantableActError: If ``remember_recipients_until`` was supplied beside
+                ``approved`` ``True`` and the act may not ride this confirmation — its
+                binding is not an ``EgressBinding``, or is one carrying
+                ``planned_with_external_content`` (ADR-0193 §4) — or the instant is not
+                strictly after the one the answer would carry. Raised **before the
+                gate**, so the park is not spent and the same token answers it again.
             PlanningError: If the injected clock's reading is not conforming.
         """
         store = self._store
@@ -390,6 +505,13 @@ class ParkedReadOperations:
             # **resolving** decision, by `ToolCall`'s own validator and again at the
             # seam. A lane collapsing them would refuse every parked read.
             return AnsweredRead(ReadAnswerOutcome.OPERATION_CHANGED, park)
+        if remember_recipients_until is not None and approved:
+            # ADR-0235 §2's binding refusal and §1's expiry refusal, in that order and
+            # **before the gate**. The clock reading they are compared against is the
+            # one clause 1 took and the one the resolving answer will carry, which is
+            # §1's "one clock reading, used for both the comparison and the record".
+            _refuse_an_ungrantable_act(confirmed)
+            _refuse_a_stale_expiry(remember_recipients_until, at=now)
         # **Clause 5 — the gate.**
         settled = ParkedReadDisposition.APPROVED if approved else ParkedReadDisposition.DENIED
         if not await store.settle(park.id, disposition=settled, at=now):
@@ -399,7 +521,7 @@ class ParkedReadOperations:
             # of an agreement between several readers.
             return AnsweredRead(ReadAnswerOutcome.ALREADY_SETTLED, park)
         # **Clause 6 — the ruling, recorded whatever it is.**
-        answer = await search.ruled_on_answer(confirmed, approved=approved)
+        answer = await search.ruled_on_answer(confirmed, approved=approved, at=now)
         if answer is None:
             # A refused append, returned and not raised (ADR-0244 §6, §9): the answer is
             # **not** recorded, the park stays spent, and nothing is dispatched.
@@ -410,15 +532,35 @@ class ParkedReadOperations:
             # exactly (ADR-0244 §10). Nothing is sent, no channel is opened, no claim is
             # appended, and no minted record exists.
             return AnsweredRead(ReadAnswerOutcome.DECLINED, park)
+        # ADR-0235 §6: the act is reported on the carrier whatever the ruling was, and
+        # the engine performs it — this object holds no ``RecipientGrantStore`` and
+        # ADR-0235 §12 puts that face on ``AssistantEngine`` and nowhere else.
+        establishing = (
+            None
+            if remember_recipients_until is None
+            else EstablishingAnswer(confirmed=confirmed, answer=answer)
+        )
         if answer.ruling.outcome is not PermissionOutcome.ALLOW:
             # **Reserved for an approving answer the policy refused** (ADR-0244 §6). The
             # ruling **is** recorded — ADR-0004 §7's reason — nothing was dispatched, and
             # the park is spent either way.
-            return AnsweredRead(ReadAnswerOutcome.AUTHORITY_CHANGED, park)
-        records = await self._dispatched(park, ToolCall(request=request, decision=answer))
-        return AnsweredRead(ReadAnswerOutcome.DISPATCHED, park, records)
+            return AnsweredRead(
+                ReadAnswerOutcome.AUTHORITY_CHANGED, park, establishing=establishing
+            )
+        records, not_serviced = await self._dispatched(
+            park, ToolCall(request=request, decision=answer)
+        )
+        return AnsweredRead(
+            ReadAnswerOutcome.DISPATCHED,
+            park,
+            records,
+            not_serviced=not_serviced,
+            establishing=establishing,
+        )
 
-    async def _dispatched(self, park: ParkedRead, call: ToolCall) -> tuple[MemoryRecord, ...]:
+    async def _dispatched(
+        self, park: ParkedRead, call: ToolCall
+    ) -> tuple[tuple[MemoryRecord, ...], SearchNotServiced | None]:
         """Run the one call, registered so that a cancellation can reach it.
 
         **The dispatch is one call** (ADR-0244 §7). ``settle`` is the gate and it was
@@ -432,10 +574,18 @@ class ParkedReadOperations:
         park's approval changes **where a search happens in time** and changes nothing
         about what a search *is*.
 
-        **A refusal yields no records and is not an error** (ADR-0244 §8). Where the
-        dispatched read was refused, expired, interrupted or returned nothing the turn
-        still composes, and ADR-0242 §6's carrier gives the composing stage its member
-        exactly as it does on any other turn.
+        **A refusal yields no records and is not an error, and it carries its own
+        explanation** (ADR-0244 §8). Where the dispatched read was refused, expired,
+        interrupted or returned nothing the turn still composes, and "ADR-0242 §6's
+        carrier gives the composing stage its member exactly as it does on any other
+        turn" — so the refusal is mapped **here**, at the site that holds it, through the
+        same two functions the servicing site maps one with, and carried back as data.
+        A caller told only ``DISPATCHED`` would compose a reply over nothing and say
+        nothing about why.
+
+        **A read that reached the provider and found nothing carries no member either**,
+        which is ``SearchRefusal.NO_RESULT``'s own mapping (ADR-0231 §13): the assistant
+        looked, and saying it did not would be false.
 
         **Registered for the length of the send and no longer** (ADR-0244 §11). The
         entry is what :meth:`cancel` reaches, and the ``finally`` is what keeps a
@@ -448,14 +598,25 @@ class ParkedReadOperations:
             call: The call over the resolving ``ALLOW``.
 
         Returns:
-            What the read minted, empty on a refusal.
+            What the read minted, empty on a refusal; and which class of act would have
+            let it happen, or ``None`` where it yielded.
         """
         self._dispatches.running[park.id] = asyncio.current_task()
         try:
             outcome = await self._search.dispatch(call)  # type: ignore[union-attr]  # `answer` returned early where `_search` is None
         finally:
             self._dispatches.running.pop(park.id, None)
-        return () if outcome.refusal is not None else outcome.records
+        refusal = outcome.refusal
+        if refusal is None:
+            return outcome.records, None
+        return (), not_serviced(
+            SEARCH_DISPOSITIONS.get(refusal),
+            max_calls=self._max_calls,
+            # The binding and the destination's trust are the **servicing** site's two
+            # discriminators for a `RULING_CONFIRM` row, and this branch is not one: a
+            # refusal after a recorded `ALLOW` maps by its own disposition alone, so
+            # passing anything here would be inventing an input this site does not hold.
+        )
 
     # --- the cancellation (ADR-0244 §11) ------------------------------------
 

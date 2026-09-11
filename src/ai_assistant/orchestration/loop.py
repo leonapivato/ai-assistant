@@ -73,6 +73,7 @@ from ai_assistant.orchestration.reads import (
     StructuredFacts,
     TriggerOutcome,
     TurnReadAudit,
+    admitted_fourth_group,
     earliest,
     service_read_request,
 )
@@ -1755,12 +1756,14 @@ class LearningLoop:
         where that is kept rather than asserted.
 
         **The read's records are ADR-0226 §7's fourth group**, appended after the three
-        the pipeline assembles, in servicing order, **over the deduplicated union** and
-        constructed once: a record already in the supply keeps its place there and does
-        not appear twice. The budget is not consulted — ADR-0226 §6's ten bound a
-        turn's servicings and this pass performs none — and ADR-0231 §10's clauses bind
-        the records unchanged, so they carry their provenance and their attestation
-        exactly as they do on an unparked servicing.
+        the pipeline assembles, in servicing order, **under §6's budget of ten and over
+        the deduplicated union**, constructed once: ADR-0244 §7 retains both rules
+        unchanged — "they are deduplicated and admitted under ADR-0226 §6's budget of
+        ten" — so a record already in the supply keeps its place there and does not
+        appear twice, two records of one batch sharing an id enter once, and an
+        eleventh admits nothing. ADR-0231 §10's clauses bind the records unchanged, so
+        they carry their provenance and their attestation exactly as they do on an
+        unparked servicing.
 
         **No ADR-0226 §9 record is written and no audit is emitted.** This pass makes
         no emission, so §8's judgement is not reached and a record saying a turn fired
@@ -1776,7 +1779,8 @@ class LearningLoop:
             records: The records the approved read minted, in the order it minted
                 them. Empty where the dispatched read yielded none — refused,
                 expired, interrupted or empty-handed — on which the turn still
-                composes (ADR-0244 §8).
+                composes, and what tells the user why is ADR-0242 §6's carrier the
+                caller passes to the composing stage (ADR-0244 §8).
             history: The conversation's replay tail, as every turn is handed one.
             history_degraded: Whether reading that tail degraded, reported on
                 :attr:`TurnResult.memory_degraded` beside retrieval's own answer
@@ -1798,11 +1802,11 @@ class LearningLoop:
         memories = preceding + supplement
         retrieved_ids = frozenset(record.id for record in retrieved) | supplement_read
         context, memories = _narrowed(narrow, context, memories, retrieved_ids)
-        # ADR-0226 §7's deduplication, over the whole union and with the first
-        # occurrence keeping its place — the same rule the servicing site applies to a
-        # fourth group, applied here because this pass reaches no servicing site.
-        held = {record.id for record in memories}
-        fourth = tuple(record for record in records if record.id not in held)
+        # ADR-0226 §6's budget and §7's deduplication, through the **one** function
+        # that states them — so a resumed turn's fourth group is bounded and
+        # deduplicated exactly as a servicing's is, and a second statement of the two
+        # rules cannot drift from the first (ADR-0244 §7).
+        fourth = admitted_fourth_group(records, held={record.id for record in memories})
         return TurnResult(
             goal=goal,
             context=context,
