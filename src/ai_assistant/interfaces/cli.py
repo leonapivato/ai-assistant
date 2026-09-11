@@ -11428,6 +11428,20 @@ def _render_confirmation(confirmation: Confirmation) -> bool:
     occurrences, both destination forms and the payload description are rendered by
     the same :func:`_render_confirmation_egress` either way, from one implementation.
 
+    **A read's question carrying no egress is refused rather than rendered thin**
+    (ADR-0244 §13, ADR-0178 §4). §13 owes "ADR-0178 §7's floor **entire**" for a
+    read's confirmation and says "being a read relaxes no clause of it", so a card
+    that could not render the account, the recipients and the payload description
+    would be one §13 says "has not implemented this section". ADR-0178 §7's last
+    clause — a confirmation whose ``egress`` is ``None`` "owes none of the above" —
+    is the opposite reading, and the two are only ever both in play on a shape
+    ADR-0244 §4 rules **unreachable**: "on a ``WEB_SEARCH`` park it is always
+    present", because ADR-0231 §5 registers the search integration at the egress
+    seam. So this takes the conservative arm of an unreachable case, which §13
+    licenses in terms — "what a surface may do is **refuse** a confirmation it cannot
+    render, on the discriminator §4 gives it" — and a kind ADR-0244 §20 defers by
+    name arrives with the ADR that decides what its question owes.
+
     **The width check now guards the read block too.** It used to fire only where a
     span had a value to mark, because that was the only content behind
     :data:`_VALUE_GUTTER`; a read's arguments are behind the same gutter and carry
@@ -11449,6 +11463,14 @@ def _render_confirmation(confirmation: Confirmation) -> bool:
             )
             return False
         values = located
+    if confirmation.read is not None and egress is None:
+        _render_withheld_confirmation(
+            confirmation,
+            because=(
+                "it does not say where this lookup would go or whose account it would go from"
+            ),
+        )
+        return False
     asked: tuple[tuple[str, str], ...] = (
         () if confirmation.read is None else _read_parameters(confirmation)
     )
@@ -11494,15 +11516,27 @@ def _render_withheld_confirmation(confirmation: Confirmation, *, because: str) -
     §4 fixes: nothing was sent and nothing was declined, so no ruling was recorded in
     either direction and the step is exactly where it was.
 
+    **It names what is actually waiting**, which for a read is not a step
+    (ADR-0244 §4). The discriminator is the same one the card itself branches on, and
+    the sentence is the only place on this rendering that says what the unanswered
+    thing *is*: a parked read holds no plan step at all — ADR-0244 §1 is explicit that
+    "the turn does not park" — so "the step is still waiting" would name something
+    that does not exist and would leave the user looking for it.
+
     Args:
         confirmation: The action that will not be put to the user.
         because: What could not be rendered, in words that name no value.
     """
+    waiting = (
+        "the question is still open"
+        if confirmation.read is not None
+        else "the step is still waiting"
+    )
     _print("\n[bold yellow]Confirmation withheld[/]")
     _print(
         f"  I cannot show you everything {_safe(confirmation.tool_id)} would send — "
         f"{because} — so I am not asking you to approve it. Nothing was sent and "
-        "nothing was declined; the step is still waiting."
+        f"nothing was declined; {waiting}."
     )
 
 

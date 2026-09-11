@@ -350,6 +350,28 @@ def test_a_step_confirmation_is_unchanged_and_carries_no_read_block(
     assert "assistant cancel-read" not in rendered
 
 
+def test_a_reads_question_with_no_recipient_facts_is_refused_rather_than_rendered_thin(
+    output: StringIO,
+) -> None:
+    """ADR-0244 §13's permitted refusal, taken on the discriminator §4 gives it.
+
+    §13 owes "ADR-0178 §7's floor **entire**" for a read's confirmation and says being
+    a read relaxes no clause of it, so a card that could show neither the account nor
+    the recipients is one §13 says "has not implemented this section". ADR-0244 §4
+    rules the shape unreachable on a ``WEB_SEARCH`` park — ``egress`` "is always
+    present" there — so what this pins is the conservative arm of a case that cannot
+    arise rather than a behaviour a hub produces, and §13 licenses it in terms: "what a
+    surface may do is **refuse** a confirmation it cannot render".
+    """
+    assert not cli._render_confirmation(_question().model_copy(update={"egress": None}))
+    rendered = _flat(output.getvalue())
+
+    assert "Confirmation withheld" in rendered
+    assert "where this lookup would go" in rendered
+    assert "the question is still open" in rendered, "a read holds no step to be waiting"
+    assert QUERY not in output.getvalue()
+
+
 def test_a_terminal_too_narrow_to_mark_the_query_as_data_withholds_the_card(
     narrow: StringIO,
 ) -> None:
