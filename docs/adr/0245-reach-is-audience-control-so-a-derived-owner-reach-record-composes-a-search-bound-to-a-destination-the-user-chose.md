@@ -1,6 +1,6 @@
 # 245. Reach is audience control, so a derived owner-reach record composes a search bound to a destination the user chose
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-11
 - **Partially supersedes** [ADR-0238](0238-a-destination-the-user-chose-may-be-told-what-the-turn-knows-and-the-searching-that-follows-runs-under-a-per-conversation-budget.md)
   — **§2's validator clause in the rule it states, §3's first clause, §11's
