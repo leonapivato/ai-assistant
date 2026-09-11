@@ -41,6 +41,7 @@ from ai_assistant.core.types import (
     DiscloserProvenance,
     EgressDestination,
     EgressSpan,
+    ReadKind,
     SpanCoverage,
 )
 from ai_assistant.interfaces.gateway.server import _confirmation_view
@@ -1031,3 +1032,175 @@ async def test_one_card_this_page_cannot_put_does_not_take_the_listing_with_it(
         # The listing survived, so nothing said the gateway had stopped.
         await expect(drive.page.locator("#confirmations > .fault")).to_be_hidden()
         assert thrown == []
+
+
+# --- ADR-0244 §13: a read's question, driven (#2222 scenarios 1, 2, 7) ---------
+#
+# ADR-0233 §15's reason reaches this kind unchanged: "'before the control' is a claim
+# about a rendering that no assertion over the bytes can check". A read's card adds a
+# sentence and a third control to a rendering whose floor is already driven, and the
+# two things worth driving are the two a reading of ``app.js`` cannot settle — that the
+# exact query survives to the screen as the characters the ruling was taken over, and
+# that pressing the act sends the act.
+
+#: The composed query, as a ruling would have been taken over it. Long enough not to fit
+#: a phone's line, and carrying a quotation mark and an em dash, because the clause under
+#: test forbids re-casing, re-wrapping "into a different quoting" and paraphrase.
+_QUERY = (
+    'survey "closing Friday" — what did respondents say about the deadline, and did '
+    "anyone ask for an extension?"
+)
+
+
+def _read(*, handle: str = "r-1") -> Confirmation:
+    """One parked read, with the binding ADR-0244 §4 says a real one always has."""
+    return Confirmation(
+        tool_id="web_search",
+        tool_description="asks one connected search account a question",
+        parameters={"origin": "search.example", "query": _QUERY},
+        reason="this lookup would leave the device, so it is put to you as a question",
+        token=ContinuationToken(handle=handle),
+        egress=ConfirmationEgress(
+            account_identity=_IDENTITY,
+            spans=(_span("query", _QUERY, canonical="search.example"),),
+            coverage=SpanCoverage.MODEL_ON_EVERY_PATH,
+            planned_with_external_content=False,
+        ),
+        read=ReadKind.WEB_SEARCH,
+    )
+
+
+@pytest.mark.parametrize("viewport", [DESKTOP, PHONE], ids=["desktop", "phone"])
+async def test_a_parked_reads_question_puts_the_exact_query_above_the_act(
+    gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize
+) -> None:
+    """#2222 scenario 1 at the browser — ADR-0244 §19's Arm 1, driven.
+
+    **The exact query is on the screen, character for character** (§13): "No surface
+    abbreviates, elides, truncates, re-cases, normalises, re-wraps into a different
+    quoting, translates or paraphrases the query, and none renders a description of it in
+    its place. **A surface that showed the user less than what would leave the device has
+    not put ADR-0148 §8's question.**" So the comparison is an equality against the string
+    the confirmation carries, at a width where it does not fit on one line — which is the
+    pressure ADR-0233 §12 names as the case that most matters and is least likely to be
+    looked at.
+
+    **ADR-0178 §7's floor is unreduced, because "being a read relaxes no clause of it"**:
+    the account is named, and the occurrence's destination is on screen in both forms.
+
+    **The sentence and the act are below the values** (ADR-0233 §8's ordering clause,
+    ADR-0178 §7's "before it collects the user's answer"), asserted in the pixels and in
+    document order, which is what no reading of the file can say.
+    """
+    thrown: list[str] = []
+    complaints: list[str] = []
+    async with driving(gateway_browser, tmp_path, viewport=viewport) as drive:
+        drive.page.on("pageerror", lambda error: thrown.append(str(error)))
+        drive.page.on("console", lambda message: _note(message, complaints))
+        drive.engine.read_parked["r-1"] = _read()
+
+        shown = await _shown(drive)
+
+        values = [one["text"] for one in shown["values"]]
+        assert _QUERY in values, values
+        assert all(one["beforeEveryControl"] for one in shown["values"]), shown["values"]
+        assert not any(one["clipped"] for one in shown["values"])
+        assert _IDENTITY in shown["cardText"]
+        assert "search.example" in shown["cardText"]
+        assert "Answering yes dispatches this one lookup and nothing else." in shown["cardText"]
+        controls = [one["text"] for one in shown["controls"]]
+        assert controls == ["Yes, do it", "No", "Stop waiting", "Cancel this lookup"], controls
+        # The act is below every value in the pixels as well as in the markup, which is
+        # the half `beforeEveryControl` cannot see at a width where the card scrolls.
+        act = next(one for one in shown["controls"] if one["text"] == "Cancel this lookup")
+        assert act["top"] > max(one["top"] + one["height"] for one in shown["values"])
+        assert shown["pageWidth"] <= shown["viewportWidth"]
+        assert thrown == []
+        assert complaints == []
+
+
+async def test_a_step_that_parks_is_offered_no_cancellation_control(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """ADR-0244 §11: ``cancel_read`` is the cancellation source "for this operation kind
+    alone", and §4's discriminator is what this page decides that from.
+
+    Driven beside the case above rather than argued from it, because the two cards are
+    built by one renderer and the difference between them is one member of the view. A
+    step's park offering the act would be a control whose token the engine refuses —
+    ``UnknownContinuationError``, which ADR-0084 §7 makes emphatically not a denial, for
+    an act the owner was invited to perform.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.parked["h-1"] = _email()
+
+        shown = await _shown(drive)
+
+        controls = [one["text"] for one in shown["controls"]]
+        assert controls == ["Yes, do it", "No", "Stop waiting"], controls
+        assert "dispatches this one lookup" not in shown["cardText"]
+
+
+async def test_pressing_the_act_withdraws_the_question_and_says_which_state_it_reached(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """#2222 scenario 7 at the browser — ADR-0244 §19's Arm 7, driven.
+
+    "``cancel_read`` on an ``OPEN`` park returns ``WITHDRAWN``, settles it ``CANCELLED``,
+    records **no** ruling and sends nothing." Three things are then true of this surface
+    and each is checked where only a driven case can check it: exactly one ``cancel_read``
+    goes out and it names one handle; **no** ``resume`` goes out, because a cancellation
+    is not an answer and this page must not turn it into one; and the row says which of
+    the three states the act reached rather than going quiet or reporting the park as
+    answered.
+
+    **The pair goes with the sentence**, because all three members leave the park
+    unanswerable — and a row left enabled over one of them is the control that submits
+    nothing which this surface spends the most words preventing.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.read_parked["r-1"] = _read()
+        drive.engine._read_handles.add("r-1")
+
+        await drive.page.click("#confirmations-button")
+        await drive.page.wait_for_selector("#confirmation-list .confirmation-row")
+        row = drive.page.locator("#confirmation-list .confirmation-row").first
+        await row.locator("button", has_text="Cancel this lookup").click()
+        await expect(row).to_contain_text("That question is withdrawn")
+
+        assert [one for one in drive.engine.calls if one[0] == "cancel_read"] == [
+            ("cancel_read", {"token": "r-1"})
+        ]
+        assert [one for one in drive.engine.calls if one[0] == "resume"] == []
+        await expect(row.locator("button", has_text="Yes, do it")).to_be_disabled()
+        await expect(row.locator("button", has_text="No")).to_be_disabled()
+        await expect(row.locator("button", has_text="Cancel this lookup")).to_be_disabled()
+        assert "no answer was recorded" in await row.inner_text()
+
+
+async def test_an_approved_read_renders_the_statement_for_the_member_it_came_back_with(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """#2222 scenario 2 at the browser — ADR-0244 §19's Arm 2, at the surface half.
+
+    §13's last clause is what makes this obligatory: "a surface that renders no statement
+    for a ``ReadAnswerOutcome`` member it was given … has not implemented this section —
+    it is **not permissibly degraded**". So the answer's own member reaches the screen as
+    its fixed statement, and the second answer's does too: Arm 2's second half is one of
+    the three this decision "would be worthless without", and the browser is the surface
+    most able to ask for it, because one park is on screen twice.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.read_parked["r-1"] = _read()
+        drive.engine._read_handles.add("r-1")
+
+        await drive.page.click("#confirmations-button")
+        await drive.page.wait_for_selector("#confirmation-list .confirmation-row")
+        row = drive.page.locator("#confirmation-list .confirmation-row").first
+        await row.locator("button", has_text="Yes, do it").click()
+        await expect(drive.page.locator("#answer-body")).to_contain_text("That lookup was made")
+
+        answered = [one for one in drive.engine.calls if one[0] == "resume"]
+        assert [(name, held["token"], held["approved"]) for name, held in answered] == [
+            ("resume", "r-1", True)
+        ]

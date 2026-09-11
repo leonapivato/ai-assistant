@@ -40,6 +40,7 @@ from ai_assistant.core.types import (
     EgressDestination,
     EgressSpan,
     ExecutionState,
+    ReadAnswerOutcome,
     SpanCoverage,
     StepOutcome,
     TurnOutcome,
@@ -64,10 +65,13 @@ pytestmark = pytest.mark.integration
 
 _AT = datetime(2026, 1, 2, 15, 0, tzinfo=UTC)
 
-#: The two shapes this lane adds, each with the operation ADR-0177 §1 admits it for.
+#: The shapes these lanes add, each with the operation ADR-0177 §1 admits it for. The
+#: first two are ADR-0177 §8's CONFIRM pair; the third is ADR-0244 §13's cancellation
+#: act, which that section adds to §1's enumeration in its own text.
 _ADDED: dict[str, str] = {
     "/confirmations": "pending_confirmations",
     "/confirmation/resume": "resume",
+    "/confirmation/cancel-read": "cancel_read",
 }
 
 #: One well-formed body per shape. Every value is the **browser's own**: the token it
@@ -75,6 +79,7 @@ _ADDED: dict[str, str] = {
 _WELL_FORMED: dict[str, dict[str, Any]] = {
     "/confirmations": {},
     "/confirmation/resume": {"token": "h-1", "approved": True},
+    "/confirmation/cancel-read": {"token": "h-1"},
 }
 
 _IDENTITY = "work@example.com"
@@ -1002,3 +1007,258 @@ async def test_no_span_view_carries_content_on_either_surface_it_reaches() -> No
     assert recorded["spans"] == [_span_view(span)]
     assert crossed == [_span_view(span)]
     assert "value" not in _span_view(span)
+
+
+# --- ADR-0244 §13: a read's question, its answer and its cancellation ---------
+#
+# Each case below is bound by name to the pre-registered acceptance scenario on #2222
+# it discharges at the browser, and to the ADR-0244 §19 arm that states it. They are
+# driven against the canonical fake (ADR-0216 §4) through a real socket, because what
+# is under test is the view the page receives — the level #1404's obligation is stated
+# at, and the one a reading of `server.py` cannot reach.
+
+
+def _read_park(engine: FakeAssistantEngine, *, handle: str = "r-1") -> Confirmation:
+    """One parked read the fake will answer, with a binding the floor is owed over.
+
+    Built through ``FakeAssistantEngine.park_read`` rather than here, which is the
+    opposite of :func:`_confirmation`'s choice and for the same reason read the other
+    way: the cases below turn on the *answer* and the act, not on the arguments, and
+    the fake's helper is the thing that makes a park answerable at all.
+    """
+    return engine.park_read(
+        handle,
+        query="what did the survey say about Friday",
+        egress=EgressBinding(
+            spans=(_span("query", extent=41, canonical="search.example"),),
+            account=BoundAccount(identity=_IDENTITY, reference="conn-1"),
+            transport_endpoint="search.example:443",
+            planned_with_external_content=False,
+            coverage=SpanCoverage.NOT_COVERED,
+        ),
+    )
+
+
+async def test_the_cancellation_path_names_the_operation_the_adr_admits() -> None:
+    """ADR-0244 §13 widens ADR-0177 §1's enumeration in its own text, which is the
+    route §1's third clause fixes: "the command line and the browser each render the
+    pending read, collect the answer, and **offer the cancellation act**".
+
+    Read off the one table the gateway classifies from, so the ADR and the code are one
+    thing to compare rather than two.
+    """
+    assert _ASSISTANT_PATHS[("POST", "/confirmation/cancel-read")] == "cancel_read"
+
+
+async def test_a_parked_read_crosses_with_the_exact_query_and_both_destination_forms() -> None:
+    """#2222 scenario 1 at the browser, ADR-0244 §19's Arm 1 — the question appears.
+
+    Three things cross and each is a clause: ``read`` is §4's discriminator, stating
+    only that answering this question dispatches a read; ``parameters`` is the exact
+    query, "byte for byte as the ruling was taken over them", which §13 forbids any
+    surface to abbreviate, truncate, re-case, normalise or paraphrase; and ``egress``
+    carries ADR-0178 §7's floor entire, which "being a read relaxes no clause of".
+
+    **Asserted over the view rather than over the page** for :func:`_confirmation_view`'s
+    own reason: a gateway that shipped the control while enumerating none of this would
+    satisfy every driven case, which is ADR-0178 §10 in terms.
+    """
+    engine = FakeAssistantEngine()
+    question = _read_park(engine)
+    engine.turn_outcome = TurnOutcome(turn=None, conversation_id="c-1", read_confirmation=question)
+    async with _harness(engine) as one:
+        status, body = await one.whole("POST", "/ask", {"utterance": "what did it say"})
+
+        assert status == 200, body
+        view = body["outcome"]["read_confirmation"]
+        assert view["read"] == "web_search"
+        assert view["parameters"] == [
+            {"key": "origin", "index": None, "value": "search.example"},
+            {"key": "query", "index": None, "value": "what did the survey say about Friday"},
+        ]
+        assert view["egress"]["account_identity"] == _IDENTITY
+        assert view["egress"]["destinations"] == _derived(question)
+        assert [one_span["destination"] for one_span in view["egress"]["spans"]] == [
+            {"protocol": "smtp", "supplied": "search.example", "canonical": "search.example"}
+        ]
+        assert body["outcome"]["read_answer"] is None
+
+
+async def test_a_step_that_parks_still_crosses_with_no_read_and_no_answer() -> None:
+    """#2222 scenario 8's fourth limb at the browser, ADR-0244 §19's Arm 8.
+
+    "A step's confirmation is unchanged in every member and every assembly site." The
+    discriminator is what makes that checkable at this surface: a step's park carries
+    ``read`` ``null``, so a page branching on it renders the card it rendered before
+    this ADR and offers no cancellation act over a token ``cancel_read`` would refuse.
+    """
+    async with _harness(_holding()) as one:
+        view = await _view(one, _confirmation(_span("body")))
+
+        assert view["read"] is None
+
+
+@pytest.mark.parametrize(
+    ("scripted", "expected"),
+    [
+        (None, "dispatched"),
+        (ReadAnswerOutcome.EXPIRED, "expired"),
+        (ReadAnswerOutcome.AUTHORITY_CHANGED, "authority_changed"),
+        (ReadAnswerOutcome.OPERATION_CHANGED, "operation_changed"),
+        (ReadAnswerOutcome.UNAVAILABLE_NOW, "unavailable_now"),
+    ],
+)
+async def test_every_answer_a_read_can_get_crosses_as_its_own_member(
+    scripted: ReadAnswerOutcome | None, expected: str
+) -> None:
+    """#2222 scenarios 2, 5 and 6 at the browser — ADR-0244 §19's Arms 2, 5 and 6.
+
+    The member is what a surface renders one fixed statement from (§13), so a member
+    that did not cross is a statement the page cannot render — and §13's last clause
+    makes that "not permissibly degraded". Five of the seven are reachable here by
+    scripting the fake, which is the reason ``read_answers`` exists: a fake performing
+    no real send cannot *reach* ``AUTHORITY_CHANGED``, ``OPERATION_CHANGED`` or
+    ``UNAVAILABLE_NOW``, and a surface obliged to render each needs each reachable.
+    """
+    engine = FakeAssistantEngine()
+    _read_park(engine)
+    if scripted is not None:
+        engine.read_answers["r-1"] = scripted
+    async with _harness(engine) as one:
+        status, body = await one.whole(
+            "POST", "/confirmation/resume", {"token": "r-1", "approved": True}
+        )
+
+        assert status == 200, body
+        assert body["outcome"]["read_answer"] == expected
+        assert body["outcome"]["read_confirmation"] is None
+
+
+async def test_a_denial_crosses_as_declined_and_an_answer_twice_as_already_settled() -> None:
+    """#2222 scenarios 2 and 3 at the browser — ADR-0244 §19's Arms 2 and 3.
+
+    Arm 3 is the denial: ``approved`` ``False`` answers ``DECLINED`` with ``turn`` and
+    ``reply`` both ``None``, which is ADR-0170 §4's second shape. Arm 2's second half is
+    the one this decision "would be worthless without": a second answer on the same
+    token "sends nothing, records nothing and returns ``ALREADY_SETTLED``" — and the
+    browser has two rows of one park, so it is the surface most able to ask for it.
+    """
+    engine = FakeAssistantEngine()
+    _read_park(engine)
+    async with _harness(engine) as one:
+        _, denied = await one.whole(
+            "POST", "/confirmation/resume", {"token": "r-1", "approved": False}
+        )
+        _, again = await one.whole(
+            "POST", "/confirmation/resume", {"token": "r-1", "approved": True}
+        )
+
+        assert denied["outcome"]["read_answer"] == "declined"
+        assert denied["outcome"]["reply"] is None
+        assert again["outcome"]["read_answer"] == "already_settled"
+
+
+async def test_a_still_open_read_is_offered_again_by_the_one_recovery_route() -> None:
+    """#2222 scenario 4 at the browser — ADR-0244 §19's Arm 4, at the surface half.
+
+    ADR-0177 §8's recovery clause is the whole of the browser's answer to a restart: "A
+    browser that has been closed and reopened, and a gateway that has been restarted,
+    both recover through this read and through no other route." So the listing offers
+    both populations (ADR-0244 §5) through the one renderer, each carrying the
+    discriminator §4 gives it — which is why a surface needs one renderer and not two.
+    """
+    engine = FakeAssistantEngine()
+    engine.park("h-1")
+    _read_park(engine)
+    async with _harness(engine) as one:
+        status, body = await one.whole("POST", "/confirmations", {})
+
+        assert status == 200, body
+        assert [entry["read"] for entry in body["confirmations"]] == [None, "web_search"]
+        offered = body["confirmations"][1]
+        assert offered["token"] == "r-1"  # noqa: S105 — a continuation handle, not a secret
+        assert offered["parameters"][1]["value"] == "what did the survey say about Friday"
+
+
+async def test_the_cancellation_act_relays_and_renders_each_of_its_three_states() -> None:
+    """#2222 scenario 7 at the browser — ADR-0244 §19's Arm 7, at the surface half.
+
+    All three members, each reached by the state §11 defines it over: an ``OPEN`` park
+    is ``WITHDRAWN``; a dispatch this process is running is ``INTERRUPTED``; and a park
+    that is settled with nothing running here is ``NOTHING_TO_CANCEL`` — "which is true
+    of what this process can do".
+
+    **The adapter relays and renders, and rules on nothing** (golden rule 3, ADR-0042
+    §6): the request carries the token and no second member, and what comes back is the
+    member's own value rather than a sentence this gateway composed.
+    """
+    engine = FakeAssistantEngine()
+    _read_park(engine)
+    _read_park(engine, handle="r-2")
+    engine.read_dispatching.add("r-2")
+    async with _harness(engine) as one:
+        _, withdrawn = await one.whole("POST", "/confirmation/cancel-read", {"token": "r-1"})
+        _, interrupted = await one.whole("POST", "/confirmation/cancel-read", {"token": "r-2"})
+        _, nothing = await one.whole("POST", "/confirmation/cancel-read", {"token": "r-1"})
+
+        assert withdrawn == {"cancellation": "withdrawn"}
+        assert interrupted == {"cancellation": "interrupted"}
+        assert nothing == {"cancellation": "nothing_to_cancel"}
+        assert [name for name, _ in engine.calls] == ["cancel_read"] * 3
+        assert engine.calls[0] == ("cancel_read", {"token": "r-1"})
+
+
+async def test_a_cancelled_question_is_no_longer_offered_and_records_no_ruling() -> None:
+    """ADR-0244 §11's difference from a denial, at the surface that offers both.
+
+    "Cancelling an ``OPEN`` park withdraws the question and records no answer …  which
+    is the whole difference from a denial: a denial is the user answering *no* and is a
+    ruling; a cancellation is the user withdrawing the question and is not one." The
+    page therefore must not report a cancelled park as answered, and this is the half
+    of that the gateway can be held to: the question stops being offered, and a later
+    answer on its token is ``ALREADY_SETTLED`` rather than a ruling of any kind.
+    """
+    engine = FakeAssistantEngine()
+    _read_park(engine)
+    async with _harness(engine) as one:
+        await one.whole("POST", "/confirmation/cancel-read", {"token": "r-1"})
+        _, listed = await one.whole("POST", "/confirmations", {})
+        _, answered = await one.whole(
+            "POST", "/confirmation/resume", {"token": "r-1", "approved": True}
+        )
+
+        assert listed["confirmations"] == []
+        assert answered["outcome"]["read_answer"] == "already_settled"
+
+
+async def test_a_token_naming_no_read_is_refused_and_is_never_reported_as_a_denial() -> None:
+    """ADR-0244 §11: "An unknown token raises ``UnknownContinuationError``, exactly as
+    ``resume`` does" — and ADR-0084 §7 is that such a refusal is never a denial,
+    because "nobody ruled on this action".
+
+    A step's park is the case worth driving rather than a made-up handle: its token is
+    one this browser really holds, and `cancel_read` is "for this operation kind alone".
+    """
+    engine = FakeAssistantEngine()
+    engine.park("h-1")
+    async with _harness(engine) as one:
+        status, body = await one.whole("POST", "/confirmation/cancel-read", {"token": "h-1"})
+
+        assert status == 422, body
+        assert body["fault"] == "assistant-declined"
+
+
+async def test_the_cancellation_is_relayed_with_the_token_and_with_no_second_member() -> None:
+    """ADR-0244 §11: ``cancel_read`` "takes no other argument, no reason, no free text
+    and no deadline", and ADR-0042 §4 is that the token is relayed rather than
+    interpreted — this gateway mints none, rewrites none and substitutes none.
+
+    Read off the handler rather than off a response, because a second member would be
+    supplied here and would never appear in one.
+    """
+    engine = FakeAssistantEngine()
+    _read_park(engine)
+    async with _harness(engine) as one:
+        await one.whole("POST", "/confirmation/cancel-read", {"token": "r-1", "reason": "no"})
+
+        assert engine.calls == [("cancel_read", {"token": "r-1"})]
