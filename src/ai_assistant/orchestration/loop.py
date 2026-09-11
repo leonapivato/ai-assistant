@@ -95,6 +95,7 @@ if TYPE_CHECKING:
         ActionPlan,
         FeedbackEvent,
         ParkedRead,
+        PermissionDecision,
         ReadAsk,
         SourceListing,
     )
@@ -200,6 +201,11 @@ class RespondedTurn:
             therefore keeps the **first** park it was given rather than choosing between
             two. It is supplied and never inferred, exactly as
             :attr:`search_not_serviced` is.
+        parked_decision: The trail's own copy of the ``CONFIRM`` that park holds the
+            question of, carried beside it so that the engine assembles the question
+            with no store read of its own — ADR-0244 §1's "the turn does not park, is
+            not suspended and does not fail", which a trail read taken after the park
+            was written could break between the park and the reply.
     """
 
     turn: TurnResult
@@ -209,6 +215,7 @@ class RespondedTurn:
     structured: StructuredFacts = field(default_factory=StructuredFacts)
     search_not_serviced: SearchNotServiced | None = None
     parked_read: ParkedRead | None = None
+    parked_decision: PermissionDecision | None = None
 
 
 #: ADR-0228 §3's bound: **at most two** calls to ``Planner.plan`` on one turn, so a
@@ -1077,7 +1084,7 @@ class LearningLoop:
             await footing.observe(responded.turn.memories)
         return responded
 
-    async def _turn(  # noqa: PLR0913, PLR0915 — the utterance, the tail, whether reading it degraded, the supply filter, the operation's planning budget, this turn's audit record and its ADR-0238 footing; every one is a distinct fact about the turn, and collapsing any pair would put a flag where a value belongs
+    async def _turn(  # noqa: C901, PLR0913, PLR0915 — the utterance, the tail, whether reading it degraded, the supply filter, the operation's planning budget, this turn's audit record and its ADR-0238 footing; every one is a distinct fact about the turn, and collapsing any pair would put a flag where a value belongs
         self,
         utterance: str,
         *,
@@ -1386,6 +1393,7 @@ class LearningLoop:
         # park — which is every turn on a deployment that wired no ``ParkedReads``, and
         # every turn whose search was not ruled a ``CONFIRM``.
         parked_read: ParkedRead | None = None
+        parked_decision: PermissionDecision | None = None
         if not bounded_audience:
             # ADR-0203 §1: between retrieval and planning, and applied to the
             # context as well as to the records — a facet no ADR has placed is
@@ -1614,7 +1622,8 @@ class LearningLoop:
             # rule — so `or` is the fold rather than a precedence decision, and a lane
             # that assigned unconditionally would drop the question the user was
             # actually shown.
-            parked_read = parked_read or carried.parked_read
+            if parked_read is None and carried.parked_read is not None:
+                parked_read, parked_decision = carried.parked_read, carried.parked_decision
             # ADR-0240 §8. The reach and the temporal facts are ORed across the
             # turn's servicings — §8's own clause for the first is "whether or not a
             # later read of the same turn did", and the second rests on the same
@@ -1720,6 +1729,7 @@ class LearningLoop:
             # `orchestration`, on ADR-0242 §7's terms: no member on any Protocol, and
             # nothing re-read at the render site.
             parked_read=parked_read,
+            parked_decision=parked_decision,
         )
 
     async def resumed_read(  # noqa: PLR0913 — the parked turn's two persisted members, the read's records, and the three things every turn's supply is assembled against; each is a distinct fact and none is derivable from another
@@ -1728,6 +1738,7 @@ class LearningLoop:
         plan: ActionPlan,
         *,
         records: Sequence[MemoryRecord],
+        conversation_id: str,
         history: Sequence[MemoryRecord] = (),
         history_degraded: bool = False,
         narrow: SupplyFilter | None = None,
@@ -1773,6 +1784,28 @@ class LearningLoop:
         servicing, of which there is none, records its own disposition in its own
         turn's event.
 
+        **ADR-0238 §8's two folds are owed here and are taken here**, which is what
+        ADR-0244 §8's "the exchange is captured as a turn's exchange is captured" costs
+        on this axis. A resumed turn admits records to a conversation exactly as any
+        other does — its retrieval, its episodic supplement and the approved read's own
+        mint — and §8's trigger is *the admission*, "whether or not that turn ever
+        builds a ``WEB_SEARCH`` request". A pass that folded neither would leave the
+        conversation's ``all_external_user_chosen`` flag standing at ``True`` over a
+        supply that had just carried external content, and §5's **recorded** half would
+        then hand a later search a ``closed_loop`` it has not earned. The early fold
+        narrows §8's window to one store write; the capture fold is the one that may
+        report a turn *clean*, because only the end of the pass sees the final supply.
+
+        **The approved read's own records are folded as any other external span is**,
+        and that is the fail-closed direction rather than an omission. §8's predicate
+        asks whether a span was minted "at a destination of recorded trust
+        ``USER_CHOSEN``", and ADR-0244 §6 rules that at the answer "``trust_of`` is not
+        asked again and no destination's recorded trust is written" — so this pass holds
+        no answer to that question and may not invent one. The fold therefore treats
+        them as it treats every record no set vouches for, which lowers the flag and can
+        only *reduce* what a later search is authorised to compose over. ADR-0238 §8
+        makes the flag monotone, so nothing is reopened by it.
+
         Args:
             goal: The parked turn's goal, read from the park.
             plan: The parked turn's plan, read from the park.
@@ -1781,6 +1814,10 @@ class LearningLoop:
                 expired, interrupted or empty-handed — on which the turn still
                 composes, and what tells the user why is ADR-0242 §6's carrier the
                 caller passes to the composing stage (ADR-0244 §8).
+            conversation_id: The conversation the parked turn ran under, read from the
+                park. **This pass's ADR-0238 footing is built from it**, and it is taken
+                as an argument rather than inferred for :meth:`respond`'s own reason:
+                the footing is a per-turn value over a conversation the caller names.
             history: The conversation's replay tail, as every turn is handed one.
             history_degraded: Whether reading that tail degraded, reported on
                 :attr:`TurnResult.memory_degraded` beside retrieval's own answer
@@ -1798,6 +1835,10 @@ class LearningLoop:
             The resumed turn's result: the parked turn's goal and plan, this instant's
             context and supply, and the approved read's records at the end of it.
         """
+        # **One footing per pass**, built here and for this conversation, exactly as
+        # :meth:`respond` builds one per turn — because what it carries is per-pass
+        # state and because ADR-0238 §14 wires the trust store into one path.
+        footing = None if self._footing is None else self._footing(conversation_id)
         recent = tuple(history)
         context = await self._context.assemble()
         retrieved, degraded = await self._retrieve(goal.statement)
@@ -1805,6 +1846,19 @@ class LearningLoop:
         supplement, supplement_read = await self._supplement(goal.statement, preceding=preceding)
         memories = preceding + supplement
         retrieved_ids = frozenset(record.id for record in retrieved) | supplement_read
+        if footing is not None:
+            # ADR-0238 §2's first population, taken from the tail without a read for
+            # :meth:`_turn`'s own reason: ``ConversationLifecycle.history`` built it by
+            # walking this conversation's index rows, so asking ``turn_of_episode``
+            # about each would re-read rows this pass already walked. What the tail
+            # cannot answer for, :meth:`SearchFooting.admitted` places itself.
+            footing.conversation_episodes.update(
+                record.id for record in recent if MemoryKind(record.kind) is MemoryKind.EPISODIC
+            )
+            # §8's **early** fold, over the supply as it stands before the fourth group:
+            # the trigger is the admission, and folding here puts the ``False`` on the
+            # record as early as the fact exists.
+            await footing.admitted(memories)
         # ADR-0226 §6's budget and §7's deduplication, through the **one** function
         # that states them — so a resumed turn's fourth group is bounded and
         # deduplicated exactly as a servicing's is, and a second statement of the two
@@ -1822,6 +1876,16 @@ class LearningLoop:
         # operation, so the filter subtracts nothing and the records reach the
         # composing stage exactly as the other three groups do.
         context, memories = _narrowed(narrow, context, memories + fourth, retrieved_ids)
+        if footing is not None:
+            # §8's early fold again, on this pass's own fourth group — the same clause
+            # ``service_read_request`` applies after every admission, at the one place
+            # this pass admits anything.
+            await footing.admitted(fourth)
+            # §8's capture fold, over the **final** supply — the same sequence the
+            # episode's own ADR-0223 §1 mark is computed from, at the same instant and
+            # by the same component. It is the only fold that may report a pass *clean*,
+            # and the two agree because ``observe_search`` folds by **and**.
+            await footing.observe(memories)
         return TurnResult(
             goal=goal,
             context=context,

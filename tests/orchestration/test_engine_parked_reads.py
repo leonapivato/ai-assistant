@@ -34,7 +34,11 @@ from test_engine import AT, PATIENT, Harness
 from test_engine_read_envelope import _AskingPlanner, _recorder
 from test_loop_search import _DEADLINE, _binder, _CostedSearcher, _search
 
-from ai_assistant.core.errors import UngrantableActError, UnknownContinuationError
+from ai_assistant.core.errors import (
+    AuditError,
+    UngrantableActError,
+    UnknownContinuationError,
+)
 from ai_assistant.core.types import (
     ContinuationToken,
     EgressBinding,
@@ -1697,3 +1701,85 @@ async def test_an_answer_for_a_deleted_conversation_is_refused_as_unavailable() 
     still_open = await wired.parks.get(park.id)
     assert still_open is not None
     assert still_open.disposition is ParkedReadDisposition.OPEN, "clause 2 precedes the gate"
+
+
+# --- what a resumed turn owes the conversation it ran under -------------------
+
+
+class _UnreadableTrail:
+    """A trail whose ``get`` raises, for the one clause ADR-0244 §1 states in terms.
+
+    Every other member delegates, so what is under test is whether the **parking turn**
+    survives a store fault on the path that assembles its question — not a second
+    trail's behaviour.
+    """
+
+    def __init__(self, inner: FakeAuditTrail) -> None:
+        self._inner = inner
+        self.gets = 0
+
+    async def get(self, decision_id: str) -> Any:
+        self.gets += 1
+        msg = "fake: the trail could not be read"
+        raise AuditError(msg)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+async def test_parking_a_read_survives_a_trail_that_cannot_be_read() -> None:
+    """ADR-0244 §1: "**the turn does not park, is not suspended and does not fail**".
+
+    The question is assembled from the decision the servicing site already holds, so the
+    parking turn takes **no** trail read of its own. A read taken there could raise
+    between the park and the reply and take down a turn that had already composed its
+    answer — which is the one thing §1 says parking must not do, and the failure this
+    case exists to make unreachable.
+
+    The enumeration path is a different seam and still reads: it is not inside a turn
+    and already declares ``AuditError`` (ADR-0052 §1).
+    """
+    wired = _wired()
+    unreadable = _UnreadableTrail(wired.trail)
+    wired.engine._trail = unreadable
+
+    outcome = await wired.engine.converse(_ASKED, timeout=PATIENT)
+
+    assert outcome.reply is not None, "the turn composed and answered"
+    assert outcome.search_not_serviced is SearchNotServiced.ANSWER_AWAITED
+    assert outcome.read_confirmation is not None, "and the question was assembled"
+    assert unreadable.gets == 0, "with no trail read on the parking turn's path at all"
+    assert len(await wired.parks.outstanding()) == 1
+
+
+async def test_a_resumed_turn_folds_its_supply_onto_the_conversations_footing() -> None:
+    """ADR-0238 §8's two folds, owed by a resumed turn as by any other.
+
+    §8's trigger is *the admission* — "whether or not that turn ever builds a
+    ``WEB_SEARCH`` request" — and a resumed turn admits records to a conversation
+    exactly as any other does. A pass that folded neither would leave
+    ``all_external_user_chosen`` standing at ``True`` over a supply that had just
+    carried external content, and ADR-0238 §5's **recorded** half would then hand a
+    later search a ``closed_loop`` it has not earned.
+
+    **The approved read's own records are what lower it here**, and that is the
+    fail-closed direction ADR-0244 §6 leaves available: at the answer "``trust_of`` is
+    not asked again", so this pass holds no answer to §8's "at a destination of recorded
+    trust ``USER_CHOSEN``" and may not invent one.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    park = await _parked(wired)
+    before = await wired.engine._conversations._conversations.search_draw(park.conversation_id)
+    assert before is not None
+    assert before.all_external_user_chosen is True, "the parking turn carried nothing external"
+
+    await wired.engine.resume(parked.read_confirmation.token, approved=True, timeout=PATIENT)
+
+    after = await wired.engine._conversations._conversations.search_draw(park.conversation_id)
+    assert after is not None
+    assert after.all_external_user_chosen is False, (
+        "the resumed turn's supply carried the read's own records, and §8's fold is "
+        "what keeps a later search from composing over them under a closed loop"
+    )

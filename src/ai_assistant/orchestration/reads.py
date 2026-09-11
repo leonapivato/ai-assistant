@@ -1176,12 +1176,27 @@ class _Searched:
             so the question appears in the exchange that raised it; no render site
             reads ``ParkedReads``, and no component recomputes it downstream (ADR-0242
             §7, ADR-0244 §12).
+        parked_decision: The trail's own copy of the ``CONFIRM`` that park holds the
+            question of, carried beside it and for the same reason — **so that
+            assembling the question costs no second store read** (ADR-0244 §1).
+
+            "**The turn does not park, is not suspended and does not fail**": a read of
+            the trail taken *after* the servicing has parked is a read that can raise
+            an ``AuditError`` between the park and the reply, taking down a turn that
+            had already composed its answer — which is the one thing §1 states in terms
+            that parking must not do. This site holds the decision by construction, so
+            the engine is handed it rather than sent back for it.
+
+            The **enumeration** path reads the trail for a park it did not write, and
+            that is a different seam: ``pending_confirmations`` is not inside a turn and
+            already declares ``AuditError`` (ADR-0052 §1).
     """
 
     records: tuple[MemoryRecord, ...]
     disposition: SearchDisposition | None
     not_serviced: SearchNotServiced | None = None
     parked_read: ParkedRead | None = None
+    parked_decision: PermissionDecision | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1320,6 +1335,11 @@ class ServicedCarriers:
             **Carried as data and never re-read.** No render site, adapter or composing
             stage reads ``ParkedReads``, and no component recomputes this downstream
             (ADR-0242 §7, ADR-0244 §12, §13).
+        parked_decision: The trail's own copy of the ``CONFIRM`` that park holds the
+            question of, carried beside it so that the engine assembles the question
+            with **no store read of its own** — ADR-0244 §1's "the turn does not park,
+            is not suspended and does not fail", which a trail read taken after the park
+            was written could break between the park and the reply.
     """
 
     hop_reached: tuple[str, ...] = ()
@@ -1329,6 +1349,7 @@ class ServicedCarriers:
     window_filtered: bool = False
     not_serviced: SearchNotServiced | None = None
     parked_read: ParkedRead | None = None
+    parked_decision: PermissionDecision | None = None
 
 
 @dataclass(slots=True)
@@ -2043,6 +2064,11 @@ class SearchServicer:
                 planned_with_external_content=bound.binding.planned_with_external_content,
                 trust=trust,
                 park=park,
+                # The decision this site already holds, carried so the engine assembles
+                # the question without a second trail read — a read that could raise
+                # **after** the park was written and take down a turn §1 says must not
+                # fail.
+                decision=recorded,
             )
         # ADR-0021 §1's `authorises` runs inside `ToolCall`'s own validator, so an
         # unauthorised search is unconstructable at the type level — which is
@@ -2262,13 +2288,14 @@ class SearchServicer:
         return await self._searcher.search(call, timeout=self._deadline)
 
     @staticmethod
-    def _not_serviced(
+    def _not_serviced(  # noqa: PLR0913 — the disposition, the footing, and one keyword per fact ADR-0242 §8's table and ADR-0244 §12's row are discriminated by; each is a value this branch holds and none is derivable from another
         disposition: SearchDisposition | None,
         footing: SearchFooting,
         *,
         planned_with_external_content: bool = False,
         trust: DestinationTrust = DestinationTrust.UNCHOSEN,
         park: ParkedRead | None = None,
+        decision: PermissionDecision | None = None,
     ) -> _Searched:
         """One non-yield, carrying ADR-0231 §13's disposition and ADR-0242 §7's member.
 
@@ -2292,8 +2319,12 @@ class SearchServicer:
                 (ADR-0242 §7, ADR-0244 §12): the site wrote the park or its ``park``
                 answered ``False``, and that is the whole of the further input.
 
+            decision: The recorded ``CONFIRM`` the park holds the question of, where
+                this branch wrote one. Carried rather than re-read, so that assembling
+                the question cannot raise inside a turn ADR-0244 §1 says must not fail.
+
         Returns:
-            The empty records, the disposition, the member and the park.
+            The empty records, the disposition, the member, the park and its decision.
         """
         return _Searched(
             (),
@@ -2306,6 +2337,7 @@ class SearchServicer:
                 parked=park is not None,
             ),
             park,
+            decision if park is not None else None,
         )
 
     async def _park(
@@ -3148,7 +3180,12 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
     # searcher raised — because `searched` is assigned on each of them and `carried` is
     # rebuilt only on the success path. It is what the servicing computed and is never
     # recomputed here.
-    return replace(carried, not_serviced=searched.not_serviced, parked_read=searched.parked_read)
+    return replace(
+        carried,
+        not_serviced=searched.not_serviced,
+        parked_read=searched.parked_read,
+        parked_decision=searched.parked_decision,
+    )
 
 
 def _admitted_to_a_supply(placement: Placement) -> bool:
