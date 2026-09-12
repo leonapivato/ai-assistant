@@ -151,9 +151,14 @@
 
   **And §4's assignment is discharged rather than amended.** *"`ABANDONED` and
   `BLOCKED` likewise gain no producer here; which act writes each is A2's and A3's
-  respectively"* — ADR-0250 §12 took A2's half and ADR-0251 §9 takes A3's: one
-  producer, `orchestration` at the site that writes `AttemptState.BLOCKED`, under a
-  two-limb test on which **an exhausted allowance is never a blocker**. §4's status
+  respectively"* — ADR-0250 §12 took A2's half by naming `abandon_goal`, and ADR-0251 §9
+  takes A3's by naming the **act**: `orchestration`, at the site that writes
+  `AttemptState.BLOCKED`, through `PlanStore.set_goal_status`, under a three-limb test on
+  which **an exhausted allowance is never a blocker** and on which what the blocker closed
+  must have been **necessary** to the objective. ADR-0251 names **no reason that passes
+  that test** and therefore supplies no producer, for this ADR's own stated reason at §4 —
+  *"it is named here so that no later lane supplies one by inference"* — and defers the
+  reasons to A6, A8 and A9, each of which holds a prerequisite a plan actually required. §4's status
   semantics, its no-producer-for-`ACHIEVED` rule and its rule that an attempt reaching
   a terminal state does not move the goal's status are relied on unchanged, as are §5's
   monotonicity and its user-act rule, §6's no-backwards phase rule, §8's stale-target
