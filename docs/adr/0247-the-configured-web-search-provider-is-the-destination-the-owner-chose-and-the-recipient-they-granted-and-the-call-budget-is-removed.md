@@ -65,6 +65,13 @@
   resolution invariant, §5's disclosure floor and its monotonicity obligation — satisfied
   rather than relaxed — and §6's deferral of standing grants for other actions bind as
   written.
+- **Partially supersedes** [ADR-0246](0246-reach-does-not-bind-at-all-on-a-search-bound-to-a-destination-the-user-chose-and-the-supply-type-refuses-no-placement.md)
+  — **§11's Arm F′ in its `calls` count alone**, the arm being restated over the three
+  counts that remain once the per-conversation call budget is removed. That scope, and
+  nothing else in that ADR: Arm F′'s each-at-its-true-value requirement, its withheld-at-zero
+  and supplied-narrowed-at-two limbs and its one-identifier-and-no-other rule, §1's rule
+  that `Placement.reach` does not bind at all on a chosen destination's supply, §§2-10,
+  §11's other arms, §12's deferrals and §§13-15 bind as written.
 
 ## Context
 
@@ -221,6 +228,17 @@ as it does before it.
 > re-canonicalised. A request failing either is **not** at the configured provider and
 > every clause this ADR relaxes binds on it exactly as it does today.
 
+> **Normative.** **That predicate is the authority's *extent*, and it is checked where the
+> binding exists — at the ruling — and never where it does not.** It is **not** the rule
+> `orchestration` evaluates to write `closed_loop`, and no clause of this ADR asks it to
+> be: at the servicing site the binding has not been derived yet, and a fact the seam
+> derives cannot be an input to the derivation. **Three sites, each holding what it needs**:
+> `orchestration` writes the carried fact (§4) before the binding, exactly as it writes
+> `planned_with_external_content` and `coverage`; the **policy** takes this predicate over
+> the binding the request carries (§2); and the **trail** takes the pointer check over the
+> decision it is handed (§2). A lane that finds itself comparing a configured value against
+> a binding inside `orchestration` has put the check at the one site that cannot hold it.
+
 > **Normative.** **On such a request the destination is the one the owner chose, and the
 > configuration is the choosing act.** This supersedes **ADR-0238 §1's third clause** —
 > *"The fact is **set by a recorded act of the user and by nothing else**. No configuration
@@ -241,14 +259,23 @@ as it does before it.
 > rule — bind entire, as does ADR-0242 §1's `trust-destinations` act and §4's listing and
 > revocation.
 
-> **Normative.** **The servicing site stops asking the trust store about a request at the
-> configured provider, and asks the configuration instead.** `SearchFooting.trusted`'s read
-> is replaced, at both the sites ADR-0238 §5 fixes — the one that decides what may be
-> composed over (§2) and the one taken at the instant the request is built — by the
-> comparison this section's first clause states. **No `Settings` value reaches below
-> `orchestration`**: the composition root already hands the connection reference and the
-> origin to the one site that holds the `WebSearcher`, which is ADR-0238 §8's *"every
-> judgement about what a bound is stays in `orchestration`"* read one field over.
+> **Normative.** **The servicing site stops asking the trust store, and reads one fact it
+> already holds: whether this deployment has a search registration at all.**
+> `SearchFooting.trusted`'s two `trust_of` reads — the one deciding what may be composed
+> over (ADR-0238 §2) and the one taken at the instant the request is built (ADR-0238 §5) —
+> are both replaced by that fact, which is true where `Settings.web_search_connection` and
+> `Settings.web_search_origin` are set and false where they are not. **`Settings` is a pair
+> the composition root already hands the one site that holds the `WebSearcher`**, so no
+> value reaches below `orchestration`, no store handle is added and no await is introduced.
+
+> **Normative.** **That the registration's binding *is* the configured one is the egress
+> seam's guarantee and not an assumption.** `EgressBindingSeam` derives a `WEB_SEARCH`
+> binding from the registration `build_web_search_integration` built out of those same two
+> values, so its `account.reference` and canonical destination set are the configured ones
+> by construction, and the transport pins every call to the registration's origin **as
+> text, before parsing** (ADR-0154's condition 5, ADR-0231 §5, §8). **This ADR relies on
+> that derivation and does not restate it**; what §2 adds is the ruling-side check that
+> holds even if a later lane registers something else against a search account.
 
 > **Normative.** **The configured provider is also the granted recipient, and no
 > `RecipientGrant` is established, read, extended or implied.** This supersedes **ADR-0193
@@ -301,12 +328,31 @@ discovering it is owed.
 > **Normative.** **Route (c) is reachable exactly where route (b) is reachable, and on the
 > same predicate.** `permissions/policy.py`'s `_only_the_disclosure_floor` is unchanged in
 > all five of its conditions — a source is no longer required for route (c), which is the
-> one condition below — and where it holds **and the binding carries `closed_loop`**, the
-> ruling is an `ALLOW` on route (c) **without consulting the recipient-grant seam at all**.
-> Every other ground survives exactly as ADR-0193 §3 requires of a grant: an `UNKNOWN` cost
-> still draws `CONFIRM`, a `risk_level` or `reversibility` at the policy's own threshold
-> still draws `CONFIRM`, a threshold `DENY` still stands, and each reaches no route at all
-> because `fired == [_DISCLOSURE_FLOOR]` is false for it.
+> one condition below — and where it holds, **the binding carries `closed_loop`, and §1's
+> predicate holds of that binding**, the ruling is an `ALLOW` on route (c) **without
+> consulting the recipient-grant seam at all**. Every other ground survives exactly as
+> ADR-0193 §3 requires of a grant: an `UNKNOWN` cost still draws `CONFIRM`, a `risk_level`
+> or `reversibility` at the policy's own threshold still draws `CONFIRM`, a threshold
+> `DENY` still stands, and each reaches no route at all because `fired ==
+> [_DISCLOSURE_FLOOR]` is false for it.
+
+> **Normative.** **§1's predicate is taken here, and the policy is constructed with the two
+> configured values to take it.** `ThresholdActionPolicy` gains one constructor argument —
+> the deployment's configured search destination, being the connection reference and the
+> canonical destination set — beside the `RecipientGrants` it already takes, and route (c)
+> requires the request's binding to equal both. **This is not a store handle, a trail read,
+> a grant seam or a conversation identity**, so ADR-0238 §5's clause forbidding those is
+> untouched and its trust boundary is unmoved: the policy still re-derives none of the
+> carried facts and reads what `orchestration` wrote. **A policy constructed without it
+> reaches no route-(c) `ALLOW`**, which is the fail-closed direction and is the same shape
+> ADR-0021 §3 gives a policy with no authorisation source.
+
+> **Normative.** **Route (c) is taken before the grant seam is consulted, so no binding
+> carrying `closed_loop` ever cites a grant again.** Where both routes would be reachable
+> for one request, (c) answers it, `_covering` is called **zero** times, and the recorded
+> `authorised_by` is the connection reference. That ordering is what makes §2's next clause
+> a total discriminator on every row written after this decision, rather than one that is
+> true of most of them.
 
 > **Normative.** **A policy constructed with no `RecipientGrants` reaches route (c).** That
 > is the one way route (c) differs from route (b)'s reachability, and it is the decision
@@ -342,6 +388,20 @@ discovering it is owed.
 > from the decision alone, with no store read, no `Settings` read and no clock — which is
 > `_check_authorisation`'s own reason stated one route over: *"Without this the pointer is
 > a string a policy could invent."*
+
+> **Normative.** **The narrowed invariant binds at `record` and never on a stored row, and
+> a decision ADR-0238 wrote keeps its recorded meaning.** ADR-0238 permits a route-(b)
+> `ALLOW` on a closed-loop request covered by a grant, and the tree holds one — a decision
+> whose `closed_loop` is `True` and whose `authorised_by` is a **grant id**. Such a row was
+> validated by ADR-0193 §6's eight checks when it was written and **is not revalidated
+> afterwards**: `AuditTrail.record`'s invariant is a write-path check, and no lane applies
+> route (c)'s pointer check retroactively, rewrites such a row, re-derives its
+> `authorised_by` or reads it as a configuration authority. **What an auditor reads is the
+> row as written**, and the two shapes are told apart by exactly the fact that discriminates
+> them: a `closed_loop` row whose `authorised_by` names a grant the store holds is
+> ADR-0238's, and one whose `authorised_by` is its own binding's `account.reference` is this
+> ADR's. **No row of the first shape is written after this decision** (the ordering clause
+> above), so the ambiguity is bounded to history and is stated rather than designed away.
 
 > **Normative.** **`OriginUnrecordedBinding` and `CoverageUnrecordedBinding` stay refused
 > by name.** ADR-0184 §7's and ADR-0233 §14's ended-epoch refusals are untouched, and a
@@ -419,15 +479,24 @@ implied.
 
 ### 4. What `closed_loop` becomes: two conditions, and the third and fourth retire
 
-> **Normative.** **`EgressBinding.closed_loop` is `True` exactly where the request's kind
-> is `WEB_SEARCH` and the request is at the configured provider (§1), and `False`
-> otherwise.** This supersedes **ADR-0238 §5's four-condition definition**: the second
-> condition is replaced by §1's comparison, the **third** — every recorded external span
-> the conversation has carried was minted by a `WEB_SEARCH` servicing at a chosen
-> destination — is **retired**, and the **fourth** — the request holds an admission
+> **Normative.** **`CarriedProvenance.closed_loop`, and so `EgressBinding.closed_loop`, is
+> written `True` exactly where the request's kind is `WEB_SEARCH` and this deployment holds
+> a search registration — which `orchestration` knows because `WebSearcher.request`
+> answered a proposal rather than `None` (ADR-0231 §17) — and `False` otherwise.** This
+> supersedes **ADR-0238 §5's four-condition definition**: the second condition, a
+> `trust_of` read at build time, is replaced by that fact, the **third** — every recorded
+> external span the conversation has carried was minted by a `WEB_SEARCH` servicing at a
+> chosen destination — is **retired**, and the **fourth** — the request holds an admission
 > `admit_search` granted — is retired with the budget §5 removes. The field itself, its
 > type, its `False` default, its carriage on `CarriedProvenance` and its comparison inside
 > `PermissionDecision.authorises` are **unchanged**.
+
+> **Normative.** **What that fact asserts is *"this is the deployment's own search"*, and
+> what makes it an authority is §1's predicate taken at the ruling.** The carried fact is
+> computed where every other carried fact is computed and before the binding exists; the
+> account and the origin are compared where they exist. **Neither site is offered the
+> other's job**, and a reader who takes §4's fact alone as the whole authority has dropped
+> §2's second clause.
 
 > **Normative.** **`all_external_user_chosen` retires with the third condition, and neither
 > outlives the other.** The flag's only reader was §5's recorded half; the current-turn
@@ -599,6 +668,19 @@ trigger.
 > no-identifier rule and its refusal to write the destination's trust to the event bind
 > entire.
 
+> **Normative.** **ADR-0246 §11's Arm F′ is superseded in its `calls` limb, and is restated
+> over three counts.** That arm requires the event to record *"the supplied count, the
+> withheld count at **zero**, this turn's `calls` and the supplied-narrowed count at
+> **two**"*, and closes with *"restated here so the arm cannot be satisfied by dropping a
+> field §7 keeps"* — a sentence written against a lane dropping a field for convenience,
+> which is a different act from an ADR removing the quantity. **The arm binds entire on its
+> other three counts, on its each-at-its-true-value requirement and on its
+> one-identifier-and-no-other rule**, and a lane owes it in that form: a turn carrying an
+> admitted `DERIVED` narrowing and an admitted `OWNER_ACT` one records the supplied count,
+> the withheld count at zero and the supplied-narrowed count at two, carrying the ambient
+> correlation identifier and no other. **Every other arm of ADR-0246 §11 binds entire**,
+> and §1's rule that `Placement.reach` does not bind at all is untouched.
+
 > **Normative.** **Nothing else is removed.** `SearchSupply`, `DestinationTrust`,
 > `DestinationTrustRecord`, `DestinationTrustStore`, `EgressBinding.closed_loop`,
 > `CarriedProvenance.closed_loop`, `ParkedRead`, `ParkedReads`, `Confirmation.read`,
@@ -638,13 +720,23 @@ trigger.
 > is `OPERATION_CHANGED`: **a park nobody could ever answer.** With the transcription, the
 > two compare equal and the read runs.
 
-> **Normative.** **A park written before this decision answers exactly as it does today,
-> and no park is migrated, re-derived or repaired.** Every binding recorded before the
-> implementing lane lands carries `closed_loop` `False` — ADR-0238 §5's own default, and
-> true of every such request, since a closed-loop request under §5's four conditions ruled
-> `ALLOW` and never parked. So `was.closed_loop` is `False` for every one of them, which is
-> the literal the old code passed. **The change is a no-op on every stored park** and a
-> repair on every park written after it.
+> **Normative.** **No park is migrated, re-derived, rewritten or repaired, and what the
+> transcription does to an existing one depends on the value that park already stores.**
+> **A park whose recorded binding carries `closed_loop` `False` answers exactly as it does
+> today**, `False` being the literal the old code passed, so the transcription changes no
+> byte of its outcome — and that is every park a deployment with no recorded trust act can
+> hold, which is every production deployment (§Context). **A park whose recorded binding
+> carries `True` becomes answerable**, where before it was refused at every answer.
+
+> **Normative.** **Such a park is reachable under ADR-0238 as ratified, and an earlier
+> revision of this section wrongly said it was not.** A deployment that recorded a trust
+> act, on a clean conversation with allowance left, binds `closed_loop` `True`; the
+> unknown-cost floor (ADR-0016 §4, ADR-0236) or an operator threshold then draws `CONFIRM`
+> on a ground route (b) never discharged; and ADR-0244 parks it. **That park is #2232 as it
+> stands in the tree today**, and making it answerable is the repair rather than a side
+> effect of it. **No stored binding is touched**: `rebind` reads the `True` the trail
+> already holds, derives an equal one, and the read runs — which is the same act the
+> approval always authorised and could never reach.
 
 > **Normative.** **No second fact is transcribed and no count is opened.** Four is the
 > count, `rebind` receives nothing else from `approved`, and a lane that finds a fifth owes
@@ -796,10 +888,14 @@ trigger.
 > is read. **A conversation in progress when the implementing lanes land behaves as this ADR
 > rules from its next turn**, with no migration and no carried state.
 
-> **Normative.** **A stored `PermissionDecision` is untouched.** Its `egress_binding` keeps
-> whatever `closed_loop` it carries — `False` for every decision this corpus has ever
-> written — and no lane back-fills, re-derives or repairs it. §7's transcription reads that
-> stored value and does not change it.
+> **Normative.** **A stored `PermissionDecision` is untouched, and some of them carry
+> `closed_loop` `True`.** ADR-0238 permits a route-(b) `ALLOW` on a closed-loop request
+> covered by a grant, and `tests/orchestration/test_engine_search_not_serviced.py` drives
+> one through the production engine, so *"`False` for every decision this corpus has ever
+> written"* would be a false claim and is not made. **No lane back-fills, re-derives,
+> repairs or re-validates any stored row**; §7's transcription reads the stored value and
+> does not change it; and §2's clause on historical rows says how an auditor tells a
+> route-(b) closed-loop row from a route-(c) one.
 
 ### 11. What the implementing lanes owe, cut at ADR-0137 §2's seam
 
@@ -808,13 +904,17 @@ trigger.
 > depends on lane 3.
 
 > **Normative.** **Lane 1 — the authority, in `permissions/` alone.** §2's route (c) in
-> `ThresholdActionPolicy.decide`: the `ALLOW` on a `closed_loop` binding with no grant seam
-> consulted, `authorised_by` set to the binding's `account.reference`, `authorised_subject`
-> unset, and a reason naming the basis and no identifier. In `permissions/audit.py`: the
-> route-(b) scope narrowed by the `closed_loop` conjunct and the route-(c) pointer check
-> added, with both arms in the `AuditTrailContract` suite in the same change. **It lands
-> before lane 3 and changes no live behaviour on its own**, because nothing yet writes
-> `closed_loop` `True` on a production deployment.
+> `ThresholdActionPolicy.decide`: the one new constructor argument carrying the configured
+> search destination, §1's predicate taken over the request's binding, the `ALLOW` with no
+> grant seam consulted, taken **before** `_covering` is reached, `authorised_by` set to the
+> binding's `account.reference`, `authorised_subject` unset, and a reason naming the basis
+> and no identifier. In `permissions/audit.py`: the route-(b) scope narrowed by the
+> `closed_loop` conjunct and the route-(c) pointer check added, with both arms in the
+> `AuditTrailContract` suite in the same change. **`app/composition.py` supplies the new
+> argument**, which is the one file outside `permissions/` this lane touches and is the
+> composition root's own job. **It lands before lane 3 and changes no live behaviour on its
+> own**, because no production deployment has a recorded trust act and so nothing yet
+> writes `closed_loop` `True` there.
 
 > **Normative.** **Lane 2 — #2232, in `tools/` alone.** §7's fourth transcription in
 > `EgressBindingSeam.rebind`, its arm, and the comment beside it replaced rather than left
@@ -822,13 +922,16 @@ trigger.
 > rides alone because it is correct independently of every other lane and closes an open
 > defect on the resumable path.
 
-> **Normative.** **Lane 3 — the configuration read, in `orchestration/` alone.** §1's
-> comparison in place of `SearchFooting.trusted`'s store read at both sites, and §4's
-> two-condition `closed_loop` at `SearchServicer.service`'s binding site. The composition
-> root already holds the two configured values; **the lane adds no `Settings` read below
-> `orchestration` and no store handle anywhere.** The budget mechanism is left standing and
-> untouched here — it still admits, still folds, and still refuses at the bound — so that
-> this lane's diff is the authority fact and nothing else.
+> **Normative.** **Lane 3 — the carried fact, in `orchestration/` alone.** §1's
+> registration fact in place of `SearchFooting.trusted`'s two `trust_of` reads, and §4's
+> `closed_loop` at `SearchServicer.service`'s binding site, written after
+> `WebSearcher.request` has answered a proposal and before `_bound` is called — **the same
+> position the current argument occupies, with no await added between that value and the
+> `EgressBinding`'s construction.** The composition root already holds the two configured
+> values; **the lane adds no `Settings` read below `orchestration`, no store handle, and no
+> comparison against a binding.** The budget mechanism is left standing and untouched here
+> — it still admits, still folds, and still refuses at the bound — so that this lane's diff
+> is the authority fact and nothing else.
 
 > **Normative.** **Lane 4 — the contract removal, and it is the one cross-subsystem change
 > this ADR sanctions.** `core/config.py`, `core/types.py`, `core/protocols.py`,
@@ -908,7 +1011,10 @@ trigger.
 > with `closed_loop` `True` reads that store **zero** times and is refused if and only if
 > its `authorised_by` is not its binding's `account.reference`. **This replaces ADR-0238
 > §15 Arm 5b's premise** and keeps its `OriginUnrecordedBinding` limb: such a decision is
-> refused by name in both cases.
+> refused by name in both cases. **Arm D′ — a stored route-(b) closed-loop row is not
+> re-validated**: a decision ADR-0238 wrote, whose `closed_loop` is `True` and whose
+> `authorised_by` is a grant id, is read back by `recent_decisions` and `export_decisions`
+> unchanged, and no read path applies route (c)'s pointer check to it.
 
 > **Normative.** **Arm E — a park with `closed_loop` `True` is answerable (lane 2).** A
 > `WEB_SEARCH` at the configured provider that draws `CONFIRM` on an independent ground — an
@@ -916,7 +1022,12 @@ trigger.
 > binding equal to the recorded one, and the read **dispatches**. Asserted to fail before
 > the transcription lands. **Arm E′ — a park written under the old binder is unmoved**: a
 > park whose recorded binding carries `closed_loop` `False` answers exactly as it does
-> today, and the transcription changes no byte of its outcome.
+> today, and the transcription changes no byte of its outcome. **Arm E″ — a pre-existing
+> `True` park becomes answerable, and its stored row is not rewritten**: a park recorded
+> **before** lane 2, whose binding carries `closed_loop` `True` and whose decision the
+> unknown-cost floor drew, is refused with `OPERATION_CHANGED` on the old binder and
+> **dispatches** on the new one, with the stored binding byte-identical before and after —
+> which is §7's own case and the one Arm E′ does not reach.
 
 > **Normative.** **Arm F — a configuration change refuses an open park (lanes 2, 3).** With
 > a park open and the deployment's `web_search_origin` then changed, the answer derives an
@@ -938,6 +1049,13 @@ trigger.
 > planner calls and therefore at most two searches. **This replaces ADR-0238 §15 Arms 3, 6
 > and 6b entire**, whose subject is a counter that no longer exists, and **Arm 4 is
 > retired** with the filter ADR-0246 §1 removed.
+
+> **Normative.** **Arm H′ — the audit event carries three counts (lane 4).** On a turn
+> carrying an admitted `DERIVED` narrowing and an admitted `OWNER_ACT` one, the one event
+> under the one key records the supplied count, the withheld count at **zero** and the
+> supplied-narrowed count at **two**, each at its true value, carries **the ambient
+> correlation identifier and no other identifier**, and carries **no `calls` field at
+> all**. This is ADR-0246 §11 Arm F′ in the form §6 leaves it.
 
 > **Normative.** **Arm I — the negative arm, restated over what it now protects (lane 3).**
 > A search result, a fetched file or a memory record whose text asks in any terms for a
@@ -990,11 +1108,11 @@ trigger.
 
 ### 14. Scope, and what this records against earlier ADRs
 
-> **Normative.** This ADR partially supersedes **eight** ratified ADRs and amends none:
+> **Normative.** This ADR partially supersedes **nine** ratified ADRs and amends none:
 > ADR-0238 in nine scopes, ADR-0244 in three, ADR-0242 in two, ADR-0193 in two, ADR-0148 in
-> two, ADR-0181 in one, ADR-0152 in one, and ADR-0021 in one. Each is named on that ADR's
-> `Status` line and in its appended dated note under ADR-0082 §1 and §2. **No other ADR's
-> text moves.**
+> two, ADR-0181 in one, ADR-0152 in one, ADR-0021 in one, and ADR-0246 in one. Each is
+> named on that ADR's `Status` line and in its appended dated note under ADR-0082 §1 and
+> §2. **No other ADR's text moves.**
 
 > **Normative.** **Superseded on ADR-0238, and nothing else beyond what ADR-0241, ADR-0242,
 > ADR-0245 and ADR-0246 already recorded there.** §1's third clause in the limb that reaches
@@ -1057,6 +1175,15 @@ trigger.
 > ADR-0233 already recorded there.** §7's transcription count alone, which becomes four
 > (§7). **Relied on as written**: §7's every other clause, §§1–6 and §§8–16.
 
+> **Normative.** **Superseded on ADR-0246, and nothing else.** §11's Arm F′, in its
+> `calls` count alone, the arm being restated over the three counts that remain (§6). Its
+> each-at-its-true-value requirement, its `withheld`-at-zero and supplied-narrowed-at-two
+> limbs, and its one-identifier-and-no-other rule bind entire. **Relied on as written**:
+> §1's rule that `Placement.reach` does not bind at all on a chosen destination's supply,
+> §§2-10, §11's other arms, §12's deferrals, §§13-15. §1's trust condition is read through
+> ADR-0238 §2's trust clause, whose answer for a `WEB_SEARCH` at the configured provider
+> §1 above decides; **no clause of ADR-0246 is read more widely for that.**
+
 > **Normative.** **Superseded on ADR-0021, and nothing else.** §3's clause that a policy
 > constructed with no authorisation source leaves `authorised_by` unset, in the limb that
 > reaches a request whose binding carries `closed_loop` (§2). **Relied on as written**: §3's
@@ -1076,12 +1203,12 @@ trigger.
 > ADR-0125, ADR-0126, ADR-0137, ADR-0146, ADR-0149, ADR-0150, ADR-0154, ADR-0155, ADR-0158,
 > ADR-0165, ADR-0170, ADR-0178, ADR-0184, ADR-0192, ADR-0194, ADR-0197, ADR-0198, ADR-0199,
 > ADR-0203, ADR-0204, ADR-0205, ADR-0208, ADR-0212, ADR-0217, ADR-0223, ADR-0226, ADR-0228,
-> ADR-0231, ADR-0233, ADR-0235, ADR-0236, ADR-0237, ADR-0239, ADR-0240, ADR-0241, ADR-0243,
-> ADR-0245 or ADR-0246, on ADR-0082 §1's test: every sentence each of them wrote stays true
+> ADR-0231, ADR-0233, ADR-0235, ADR-0236, ADR-0237, ADR-0239, ADR-0240, ADR-0241, ADR-0243 or
+> ADR-0245, on ADR-0082 §1's test: every sentence each of them wrote stays true
 > and none is read more widely. In particular **ADR-0233 §7's absolute clause and §9's four
 > conditions are quoted and unnarrowed** (§3); **ADR-0155 §3's second clause is untouched**;
 > **ADR-0246 §1's rule binds entire** and §1 above decides only what its trust condition
-> answers; **ADR-0154's condition 5 and ADR-0231 §8's grammar are relied on** as the pin
+> answers, its own record above being confined to §11's one count; **ADR-0154's condition 5 and ADR-0231 §8's grammar are relied on** as the pin
 > §4's negative arm rests on; and **ADR-0228 §4 is applied rather than amended**, a rule
 > applied being a rule relied upon.
 
@@ -1165,6 +1292,12 @@ differently, or read one of its clauses more widely than it now holds?
   A reader holding it builds a `rebind` transcribing three facts and refusing every park
   carrying a fourth. **Supersession** of a count, for the third time, with every other
   clause of §7 relied on.
+- **ADR-0246 §11's Arm F′, in its `calls` count** — **yes**, narrowly, and it is the arm
+  most easily missed because it lives in a different ADR's test list. A reader holding it
+  writes a test asserting a field §6 deletes, and the arm's own closing sentence — *"so the
+  arm cannot be satisfied by dropping a field §7 keeps"* — reads as forbidding exactly
+  that. **Supersession** of one count; the sentence was aimed at a lane dropping a field
+  for convenience, and an ADR removing the quantity is the instrument it left open.
 - **ADR-0021 §3's sourceless-policy clause** — **yes**, in one limb. A reader holding it
   builds a policy that cites no authorisation when it was given no grant seam, which would
   make route (c) unreachable on exactly the deployments that need it. **Supersession**;
