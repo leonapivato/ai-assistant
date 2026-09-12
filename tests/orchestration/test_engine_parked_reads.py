@@ -32,7 +32,14 @@ from typing import TYPE_CHECKING, Any, Final
 import pytest
 from test_engine import AT, PATIENT, Harness
 from test_engine_read_envelope import _AskingPlanner, _recorder
-from test_loop_search import _DEADLINE, _binder, _CostedSearcher, _search
+from test_loop_search import (
+    _ACCOUNT,
+    _CONFIGURED_SEARCH,
+    _DEADLINE,
+    _binder,
+    _CostedSearcher,
+    _search,
+)
 
 from ai_assistant.core.errors import (
     AuditError,
@@ -64,7 +71,9 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.reads import SearchServicer, admitted_fourth_group
 from ai_assistant.permissions.policy import ThresholdActionPolicy
 from ai_assistant.testing import (
+    FAKE_WEB_SEARCH,
     FakeAuditTrail,
+    FakeEgressBinder,
     FakeMemoryStore,
     FakeParkedReads,
     FakeQueryComposer,
@@ -110,6 +119,10 @@ class _Wired:
     composer: FakeQueryComposer
     memory: FakeMemoryStore
     clock: _Clock
+    #: The seam the servicing bound through, kept so a case can perform a **provisioning
+    #: act on it** between the park and the answer — which is what ADR-0247 §12's Arms F
+    #: and F' are driven by, and the one thing a re-derived binding is compared against.
+    binder: FakeEgressBinder
 
 
 class _Clock:
@@ -126,12 +139,25 @@ class _Clock:
         self.now += by
 
 
-def _wired(*, composing: ComposingStage | None = None, search_calls: int = 8) -> _Wired:
+def _wired(
+    *,
+    composing: ComposingStage | None = None,
+    search_calls: int = 8,
+    configured: bool = False,
+) -> _Wired:
     """The real pipeline over shared stores, with a parked-read store wired.
 
     Nothing is seeded: no recipient grant, so the production policy rules ``CONFIRM`` on
     the first search — which is the state #2221 records on the owner's own store and the
     one every arm below starts from.
+
+    ``configured`` is ADR-0247's deployment, and it is a **different ground for the same
+    park**: the policy is handed the destination this deployment is configured with, so
+    §3's two retired floors no longer draw the ``CONFIRM``, and what draws it instead is
+    the per-call cost ADR-0236 §4 leaves ``UNKNOWN`` where the operator declared no
+    figure — which is exactly the shape §12's Arm E names. The searcher is then the bare
+    fake and the seam holds its **uncosted** declaration, because a binding seam holding
+    a different declaration refuses the request before any ruling is sought.
     """
     decisions = count(1)
     clock = _Clock()
@@ -141,6 +167,7 @@ def _wired(*, composing: ComposingStage | None = None, search_calls: int = 8) ->
     composer = FakeQueryComposer()
     store = FakeParkedReads()
     memory = FakeMemoryStore(now=clock)
+    binder = _binder(definition=FAKE_WEB_SEARCH) if configured else _binder()
     harness = Harness(
         memory=memory,
         planner=_AskingPlanner(_search()),
@@ -149,9 +176,12 @@ def _wired(*, composing: ComposingStage | None = None, search_calls: int = 8) ->
         search_calls=search_calls,
         search=SearchServicer(
             composer=composer,
-            searcher=_CostedSearcher(searcher),
-            binder=_binder(),
-            policy=ThresholdActionPolicy(grants=grants),
+            searcher=searcher if configured else _CostedSearcher(searcher),
+            binder=binder,
+            policy=ThresholdActionPolicy(
+                grants=grants,
+                configured_search=_CONFIGURED_SEARCH if configured else None,
+            ),
             trail=trail,
             now=clock,
             # **A prefix of its own**, because the harness mints ``d-N`` for the answers
@@ -176,6 +206,7 @@ def _wired(*, composing: ComposingStage | None = None, search_calls: int = 8) ->
         composer=composer,
         memory=memory,
         clock=clock,
+        binder=binder,
     )
 
 
@@ -1915,3 +1946,112 @@ async def test_a_resumed_turn_folds_its_supply_onto_the_conversations_footing() 
         "the resumed turn's supply carried the read's own records, and §8's fold is "
         "what keeps a later search from composing over them under a closed loop"
     )
+
+
+# --- ADR-0247 §12's Arms F and F': what moves a park's binding and what does not
+
+
+async def test_a_park_at_the_configured_provider_answers_and_dispatches() -> None:
+    """ADR-0247 §12's **Arm E**, over the ground that still parks a configured search.
+
+    "A ``WEB_SEARCH`` at the configured provider that draws ``CONFIRM`` on an independent
+    ground — an ``UNKNOWN`` per-call cost — parks; the answer rebuilds the request,
+    ``rebind`` derives a binding equal to the recorded one, and the read **dispatches**."
+    Lane 2 landed the transcription this rests on, and what is asserted here is the
+    engine's end of it: the park carries ``closed_loop`` ``True`` — ADR-0247 §4 writes it
+    from the kind and the configuration, so *every* search of such a deployment does —
+    and the answer runs it.
+
+    It is the premise Arms F and F' below vary, so it is asserted first: without it a
+    refusal there could be the park having been unanswerable all along.
+    """
+    wired = _wired(configured=True)
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    park = await _parked(wired)
+    held = await wired.trail.get(park.decision_id)
+    assert held is not None
+    assert isinstance(held.egress_binding, EgressBinding)
+    assert held.egress_binding.closed_loop is True, "ADR-0247 §4's two conditions both hold"
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert outcome.read_answer is ReadAnswerOutcome.DISPATCHED
+    assert len(wired.searcher.searched) == 1, "the read ran once"
+
+
+async def test_a_changed_search_origin_refuses_an_open_park() -> None:
+    """ADR-0247 §12's **Arm F**, engine half (lane 2 holds the seam's).
+
+    "With a park open and the deployment's ``web_search_origin`` then changed, the answer
+    derives an unequal binding, dispatches nothing, leaves the park ``OPEN`` and returns
+    ``OPERATION_CHANGED``."
+
+    **The origin reaches the binding as the registration's ``transport_endpoint``**, which
+    ``EgressBindingSeam`` stamps onto every binding it derives (ADR-0148 §6), so changing
+    what the deployment configured is a provisioning act on the seam and not an edit of
+    the park: the park's own parameters are replayed byte for byte, and the binding
+    derived over them no longer equals the recorded one. That is the whole of the
+    refusal, and it is why the answer needs no ``Settings`` read of its own.
+
+    **Clause 4 precedes the gate**, so the park is left ``OPEN`` and nothing is ruled:
+    "a park spent on an answer the subject check would have refused is an answer the user
+    has to give again for no reason" (ADR-0244 §6).
+    """
+    wired = _wired(configured=True)
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    park = await _parked(wired)
+    wired.binder.register_egress(
+        FAKE_WEB_SEARCH,
+        reference=_ACCOUNT.reference,
+        identity=_ACCOUNT.identity,
+        transport_endpoint="https://elsewhere.example",
+    )
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert outcome.read_answer is ReadAnswerOutcome.OPERATION_CHANGED
+    assert wired.searcher.searched == [], "nothing was dispatched"
+    assert [row for row in await wired.trail.recent() if row.resolves] == [], "and nothing ruled"
+    still_open = await wired.parks.get(park.id)
+    assert still_open is not None
+    assert still_open.disposition is ParkedReadDisposition.OPEN, "the park is not spent"
+
+
+async def test_a_reprovisioned_account_leaves_an_open_park_answerable() -> None:
+    """ADR-0247 §12's **Arm F'**, engine half.
+
+    "With the connection reference and origin unchanged and the stored secret replaced,
+    the same park answers and the read dispatches." A rotation is a provisioning act on
+    the **record** the reference names, and ADR-0148 §6 keeps the two facts a binding
+    carries — the account identity and the transport endpoint — apart from the credential
+    slot and the revision it moves. So the re-derived binding equals the recorded one and
+    the ``closed_loop`` ADR-0247 §7 transcribes rides through with it.
+
+    **The rotation's own moving parts are asserted at the seam, not here**
+    (``tests/tools/test_egress_binder.py``): the canonical fake's record holds an identity
+    and a state and nothing else, so what this arm can state is that a provisioning act
+    over the same reference leaves the park answerable — the half the engine owns — while
+    Arm F one case above shows the refusal is reachable at all, so this is not passing on
+    a check that never runs.
+    """
+    wired = _wired(configured=True)
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    park = await _parked(wired)
+    wired.binder.set_connection(_ACCOUNT.reference, identity=_ACCOUNT.identity)
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert outcome.read_answer is ReadAnswerOutcome.DISPATCHED
+    assert len(wired.searcher.searched) == 1, "the read ran"
+    settled = await wired.parks.get(park.id)
+    assert settled is not None
+    assert settled.disposition is ParkedReadDisposition.APPROVED

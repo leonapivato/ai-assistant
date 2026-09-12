@@ -19,18 +19,26 @@ words.
 producer" for ``DEADLINE_EXPIRED`` or ``SEARCH_FAILED`` — those are ADR-0241's lane's to
 emit — so the arms over those two construct the dispositions directly, which is what
 that section says in terms.
+
+**``TRUST_MISSING`` now joins them, and for a reason of its own** (ADR-0247 §1, §6,
+#2252). The member and its row in ADR-0242 §8's table stay ratified and are still
+asserted over ``not_serviced`` at the top of this module; what has gone is its producer,
+because the servicing site no longer takes a ``trust_of`` answer to pass. So the §15
+journeys that revoked trust, established it later, or told a ``TRUST_MISSING`` follow-up
+from an ``UNAVAILABLE`` one are **removed rather than rewritten**: each was an arm over a
+read that is not taken. ``AUTHORISATION_AWAITED`` keeps a producer — ADR-0236 §4's
+unknown per-call cost — and its arms are unmoved.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Final, cast, final
+from typing import TYPE_CHECKING, Any, Final, final
 
 import pytest
 import structlog
-from test_closed_loop import _CHOSEN, _chosen_footing, _external_belief
+from test_closed_loop import _chosen_footing, _external_belief
 from test_loop_search import (
     _ASK,
-    _NOW,
     _RESULT,
     _REVISING,
     ActionPlanFor,
@@ -44,7 +52,6 @@ from test_loop_search import (
     _search,
     _serviced,
     _servicer,
-    _stamped_episode,
 )
 
 from ai_assistant.core.types import (
@@ -63,7 +70,6 @@ from ai_assistant.orchestration.reads import SearchDisposition, earliest, not_se
 from ai_assistant.testing import (
     DEFAULT_COMPOSED_QUERY,
     FAKE_WEB_SEARCH,
-    FakeDestinationTrustStore,
     FakeMemoryStore,
     FakeModelProvider,
     FakePlanner,
@@ -462,12 +468,22 @@ async def _followed_up() -> FakeMemoryStore:
     return store
 
 
-async def test_a_follow_up_from_an_unchosen_destination_carries_trust_missing() -> None:
-    """§15 Arm 2(b): grant, **no** trust record, a follow-up search.
+async def test_a_follow_up_at_the_configured_provider_is_serviced_and_carries_nothing() -> None:
+    """What ADR-0247 §3 leaves of §15 Arm 2's (b) and (c): neither row is reachable.
 
-    The binding carries ``planned_with_external_content`` ``True``, ``trust_of`` answers
-    ``UNCHOSEN``, the disposition is ``RULING_CONFIRM``, and the carried member is
-    ``TRUST_MISSING``.
+    Both were rows of one ``RULING_CONFIRM`` the lineage floor drew over a follow-up
+    search — a turn with a recorded external span in view — and ADR-0247 §3 retires that
+    floor for a request at the configured provider. So the follow-up is **serviced**, the
+    disposition is ``None`` and the turn carries no member at all: there is nothing to
+    explain, because the search happened.
+
+    **The two members are not deleted and this case is not their replacement.** ADR-0247
+    §6 rules that ``TRUST_MISSING`` and ``AUTHORISATION_AWAITED`` stay and that "no lane
+    removes them"; what has gone is ``TRUST_MISSING``'s producer on a configured
+    deployment (#2252), while ``AUTHORISATION_AWAITED``'s survives on the unknown-cost
+    floor two cases above. The mapping itself — including the ``UNCHOSEN`` row that
+    yields ``TRUST_MISSING`` — is still asserted over ``not_serviced`` directly at the
+    top of this module.
     """
     with structlog.testing.capture_logs() as captured:
         responded = await _loop(
@@ -477,65 +493,11 @@ async def test_a_follow_up_from_an_unchosen_destination_carries_trust_missing() 
             footing=await _admitted(),
         ).respond(_ASK, narrow=_bounded())
 
-    assert _serviced(captured)["disposition"] == SearchDisposition.RULING_CONFIRM.value
-    assert responded.search_not_serviced is SearchNotServiced.TRUST_MISSING
-
-
-async def test_a_follow_up_at_a_chosen_destination_carries_unavailable() -> None:
-    """§15 Arm 2(c): grant **and** trust, refused for another reason.
-
-    "(b) and (c) differ in the ``trust_of`` answer alone", which is what makes that
-    discrimination the subject of the test rather than a coincidence. The member is
-    ``UNAVAILABLE``, whose statement **names no act**: the destination is already chosen
-    so the trust act is not the answer, and ADR-0238 §5's recorded half is monotone so
-    nothing established now repairs it. **Naming an act that cannot help is worse than
-    naming none.**
-    """
-    with structlog.testing.capture_logs() as captured:
-        responded = await _loop(
-            planner=FakePlanner(now=_clock, read_request=_search()),
-            memory=await _followed_up(),
-            search=_servicer(granted=True),
-            footing=await _chosen_footing(),
-        ).respond(_ASK, narrow=_bounded())
-
-    assert _serviced(captured)["disposition"] == SearchDisposition.RULING_CONFIRM.value
-    assert responded.search_not_serviced is SearchNotServiced.UNAVAILABLE
-
-
-async def test_the_three_fixtures_differ_only_where_the_adr_says_they_do() -> None:
-    """§15 Arm 2's own closing clause, asserted rather than left to reading.
-
-    "(b) and (c) differ in the ``trust_of`` answer alone … (a) differs from both in the
-    binding's footing, which §8 makes the discriminator it is."
-    """
-    clean = await _loop(
-        planner=FakePlanner(now=_clock, read_request=_search()),
-        search=_servicer(granted=False),
-        footing=await _admitted(),
-    ).respond(_ASK, narrow=_bounded())
-    unchosen = await _loop(
-        planner=FakePlanner(now=_clock, read_request=_search()),
-        memory=await _followed_up(),
-        search=_servicer(granted=True),
-        footing=await _admitted(conversation_id="c-2"),
-    ).respond(_ASK, narrow=_bounded())
-    chosen = await _loop(
-        planner=FakePlanner(now=_clock, read_request=_search()),
-        memory=await _followed_up(),
-        search=_servicer(granted=True),
-        footing=await _chosen_footing(),
-    ).respond(_ASK, narrow=_bounded())
-
-    assert (
-        clean.search_not_serviced,
-        unchosen.search_not_serviced,
-        chosen.search_not_serviced,
-    ) == (
-        SearchNotServiced.AUTHORISATION_AWAITED,
-        SearchNotServiced.TRUST_MISSING,
-        SearchNotServiced.UNAVAILABLE,
+    assert _serviced(captured)["disposition"] is None, (
+        "the lineage floor no longer fires at the configured provider (ADR-0247 §3), so "
+        "the follow-up reached the provider"
     )
+    assert responded.search_not_serviced is None
 
 
 # --------------------------------------------------------------------------- #
@@ -709,49 +671,6 @@ async def test_a_second_servicing_that_succeeds_does_not_clear_the_first_members
 
 
 # --------------------------------------------------------------------------- #
-# §15 Arm 3 — revoked authority                                                 #
-# --------------------------------------------------------------------------- #
-
-
-async def test_revoking_trust_makes_the_next_search_carry_trust_missing() -> None:
-    """§15 Arm 3(b): the revocation takes effect for the next request.
-
-    And **an ``ALLOW`` recorded before the revocation is unchanged** — §4's
-    prospectivity clause asserted rather than assumed: "a search already ruled ``ALLOW``
-    stays ruled".
-    """
-    store = FakeDestinationTrustStore([_CHOSEN])
-    searcher = _RefusingOnceThen(_CostedSearcher(FakeWebSearcher(results=(_RESULT,))), (None,))
-    trail = _servicer_trail()
-    servicer = _servicer(searcher=searcher, granted=True, trail=trail)
-    turns = _loop(
-        planner=FakePlanner(now=_clock, read_request=_search()),
-        search=servicer,
-        footing=await _chosen_footing(trust=store),
-    )
-
-    first = await turns.respond(_ASK, narrow=_bounded())
-    before = {row.id: row.ruling.outcome for row in await trail.recent()}
-    await store.revoke(_CHOSEN.id, _NOW)
-    second = await turns.respond(_ASK, narrow=_bounded(), history=(_stamped_episode(),))
-
-    assert first.search_not_serviced is None
-    assert second.search_not_serviced is SearchNotServiced.TRUST_MISSING
-    after = {row.id: row.ruling.outcome for row in await trail.recent()}
-    assert before, "the first turn's search was ruled on, which is what the arm compares"
-    assert {row: after[row] for row in before} == before, (
-        "revocation is prospective: a ruling recorded before it is not rewritten (§4)"
-    )
-
-
-def _servicer_trail() -> Any:
-    """The trail ``_servicer`` wires, held so a case can read its rows back."""
-    from test_closed_loop import _trail  # noqa: PLC0415 — one helper, borrowed by name
-
-    return _trail()
-
-
-# --------------------------------------------------------------------------- #
 # §15 Arm 4 — exhausted allowance, and spend kept distinct                      #
 # --------------------------------------------------------------------------- #
 
@@ -866,124 +785,3 @@ def test_the_field_does_not_set_reply_degraded() -> None:
 
     assert outcome.reply_degraded is False
     assert outcome.reply is None
-
-
-# --------------------------------------------------------------------------- #
-# §9: a revocation landing between ADR-0238 §5's two reads                      #
-# --------------------------------------------------------------------------- #
-
-
-@final
-class _RevokedBetweenTheReads:
-    """A store the user revokes from **between** ADR-0238 §5's two ``trust_of`` reads.
-
-    That window is real and ADR-0238 §16 defers closing it: §2's read decides what may
-    be composed over and §5's decides the ruling, and a revocation landing between them
-    leaves a supply that *was* composed over records and a build-time read that answers
-    ``UNCHOSEN``. §9 is explicit that ``TRUST_MISSING``'s statement "says nothing about
-    what the query was composed from", because a statement asserting the composition's
-    inputs would be false in exactly this case.
-
-    The revocation is performed **by the store itself**, on the first read, because a
-    case cannot otherwise land a user act inside a single ``await`` of the servicing.
-    It **wraps** the canonical fake rather than deriving from it — that class is
-    ``@final``, deliberately, so a consumer's double is a delegate and never a subclass
-    that could quietly diverge from the conformance suite's subject.
-    """
-
-    def __init__(self, record: Any) -> None:
-        self.inner = FakeDestinationTrustStore([record])
-        self._record = record
-        self.reads = 0
-
-    def __getattr__(self, name: str) -> Any:
-        """Delegate every member this class does not name."""
-        return getattr(self.inner, name)
-
-    async def trust_of(self, destinations: Any) -> Any:
-        """Answer, and revoke the record on the way out of the first read."""
-        answered = await self.inner.trust_of(destinations)
-        self.reads += 1
-        if self.reads == 1:
-            await self.inner.revoke(self._record.id, _NOW)
-        return answered
-
-
-async def test_a_revocation_between_the_two_reads_carries_trust_missing() -> None:
-    """§15: "an arm in which trust is revoked between ADR-0238 §5's two reads".
-
-    The supply was built over records — §2's read answered ``USER_CHOSEN`` — and the
-    build-time read answers ``UNCHOSEN``, so the member is ``TRUST_MISSING``. That the
-    statement rendered for it asserts nothing about what the query was composed from is
-    asserted over the rendered bytes in
-    ``tests/interfaces/test_cli_destination_trust.py``; what is asserted here is the
-    member, which is the half this site decides.
-    """
-    store = _RevokedBetweenTheReads(_CHOSEN)
-
-    with structlog.testing.capture_logs() as captured:
-        responded = await _loop(
-            planner=FakePlanner(now=_clock, read_request=_search()),
-            search=_servicer(granted=True),
-            footing=await _chosen_footing(trust=cast("Any", store)),
-        ).respond(_ASK, narrow=_bounded(), history=(_stamped_episode(),))
-
-    assert store.reads >= 2, "§5 fixes two reads and this arm is about the window between"
-    assert _serviced(captured)["disposition"] == SearchDisposition.RULING_CONFIRM.value
-    assert responded.search_not_serviced is SearchNotServiced.TRUST_MISSING
-
-
-# --------------------------------------------------------------------------- #
-# §15 Arm 2c — the trust act does not repair the conversation it was prompted by #
-# --------------------------------------------------------------------------- #
-
-
-async def test_trust_established_later_does_not_repair_this_conversation() -> None:
-    """§15 Arm 2c's end, and §9's monotonicity clause.
-
-    The recovery journey walked to where it matters: a conversation whose granted search
-    **returned external records from an ``UNCHOSEN`` destination**, a follow-up refused
-    as ``TRUST_MISSING``, the trust act performed — and then **the same follow-up
-    retried in the same conversation**, still refused and now carrying ``UNAVAILABLE``.
-
-    ADR-0238 §5's recorded half is monotone over a conversation: once a record has
-    arrived from an ``UNCHOSEN`` destination that conversation "fails the recorded half
-    for every later turn", and a trust record established afterwards does not lift it.
-    That is why §9 bars ``TRUST_MISSING``'s statement from promising the act repairs
-    *this* conversation — a statement implying otherwise "would send the user to perform
-    an act and then watch the same conversation refuse the same search". **And the same
-    follow-up in a fresh conversation is serviced**, which is the half that makes the
-    statement's real promise true.
-    """
-    store = FakeDestinationTrustStore()
-    results = _CostedSearcher(FakeWebSearcher(results=(_RESULT,)))
-    turns = _loop(
-        planner=FakePlanner(now=_clock, read_request=_search()),
-        search=_servicer(searcher=results, granted=True),
-        footing=await _admitted(trust=store),
-    )
-
-    granted = await turns.respond(_ASK, narrow=_bounded())
-    refused = await turns.respond(_ASK, narrow=_bounded(), history=(_stamped_episode(),))
-    await store.record(_CHOSEN)
-    retried = await turns.respond(_ASK, narrow=_bounded(), history=(_stamped_episode(),))
-    fresh = await _loop(
-        planner=FakePlanner(now=_clock, read_request=_search()),
-        search=_servicer(
-            searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))), granted=True
-        ),
-        footing=await _admitted(trust=store, conversation_id="c-fresh"),
-    ).respond(_ASK, narrow=_bounded())
-
-    assert granted.search_not_serviced is None, (
-        "the conversation's first search was serviced, which is what puts a record from "
-        "an UNCHOSEN destination into it (ADR-0238 §5)"
-    )
-    assert refused.search_not_serviced is SearchNotServiced.TRUST_MISSING
-    assert retried.search_not_serviced is SearchNotServiced.UNAVAILABLE, (
-        "the act was performed and this conversation is still closed — which is why the "
-        "statement for TRUST_MISSING may not promise it repairs this one (§9)"
-    )
-    assert fresh.search_not_serviced is None, (
-        "and a later conversation is what the act does change, which is what the statement does say"
-    )

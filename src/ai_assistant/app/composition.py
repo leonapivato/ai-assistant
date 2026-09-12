@@ -1601,14 +1601,28 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # per-conversation exclusion makes the increment atomic, and ADR-0074 §9
             # records why a second holder would serialise nothing.
             #
-            # **This is the one place the trust store is wired into** (§14). It is
-            # handed to this factory and to nothing else; no other subsystem holds the
-            # reference, and no lane adds a second caller.
+            # **The trust store is no longer wired in here** (ADR-0247 §1). The
+            # servicing site's two `trust_of` reads are replaced by the registration
+            # fact below, so the footing holds no trust handle at all; the store, the
+            # records it holds and `trust_of`'s answers are untouched, and the
+            # `trust-destinations` act below is still the one surface that writes it.
             footing=lambda conversation_id: SearchFooting(
                 conversation_id=conversation_id,
                 conversations=conversations,
-                trust=destination_trust,
-                destinations=search_destinations,
+                # **Whether this deployment holds a search registration at all**
+                # (ADR-0247 §1), which is the whole of what the servicing site now
+                # consults about the destination: the configured provider *is* the
+                # destination the owner chose, and the configuration is the choosing
+                # act. **The same condition `search` above is built under**, written
+                # from the same two `Settings` fields rather than from the searcher —
+                # `Settings` refuses one of the pair without the other, and ADR-0231
+                # §17 answers it a second way at the seam by returning `None`. No
+                # `Settings` object and no value below this root reaches the footing,
+                # which is §11's lane-3 restraint in one argument.
+                registered=(
+                    settings.web_search_connection is not None
+                    and settings.web_search_origin is not None
+                ),
                 # **The bound is passed in rather than read by the store** (ADR-0238
                 # §8): "every judgement about what a bound is stays in
                 # `orchestration`", so the three members read no `Settings` field, hold

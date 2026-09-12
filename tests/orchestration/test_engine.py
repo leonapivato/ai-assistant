@@ -817,15 +817,21 @@ class Harness:
             registry=self.invoker,
             fetcher=fetcher,  # type: ignore[arg-type]  # the harness's own heterogeneous knobs
             search=search,
-            # ADR-0238 §14: the trust store wired into the one servicing path and into
-            # nothing else, over the **same** `ConversationStore` the capture stage
-            # holds — the composition root's own discipline, because §8 rests the
+            # ADR-0247 §1: the registration fact wired into the one servicing path,
+            # in place of the trust store ADR-0238 §14 put there — over the **same**
+            # `ConversationStore` the capture stage holds, because §8 rests the
             # increment's atomicity on that one object's per-conversation exclusion.
+            #
+            # **Derived from the searcher and not offered as a knob**, which is the
+            # composition root's own arithmetic: `app/composition.py` builds the
+            # servicer and reads `registered` from the same two `Settings` fields, so a
+            # harness wiring a servicer *is* a deployment holding a registration and
+            # one wiring none is not. A knob would let a case arrange a deployment that
+            # cannot exist.
             footing=lambda conversation_id: SearchFooting(
                 conversation_id=conversation_id,
                 conversations=self.conversation_store,
-                trust=self.destination_trust,
-                destinations=SEARCH_DESTINATIONS,
+                registered=search is not None,
                 max_calls=search_calls,
             ),
         )

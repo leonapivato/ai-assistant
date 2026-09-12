@@ -56,7 +56,6 @@ from test_engine import (
     CAPABILITY,
     EGRESS_SCHEMA,
     PATIENT,
-    SEARCH_DESTINATIONS,
     Harness,
     OneStepPlanner,
     bound_binder,
@@ -82,8 +81,6 @@ from ai_assistant.core.types import (
     CostBasis,
     CurrentContext,
     DestinationProtocol,
-    DestinationTrust,
-    DestinationTrustRecord,
     Disposition,
     EgressBinding,
     EpisodicMemory,
@@ -134,7 +131,6 @@ from ai_assistant.testing import (
     FakeContextProvider,
     FakeConversationStore,
     FakeDeferralStore,
-    FakeDestinationTrustStore,
     FakeEgressBinder,
     FakeFeedbackProcessor,
     FakeMemoryPolicy,
@@ -471,25 +467,20 @@ def _servicer(  # noqa: PLR0913 — one knob per contract ADR-0231 §6 names plu
 def _footing(
     *,
     conversations: FakeConversationStore | None = None,
-    trust: FakeDestinationTrustStore | None = None,
     conversation_id: str = "c-1",
     max_calls: int = 8,
-    trusted: bool = False,
+    registered: bool = True,
 ) -> SearchFooting:
-    """This conversation's ADR-0238 footing, chosen or not.
+    """This conversation's ADR-0238 footing, on a deployment that configured a search.
 
-    ``trusted`` is the one knob that decides §5's second condition: with it the store
-    holds a live record over the searcher's own origin and ``trust_of`` answers
-    ``USER_CHOSEN``; without it the store is empty, which is `origin/main`'s state and
-    ADR-0238's own exit note for the tree its lanes merge into.
+    ``registered`` is ADR-0247 §1's fact in place of ADR-0238 §1's ``trust_of`` reads:
+    whether this deployment holds a search registration at all. It **defaults true**
+    because every case in this module wires a :class:`SearchServicer`, and a deployment
+    that holds one holds the registration it was built from — the composition root reads
+    both from the same pair of ``Settings`` fields, so the two cannot disagree. A footing
+    for a loop wired ``search=None`` may leave it either way: the value is read inside
+    ``SearchServicer.service`` and nowhere else.
     """
-    chosen = DestinationTrustRecord(
-        id="t-1",
-        destinations=SEARCH_DESTINATIONS,
-        trust=DestinationTrust.USER_CHOSEN,
-        established_at=_NOW - timedelta(days=1),
-    )
-    store = FakeDestinationTrustStore([chosen] if trusted else []) if trust is None else trust
     return SearchFooting(
         conversation_id=conversation_id,
         conversations=(
@@ -497,8 +488,7 @@ def _footing(
             if conversations is None
             else conversations
         ),
-        trust=store,
-        destinations=SEARCH_DESTINATIONS,
+        registered=registered,
         max_calls=max_calls,
     )
 
@@ -788,24 +778,26 @@ async def test_the_same_grant_that_allowed_the_search_confirms_the_conversations
 
 
 # --------------------------------------------------------------------------- #
-# §18 item 3: a second search in the same turn is refused                      #
+# §18 item 3, over what ADR-0247 §3 leaves of it: the refinement is serviced   #
 # --------------------------------------------------------------------------- #
 
 
-async def test_a_second_search_in_the_same_turn_opens_no_channel() -> None:
-    """§18 item 3, over a searcher that fails the case if ``search`` is called twice.
+async def test_a_second_search_in_the_same_turn_is_serviced_at_the_configured_provider() -> None:
+    """§18 item 3's premise, and the clause ADR-0247 §3 retired under it.
 
-    "A turn whose first servicing minted a result and whose revision emits a second
-    ``WEB_SEARCH`` ask: the second request's binding carries the origin fact, the
-    ruling is not ``ALLOW``, the searcher's ``search`` is **never reached**, and §13's
-    disposition records the ``CONFIRM``."
+    §18 item 3 was written over ADR-0181 §5's floor: "once a minted record is in a
+    turn's supply the binding of any later request in that turn carries
+    ``planned_with_external_content``, ADR-0193 §4 admits no grant on such a request and
+    ADR-0181 §5's floor admits no ``ALLOW`` but a decision of the user about that
+    request". **ADR-0247 §3 retires that floor for a request at the configured
+    provider**, and §2 gives it route (c) instead — so the refinement is serviced, which
+    is exactly what ADR-0231 §12's refining turn was for.
 
-    Nothing ADR-0231 adds does this. §12: "once a minted record is in a turn's supply
-    the binding of any later request in that turn carries
-    ``planned_with_external_content``, ADR-0193 §4 admits no grant on such a request
-    and ADR-0181 §5's floor admits no ``ALLOW`` but a decision of the user about that
-    request". The grant is the same one that allowed the first search, live and
-    covering throughout — asserted by the first servicing having yielded.
+    **The origin fact itself is unmoved and is asserted here**: the second binding
+    carries ``planned_with_external_content``, because ADR-0181 §4 computes it over what
+    the turn has admitted and this decision moves no word of that. What moved is the
+    floor over it, and a lane that dropped the *fact* rather than the floor fails this
+    line while passing every outcome below it.
     """
     searcher = FakeWebSearcher(results=(_RESULT,))
     planner = FakePlanner(
@@ -813,20 +805,31 @@ async def test_a_second_search_in_the_same_turn_opens_no_channel() -> None:
         read_request=_search(),
         revision=ActionPlanFor(read_request=_search()),
     )
+    trail = FakeAuditTrail(recipient_grants=FakeRecipientGrantResolution([_grant()]))
 
     with structlog.testing.capture_logs() as captured:
         responded = await _loop(
             planner=planner,
-            search=_servicer(searcher=_CostedSearcher(searcher), granted=True),
+            search=_servicer(searcher=_CostedSearcher(searcher), trail=trail, granted=True),
         ).respond(_ASK, narrow=_bounded(), operation=_REVISING)
 
     assert len(planner.calls) == 2, "the turn revised (ADR-0228 §2)"
-    assert len(searcher.searched) == 1, "`search` was reached on the first servicing alone"
+    assert len(searcher.searched) == 2, "`search` was reached on both servicings"
     assert _serviced(captured, 0)["disposition"] is None, "the first yielded"
-    assert _serviced(captured, 1)["disposition"] == SearchDisposition.RULING_CONFIRM.value
-    assert _serviced(captured, 1)["new"] == 0, "and the second added nothing"
+    assert _serviced(captured, 1)["disposition"] is None, "and so did the refinement"
+    first, second = (
+        decision.egress_binding
+        for decision in sorted(await trail.recent(), key=lambda decision: decision.id)
+    )
+    assert isinstance(first, EgressBinding), "a search request carries a whole binding"
+    assert isinstance(second, EgressBinding)
+    assert first.planned_with_external_content is False
+    assert second.planned_with_external_content is True, (
+        "§12's origin fact is unchanged: the minted record is in the turn's supply"
+    )
+    assert second.closed_loop is True, "and ADR-0247 §4's two conditions both hold"
     minted = [one for one in responded.turn.memories if _DISTINCTIVE in one.content]
-    assert len(minted) == 1, "one record from one search"
+    assert len(minted) == 2, "one record from each servicing, both in the turn's supply"
 
 
 # --------------------------------------------------------------------------- #
@@ -1452,30 +1455,38 @@ async def test_the_search_draws_slots_of_the_one_budget_and_never_a_second() -> 
 # --------------------------------------------------------------------------- #
 
 
-async def test_a_supply_already_holding_an_external_record_taints_the_search_request() -> None:
+async def test_a_supply_already_holding_an_external_record_stamps_the_search_request() -> None:
     """§11's origin-fact clause, over the **pre-servicing supply**.
 
     "The ``planned_with_external_content`` on a search request's binding is the
     disjunction of ``rests_on_recorded_external_content`` over the turn's
     pre-servicing supply and over every record this servicing has already
     contributed." So a turn whose supply already carries a stamped episode — ADR-0223
-    §1's mechanism reaching a later turn of the conversation — draws a ``CONFIRM``
-    under the very grant that would otherwise have allowed it, and the searcher is
-    never reached.
+    §1's mechanism reaching a later turn of the conversation — binds a request that says
+    so.
 
-    This is §12's second answer to #1844 stated where it is computed: the conversation
-    "un-taints as the tail moves on", and until it does every search in it asks first.
+    **What the stamp then costs is a separate question, and ADR-0247 §3 answered it**:
+    the floor ADR-0181 §5 put over the fact is retired for a request at the configured
+    provider, so the search runs. This case is about the *fact*, which is why it is
+    asserted off the binding rather than off the ruling — a lane that stopped computing
+    it would pass an outcome-only assertion.
     """
     inner = FakeWebSearcher(results=(_RESULT,))
+    trail = FakeAuditTrail(recipient_grants=FakeRecipientGrantResolution([_grant()]))
 
     with structlog.testing.capture_logs() as captured:
         await _loop(
             planner=FakePlanner(now=_clock, read_request=_search()),
-            search=_servicer(searcher=_CostedSearcher(inner), granted=True),
+            search=_servicer(searcher=_CostedSearcher(inner), trail=trail, granted=True),
         ).respond(_ASK, narrow=_bounded(), history=(_stamped_episode(),))
 
-    assert _serviced(captured)["disposition"] == SearchDisposition.RULING_CONFIRM.value
-    assert inner.searched == [], "no channel opened over a tainted supply (ADR-0193 §4)"
+    assert _serviced(captured)["disposition"] is None, "the search was serviced"
+    [decision] = await trail.recent()
+    assert isinstance(decision.egress_binding, EgressBinding)
+    assert decision.egress_binding.planned_with_external_content is True, (
+        "the stamped episode is a recorded external span in the pre-servicing supply"
+    )
+    assert len(inner.searched) == 1
 
 
 async def test_a_clean_supply_leaves_the_grant_covering() -> None:
@@ -1503,20 +1514,29 @@ async def test_a_clean_supply_leaves_the_grant_covering() -> None:
     assert len(inner.searched) == 1
 
 
-async def test_the_binding_a_search_is_ruled_on_is_covered_by_nothing() -> None:
+@pytest.mark.parametrize(
+    ("registered", "expected"),
+    [(False, SpanCoverage.NOT_COVERED), (True, SpanCoverage.MODEL_ON_EVERY_PATH)],
+    ids=["utterance-only", "supplied-records"],
+)
+async def test_the_coverage_is_read_off_what_reached_the_composer(
+    registered: bool, expected: SpanCoverage
+) -> None:
     """§4 and ADR-0233 §5: the coverage fact this package computes for a search.
 
     ADR-0233 §5 puts ``coverage`` on "the component that composed the call's
     arguments, from the membership and path character of what it supplied to the
-    operations that produced them", and what this package supplied the composer's
-    model call is the turn's own utterance and nothing else. §4 states the
-    consequence: "the composer's model call is supplied no covered content, and its
-    output is therefore not covered content either. Neither §3's second clause … nor
-    its third … has a subject" — which is ADR-0233 §4's ``NOT_COVERED``.
+    operations that produced them", so what decides it is the **search supply** and not
+    the turn's selection. Both arms hold the same full memory store, and an
+    implementation reading the coverage off the *turn's* selection — as the step path
+    correctly does — answers ``MODEL_ON_EVERY_PATH`` on both and fails the first.
 
-    A turn whose supply is full of store records is used deliberately: an
-    implementation reading the coverage off the *turn's* selection, as the step path
-    correctly does, would answer ``MODEL_ON_EVERY_PATH`` here and fail.
+    The pair is the two states ADR-0238 §2's clause admits, as ADR-0247 §1 decides it:
+    a deployment holding **no** search registration composes over the utterance alone,
+    so "the composer's model call is supplied no covered content, and its output is
+    therefore not covered content either" (§4) — ADR-0233 §4's ``NOT_COVERED``; and one
+    holding a registration composes over the records, which is the class ADR-0238 §7's
+    second exception admits.
     """
     trail = FakeAuditTrail(recipient_grants=FakeRecipientGrantResolution([_grant()]))
     memory = FakeMemoryStore(now=_clock)
@@ -1526,12 +1546,13 @@ async def test_the_binding_a_search_is_ruled_on_is_covered_by_nothing() -> None:
         planner=FakePlanner(now=_clock, read_request=_search()),
         memory=memory,
         search=_servicer(trail=trail, granted=True),
+        footing=await _admitted(registered=registered),
     ).respond(_ASK, narrow=_bounded())
 
     [decision] = await trail.recent()
     binding = decision.egress_binding
     assert isinstance(binding, EgressBinding), "a search request carries a whole binding"
-    assert binding.coverage is SpanCoverage.NOT_COVERED
+    assert binding.coverage is expected
     assert binding.planned_with_external_content is False
     assert decision.step_id is None, "§6: no plan step is synthesised"
     assert decision.execution_id is None, "and no execution"
