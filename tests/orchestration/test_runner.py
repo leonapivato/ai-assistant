@@ -31,6 +31,8 @@ from ai_assistant.core.types import (
     DataTier,
     Disposition,
     Goal,
+    GoalInterpretation,
+    Ground,
     Idempotency,
     MemorySource,
     PermissionDecision,
@@ -145,7 +147,16 @@ async def an_execution(store: FakePlanStore, step: PlanStep) -> ExecutionState:
     """Store a goal, a one-step plan, and open an execution for it."""
     goal = Goal(
         id="g-1",
-        statement="send the note",
+        interpretation=(
+            GoalInterpretation(
+                revision=1,
+                outcome="send the note",
+                outcome_ground=Ground.USER_STATED,
+                outcome_span="send the note",
+                recorded_at=AT,
+                raised_by="t-1",
+            ),
+        ),
         provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT),
         created_at=AT,
     )
@@ -159,7 +170,16 @@ async def a_two_step_execution(store: FakePlanStore) -> ExecutionState:
     """Store a goal, a two-step plan, and open an execution for it."""
     goal = Goal(
         id="g-1",
-        statement="send the notes",
+        interpretation=(
+            GoalInterpretation(
+                revision=1,
+                outcome="send the notes",
+                outcome_ground=Ground.USER_STATED,
+                outcome_span="send the notes",
+                recorded_at=AT,
+                raised_by="t-1",
+            ),
+        ),
         provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT),
         created_at=AT,
     )

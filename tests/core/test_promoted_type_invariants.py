@@ -33,6 +33,9 @@ from ai_assistant.core.types import (
     Disposition,
     ExecutionState,
     Goal,
+    GoalBrief,
+    GoalInterpretation,
+    Ground,
     IngestSummary,
     LearnDecision,
     MemoryKind,
@@ -271,13 +274,24 @@ def _turn() -> TurnResult:
     """One turn's result — the presence of which is what makes an answer owed."""
     return TurnResult(
         utterance="what do you know about me?",
-        goal=Goal(
-            id="g-1",
-            statement="what do you know about me?",
-            provenance=Provenance(
-                source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
-            ),
-            created_at=AT,
+        goal=GoalBrief.of(
+            Goal(
+                id="g-1",
+                interpretation=(
+                    GoalInterpretation(
+                        revision=1,
+                        outcome="what do you know about me?",
+                        outcome_ground=Ground.USER_STATED,
+                        outcome_span="what do you know about me?",
+                        recorded_at=AT,
+                        raised_by="t-1",
+                    ),
+                ),
+                provenance=Provenance(
+                    source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
+                ),
+                created_at=AT,
+            )
         ),
         context=CurrentContext(
             now=AT, time_of_day=TimeOfDay.AFTERNOON, is_weekend=False, within_working_hours=True

@@ -30,6 +30,9 @@ from ai_assistant.core.types import (
     ExchangeDisposition,
     ExecutionState,
     Goal,
+    GoalBrief,
+    GoalInterpretation,
+    Ground,
     MemorySource,
     Message,
     PlanStep,
@@ -65,7 +68,16 @@ _FINISHED = {StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.INDETERMINATE}
 def _goal(statement: str = "what do you know about me?") -> Goal:
     return Goal(
         id="g-1",
-        statement=statement,
+        interpretation=(
+            GoalInterpretation(
+                revision=1,
+                outcome=statement,
+                outcome_ground=Ground.USER_STATED,
+                outcome_span=statement,
+                recorded_at=AT,
+                raised_by="t-1",
+            ),
+        ),
         provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT),
         created_at=AT,
     )
@@ -101,7 +113,7 @@ def _turn(
 ) -> TurnResult:
     return TurnResult(
         utterance=statement,
-        goal=_goal(statement),
+        goal=GoalBrief.of(_goal(statement)),
         context=context if context is not None else _context(),
         memories=tuple(memories),
         plan=plan if plan is not None else _plan(),
@@ -1688,7 +1700,8 @@ async def test_the_planners_assembler_renders_no_reply_line_for_a_hop_reached_re
     planner = ModelBackedPlanner(model, now=lambda: AT, id_factory=lambda: "p-1")
 
     await planner.plan(
-        _goal(),
+        GoalBrief.of(_goal()),
+        utterance="a request",
         context=_context(),
         memories=[
             _hop_episode("tail-1", outcome=_REPLY, content="The user asked: what is on today?"),

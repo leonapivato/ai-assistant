@@ -387,7 +387,7 @@ async def test_a_turns_request_reaches_the_client_on_the_turn_it_belongs_to(
 
     assert outcome.turn is not None
     assert outcome.turn.utterance == "what did I say about the ledger"
-    assert outcome.turn.utterance == outcome.turn.goal.statement, (
+    assert outcome.turn.utterance == outcome.turn.goal.outcome, (
         "§6's byte-equality holds of what crossed the wire too"
     )
 

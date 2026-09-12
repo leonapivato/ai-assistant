@@ -26,6 +26,8 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 from uuid import uuid4
 
+from pydantic import ValidationError
+
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
     ActiveExecutionError,
@@ -35,10 +37,16 @@ from ai_assistant.core.errors import (
     StaleExecutionError,
 )
 from ai_assistant.core.types import (
+    MAX_GOAL_INTERPRETATIONS,
+    TERMINAL_ATTEMPT_STATES,
     ActionPlan,
+    AttemptEffort,
+    AttemptPhase,
     ExecutionState,
+    GoalAttempt,
     GoalDeletion,
     PlanExport,
+    PlannerOutput,
     SkipReason,
     StepExecution,
     StepStatus,
@@ -50,9 +58,14 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import (
+        AttemptTransition,
         CurrentContext,
+        EvidenceDigest,
         Goal,
+        GoalBrief,
+        GoalRevision,
         MemoryRecord,
+        ProposedUnderstanding,
         ReadAsk,
         ReadRequest,
         ShownFile,
@@ -92,6 +105,28 @@ _LEGAL_SKIP_REASONS: dict[StepStatus, frozenset[SkipReason]] = {
 }
 
 _MAX_ATTEMPTS = 3
+
+#: ADR-0249 §6's order, read off the declaration rather than restated: "within one
+#: attempt, ``phase`` advances in that order and never moves backwards".
+_PHASE_ORDER: Final[dict[AttemptPhase, int]] = {
+    phase: index for index, phase in enumerate(AttemptPhase)
+}
+
+
+def _appended_id(held: tuple[str, ...], addition: str | None) -> tuple[str, ...]:
+    """Append ``addition`` unless the tuple already holds it (ADR-0249 §12).
+
+    Args:
+        held: The identifiers already on the attempt, in order.
+        addition: The identifier to append, or ``None``.
+
+    Returns:
+        The tuple with ``addition`` at its end, or unchanged where it was absent or
+        already held.
+    """
+    if addition is None or addition in held:
+        return held
+    return (*held, addition)
 
 
 #: ADR-0228 §3's bound, restated here for the one thing this module needs it for:
@@ -202,6 +237,7 @@ class FakePlanner:
         now: Clock = _utcnow,
         read_request: ReadRequest | None = None,
         revision: ActionPlan | None = None,
+        understanding: ProposedUnderstanding | None = None,
     ) -> None:
         """Create a planner.
 
@@ -224,6 +260,12 @@ class FakePlanner:
                 turn this is the only other one there is. Its ``supersedes`` is
                 scripted like any other field and the loop discards it (§5), which is
                 what makes the discard assertable.
+            understanding: What every call proposes the system now understands
+                (ADR-0249 §7), or ``None`` — the default, and the true answer for a
+                planner that knows nothing of that envelope. Returned unchanged on
+                every call, because what a planner proposes is not a function of the
+                iteration and a fake that varied it would hold an opinion the contract
+                leaves to an implementation.
 
         Raises:
             ValueError: If both ``plan`` and ``read_request`` are given. A scripted
@@ -243,6 +285,7 @@ class FakePlanner:
         self._plan = plan
         self._read_request = read_request
         self._revision = revision
+        self._understanding = understanding
         #: The id of the plan this fake answered a turn's **first** call with, which
         #: a scripted revision may not reuse. Recorded rather than derived: the
         #: synthesised id is a function of the goal, so it is not knowable until the
@@ -268,12 +311,14 @@ class FakePlanner:
         #: store returned — which is a fact about no return value.
         self.calls: list[
             tuple[
-                Goal,
+                GoalBrief,
+                str,
                 CurrentContext,
                 tuple[MemoryRecord, ...],
                 tuple[str, ...],
                 tuple[ShownFile, ...],
                 tuple[ReadAsk, ...],
+                tuple[EvidenceDigest, ...],
             ]
         ] = []
 
@@ -295,17 +340,33 @@ class FakePlanner:
         except ClockReadingError as exc:
             raise PlanningError(str(exc)) from exc
 
-    async def plan(  # noqa: PLR0913 — the goal plus one keyword per thing the pipeline assembled before planning, as the Protocol declares them; ADR-0230 §3 and ADR-0240 §7 each add one
+    async def plan(  # noqa: PLR0913 — the brief plus one keyword per thing the pipeline assembled before planning, as the Protocol declares them; ADR-0230 §3, ADR-0240 §7 and ADR-0249 §7 each add to it
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         """Return the scripted plan, recording the arguments it was given.
+
+        **It proposes no understanding unless one is scripted** (ADR-0249 §7).
+        ``understanding`` defaults to ``None``, which is what a planner that knows
+        nothing of the envelope returns and what every existing consumer of this fake
+        keeps getting; ``understanding=`` is the hook a consumer takes to drive a
+        revising turn without standing a model up. Nothing here derives one from the
+        brief, the utterance or the supply: what a planner proposes is the judgement
+        the envelope *is*, and a fake that judged it would be a fake with an opinion
+        the contract leaves to an implementation.
+
+        **It authors no phase, no revision number, no ``raised_by`` and no
+        ``recorded_at``** (ADR-0249 §6): ``ProposedUnderstanding`` carries no field
+        for any of them, so the writer clause is a property of the type here rather
+        than a restraint this fake is trusted to keep.
 
         ``capabilities`` is recorded and **not acted on**: the plan is scripted, so
         making it depend on the vocabulary would put a judgement in a fake that the
@@ -344,7 +405,9 @@ class FakePlanner:
         exactly the arm a consumer needs to drive an unresolved label.
 
         Args:
-            goal: The objective to plan for.
+            goal: The brief of the objective to plan for (ADR-0249 §9).
+            utterance: This turn's own request (ADR-0248 §1, ADR-0249 §7). Recorded
+                and **not acted on**, for ``capabilities``' own reason.
             context: The situational context assembled for this request.
             memories: What the pipeline assembled for this turn.
             capabilities: The vocabulary the registry advertised for this turn.
@@ -363,15 +426,20 @@ class FakePlanner:
                 implementation — and would put ADR-0228 §2's last clause, that no
                 implementation widens a request, out of a consumer's reach. Empty is
                 legal and is every first call. Frozen into a tuple, as the others are.
+            evidence: What this call may act on about the reads already taken
+                (ADR-0249 §10). Recorded and **not acted on**, for the same reason;
+                empty is legal and is every call of ADR-0249's own lanes.
         """
         self.calls.append(
             (
                 goal,
+                utterance,
                 context,
                 tuple(memories),
                 tuple(capabilities),
                 tuple(files),
                 tuple(empty_reads),
+                tuple(evidence),
             )
         )
         ordinal = len(self.calls)
@@ -403,7 +471,7 @@ class FakePlanner:
                         "ids (ADR-0014 §2, ADR-0228 §5)"
                     )
                     raise RuntimeError(msg)
-                return self._revision
+                return PlannerOutput(plan=self._revision, understanding=self._understanding)
         if self._plan is not None:
             # Exactly as scripted on the first call, and with a fresh id afterwards
             # (ADR-0014 §2, ADR-0228 §3, §5). Only `id` moves — every other field is
@@ -412,8 +480,11 @@ class FakePlanner:
             # certify nothing.
             if ordinal == 1:
                 self._first_id = self._plan.id
-                return self._plan
-            return self._plan.model_copy(update={"id": f"{self._plan.id}-{ordinal}"})
+                return PlannerOutput(plan=self._plan, understanding=self._understanding)
+            return PlannerOutput(
+                plan=self._plan.model_copy(update={"id": f"{self._plan.id}-{ordinal}"}),
+                understanding=self._understanding,
+            )
         synthesised = ActionPlan(
             # Distinct on every call after the first (ADR-0228 §3, ADR-0014 §2). The
             # first keeps the id this fake has always minted, so nothing that named
@@ -421,8 +492,8 @@ class FakePlanner:
             # plans and `save_plan` refuses a `supersedes` naming the saving plan's
             # own id (ADR-0228 §5) — a fake reusing the id would fail its consumer
             # for the fake's own defect.
-            id=f"{goal.id}-plan" if ordinal == 1 else f"{goal.id}-plan-{ordinal}",
-            goal_id=goal.id,
+            id=(f"{goal.goal_id}-plan" if ordinal == 1 else f"{goal.goal_id}-plan-{ordinal}"),
+            goal_id=goal.goal_id,
             steps=(),
             created_at=self._now(),
             rationale="synthesised by FakePlanner",
@@ -430,7 +501,7 @@ class FakePlanner:
         )
         if ordinal == 1:
             self._first_id = synthesised.id
-        return synthesised
+        return PlannerOutput(plan=synthesised, understanding=self._understanding)
 
 
 class FakePlanStore:
@@ -450,6 +521,7 @@ class FakePlanStore:
                 ``InMemoryPlanStore`` is (ADR-0026 §7).
         """
         self._goals: dict[str, Goal] = {}
+        self._attempts: dict[str, GoalAttempt] = {}
         self._plans: dict[str, ActionPlan] = {}
         self._executions: dict[str, ExecutionState] = {}
         self._clock = checked_clock(now, owner="FakePlanStore")
@@ -498,30 +570,205 @@ class FakePlanStore:
             raise PlanningError(str(exc)) from exc
 
     async def save_goal(self, goal: Goal) -> str:
-        """Persist a goal, or update the parts of one that may change.
+        """Persist a **new** goal (ADR-0249 §12), refusing an id already held.
 
-        ``status`` and ``deadline`` move over a goal's life. ``statement``,
-        ``provenance`` and ``created_at`` are its identity: rewriting them would
-        make every plan and execution already recorded against this id describe
-        an objective the user never set — the same audit hazard ``save_plan``
-        refuses, and the reason a changed objective needs a new goal.
+        The opening write alone, and no longer an upsert: an upsert that replaced a
+        whole goal would defeat ADR-0249 §1's append-only interpretation and §12's
+        compare-and-swap in one call, so every later change goes through
+        :meth:`record_interpretation`.
+
+        Raises:
+            PlanningError: If the store already holds a goal under this ``id``.
         """
         async with self._resource.held():
-            existing = self._goals.get(goal.id)
-            if existing is not None:
-                identity = ("statement", "provenance", "created_at")
-                changed = [
-                    field for field in identity if getattr(existing, field) != getattr(goal, field)
-                ]
-                if changed:
-                    msg = (
-                        f"goal {goal.id} already exists and its {', '.join(changed)} cannot "
-                        "change: plans and executions already recorded against it would "
-                        "silently come to describe a different objective. Use a new id."
-                    )
-                    raise PlanningError(msg)
+            if goal.id in self._goals:
+                msg = (
+                    f"goal {goal.id} already exists: save_goal is the opening write "
+                    "alone, and a later change to a goal is a record_interpretation "
+                    "(ADR-0249 §12)"
+                )
+                raise PlanningError(msg)
             self._goals[goal.id] = goal.model_copy(deep=True)
         return goal.id
+
+    async def record_interpretation(self, revision: GoalRevision) -> Goal:
+        """Append one interpretation revision, compare-and-swap (ADR-0249 §12).
+
+        Re-implemented here rather than imported from ``ai_assistant.planning``, for
+        the reason this module's docstring gives for the transition graph: importing
+        it would pull in the very subsystem the fake stands in for. The shared
+        ``PlanStoreContract`` is what holds the two statements honest.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            PlanningError: If ``goal_id`` names no stored goal, or the revision does
+                not follow the goal's current one.
+        """
+        async with self._resource.held():
+            stored = self._goals.get(revision.goal_id)
+            if stored is None:
+                msg = f"cannot record an interpretation for unknown goal {revision.goal_id}"
+                raise PlanningError(msg)
+            if stored.version != revision.expected_version:
+                msg = (
+                    f"goal {revision.goal_id} is at version {stored.version}, not "
+                    f"{revision.expected_version}: re-read it and recompute the revision"
+                )
+                raise StaleExecutionError(msg)
+            current = stored.interpretation[-1]
+            if revision.interpretation.revision != current.revision + 1:
+                msg = (
+                    f"goal {revision.goal_id} is at revision {current.revision}, so the "
+                    f"next revision is {current.revision + 1} and not "
+                    f"{revision.interpretation.revision} (ADR-0249 §1)"
+                )
+                raise PlanningError(msg)
+            history = (*stored.interpretation, revision.interpretation)
+            # ADR-0249 §2: the write that would exceed the bound drops the **oldest**
+            # element, never the current one, and the count is advanced rather than
+            # the truncation left silent.
+            dropped = max(0, len(history) - MAX_GOAL_INTERPRETATIONS)
+            updated = stored.model_copy(
+                update={
+                    "interpretation": history[dropped:],
+                    "interpretation_elided": stored.interpretation_elided + dropped,
+                    "version": stored.version + 1,
+                }
+            )
+            self._goals[updated.id] = updated
+            return updated.model_copy(deep=True)
+
+    async def open_attempt(self, attempt: GoalAttempt) -> str:
+        """Persist a new attempt for a stored goal (ADR-0249 §12).
+
+        Raises:
+            PlanningError: If ``goal_id`` names no stored goal, or the store already
+                holds an attempt under this ``id``.
+        """
+        async with self._resource.held():
+            if attempt.goal_id not in self._goals:
+                msg = f"attempt {attempt.id} refers to unknown goal {attempt.goal_id}"
+                raise PlanningError(msg)
+            if attempt.id in self._attempts:
+                msg = (
+                    f"attempt {attempt.id} already exists; a change to an attempt is a "
+                    "commit_attempt, which is its only mutation route (ADR-0249 §12)"
+                )
+                raise PlanningError(msg)
+            self._attempts[attempt.id] = attempt.model_copy(deep=True)
+        return attempt.id
+
+    async def get_attempt(self, attempt_id: str) -> GoalAttempt | None:
+        """Return the attempt with ``attempt_id``, or ``None`` — under the resource (#397)."""
+        async with self._resource.held():
+            stored = self._attempts.get(attempt_id)
+            return None if stored is None else stored.model_copy(deep=True)
+
+    async def attempts_of(self, goal_id: str) -> tuple[GoalAttempt, ...]:
+        """Return every attempt of ``goal_id``, in ``opened_at`` order (#397)."""
+        async with self._resource.held():
+            return tuple(
+                attempt.model_copy(deep=True)
+                for attempt in sorted(
+                    (one for one in self._attempts.values() if one.goal_id == goal_id),
+                    key=lambda one: (one.opened_at, one.id),
+                )
+            )
+
+    async def commit_attempt(self, transition: AttemptTransition) -> GoalAttempt:
+        """Apply one attempt transition, compare-and-swap (ADR-0249 §12).
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            IllegalTransitionError: If the move is not legal from where it stands.
+            PlanningError: If the attempt does not exist, or the result is not a shape
+                ADR-0249 §5 admits.
+        """
+        async with self._resource.held():
+            stored = self._attempts.get(transition.attempt_id)
+            if stored is None:
+                msg = f"unknown attempt {transition.attempt_id}"
+                raise PlanningError(msg)
+            if stored.version != transition.expected_version:
+                msg = (
+                    f"attempt {transition.attempt_id} is at version {stored.version}, not "
+                    f"{transition.expected_version}: re-read it and recompute the transition"
+                )
+                raise StaleExecutionError(msg)
+            updated = self._advanced_attempt(stored, transition)
+            self._attempts[updated.id] = updated
+            return updated.model_copy(deep=True)
+
+    def _advanced_attempt(self, attempt: GoalAttempt, transition: AttemptTransition) -> GoalAttempt:
+        """Apply one transition to ``attempt``; the caller holds the resource.
+
+        Every absent member leaves its field unchanged; an ``add_*`` member appends,
+        and an identifier the tuple already holds is ignored rather than duplicated
+        or refused (ADR-0249 §12). The phase never moves backwards, no transition
+        leaves a terminal state, and neither effort counter is ever reduced.
+
+        Args:
+            attempt: The attempt as stored.
+            transition: The command to apply.
+
+        Returns:
+            The attempt as it stands after the transition.
+
+        Raises:
+            IllegalTransitionError: If the move would take the phase backwards or
+                move a terminal attempt to another state.
+            PlanningError: If an effort counter would be reduced, or the result is
+                not a shape ADR-0249 §5 admits.
+        """
+        state = attempt.state if transition.to_state is None else transition.to_state
+        if attempt.state in TERMINAL_ATTEMPT_STATES and state is not attempt.state:
+            msg = (
+                f"attempt {attempt.id} is {attempt.state.value} and no transition leaves "
+                f"a terminal member (ADR-0249 §5)"
+            )
+            raise IllegalTransitionError(msg)
+        phase = attempt.phase if transition.to_phase is None else transition.to_phase
+        if _PHASE_ORDER[phase] < _PHASE_ORDER[attempt.phase]:
+            msg = (
+                f"attempt {attempt.id} stands at {attempt.phase.value} and a phase "
+                f"advances in ADR-0249 §6's order and never moves backwards"
+            )
+            raise IllegalTransitionError(msg)
+        calls = (
+            attempt.effort.planner_calls
+            if transition.planner_calls is None
+            else transition.planner_calls
+        )
+        working = attempt.effort.working if transition.working is None else transition.working
+        if calls < attempt.effort.planner_calls or working < attempt.effort.working:
+            msg = (
+                f"attempt {attempt.id}'s effort is monotonically non-decreasing and no "
+                f"implementation subtracts from it (ADR-0249 §5)"
+            )
+            raise PlanningError(msg)
+        try:
+            return GoalAttempt(
+                id=attempt.id,
+                goal_id=attempt.goal_id,
+                opened_at=attempt.opened_at,
+                phase=phase,
+                state=state,
+                outcome=attempt.outcome if transition.outcome is None else transition.outcome,
+                effort=AttemptEffort(planner_calls=calls, working=working),
+                plan_ids=_appended_id(attempt.plan_ids, transition.add_plan_id),
+                execution_ids=_appended_id(attempt.execution_ids, transition.add_execution_id),
+                authorization_ids=_appended_id(
+                    attempt.authorization_ids, transition.add_authorization_id
+                ),
+                ended_at=attempt.ended_at if transition.ended_at is None else transition.ended_at,
+                version=attempt.version + 1,
+            )
+        except ValidationError as exc:
+            msg = (
+                f"the transition would leave attempt {attempt.id} in a shape "
+                f"ADR-0249 §5 refuses: {exc}"
+            )
+            raise PlanningError(msg) from exc
 
     async def get_goal(self, goal_id: str) -> Goal | None:
         """Return the goal with ``goal_id``, or ``None``.
@@ -540,6 +787,11 @@ class FakePlanStore:
         Re-planning must take a new id so the previous plan stays an intact
         audit record; an identical re-save is idempotent (ADR-0014 §2).
 
+        **An unstamped ``targets_revision`` is refused too** (ADR-0249 §8), for the
+        reason the ``supersedes`` check below is here: the window is closed at the
+        store rather than trusted to close itself. A plan already on disk carrying
+        ``None`` decodes, and §8's not-driven rule is what reads it.
+
         **A ``supersedes`` that does not resolve is refused** (ADR-0228 §5): one
         naming a plan this store does not hold, one naming the saving plan's own
         ``id``, and one naming a plan under a different ``goal_id``. That is
@@ -551,6 +803,15 @@ class FakePlanStore:
         async with self._resource.held():
             if plan.goal_id not in self._goals:
                 msg = f"plan {plan.id} refers to unknown goal {plan.goal_id}"
+                raise PlanningError(msg)
+            # ADR-0249 §8: the window between the planner's return and the loop's
+            # stamp is closed at the store rather than trusted to close itself.
+            if plan.targets_revision is None:
+                msg = (
+                    f"plan {plan.id} carries no targets_revision: the unstamped state "
+                    "exists only between the planner's return and the loop's stamp, "
+                    "and the window is closed at the store (ADR-0249 §8)"
+                )
                 raise PlanningError(msg)
             if plan.supersedes is not None:
                 if plan.supersedes == plan.id:
@@ -640,6 +901,21 @@ class FakePlanStore:
                 f"step {current.step_id} cannot go from {current.status} to {transition.to_status}"
             )
             raise IllegalTransitionError(msg)
+
+        # ADR-0249 §8's further claim condition, read inside the same step as the
+        # claim: the plan the execution runs must target its goal's current
+        # interpretation revision, and a plan carrying no revision at all — the one
+        # route being a row ADR-0249 §12 migrated — is not driven either.
+        if transition.to_status is StepStatus.RUNNING:
+            plan = self._plans.get(stored.plan_id)
+            goal = None if plan is None else self._goals.get(plan.goal_id)
+            if plan is not None and goal is not None and plan.targets_revision != goal.revision:
+                msg = (
+                    f"plan {plan.id} targets revision {plan.targets_revision} and goal "
+                    f"{goal.id} stands at {goal.revision}: a plan that does not target "
+                    f"the goal's current understanding is not driven (ADR-0249 §8)"
+                )
+                raise StaleExecutionError(msg)
 
         updated = self._advance(current, transition)
         state = ExecutionState.model_validate(
@@ -776,6 +1052,7 @@ class FakePlanStore:
                 executions=tuple(
                     state.model_copy(deep=True) for state in self._executions.values()
                 ),
+                attempts=tuple(one.model_copy(deep=True) for one in self._attempts.values()),
             )
 
     async def delete_goal(self, goal_id: str) -> GoalDeletion:
@@ -808,6 +1085,12 @@ class FakePlanStore:
             del self._executions[state.id]
         for plan_id in plan_ids:
             del self._plans[plan_id]
+        # ADR-0249 §12: the cascade reaches attempts, extending ADR-0014 §5's "a goal
+        # the user deletes must not leave its plan history behind". The live-step
+        # refusal above is unchanged and keys on a RUNNING step, so an attempt in a
+        # non-terminal state does not block a deletion no execution blocks.
+        for attempt_id in [one.id for one in self._attempts.values() if one.goal_id == goal_id]:
+            del self._attempts[attempt_id]
         del self._goals[goal_id]
 
         return GoalDeletion(
@@ -825,8 +1108,11 @@ class FakePlanStore:
                 msg = f"cannot clear while executions are live: {', '.join(live)}"
                 raise ActiveExecutionError(msg)
 
-            removed = len(self._goals) + len(self._plans) + len(self._executions)
+            removed = (
+                len(self._goals) + len(self._attempts) + len(self._plans) + len(self._executions)
+            )
             self._goals.clear()
+            self._attempts.clear()
             self._plans.clear()
             self._executions.clear()
         return removed

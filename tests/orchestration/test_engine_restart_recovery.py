@@ -29,7 +29,10 @@ from ai_assistant.core.types import (
     CostBasis,
     DataTier,
     Disposition,
+    EvidenceDigest,
+    GoalBrief,
     Idempotency,
+    PlannerOutput,
     PlanStep,
     ReadAsk,
     Reversibility,
@@ -89,7 +92,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ai_assistant.core.protocols import ActionPolicy, AuditTrail
-    from ai_assistant.core.types import CurrentContext, FrozenJson, Goal, MemoryRecord, ShownFile
+    from ai_assistant.core.types import CurrentContext, FrozenJson, MemoryRecord, ShownFile
 
 AT = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
 
@@ -253,18 +256,24 @@ class _OneStepPlanner:
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         step = PlanStep(
             id="step-1", intent="send the note", capability=CAPABILITY, parameters=PARAMETERS
         )
-        return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(step,), created_at=AT)
+        return PlannerOutput(
+            plan=ActionPlan(
+                id=f"{goal.goal_id}-plan", goal_id=goal.goal_id, steps=(step,), created_at=AT
+            )
+        )
 
 
 async def _succeeds(parameters: object, *, idempotency_key: str | None) -> None:

@@ -22,6 +22,9 @@ from ai_assistant.core.types import (
     ActionPlan,
     CurrentContext,
     Goal,
+    GoalBrief,
+    GoalInterpretation,
+    Ground,
     MemorySource,
     Provenance,
     ReadAsk,
@@ -196,16 +199,31 @@ async def test_a_fresh_fake_does_not_reuse_a_prior_instances_execution_id() -> N
     assert first_id != second_id
 
 
+#: The request the calls below are driven with (ADR-0249 §7).
+_REQUEST = "ship it"
+
+
 async def test_fake_planner_records_what_it_was_asked() -> None:
     """Beyond the contract: the fake exists to let callers assert on the call."""
     planner = FakePlanner(now=_fixed_now)
-    goal = Goal(
-        id="g1",
-        statement="ship it",
-        provenance=Provenance(
-            source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_fixed_now()
-        ),
-        created_at=_fixed_now(),
+    goal = GoalBrief.of(
+        Goal(
+            id="g1",
+            interpretation=(
+                GoalInterpretation(
+                    revision=1,
+                    outcome="ship it",
+                    outcome_ground=Ground.USER_STATED,
+                    outcome_span="ship it",
+                    recorded_at=_fixed_now(),
+                    raised_by="t-1",
+                ),
+            ),
+            provenance=Provenance(
+                source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_fixed_now()
+            ),
+            created_at=_fixed_now(),
+        )
     )
     context = CurrentContext(
         now=_fixed_now(),
@@ -219,16 +237,18 @@ async def test_fake_planner_records_what_it_was_asked() -> None:
         ShownFile(name="roster.txt", size_bytes=300, modified_at=_fixed_now()),
     )
 
-    await planner.plan(goal, context=context, capabilities=("send_email",), files=shown)
+    await planner.plan(
+        goal, utterance=_REQUEST, context=context, capabilities=("send_email",), files=shown
+    )
 
     assert len(planner.calls) == 1
-    assert planner.calls[0][0].id == "g1"
+    assert planner.calls[0][0].goal_id == "g1"
     # ADR-0211 §9 item 3: the vocabulary is recorded as handed, so a test over the
     # loop can assert what the planner was told without standing a model up.
-    assert planner.calls[0][3] == ("send_email",)
+    assert planner.calls[0][4] == ("send_email",)
     # ADR-0230 §14 item 20 asks that the value crossing the seam be asserted, which is
     # a fact about the **call**: a consumer's test has no other place to read it.
-    assert planner.calls[0][4] == shown
+    assert planner.calls[0][5] == shown
 
 
 async def test_fake_planner_records_an_absent_listing_as_the_empty_one() -> None:
@@ -240,18 +260,32 @@ async def test_fake_planner_records_an_absent_listing_as_the_empty_one() -> None
     """
     planner = FakePlanner(now=_fixed_now)
 
-    await planner.plan(_goal_for(), context=_context_for(), capabilities=())
+    await planner.plan(_goal_for(), utterance=_REQUEST, context=_context_for(), capabilities=())
 
-    assert planner.calls[0][4] == ()
+    assert planner.calls[0][5] == ()
 
 
 # --- ADR-0228 §3: a turn may call this fake twice ----------------------------
 
 
-def _goal_for(goal_id: str = "g1") -> Goal:
+def _goal_for(goal_id: str = "g1") -> GoalBrief:
+    """The brief a planner is handed (ADR-0249 §9)."""
+    return GoalBrief.of(_goal_record(goal_id))
+
+
+def _goal_record(goal_id: str = "g1") -> Goal:
     return Goal(
         id=goal_id,
-        statement="relocate to Lisbon",
+        interpretation=(
+            GoalInterpretation(
+                revision=1,
+                outcome="relocate to Lisbon",
+                outcome_ground=Ground.USER_STATED,
+                outcome_span="relocate to Lisbon",
+                recorded_at=_fixed_now(),
+                raised_by="t-1",
+            ),
+        ),
         provenance=Provenance(
             source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_fixed_now()
         ),
@@ -278,8 +312,12 @@ async def test_a_synthesised_plan_takes_a_fresh_id_on_every_call_after_the_first
     """
     planner = FakePlanner(now=_fixed_now)
 
-    first = await planner.plan(_goal_for(), context=_context_for(), capabilities=())
-    second = await planner.plan(_goal_for(), context=_context_for(), capabilities=())
+    first = (
+        await planner.plan(_goal_for(), utterance=_REQUEST, context=_context_for(), capabilities=())
+    ).plan
+    second = (
+        await planner.plan(_goal_for(), utterance=_REQUEST, context=_context_for(), capabilities=())
+    ).plan
 
     assert first.id == "g1-plan", "the id this fake has always minted"
     assert second.id != first.id
@@ -305,8 +343,12 @@ async def test_a_scripted_plan_also_takes_a_fresh_id_and_changes_in_nothing_else
     )
     planner = FakePlanner(scripted, now=_fixed_now)
 
-    first = await planner.plan(_goal_for(), context=_context_for(), capabilities=())
-    second = await planner.plan(_goal_for(), context=_context_for(), capabilities=())
+    first = (
+        await planner.plan(_goal_for(), utterance=_REQUEST, context=_context_for(), capabilities=())
+    ).plan
+    second = (
+        await planner.plan(_goal_for(), utterance=_REQUEST, context=_context_for(), capabilities=())
+    ).plan
 
     assert first is scripted, "exactly as scripted on the first call"
     assert second.id != scripted.id
@@ -328,8 +370,12 @@ async def test_a_scripted_revision_answers_the_call_after_the_first() -> None:
     )
     planner = FakePlanner(first_plan, now=_fixed_now, revision=revision)
 
-    first = await planner.plan(_goal_for(), context=_context_for(), capabilities=())
-    second = await planner.plan(_goal_for(), context=_context_for(), capabilities=())
+    first = (
+        await planner.plan(_goal_for(), utterance=_REQUEST, context=_context_for(), capabilities=())
+    ).plan
+    second = (
+        await planner.plan(_goal_for(), utterance=_REQUEST, context=_context_for(), capabilities=())
+    ).plan
 
     assert first is first_plan
     assert second is revision
@@ -346,9 +392,9 @@ async def test_a_scripted_revision_reusing_the_first_plans_id_is_refused() -> No
     shared = ActionPlan(id="p1", goal_id="g1", steps=(), created_at=_fixed_now())
     planner = FakePlanner(shared, now=_fixed_now, revision=shared)
 
-    await planner.plan(_goal_for(), context=_context_for(), capabilities=())
+    await planner.plan(_goal_for(), utterance=_REQUEST, context=_context_for(), capabilities=())
     with pytest.raises(RuntimeError, match="two records with two ids"):
-        await planner.plan(_goal_for(), context=_context_for(), capabilities=())
+        await planner.plan(_goal_for(), utterance=_REQUEST, context=_context_for(), capabilities=())
 
 
 async def test_a_revision_colliding_with_the_synthesised_first_id_is_refused() -> None:
@@ -368,10 +414,12 @@ async def test_a_revision_colliding_with_the_synthesised_first_id_is_refused() -
         revision=ActionPlan(id="g1-plan", goal_id="g1", steps=(), created_at=_fixed_now()),
     )
 
-    first = await planner.plan(_goal_for(), context=_context_for(), capabilities=())
+    first = (
+        await planner.plan(_goal_for(), utterance=_REQUEST, context=_context_for(), capabilities=())
+    ).plan
     assert first.id == "g1-plan", "the id the fake synthesises for this goal"
     with pytest.raises(RuntimeError, match="two records with two ids"):
-        await planner.plan(_goal_for(), context=_context_for(), capabilities=())
+        await planner.plan(_goal_for(), utterance=_REQUEST, context=_context_for(), capabilities=())
 
 
 async def test_a_revision_scripted_fake_refuses_a_third_call() -> None:
@@ -392,11 +440,11 @@ async def test_a_revision_scripted_fake_refuses_a_third_call() -> None:
         now=_fixed_now,
         revision=ActionPlan(id="p2", goal_id="g1", steps=(), created_at=_fixed_now()),
     )
-    await planner.plan(_goal_for(), context=_context_for(), capabilities=())
-    await planner.plan(_goal_for(), context=_context_for(), capabilities=())
+    await planner.plan(_goal_for(), utterance=_REQUEST, context=_context_for(), capabilities=())
+    await planner.plan(_goal_for(), utterance=_REQUEST, context=_context_for(), capabilities=())
 
     with pytest.raises(RuntimeError, match="one FakePlanner per turn"):
-        await planner.plan(_goal_for(), context=_context_for(), capabilities=())
+        await planner.plan(_goal_for(), utterance=_REQUEST, context=_context_for(), capabilities=())
 
 
 async def test_a_fake_without_a_scripted_revision_is_reusable_across_turns() -> None:
@@ -410,7 +458,12 @@ async def test_a_fake_without_a_scripted_revision_is_reusable_across_turns() -> 
     planner = FakePlanner(now=_fixed_now)
 
     plans = [
-        await planner.plan(_goal_for(), context=_context_for(), capabilities=()) for _ in range(4)
+        (
+            await planner.plan(
+                _goal_for(), utterance=_REQUEST, context=_context_for(), capabilities=()
+            )
+        ).plan
+        for _ in range(4)
     ]
 
     assert len({plan.id for plan in plans}) == 4

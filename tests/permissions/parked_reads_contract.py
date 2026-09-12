@@ -54,6 +54,9 @@ from ai_assistant.core.types import (
     ActionPlan,
     FrozenJsonMapping,
     Goal,
+    GoalBrief,
+    GoalInterpretation,
+    Ground,
     MemorySource,
     ParkedRead,
     ParkedReadDisposition,
@@ -100,11 +103,25 @@ TERMINAL: Final = (
 )
 
 
-def goal(statement: str = "what is that bell tower in Porto") -> Goal:
-    """The objective a parked turn was planned against (ADR-0244 §2)."""
+def goal(statement: str = "what is that bell tower in Porto") -> GoalBrief:
+    """The brief of the goal a parked turn was planned against (ADR-0249 §11)."""
+    return GoalBrief.of(goal_record(statement))
+
+
+def goal_record(statement: str = "what is that bell tower in Porto") -> Goal:
+    """The goal record the brief above projects from."""
     return Goal(
         id="goal-1",
-        statement=statement,
+        interpretation=(
+            GoalInterpretation(
+                revision=1,
+                outcome=statement,
+                outcome_ground=Ground.USER_STATED,
+                outcome_span=statement,
+                recorded_at=AT,
+                raised_by="t-1",
+            ),
+        ),
         provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT),
         created_at=AT,
     )
@@ -148,6 +165,8 @@ def park(  # noqa: PLR0913 — one keyword per field a case varies, and each var
         ),
         utterance=utterance,
         goal=goal(),
+        # ADR-0249 §11: an identifier settlement does not clear, taken off the brief.
+        goal_id=goal().goal_id,
         plan=plan(),
         parked_at=parked_at,
         expires_at=expires_at,

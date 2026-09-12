@@ -84,12 +84,17 @@ from ai_assistant.core.types import (
     Disposition,
     EgressBinding,
     EpisodicMemory,
+    EvidenceDigest,
     Goal,
+    GoalBrief,
+    GoalInterpretation,
+    Ground,
     MemorySource,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
     Placement,
+    PlannerOutput,
     Provenance,
     QueryRefusal,
     ReadAsk,
@@ -180,12 +185,24 @@ _PARKED_READ_TTL: Final = timedelta(hours=24)
 #: ``service_read_request`` call because the servicing site takes them on every call and
 #: reads them only on the branch that writes a park — which is what makes "a servicing
 #: that records no ``CONFIRM`` never reads them" checkable rather than asserted.
-_PARK_GOAL: Final = Goal(
+_PARK_GOAL_RECORD: Final = Goal(
     id="goal-1",
-    statement="what is that bell tower in Porto",
+    interpretation=(
+        GoalInterpretation(
+            revision=1,
+            outcome="what is that bell tower in Porto",
+            outcome_ground=Ground.USER_STATED,
+            outcome_span="what is that bell tower in Porto",
+            recorded_at=_NOW,
+            raised_by="t-1",
+        ),
+    ),
     provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_NOW),
     created_at=_NOW,
 )
+
+#: The **brief** a park stores (ADR-0249 §11), projected from the record above.
+_PARK_GOAL: Final = GoalBrief.of(_PARK_GOAL_RECORD)
 
 #: The bound this file's servicers are wired with (ADR-0241 §3). Generous, because
 #: no case here is about the deadline: `Settings.search_call_deadline`'s own default
@@ -621,7 +638,7 @@ async def test_a_turn_whose_supply_knows_nothing_answers_from_the_search() -> No
         search=_servicer(searcher=_CostedSearcher(searcher), granted=True),
     ).respond(_ASK, narrow=_bounded())
 
-    assert _DISTINCTIVE not in _contents(planner.calls[0][2]), (
+    assert _DISTINCTIVE not in _contents(planner.calls[0][3]), (
         "the supply the planner saw held nothing about the subject"
     )
     minted = [record for record in responded.turn.memories if _DISTINCTIVE in record.content]
@@ -684,7 +701,7 @@ async def test_a_turn_that_searched_leaves_a_supply_that_carries_the_origin_fact
         ),
     ).respond(_ASK, narrow=_bounded())
 
-    before = SelectionOrigin.over(planner.calls[0][2])
+    before = SelectionOrigin.over(planner.calls[0][3])
     after = SelectionOrigin.over(responded.turn.memories)
     assert before.planned_with_external_content is False, "nothing external before the search"
     assert after.planned_with_external_content is True, "and the minted record carries it"
@@ -1387,7 +1404,7 @@ async def test_the_search_is_serviced_before_the_sighted_query() -> None:
         ),
     ).respond(_ASK, narrow=_bounded())
 
-    fourth = [record.content for record in responded.turn.memories[len(planner.calls[0][2]) :]]
+    fourth = [record.content for record in responded.turn.memories[len(planner.calls[0][3]) :]]
     assert fourth, "the servicing contributed something"
     assert fourth[0] == _RESULT, "the search is serviced before the sighted query (§11)"
 
@@ -1414,7 +1431,7 @@ async def test_the_search_draws_slots_of_the_one_budget_and_never_a_second() -> 
         ),
     ).respond(_ASK, narrow=_bounded())
 
-    fourth = responded.turn.memories[len(planner.calls[0][2]) :]
+    fourth = responded.turn.memories[len(planner.calls[0][3]) :]
     assert len(fourth) <= READ_BUDGET, "ADR-0226 §6's ten, shared by the whole emission"
     assert [record.content for record in fourth[:3]] == [_RESULT, "second", "third"]
 
@@ -1656,20 +1673,31 @@ class _SearchingOneStepPlanner(OneStepPlanner):
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         """Answer the base plan, carrying a ``WEB_SEARCH`` ask the first time only."""
         first = self._calls == 0
-        plan = await super().plan(
-            goal, context=context, memories=memories, capabilities=capabilities, files=files
+        produced = await super().plan(
+            goal,
+            utterance=utterance,
+            context=context,
+            memories=memories,
+            capabilities=capabilities,
+            files=files,
         )
-        return plan if not first else plan.model_copy(update={"read_request": _search()})
+        if not first:
+            return produced
+        return produced.model_copy(
+            update={"plan": produced.plan.model_copy(update={"read_request": _search()})}
+        )
 
 
 def _searching_egress_harness(*, searching: bool) -> Harness:

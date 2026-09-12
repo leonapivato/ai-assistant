@@ -82,6 +82,9 @@ from ai_assistant.core.types import (
     FeedbackEvent,
     FeedbackKind,
     Goal,
+    GoalBrief,
+    GoalInterpretation,
+    Ground,
     Idempotency,
     MemoryDecision,
     MemoryDecisionKind,
@@ -252,10 +255,24 @@ def _record(*, expires_at: datetime | None = None) -> SemanticMemory:
     )
 
 
-def _goal() -> Goal:
+def _goal() -> GoalBrief:
+    """The brief a planner and a servicing are handed (ADR-0249 §9, §11)."""
+    return GoalBrief.of(_goal_record())
+
+
+def _goal_record() -> Goal:
     return Goal(
         id="g1",
-        statement="book the flight",
+        interpretation=(
+            GoalInterpretation(
+                revision=1,
+                outcome="book the flight",
+                outcome_ground=Ground.USER_STATED,
+                outcome_span="book the flight",
+                recorded_at=_AWARE,
+                raised_by="t-1",
+            ),
+        ),
         provenance=Provenance(
             source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_AWARE
         ),
@@ -494,7 +511,9 @@ async def _local_file_fetcher(now: Clock) -> None:
 
 
 async def _fake_planner(now: Clock) -> None:
-    await FakePlanner(now=now).plan(_goal(), context=_context(), capabilities=())
+    await FakePlanner(now=now).plan(
+        _goal(), utterance="a request", context=_context(), capabilities=()
+    )
 
 
 async def _fake_plan_store(now: Clock) -> None:
@@ -678,7 +697,7 @@ def _decision(request: ActionRequest) -> PermissionDecision:
 
 async def _claimed(store: FakePlanStore) -> str:
     """Store a goal and a one-step plan, open an execution, and answer its id."""
-    await store.save_goal(_goal())
+    await store.save_goal(_goal_record())
     await store.save_plan(
         ActionPlan(
             id="p1",
@@ -799,7 +818,7 @@ async def _observer(now: Clock) -> None:
 async def _planner(now: Clock) -> None:
     """The plan the model's reply becomes is stamped ``created_at`` from the clock."""
     await ModelBackedPlanner(FakeModelProvider(_PLAN_REPLY), now=now).plan(
-        _goal(), context=_context(), capabilities=("search_housing",)
+        _goal(), utterance="a request", context=_context(), capabilities=("search_housing",)
     )
 
 

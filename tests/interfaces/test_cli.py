@@ -62,11 +62,15 @@ from ai_assistant.core.types import (
     EgressDestination,
     EgressSpan,
     Evidence,
+    EvidenceDigest,
     ExecutionState,
     FeedbackEvent,
     FeedbackKind,
     Goal,
+    GoalBrief,
+    GoalInterpretation,
     GrantScope,
+    Ground,
     HeldNotification,
     Idempotency,
     IngestSummary,
@@ -83,6 +87,7 @@ from ai_assistant.core.types import (
     ObservationReport,
     ObservedProposal,
     OperationConfirmation,
+    PlannerOutput,
     PlanStep,
     Provenance,
     Question,
@@ -324,23 +329,27 @@ class _OneStepPlanner:
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         step = PlanStep(
             id="step-1", intent="send the note", capability=CAPABILITY, parameters=PARAMETERS
         )
-        return ActionPlan(
-            id=f"{goal.id}-plan",
-            goal_id=goal.id,
-            steps=(step,),
-            created_at=AT,
-            rationale="send the note",
+        return PlannerOutput(
+            plan=ActionPlan(
+                id=f"{goal.goal_id}-plan",
+                goal_id=goal.goal_id,
+                steps=(step,),
+                created_at=AT,
+                rationale="send the note",
+            )
         )
 
 
@@ -4443,15 +4452,21 @@ class _NoStepPlanner:
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
-        return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(), created_at=AT)
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
+        return PlannerOutput(
+            plan=ActionPlan(
+                id=f"{goal.goal_id}-plan", goal_id=goal.goal_id, steps=(), created_at=AT
+            )
+        )
 
 
 async def test_ask_names_the_conversation_it_ran_under(output: StringIO) -> None:
@@ -4904,13 +4919,24 @@ def _outcome_replying(
     return TurnOutcome(
         turn=TurnResult(
             utterance="say something",
-            goal=Goal(
-                id="g-1",
-                statement="say something",
-                provenance=Provenance(
-                    source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
-                ),
-                created_at=AT,
+            goal=GoalBrief.of(
+                Goal(
+                    id="g-1",
+                    interpretation=(
+                        GoalInterpretation(
+                            revision=1,
+                            outcome="say something",
+                            outcome_ground=Ground.USER_STATED,
+                            outcome_span="say something",
+                            recorded_at=AT,
+                            raised_by="t-1",
+                        ),
+                    ),
+                    provenance=Provenance(
+                        source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
+                    ),
+                    created_at=AT,
+                )
             ),
             context=CurrentContext(
                 now=AT,

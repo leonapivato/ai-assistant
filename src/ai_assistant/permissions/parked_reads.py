@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import sqlite3
 import threading
 from datetime import UTC, datetime
@@ -73,7 +74,14 @@ from typing import TYPE_CHECKING, Any, Final
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import AssistantError
-from ai_assistant.core.types import ParkedRead, ParkedReadDisposition
+from ai_assistant.core.types import (
+    GoalBrief,
+    GoalStatus,
+    MemorySource,
+    ParkedRead,
+    ParkedReadDisposition,
+    ground_of,
+)
 from ai_assistant.permissions._detachment import field_state
 from ai_assistant.permissions._transactions import transaction
 
@@ -151,18 +159,25 @@ async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
     return outcome[0]
 
 
-#: **2 since ADR-0248 §9**, whose fourth cleared field makes :data:`_SETTLE_ONLY` a
-#: different stored object — and a stored object definition is exactly what this store
-#: holds every file to (:data:`_OBJECTS`). Version 1 is the shape this store shipped
-#: before that decision, and a database labelled 1 is **upgraded rather than refused**:
+#: **3 since ADR-0249 §12**, which converts a stored park's ``goal`` column to a
+#: :class:`~ai_assistant.core.types.GoalBrief`, fills the record's new ``goal_id``, and
+#: adds that identifier to the terminal facts :data:`_SETTLE_ONLY` holds byte for byte
+#: — so both the *rows* and a *stored object definition* change, and this store holds
+#: every file to the latter (:data:`_OBJECTS`).
+#:
+#: Version 2 is the shape ADR-0248 §9 left, whose fourth cleared field first made the
+#: trigger a different stored object; version 1 is the shape before it. A database
+#: labelled either is **upgraded rather than refused**:
 #: :meth:`SqliteParkedReads._upgrade_settle_trigger` drops the trigger it recognises as
-#: version 1's and lets the create below rebuild it. An unlabelled database is one this
-#: code is creating now, and it is stamped rather than migrated.
-_SCHEMA_VERSION = 2
+#: one of those two and lets the create below rebuild it, and
+#: :meth:`SqliteParkedReads._upgrade_goal_column` rewrites the rows in the window that
+#: leaves. An unlabelled database is one this code is creating now, and it is stamped
+#: rather than migrated.
+_SCHEMA_VERSION = 3
 
-#: The version a database this code can upgrade carries. One member, because there is one
-#: earlier shape.
-_UPGRADABLE_FROM: Final = frozenset({1})
+#: The versions a database this code can upgrade carries. Two members, because there are
+#: two earlier shapes.
+_UPGRADABLE_FROM: Final = frozenset({1, 2})
 
 #: Created first and on its own, so a database labelled with a schema this code cannot read
 #: is refused *before* the ``parked_reads`` table is created or read — creating a table is
@@ -267,6 +282,31 @@ _INDEXES = {
 #: application, and Tier 1 content is the wrong place to start making exceptions to it.
 _SETTLE_ONLY = (
     "CREATE TRIGGER IF NOT EXISTS parked_reads_settle_only "
+    "BEFORE UPDATE ON parked_reads "
+    "WHEN OLD.disposition IS NOT 'open' OR NEW.disposition IS 'open' "
+    "OR NEW.id IS NOT OLD.id OR NEW.conversation_id IS NOT OLD.conversation_id "
+    "OR NEW.decision_id IS NOT OLD.decision_id "
+    "OR NEW.parked_at_us IS NOT OLD.parked_at_us "
+    "OR json_extract(NEW.data, '$.goal_id') IS NOT json_extract(OLD.data, '$.goal_id') "
+    "OR json_extract(NEW.data, '$.parked_at') IS NOT json_extract(OLD.data, '$.parked_at') "
+    "OR json_extract(NEW.data, '$.expires_at') IS NOT json_extract(OLD.data, '$.expires_at') "
+    "OR json_extract(NEW.data, '$.parameters') IS NOT NULL "
+    "OR json_extract(NEW.data, '$.utterance') IS NOT NULL "
+    "OR json_extract(NEW.data, '$.goal') IS NOT NULL "
+    "OR json_extract(NEW.data, '$.plan') IS NOT NULL "
+    "BEGIN SELECT RAISE(ABORT, 'a parked read is mutated only by settling an open park: "
+    "the disposition moves to a terminal member, the four content fields are cleared in "
+    "the same step, and every terminal fact stands (ADR-0244 §2, §3; ADR-0248 §3; "
+    "ADR-0249 §11)'); END"
+)
+
+#: **Version 2's trigger, byte for byte as SQLite stored it**, and the second definition
+#: :meth:`SqliteParkedReads._upgrade_settle_trigger` will drop. Written out here rather
+#: than derived from :data:`_SETTLE_ONLY` for :data:`_SETTLE_ONLY_V1`'s own reason: it is
+#: a *record of what was shipped*, and an upgrade that recognised whatever this module
+#: happens to say today would drop a trigger it had not actually verified.
+_SETTLE_ONLY_V2: Final = (
+    "CREATE TRIGGER parked_reads_settle_only "
     "BEFORE UPDATE ON parked_reads "
     "WHEN OLD.disposition IS NOT 'open' OR NEW.disposition IS 'open' "
     "OR NEW.id IS NOT OLD.id OR NEW.conversation_id IS NOT OLD.conversation_id "
@@ -480,6 +520,11 @@ class SqliteParkedReads:
                 # in the file.
                 if stored in _UPGRADABLE_FROM:
                     self._upgrade_settle_trigger(conn)
+                    # **ADR-0249 §12's row conversion, in the window the drop above
+                    # leaves open** — the settlement trigger refuses every UPDATE that
+                    # leaves a park OPEN, so the rewrite cannot run once the create
+                    # below has put it back.
+                    self._upgrade_goal_column(conn)
                 conn.execute(_SETTLE_ONLY)
                 self._check_objects(conn, tuple(_OBJECTS))
                 if stored != _SCHEMA_VERSION:
@@ -536,20 +581,22 @@ class SqliteParkedReads:
                 raise AssistantError(msg)
 
     def _upgrade_settle_trigger(self, conn: sqlite3.Connection) -> None:
-        """Replace version 1's settlement trigger with this version's (ADR-0248 §9).
+        """Replace an earlier settlement trigger with this version's (ADR-0248 §9, ADR-0249 §12).
 
         **A real upgrade rather than an edit to a string.** ``CREATE TRIGGER IF NOT
         EXISTS`` is a no-op against a trigger already in the file and
         :meth:`_check_objects` then compares the *stored* SQL against this module's, so a
-        trigger naming a fourth cleared field would make every existing parked-read
-        database fail to open — not merely the parks inside it.
+        trigger naming a fourth cleared field, or one holding ``goal_id`` byte for byte
+        across a settlement, would make every existing parked-read database fail to open
+        — not merely the parks inside it.
 
         **It touches definitions and no content** (ADR-0248 §9). No park's ``data`` is
         read, no row is rewritten, no column is back-filled, no stored model is
         re-validated and nothing is settled: a park that was ``OPEN`` before this is
         ``OPEN`` after, with the same ``expires_at`` and the same answer available.
 
-        **Where the stored trigger is anything but version 1's, this does nothing** and
+        **Where the stored trigger is anything but version 1's or version 2's, this does
+        nothing** and
         the existing refusal stands, word for word and for its own reason: the create
         that follows is a no-op against whatever is there, and :meth:`_check_objects`
         reports that the file holds an object that is not the one this store defines. A
@@ -563,13 +610,83 @@ class SqliteParkedReads:
         Args:
             conn: The connection the setup transaction is running on.
         """
-        held = conn.execute(
+        held = self._held_settle_trigger(conn)
+        if held is None or held not in {_SETTLE_ONLY_V1, _SETTLE_ONLY_V2}:
+            return
+        conn.execute(_DROP_SETTLE_ONLY)
+
+    @staticmethod
+    def _held_settle_trigger(conn: sqlite3.Connection) -> str | None:
+        """The settlement trigger's stored SQL, or ``None`` where the file holds none.
+
+        Args:
+            conn: The connection the setup transaction is running on.
+
+        Returns:
+            What ``sqlite_master`` holds under the trigger's name, or ``None``.
+        """
+        row = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
             ("parked_reads_settle_only",),
         ).fetchone()
-        if held is None or held[0] != _SETTLE_ONLY_V1:
+        return None if row is None else str(row[0])
+
+    def _upgrade_goal_column(self, conn: sqlite3.Connection) -> None:
+        """Convert a pre-ADR-0249 park's ``goal`` column and fill ``goal_id`` (§12).
+
+        A stored ``goal`` object of the pre-decision shape is read and rewritten as a
+        :class:`~ai_assistant.core.types.GoalBrief`: ``goal_id`` and the record's new
+        ``goal_id`` column both from its ``id``; ``outcome`` from its ``statement``;
+        ``outcome_ground`` by :func:`~ai_assistant.core.types.ground_of`, from its
+        stored ``provenance.source``; ``status`` and ``deadline`` carried across; and
+        ``constraints``, ``criteria``, ``conditions`` and ``open_questions`` empty.
+
+        **The conversion is lossless and not a fabrication** (§12). The stored record
+        holds one objective and one provenance, so the brief's ``outcome`` is that
+        objective's own bytes and its ``outcome_ground`` is that provenance read by a
+        total rule: the brief states what the record already said and **invents
+        nothing** — least of all a span, which the record does not hold and the brief
+        has no field for (§9).
+
+        **This upgrade does read park content, unlike ADR-0248 §9's**, because its
+        alternative is a park that cannot be decoded at all. It **writes no new
+        content**, and ADR-0004 §5's "Tier 0/1 data must never be logged" binds it
+        unchanged: nothing here logs a park, a goal or a statement.
+
+        **A terminal park keeps its cleared ``goal`` and gains no ``goal_id``**: the
+        row holds no goal to read an identifier off, and inventing one would be the
+        fabrication the paragraph above refuses. That is the one route by which
+        ``ParkedRead.goal_id`` is ``None`` on a row this store returns.
+
+        **A pre-decision park's stored ``plan`` is left byte for byte as it is** (§12)
+        and decodes with ``targets_revision`` ``None``; its resumption is unaffected,
+        because ADR-0244 §8 composes a resumed turn from the park and drives no step.
+
+        **Run in the window the trigger upgrade above leaves open**, before
+        :data:`_SETTLE_ONLY` is recreated: the trigger refuses every ``UPDATE`` that
+        leaves a park ``OPEN``, which is exactly what this rewrite does. Where the
+        file holds a settlement trigger this store does not recognise, the rewrite is
+        **skipped** and the existing refusal stands word for word — :meth:`_check_objects`
+        reports that the file holds an object that is not the one this store defines,
+        which is a better answer than a raw ``ABORT`` from a foreign trigger.
+
+        Runs inside the setup transaction, so a failure anywhere leaves the file
+        exactly as it arrived — unupgraded, unlabelled at the new version, and
+        refusing to open rather than half-migrated.
+
+        Args:
+            conn: The connection the setup transaction is running on.
+
+        Raises:
+            AssistantError: If a stored park is not a shape this conversion can read.
+        """
+        if self._held_settle_trigger(conn) is not None:
             return
-        conn.execute(_DROP_SETTLE_ONLY)
+        for row_id, data in conn.execute("SELECT id, data FROM parked_reads").fetchall():
+            conn.execute(
+                "UPDATE parked_reads SET data = ? WHERE id = ?",
+                (_converted_park(str(row_id), str(data)), row_id),
+            )
 
     def _restrict_permissions(self) -> None:
         """Make the database file and any sidecar beside it owner-only (ADR-0004 §4).
@@ -998,3 +1115,59 @@ def _revalidated(record: ParkedRead) -> ParkedRead:
     except ValueError as exc:
         msg = f"the park offered to this store is not a valid parked read ({type(exc).__name__})"
         raise AssistantError(msg) from exc
+
+
+def _converted_park(row_id: str, data: str) -> str:
+    """Rewrite one pre-ADR-0249 park row as this version's shape (§12).
+
+    The row's ``goal`` is a pre-decision :class:`~ai_assistant.core.types.Goal`
+    object: an ``id``, a ``statement``, a ``status``, a ``provenance``, a
+    ``created_at`` and an optional ``deadline``. It becomes the
+    :class:`~ai_assistant.core.types.GoalBrief` ADR-0249 §12 describes, and the
+    record's new ``goal_id`` column takes the same ``id``.
+
+    A row whose ``goal`` is already absent is a **terminal** park: settlement cleared
+    it, so there is no objective to project and no identifier to read. Such a row
+    gains ``goal_id`` ``None`` rather than an invented value, which is the one route
+    by which that field is absent on a park this store returns.
+
+    Read and rewritten as JSON rather than through :class:`ParkedRead`, because the
+    stored shape is one the current model no longer validates — a conversion that
+    could only read rows the new contract accepts would be able to convert nothing.
+
+    **Nothing of the row is interpolated into a failure message**, the statement and
+    the query included: ADR-0004 §5's "Tier 0/1 data must never be logged" binds this
+    conversion unchanged, and the row's id is the whole of what a refusal names.
+
+    Args:
+        row_id: The row's id, for the message.
+        data: The row's stored JSON.
+
+    Returns:
+        The row's JSON at the current shape.
+
+    Raises:
+        AssistantError: If the row is not a park this conversion can read.
+    """
+    try:
+        held = json.loads(data)
+        goal = held["goal"]
+        if goal is None:
+            held["goal_id"] = None
+            return json.dumps(held)
+        brief = GoalBrief(
+            goal_id=goal["id"],
+            outcome=goal["statement"],
+            outcome_ground=ground_of(MemorySource(goal["provenance"]["source"])),
+            status=GoalStatus(goal["status"]),
+            deadline=goal["deadline"],
+        )
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        msg = (
+            f"the parked-read store holds a park {row_id!r} this conversion cannot read "
+            f"({type(exc).__name__}); the file is left exactly as it arrived (ADR-0249 §12)"
+        )
+        raise AssistantError(msg) from exc
+    held["goal"] = brief.model_dump(mode="json")
+    held["goal_id"] = brief.goal_id
+    return json.dumps(held)

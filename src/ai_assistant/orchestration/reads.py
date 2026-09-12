@@ -134,7 +134,7 @@ if TYPE_CHECKING:
         BoundEgressCall,
         FetchRefusal,
         FrozenJsonMapping,
-        Goal,
+        GoalBrief,
         MemoryRecord,
         ReadAsk,
         ReadRequest,
@@ -1537,7 +1537,7 @@ class SearchServicer:
         footing: SearchFooting,
         in_view: Sequence[MemoryRecord],
         counts: _SearchCounts,
-        goal: Goal,
+        goal: GoalBrief,
         plan: ActionPlan,
     ) -> _Searched:
         """Compose, bind, rule, record and send — in that order and no other (§11).
@@ -1604,7 +1604,7 @@ class SearchServicer:
             counts: ADR-0238 §11's three counts, **written** as each stage completes
                 rather than returned, so a fault the searcher raised after the ruling
                 leaves behind what actually happened.
-            goal: The :class:`Goal` **this turn** was planned against, persisted onto a
+            goal: The brief of the goal **this turn** was planned against, persisted onto a
                 park so that ADR-0244 §8's continuation composes over the parked turn's
                 own objective rather than fabricating one. It reaches no composer, no
                 model call and no rendering of the question (ADR-0244 §2, §4, §16).
@@ -2071,7 +2071,7 @@ class SearchServicer:
         *,
         footing: SearchFooting,
         utterance: str,
-        goal: Goal,
+        goal: GoalBrief,
         plan: ActionPlan,
     ) -> ParkedRead | None:
         """Write the question this ``CONFIRM`` leaves standing, or answer that none was.
@@ -2121,7 +2121,7 @@ class SearchServicer:
                 two below — the continuation composes over it and would otherwise
                 fabricate it — and read back at the resume rather than re-derived from
                 the goal there.
-            goal: The parked turn's goal.
+            goal: The brief of the parked turn's goal (ADR-0249 §11).
             plan: The parked turn's plan.
 
         Returns:
@@ -2155,6 +2155,13 @@ class SearchServicer:
             parameters=request.parameters,
             utterance=utterance,
             goal=goal,
+            # ADR-0249 §11: an identifier that **settlement does not clear**, taken
+            # off the brief this servicing was handed rather than from a second
+            # source that could disagree with it. It is not a resolution guarantee —
+            # a turn that parked and then ended before its persistence site leaves a
+            # park whose goal the store does not hold, which is answerable exactly as
+            # ADR-0248 §3's `utterance`-less park is.
+            goal_id=goal.goal_id,
             plan=plan,
             parked_at=recorded.decided_at,
             expires_at=expires_at,
@@ -2409,7 +2416,7 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
     search: SearchServicer | None,
     utterance: str,
     audit: TurnReadAudit,
-    goal: Goal,
+    goal: GoalBrief,
     plan: ActionPlan,
     footing: SearchFooting | None = None,
 ) -> ServicedCarriers:
@@ -2607,7 +2614,7 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
             deduplication set and not a value any other kind reads: no store value,
             supply, tail, listing, rationale or record reaches the composing seam,
             which is what keeps ADR-0155 §3 from having a subject here.
-        goal: The :class:`Goal` this turn was planned against. It is read by **one**
+        goal: The brief of the goal this turn was planned against. It is read by **one**
             kind and only on one branch — ADR-0244 §2's park, where a ``WEB_SEARCH``
             servicing records a ``CONFIRM`` — and reaches no composer, no model call
             and no other kind's servicing.
@@ -3018,7 +3025,7 @@ async def _serviced_search(  # noqa: PLR0913 — the seam, the ask, the composer
     truncated: list[ReadKind],
     footing: SearchFooting | None,
     counts: _SearchCounts,
-    goal: Goal,
+    goal: GoalBrief,
     plan: ActionPlan,
 ) -> _Searched:
     """Service one ``WEB_SEARCH`` ask into the fourth group (ADR-0231 §9, §11).
@@ -3095,7 +3102,7 @@ async def _serviced_search(  # noqa: PLR0913 — the seam, the ask, the composer
             unconditionally and every production caller of
             :meth:`~ai_assistant.orchestration.loop.PlanningLoop.respond` passes a
             conversation it has already begun.
-        goal: The goal this turn was planned against, persisted onto a park where this
+        goal: The brief of the goal this turn was planned against, persisted onto a park where this
             servicing records a ``CONFIRM`` (ADR-0244 §2).
         plan: The plan the planner returned on the call this servicing answers,
             persisted for the same reason.

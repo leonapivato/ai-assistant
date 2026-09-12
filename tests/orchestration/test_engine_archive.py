@@ -24,7 +24,10 @@ from test_engine_routing import _UTTERANCE, _parked, _routed_harness, _seed_beli
 
 from ai_assistant.core.errors import TranscriptArchiveError
 from ai_assistant.core.types import (
+    EvidenceDigest,
     ExchangeDisposition,
+    GoalBrief,
+    PlannerOutput,
     ReadAsk,
     SpokenAudio,
     SpokenAudioFormat,
@@ -37,7 +40,7 @@ from ai_assistant.testing.routing import FakeRoutingRecorder
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import ActionPlan, CurrentContext, Goal, MemoryRecord, ShownFile
+    from ai_assistant.core.types import CurrentContext, MemoryRecord, ShownFile
 
 #: A span nothing else in this tree says, so a match anywhere is this entry's.
 ARCHIVED_SPAN = "the lender was Ravensworth and the account was nine-nine-four"
@@ -73,22 +76,28 @@ class RecordingPlanner:
     """
 
     def __init__(self) -> None:
-        self.shown: list[tuple[Goal, CurrentContext, Sequence[MemoryRecord]]] = []
+        self.shown: list[tuple[GoalBrief, CurrentContext, Sequence[MemoryRecord]]] = []
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         from ai_assistant.core.types import ActionPlan  # noqa: PLC0415 — a fake's own import
 
         self.shown.append((goal, context, tuple(memories)))
-        return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(), created_at=AT)
+        return PlannerOutput(
+            plan=ActionPlan(
+                id=f"{goal.goal_id}-plan", goal_id=goal.goal_id, steps=(), created_at=AT
+            )
+        )
 
 
 def _seen_by(harness: Harness, planner: RecordingPlanner, observer: FakeObserver) -> str:

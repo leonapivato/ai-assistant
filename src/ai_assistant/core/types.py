@@ -5633,20 +5633,356 @@ class GoalStatus(StrEnum):
     BLOCKED = "blocked"
 
 
+# --- the goal seam: an understanding, its revisions, and what was tried ------
+# ADR-0249. A `Goal` stops being a string and becomes an **append-only sequence of
+# interpretation revisions**, each a complete statement of what the system
+# understands the request to be for. `Goal.statement` survives as a **read-only
+# projection** of the current revision's outcome, so every existing reader keeps
+# reading it — and the two authorities a stored copy would create cannot disagree,
+# because there is only one.
+#
+# **What crosses the planning seam is a projection and never the record** (§9).
+# `GoalBrief` and `BriefElement` carry each value's ground **kind** and no
+# reference, no span and no identifier, so ADR-0228 §8's namer rule is a property of
+# the types rather than a rule `_render_request` is trusted to keep — which is
+# exactly the move ADR-0230 §4 makes for `ShownFile`.
+
+
+def _refuse_mismatched_ground(  # noqa: PLR0913 — the ground, its two possible arguments, and three facts about the caller that shape the message; every one is a distinct value and a bundle would mint a type for a message
+    *,
+    ground: Ground,
+    reference: str | None,
+    span: str | None,
+    what: str,
+    reference_name: str,
+    bare_user_stated: bool,
+) -> None:
+    """Refuse every ground-and-argument shape ADR-0249 §1 does not admit.
+
+    Stated **once** and read by both validators that need it, so a
+    :class:`GoalElement` and a :class:`GoalInterpretation`'s outcome cannot drift on
+    what a ground means. The one difference between them is ``bare_user_stated``:
+    an interpretation's outcome admits a ``USER_STATED`` carrying neither argument,
+    whose one origin is ADR-0249 §12's migration and whose one further route is §7's
+    retention copying it forward (§1's fourth absence).
+
+    Args:
+        ground: The ground the value declares.
+        reference: The record identifier beside it, or ``None``.
+        span: The span of the request beside it, or ``None``.
+        what: What is being validated, for the message.
+        reference_name: The field name the reference sits on, for the message.
+        bare_user_stated: Whether ``USER_STATED`` with neither argument is admitted.
+
+    Raises:
+        ValueError: If the shape is not one this ground admits.
+    """
+    if ground is Ground.FROM_EVIDENCE:
+        wanted = reference is not None and span is None
+        expected = f"{reference_name} and no span"
+    elif ground is Ground.USER_STATED:
+        wanted = reference is None and (span is not None or bare_user_stated)
+        expected = f"a span and no {reference_name}"
+        if bare_user_stated:
+            expected += " — or neither, on a value ADR-0249 §12 migrated"
+    else:
+        wanted = reference is None and span is None
+        expected = "neither"
+    if not wanted:
+        held = ", ".join(
+            name
+            for name, value in ((reference_name, reference), ("span", span))
+            if value is not None
+        )
+        msg = (
+            f"{what} grounded {ground.value} carries {held or 'neither argument'}, "
+            f"and ADR-0249 §1 admits {expected}"
+        )
+        raise ValueError(msg)
+
+
+class Ground(StrEnum):
+    """How a value of an interpretation came to be known (ADR-0249 §1).
+
+    A **closed** enumeration of exactly **three** members, each valued by its
+    lower-cased name. The vocabulary is **added to and never renamed**, on
+    ``ReadKind``'s own rule (ADR-0226 §4): no later ADR removes a member, renames
+    one, gives one a second spelling, or replaces this enum with a
+    differently-named one for the same question.
+
+    It is a **kind** and never a reference. Where an argument accompanies it — an
+    evidence id, a span of the turn's request — that argument sits beside it on the
+    value it grounds, and the planner-facing projections carry the kind alone
+    (ADR-0249 §9, §10).
+    """
+
+    USER_STATED = "user_stated"
+    """The user said it, and the span of their request that says so is carried."""
+
+    FROM_EVIDENCE = "from_evidence"
+    """A record of the labelled supply establishes it, named by ``evidence_id``."""
+
+    INFERRED = "inferred"
+    """Neither: the system judged it, and carries no argument for it."""
+
+
+def ground_of(source: MemorySource) -> Ground:
+    """The ground a stored :class:`Provenance` source reads as (ADR-0249 §12).
+
+    **The one grounding rule both of ADR-0249 §12's migrations take**, stated once so
+    the plan store's conversion and the parked-read store's cannot drift on it — the
+    shape :func:`band_of` already has for ADR-0072 §2's classification. It reads the
+    **row** rather than §3's rule: §3 makes an *opened* revision 1's ground
+    ``USER_STATED`` because for a goal this system opens the outcome *is* the
+    request, which a migration cannot claim because the request the statement came
+    from was never stored. ``Goal.provenance`` **was**, and ADR-0014 §1 put it on the
+    record for precisely this distinction — "a goal the system **inferred** must
+    never be indistinguishable from one the user **stated**".
+
+    The mapping is **total**, and its totality is mechanically enforced exactly as
+    :func:`band_of`'s is: a :class:`MemorySource` added without choosing its ground
+    fails ``mypy --strict`` rather than being silently classified.
+
+    **No migrated outcome is** ``FROM_EVIDENCE`` (§12), because that ground names a
+    record of the labelled supply through an ``evidence_id`` and a legacy row holds
+    no such reference — recording one would state a warrant the row cannot show.
+
+    Args:
+        source: The provenance source of the goal being migrated.
+
+    Returns:
+        The ground its outcome is recorded under.
+    """
+    match source:
+        case MemorySource.USER_ASSERTED:
+            return Ground.USER_STATED
+        case MemorySource.OBSERVED | MemorySource.INFERRED | MemorySource.EXTERNAL:
+            return Ground.INFERRED
+        case _:  # pragma: no cover - exhaustive
+            assert_never(source)
+
+
+class GoalElement(BaseModel):
+    """One constraint, success criterion or condition of an interpretation (§1).
+
+    **The type is what expresses the correspondence rather than a rule to
+    remember**, which is the move ADR-0244 §2 makes for ``ParkedRead``'s content
+    fields: a :class:`Ground` and the argument it takes travel together or the value
+    does not construct.
+
+    Attributes:
+        text: What the element says, in the system's own words.
+        ground: How it came to be known.
+        evidence_id: The record of the labelled supply that establishes it, present
+            exactly on a ``FROM_EVIDENCE`` element. It is the identifier of the
+            record **the loop itself labelled** (ADR-0249 §7); no identifier crosses
+            the planning seam in either direction.
+        span: The span of the turn's own request that states it, present exactly on
+            a ``USER_STATED`` element.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    text: NonBlankEncodableText = Field(description="What this element says.")
+    ground: Ground = Field(description="How this element came to be known.")
+    evidence_id: Identifier | None = Field(
+        default=None, description="The record establishing it, on a FROM_EVIDENCE element."
+    )
+    span: EncodableText | None = Field(
+        default=None, description="The span of the request stating it, on a USER_STATED element."
+    )
+
+    @model_validator(mode="after")
+    def _ground_carries_its_own_argument(self) -> GoalElement:
+        """Admit exactly ADR-0249 §1's three shapes and refuse every other.
+
+        Raises:
+            ValueError: If the ground and the arguments beside it disagree.
+        """
+        _refuse_mismatched_ground(
+            ground=self.ground,
+            reference=self.evidence_id,
+            span=self.span,
+            what="a goal element",
+            reference_name="evidence_id",
+            bare_user_stated=False,
+        )
+        return self
+
+
+#: The most interpretation revisions one goal's history holds (ADR-0249 §2).
+#:
+#: **A fixed constant and not a ``Settings`` field**, exactly as
+#: :data:`MAX_TOPICS_PER_PROPOSAL` is not (ADR-0213 §4): ADR-0086 §1's reasoning for
+#: fixing its own bound in ``core`` applies unchanged — "a knob that raises the ceiling
+#: is a knob that re-opens it". A goal whose sequence would exceed it drops its
+#: **oldest** element on the write that would exceed it, never its current one, and
+#: :attr:`Goal.interpretation_elided` carries how many have gone.
+#:
+#: **Why 32 and not a tuned figure** (§2): the bound exists to stop a long-running goal
+#: growing a row without limit, not to express a judgement about how often an
+#: understanding should change.
+MAX_GOAL_INTERPRETATIONS: Final[int] = 32
+
+
+class GoalInterpretation(BaseModel):
+    """One revision of what the system understands a request to be for (§1).
+
+    A revision is a **complete statement** of an understanding: its outcome, and the
+    constraints, success criteria and conditions that stand with it. It carries no
+    plan, no attempt, no evidence and no status — those belong to the attempt, to the
+    plan and to the goal respectively.
+
+    **The outcome carries its own ground**, and that is what keeps ADR-0014 §1's
+    stated-versus-inferred distinction alive on a goal carrying no elements at all
+    (ADR-0249 §3): every goal is such a goal at revision 1, so a distinction carried
+    only by element grounds would be no distinction exactly where it matters most.
+
+    Attributes:
+        revision: Which understanding this is, at least 1, minted one greater than
+            the revision it follows in the goal's **history** — which after §2's
+            elision need not be the element before it in the tuple.
+        outcome_ground: How the outcome came to be known. Its arguments are carried
+            and validated as a :class:`GoalElement`'s are, but for **one further
+            admitted shape**: ``USER_STATED`` with neither argument, whose one origin
+            is ADR-0249 §12's migration of a row this system stored before the
+            decision and whose one further route is §7's retention copying it
+            forward.
+        outcome_evidence_id: The record establishing the outcome, on a
+            ``FROM_EVIDENCE`` outcome.
+        outcome_span: The span of the turn's request stating the outcome, on a
+            ``USER_STATED`` outcome this system authored.
+        outcome: The understood outcome, as a statement.
+        constraints: What must hold of any way of reaching it.
+        criteria: What would establish that it was reached.
+        conditions: What it depends on.
+        recorded_at: When this revision was recorded.
+        raised_by: The conversation turn whose message caused this revision.
+            ``None`` is reachable by exactly one route — a row written before
+            ADR-0249 (§12) — and **no lane writes it**: a synthesised value would
+            attribute an understanding to a turn that never raised it.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    revision: int = Field(ge=1, description="Which understanding this is, counting from 1.")
+    outcome: NonBlankEncodableText = Field(description="The understood outcome, as a statement.")
+    outcome_ground: Ground = Field(description="How the outcome came to be known.")
+    outcome_evidence_id: Identifier | None = Field(
+        default=None, description="The record establishing the outcome, on a FROM_EVIDENCE one."
+    )
+    outcome_span: EncodableText | None = Field(
+        default=None, description="The span of the request stating it, on a USER_STATED one."
+    )
+    constraints: tuple[GoalElement, ...] = Field(default=(), description="What must hold.")
+    criteria: tuple[GoalElement, ...] = Field(default=(), description="What would establish it.")
+    conditions: tuple[GoalElement, ...] = Field(default=(), description="What it depends on.")
+    recorded_at: UtcInstant = Field(description="When this revision was recorded (tz-aware).")
+    raised_by: Identifier | None = Field(
+        default=None, description="The conversation turn whose message caused this revision."
+    )
+
+    @model_validator(mode="after")
+    def _outcome_ground_carries_its_own_argument(self) -> GoalInterpretation:
+        """Admit ADR-0249 §1's three shapes plus the bare ``USER_STATED`` one.
+
+        Raises:
+            ValueError: If the ground and the arguments beside it disagree.
+        """
+        _refuse_mismatched_ground(
+            ground=self.outcome_ground,
+            reference=self.outcome_evidence_id,
+            span=self.outcome_span,
+            what="an interpretation's outcome",
+            reference_name="outcome_evidence_id",
+            bare_user_stated=True,
+        )
+        return self
+
+
 class Goal(BaseModel):
-    """A durable objective the assistant is working toward (see ADR-0014 §1).
+    """A durable objective the assistant is working toward (ADR-0014 §1, ADR-0249 §1).
 
     Deliberately not the same thing as a user utterance: a request is transient,
     a goal outlives any one conversation and is what makes a plan resumable and
     a notification justifiable. It carries :class:`Provenance` for the same
     reason every memory does — a goal the system *inferred* must never be
     indistinguishable from one the user *stated*.
+
+    **It is an append-only sequence of interpretation revisions** (ADR-0249 §1).
+    :attr:`interpretation` is oldest first and never empty, and its **last** element
+    is the goal's current understanding. No lane edits an element in place, reorders
+    the tuple, removes an element other than by §2's elision, or writes a
+    ``revision`` that is not one greater than the element before it.
+
+    **:attr:`statement` is a read-only projection and not a field** (§1). It has no
+    setter, is not accepted in a constructor, does not appear in ``model_dump()``,
+    and no lane assigns it; every existing reader keeps reading it and receives the
+    current outcome statement. A stored ``statement`` beside a stored interpretation
+    would be **two records of one fact**, and ADR-0244 §2's argument applies without
+    change — a goal read back with a ``statement`` that is not its current outcome
+    would misrepresent a record in exactly the place a reader would not look.
+    Computing it is not the read-time inference ADR-0213 forbids: that clause is
+    about a record's own content being *derived from other content*, and this reads
+    one stored field of one stored element by a fixed rule.
+
+    **A goal round-trips through construction from its own dump** (§1), which is why
+    the projection is a property rather than a computed field: a value that
+    serialised but could not be constructed from would break that round trip under
+    ``extra="forbid"``.
+
+    **The non-blank refusal moved with the value it guards** (§1). It is
+    :attr:`GoalInterpretation.outcome`'s :data:`NonBlankEncodableText` that refuses a
+    blank objective, one type earlier than the validator this model used to carry, so
+    the refusal ``planning/sqlite_store.py`` argues for is preserved rather than
+    dropped.
+
+    Attributes:
+        id: The goal's own identifier.
+        conversation_id: The conversation the goal was **opened in**. It is
+            provenance and **not a fence**: no clause makes a goal unreachable from
+            another conversation, and ADR-0014 §1's "a goal … outlives any one
+            conversation" binds entire.
+        interpretation: The revisions, oldest first, never empty.
+        interpretation_elided: How many revisions this goal's history has dropped
+            (ADR-0249 §2). A **count and never an identifier**, it never decreases,
+            and a write that drops *k* elements advances it by *k*. Silent truncation
+            is not available, on ADR-0086 §4's own ground.
+        status: The goal's **overall disposition** — whether the objective stands,
+            was reached, was given up, or cannot currently be reached — and never the
+            state of any one attempt (ADR-0249 §4).
+        provenance: Where the goal itself came from. Read by ADR-0249 §12's
+            migrations as the ground of a legacy outcome, which is the distinction
+            ADR-0014 §1 put it on the record to carry.
+        created_at: When the goal was recorded.
+        deadline: Optional target date.
+        version: The **compare-and-swap token** every mutation of the goal advances
+            (ADR-0249 §1). It is a different value from a
+            :attr:`GoalInterpretation.revision` and the two are never read for each
+            other: ``version`` orders writes, ``revision`` names an understanding.
+        last_engaged_at: When a turn last engaged the goal. **What engages a goal is
+            A2's** and no lane of ADR-0249 reads this field: the decision lands the
+            carrier and nothing else.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     id: Identifier
-    statement: EncodableText = Field(description="Canonical text rendering of the objective.")
+    conversation_id: Identifier | None = Field(
+        default=None,
+        description=(
+            "The conversation the goal was opened in — provenance, not a fence. None "
+            "is reachable only by a row written before ADR-0249 (§1, §12)."
+        ),
+    )
+    interpretation: tuple[GoalInterpretation, ...] = Field(
+        description="The revisions, oldest first and never empty (ADR-0249 §1)."
+    )
+    interpretation_elided: int = Field(
+        default=0,
+        ge=0,
+        description="How many revisions this goal's history has dropped (ADR-0249 §2).",
+    )
     status: GoalStatus = GoalStatus.ACTIVE
     provenance: Provenance
     created_at: UtcInstant = Field(description="When the goal was recorded (tz-aware).")
@@ -5654,16 +5990,674 @@ class Goal(BaseModel):
         default=None,
         description="Optional target date; timezone-aware, stored as UTC.",
     )
+    version: int = Field(
+        default=0, ge=0, description="The compare-and-swap token every mutation advances."
+    )
+    last_engaged_at: UtcInstant | None = Field(
+        default=None, description="When a turn last engaged this goal (ADR-0249 §1)."
+    )
 
-    @field_validator("statement")
-    @classmethod
-    def _statement_is_present(cls, value: str) -> str:
-        """Require a non-empty statement, so a goal cannot be a blank objective."""
-        stripped = value.strip()
-        if not stripped:
-            msg = "goal statement must not be empty"
+    @property
+    def statement(self) -> str:
+        """The current interpretation's outcome (ADR-0249 §1).
+
+        Returns:
+            The understood outcome of the goal's **last** interpretation revision —
+            the same value every reader of this attribute has always been handed.
+        """
+        return self.interpretation[-1].outcome
+
+    @property
+    def revision(self) -> int:
+        """The current interpretation's ``revision`` (ADR-0249 §1, §8).
+
+        Returns:
+            The revision number a plan formed against this goal now targets. It is
+            not :attr:`version`: this names an understanding, that orders writes.
+        """
+        return self.interpretation[-1].revision
+
+    @model_validator(mode="after")
+    def _interpretation_is_a_sequence(self) -> Goal:
+        """Require a non-empty history whose revisions step by exactly one (§1).
+
+        Raises:
+            ValueError: If the goal carries no interpretation, or if a revision is
+                not one greater than the element before it.
+        """
+        if not self.interpretation:
+            msg = (
+                "a goal carries at least one interpretation revision: no goal is ever "
+                "constructed with an empty interpretation (ADR-0249 §1, §3)"
+            )
             raise ValueError(msg)
-        return stripped
+        for earlier, later in pairwise(self.interpretation):
+            if later.revision != earlier.revision + 1:
+                msg = (
+                    f"a goal's interpretation runs oldest first with each revision one "
+                    f"greater than the one before it: revision {later.revision} follows "
+                    f"{earlier.revision} (ADR-0249 §1)"
+                )
+                raise ValueError(msg)
+        return self
+
+
+class GoalRevision(BaseModel):
+    """The command that appends one interpretation revision to a goal (§12).
+
+    **A command and not a snapshot**, on ADR-0014 §5's own argument: "Had the store
+    taken a whole ``ExecutionState``, any consumer of the Protocol could commit
+    ``PENDING → SUCCEEDED`` directly and the claim that deterministic code owns state
+    transitions (VISION §7) would rest on nobody choosing to bypass it."
+
+    Attributes:
+        goal_id: The goal to append to.
+        interpretation: The revision to append.
+        expected_version: The :attr:`Goal.version` this revision was computed
+            against. The read, the comparison and the write are **one indivisible
+            step**, and there is no separate read on which a decision is taken.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    goal_id: Identifier
+    interpretation: GoalInterpretation
+    expected_version: int = Field(ge=0, description="The Goal.version this was computed against.")
+
+
+class AttemptPhase(StrEnum):
+    """Where one attempt stands in the task lifecycle (ADR-0249 §6).
+
+    A **closed** enumeration of exactly **six** members, **in this order**, each
+    valued by its lower-cased name. The vocabulary is added to and never renamed.
+
+    **Within one attempt the phase advances in that order and never moves
+    backwards**, and a new attempt opens at :attr:`UNDERSTAND`. Recording an
+    interpretation revision does **not** move it: an understanding revised during
+    investigation advances the goal's ``version`` and leaves the attempt where it
+    stood.
+
+    **A phase whose work is vacuous is stamped and left in the same instant**: no
+    phase mandates a model call, a store read, a park or a user interaction, and a
+    turn that answers a plain question passes through all six on one planner call.
+
+    **``orchestration`` stamps the phase** (§6's writer clause). No model output
+    writes one, no field of any planner envelope carries one, and no implementation
+    infers one at read time.
+    """
+
+    UNDERSTAND = "understand"
+    INVESTIGATE = "investigate"
+    PLAN = "plan"
+    AUTHORIZE = "authorize"
+    EXECUTE = "execute"
+    VERIFY = "verify"
+
+
+class AttemptState(StrEnum):
+    """What one attempt is doing, or why it stopped (ADR-0249 §5).
+
+    A **closed** enumeration of exactly **seven** members, each valued by its
+    lower-cased name and added to but never renamed. :attr:`CANCELLED` and
+    :attr:`ENDED` are the **terminal** members and **no transition leaves a terminal
+    member**.
+    """
+
+    RUNNING = "running"
+    AWAITING_CLARIFICATION = "awaiting_clarification"
+    AWAITING_AUTHORIZATION = "awaiting_authorization"
+    BLOCKED = "blocked"
+    EFFECT_UNRESOLVED = "effect_unresolved"
+    CANCELLED = "cancelled"
+    ENDED = "ended"
+
+
+#: The two terminal members of :class:`AttemptState` (ADR-0249 §5), stated once so a
+#: reader and a store cannot disagree on which moves are final.
+TERMINAL_ATTEMPT_STATES: Final[frozenset[AttemptState]] = frozenset(
+    {AttemptState.CANCELLED, AttemptState.ENDED}
+)
+
+
+class AttemptOutcome(StrEnum):
+    """What one attempt produced (ADR-0249 §5).
+
+    A **closed** enumeration of exactly **six** members, each valued by its
+    lower-cased name and added to but never renamed. **Which member a given attempt
+    earns is A10's**; this vocabulary is fixed here, because a field typed by an enum
+    nobody has written is not a contract.
+    """
+
+    VERIFIED = "verified"
+    CONDITION_PREVENTED = "condition_prevented"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    UNCERTAIN = "uncertain"
+    ANSWERED = "answered"
+    """The attempt produced an answer and **nothing was verified**.
+
+    It is not a weaker :attr:`VERIFIED` and no lane reads it as one: it asserts that
+    a reply exists, that no step failed and that no condition blocked, and it asserts
+    nothing about whether the reply is correct."""
+
+
+class AttemptEffort(BaseModel):
+    """What one attempt has spent (ADR-0249 §5).
+
+    **Waiting is not work**, and the ledger separates them because an allowance that
+    counted wall-clock would exhaust every paused goal by morning. Both members are
+    **monotonically non-decreasing within an attempt**: no replan, branch, recovery
+    or phase transition resets either, and no implementation subtracts from one.
+
+    **A3 fixes the allowances, the reserve and any further member** (§13). This type
+    fixes the ledger's owner — the attempt — and the two counters, and fixes no
+    figure.
+
+    Attributes:
+        planner_calls: How many ``Planner.plan`` calls this attempt has made.
+        working: The attempt's accumulated **working** intervals, **excluding every
+            interval spent waiting for the user**.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    planner_calls: int = Field(default=0, ge=0, description="Planner calls this attempt made.")
+    working: timedelta = Field(
+        default=timedelta(0), ge=timedelta(0), description="Accumulated working time."
+    )
+
+
+class GoalAttempt(BaseModel):
+    """What was tried for a goal, once, from a user act (ADR-0249 §5).
+
+    **A reopened goal starts a new attempt**, and an attempt is opened only by a
+    **user act**: no implementation opens one in order to obtain a fresh allowance,
+    and no replan, branch or recovery opens one. Which user acts open one is A2's and
+    A3's; that they must be user acts is fixed here.
+
+    **Plans, executions and authorizations are referenced by id and never inlined**,
+    which is ADR-0014 §3's own pattern for ``approval_ref``. The three tuples grow by
+    **append** and never by replacement (§12).
+
+    **An attempt carries no interpretation and no element** (§5). The objective and
+    its disposition are the goal's; the phase, the progress and the effort are the
+    attempt's.
+
+    **It records its position, not its itinerary** (§12): one :attr:`phase` and one
+    :attr:`state`, with no history of the phases passed through and no instant per
+    phase. §6 makes the order fixed and monotonic, so the phases an attempt has
+    passed are exactly those at or before its current one. A per-phase event log is a
+    different record with its own retention and export obligations; **no lane infers
+    one from a** ``GoalAttempt``.
+
+    Attributes:
+        id: The attempt's own identifier.
+        goal_id: The goal this attempt is for.
+        opened_at: When the user act that opened it occurred.
+        phase: Where it stands in the lifecycle.
+        state: What it is doing, or why it stopped.
+        outcome: What it produced, present exactly on a terminal :attr:`state`.
+        effort: What it has spent.
+        plan_ids: The plans it produced, in the order they were appended.
+        execution_ids: The executions it opened, in the order they were appended.
+        authorization_ids: The authorizations it took, in the order appended.
+        ended_at: When it reached a terminal state, present exactly then.
+        version: Its own compare-and-swap token.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Identifier
+    goal_id: Identifier
+    opened_at: UtcInstant = Field(description="When the user act that opened it occurred.")
+    phase: AttemptPhase = Field(
+        default=AttemptPhase.UNDERSTAND, description="Where this attempt stands (ADR-0249 §6)."
+    )
+    state: AttemptState = Field(
+        default=AttemptState.RUNNING, description="What it is doing, or why it stopped."
+    )
+    outcome: AttemptOutcome | None = Field(
+        default=None, description="What it produced, on a terminal state alone."
+    )
+    effort: AttemptEffort = Field(
+        default_factory=AttemptEffort, description="What this attempt has spent."
+    )
+    plan_ids: tuple[Identifier, ...] = Field(default=(), description="The plans it produced.")
+    execution_ids: tuple[Identifier, ...] = Field(
+        default=(), description="The executions it opened."
+    )
+    authorization_ids: tuple[Identifier, ...] = Field(
+        default=(), description="The authorizations it took."
+    )
+    ended_at: UtcInstant | None = Field(
+        default=None, description="When it reached a terminal state (tz-aware)."
+    )
+    version: int = Field(default=0, ge=0, description="Its own compare-and-swap token.")
+
+    @model_validator(mode="after")
+    def _terminal_states_carry_their_result(self) -> GoalAttempt:
+        """Admit exactly ADR-0249 §5's two shapes and refuse every other.
+
+        Raises:
+            ValueError: If a terminal attempt carries no result, or a live one does.
+        """
+        terminal = self.state in TERMINAL_ATTEMPT_STATES
+        settled = {"outcome": self.outcome, "ended_at": self.ended_at}
+        if terminal:
+            absent = sorted(name for name, value in settled.items() if value is None)
+            if absent:
+                msg = (
+                    f"a {self.state.value} attempt carries what it produced and when it "
+                    f"ended: {', '.join(absent)} "
+                    f"{'is' if len(absent) == 1 else 'are'} absent (ADR-0249 §5)"
+                )
+                raise ValueError(msg)
+            return self
+        present = sorted(name for name, value in settled.items() if value is not None)
+        if present:
+            msg = (
+                f"a {self.state.value} attempt has not ended: {', '.join(present)} "
+                f"{'is' if len(present) == 1 else 'are'} already set, and no "
+                f"transition leaves a terminal member (ADR-0249 §5)"
+            )
+            raise ValueError(msg)
+        return self
+
+
+class AttemptTransition(BaseModel):
+    """The command that mutates one attempt — its **only** route (ADR-0249 §12).
+
+    **Every member is optional and every absent member leaves its field unchanged.**
+    An ``add_*`` member **appends** its identifier to the corresponding tuple; an
+    identifier the tuple already holds is **ignored** rather than duplicated or
+    refused, and no member removes, reorders or replaces one.
+
+    Attributes:
+        attempt_id: The attempt to move.
+        expected_version: The :attr:`GoalAttempt.version` this was computed against.
+        to_phase: The phase to stamp; never earlier than the one held (§6).
+        to_state: The state to move to; never out of a terminal member (§5).
+        outcome: What the attempt produced, set as it reaches a terminal state.
+        ended_at: When it reached one.
+        planner_calls: The effort counter's new value; never below the one held (§5).
+        working: The working ledger's new value; never below the one held (§5).
+        add_plan_id: A plan to append to :attr:`GoalAttempt.plan_ids`.
+        add_execution_id: An execution to append to :attr:`GoalAttempt.execution_ids`.
+        add_authorization_id: An authorization to append to
+            :attr:`GoalAttempt.authorization_ids`.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    attempt_id: Identifier
+    expected_version: int = Field(ge=0, description="The version this was computed against.")
+    to_phase: AttemptPhase | None = Field(default=None, description="The phase to stamp.")
+    to_state: AttemptState | None = Field(default=None, description="The state to move to.")
+    outcome: AttemptOutcome | None = Field(default=None, description="What the attempt produced.")
+    ended_at: UtcInstant | None = Field(default=None, description="When it reached a terminal.")
+    planner_calls: int | None = Field(
+        default=None, ge=0, description="The effort counter's new value."
+    )
+    working: timedelta | None = Field(
+        default=None, ge=timedelta(0), description="The working ledger's new value."
+    )
+    add_plan_id: Identifier | None = Field(default=None, description="A plan id to append.")
+    add_execution_id: Identifier | None = Field(
+        default=None, description="An execution id to append."
+    )
+    add_authorization_id: Identifier | None = Field(
+        default=None, description="An authorization id to append."
+    )
+
+
+class BriefElement(BaseModel):
+    """One element of a :class:`GoalBrief` — the text and the ground **kind** (§9).
+
+    It carries the kind and **nothing else**: no evidence identifier, no record id
+    and no span. The containment is a property of the type, which is ADR-0230 §4's
+    own move for ``ShownFile`` — "that is a property of the types rather than a rule
+    a planner is trusted to keep".
+
+    Attributes:
+        text: What the element says.
+        ground: How it came to be known — the kind, never the reference.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    text: NonBlankEncodableText = Field(description="What this element says.")
+    ground: Ground = Field(description="How it came to be known — the kind alone.")
+
+
+class GoalBrief(BaseModel):
+    """The planner-facing projection of a goal (ADR-0249 §9).
+
+    **A brief carries no ground reference, no record identifier, no evidence
+    identifier, no span, no revision number, no attempt, no plan, no effort figure
+    and no authority.** It carries the outcome's :class:`Ground` and each element's —
+    the **kind** and never the reference — which is what ADR-0014 §1's
+    stated-versus-inferred distinction needs and the whole of what this projection
+    discloses about provenance. An implementation that rendered every field of every
+    value it was handed, logged them all, or returned them, discloses none of those,
+    because there is none on the value to disclose.
+
+    **It is projected from the goal's current interpretation alone** — never from an
+    elided revision, a superseded one, or a union of several. :meth:`of` is that
+    projection, stated once so two surfaces cannot render it differently.
+
+    **The elements are labelled, and the scheme is ADR-0226 §3's applied to three
+    sequences**: the label of the element at 1-based index *n* of
+    :attr:`constraints` is ``C`` followed by *n* in decimal with no padding; of
+    :attr:`criteria`, ``S`` followed by *n*; of :attr:`conditions`, ``D`` followed by
+    *n*. Both sides derive the label from the brief they hold and neither consults
+    the other, and **no label survives the call that rendered it**.
+
+    **What ``goal_id`` is doing here, since the rule above forbids identifiers**
+    (§9): it is not a record identifier in ADR-0228 §8's sense — it names the
+    *subject* of the call rather than a record in the labelled supply, it has crossed
+    this seam since ADR-0014 §6 put ``Goal`` in the signature, and
+    ``ActionPlan.goal_id`` is the value ``Engine._check_plan_is_for_goal`` compares it
+    against. It is also **rendered nowhere**, so no model ever sees it.
+
+    Attributes:
+        goal_id: The goal this brief projects.
+        outcome: Its current understood outcome.
+        outcome_ground: How that outcome came to be known — the kind alone.
+        constraints: What must hold, labelled ``C1``, ``C2``, ….
+        criteria: What would establish it, labelled ``S1``, ``S2``, ….
+        conditions: What it depends on, labelled ``D1``, ``D2``, ….
+        status: The goal's overall disposition.
+        deadline: Its optional target date.
+        open_questions: The **texts** of the goal's open questions — all a planner
+            can act on, since a question's identity, its deadline and its settlement
+            are A2's. Empty on every brief ADR-0249's own lanes build.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    goal_id: Identifier
+    outcome: NonBlankEncodableText = Field(description="The current understood outcome.")
+    outcome_ground: Ground = Field(description="How that outcome came to be known.")
+    constraints: tuple[BriefElement, ...] = Field(default=(), description="What must hold.")
+    criteria: tuple[BriefElement, ...] = Field(default=(), description="What would establish it.")
+    conditions: tuple[BriefElement, ...] = Field(default=(), description="What it depends on.")
+    status: GoalStatus = Field(
+        default=GoalStatus.ACTIVE, description="The goal's overall disposition."
+    )
+    deadline: UtcInstant | None = Field(default=None, description="The goal's target date.")
+    open_questions: tuple[NonBlankEncodableText, ...] = Field(
+        default=(), description="The texts of the goal's open questions (ADR-0249 §9)."
+    )
+
+    @classmethod
+    def of(cls, goal: Goal) -> GoalBrief:
+        """Project ``goal``'s **current** interpretation onto a brief (ADR-0249 §9).
+
+        The one projection site in the system, so that "no lane projects a brief from
+        an elided revision, from a superseded one, or from a union of several" is a
+        property of there being one implementation rather than of every caller
+        remembering the rule.
+
+        :attr:`open_questions` is empty: ADR-0249 §7 carries a
+        :class:`ProposedUnderstanding`'s ``questions`` and no lane of that decision
+        reads them, and what a raised question becomes is A2's.
+
+        Args:
+            goal: The goal to project.
+
+        Returns:
+            The brief a planner is handed for this goal.
+        """
+        current = goal.interpretation[-1]
+        shown = tuple(
+            tuple(BriefElement(text=element.text, ground=element.ground) for element in group)
+            for group in (current.constraints, current.criteria, current.conditions)
+        )
+        return cls(
+            goal_id=goal.id,
+            outcome=current.outcome,
+            outcome_ground=current.outcome_ground,
+            constraints=shown[0],
+            criteria=shown[1],
+            conditions=shown[2],
+            status=goal.status,
+            deadline=goal.deadline,
+        )
+
+
+class EvidenceStanding(StrEnum):
+    """Whether a piece of evidence still bears on a goal (ADR-0249 §10).
+
+    A **closed** enumeration of exactly **three** members, each valued by its
+    lower-cased name and added to but never renamed. **Which rules put a row in
+    :attr:`INAPPLICABLE` or :attr:`SUPERSEDED` are A4's**; that the digest can *say* a
+    row was superseded is fixed here, so that refreshed evidence has a way to state
+    that it displaces an older disagreement rather than standing beside it forever.
+    """
+
+    STANDING = "standing"
+    INAPPLICABLE = "inapplicable"
+    SUPERSEDED = "superseded"
+
+
+class EvidenceDigest(BaseModel):
+    """What the planner is told about one piece of evidence (ADR-0249 §10).
+
+    **It carries no record identifier**, no evidence row id, no memory id, no
+    snippet, no title and no address: ADR-0228 §8's namer rule binds it exactly as it
+    binds :class:`GoalBrief`.
+
+    Attributes:
+        requested: What the ask named, or ``None``.
+        supported: What the response establishes a proposition about, or ``None``.
+            It is **never derived** from :attr:`requested`, from the query, or from
+            the fact that a read completed, and **an absent ``supported`` supports
+            nothing**.
+        read_at: When the read was taken.
+        as_of: What instant the response speaks for, where it says.
+        verdict: The **value of a typed outcome** — never a prose summary a model
+            wrote about one. The outcome vocabularies themselves are A4's.
+        standing: Whether it still bears on the goal.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    requested: EncodableText | None = Field(default=None, description="What the ask named.")
+    supported: EncodableText | None = Field(
+        default=None, description="What the response establishes a proposition about."
+    )
+    read_at: UtcInstant = Field(description="When the read was taken (tz-aware).")
+    as_of: UtcInstant | None = Field(default=None, description="What instant it speaks for.")
+    verdict: EncodableText = Field(description="The typed outcome's own value.")
+    standing: EvidenceStanding = Field(description="Whether it still bears on the goal.")
+
+
+class ProposedElement(BaseModel):
+    """One element a planner proposes, or keeps by naming it (ADR-0249 §7).
+
+    **A planner keeps an element by naming it, and keeping is not restating.** A
+    :attr:`retains` value is the **label** of an element of the :class:`GoalBrief`
+    this call received; ``orchestration`` resolves it to that element of the current
+    interpretation and copies it into the new revision **whole and unchanged**. The
+    planner is not asked to re-ground it and **cannot**: the brief carries no
+    reference and no span.
+
+    Without that, the case ADR-0249 §7 turns on fails. After *"Book a campsite, under
+    $100"* and then *"Actually, make it Sunday"*, the budget constraint's own span is
+    in the **first** turn's request: a planner asked to restate it could only re-emit
+    it as ``USER_STATED`` — which §7 then drops — or as ``INFERRED``, quietly
+    downgrading an explicit user instruction.
+
+    Attributes:
+        text: What a **new** element says.
+        ground: How a new element came to be known.
+        evidence_label: The ``M`` label of the record establishing it, on a
+            ``FROM_EVIDENCE`` element. A **label and never an identifier**.
+        span: The span of this turn's request stating it, on a ``USER_STATED`` one.
+        retains: The brief label of an element to keep whole, and the only field a
+            retaining element carries.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    text: NonBlankEncodableText | None = Field(default=None, description="What a new element says.")
+    ground: Ground | None = Field(default=None, description="How a new element came to be known.")
+    evidence_label: EncodableText | None = Field(
+        default=None, description="The label of the record establishing it."
+    )
+    span: EncodableText | None = Field(
+        default=None, description="The span of this turn's request stating it."
+    )
+    retains: EncodableText | None = Field(
+        default=None, description="The brief label of an element to keep whole."
+    )
+
+    @model_validator(mode="after")
+    def _is_new_or_retaining(self) -> ProposedElement:
+        """Admit exactly ADR-0249 §7's four shapes and refuse every other.
+
+        Raises:
+            ValueError: If the element neither states a new value nor keeps one.
+        """
+        if self.retains is not None:
+            beside = sorted(
+                name
+                for name, value in (
+                    ("text", self.text),
+                    ("ground", self.ground),
+                    ("evidence_label", self.evidence_label),
+                    ("span", self.span),
+                )
+                if value is not None
+            )
+            if beside:
+                msg = (
+                    f"a retaining element carries retains and nothing else: "
+                    f"{', '.join(beside)} "
+                    f"{'is' if len(beside) == 1 else 'are'} set beside it (ADR-0249 §7)"
+                )
+                raise ValueError(msg)
+            return self
+        if self.text is None or self.ground is None:
+            msg = (
+                "a new element carries text and ground, and a retaining one carries "
+                "retains alone (ADR-0249 §7)"
+            )
+            raise ValueError(msg)
+        _refuse_mismatched_ground(
+            ground=self.ground,
+            reference=self.evidence_label,
+            span=self.span,
+            what="a proposed element",
+            reference_name="evidence_label",
+            bare_user_stated=False,
+        )
+        return self
+
+
+class ProposedUnderstanding(BaseModel):
+    """What a planner proposes the system now understands (ADR-0249 §7).
+
+    **It carries no revision number, no ``raised_by``, no ``recorded_at``, no goal id
+    and no phase** — every one of those is ``orchestration``'s under §6's writer
+    clause, and a planner envelope that comes back carrying one has it **discarded
+    silently**.
+
+    **The outcome is retained or restated, and exactly those two shapes construct.**
+    Retained: :attr:`retains_outcome` set and every outcome field absent. Restated:
+    :attr:`retains_outcome` clear, :attr:`outcome` and :attr:`outcome_ground` both
+    present, and the ground's argument correct for it. An understanding that neither
+    states an outcome nor retains one is **not constructible**, so omitting the
+    objective is impossible rather than a silent removal.
+
+    **A revision states its elements in full, and omission is removal** (§7). An
+    element of the current interpretation that this value neither retains nor
+    replaces is not in the new revision; there is no delete member and no
+    partial-update shape.
+
+    Attributes:
+        outcome: The restated outcome, absent on a retained one.
+        outcome_ground: How the restated outcome came to be known.
+        outcome_evidence_label: The ``M`` label establishing a ``FROM_EVIDENCE``
+            outcome.
+        outcome_span: The span of this turn's request stating a ``USER_STATED`` one.
+        retains_outcome: Whether the current outcome is kept whole. On a retained
+            outcome ``orchestration`` copies the current revision's ``outcome``, its
+            ``outcome_ground``, its ``outcome_evidence_id`` and its ``outcome_span``
+            **byte for byte** — including a ``USER_STATED`` ground whose span is
+            absent because ADR-0249 §12 migrated the row it came from.
+        constraints: The constraints this understanding states in full.
+        criteria: The success criteria it states in full.
+        conditions: The conditions it states in full.
+        questions: What the planner would ask. **Carried and read by no lane of
+            ADR-0249**; what a raised question becomes is A2's.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    outcome: NonBlankEncodableText | None = Field(
+        default=None, description="The restated outcome, absent on a retained one."
+    )
+    outcome_ground: Ground | None = Field(
+        default=None, description="How the restated outcome came to be known."
+    )
+    outcome_evidence_label: EncodableText | None = Field(
+        default=None, description="The label establishing a FROM_EVIDENCE outcome."
+    )
+    outcome_span: EncodableText | None = Field(
+        default=None, description="The span stating a USER_STATED outcome."
+    )
+    retains_outcome: bool = Field(
+        default=False, description="Whether the current outcome is kept whole (ADR-0249 §7)."
+    )
+    constraints: tuple[ProposedElement, ...] = Field(default=(), description="What must hold.")
+    criteria: tuple[ProposedElement, ...] = Field(
+        default=(), description="What would establish it."
+    )
+    conditions: tuple[ProposedElement, ...] = Field(default=(), description="What it depends on.")
+    questions: tuple[NonBlankEncodableText, ...] = Field(
+        default=(), description="What the planner would ask (carried, read by no lane here)."
+    )
+
+    @model_validator(mode="after")
+    def _outcome_is_retained_or_restated(self) -> ProposedUnderstanding:
+        """Admit exactly ADR-0249 §7's two outcome shapes.
+
+        Raises:
+            ValueError: If the outcome is neither retained nor properly restated.
+        """
+        stated = {
+            "outcome": self.outcome,
+            "outcome_ground": self.outcome_ground,
+            "outcome_evidence_label": self.outcome_evidence_label,
+            "outcome_span": self.outcome_span,
+        }
+        if self.retains_outcome:
+            present = sorted(name for name, value in stated.items() if value is not None)
+            if present:
+                msg = (
+                    f"a retained outcome states nothing beside retains_outcome: "
+                    f"{', '.join(present)} "
+                    f"{'is' if len(present) == 1 else 'are'} set (ADR-0249 §7)"
+                )
+                raise ValueError(msg)
+            return self
+        if self.outcome is None or self.outcome_ground is None:
+            msg = (
+                "an understanding states an outcome or retains the current one: "
+                "outcome and outcome_ground are both required where retains_outcome "
+                "is clear (ADR-0249 §7)"
+            )
+            raise ValueError(msg)
+        _refuse_mismatched_ground(
+            ground=self.outcome_ground,
+            reference=self.outcome_evidence_label,
+            span=self.outcome_span,
+            what="a proposed outcome",
+            reference_name="outcome_evidence_label",
+            bare_user_stated=False,
+        )
+        return self
 
 
 class PlanStep(BaseModel):
@@ -6626,6 +7620,30 @@ class ActionPlan(BaseModel):
     (ADR-0228 §5) — which is ADR-0014 §5's export promise kept at write time rather
     than a new invariant. :class:`PlanExport`'s reference closure covers it for the
     same reason.
+
+    **And a plan names the interpretation revision it targets** (ADR-0249 §8).
+    :attr:`targets_revision` is the second field the loop takes for its own, under
+    ADR-0228 §5's identical discipline — taken once, immediately on return, at the
+    same moment as ``supersedes`` and discarding whatever the plan came back
+    carrying — and every remaining field is still exactly as the planner returned it.
+    ADR-0228 §1's one-field clause becomes a two-field clause **in that count
+    alone**; its authored-at-the-seam enumeration is untouched, because
+    ``targets_revision`` is not among the five fields it names.
+
+    **The value is the goal's current revision at the moment the loop takes the plan
+    — after this same call's ``understanding``, if any, has been recorded** (§8).
+    Ordering the stamp after the recording step is the whole of what makes "a plan is
+    never stale against the understanding it was returned with" true: stamping the
+    *input* revision would leave every turn on which the planner revised its
+    understanding holding a plan §8 forbids driving.
+
+    **A plan whose ``targets_revision`` is not the goal's current revision is not
+    driven**, and the refusal is the store's: ``PlanStore.commit_transition`` accepts
+    a ``→ RUNNING`` claim only where the plan the execution runs targets the current
+    revision of that plan's goal, reading the plan and the goal **inside the same
+    indivisible step** as the claim. ADR-0014 §5's reason is why it lives there —
+    "it belongs to the store because the store is the only place with a total order
+    over writes".
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -6655,6 +7673,19 @@ class ActionPlan(BaseModel):
             "is never read as an error or as an unknown."
         ),
     )
+    targets_revision: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "The GoalInterpretation.revision this plan was planned against, or None "
+            "where it is not yet stamped (ADR-0249 §8). None is the only value a "
+            "planner can return, because a GoalBrief carries no revision to copy; "
+            "the loop takes the field for its own on every plan a planner returns, "
+            "discarding whatever came back, and PlanStore.save_plan refuses a plan "
+            "that still carries None. A plan already on disk carrying it — the one "
+            "route being a row written before ADR-0249 — decodes and is not driven."
+        ),
+    )
 
     @field_validator("steps")
     @classmethod
@@ -6669,6 +7700,39 @@ class ActionPlan(BaseModel):
             msg = "plan step ids must be unique within a plan"
             raise ValueError(msg)
         return value
+
+
+class PlannerOutput(BaseModel):
+    """What one ``Planner.plan`` call returns (ADR-0249 §7).
+
+    Exactly two fields, and the second is the whole of what this envelope adds: a
+    call decides the understanding and the plan **in one pass**, so the plan embodies
+    the understanding rather than predating it.
+
+    **``None`` means the planner proposed no change to the understanding**, and it is
+    the semantically correct answer for a planner that knows nothing of this
+    envelope. No implementation reads ``None`` as an error, a degradation, or an
+    instruction to re-plan.
+
+    **``ActionPlan.read_request`` does not move.** ADR-0226 §4 places it on the plan
+    and §8 makes the plan's own field the whole of the trigger's record, so this
+    envelope carries no read request of its own.
+
+    Attributes:
+        plan: What the planner decided to do.
+        understanding: What it proposes the system now understands, or ``None``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    plan: ActionPlan = Field(description="What the planner decided to do.")
+    understanding: ProposedUnderstanding | None = Field(
+        default=None,
+        description=(
+            "What the planner proposes the system now understands, or None where it "
+            "proposed no change (ADR-0249 §7). None is never read as an error."
+        ),
+    )
 
 
 # --- the search seam: what one composition of a query produced (ADR-0231 §3) --
@@ -7877,7 +8941,24 @@ class PlanExport(BaseModel):
     internally consistent — every ``goal_id``/``plan_id`` referenced by an
     included record resolves within the same export.
 
-    **``schema_version`` is 7 because ``ActionPlan``'s ``read_request`` changed
+    **``schema_version`` is 8 because this document gained ``attempts`` and
+    ``ActionPlan`` gained ``targets_revision``** (ADR-0249 §11, §12). Both are shape
+    changes to every document that carries a plan or an attempt, and either would
+    oblige the move on its own: ``tuple[GoalAttempt, ...]`` is a member an earlier
+    reading of this document has no field for, and ``targets_revision`` is emitted by
+    ``model_dump()`` on **every** plan a document carries and refused by an older
+    reader's ``extra="forbid"``. ``Goal`` itself changes shape in the same decision —
+    it gains ``conversation_id``, ``interpretation``, ``interpretation_elided``,
+    ``version`` and ``last_engaged_at``, and loses ``statement`` from its dump — which
+    is a third independent ground over ``tuple[Goal, ...]``.
+
+    **ADR-0014 §5's closure rule extends to the attempt rather than changing** (§11):
+    an export naming an attempt's goal it does not carry does not validate as a
+    ``PlanExport`` at all, and the plan and execution ids an attempt references
+    resolve within the same document for the reason ``supersedes`` does. It does
+    **not** gain evidence rows, because A4 mints them (§10).
+
+    **It was 7 because ``ActionPlan``'s ``read_request`` changed
     shape again** (ADR-0240 §11): ``ReadKind`` gained ``STRUCTURED_READ``, ``ReadAsk``
     gained ``structure`` and the arm that admits it, and ``StructuredAsk`` is a model
     an earlier reading of this document has no field for — so a plan carrying such an
@@ -7932,12 +9013,12 @@ class PlanExport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[7] = Field(
-        default=7,
+    schema_version: Literal[8] = Field(
+        default=8,
         description=(
-            "Shape of this export, pinned to exactly 7 (ADR-0039 §10, ADR-0240 §11): an "
+            "Shape of this export, pinned to exactly 8 (ADR-0039 §10, ADR-0249 §11): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[7]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[8]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."
@@ -7947,6 +9028,7 @@ class PlanExport(BaseModel):
     goals: tuple[Goal, ...] = ()
     plans: tuple[ActionPlan, ...] = ()
     executions: tuple[ExecutionState, ...] = ()
+    attempts: tuple[GoalAttempt, ...] = ()
 
     @model_validator(mode="after")
     def _references_resolve_within_the_export(self) -> PlanExport:
@@ -7960,11 +9042,13 @@ class PlanExport(BaseModel):
         goal_ids = {goal.id for goal in self.goals}
         plan_ids = {plan.id for plan in self.plans}
         execution_ids = {execution.id for execution in self.executions}
+        attempt_ids = {attempt.id for attempt in self.attempts}
 
         for label, records, ids in (
             ("goal", self.goals, goal_ids),
             ("plan", self.plans, plan_ids),
             ("execution", self.executions, execution_ids),
+            ("attempt", self.attempts, attempt_ids),
         ):
             if len(ids) != len(records):
                 msg = f"export contains duplicate {label} ids"
@@ -7997,6 +9081,26 @@ class PlanExport(BaseModel):
         if dangling_executions:
             msg = f"export has executions whose plan is missing: {', '.join(dangling_executions)}"
             raise ValueError(msg)
+
+        # ADR-0249 §11: ADR-0014 §5's completeness promise **extends** to the attempt
+        # rather than changing. An attempt names a goal, and names the plans and
+        # executions it accumulated, so each of those is a `goal_id`/`plan_id` §5
+        # requires to resolve within the same document — the same reading that put
+        # `supersedes` under this validator, stated over three more references.
+        for label, missing in (
+            ("goal", sorted(a.id for a in self.attempts if a.goal_id not in goal_ids)),
+            (
+                "plan",
+                sorted(a.id for a in self.attempts if not set(a.plan_ids) <= plan_ids),
+            ),
+            (
+                "execution",
+                sorted(a.id for a in self.attempts if not set(a.execution_ids) <= execution_ids),
+            ),
+        ):
+            if missing:
+                msg = f"export has attempts whose {label} is missing: {', '.join(missing)}"
+                raise ValueError(msg)
 
         steps_by_plan = {plan.id: [step.id for step in plan.steps] for plan in self.plans}
         for execution in self.executions:
@@ -15103,7 +16207,28 @@ class ParkedRead(BaseModel):
             re-validates the value on a stored row; what such a park's resolution
             renders is ADR-0248 §3's single fallback, in ``Engine._resume_read`` and
             nowhere else.
-        goal: The :class:`Goal` the parked turn was planned against.
+        goal: The :class:`GoalBrief` of the goal the parked turn was planned against
+            (ADR-0249 §11). Storing the brief rather than the record **strengthens**
+            ADR-0244 §3's retention rule — "The content lives exactly as long as the
+            question does" — by holding strictly less Tier 1 content for the same
+            duration, and §2's validator is not widened: the brief is a content field
+            and a terminal park carries none.
+        goal_id: The goal the parked turn was planned against, and a **fact that
+            survives settlement** (ADR-0249 §11). It joins :attr:`id`,
+            :attr:`conversation_id`, :attr:`decision_id`, :attr:`parked_at`,
+            :attr:`expires_at` and :attr:`disposition` among the terminal facts;
+            ADR-0244 §2's three-content-fields clause, as ADR-0248 widened it to
+            four, is **not** widened again, because this is an identifier rather than
+            content.
+
+            **It is not a resolution guarantee.** A park whose goal the store does
+            not hold — the one route being a turn that parked and then ended before
+            its persistence site — is answerable exactly as ADR-0248 §3's
+            ``utterance``-less park is: the association finds nothing and the
+            resumption proceeds on what the park itself carries. No lane repairs,
+            back-fills or refuses such a park, and no lane reorders persistence to
+            prevent it. ``None`` is reachable by exactly one route — a park written
+            before ADR-0249 §12's upgrade filled the column.
         plan: The :class:`ActionPlan` the planner returned on that turn.
 
             **Persisted because the continuation composes over them and would
@@ -15151,8 +16276,19 @@ class ParkedRead(BaseModel):
             "written before ADR-0248 §3 added the field."
         ),
     )
-    goal: Goal | None = Field(
-        description="The parked turn's goal, or absent on a terminal park (ADR-0244 §2)."
+    goal: GoalBrief | None = Field(
+        description=(
+            "The brief of the parked turn's goal, or absent on a terminal park "
+            "(ADR-0244 §2, ADR-0249 §11)."
+        )
+    )
+    goal_id: Identifier | None = Field(
+        default=None,
+        description=(
+            "The goal the parked turn was planned against (ADR-0249 §11). An "
+            "identifier and not a resolution guarantee, and settlement does not "
+            "clear it. None is reachable only by a park written before ADR-0249."
+        ),
     )
     plan: ActionPlan | None = Field(
         description="The parked turn's plan, or absent on a terminal park (ADR-0244 §2)."
@@ -15598,11 +16734,19 @@ class TurnResult(BaseModel):
             **The value belongs to the pass.** A turn assembled from durable state
             carries the request the pass that produced it received (ADR-0248 §3),
             never one a later pass supplies.
-        goal: The objective this turn was planned against, minted from the
-            utterance. At ADR-0248 it is byte-equal to :attr:`utterance` on every
-            path that carries a turn, and that equality is a **transitional fact**
-            rather than redundancy: the two part company when the goal becomes the
-            understood outcome rather than the latest thing said.
+        goal: The **brief** of the objective this turn was planned against
+            (ADR-0249 §11) — the planner-facing projection of the goal's current
+            interpretation, not the record. ``TurnOutcome.turn`` is a ``TurnResult``
+            and ``TurnOutcome`` is what the promoted wire surface returns, so a
+            widened ``Goal`` would put the interpretation chain and its ground
+            references on the wire; the projection goes instead. The request rides
+            beside it on :attr:`utterance`, which ADR-0248 §1 already put there.
+
+            On a goal's **first** turn ``goal.outcome`` is byte-equal to
+            :attr:`utterance`, because revision 1's outcome *is* the one normalised
+            request (ADR-0249 §3) — ADR-0248 §6's assertion kept true on that path.
+            The two part company on the turns after it, which is what the goal
+            becoming an understood outcome means.
         context: The situational context assembled for the turn.
         memories: What the pipeline assembled for this turn, in the order the
             planner is handed it (ADR-0074 §5, widened by ADR-0158 §5) — the
@@ -15647,7 +16791,12 @@ class TurnResult(BaseModel):
             "received it — unrewritten, unrendered and uninterpreted (ADR-0248 §1)."
         )
     )
-    goal: Goal = Field(description="The objective this turn was planned against.")
+    goal: GoalBrief = Field(
+        description=(
+            "The brief of the objective this turn was planned against (ADR-0249 §11) "
+            "— the projection, never the record."
+        )
+    )
     context: CurrentContext = Field(description="The situational context assembled for the turn.")
     memories: tuple[MemoryRecord, ...] = Field(
         description=(

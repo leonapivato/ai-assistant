@@ -33,7 +33,9 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     ActionPlan,
     Goal,
+    GoalInterpretation,
     GoalStatus,
+    Ground,
     MemorySource,
     PlanStep,
     Provenance,
@@ -70,7 +72,16 @@ _RELEASED_EARLY = (
 def _goal(goal_id: str = "g1") -> Goal:
     return Goal(
         id=goal_id,
-        statement="relocate to Lisbon",
+        interpretation=(
+            GoalInterpretation(
+                revision=1,
+                outcome="relocate to Lisbon",
+                outcome_ground=Ground.USER_STATED,
+                outcome_span="relocate to Lisbon",
+                recorded_at=_WHEN,
+                raised_by="t-1",
+            ),
+        ),
         provenance=Provenance(
             source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_WHEN
         ),
@@ -1112,7 +1123,7 @@ class PlanStoreContract:
         goal = _goal()
         await store.save_goal(goal)
         with pytest.raises(ValidationError):
-            goal.statement = "tampered"
+            goal.interpretation[0].outcome = "tampered"
 
         stored = await store.get_goal("g1")
         assert stored is not None
@@ -1125,7 +1136,7 @@ class PlanStoreContract:
         got = await store.get_goal("g1")
         assert got is not None
         with pytest.raises(ValidationError):
-            got.statement = "tampered"
+            got.interpretation[0].outcome = "tampered"
 
         fresh = await store.get_goal("g1")
         assert fresh is not None
@@ -1233,7 +1244,7 @@ class PlanStoreContract:
         await store.save_plan(_plan(read_request=_READ_REQUEST))
         export = await store.export()
 
-        assert export.schema_version == 7
+        assert export.schema_version == 8
         assert export.plans[0].read_request == _READ_REQUEST
 
     async def test_export_round_trips_a_plans_read_request(self, store: PlanStore) -> None:

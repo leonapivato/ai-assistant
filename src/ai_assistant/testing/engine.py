@@ -75,8 +75,11 @@ from ai_assistant.core.types import (
     EgressBinding,
     ExecutionState,
     Goal,
+    GoalBrief,
+    GoalInterpretation,
     GrantableSource,
     GrantScope,
+    Ground,
     IngestSummary,
     LearnDecision,
     LearnOutcome,
@@ -3943,21 +3946,37 @@ def _turn(utterance: str) -> TurnResult:
     """A turn whose plan has no step — a real ratified shape, not a stub.
 
     ``utterance`` is stripped **once** here and that one string reaches both
-    :attr:`TurnResult.utterance` and the goal's statement, which is the shape of the
-    production path (ADR-0248 §1). So this fake exhibits the byte-equality §6 asserts
-    rather than two normalisations that happen to agree — and a fake that let the two
-    diverge would certify a consumer the real engine never produces.
+    :attr:`TurnResult.utterance` and the brief's ``outcome``, which is the shape of the
+    production path (ADR-0248 §1, ADR-0249 §3): a goal opened by this system carries
+    revision 1 whose outcome *is* the request. So this fake exhibits the byte-equality
+    ADR-0248 §6 asserts rather than two normalisations that happen to agree — and a fake
+    that let the two diverge would certify a consumer the real engine never produces.
+
+    The turn carries the **brief** and not the record (ADR-0249 §11), because that is
+    what a ``TurnResult`` holds: the projection goes over the wire and the record stays
+    inside ``orchestration``.
     """
     request = utterance.strip()
     goal = Goal(
         id="g-1",
-        statement=request,
+        conversation_id="c-1",
+        interpretation=(
+            GoalInterpretation(
+                revision=1,
+                outcome=request,
+                outcome_ground=Ground.USER_STATED,
+                outcome_span=request,
+                recorded_at=_AT,
+                raised_by="t-1",
+            ),
+        ),
         provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_AT),
         created_at=_AT,
+        last_engaged_at=_AT,
     )
     return TurnResult(
         utterance=request,
-        goal=goal,
+        goal=GoalBrief.of(goal),
         context=CurrentContext(
             now=_AT,
             time_of_day=TimeOfDay.AFTERNOON,
@@ -3965,7 +3984,9 @@ def _turn(utterance: str) -> TurnResult:
             within_working_hours=True,
         ),
         memories=(),
-        plan=ActionPlan(id="p-1", goal_id=goal.id, steps=(), created_at=_AT),
+        plan=ActionPlan(
+            id="p-1", goal_id=goal.id, steps=(), created_at=_AT, targets_revision=goal.revision
+        ),
     )
 
 

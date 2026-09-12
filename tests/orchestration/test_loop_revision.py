@@ -42,7 +42,10 @@ from test_loop_reads import (
 from ai_assistant.core.errors import MemoryStoreError, PlanningError, ToolError
 from ai_assistant.core.types import (
     ActionPlan,
+    EvidenceDigest,
+    GoalBrief,
     MemorySource,
+    PlannerOutput,
     PlanStep,
     ReadAsk,
     ReadKind,
@@ -73,7 +76,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         BeliefBand,
         CurrentContext,
-        Goal,
         MemoryKind,
         MemoryRecord,
         MemorySearchResult,
@@ -156,14 +158,16 @@ class _Script:
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         """Answer this call from the script, recording what it was handed."""
         ordinal = len(self.calls)
         self.calls.append((tuple(memories), tuple(capabilities)))
@@ -172,14 +176,16 @@ class _Script:
             raise PlanningError(msg)
         if self._on_call is not None:
             self._on_call(ordinal + 1)
-        return ActionPlan(
-            id=f"{goal.id}-plan-{ordinal + 1}",
-            goal_id=goal.id,
-            steps=self._at(self._steps, ordinal, ()),
-            created_at=_NOW,
-            rationale=f"call {ordinal + 1}",
-            read_request=self._at(self._requests, ordinal, None),
-            supersedes=self._at(self._supersedes, ordinal, None),
+        return PlannerOutput(
+            plan=ActionPlan(
+                id=f"{goal.goal_id}-plan-{ordinal + 1}",
+                goal_id=goal.goal_id,
+                steps=self._at(self._steps, ordinal, ()),
+                created_at=_NOW,
+                rationale=f"call {ordinal + 1}",
+                read_request=self._at(self._requests, ordinal, None),
+                supersedes=self._at(self._supersedes, ordinal, None),
+            )
         )
 
 

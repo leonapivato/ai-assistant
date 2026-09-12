@@ -339,7 +339,7 @@ async def test_a_turn_whose_supply_knows_nothing_answers_from_the_document(
         "summarise the PDF I saved yesterday", narrow=_bounded()
     )
 
-    assert _DISTINCTIVE not in _contents(planner.calls[0][2]), (
+    assert _DISTINCTIVE not in _contents(planner.calls[0][3]), (
         "the supply the planner saw held nothing about the document"
     )
     fetched = [record for record in responded.turn.memories if _DISTINCTIVE in record.content]
@@ -457,7 +457,7 @@ async def test_an_unresolvable_ordinal_is_audited_and_renders_nothing() -> None:
     assert serviced["refusal"] is None, "an unresolved label is not a refusal"
     assert serviced["new"] == 0
     assert serviced["failed"] is False, "not an error, not a park, not a degradation"
-    assert responded.turn.memories == tuple(planner.calls[0][2]), "the supply is unchanged"
+    assert responded.turn.memories == tuple(planner.calls[0][3]), "the supply is unchanged"
     assert _DISTINCTIVE not in await _prompt_over(responded)
 
 
@@ -508,7 +508,7 @@ async def test_a_named_file_on_a_turn_that_showed_no_listing_resolves_to_nothing
 
         assert _serviced(captured)["labels_unresolved"] == 1
         assert _serviced(captured)["refusal"] is None
-        assert responded.turn.memories == tuple(planner.calls[0][2])
+        assert responded.turn.memories == tuple(planner.calls[0][3])
 
 
 # --------------------------------------------------------------------------- #
@@ -537,7 +537,7 @@ async def test_a_turn_whose_supply_sufficed_pays_no_fetch() -> None:
 
     assert fetcher.listing_count == 1, "§3: once per turn, before the first planner call"
     assert fetcher.fetch_count == 0
-    assert responded.turn.memories == tuple(planner.calls[0][2])
+    assert responded.turn.memories == tuple(planner.calls[0][3])
     assert _record(captured)["trigger"] == "not_fired"
     assert _record(captured)["servicings"] == ()
 
@@ -563,7 +563,7 @@ async def test_the_ordinal_fetches_the_entry_at_that_position(label: str, positi
     )
 
     assert [entry.name for entry in fetcher.fetched] == [list(_ROOT)[position]]
-    fourth = responded.turn.memories[len(planner.calls[0][2]) :]
+    fourth = responded.turn.memories[len(planner.calls[0][3]) :]
     assert [record.content for record in fourth] == [list(_ROOT.values())[position]]
 
 
@@ -796,7 +796,7 @@ async def test_a_refusal_renders_no_name_no_excerpt_and_no_library_message() -> 
     prompt = await _prompt_over(responded)
     for secret in (_DISTINCTIVE, "quarterly-review.md", "quarterly-review", ".md"):
         assert secret not in prompt, f"{secret!r} reached the prompt"
-    assert responded.turn.memories == tuple(planner.calls[0][2])
+    assert responded.turn.memories == tuple(planner.calls[0][3])
     assert _serviced(captured)["refusal"] == FetchRefusal.EXTRACTION_FAILED.value
 
 
@@ -836,7 +836,7 @@ async def test_a_serviced_fetch_revises_the_plan_and_each_servicing_draws_its_ow
         )
 
     assert [entry.name for entry in fetcher.fetched] == ["quarterly-review.md", "roster.txt"]
-    fourth = [record.content for record in responded.turn.memories[len(planner.calls[0][2]) :]]
+    fourth = [record.content for record in responded.turn.memories[len(planner.calls[0][3]) :]]
     assert fourth == [_ROOT["quarterly-review.md"], _ROOT["roster.txt"]], "in servicing order"
     record = _record(captured)
     assert record["planner_calls"] == 2
@@ -874,9 +874,9 @@ async def test_the_second_plan_sees_the_supply_the_first_fetch_produced() -> Non
     )
 
     first, second = planner.calls
-    assert _DISTINCTIVE not in _contents(first[2])
-    assert _DISTINCTIVE in _contents(second[2]), "the second call ran over the fetched record"
-    assert first[4] == second[4], "and over the same listing (ADR-0230 §3)"
+    assert _DISTINCTIVE not in _contents(first[3])
+    assert _DISTINCTIVE in _contents(second[3]), "the second call ran over the fetched record"
+    assert first[5] == second[5], "and over the same listing (ADR-0230 §3)"
 
 
 # --------------------------------------------------------------------------- #
@@ -1057,7 +1057,7 @@ async def test_a_fetched_record_is_in_the_supply_the_evaluation_is_taken_over() 
         planner=planner, fetcher=FakeFetcher(_ROOT, read_at=_NOW), memory=memory
     ).respond("how did the quarter go", narrow=_bounded())
 
-    assert _external(planner.calls[0][2]) == [], (
+    assert _external(planner.calls[0][3]) == [], (
         "the three groups the planner saw held nothing external"
     )
     [tainting] = _external(responded.turn.memories)
@@ -1114,7 +1114,7 @@ async def test_a_refusal_before_a_failing_hop_is_recorded_beside_the_failure() -
     assert serviced["refusal"] == FetchRefusal.NOT_A_FILE.value
     assert serviced["failed_after_read_returned"] is False, "the fetch returned no record"
     assert serviced["new"] == 0
-    assert responded.turn.memories == tuple(planner.calls[0][2])
+    assert responded.turn.memories == tuple(planner.calls[0][3])
 
 
 async def test_a_fetch_that_returned_before_a_failing_hop_records_the_partial_fact() -> None:
@@ -1247,7 +1247,7 @@ async def test_a_stale_listing_is_never_carried_into_a_later_turn(
 
     second = await loop.respond("and now", narrow=_bounded())
 
-    shown_first, shown_second = (call[4] for call in planner.calls)
+    shown_first, shown_second = (call[5] for call in planner.calls)
     assert [one.name for one in shown_first] == ["first.md"]
     assert [one.name for one in shown_second] == ["second.md"], "turn two rendered its own"
     assert "turn two holds something else" in _contents(second.turn.memories)

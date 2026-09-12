@@ -25,10 +25,12 @@ from test_engine import (
 
 from ai_assistant.core.errors import ModelUnavailableError
 from ai_assistant.core.types import (
-    ActionPlan,
     Disposition,
+    EvidenceDigest,
+    GoalBrief,
     Idempotency,
     Message,
+    PlannerOutput,
     PlanStep,
     ReadAsk,
     Role,
@@ -41,7 +43,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.protocols import ModelProvider
-    from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord, ShownFile
+    from ai_assistant.core.types import CurrentContext, MemoryRecord, ShownFile
 
 _ANSWER = "You prefer hiking, and I have not sent anything."
 
@@ -84,21 +86,29 @@ class _TwoStepPlanner(OneStepPlanner):
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         first = await super().plan(
-            goal, context=context, memories=memories, capabilities=capabilities
+            goal,
+            utterance=utterance,
+            context=context,
+            memories=memories,
+            capabilities=capabilities,
         )
         later = PlanStep(
             id="step-2", intent="file the reply", capability="file_note", parameters=PARAMETERS
         )
-        return first.model_copy(update={"steps": (*first.steps, later)})
+        return first.model_copy(
+            update={"plan": first.plan.model_copy(update={"steps": (*first.plan.steps, later)})}
+        )
 
 
 def _prompt(model: FakeModelProvider) -> str:
@@ -142,18 +152,24 @@ class _NoStep(OneStepPlanner):
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         built = await super().plan(
-            goal, context=context, memories=memories, capabilities=capabilities
+            goal,
+            utterance=utterance,
+            context=context,
+            memories=memories,
+            capabilities=capabilities,
         )
-        return built.model_copy(update={"steps": ()})
+        return built.model_copy(update={"plan": built.plan.model_copy(update={"steps": ()})})
 
 
 @pytest.mark.parametrize(
@@ -193,7 +209,7 @@ async def test_a_declined_plan_is_persisted_and_composed_and_drives_nothing(
     assert outcome.turn is not None
     assert outcome.turn.plan.steps == ()
     # The goal and the plan are persisted, composition succeeding or not.
-    assert await harness.plans.get_goal(outcome.turn.goal.id) is not None
+    assert await harness.plans.get_goal(outcome.turn.goal.goal_id) is not None
     assert await harness.plans.get_plan(outcome.turn.plan.id) is not None
     # Nothing was driven: no step reported, no execution started, no tool invoked.
     assert outcome.step is None

@@ -54,13 +54,17 @@ from test_engine_routing import (
 )
 
 from ai_assistant.core.types import (
-    ActionPlan,
     CurrentContext,
     Disposition,
     EgressBinding,
     EpisodicMemory,
+    EvidenceDigest,
     Goal,
+    GoalBrief,
+    GoalInterpretation,
+    Ground,
     MemorySource,
+    PlannerOutput,
     Provenance,
     ReadAsk,
     ReadKind,
@@ -542,7 +546,16 @@ async def test_the_planners_rendering_of_a_stamped_episode_is_byte_identical() -
     unstamped = FakeModelProvider(decline)
     goal = Goal(
         id="g-1",
-        statement="send the note",
+        interpretation=(
+            GoalInterpretation(
+                revision=1,
+                outcome="send the note",
+                outcome_ground=Ground.USER_STATED,
+                outcome_span="send the note",
+                recorded_at=AT,
+                raised_by="t-1",
+            ),
+        ),
         provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT),
         created_at=AT,
     )
@@ -552,7 +565,11 @@ async def test_the_planners_rendering_of_a_stamped_episode_is_byte_identical() -
 
     for provider, marked in ((stamped, True), (unstamped, False)):
         await ModelBackedPlanner(provider).plan(
-            goal, context=context, memories=(_episode(marked=marked),), capabilities=(CAPABILITY,)
+            GoalBrief.of(goal),
+            utterance="a request",
+            context=context,
+            memories=(_episode(marked=marked),),
+            capabilities=(CAPABILITY,),
         )
 
     assert _assembled(stamped) == _assembled(unstamped)
@@ -595,29 +612,38 @@ class _FetchingOneStepPlanner(OneStepPlanner):
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         """Answer the base plan, carrying a ``LOCAL_FILE`` ask the first time only."""
         first = self._calls == 0
-        plan = await super().plan(
-            goal,
-            context=context,
-            memories=memories,
-            capabilities=capabilities,
-            files=files,
-        )
+        plan = (
+            await super().plan(
+                goal,
+                utterance="a request",
+                context=context,
+                memories=memories,
+                capabilities=capabilities,
+                files=files,
+            )
+        ).plan
         if not first:
-            return plan
-        return plan.model_copy(
-            update={
-                "read_request": ReadRequest(asks=(ReadAsk(kind=ReadKind.LOCAL_FILE, entry="F1"),))
-            }
+            return PlannerOutput(plan=plan)
+        return PlannerOutput(
+            plan=plan.model_copy(
+                update={
+                    "read_request": ReadRequest(
+                        asks=(ReadAsk(kind=ReadKind.LOCAL_FILE, entry="F1"),)
+                    )
+                }
+            )
         )
 
 

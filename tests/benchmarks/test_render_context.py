@@ -46,7 +46,10 @@ from ai_assistant.core.types import (
     CurrentContext,
     EpisodicMemory,
     Goal,
+    GoalBrief,
+    GoalInterpretation,
     GoalStatus,
+    Ground,
     MemorySource,
     Provenance,
     SemanticMemory,
@@ -119,7 +122,16 @@ def _product_prompt(*records: SemanticMemory | EpisodicMemory) -> str:
     """
     goal = Goal(
         id="0f8f8f2c-1111-4222-8333-444455556666",
-        statement="Answer the user's question.",
+        interpretation=(
+            GoalInterpretation(
+                revision=1,
+                outcome="Answer the user's question.",
+                outcome_ground=Ground.USER_STATED,
+                outcome_span="Answer the user's question.",
+                recorded_at=NOW,
+                raised_by="t-1",
+            ),
+        ),
         status=GoalStatus.ACTIVE,
         provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=NOW),
         created_at=NOW,
@@ -127,7 +139,7 @@ def _product_prompt(*records: SemanticMemory | EpisodicMemory) -> str:
     context = CurrentContext(
         now=NOW, time_of_day=TimeOfDay.AFTERNOON, is_weekend=False, within_working_hours=True
     )
-    return planner._render_request(goal, context, list(records))
+    return planner._render_request(GoalBrief.of(goal), context, list(records))
 
 
 def test_the_block_is_the_one_the_product_would_render() -> None:
