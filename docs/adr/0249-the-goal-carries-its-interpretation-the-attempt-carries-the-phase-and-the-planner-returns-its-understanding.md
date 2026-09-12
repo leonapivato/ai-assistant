@@ -218,9 +218,9 @@ in `Settings` applies unchanged: *"a knob that raises the ceiling is a knob that
 
 **This is forced by the order of the turn, and it is the clause the design report does not
 have.** The relevance read and the episodic supplement are taken **before** `Planner.plan` is
-called — `loop.py` reads `self._retrieve(goal.statement)` and `self._supplement(goal.
-statement, …)` above the planner call on both its paths — and the interpretation the planner
-proposes is a *result* of that call. So on a goal's first turn there is no interpretation in
+called: in `LearningLoop.respond` and again in `LearningLoop.resumed_read`, `_retrieve` and
+`_supplement` are both given the goal's statement above the planner call, and the
+interpretation the planner proposes is a *result* of that call. So on a goal's first turn there is no interpretation in
 existence at the moment the goal's statement is first read. A design in which `statement` is
 absent until the planner answers would make `Goal.statement` optional, break the non-blank
 refusal `planning/sqlite_store.py` argues for, and leave the two blind reads with no query at
