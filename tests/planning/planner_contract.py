@@ -997,6 +997,32 @@ class PlannerContract:
         ).plan
         assert plan.supersedes is None
 
+    async def test_it_stamps_no_targets_revision(self, planner: Planner) -> None:
+        """ADR-0249 §8: that field is the loop's, on every plan a planner returns.
+
+        "**The loop sets it, and the planner never does.** … it discards any value the
+        plan came back carrying and sets it to the goal's current ``revision`` at the
+        moment it takes the plan", and absent "is the only value a planner can return,
+        because ``GoalBrief`` carries no revision for a planner to copy".
+
+        It is here beside ``test_it_sets_no_supersedes`` because ADR-0249 §8 makes
+        ADR-0228's one-field clause a **two**-field clause under "§5's identical
+        discipline — taken by the loop, taken once, at the same moment, discarding
+        whatever came back". A planner that stamps one is not non-conforming in a way
+        that fails a turn, for §5's reason; a conforming one leaves it alone, and this
+        is where that is held.
+        """
+        plan = (
+            await planner.plan(
+                _goal(),
+                utterance=_REQUEST,
+                context=_context(),
+                memories=_supply() + _fourth_group(),
+                capabilities=_VOCABULARY,
+            )
+        ).plan
+        assert plan.targets_revision is None
+
     async def test_a_read_it_asks_for_never_becomes_a_step(
         self, asking_planner: Planner | None
     ) -> None:
