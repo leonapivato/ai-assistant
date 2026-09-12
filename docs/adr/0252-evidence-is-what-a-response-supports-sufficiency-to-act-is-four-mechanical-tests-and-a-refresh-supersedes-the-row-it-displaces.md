@@ -1,6 +1,6 @@
 # 252. Evidence is what a response supports, sufficiency to act is four mechanical tests, and a refresh supersedes the row it displaces
 
-- Status: Proposed
+- Status: Accepted
 - **Partially supersedes [ADR-0249](0249-the-goal-carries-its-interpretation-the-attempt-carries-the-phase-and-the-planner-returns-its-understanding.md),
   in three narrowly stated scopes**, and §16 shows the working for all three.
   **§1's `GoalElement` field enumeration and its three-shape validator** — *"A `GoalElement`
