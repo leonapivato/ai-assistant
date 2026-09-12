@@ -734,6 +734,80 @@ class PlanStoreContract:
         ]
         assert stored.version == 1
 
+    async def test_two_interpretations_dispatched_together_leave_one_loser(
+        self, store: PlanStore
+    ) -> None:
+        """§12's indivisibility, over calls that are actually in flight together.
+
+        The arm above awaits the winner before the loser starts, so an implementation
+        that read and compared *before* a suspension and wrote after it without
+        re-reading would pass it while letting two concurrent callers both succeed.
+        This one dispatches both commands before either completes, which is the
+        interleaving §12's "the read, the comparison and the write are **one
+        indivisible step**" is stated about.
+
+        **Exactly one succeeds**, and what is stored is the winner's own revision —
+        asserted rather than assumed, because a store that let both through would
+        leave a history the losing write had appended to.
+        """
+        await store.save_goal(_goal())
+        commands = [
+            GoalRevision(
+                goal_id="g1",
+                interpretation=_revision(2, outcome=f"understanding {label}"),
+                expected_version=0,
+            )
+            for label in ("a", "b")
+        ]
+
+        settled = await asyncio.gather(
+            *(store.record_interpretation(one) for one in commands), return_exceptions=True
+        )
+
+        won = [one for one in settled if isinstance(one, Goal)]
+        lost = [one for one in settled if isinstance(one, BaseException)]
+        assert len(won) == 1, "exactly one write of a version lands"
+        assert all(isinstance(one, StaleExecutionError) for one in lost)
+
+        stored = await store.get_goal("g1")
+        assert stored is not None
+        assert stored.version == 1, "one write, one version"
+        assert [one.revision for one in stored.interpretation] == [1, 2]
+        assert stored.statement == won[0].statement, "and the stored history is the winner's"
+
+    async def test_two_attempt_transitions_dispatched_together_leave_one_loser(
+        self, store: PlanStore
+    ) -> None:
+        """§12's indivisibility over the second command, on the same construction.
+
+        :meth:`test_two_interpretations_dispatched_together_leave_one_loser`'s
+        reasoning applied to ``commit_attempt``, because §12 states the rule of both
+        writes and an implementation can get one right and the other wrong.
+        """
+        await store.save_goal(_goal())
+        await store.save_plan(_plan())
+        await store.save_plan(_plan(plan_id="p2"))
+        await store.open_attempt(_attempt())
+        moves = [
+            AttemptTransition(attempt_id="a1", expected_version=0, add_plan_id=plan_id)
+            for plan_id in ("p1", "p2")
+        ]
+
+        settled = await asyncio.gather(
+            *(store.commit_attempt(one) for one in moves), return_exceptions=True
+        )
+
+        won = [one for one in settled if isinstance(one, GoalAttempt)]
+        lost = [one for one in settled if isinstance(one, BaseException)]
+        assert len(won) == 1, "exactly one transition of a version lands"
+        assert all(isinstance(one, StaleExecutionError) for one in lost)
+
+        stored = await store.get_attempt("a1")
+        assert stored is not None
+        assert stored.version == 1
+        assert stored.plan_ids == won[0].plan_ids, "and the stored record is the winner's"
+        assert len(stored.plan_ids) == 1, "the loser appended nothing"
+
     async def test_the_interpretation_history_is_bounded_and_the_elision_is_disclosed(
         self, store: PlanStore
     ) -> None:

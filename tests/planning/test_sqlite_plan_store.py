@@ -32,6 +32,7 @@ from pydantic import ValidationError
 
 from ai_assistant.core.errors import PlanningError, StaleExecutionError
 from ai_assistant.core.types import (
+    AttemptPhase,
     AttemptTransition,
     GoalRevision,
     Ground,
@@ -458,6 +459,83 @@ async def test_two_connections_serialise_a_compare_and_swap(tmp_path: Path) -> N
         await a.commit_transition(claim_a)
         with pytest.raises(PlanningError):  # StaleExecutionError, a PlanningError
             await b.commit_transition(claim_b)
+    finally:
+        a.close()
+        b.close()
+
+
+async def test_two_connections_serialise_an_interpretation_and_an_attempt(
+    tmp_path: Path,
+) -> None:
+    """ADR-0249 §12's two compare-and-swap writes, across **separate connections**.
+
+    ``test_two_connections_serialise_a_compare_and_swap``'s construction over the two
+    writes ADR-0249 adds. This is the level at which §12's "the read, the comparison
+    and the write are **one indivisible step**" is actually load-bearing: two stores
+    over one file cannot share an in-process lock, so what serialises them is the
+    ``BEGIN IMMEDIATE`` each write opens — and an implementation that read outside its
+    transaction would let both callers through here while passing every single-store
+    arm in the shared suite.
+
+    Both readers take their version **before** either writes, which is the shape a
+    real race has: two turns that each read a goal at version 0 and then commit.
+    """
+    path = tmp_path / "plans.db"
+    a = SqlitePlanStore(path=path, now=_fixed_now)
+    b = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await a.save_goal(_goal())
+        await a.save_plan(_plan())
+        await a.open_attempt(_attempt())
+
+        held_a = await a.get_goal("g1")
+        held_b = await b.get_goal("g1")
+        assert held_a is not None
+        assert held_b is not None
+        assert held_a.version == held_b.version == 0, "both read the same version"
+
+        await a.record_interpretation(
+            GoalRevision(
+                goal_id="g1",
+                interpretation=_revision(2, outcome="a's understanding"),
+                expected_version=held_a.version,
+            )
+        )
+        with pytest.raises(StaleExecutionError):
+            await b.record_interpretation(
+                GoalRevision(
+                    goal_id="g1",
+                    interpretation=_revision(2, outcome="b's understanding"),
+                    expected_version=held_b.version,
+                )
+            )
+
+        stored = await b.get_goal("g1")
+        assert stored is not None
+        assert stored.statement == "a's understanding", "the winner's, read back on the loser"
+        assert stored.version == 1
+
+        attempt_a = await a.get_attempt("a1")
+        attempt_b = await b.get_attempt("a1")
+        assert attempt_a is not None
+        assert attempt_b is not None
+
+        await a.commit_attempt(
+            AttemptTransition(attempt_id="a1", expected_version=attempt_a.version, add_plan_id="p1")
+        )
+        with pytest.raises(StaleExecutionError):
+            await b.commit_attempt(
+                AttemptTransition(
+                    attempt_id="a1",
+                    expected_version=attempt_b.version,
+                    to_phase=AttemptPhase.EXECUTE,
+                )
+            )
+
+        settled = await b.get_attempt("a1")
+        assert settled is not None
+        assert settled.plan_ids == ("p1",)
+        assert settled.phase is AttemptPhase.UNDERSTAND, "the loser's move landed on nothing"
     finally:
         a.close()
         b.close()
