@@ -1532,6 +1532,14 @@ class LearningLoop:
             if continuing is None
             else continuing
         )
+        # ADR-0249 §1: `raised_by` names "**the conversation turn** whose message caused
+        # this revision", so it is one value per turn and not one per call — a turn that
+        # revised twice would otherwise attribute its revisions to two turns that never
+        # existed. On a goal this turn **opened** it is the one revision 1 already
+        # carries, read back rather than minted again so the two cannot differ; on a
+        # continued goal there is none on the record to share, so one is minted.
+        opening = goal.interpretation[-1].raised_by
+        raised_by = opening if opened and opening is not None else self._id_factory()
         # **One instant for everything this turn stamps.** On an opened goal it is the
         # instant §3 already put on revision 1 — "its `recorded_at` is that turn's
         # instant" — so a second revision this same turn cannot be stamped *earlier*
@@ -1682,6 +1690,7 @@ class LearningLoop:
             supply=memories,
             minted=minted,
             at=turn_at,
+            raised_by=raised_by,
             brief=brief,
         )
         # ADR-0249 §8: the stamp is the goal's revision **after this call's
@@ -1893,6 +1902,7 @@ class LearningLoop:
                 supply=memories,
                 minted=minted,
                 at=turn_at,
+                raised_by=raised_by,
                 brief=brief,
             )
             plan = _stamped(
@@ -2477,6 +2487,7 @@ class LearningLoop:
         supply: Sequence[MemoryRecord],
         minted: Collection[str],
         at: datetime,
+        raised_by: str,
         brief: GoalBrief,
     ) -> tuple[Goal, tuple[GoalInterpretation, ...], GoalBrief]:
         """Record one planner call's understanding onto the goal, if it proposed one.
@@ -2496,11 +2507,11 @@ class LearningLoop:
         ``recorded_at`` a model wrote is discarded **structurally** rather than by a rule
         someone remembered.
 
-        **``raised_by`` is a minted identifier naming this turn**, on
-        :meth:`_goal_from`'s own ground: §1 forbids writing ``None`` into it on a value
-        ``orchestration`` authors, and a conversation turn's durable identity is
-        allocated by the capture stage *after* this loop returns, so there is no stored
-        id to read here.
+        **``raised_by`` names the turn and not the call.** §1 defines it as "the
+        conversation turn whose message caused this revision", so one value is minted per
+        turn and handed to every revision that turn authors — its opening revision
+        included. A value minted per call would attribute a turn's two revisions to two
+        turns that never existed.
 
         **Recording a revision does not move the attempt's phase** (§6). It advances the
         goal's understanding, which is what §8's stale-target rule keys on through the
@@ -2520,6 +2531,8 @@ class LearningLoop:
                 §3's label space for this call and no other.
             minted: The ids of the records this turn's searches minted (ADR-0231 §16).
             at: This turn's own instant.
+            raised_by: The turn whose message caused this revision — one value per turn
+                (§1), minted by the caller and shared with its opening revision.
             brief: The brief this call received, returned unchanged where nothing was
                 recorded so that the value is taken once per revision rather than once
                 per call.
@@ -2538,7 +2551,7 @@ class LearningLoop:
             supply=supply,
             minted=minted,
             recorded_at=at,
-            raised_by=self._id_factory(),
+            raised_by=raised_by,
         )
         # §1: append-only. Nothing edits an element in place, reorders the tuple or
         # removes one — §2's elision is the store's, taken on the write.

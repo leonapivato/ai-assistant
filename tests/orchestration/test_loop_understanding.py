@@ -361,6 +361,33 @@ async def test_the_stamped_provenance_is_the_loops_and_the_envelope_carries_none
     assert responded.turn.plan.steps == (), "and the turn ran to its end unharmed"
 
 
+async def test_every_revision_one_turn_authors_names_the_same_turn() -> None:
+    """§1: ``raised_by`` is "the conversation **turn** whose message caused this revision".
+
+    One turn, one identifier — for the revision it opened the goal with and for every
+    revision its planner calls then produce. A value minted per call would attribute one
+    turn's revisions to two turns that never existed, and an assertion that the field is
+    merely non-``None`` would not notice.
+    """
+    planner = _Understanding(
+        understandings=[
+            _restated("lease the flat", "lease"),
+            _restated("lease the flat by March", "lease"),
+        ],
+        requests=[_hop("M1"), None],
+    )
+
+    responded = await _turn(planner)
+
+    assert len(planner.briefs) == 2, "the turn really did make both calls"
+    record = responded.goal
+    assert record is not None
+    raised = [one.raised_by for one in record.goal.interpretation]
+    assert len(raised) == 3, "revision 1 and one per call"
+    assert all(one is not None for one in raised)
+    assert len(set(raised)) == 1, "one turn, one identifier"
+
+
 # --------------------------------------------------------------------------- #
 # §16 item 2 — S2's understanding half, over a goal the loop did not open      #
 # --------------------------------------------------------------------------- #

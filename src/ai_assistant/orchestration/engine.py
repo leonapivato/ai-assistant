@@ -8108,7 +8108,7 @@ class Engine:
             return
         await self._plans.open_attempt(opened.attempt)
 
-    async def _resumed_attempt(self, step: StepOutcome) -> OpenedAttempt | None:
+    async def _resumed_attempt(self, execution_id: str) -> OpenedAttempt | None:
         """Move the resumed execution's attempt out of waiting (ADR-0249 §12).
 
         **After the first write, every change goes through ``commit_attempt``, in this
@@ -8117,14 +8117,22 @@ class Engine:
         is owed here is bookkeeping and not an association: nothing opens an attempt, and
         §13's deferral of **which user acts open** one is untouched.
 
-        **It is committed the moment the fact becomes true**, which is when the step is
-        resolved and **before** the answer is composed. §12 states the timing in terms —
-        "each reaches the store through a ``commit_attempt`` … at the moment the fact
-        becomes true" — and the reason is what a later commit costs: composing is an
-        arbitrarily slow model call outside the resolution's lock, so a cancellation
-        landing in it would leave an attempt whose step has *already run* still recorded
-        as awaiting the user's approval, and the token now restates rather than resolving,
-        so nothing would ever repair it.
+        **It is committed the moment the fact becomes true**, which is when the user's
+        answer arrives and **before** the step is driven or the answer composed. §12
+        states the timing in terms — "each reaches the store through a ``commit_attempt``
+        … at the moment the fact becomes true" — and the fact here is that the attempt is
+        no longer waiting on the user, which a refusal establishes exactly as an approval
+        does. Committing any later costs real intervals: the runner may hold an
+        arbitrarily slow tool and composing is a model call outside the resolution's
+        lock, so a cancellation landing in either would leave an attempt whose step is
+        already ``RUNNING`` — or has already run — still recorded as awaiting the user's
+        approval, and the token then **restates** rather than resolving, so nothing would
+        ever repair it.
+
+        **``EXECUTE`` is stamped here even where the answer turns out to be a refusal**,
+        which is §6's own rule rather than an approximation: "a phase whose work is
+        vacuous is stamped and left in the same instant", and the attempt has left
+        ``AUTHORIZE`` the moment the authorisation was answered.
 
         **The attempt is found through the reference it already carries**, not guessed at:
         the execution names its plan, the plan names its goal, and exactly one of that
@@ -8135,7 +8143,7 @@ class Engine:
         whose goal the store never got is answered on what the park itself carries.
 
         Args:
-            step: The step this resumption drove.
+            execution_id: The execution this resumption is about.
 
         Returns:
             The attempt as the store now holds it, or ``None`` where none references this
@@ -8144,13 +8152,14 @@ class Engine:
         Raises:
             PlanningError: As the store raises it.
         """
-        plan = await self._plans.get_plan(step.state.plan_id)
-        if plan is None:  # pragma: no cover — the execution's plan was persisted with it
+        state = await self._plans.get_execution(execution_id)
+        plan = None if state is None else await self._plans.get_plan(state.plan_id)
+        if plan is None:  # pragma: no cover — the execution and its plan were persisted together
             return None
         found = [
             one
             for one in await self._plans.attempts_of(plan.goal_id)
-            if step.state.id in one.execution_ids
+            if execution_id in one.execution_ids
         ]
         if not found:
             # No attempt references this execution: the park outlived a turn that never
@@ -8158,7 +8167,7 @@ class Engine:
             return None
         # §5, §6: the user has answered, so the attempt is no longer waiting on them —
         # whichever way they answered. `EXECUTE` is the phase whose work the resolution
-        # just did, vacuously where the answer was a refusal, which is §6's own rule.
+        # is about to do, vacuously where the answer is a refusal, which is §6's own rule.
         return await self._move_attempt(
             OpenedAttempt(attempt=found[0]),
             to_phase=AttemptPhase.EXECUTE,
@@ -8203,6 +8212,10 @@ class Engine:
             outcome=AttemptOutcome.ANSWERED if answered else None,
             ended_at=self._clock() if answered else None,
             working=self._worked(held, since),
+            # §5: the decision the *resumption* recorded — the approval or the refusal the
+            # user just gave — which is a different id from the `CONFIRM` the parked turn
+            # took, and is appended rather than replacing it (§12).
+            add_authorization_id=self._authorization_of(step),
         )
 
     def _worked(self, opened: OpenedAttempt | None, since: datetime) -> timedelta | None:
@@ -8233,6 +8246,30 @@ class Engine:
         if opened is None:  # pragma: no cover — every RespondedTurn carries an attempt
             return None
         return opened.attempt.effort.working + max(self._clock() - since, timedelta(0))
+
+    @staticmethod
+    def _authorization_of(step: StepOutcome | None) -> str | None:
+        """The permission decision this step was claimed under, if any (ADR-0249 §5).
+
+        ``GoalAttempt.authorization_ids`` holds "the authorizations it took", referenced
+        by id and never inlined — ADR-0014 §3's own pattern for ``approval_ref``, which is
+        the very field this reads. ADR-0014 §5 requires *"a claimed step must be traceable
+        to the decision that allowed it"*, so the attempt's own record of what it was
+        allowed to do is that same identifier and never a second one minted here.
+
+        ``None`` where the step carries no decision at all: a step no policy ruled on, one
+        whose execution the store does not hold, and a pass that drove no step.
+
+        Args:
+            step: The step this pass drove, or ``None``.
+
+        Returns:
+            The ``approval_ref`` of the step's own execution, or ``None``.
+        """
+        if step is None:
+            return None
+        state = step.state.step(step.step_id)
+        return None if state is None else state.approval_ref
 
     @staticmethod
     def _answered(composed: ComposedReply | None, step: StepOutcome | None) -> bool:
@@ -8292,6 +8329,7 @@ class Engine:
         ended_at: datetime | None = None,
         working: timedelta | None = None,
         add_execution_id: str | None = None,
+        add_authorization_id: str | None = None,
     ) -> OpenedAttempt | None:
         """Commit one attempt transition and carry the moved attempt forward (§12).
 
@@ -8315,6 +8353,10 @@ class Engine:
             working: The ledger's new value; never below the one held (§5).
             add_execution_id: An execution this attempt opened, appended to
                 :attr:`~ai_assistant.core.types.GoalAttempt.execution_ids`.
+            add_authorization_id: A permission decision this attempt took, appended to
+                :attr:`~ai_assistant.core.types.GoalAttempt.authorization_ids`. An id the
+                tuple already holds is ignored rather than duplicated (§12), which is what
+                makes a resumption's re-append free.
 
         Returns:
             The attempt as the store now holds it, beside the phases stamped so far, or
@@ -8329,7 +8371,9 @@ class Engine:
         """
         if opened is None:  # pragma: no cover — every RespondedTurn carries an attempt
             return None
-        if not any((to_phase, to_state, outcome, ended_at, working, add_execution_id)):
+        if not any(
+            (to_phase, to_state, outcome, ended_at, working, add_execution_id, add_authorization_id)
+        ):
             # Every absent member leaves its field unchanged (§12), so a transition that
             # sets none of them would advance the compare-and-swap token and change
             # nothing else — a write whose only effect is to invalidate a version
@@ -8345,6 +8389,7 @@ class Engine:
                 ended_at=ended_at,
                 working=working,
                 add_execution_id=add_execution_id,
+                add_authorization_id=add_authorization_id,
             )
         )
         stamped = opened.phases + (() if to_phase is None else (to_phase,))
@@ -8698,6 +8743,10 @@ class Engine:
             attempt,
             to_state=AttemptState.AWAITING_AUTHORIZATION if parked is not None else None,
             to_phase=None if parked is not None else AttemptPhase.EXECUTE,
+            # §5: "the authorizations it took", referenced by id. It exists only once the
+            # runner has recorded the ruling, which is why it is appended here and not
+            # beside the execution id above.
+            add_authorization_id=self._authorization_of(step),
         )
         # The terminal composing stage, after execution and before the exchange is
         # recorded (ADR-0170 §1). Ordering against capture is free — ADR-0170 §9
@@ -9785,6 +9834,13 @@ class Engine:
         if answered is not None:
             park, routed = answered
             return await self._compose_and_capture_routed(park, routed)
+        # ADR-0249 §12: the attempt leaves waiting **before** the step is driven, because
+        # that is the moment the user's answer arrives. The binding names the execution
+        # this resumption is about, so no resolution is needed to find the attempt — and a
+        # handle this table does not hold is a restatement or a binding recovered from
+        # durable state, both of which are answered below without moving anything here.
+        binding = self._parked.get(token.handle)
+        held = None if binding is None else await self._resumed_attempt(binding.execution_id)
         parked, step, establishing = await self._resolve_park(
             token,
             approved=approved,
@@ -9823,11 +9879,10 @@ class Engine:
         recipient_grant = await self._establish_recipients(
             establishing, approved=approved, remember_recipients_until=remember_recipients_until
         )
-        # ADR-0249 §12: the attempt this execution belongs to, moved out of waiting at
-        # the moment that fact becomes true — **before** composing, which is an
-        # arbitrarily slow model call a cancellation can land in. Composing then runs,
-        # and only the half that depends on the answer waits for it.
-        held = await self._resumed_attempt(step)
+        if held is None:
+            # A binding recovered from durable state rather than held in process, so the
+            # lookup above had nothing to read; the resolved step names the execution.
+            held = await self._resumed_attempt(step.state.id)
         composed = await self._compose(parked.turn, step, deliveries={})
         # `resumed_from` is read above the resolution, so the ledger counts this pass's
         # own work and not the interval the park spent waiting for the user (§5).
