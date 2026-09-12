@@ -94,6 +94,7 @@ from ai_assistant.orchestration import (
 )
 from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
 from ai_assistant.permissions import (
+    ConfiguredSearchDestination,
     SqliteAuditTrail,
     SqliteDestinationTrustStore,
     SqliteParkedReads,
@@ -360,6 +361,38 @@ def _search_destinations(origin: str | None) -> tuple[CanonicalDestination, ...]
         return (canonical_destination(DestinationProtocol.HTTPS, origin),)
     except DestinationCanonicalisationError:
         return ()
+
+
+def _configured_search(
+    connection: str | None, destinations: tuple[CanonicalDestination, ...]
+) -> ConfiguredSearchDestination | None:
+    """What ADR-0247 §2's route (c) rests on, or ``None`` where nothing does.
+
+    The two configured values as the one argument the policy takes: the connection
+    reference the search is registered against and the canonical destination set its
+    origin canonicalises to (§1). **Both are passed through rather than derived** —
+    the set is :func:`_search_destinations`' own answer, from the canonicaliser
+    ``EgressBindingSeam`` derives a span's occurrence with — because §1 compares
+    recorded values and forbids either side being re-canonicalised.
+
+    Args:
+        connection: ``Settings.web_search_connection``, or ``None`` where this
+            deployment connected no search account.
+        destinations: :func:`_search_destinations`' answer for
+            ``Settings.web_search_origin``.
+
+    Returns:
+        The pair, or ``None`` where this deployment has no search destination to
+        compare against — no connection, or an origin this seam asserts no canonical
+        form for. A policy given ``None`` takes the *at the configured provider* fact
+        as false for every request, which is §2's fail-closed direction; **an empty
+        set is not passed as a pair**, because a binding's own canonical destination
+        set is never empty and a pair that can never compare equal would read as a
+        configuration while authorising nothing.
+    """
+    if connection is None or not destinations:
+        return None
+    return ConfiguredSearchDestination(reference=connection, destinations=frozenset(destinations))
 
 
 def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
@@ -1323,6 +1356,32 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             registrations=egress_registrations(egress, search),
             records=connections,
         )
+        # **The canonical destination set a search of this deployment would bind to**
+        # (ADR-0238 §2, §5). ADR-0238 §2 obliges the servicing site to read the
+        # destination's recorded trust *before* the supply is built, and at that instant
+        # no request and so no binding exists — `WebSearcher` has no destination member
+        # and ADR-0238 §13 gives it none. So the set is derived here, from the one value
+        # the searcher's own transport is built from, through
+        # `ai_assistant.tools.destinations.canonicalise`: **the same pure, total function
+        # `EgressBindingSeam` derives a span's destination with**, applied to the same
+        # input, so the two cannot state one rule twice.
+        #
+        # `web_search.py` declares the `origin` argument `x-egress-destination: "https"`,
+        # so a search binding's spans carry exactly this one destination and
+        # `EgressBinding.canonical_destination_set` answers exactly this tuple —
+        # asserted against a binding the real seam derived, in
+        # `tests/app/test_search_destination_set.py`, rather than left as a claim.
+        #
+        # **Empty where this deployment connected no search account**, which is not a
+        # special case: ADR-0238 §1 answers `UNCHOSEN` for an empty sequence, and a
+        # deployment with no account holds no `SearchServicer` and services no search.
+        #
+        # **The policy above is handed the same tuple** (ADR-0247 §1, §2), so the set
+        # a search *binds* to and the set the ruling compares against are one value
+        # derived once. A second derivation here would be the second shape that must
+        # agree ADR-0150 is named after, and the ADR forbids re-canonicalising either
+        # side of that comparison.
+        search_destinations = _search_destinations(settings.web_search_origin)
         # The four gate thresholds are the operator's configuration (ADR-0021 §5,
         # #239); the Settings defaults reproduce the policy's own, so an unset
         # deployment keeps today's gate. The two floors take no setting.
@@ -1345,6 +1404,29 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # all, and the establishing act ADR-0235 decides is now implemented
             # below — so a ruling here may source a grant a user actually made.
             grants=recipient_grants,
+            # **The configured search destination, which makes route (c) reachable**
+            # (ADR-0247 §2, §11's lane 1): the connection reference and the canonical
+            # destination set, as two values and never a `Settings` object — a policy
+            # handed the settings could read any field of them, and the authority §1
+            # states is exactly these two.
+            #
+            # **Nothing is derived here.** The reference is the configured string and
+            # the set is `search_destinations` above, built by the same canonicaliser
+            # `EgressBindingSeam` derives a span's occurrence with, so the ruling's
+            # comparison and the binding it compares against cannot state one rule
+            # twice.
+            #
+            # **`None` where this deployment connected no search account**, and `None`
+            # too where the configured origin is one this seam asserts no canonical
+            # form for: the fact is then false for every request, which is §2's
+            # fail-closed direction. `Settings` refuses one of the pair without the
+            # other, so the first case is the reference being absent and the second is
+            # the set being empty — and an empty set could never equal a binding's
+            # own, which is never empty (ADR-0148 §2's third clause), so passing one
+            # would be a value that reads as a configuration and authorises nothing.
+            configured_search=_configured_search(
+                settings.web_search_connection, search_destinations
+            ),
         )
 
         # The writer persists to the *same* store the loop retrieves from (ADR-0028 §4),
@@ -1384,26 +1466,6 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # path is the only producer of a `UserConfirmation`) is structural rather
         # than wiring, and a structural test holds it.
         writes = MemoryWriteStage(writer=writer, deferrals=deferrals)
-        # **The canonical destination set a search of this deployment would bind to**
-        # (ADR-0238 §2, §5). ADR-0238 §2 obliges the servicing site to read the
-        # destination's recorded trust *before* the supply is built, and at that instant
-        # no request and so no binding exists — `WebSearcher` has no destination member
-        # and ADR-0238 §13 gives it none. So the set is derived here, from the one value
-        # the searcher's own transport is built from, through
-        # `ai_assistant.tools.destinations.canonicalise`: **the same pure, total function
-        # `EgressBindingSeam` derives a span's destination with**, applied to the same
-        # input, so the two cannot state one rule twice.
-        #
-        # `web_search.py` declares the `origin` argument `x-egress-destination: "https"`,
-        # so a search binding's spans carry exactly this one destination and
-        # `EgressBinding.canonical_destination_set` answers exactly this tuple —
-        # asserted against a binding the real seam derived, in
-        # `tests/app/test_search_destination_set.py`, rather than left as a claim.
-        #
-        # **Empty where this deployment connected no search account**, which is not a
-        # special case: ADR-0238 §1 answers `UNCHOSEN` for an empty sequence, and a
-        # deployment with no account holds no `SearchServicer` and services no search.
-        search_destinations = _search_destinations(settings.web_search_origin)
         # **The search servicer, where this deployment connected an account**
         # (ADR-0231 §11, §17's Lane 5). It is the loop's only route to the
         # search seam and the seam's only caller: `search` above is handed to
