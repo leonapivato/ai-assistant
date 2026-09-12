@@ -270,8 +270,11 @@ attempt (A2 and A3, by ADR-0249 §5). §19 lists what it declines, each with wha
 >   `supersedes` **unset**, `disposition` **`ESTABLISHED`** directly and `settled_at` equal to
 >   `proposed_at` — the recorded turn's instant — and **retires nothing, there being nothing to
 >   retire**. It **may** set `tool`, `account`, `destinations` and `expires_at`, because there
->   is no earlier row to transcribe them from, and every member it carries is minted by §10's
->   resolutions from that turn's own span under §9's three clauses entire. **The row is written
+>   is no earlier row to transcribe them from — **but only where the recipient is already
+>   authorised by a recorded act of the user** (the clause below), because copying an account
+>   and a destination set off the request would let the selection authorise the recipient. Every
+>   member it carries is minted by §10's resolutions from that turn's own span under §9's three
+>   clauses entire. **The row is written
 >   by `orchestration` when the goal's first request reaching that declaration is built, before
 >   `ActionPolicy.decide` is called and before any `CONFIRM` about a concrete call exists** —
 >   the declaration, the account and the destination set are not knowable at the turn itself
@@ -285,6 +288,45 @@ attempt (A2 and A3, by ADR-0249 §5). §19 lists what it declines, each with wha
 > every later disposition through `settle` alone; a row carrying `confirmation` **unset** is
 > written `ESTABLISHED` with `settled_at` equal to `proposed_at` — each a rule of the write
 > path and not of the type, for the reason below.
+
+> **Normative — a path-(iii) row is written only where the **recipient** is already authorised
+> by a recorded act of the user, and it never supplies that authority itself.** An opening act
+> bounds **argument values**; it says nothing about **who may be reached**, and a row whose
+> `account` and `destinations` were copied from the request the system was about to make would
+> let the **selection** authorise the recipient — which ADR-0148 §3's second clause forbids in
+> terms, in its *"a tool's own declaration"*, *"a configured base URL or host"* and *"an
+> allowlist the system assembled"* limbs. So `orchestration` writes a path-(iii) row **only**
+> where the request's canonical destination set is covered by a recorded act of the user about
+> that recipient, taken over the request being built and read from the seams that already hold
+> such acts:
+>
+> - a **live `RecipientGrant`** covering it on ADR-0193 §3's comparisons — the declaration by
+>   value, the `BoundAccount` by value, and every member of the request's canonical destination
+>   set a member of the grant's; **or**
+> - the request is a **`WEB_SEARCH` at the configured provider** (ADR-0247 §1), which is the
+>   owner's own recorded configuring act and is the one recipient authority this corpus admits
+>   without a grant.
+>
+> **Where neither holds, no path-(iii) row is written.** The request is ruled with no standing
+> route from that act, and the user is asked — by a `CONFIRM` that names the destination set
+> (ADR-0148 §8's fourth clause) and whose answer proposes a **path-(i)** row. **That row carries
+> the earlier act's bounds**: the completeness condition below is stated over *"the user's own
+> recorded words of this goal"* and §8's basis names *"the recorded conversation turn the
+> coverage member rests on"* — any turn of the goal and not only this one — so the confirmation
+> asks about the **recipient** and never asks the user to repeat the **bound**, which is the
+> whole of the owner's Q1 direction.
+
+> **Normative — that is two recorded acts composed at the write and never at the ruling, and
+> the reads are `orchestration`'s.** Whatever writes the row is constructed with a
+> `RecipientGrants` and the two configured search values beside the store it already holds;
+> **one constructed with neither writes no path-(iii) row at all**, which is the fail-closed
+> default and the same shape §6 gives a policy holding no `GoalAuthorizations`. **The ruling is
+> untouched**: it still reads one row, `authorised_by` still names one row, no component
+> composes coverage across two records (§1), and where route (d) answers
+> `RecipientGrants.covering` is called **zero** times inside `decide` — ADR-0193 §7's
+> at-most-one-read-per-seam-per-ruling is a rule about the ruling, and this read is before it.
+> §5 is explicit that composition belongs at the moment of the act, where the store can verify
+> it, and this is that rule one path over.
 
 > **Normative — path (iii) is the owner's upfront permission, and it is what makes the user's
 > own instruction sufficient.** *"You may spend up to fifty pounds on this"*, said while the
@@ -320,9 +362,11 @@ attempt (A2 and A3, by ADR-0249 §5). §19 lists what it declines, each with wha
 
 > **Normative — the four conditions below govern path (iii) too, read over the request being
 > built rather than over a recorded `CONFIRM`**, with the goal, the egress binding, the
-> completeness of the coverage and §12's ladder each taken exactly as stated. Failing any of
-> them **no row is written**, the request is ruled with no standing route, and the concrete
-> call is confirmed under route (a) — which is the path that exists today and is unchanged.
+> completeness of the coverage and §12's ladder each taken exactly as stated — **and the
+> recipient precondition above beside them**, which path (i) does not need because its own
+> confirmation names the destination set. Failing any of the five, **no row is written**, the
+> request is ruled with no standing route, and the concrete call is confirmed under route (a) —
+> which is the path that exists today and is unchanged.
 
 > **Normative — which `CONFIRM` proposes a row, stated because §11's absence rule needs it and
 > because *"when a `CONFIRM` is put"* (§15) is not a rule a lane could apply.** `orchestration`
@@ -377,7 +421,9 @@ attempt (A2 and A3, by ADR-0249 §5). §19 lists what it declines, each with wha
 >
 > - A rule true of **every state a row is ever persisted in** is a **model validator** on the
 >   type: the `settled_at`/disposition pairing, `expires_at` strictly after `proposed_at`, the
->   rule that `confirmation` and `supersedes` are not both unset, a `CoverageMember`'s two
+>   rule that a row carrying **neither** `confirmation` **nor** `supersedes` carries a
+>   **non-empty** `coverage` — path (iii)'s invariant, which replaces the pairing rule an
+>   earlier draft stated and which an opening act satisfies — a `CoverageMember`'s two
 >   shapes, a `ValueBound`'s three, a `ValueResolution`'s three, and the agreement between a
 >   `MONEY` bound and a fixed currency member of the same row.
 > - A rule about the state a row may be **first written in** is the **store's**, at `record`:
@@ -593,12 +639,22 @@ argument that actually needs one.
 > `CoverageMember.argument` is (§2). This is a **BREAKING** contract change to a `core` type
 > under golden rule 5 and is flagged as one.
 >
-> **The default is the strict claim and not an omission**, which is what makes it admissible
-> beside ADR-0016 §1's rule that *"no safety field has a default"*. That rule is written against
-> a default that is *"a claim"* a forgetful author would ship — *"this tool touches no data"* —
-> and this default makes the opposite claim: an unclassified argument is user-facing, so a
-> declaration that says nothing needs coverage for **every** argument and asks where it has
-> none. It costs a question and can never authorise a call.
+> **This narrows ADR-0016 §1's required-field clause by one field, and the narrowing is stated
+> rather than argued around.** That clause is unconditional — *"Every field that a permission
+> decision depends on is required"* — and a permission decision does depend on this one, since
+> it moves §3's condition 6 and §6's bar. So the exception is **recorded** (§18) rather than
+> claimed away. **The grounds are the clause's own reason, which does not reach this default.**
+> §1's reason is that *"A default is a claim"* and that the natural-looking one — the empty
+> tuple for `reads`/`writes` — is *"exactly the false statement a forgetful integration author
+> would ship"*. Here the empty tuple makes the **opposite** claim: an unclassified argument is
+> user-facing, so a declaration that says nothing needs coverage for **every** argument and asks
+> where it has none. **It costs a question and can never authorise a call**, which is the one
+> direction §1 exists to protect. **The alternative was making the field required**, and it is
+> declined because it would oblige every declaration in the tree and every fixture to write
+> `system_supplied=()` for a fact that is empty on almost all of them, buying nothing in the
+> direction §1 cares about — a cost with no safety return is not what an unconditional rule is
+> for, and the honest move is the recorded exception rather than a claim that no exception is
+> needed.
 
 > **Normative — a row's coverage names no system-supplied argument.** A `CoverageMember` whose
 > `argument` is a member of that row's own `tool.system_supplied` makes the row **not
@@ -615,6 +671,27 @@ argument that actually needs one.
 > asked to approve an idempotency key**, and a model that reached for one is a fault and not a
 > question — ADR-0249 §7's *"A model may never clear a permission, a coverage test, a
 > prerequisite or a dependency"* read at the other end, where it may not **supply** one either.
+
+> **Normative — a system-supplied argument is filled before the candidate fit test, so every
+> check reads the call that would actually be made.** ADR-0144 §7 decides eligibility by
+> evaluating each candidate's schema against **the step's parameters**, before any ordering key
+> and before the request is built; a declaration whose schema **requires** a key it classifies
+> system-supplied would then be ineligible for every step, because the clause above forbids the
+> model naming that key at all. So `orchestration` fills that candidate's system-supplied
+> arguments **before** the fit test, and the eligibility evaluation is taken over **the step's
+> parameters merged with them**, per candidate. **`core`'s one evaluator is unchanged and no
+> second comparison is written** (ADR-0145 §2): what moves is the mapping it is called with, not
+> the rule that reads it. The merge is `orchestration`'s alone, it names **only** keys that
+> candidate's own declaration classifies system-supplied, and **it overwrites no step
+> parameter** — the refusal above makes the two sets disjoint by construction, so there is no
+> precedence rule to remember. §18 records what this takes from ADR-0144 §7.
+
+> **Normative — §14's check 2 reads the same way.** Every argument the declaration's schema
+> requires is a literal on the step, filled by a `ResultReference` (ADR-0253 §6), **or
+> classified system-supplied on that declaration and filled by `orchestration`**. **A key that
+> is none of the three is still `UNMET_DEPENDENCY`'s neighbour and still refuses the step**, and
+> ADR-0145 §1's construction-time schema check is unmoved: it runs over the **final** arguments,
+> where a system-supplied value is present like any other.
 
 > **Normative — the classification narrows what is compared and nothing else.**
 > `ActionRequest.parameters_digest` is taken over **every** argument, system-supplied ones
@@ -1628,8 +1705,17 @@ all three would be one thing to be wrong about.
 > nobody stated at the act and nobody could read off the row. The expiry is **per
 > `Authorization`**, set when the authority is granted and shown then (§11).
 
-> **Normative — the ladder, taken in order at the instant the row is written, and it is
-> total.** `expires_at` is:
+> **Normative — the ladder is taken on the two paths that *set* an expiry, and never on the one
+> that transcribes it.** Paths (i) and (iii) set `expires_at` and take the ladder below. **Path
+> (ii) takes none of it**: a correction transcribes the superseded row's `expires_at` unchanged
+> (§1, §5), so a chain of corrections carries the first act's horizon whatever the goal's
+> `deadline` now says and whether or not the correcting act names an instant. **That is the
+> clause this ladder must not disturb** — it is what makes *"No sequence of corrections outlives
+> the confirmation that began it"* true — and a correction is never refused for want of an
+> instant it was never going to set.
+
+> **Normative — the ladder, taken in order at the instant a path-(i) or path-(iii) row is
+> written, and it is total.** `expires_at` is:
 >
 > 1. **the instant the user's own act states**, where the recorded act states one and §10's
 >    resolutions take it — *"until Sunday"*, *"for this week"*, *"while I'm away"* — resolved
@@ -1642,9 +1728,10 @@ all three would be one thing to be wrong about.
 >    **This is decision 4's *no separate arbitrary timer*** — the authority borrows the
 >    objective's horizon rather than minting a second one beside it; otherwise
 > 3. **no row at all.** Where the act states no instant **and** the goal carries no `deadline`,
->    or carries one at or before `proposed_at`, **no `Authorization` is written by any path**,
->    `Confirmation.authorization` is absent (§11), and the concrete call is confirmed under
->    ADR-0148 §3's route (a) exactly as it is today. **Nothing is invented, nothing is defaulted
+>    or carries one at or before `proposed_at`, **no path-(i) proposal and no path-(iii) row is
+>    written**, `Confirmation.authorization` is absent (§11), and the concrete call is confirmed
+>    under ADR-0148 §3's route (a) exactly as it is today. **A path-(ii) correction of an
+>    existing row is unaffected**, transcribing the horizon that row already carries. **Nothing is invented, nothing is defaulted
 >    and nothing falls back to a configuration**, which is §10's own discipline for a resolution
 >    the loop cannot take, read onto the one instant this record cannot do without.
 >
@@ -1772,7 +1859,8 @@ all three would be one thing to be wrong about.
 >    (ADR-0253 §1, §2). A reference that cannot resolve is `UNMET_DEPENDENCY` by that section's
 >    six cases, *"and never a default, a blank, an omission or a `null`"*.
 > 2. **Arguments present or referenced** — every argument the declaration's schema requires is
->    either a literal on the step or filled by a `ResultReference` (ADR-0253 §6). The schema
+>    either a literal on the step, filled by a `ResultReference` (ADR-0253 §6), **or classified
+>    `system_supplied` on that declaration and filled by `orchestration`** (§3). The schema
 >    check itself is ADR-0145 §1's, at construction, and is neither moved nor duplicated.
 > 3. **Sufficiency to act** — every member of the step's `when`, by ADR-0252 §6's four tests,
 >    evaluated at the moment of dispatch.
@@ -2150,9 +2238,9 @@ ADR-0082 §1's test is applied to the earlier ADR's **text**, and it is shown ra
 asserted: *"Would a reader holding only the earlier ADR now act differently, or read one of its
 clauses more widely than it now holds?"* Three come out yes and take a record; the rest come out
 no and take none, which ADR-0082 §1 requires as firmly — *"Absent a clause that fails §1's test,
-there is nothing to record."* **Five come out yes** once the owner's four restrictions are
-carried: the three this decision already recorded, plus ADR-0181 §5's lineage floor and
-ADR-0016 §1's `ToolDefinition` declaration, each below.
+there is nothing to record."* **Six come out yes** once the owner's four restrictions are
+carried: the three this decision already recorded, plus ADR-0181 §5's lineage floor, ADR-0016
+§1 in two scopes and ADR-0144 §7's parameter-fit eligibility clause, each below.
 
 **ADR-0148 §3 — partially superseded, in the route enumeration of its first clause alone.** The
 clause reads that an `ALLOW` is available *"only where every member of its canonical destination
@@ -2244,18 +2332,47 @@ inherits none of it — the discharge above is this decision's own, stated over 
 not over any configured value. ADR-0247 §3's other clauses, including both of its retirements
 and its `SearchSupply` clause, bind entire.
 
-**ADR-0016 §1 — partially superseded, in `ToolDefinition`'s field list alone.** §1 states the
-model whole and its no-default rule alongside. `ToolDefinition` gains
+**ADR-0016 §1 — partially superseded, in two scopes: `ToolDefinition`'s field list, and the
+required-field clause in the application to that one field.** §1 states the model whole and its
+no-default rule alongside. `ToolDefinition` gains
 **`system_supplied: tuple[EncodableText, ...]`** defaulting to the empty tuple (§3), so a reader
-holding only §1 authors a definition that never carries one and does not conform. **The
-no-default rule is satisfied rather than excepted**: §1 forbids a default that is *"a claim"* a
-forgetful author would ship, and the empty tuple makes the **strict** claim — every argument is
-user-facing and every argument needs coverage — so a declaration that says nothing asks more
-often rather than less. **Every other clause of §1 binds entire**: every field a permission
-decision depends on stays required, `frozen=True` and its audit argument stand, `description`'s
-non-blank refusal stands, and no lane reads this as licence to default a safety field. §§2-7 are
+holding only §1 authors a definition that never carries one and does not conform — that is the
+first scope. **The second is the one a reader would otherwise object with.** §1 reads *"Every
+field that a permission decision depends on is required"*, unconditionally, and a permission
+decision **does** depend on this field: it moves §3's condition 6 and §6's bar. So the default is
+an **exception** to that clause and is recorded as one rather than argued away.
+
+**The grounds are the clause's own reason, which does not reach this default.** §1 forbids a
+default because *"A default is a claim"*, and the empty tuple for `reads`/`writes` is *"exactly
+the false statement a forgetful integration author would ship"*. Here the empty tuple makes the
+**opposite** claim — every argument is user-facing, so every argument needs coverage — which
+costs a question and can never authorise a call. **The alternative, making the field required, is
+named and declined** (§3): it would oblige every declaration in the tree and every fixture to
+write `system_supplied=()` for a fact empty on almost all of them, with no return in the
+direction §1 protects.
+
+**Every other clause of §1 binds entire**: every **other** field a permission decision depends on
+stays required, `frozen=True` and its audit argument stand, `description`'s non-blank refusal
+stands, and **no lane reads this record as licence to default a second safety field** — the
+exception is this one field, on this argument, and the next one needs its own. §§2-7 are
 untouched, and §4's `parameters_schema` declaration is relied on rather than moved — the
 classification is a field **beside** the schema and never a keyword inside it (§3).
+
+**ADR-0144 §7 — partially superseded, in its parameter-fit eligibility clause alone.** That
+clause reads: *"When parameter-schema enforcement lands, a candidate whose schema the step's
+parameters do not satisfy is **ineligible** and is removed from the candidate set before any key
+of §2 through §4 is applied."* §3 above classifies some arguments **system-supplied**, forbids
+the model naming one on a step, and has `orchestration` fill them — so a candidate whose schema
+**requires** such a key would be ineligible for every step under that clause as written, and the
+call this decision exists to authorise could never be selected. The clause is read over **the
+step's parameters merged with the system-supplied arguments `orchestration` fills for that
+candidate**, per candidate. **Everything else of §7 binds entire**: the fit predicate is still an
+**eligibility** test taken **before any ordering key**, it is still never a key, a penalty or a
+tie-break term, and ADR-0128 §1's shape behind it is unmoved — what changes is the mapping the
+predicate is evaluated over and not where or how it binds. **ADR-0145 §2 is untouched and is the
+reason the change is stated this way**: there is still exactly one evaluator in `core` and no
+consumer substitutes its own, so only its argument moves. ADR-0144's other sections and its other
+deferrals are untouched.
 
 **ADR-0193 §5 and ADR-0148 §8 — no record owed for §6's bar, and the working is shown because
 a reader would expect one.** §5 rules that *"A grant states nothing about the payload and
@@ -2396,8 +2513,10 @@ check are each consumed as written, and §13 and §14 state where.
 > classes (§16) are Lane 1's in full, and its conformance suites are what pin them.
 > **Lane 2, the proposal, the settlement and the recheck.** `orchestration` proposing the row
 > on §1's four conditions when a `CONFIRM` is recorded, settling it on the answer, writing a
-> path-(ii) correction **and a path-(iii) opening act**, taking §12's ladder, filling every
-> system-supplied argument and refusing to build a request whose step arguments name one (§3),
+> path-(ii) correction **and a path-(iii) opening act** — the last on a `RecipientGrants` and
+> the two configured search values it is constructed with beside the store (§1) — taking §12's
+> ladder, filling every system-supplied argument **before the candidate fit test** and refusing
+> to build a request whose step arguments name one (§3),
 > **setting** `ActionRequest.goal`, and phase 4's evaluation. **It adds no
 > `core` type and no field**, both being Lane 1's, and **it writes no attempt bookkeeping**: the
 > `AWAITING_AUTHORIZATION` commit and the `add_authorization_id` append are ADR-0249's lane's
@@ -2800,8 +2919,10 @@ check are each consumed as written, and §13 and §14 state where.
 >     while moving A out of a retired disposition.
 > 64. **An opening act authorises without a question** (§1's path (iii)). A recorded turn of the
 >     goal says *"you may spend up to fifty pounds on this"*; no row of that goal and
->     declaration id stands `ESTABLISHED`; the goal carries a `deadline`. The first egress
->     request of that goal reaching that declaration → **a row is written `ESTABLISHED`** with
+>     declaration id stands `ESTABLISHED`; the goal carries a `deadline`; **and a live
+>     `RecipientGrant` covers the declaration, the account and the whole canonical destination
+>     set of the request being built**. The first egress request of that goal reaching that
+>     declaration → **a row is written `ESTABLISHED`** with
 >     `confirmation` and `supersedes` both unset, `settled_at` equal to `proposed_at` equal to
 >     the turn's instant, `expires_at` the goal's `deadline`, one member bounding the amount
 >     with the turn's own span as its basis — and the request draws **`ALLOW` on route (d)**
@@ -2813,8 +2934,33 @@ check are each consumed as written, and §13 and §14 state where.
 >     ADR-0250 §6's three conditions — asserted by driving a turn whose planner raised no
 >     `ProposedQuestion`, where no question is put and no row is written either. **A row with
 >     `confirmation` and `supersedes` both unset and `coverage=()` is not constructible**, one
->     test. **And where a row of that pair already stands `ESTABLISHED`, no path-(iii) row is
->     written** — the act is a correction and takes path (ii), or a widening and takes path (i).
+>     test, **and one carrying a non-empty `coverage` round-trips through construction and
+>     persistence in every disposition it can reach**. **And where a row of that pair already
+>     stands `ESTABLISHED`, no path-(iii) row is written** — the act is a correction and takes
+>     path (ii), or a widening and takes path (i).
+> 68. **An opening act supplies no recipient authority** (§1). The same act and the same goal,
+>     with **no** recipient grant covering the request and the request **not** at the configured
+>     provider → **no path-(iii) row is written**, the request draws **`CONFIRM`**, and the
+>     confirmation names the canonical destination set. **Answering it proposes a path-(i) row
+>     whose amount member carries the *earlier* turn's span and act as its basis**, so the user
+>     is asked about the recipient and **never asked to repeat the bound** — asserted by reading
+>     the established row's basis and finding the opening turn's id, not the confirmation's.
+>     **And the negative arms, one test each**: a grant covering the declaration and account but
+>     not every member of the destination set; a grant for a different `BoundAccount`; a grant
+>     whose `ToolDefinition` differs by value; an **expired** grant — in each, **no path-(iii)
+>     row** and a `CONFIRM`. **And a writer constructed with no `RecipientGrants` and no
+>     configured search values writes no path-(iii) row at all**, whatever the act said.
+> 69. **A schema-required system-supplied argument is selectable and dispatchable** (§3, §14). A
+>     declaration whose `parameters_schema` **requires** `idempotency_key` and whose
+>     `system_supplied` names it; a plan step naming every other argument and **not** that one →
+>     the candidate is **eligible**, the fit evaluation being taken over the step's parameters
+>     merged with the value `orchestration` fills for that candidate; phase 4's check 2 passes;
+>     the request is built carrying the key; ADR-0145 §1's construction check passes over the
+>     final arguments; and a covering record naming every user-facing argument and **not** that
+>     key → **`ALLOW` on route (d)**. **The same step naming the key itself → the request is not
+>     built**, no ruling is sought and no `CONFIRM` is put. **And `core`'s evaluator is called
+>     unchanged**: one implementation, one signature, and the merged mapping is the only thing
+>     that moved — asserted by a test that the merge overwrites no step parameter.
 > 65. **Full coverage discharges ADR-0181 §5's floor, and partial coverage does not** (§6). A
 >     live record fixing every user-facing argument and carrying the request's whole canonical
 >     destination set; the request's binding carries **`planned_with_external_content`** and its
@@ -2843,8 +2989,12 @@ check are each consumed as written, and §13 and §14 state where.
 >     instant → `expires_at` is that instant, carried with the span that named it. An act naming
 >     none on a goal carrying a `deadline` → `expires_at` is the `deadline`, transcribed. An act
 >     naming none on a goal carrying **no** `deadline`, and one carrying a `deadline` at or
->     before `proposed_at` → **no row is written by any path**, `Confirmation.authorization` is
->     **absent**, and the call is confirmed under route (a), one test each. **Editing the goal's
+>     before `proposed_at` → **no path-(i) proposal and no path-(iii) row is written**,
+>     `Confirmation.authorization` is **absent**, and the call is confirmed under route (a), one
+>     test each. **And the ladder does not reach path (ii)**: a live row with an explicit future
+>     `expires_at` on a goal carrying **no** `deadline`, corrected by *"make it Sunday"* naming
+>     no horizon → the correction **is written**, transcribing that `expires_at` unchanged. **A
+>     lane that applied the ladder to a correction fails this arm.** **Editing the goal's
 >     `deadline` after the row is written moves no `expires_at`.** **`Settings` carries no
 >     authorization field**, asserted by a roster test over `Settings` in ADR-0178 §10's shape,
 >     and `RecipientGrant.expires_at` and the configured-provider authority are untouched.
@@ -2859,16 +3009,17 @@ value, no seam through which a policy could read one, and no answer to the quest
 that evaluates three predicates and adds none. That is ADR-0070 §1's test met, and a new ADR is
 the instrument.
 
-**It is a partial supersession of exactly five documents** (ADR-0070 §3) — ADR-0148 in one
-scope, ADR-0193 in one, ADR-0247 in **three**, ADR-0181 in one and ADR-0016 in one — and the
+**It is a partial supersession of exactly six documents** (ADR-0070 §3) — ADR-0148 in one
+scope, ADR-0193 in one, ADR-0247 in **three**, ADR-0181 in one, ADR-0016 in **two** and ADR-0144
+in one — and the
 `Status` line of each names its scope **without an `ADR-NNNN` token inside the parentheses**, so
 ADR-0070 §4's extraction invariant holds. Every other ADR it touches is **relied on**, and §18
 shows the working for each rather than leaving a reader to check.
 
 **The records land in the same change as this document** (ADR-0082 §7): ADR-0148's, ADR-0193's,
-ADR-0247's, ADR-0181's and ADR-0016's `Status` qualifiers and dated notes are written with it and
-not after it. Nothing else in any of the five is edited — no Decision text is rewritten, which
-ADR-0070 §1 forbids.
+ADR-0247's, ADR-0181's, ADR-0016's and ADR-0144's `Status` qualifiers and dated notes are written
+with it and not after it. Nothing else in any of the six is edited — no Decision text is
+rewritten, which ADR-0070 §1 forbids.
 
 ### 22. Marking, review and ratification
 

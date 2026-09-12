@@ -1,6 +1,6 @@
 # 144. Selection prefers the least severe capable declaration, and opens no question of its own
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0254 (one scope. §7's parameter-fit eligibility clause alone — *"When parameter-schema enforcement lands, a candidate whose schema the step's parameters do not satisfy is **ineligible** and is removed from the candidate set before any key of §2 through §4 is applied"* — which is read over **the step's parameters merged with the system-supplied arguments the orchestrator fills for that candidate**, per candidate. A tool's declaration now classifies each argument user-facing or system-supplied; a plan step naming a system-supplied key is refused outright, so a declaration whose schema *requires* such a key would be ineligible for every step under the clause as written and could never be selected. **Everything else of §7 binds entire**: the fit predicate is still an eligibility test, still taken before any ordering key, and still never a key, a penalty or a tie-break term; only the mapping it is evaluated over moves, and there is still exactly one schema evaluator in `core` with no consumer substituting its own. §7's other deferrals — capability namespacing, the durable user-facing tool preference, the public carrier for tied candidate ids and the learned preference — and §§1-6 and §8 onward are untouched)
 - Date: 2026-08-13
 - **Not a contract change, and it ships alone anyway.** No Protocol is added or
   altered, no `core` type gains or loses a member, and `core/config.py` is
@@ -17,6 +17,37 @@
   in the scope its own header names. The `Date` line is this ADR's authoring date
   in this clone's frame; the base named here is the anchor that does not move
   under either frame.
+
+- **Partially superseded: 2026-09-12 by ADR-0254 — §7's parameter-fit eligibility
+  clause alone. Nothing else in this ADR.** That clause rules that *"a candidate whose
+  schema the step's parameters do not satisfy is **ineligible** and is removed from the
+  candidate set before any key of §2 through §4 is applied."* ADR-0254 §3 gives a
+  `ToolDefinition` a `system_supplied` roster naming the argument keys the **system**
+  fills — an idempotency key, a client reference, a locale — and refuses to build a
+  request at all where a plan step's own arguments name one, so that an implementation
+  choice never becomes a question put to the user and a value the model chose is never
+  approved. A declaration whose `parameters_schema` **requires** such a key is then
+  ineligible for **every** step under this clause as written, because the key the schema
+  demands is the one key the step may not carry.
+
+  **What moves is the mapping, not the rule.** Eligibility is decided over the step's
+  parameters **merged with the system-supplied arguments the orchestrator fills for that
+  candidate**, per candidate — so the predicate answers about the call that would actually
+  be made rather than about a step that is deliberately incomplete. **The merge names only
+  keys that candidate's own declaration classifies system-supplied and overwrites no step
+  parameter**, the two sets being disjoint by ADR-0254 §3's refusal, so there is no
+  precedence rule to remember.
+
+  **Everything else of §7 stands entire**, and the parts that carry its argument
+  conspicuously so: the fit predicate is still an **eligibility** test and not a ranking
+  term, it still binds **before any ordering key** — ADR-0128 §1's shape, which is the
+  whole reason the clause exists — and it is still never a key, a penalty or a tie-break.
+  **ADR-0145 §2 is untouched and is why the change is stated this way**: there is exactly
+  one schema evaluator, in `core`, and no consumer substitutes its own, so only its
+  argument moves. §7's four other deferrals — capability namespacing (#1100), the durable
+  user-facing tool preference (#1101), the public carrier for tied candidate ids (#1103)
+  and the learned preference — are untouched, as are §§1-6 and every section after §7.
+  Refs #2255.
 
 ## Context
 
