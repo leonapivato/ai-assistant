@@ -828,14 +828,20 @@ need"* and whose bound is A3's.
 
 > **Normative — opening an attempt and persisting one are two acts, and only the second is
 > bound by §11.** An attempt is **opened in memory** when the user act that opens it occurs,
-> which is before the turn's first planner call; it is **persisted** at the one site §11 names,
-> together with the goal, its revisions and the turn's plans. A turn that ends before that site
-> writes no attempt row, exactly as it writes no goal row and no plan row. Every phase stamp,
-> state move and reference this turn produced is applied **to the value the loop holds**, and
-> the row written at that site carries them already; `commit_attempt` is what carries a
-> **later** turn's transitions and references onto an attempt the store already holds, which is
-> the case the `add_*` members exist for. Nothing buffers a transition past that site and
-> nothing replays one.
+> which is before the turn's first planner call; it is **first written** at the one site §11
+> names, together with the goal, its revisions and the turn's plans, carrying every phase stamp,
+> state move and reference the turn had produced **by that moment**. A turn that ends before
+> that site writes no attempt row, exactly as it writes no goal row and no plan row.
+
+> **Normative — after the first write, every change goes through `commit_attempt`, in this turn
+> as in any later one.** The site §11 names precedes `start_execution` and precedes composition,
+> so an execution id, an authorization id, the phase reaching `VERIFY`, the terminal `state` and
+> the `outcome` a turn earns are all facts that do not exist yet when the row is first written.
+> Each reaches the store through a `commit_attempt` under §12's compare-and-swap, at the moment
+> the fact becomes true. **Nothing buffers a transition, nothing replays one, and no lane writes
+> an attempt that claims a result before it happened** — an attempt whose `outcome` is
+> `ANSWERED` is written after the answer exists, which is the whole of what `ANSWERED` asserts
+> (§5).
 
 > **Normative.** **Both new writes are compare-and-swap, on ADR-0014 §5's existing discipline
 > and for its existing reason.** `record_interpretation` succeeds only where the stored
@@ -1169,7 +1175,9 @@ that a hub and its clients must upgrade together.
 1. **S1, end to end.** *"What is two plus two?"* on a conversation's first turn: a goal opened
    at revision 1 whose outcome is the stripped request; **one** `Planner.plan` call and **one**
    composing call, which is exactly today's cost; six phase stamps; no read request; no
-   question; one attempt ending `ENDED`/`ANSWERED`; and the goal's status still **`ACTIVE`**.
+   question; one attempt whose **stored** row ends `ENDED`/`ANSWERED`, written first at §11's
+   site and moved there by a same-turn `commit_attempt` once the answer exists; and the goal's
+   status still **`ACTIVE`**.
 2. **S2's understanding half.** *"Actually, make it Sunday"* against a goal whose earlier
    attempt booked a campsite: a **new attempt** on the **same** goal, a new interpretation
    revision whose `raised_by` names this turn and whose changed element grounds `USER_STATED`
@@ -1194,10 +1202,13 @@ that a hub and its clients must upgrade together.
    shown set, and a `USER_STATED` element whose span is not a span of the turn's request: each
    dropped from the recorded revision, silently, with the revision's `outcome` still recorded
    and the turn unharmed.
-6. **The stale-target rule.** A plan whose `targets_revision` is not the goal's current
-   revision is not driven; and a plan the loop built carries the `revision` of the
-   interpretation whose brief it projected for that call, whatever the planner returned in that
-   field.
+6. **The stale-target rule, and what the stamp actually is.** A plan whose `targets_revision`
+   is not the goal's current revision is not driven. And the stamp is **the goal's revision
+   after this call's understanding was recorded**, whatever the planner returned in that field,
+   in both cases: a call that received revision 1 and returned no understanding yields a plan
+   targeting 1, and one that received revision 1 and returned an understanding recorded as
+   revision 2 yields a plan targeting **2** (arm 20). A stale target is therefore produced by a
+   *later* revision and never by the call that made the plan.
 7. **`ACHIEVED` has no producer.** Over the whole implementation, no assignment of
    `GoalStatus.ACHIEVED` exists anywhere under `src/` — asserted as a test over the shipped
    tree, not as a review convention, so that a later lane cannot supply one without the ADR
@@ -1219,10 +1230,13 @@ that a hub and its clients must upgrade together.
     deletion that no `RUNNING` step blocks.
 13. **An element-free brief is well-formed.** A goal at revision 1 plans without a question
     being raised on the ground that the brief carried no elements.
-14. **A turn that ends early persists nothing.** A turn whose planner raises, one rejected for
-    capacity and one that fails before the planner is reached each leave **no goal row, no
-    attempt row and no plan row** — ADR-0228 §5's clause asserted over the two new record kinds
-    as well as over the plan, and asserted on a `LearningLoop` that still holds no `PlanStore`.
+14. **A turn that ends early persists nothing, and a turn that gets past the site records the
+    rest.** A turn whose planner raises, one rejected for capacity and one that fails before the
+    planner is reached each leave **no goal row, no attempt row and no plan row** — ADR-0228 §5's
+    clause asserted over the two new record kinds as well as over the plan, and asserted on a
+    `LearningLoop` that still holds no `PlanStore`. And a turn that reaches the site and then
+    composes leaves a stored attempt whose phase, state and outcome are the ones it actually
+    finished on, moved there by same-turn `commit_attempt` calls rather than claimed in advance.
 15. **A park outlives a goal the store never got.** A park written on a turn that then ended
     early is still answerable, its resumption composes from what the park itself carries, and
     nothing repairs or refuses it (§11).
@@ -1245,8 +1259,9 @@ that a hub and its clients must upgrade together.
     into `Goal.conversation_id`, `Goal.last_engaged_at`, `GoalInterpretation.raised_by` or
     `ActionPlan.targets_revision`, and `PlanStore.save_plan` refuses a plan whose
     `targets_revision` is still absent (§8, §12).
-19. **The attempt's references grow.** An attempt the store already holds takes a plan id, then
-    an execution id, then an authorization id through `commit_attempt`, each appended in order;
+19. **The attempt's references grow, within a turn and across turns alike.** An attempt the
+    store already holds takes a plan id, then an execution id, then an authorization id through
+    `commit_attempt` — the first two inside the turn that opened it — each appended in order;
     a repeated identifier is ignored rather than duplicated; and no member of `AttemptTransition`
     removes or reorders one.
 20. **An ordinary revising turn drives.** A planner call that receives revision 1 and returns
