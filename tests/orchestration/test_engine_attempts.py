@@ -949,53 +949,83 @@ async def test_a_resolution_that_reached_no_ruling_still_leaves_the_attempt_wait
     assert attempt.outcome is None, "nothing succeeded, so nothing is ANSWERED"
 
 
-async def test_a_recovery_that_overtakes_a_parking_turn_does_not_fail_it() -> None:
-    """§12's compare-and-swap has a loser, and the loser must not take the turn down.
+async def test_the_park_is_published_only_after_the_attempt_says_it_is_waiting() -> None:
+    """§12: the parking turn and the answer are two writers who never overlap.
 
-    A park is durably answerable from **inside** the drive: ``StepRunner.run`` commits
-    ``→ AWAITING_APPROVAL`` before it returns, so ``pending_confirmations`` can enumerate
-    it, mint a token and a ``resume`` can resolve it while the turn that made it is still
-    composing its "I need your approval" reply. ADR-0052 §2's recovery exists so that it
-    can, and no ordering inside this engine removes the window — the park is published by
-    the store, not by this method.
+    A park is durably answerable the instant ``→ AWAITING_APPROVAL`` is committed: from
+    there ``pending_confirmations`` can enumerate it, mint a token and a ``resume`` can
+    resolve it, in this process or another (ADR-0052 §2). A turn that still owed its
+    attempt a write at that instant would be a second writer racing the answer, and
+    **neither ordering of that race has a good outcome** — the parking turn losing the
+    compare-and-swap raises out of a turn that had already parked, and the resumption
+    losing it raises after the confirmation is spent, stranding the step with no token
+    left to retry it.
 
-    So the two writes a parking turn still owes its attempt can find the row moved on,
-    and both describe a state the attempt has provably left: one says
-    ``AWAITING_AUTHORIZATION``, which the answer made false, and the other adds to a
-    ledger §5 makes monotonic that the resolution has already advanced past. Raising
-    there would lose the whole turn — its capture and its reply — to preserve a field
-    about a moment that has passed.
+    So the parking turn finishes with the attempt *before* the park exists, and this is
+    the ordering asserted at the store: what the attempt said at the moment the park was
+    published.
     """
-    entered = asyncio.Event()
-    release = asyncio.Event()
+    seen: list[AttemptState | None] = []
 
-    class _GateTheWaitingWrite(_Recording):
-        """Suspends the parking turn on the commit that records it is waiting."""
+    class _WatchingThePublication(_Recording):
+        """Reads the attempt at the instant the park becomes durable."""
 
-        async def commit_attempt(self, transition: AttemptTransition) -> GoalAttempt:
-            """Hold the first ``AWAITING_AUTHORIZATION`` write until released."""
-            if transition.to_state is AttemptState.AWAITING_AUTHORIZATION and not entered.is_set():
-                entered.set()
-                await release.wait()
-            return await super().commit_attempt(transition)
+        async def commit_transition(self, transition: Any) -> Any:
+            """Record the attempt's state as ``→ AWAITING_APPROVAL`` commits."""
+            if transition.to_status is StepStatus.AWAITING_APPROVAL and self.opened:
+                held = await self.get_attempt(self.opened[0].id)
+                seen.append(None if held is None else held.state)
+            return await super().commit_transition(transition)
 
-    plans = _GateTheWaitingWrite()
+    plans = _WatchingThePublication()
     harness = Harness(tools=(confirmable(),), plans=plans)
-    parking = asyncio.ensure_future(harness.engine.converse("send it", timeout=PATIENT))
-    await asyncio.wait_for(entered.wait(), timeout=5)
 
-    (recovered,) = await harness.engine.pending_confirmations()
-    resumed = await harness.engine.resume(recovered.token, approved=True, timeout=PATIENT)
-    release.set()
-    parked = await parking
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
 
-    assert resumed.step is not None
-    assert resumed.step.disposition is Disposition.EXECUTED, "the recovery really answered"
-    assert parked.step is not None, "and the overtaken turn still returned its own outcome"
+    assert parked.step is not None
+    assert parked.step.confirmation is not None, "the step parked"
+    assert seen == [AttemptState.AWAITING_AUTHORIZATION], "written before it was published"
+    assert plans.moves[-1].to_state is AttemptState.AWAITING_AUTHORIZATION, "and it is the last"
+    assert [move.to_state for move in plans.moves].count(AttemptState.AWAITING_AUTHORIZATION) == 1
+    (stored,) = plans.opened
+    after = await harness.plans.get_attempt(stored.id)
+    assert after is not None
+    assert after.phase is AttemptPhase.AUTHORIZE, "the authorisation has not been given"
+
+
+async def test_the_parking_turns_own_work_survives_the_resumption() -> None:
+    """§5: the ledger accumulates and no implementation subtracts from it.
+
+    The parking turn's interval and the resumption's are two different intervals of one
+    attempt, and a resumption counts only its own — so a parking turn whose ledger write
+    were dropped, or overwritten, would lose everything it did before the user was asked.
+    Driven with a clock advancing a second per reading, so the figures are properties of
+    the accounting rather than of how long the test took.
+    """
+    reading = 0
+
+    def advancing() -> datetime:
+        nonlocal reading
+        reading += 1
+        return AT + timedelta(seconds=reading)
+
+    plans = _Recording()
+    harness = Harness(tools=(confirmable(),), plans=plans, now=advancing)
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
     assert parked.step.confirmation is not None
     (stored,) = plans.opened
-    attempt = await harness.plans.get_attempt(stored.id)
-    assert attempt is not None
-    assert attempt.state is AttemptState.ENDED, "the winner's record stands"
-    assert attempt.outcome is AttemptOutcome.ANSWERED
-    assert attempt.phase is AttemptPhase.VERIFY, "and nothing took it backwards"
+    waiting = await harness.plans.get_attempt(stored.id)
+    assert waiting is not None
+    asked = waiting.effort.working
+    assert asked > timedelta(0), "the planning and the drive up to the question are counted"
+
+    resumed = await harness.engine.resume(
+        parked.step.confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert resumed.step is not None
+    ended = await harness.plans.get_attempt(stored.id)
+    assert ended is not None
+    assert ended.effort.working > asked, "the resumption's interval is added to it"
+    assert ended.state is AttemptState.ENDED

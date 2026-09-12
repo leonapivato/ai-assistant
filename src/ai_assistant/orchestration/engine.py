@@ -102,7 +102,6 @@ from ai_assistant.core.errors import (
     OversizedValueError,
     PlanningError,
     SpeechError,
-    StaleExecutionError,
     TraceStoreError,
     TranscriptionFailedError,
     UngrantableActError,
@@ -140,6 +139,7 @@ from ai_assistant.core.types import (
     OriginUnrecordedBinding,
     ParkedBinding,
     ParkedRead,
+    PermissionOutcome,
     Placement,
     PlacementReach,
     PlacementSetter,
@@ -8400,60 +8400,6 @@ class Engine:
         stamped = opened.phases + (() if to_phase is None else (to_phase,))
         return replace(opened, attempt=moved, phases=stamped)
 
-    async def _parked_bookkeeping(
-        self,
-        opened: OpenedAttempt | None,
-        *,
-        to_state: AttemptState | None = None,
-        working: timedelta | None = None,
-    ) -> OpenedAttempt | None:
-        """Record a parking turn's own bookkeeping, yielding to a writer that overtook it.
-
-        **A park is durably visible before the turn that made it has finished.** The
-        ``→ AWAITING_APPROVAL`` transition is committed inside ``StepRunner.run``; from
-        that instant :meth:`pending_confirmations` can enumerate the park, mint a token
-        for it and a ``resume`` can resolve it — in this process or another, and ADR-0052
-        §2's recovery exists precisely so it can. The parking turn is still composing its
-        "I need your approval" reply while that happens. So the two writes this turn still
-        owes its attempt can legitimately find the row moved on, and ADR-0249 §12's
-        compare-and-swap is what tells them so.
-
-        **The loser of that race has nothing left to record, and must not fail the turn.**
-        Both writes describe a state the attempt has *provably left*: one says it is
-        ``AWAITING_AUTHORIZATION``, which is false the moment somebody answered, and the
-        other adds an interval to a ledger §5 makes monotonic, which the resolution's own
-        ledger write has already advanced past. Retrying either would take the record
-        backwards. Raising would lose the whole turn — its capture and its reply — to
-        preserve a field about a moment that has passed, which is the trade
-        :meth:`_worked` already refuses for the same reason: "what the ledger would lose
-        is a duration, and what a raise here would lose is the record of everything the
-        turn did".
-
-        **Narrow deliberately.** It swallows ``StaleExecutionError`` on these two writes
-        and nowhere else: on the branch that did not park, nothing holds a token for this
-        step and no second writer exists, so a stale write there is a defect and still
-        raises. Every other error class is re-raised here too.
-
-        Args:
-            opened: The attempt as this pass last held it, or ``None``.
-            to_state: The state to move to, as :meth:`_move_attempt`.
-            working: The ledger's new value, as :meth:`_move_attempt`.
-
-        Returns:
-            The attempt as the store now holds it, or the attempt as this pass held it
-            where a resolution overtook the write.
-        """
-        try:
-            return await self._move_attempt(opened, to_state=to_state, working=working)
-        except StaleExecutionError:
-            # Not a defect and not retried: somebody answered the confirmation this turn
-            # had only just published, so the fact this write carried is no longer true.
-            _log.info(
-                "attempt_overtaken_by_a_resolution",
-                attempt_id=None if opened is None else opened.attempt.id,
-            )
-            return opened
-
     async def _run_turn(  # noqa: PLR0913, PLR0915 — PLR0913: the utterance, the budget, the conversation, the two composers, the supply filter and the spoken capture; every one is a distinct fact about the pass, and collapsing any pair would put a flag where a value belongs. PLR0915: one pass is one sequence — admit, persist, authorise, drive, compose, capture — and the four statements ADR-0249 §12's authorization boundary adds are a closure over this pass's own attempt carrier, which a helper could only take back by putting that carrier in a mutable cell
         self,
         utterance: str,
@@ -8760,20 +8706,32 @@ class Engine:
             # what the drive reaches decides that, below.
             attempt = await self._move_attempt(attempt, add_execution_id=state.id)
 
-            async def authorized(decision_id: str) -> None:
-                """ADR-0249 §12's authorization boundary, on the first-turn path.
+            async def ruled(decision: PermissionDecision) -> None:
+                """ADR-0249 §12's boundary, and **the whole** of this turn's attempt.
 
-                The runner calls this once the ruling is **recorded** and before the
-                step is claimed under it, which is the one instant at which an
-                answered authorisation is distinguishable from a question that parked
-                — the distinction rounds 2 and 3 of this PR's review established has
-                to be made, and the one the caller cannot make for itself.
+                The runner calls this once the ruling is recorded and before anything
+                has acted on it — the one instant at which the three outcomes are
+                distinguishable while each is still undone, which the caller cannot
+                reach for itself. A ``CONFIRM`` moves the attempt to
+                ``AWAITING_AUTHORIZATION`` and closes this turn's ledger **here**,
+                because the next commit is published to the world: the moment
+                ``→ AWAITING_APPROVAL`` lands, a recovery can enumerate the park and a
+                ``resume`` can resolve it, and a turn still owing its attempt a write
+                after that is a second writer racing the answer. Anything else claims
+                the step, so it takes ``EXECUTE`` and the decision it was allowed by.
                 """
                 nonlocal attempt
+                if decision.ruling.outcome is PermissionOutcome.CONFIRM:
+                    attempt = await self._move_attempt(
+                        attempt,
+                        to_state=AttemptState.AWAITING_AUTHORIZATION,
+                        working=self._worked(attempt, drove_from),
+                    )
+                    return
                 attempt = await self._move_attempt(
                     attempt,
                     to_phase=AttemptPhase.EXECUTE,
-                    add_authorization_id=decision_id,
+                    add_authorization_id=decision.id,
                 )
 
             # ADR-0181 §2, §4: the origin the authoriser evaluates — the value
@@ -8783,7 +8741,7 @@ class Engine:
             # an argument to that one call (§4's third clause) rather than replacing
             # it or reinstating a second one here.
             disposition = await self._runner.run(
-                state, first.id, timeout=timeout, origin=origin, on_authorized=authorized
+                state, first.id, timeout=timeout, origin=origin, on_ruled=ruled
             )
             step = self._step_outcome(
                 turn,
@@ -8808,14 +8766,14 @@ class Engine:
             if step.confirmation is not None
             else None
         )
-        # ADR-0249 §5, §6: where the drive **parked**, the attempt is waiting for the
-        # user and stands where it stood — the phase does not move, because the
-        # authorisation has not been given, and the state becomes
-        # `AWAITING_AUTHORIZATION`, which is one of the three §5 calls a paused goal.
-        # The resolution is what moves it on again, so this is a state the system can
-        # leave rather than one that goes stale the moment the user approves — and a
-        # resolution that has *already* moved it is what :meth:`_parked_bookkeeping`
-        # yields to, because the park is durably answerable from inside the drive.
+        # ADR-0249 §5, §6: a turn that **parked** has already finished with its attempt.
+        # `AWAITING_AUTHORIZATION` — one of the three §5 calls a paused goal — and its
+        # ledger were both committed at the boundary above, *before* the park became
+        # durable, and nothing below writes the attempt again on this branch. That is
+        # what makes the parking turn and the resolution that answers it two writers
+        # who never overlap rather than two who race: the park is published by the
+        # store, so a turn still owing a write when it is published is a writer the
+        # answer can overtake, and neither ordering of that race has a good outcome.
         #
         # Where the drive did not park, `EXECUTE` is owed — but every step that reached a
         # *ruling* had it stamped at the boundary above, at the instant §12 names, so
@@ -8826,11 +8784,9 @@ class Engine:
         # second time would not be refused — §6 forbids a phase *earlier* than the one
         # held, not an equal one — but it would advance the compare-and-swap token for
         # no fact, and §12 admits no transition that records nothing.
-        if parked is not None:
-            attempt = await self._parked_bookkeeping(
-                attempt, to_state=AttemptState.AWAITING_AUTHORIZATION
-            )
-        elif attempt is None or attempt.attempt.phase is not AttemptPhase.EXECUTE:
+        if parked is None and (
+            attempt is None or attempt.attempt.phase is not AttemptPhase.EXECUTE
+        ):
             attempt = await self._move_attempt(attempt, to_phase=AttemptPhase.EXECUTE)
         # The terminal composing stage, after execution and before the exchange is
         # recorded (ADR-0170 §1). Ordering against capture is free — ADR-0170 §9
@@ -8857,16 +8813,16 @@ class Engine:
         # earns is A10's** (§13). That gap is §4's stated cost taken deliberately: an
         # outcome nothing established would be worse.
         #
-        # A parked turn's half of this is its ledger alone, and it yields for
-        # :meth:`_parked_bookkeeping`'s reason: a resolution can have overtaken this
-        # turn while it composed, and §5 makes the ledger monotonic, so the interval
-        # this pass would add is one the winner's own write has already passed.
+        # **A parked turn writes nothing here**, and the ledger is why the line is a
+        # branch rather than a conditional argument: its interval was closed at the
+        # boundary, before the park was published, so adding to it now would be a write
+        # racing an answer that may already have advanced the same monotonic field. What
+        # that costs is stated rather than hidden — the composing of "I need your
+        # approval" is not counted — and it is the smaller loss by a distance: the
+        # alternative loses either the turn (a raise) or the interval the turn actually
+        # worked (a swallow).
         answered = parked is None and self._answered(composed, step)
-        if parked is not None:
-            attempt = await self._parked_bookkeeping(
-                attempt, working=self._worked(attempt, drove_from)
-            )
-        else:
+        if parked is None:
             attempt = await self._move_attempt(
                 attempt,
                 to_phase=AttemptPhase.VERIFY,
@@ -10319,17 +10275,19 @@ class Engine:
             held: OpenedAttempt | None = None
             resumed = state
 
-            async def authorized(decision_id: str) -> None:
-                """ADR-0249 §12's authorization boundary, on the resumption path.
+            async def ruled(decision: PermissionDecision) -> None:
+                """ADR-0249 §12's boundary, on the resumption path.
 
                 Reached only where a ruling was **recorded**: every refusal
                 ``StepRunner.resume`` can still raise fires above it, so an answer the
                 runner would not take — ``UngrantableActError`` on an act that may not
                 ride this confirmation, which ADR-0235 §2 leaves the confirmation
-                pending after — never moves an attempt that is still waiting.
+                pending after — never moves an attempt that is still waiting. The
+                parking turn finished with this attempt before the park was published,
+                so this writer has the row to itself.
                 """
                 nonlocal held
-                held = await self._authorized_attempt(resumed, decision_id)
+                held = await self._authorized_attempt(resumed, decision.id)
 
             disposition = await self._runner.resume(
                 state,
@@ -10338,7 +10296,7 @@ class Engine:
                 approved=approved,
                 timeout=timeout,
                 remember_recipients_until=remember_recipients_until,
-                on_authorized=authorized,
+                on_ruled=ruled,
             )
             # A resolving disposition is EXECUTED or DENIED, never AWAITING_CONFIRMATION,
             # so no new handle is needed here.

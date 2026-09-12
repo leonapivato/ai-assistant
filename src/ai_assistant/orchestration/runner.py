@@ -178,24 +178,21 @@ def _detached_step(step: PlanStep) -> PlanStep:
         raise PlanningError(msg) from exc
 
 
-async def _answered_authorization(
-    on_authorized: Authorized | None, decision: PermissionDecision
-) -> None:
-    """Tell the caller an authorisation was answered, naming the recorded decision.
+async def _recorded_ruling(on_ruled: Ruled | None, decision: PermissionDecision) -> None:
+    """Tell the caller a ruling was recorded, handing over what the trail wrote.
 
     One line, in one place, so the two stages that reach ADR-0249 §12's boundary —
-    :meth:`StepRunner.run`'s ``ALLOW`` and ``DENY`` arms, and :meth:`StepRunner.resume`
-    — cannot drift into passing different things or calling at different points. The
-    id is read off the **recorded** decision for :meth:`StepRunner.run`'s own stated
-    reason: the policy still holds the object it returned, and the claim is taken under
-    what the trail handed back.
+    :meth:`StepRunner.run` and :meth:`StepRunner.resume` — cannot drift into calling at
+    different points or passing different things. The value is the **recorded** decision
+    for :meth:`StepRunner.run`'s own stated reason: the policy still holds the object it
+    returned, and every branch below is taken on what the trail handed back.
 
     Args:
-        on_authorized: The caller's observer, or ``None`` where it wants none.
+        on_ruled: The caller's observer, or ``None`` where it wants none.
         decision: The decision as the trail recorded it.
     """
-    if on_authorized is not None:
-        await on_authorized(decision.id)
+    if on_ruled is not None:
+        await on_ruled(decision)
 
 
 def _detached_state(state: ExecutionState) -> ExecutionState:
@@ -385,28 +382,37 @@ class StepDisposition:
     establishing: EstablishingAnswer | None = None
 
 
-type Authorized = Callable[[str], Awaitable[None]]
-"""Called at the instant an authorisation has been **answered**, before the claim.
+type Ruled = Callable[[PermissionDecision], Awaitable[None]]
+"""Called at the instant a ruling is **recorded** and before anything has acted on it.
 
-ADR-0037 §2 makes "the decision is recorded before any transition is committed" a
-stage boundary, and this is the only instant at which an observer outside this object
-can tell an *answered* authorisation from a question that parked: before
-:meth:`StepRunner.run` returns, an ``ALLOW`` under a slow tool and a ``CONFIRM`` that
-parked look alike from the caller's side, and after it returns the tool has already
-run. ADR-0249 §12 needs exactly that instant — "each reaches the store through a
-``commit_attempt`` … **at the moment the fact becomes true**" — for the attempt's
-``EXECUTE`` phase and for the authorization reference §5 puts on it.
+ADR-0037 §2 makes "the decision is recorded before any transition is committed" a stage
+boundary, and this is the only instant at which an observer outside this object can tell
+the three outcomes apart *while each is still undone*: before :meth:`StepRunner.run`
+returns, an ``ALLOW`` under a slow tool and a ``CONFIRM`` that parked look alike from the
+caller's side, and by the time it returns the tool has run or the park is durable.
+ADR-0249 §12 needs exactly that instant — "each reaches the store through a
+``commit_attempt`` … **at the moment the fact becomes true**".
 
-It is handed the **recorded** decision's id, which is what
-:attr:`~ai_assistant.core.types.StepExecution.approval_ref` will name, and never the
-policy's own object: the trail round-tripped it and a caller that could reach the
-ruling could read a value the claim was not taken under.
+**Both directions matter, and the ``CONFIRM`` one is the subtler.** A ``CONFIRM``
+becomes durably answerable when ``→ AWAITING_APPROVAL`` is committed, and from that
+instant :meth:`Engine.pending_confirmations` can enumerate the park and a ``resume`` can
+resolve it — in this process or another (ADR-0052 §2). So a caller keeping a record
+*about* the step has to finish writing it **before** the park is published, or it and the
+resolution become two writers on one row and whichever loses a compare-and-swap is
+holding a fact it cannot record. Called here, there is no such window in either
+direction.
 
-It is called **once per answered authorisation and never for a ``CONFIRM``** — a
-question is not an answer, and a step that parks at the ruling has not left the
-authorising stage. Anything it raises propagates out of :meth:`StepRunner.run` and
-:meth:`StepRunner.resume` **before the step is claimed**, so nothing ran and nothing
-is left ``RUNNING``: that is the same shape an :class:`AuditError` from the record
+It is handed the **recorded** decision, never the policy's own object: the trail
+round-tripped it, and a caller branching on the ruling must branch on what the claim will
+be taken under. :attr:`~ai_assistant.core.types.PermissionDecision.id` is what
+:attr:`~ai_assistant.core.types.StepExecution.approval_ref` will name on the two
+outcomes that claim the step.
+
+It is called **once per recorded ruling**, and not at all where the stage declines before
+one is sought — no capable tool, an ambiguous capability, invalid parameters, an
+unbindable egress. Anything it raises propagates out of :meth:`StepRunner.run` and
+:meth:`StepRunner.resume` **before the step is claimed or queued**, so nothing ran and
+nothing is left ``RUNNING``: that is the same shape an :class:`AuditError` from the record
 itself produces, and it is deliberate rather than tolerated — a caller whose own
 bookkeeping is stale finds out ahead of the side effect rather than after it.
 """
@@ -541,7 +547,7 @@ class StepRunner:
         *,
         timeout: timedelta,  # noqa: ASYNC109 — passed through to the seam, which owns the deadline (ADR-0029 §4)
         origin: SelectionOrigin,
-        on_authorized: Authorized | None = None,
+        on_ruled: Ruled | None = None,
     ) -> StepDisposition:
         """Select a tool for ``step_id``, rule on it, and run it if allowed.
 
@@ -585,10 +591,10 @@ class StepRunner:
                 get both for free. A caller that genuinely selected nothing passes
                 :data:`~ai_assistant.orchestration.origin.NOTHING_EXTERNAL`, in
                 code a reviewer can see.
-            on_authorized: Called with the recorded decision's id at the moment an
-                authorisation has been **answered** and before the step is claimed
-                under it — an ``ALLOW`` or a ``DENY``, never a ``CONFIRM`` (:data:`Authorized`).
-                ``None``, the default, calls nothing.
+            on_ruled: Called with the recorded decision at the moment a ruling exists
+                and nothing has acted on it — before the step is claimed under an
+                ``ALLOW``, before it is queued under a ``CONFIRM``, before it is skipped
+                under a ``DENY`` (:data:`Ruled`). ``None``, the default, calls nothing.
 
         Returns:
             What became of the step, and the durable state after it.
@@ -597,8 +603,8 @@ class StepRunner:
             AuditError: If the trail would not accept the decision, or does not
                 hand back the record of it (:meth:`_recorded`). Raised before any
                 claim, so nothing ran and nothing is left ``RUNNING``.
-            Exception: Whatever ``on_authorized`` raises, propagated unchanged and
-                before any claim, on the same terms.
+            Exception: Whatever ``on_ruled`` raises, propagated unchanged and before
+                any claim or queue, on the same terms.
             PlanningError: If the execution's plan is missing, holds no such step
                 (:meth:`_planned`), a transition is rejected, the store is stale,
                 or the injected clock's reading is not conforming (:meth:`_now`).
@@ -652,8 +658,11 @@ class StepRunner:
         # an await — so a ruling mutated through `__dict__` while `record` is
         # suspended (ADR-0018 §3) would have an `ALLOW` recorded and a `DENY`
         # committed, leaving `approval_ref` pointing at an authorisation.
+        # ADR-0249 §12's boundary: the ruling is recorded and nothing has acted on it —
+        # the step is neither claimed nor queued, so a caller keeping a record about it
+        # writes with no second writer in existence, whichever way this goes.
+        await _recorded_ruling(on_ruled, decision)
         if decision.ruling.outcome is PermissionOutcome.ALLOW:
-            await _answered_authorization(on_authorized, decision)
             return await self._execute(state, step, request, decision, timeout=timeout)
 
         if decision.ruling.outcome is PermissionOutcome.CONFIRM:
@@ -668,7 +677,6 @@ class StepRunner:
         # (ADR-0037 §5, ADR-0041). The policy refused on its own authority with
         # nobody asked, so the step never queued for an approval — it goes
         # `PENDING → SKIPPED`/`APPROVAL_DENIED`, naming the recorded `DENY`.
-        await _answered_authorization(on_authorized, decision)
         return await self._deny(state, step, decision, tool)
 
     async def resume(  # noqa: PLR0913 — the execution, the step, the confirmation, the answer, the budget, ADR-0235 §2's one instant and ADR-0249 §12's boundary; each is a distinct fact about the act
@@ -680,7 +688,7 @@ class StepRunner:
         approved: bool,
         timeout: timedelta,  # noqa: ASYNC109 — passed through to the seam, which owns the deadline (ADR-0029 §4)
         remember_recipients_until: datetime | None = None,
-        on_authorized: Authorized | None = None,
+        on_ruled: Ruled | None = None,
     ) -> StepDisposition:
         """Answer a parked ``CONFIRM`` and continue the step (ADR-0037 §4).
 
@@ -731,13 +739,13 @@ class StepRunner:
                 declining answer it establishes nothing and changes nothing else,
                 so the ``DENY`` is recorded exactly as it is today and ADR-0042
                 §4's guarantee is preserved whole.
-            on_authorized: As :meth:`run` (:data:`Authorized`). A resolving ruling is
-                never a ``CONFIRM``, so on this path it is called on **every** answer
-                the policy resolved — the approval and the refusal alike, which is
-                what ADR-0249 §6 means by stamping a phase whose work is vacuous. It
-                is **not** called where this method raises before a ruling is sought:
-                a refused establishing act (``UngrantableActError``) leaves the
-                confirmation pending (ADR-0235 §2), and nothing was answered.
+            on_ruled: As :meth:`run` (:data:`Ruled`). A resolving ruling is never a
+                ``CONFIRM``, so on this path it is called on **every** answer the policy
+                resolved — the approval and the refusal alike, which is what ADR-0249 §6
+                means by stamping a phase whose work is vacuous. It is **not** called
+                where this method raises before a ruling is sought: a refused
+                establishing act (``UngrantableActError``) leaves the confirmation
+                pending (ADR-0235 §2), and nothing was answered.
 
         Returns:
             ``EXECUTED`` or ``DENIED``, and the durable state after it. A
@@ -866,13 +874,13 @@ class StepRunner:
         # this returns, and it is what `resolves` will point at.
         ruling = await self._policy.resolve(confirmed.model_copy(deep=True), approved=approved)
         decision = await self._record(request, ruling, resolves=confirmed.id, at=establishing_at)
-        # ADR-0249 §12's authorization boundary: the answer is recorded and the step is
-        # not yet claimed under it. Every refusal this method can still raise has already
-        # fired above — a stale confirmation, a mismatched binding, an ungrantable act —
-        # so past this line the user's answer is a durable fact, and past `_execute` the
-        # tool may already have run under a caller that a cancellation will never return
-        # to. Both halves of that are why the observation point is here.
-        await _answered_authorization(on_authorized, decision)
+        # ADR-0249 §12's boundary: the answer is recorded and the step is not yet claimed
+        # under it. Every refusal this method can still raise has already fired above — a
+        # stale confirmation, a mismatched binding, an ungrantable act — so past this line
+        # the user's answer is a durable fact, and past `_execute` the tool may already
+        # have run under a caller that a cancellation will never return to. Both halves of
+        # that are why the observation point is here.
+        await _recorded_ruling(on_ruled, decision)
         if decision.ruling.outcome is PermissionOutcome.ALLOW:
             disposition = await self._execute(state, step, request, decision, timeout=timeout)
         else:
