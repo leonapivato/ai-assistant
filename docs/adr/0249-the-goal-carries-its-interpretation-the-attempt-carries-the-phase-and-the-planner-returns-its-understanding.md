@@ -26,9 +26,11 @@
   because `targets_revision` is not among the five fields it names.
 - **Partially supersedes** [ADR-0014](0014-planning-model.md)
   — **three scopes, each narrow. §5's `PlanStore` member enumeration and its `save_goal`
-  upsert contract**: the roster gains members and `save_goal` becomes the opening write alone,
-  because an upsert that replaces a whole goal would defeat the append-only interpretation this
-  ADR makes it carry. **§5's `PlanExport` shape**: the document gains `attempts`, and §5's
+  upsert contract, and `commit_transition`'s claim conditions**: the roster gains members,
+  `save_goal` becomes the opening write alone — an upsert that replaces a whole goal would
+  defeat the append-only interpretation this ADR makes it carry — and `commit_transition`
+  refuses a `→ RUNNING` claim whose plan does not target the goal's current revision, which a
+  reader holding only §5 would not implement. **§5's `PlanExport` shape**: the document gains `attempts`, and §5's
   closure rule extends to `attempt_id` rather than changing. **§6's `Planner.plan` input roster
   and its `-> ActionPlan` return**, which ADR-0041 and ADR-0211 have already partially
   superseded in the roster alone; the return type moves here for the first time. §5's
@@ -129,7 +131,8 @@ decides the values those lanes write into and the seam they write across, and no
 > **Normative.** A `GoalInterpretation` is a frozen model with `extra="forbid"` whose fields
 > are exactly: `revision`, an `int` at least 1, minted one greater than the revision it follows
 > in the goal's **history** — which after §2's elision need not be the element before it in the
-> tuple;
+> tuple; `outcome_ground`, a `Ground`, with `outcome_evidence_id` and `outcome_span` carried and
+> validated exactly as a `GoalElement`'s are;
 > `outcome`, a `NonBlankEncodableText` stating the understood outcome; `constraints`,
 > `criteria` and `conditions`, each a possibly-empty `tuple[GoalElement, ...]`;
 > `recorded_at`, a `UtcInstant`; and `raised_by`, an `Identifier | None` naming the
@@ -258,9 +261,18 @@ in `Settings` applies unchanged: *"a knob that raises the ceiling is a knob that
 > No goal is ever constructed with an empty `interpretation`, and no lane opens a goal from
 > any other value.
 
-> **Normative.** Revision 1 carries **no `GoalElement`** and therefore proposes no ground.
-> A planner's first `understanding` for a goal is recorded as revision 2 or later, never as
-> revision 1, and no model output ever authors revision 1.
+> **Normative.** Revision 1 carries **no `GoalElement`**, and its `outcome_ground` is
+> **`USER_STATED`** with its `outcome_span` the whole request — which is exactly true, since its
+> outcome **is** the request. A planner's first `understanding` for a goal is recorded as
+> revision 2 or later, never as revision 1, and no model output ever authors revision 1.
+
+> **Normative — the outcome is grounded, and that is what keeps ADR-0014 §1's distinction
+> alive across the seam.** §1 of ADR-0014 requires that *"a goal the system **inferred** must
+> never be indistinguishable from one the user **stated**"*. A goal may carry no elements at
+> all — every goal does at revision 1 — so a distinction carried only by element grounds would
+> be no distinction on exactly the goals where it matters most. The **outcome's own ground** is
+> what carries it, it is projected onto the brief (§9), and a stated objective and an inferred
+> one therefore never produce the same brief.
 
 **This is forced by the order of the turn, and it is the clause the design report does not
 have.** The relevance read and the episodic supplement are taken **before** `Planner.plan` is
@@ -453,20 +465,54 @@ is bought for exactly that; its **provenance** is not, and §7 is where the line
 > `PlannerOutput` carries no read request of its own.
 
 > **Normative.** `core/types.py` gains **`ProposedUnderstanding`**, a frozen model with
-> `extra="forbid"` carrying exactly: `outcome`, a `NonBlankEncodableText`; `constraints`,
-> `criteria` and `conditions`, each a possibly-empty `tuple[ProposedElement, ...]`; and
-> `questions`, a possibly-empty `tuple[NonBlankEncodableText, ...]`. It carries **no
-> revision number, no `raised_by`, no `recorded_at`, no goal id and no phase** — every one of
-> those is `orchestration`'s under §6.
+> `extra="forbid"` carrying exactly: `outcome`, a `NonBlankEncodableText`; `outcome_ground`, a
+> `Ground`, with `outcome_evidence_label` and `outcome_span` validated exactly as a
+> `ProposedElement`'s are; `constraints`, `criteria` and `conditions`, each a possibly-empty
+> `tuple[ProposedElement, ...]`; and `questions`, a possibly-empty
+> `tuple[NonBlankEncodableText, ...]`. It carries **no revision number, no `raised_by`, no
+> `recorded_at`, no goal id and no phase** — every one of those is `orchestration`'s under §6.
 
 > **Normative.** `core/types.py` gains **`ProposedElement`**, a frozen model with
-> `extra="forbid"` carrying exactly `text` (`NonBlankEncodableText`), `ground` (a `Ground`),
-> `evidence_label` (`EncodableText | None`) and `span` (`EncodableText | None`). A **model
-> validator** refuses every shape but three, mirroring `GoalElement`'s: `FROM_EVIDENCE` with a
-> label and no span; `USER_STATED` with a span and no label; `INFERRED` with neither.
+> `extra="forbid"` carrying exactly `text` (`NonBlankEncodableText | None`), `ground`
+> (`Ground | None`), `evidence_label` (`EncodableText | None`), `span` (`EncodableText | None`)
+> and **`retains`** (`EncodableText | None`). A **model validator** refuses every shape but
+> **four**: a **new** element carries `text` and `ground` and no `retains`, with `FROM_EVIDENCE`
+> taking a label and no span, `USER_STATED` a span and no label, and `INFERRED` neither; a
+> **retaining** element carries `retains` **and nothing else**.
+
+> **Normative — a planner keeps an element by naming it, and keeping is not restating.** A
+> `retains` value is the **label** of an element of the `GoalBrief` this call received (§9).
+> `orchestration` resolves it to that element of the **current** interpretation and copies it
+> into the new revision **whole and unchanged** — its `text`, its `ground`, its `evidence_id`
+> and its `span` exactly as the earlier revision recorded them. The planner is not asked to
+> re-ground it and **cannot**: the brief carries no reference and no span, by §9.
+
+> **Normative.** **A revision states its elements in full, and omission is removal.** An
+> element of the current interpretation that the `ProposedUnderstanding` neither retains nor
+> replaces is **not** in the new revision. That is the whole of the removal mechanism; there is
+> no delete member and no partial-update shape, because a revision is a complete statement of
+> an understanding and a patch would make two revisions unreadable without replaying every one
+> between them.
+
+**This is the case S2 turns on, and without it the stress case fails.** After *"Book a
+campsite, under $100"* and then *"Actually, make it Sunday"*, the budget constraint's own span
+is in the **first** turn's request and not in this one. A planner asked to restate it could only
+re-emit it as `USER_STATED` — which §7 then drops, because the span is not a span of *this*
+turn's request — or as `INFERRED`, which would quietly downgrade an explicit user instruction.
+Either way the user's stated budget disappears on the turn they changed the date, which is the
+silent rewrite #2255 forbids in terms. Retention by label is the mechanism that makes *"revise
+one element and keep the rest"* expressible at all.
+
+**And it is ADR-0226 §3's namer rule reused a third time rather than a new mechanism.** The
+resolvable set is exactly what the loop chose to render, an invented label is an index outside
+the range and resolves to nothing, and no reference crosses the seam in either direction. §9
+fixes the label form.
 
 > **Normative — ground resolution.** `orchestration` **refuses a ground it cannot resolve**,
-> and resolves exactly two kinds and no others. A `FROM_EVIDENCE` element's `evidence_label` is
+> and resolves exactly two kinds and no others. It resolves the **outcome's** ground by the same
+> two rules and with the same refusal; an outcome whose ground does not resolve is recorded as
+> `INFERRED` with neither argument rather than dropped, because a revision without an outcome is
+> not a revision at all. A `FROM_EVIDENCE` element's `evidence_label` is
 > resolved **by ADR-0226 §3's labelling scheme, unchanged** — the label of the record at
 > 1-based index *n* of the `memories` sequence passed **on that call** — and the stamped
 > `GoalElement.evidence_id` is the identifier of the record the loop itself labelled. A
@@ -481,6 +527,11 @@ is bought for exactly that; its **provenance** is not, and §7 is where the line
 > record, and a durable record grounded on an identifier nothing can retrieve states a warrant
 > it cannot show. **How a search finding grounds an element is A4's** (§13) — through an
 > evidence row keyed on the goal, not through an id into `memory`.
+
+> **Normative.** A **`retains` label outside the brief's shown set resolves to nothing**, and
+> the retaining element is dropped, exactly as an out-of-range `M` label is. A label naming an
+> element of a tuple other than the one the retaining element sits in likewise resolves to
+> nothing: the label space is per tuple (§9).
 
 > **Normative.** An element whose ground does not resolve — a label outside the shown set, a
 > label naming a minted record, a span that is not a span of this turn's request — is **dropped
@@ -560,11 +611,37 @@ which side interpretation sits on.
 > at the `Planner.plan` seam.
 
 > **Normative.** **A plan whose `targets_revision` is not the goal's current revision is not
-> driven.** Nothing dispatches a step of it and nothing claims a step of it. What happens
-> instead — a replan, a typed refusal, a report to the user — and **the mechanism that enforces
-> it at the dispatch boundary are A7's and A9's** (§13); what is fixed here is that the plan
-> carries the target, that a stale target is not driven, and that no lane satisfies the rule by
-> a read of the goal taken separately from the claim.
+> driven.** Nothing dispatches a step of it and nothing claims a step of it.
+
+> **Normative — the refusal is the store's, it lands with the rule, and it is one write.**
+> `PlanStore.commit_transition` accepts a **`→ RUNNING`** claim only where the plan the
+> execution runs carries a `targets_revision` **equal to the current `revision` of that plan's
+> goal**; a claim against a plan whose `targets_revision` is absent, or names any other
+> revision, is refused with the error class a stale `expected_version` already raises. The
+> store reads the plan and the goal **inside the same indivisible step** as the claim, so there
+> is **no separate read on which a decision is taken**, and no lane satisfies this rule by a
+> read of the goal taken outside the claim.
+
+> **Normative.** **This refusal ships in the lane that lands `targets_revision` and not a lane
+> later** (§15). A migration that gives every stored plan an absent `targets_revision` while
+> nothing enforces the rule would leave an interval in which the existing claim path drives
+> exactly the plans §8 forbids — an execution awaiting authorization, approved after the
+> upgrade, is the concrete case. **What the refusal causes** — a replan, a report, a step left
+> `PENDING` and later `SKIPPED`/`SUPERSEDED` — is recovery policy and is A7's and A9's (§13);
+> that the claim is refused at all is decided here.
+
+**Why the store and not the driver, in ADR-0014 §5's own words.** *"Optimistic concurrency
+turns that into a detectable, retryable failure, and it belongs to the store because the store
+is the only place with a total order over writes."* A guard in the driver is a read-then-claim
+with a time-of-check-to-time-of-use gap: a user act that advances the goal's revision between
+the read and the claim would be overtaken. Inside the store there is nothing to overtake,
+because the comparison and the claim are the same write — the construction ADR-0244 §3 uses for
+`settle` and ADR-0014 §5 for `expected_version`, applied to one more conjunct.
+
+> **Normative.** **`StepTransition` gains no member for this.** The execution names its plan and
+> the plan names its goal, so the store already holds every value the comparison needs; adding a
+> caller-supplied revision would put the decision back in the caller's hands and re-open the gap
+> the clause above closes.
 
 > **Normative.** `targets_revision` is **not a second `supersedes`**. A revision within a turn
 > (ADR-0228 §1) carries the same `targets_revision` as the plan it replaces where the
@@ -591,18 +668,30 @@ rendered.
 ### 9. `GoalBrief`: the planner-facing projection
 
 > **Normative.** `core/types.py` gains **`GoalBrief`**, a frozen model with `extra="forbid"`
-> whose fields are exactly: `goal_id`; `outcome`, a `NonBlankEncodableText`; `constraints`,
-> `criteria` and `conditions`, each a possibly-empty `tuple[BriefElement, ...]`; `status`, a
-> `GoalStatus`; `deadline`, a `UtcInstant | None`; and `open_questions`, a possibly-empty
-> `tuple[NonBlankEncodableText, ...]` carrying the **texts** of the goal's open questions.
+> whose fields are exactly: `goal_id`; `outcome`, a `NonBlankEncodableText`; **`outcome_ground`,
+> a `Ground`**; `constraints`, `criteria` and `conditions`, each a possibly-empty
+> `tuple[BriefElement, ...]`; `status`, a `GoalStatus`; `deadline`, a `UtcInstant | None`; and
+> `open_questions`, a possibly-empty `tuple[NonBlankEncodableText, ...]` carrying the **texts**
+> of the goal's open questions.
+
+> **Normative — the brief's elements are labelled, and the scheme is ADR-0226 §3's applied to
+> three sequences.** The label of the element at 1-based index *n* of `constraints` is the ASCII
+> string `C` followed by *n* in decimal with no padding; of `criteria`, `S` followed by *n*; of
+> `conditions`, `D` followed by *n*. That is the whole of the scheme, it is the same on both
+> sides of the seam, and no later lane substitutes another spelling or makes it configurable.
+> Both sides derive the label from the brief they hold and neither consults the other. A label
+> is meaningful only within the call that rendered it: **no label survives that call, and none
+> is persisted as a reference.**
 
 > **Normative.** `core/types.py` gains **`BriefElement`**, a frozen model with
 > `extra="forbid"` carrying exactly `text` (`NonBlankEncodableText`) and `ground` (a `Ground`)
 > — the ground **kind** and **nothing else**.
 
 > **Normative.** **A `GoalBrief` carries no ground reference, no record identifier, no
-> evidence identifier, no span, no revision number, no attempt, no plan, no effort figure, no
-> provenance and no authority.** The containment is a property of the type: an implementation
+> evidence identifier, no span, no revision number, no attempt, no plan, no effort figure and
+> no authority.** It carries the outcome's `Ground` and each element's `Ground` — the **kind**
+> and never the reference — which is what ADR-0014 §1's stated-versus-inferred distinction needs
+> and the whole of what this projection discloses about provenance. The containment is a property of the type: an implementation
 > that rendered every field of every value it was handed, logged them all, or returned them,
 > discloses none of those, because there is none on the value to disclose.
 
@@ -793,10 +882,18 @@ need"* and whose bound is A3's.
 > renders status and deadline today; and the **request under a heading of its own**, because
 > the goal statement no longer carries it. It prints no identifier and no ground reference.
 
-> **Normative.** `_render_request` prints **no goal-level `provenance`**. The field stays on
-> `Goal` — ADR-0014 §1 requires it and its reason is unchanged — and it is not projected,
-> because every element of the brief carries its own `Ground`, which is strictly more
-> informative than one source value for the whole objective.
+> **Normative.** `_render_request` prints the **outcome's `Ground`** and each element's, and
+> prints **no goal-level `provenance` object**. `Goal.provenance` stays on the record — ADR-0014
+> §1 requires it and its reason is unchanged — and what reaches the planner in its place is
+> per-value grounding, which is strictly more informative than one source for the whole
+> objective and, unlike a `Provenance`, carries no `evidence` tuple of record identifiers.
+
+**Dropping the goal-level `provenance` without replacing it is what round 6 caught, and this is
+the replacement.** ADR-0014 §1 requires that *"a goal the system **inferred** must never be
+indistinguishable from one the user **stated**"*. Element grounds alone cannot carry that: a
+goal at revision 1 has no elements, so a stated objective and an inferred one would render
+identically. §1's `outcome_ground` is what closes it, and it is a strictly narrower disclosure
+than `Provenance` — a kind, with no reference and no confidence.
 
 ### 12. `PlanStore` widening, the wire, and the stored shapes
 
@@ -815,6 +912,8 @@ need"* and whose bound is A3's.
 > - **`open_attempt(attempt: GoalAttempt) -> str`**, **`get_attempt(attempt_id) ->
 >   GoalAttempt | None`** and **`attempts_of(goal_id) -> tuple[GoalAttempt, ...]`** in
 >   `opened_at` order.
+>   And **`commit_transition` gains one claim condition** — §8's stale-target refusal on a
+>   `→ RUNNING` claim — which is a strengthening of an existing member rather than a new one.
 > - **`commit_attempt(transition: AttemptTransition) -> GoalAttempt`** — the attempt's **only**
 >   mutation route. `core/types.py` gains **`AttemptTransition`**, a frozen command carrying
 >   `attempt_id`, the `expected_version`, and the fields it sets — `to_phase`, `to_state`,
@@ -830,9 +929,18 @@ need"* and whose bound is A3's.
 > **Normative — opening an attempt and persisting one are two acts, and only the second is
 > bound by §11.** An attempt is **opened in memory** when the user act that opens it occurs,
 > which is before the turn's first planner call; it is **first written** at the one site §11
-> names, together with the goal, its revisions and the turn's plans, carrying every phase stamp,
-> state move and reference the turn had produced **by that moment**. A turn that ends before
-> that site writes no attempt row, exactly as it writes no goal row and no plan row.
+> names, together with the goal, its revisions and the turn's plans, carrying **the phase and
+> state it stands at** and the references it has accumulated **by that moment**. A turn that ends
+> before that site writes no attempt row, exactly as it writes no goal row and no plan row.
+
+> **Normative — an attempt records its position, not its itinerary.** `GoalAttempt` carries one
+> `phase` and one `state`, and **this decision keeps no history of the phases an attempt passed
+> through and no instant per phase**. That is not an omission to repair at read time: §6 makes
+> the order fixed and monotonic, so the phases an attempt has passed are exactly those at or
+> before its current one, derivable from the scalar by a rule stated once. A per-phase event log
+> is a different record with its own retention and export obligations, and a later decision may
+> mint one; **no lane infers one from a `GoalAttempt`, and none stamps a phase it has already
+> left.**
 
 > **Normative — after the first write, every change goes through `commit_attempt`, in this turn
 > as in any later one.** The site §11 names precedes `start_execution` and precedes composition,
@@ -1008,9 +1116,14 @@ nothing; the marked clauses above are what a lane owes.
   step-dependencies deferrals.
 - **Authorization: fixed values, permitted ranges, the basis triple, and coverage from several
   acts.** A6.
-- **The plan-driving stage, and the mechanism that enforces §8's stale-target rule at the
-  dispatch boundary** — including whether `StepTransition` carries the goal version and the
-  attempt id it is claimed under. A7 and A9.
+- **The plan-driving stage, and what a refused stale claim then causes** — a replan, a typed
+  refusal, a report, a step left `PENDING` and later `SKIPPED`/`SUPERSEDED`. A7 and A9. **The
+  refusal itself is not deferred**: §8 puts it in `commit_transition`, in the lane that lands
+  `targets_revision`, because a rule nothing enforces for an interval is not a rule. Whether
+  `StepTransition` carries the attempt id it is claimed under is still A7's and A9's.
+- **A per-phase event log for an attempt** — the instants at which an attempt entered each
+  phase. §12 keeps the position and not the itinerary. Fired by a lane that needs the timings
+  and will carry its own retention and export obligations.
 - **Retry, reconciliation, `EFFECT_UNRESOLVED` and modify-before-replace.** A8, which takes
   ADR-0014 §7's idempotency and `INDETERMINATE`-resolution deferral.
 - **Verification against the goal's criteria, strength proportional to consequence, which
@@ -1042,7 +1155,8 @@ against an understanding the first call superseded is exactly what correction 3 
 **ADR-0014 §5 and §6 — partially superseded**, in the scopes the header names. §5's code block
 enumerates eleven `PlanStore` members and §6's enumerates `plan`'s three parameters and its
 `ActionPlan` return; a reader holding only ADR-0014 would implement eleven members with an
-upserting `save_goal`, and a planner returning a bare plan, and would not conform. Both fail
+upserting `save_goal` and a `commit_transition` gated on `expected_version` alone, and a planner
+returning a bare plan, and would not conform. Both fail
 ADR-0070 §1's test. The scope is the enumerations, the `save_goal` contract and the return
 type: §5's compare-and-swap discipline, its commands-not-snapshots rule and its data-rights
 obligations are **relied on as written and extended**, and §6's parameters-not-fetched argument
@@ -1136,8 +1250,13 @@ buildable at all.
 >   `schema_version` and `PlanExport.schema_version`, and it is the only lane that moves any of
 >   them.** No behaviour changes in L1: no attempt is opened, no phase is stamped, no
 >   understanding is proposed and no ground is resolved.
+>   **L1 also lands §8's stale-target refusal in `commit_transition`**, for §8's stated reason:
+>   the migration gives every stored plan an absent `targets_revision`, and a lane that landed
+>   the field without the refusal would leave the existing claim path driving exactly the plans
+>   §8 forbids.
 > - **L2 — the `Planner` seam.** `planning/` alone: `_render_request` renders the brief, the
->   request and the evidence digest; the model envelope proposes a `ProposedUnderstanding`.
+>   request and the evidence digest; the model envelope proposes a `ProposedUnderstanding` with
+>   retained and newly-grounded elements.
 > - **L3 — the `orchestration` threading.** `orchestration/` alone: recording the revision,
 >   resolving grounds, stamping the phase, and opening and committing attempts.
 
@@ -1182,9 +1301,9 @@ that a hub and its clients must upgrade together.
 1. **S1, end to end.** *"What is two plus two?"* on a conversation's first turn: a goal opened
    at revision 1 whose outcome is the stripped request; **one** `Planner.plan` call and **one**
    composing call, which is exactly today's cost; six phase stamps; no read request; no
-   question; one attempt whose **stored** row ends `ENDED`/`ANSWERED`, written first at §11's
-   site and moved there by a same-turn `commit_attempt` once the answer exists; and the goal's
-   status still **`ACTIVE`**.
+   question; the attempt passing through all six phases and its **stored** row ending at
+   `VERIFY`/`ENDED`/`ANSWERED`, written first at §11's site and moved there by a same-turn
+   `commit_attempt` once the answer exists; and the goal's status still **`ACTIVE`**.
 2. **S2's understanding half.** *"Actually, make it Sunday"* against a goal whose earlier
    attempt booked a campsite: a **new attempt** on the **same** goal, a new interpretation
    revision whose `raised_by` names this turn and whose changed element grounds `USER_STATED`
@@ -1284,6 +1403,28 @@ that a hub and its clients must upgrade together.
     `utterance` resumes with `asked` equal to the bytes its stored `Goal.statement` held, read
     off `park.goal.outcome` — ADR-0248 §3's exactness asserted across the conversion rather than
     assumed.
+23. **An untouched constraint survives a correction turn.** After *"Book a campsite, under
+    $100"* and then *"Actually, make it Sunday"*, the planner retains the budget constraint by
+    its brief label and revises the date: the new revision carries the budget element with its
+    **original** `ground`, `evidence_id` and `span` byte for byte, the date element newly
+    grounded on a span of **this** turn's request, and the **current brief** the next call
+    receives still shows the budget. The arm fails if the constraint is dropped, re-grounded
+    `INFERRED`, or re-grounded `USER_STATED` on a span this turn does not contain.
+24. **Omission removes and an invented label does not.** A `ProposedUnderstanding` that omits an
+    element of the current interpretation removes it from the new revision; one whose `retains`
+    names a label outside the brief's shown set, or a label of a different tuple, drops that
+    element and leaves the turn otherwise unharmed.
+25. **A stated goal and an inferred one never render alike.** Two goals at revision 1 with the
+    same outcome text and different `outcome_ground` produce different `GoalBrief` values and
+    different `_render_request` prompts — ADR-0014 §1's distinction asserted at the seam, on a
+    goal carrying no elements at all.
+26. **A stale plan cannot be claimed, and the guard is the store's.** A stored execution whose
+    plan's `targets_revision` is absent, and one whose plan targets a revision the goal has moved
+    past, each refuse a `→ RUNNING` claim at `commit_transition` with the stale-write error
+    class, on **both** conforming `PlanStore` implementations through the shared suite — and the
+    migrated-database case is driven by attempting to resume a pending execution after the
+    upgrade, not by constructing the row by hand. A plan targeting the current revision claims
+    normally.
 
 ### 17. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
