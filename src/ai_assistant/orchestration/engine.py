@@ -8195,6 +8195,21 @@ class Engine:
         copy of this method would be two places for the confirmation ceiling, the
         reservation's release and the capture point to drift apart.
 
+        **What this pass persists of a turn's understanding** (ADR-0249 §11, §12). The
+        loop builds the goal record, the revisions the turn recorded and the attempt it
+        opened; this method writes them at the one site that persists a plan today, in
+        the order their references need — the goal, then the plans, then the attempt,
+        whose ``plan_ids`` ``open_attempt`` refuses unless its goal holds them. A goal
+        this turn **opened** takes ``save_goal``, "the opening write alone"; a goal the
+        store already holds takes one ``record_interpretation`` per revision under §12's
+        compare-and-swap. After that first write, every change goes through
+        ``commit_attempt`` **at the moment the fact becomes true** (:meth:`_move_attempt`)
+        — ``AUTHORIZE`` before the step is driven, ``EXECUTE`` and the execution id once
+        it exists, ``VERIFY`` and the terminal ``ENDED``/``ANSWERED`` once the answer
+        does. A turn that ends before this site writes no goal row, no attempt row and no
+        plan row. **Nothing here moves** ``GoalStatus``: §4 gives ``ACHIEVED`` no producer
+        and "producing a reply never by itself establishes that a goal was achieved".
+
         **The routing stage runs first, and a taken route ends the pipeline there**
         (ADR-0197 §1). Nothing after it runs on such a pass: no history is read, no goal is
         minted, no context is assembled, no memories are retrieved, no plan is made or

@@ -29,6 +29,27 @@ drives them from a :class:`~ai_assistant.core.types.ActionPlan` yet: ordering,
 dependencies and cancellation across a plan's steps are the next slice, and
 :meth:`LearningLoop.respond` still ends at the plan.
 
+**What a turn now records of its own understanding** (ADR-0249). A turn opens a
+goal carrying revision 1, minted from the request (§3); resolves whatever
+understanding its planner proposed against the brief and the supply *that call*
+was handed, refusing every ground it cannot resolve (§7,
+:mod:`~ai_assistant.orchestration.interpretation`); appends the revision it
+resolves to; and stamps the plan's ``targets_revision`` **after** that
+recording, which is what makes a plan never stale against the understanding it
+was returned with (§8). It also opens the turn's :class:`GoalAttempt` in memory
+at the user act and stamps its first three phases — ``UNDERSTAND``,
+``INVESTIGATE``, ``PLAN`` — leaving the remaining three to the component that
+drives the step.
+
+**None of it is written here** (§11, ADR-0228 §5). This object holds no
+``PlanStore`` and gains none: the goal record, the revisions this turn recorded
+and the attempt travel out on :class:`RespondedTurn` as data — adding no member
+to any Protocol and riding on no wire-carried type — and
+:class:`~ai_assistant.orchestration.engine.Engine` persists them at the one site
+that persists a plan today. What crosses the planning seam and the wire is the
+:class:`~ai_assistant.core.types.GoalBrief`, which carries no ground reference
+at all.
+
 Nothing concrete is imported. Every collaborator arrives by injection and is
 seen only through its Protocol (CLAUDE.md golden rule 1), which is what lets the
 same engine run against the canonical fakes in tests and the real subsystems in
@@ -1179,10 +1200,12 @@ class LearningLoop:
                 to assert.
 
         Returns:
-            The turn — its goal, context, assembled memories and last plan — beside
-            every plan it produced, ADR-0228 §10's stop fact and ADR-0227 §3's
-            carrier naming which of those records this turn's citation hop reached
-            (:class:`RespondedTurn`).
+            The turn — its goal's **brief**, context, assembled memories and last plan
+            — beside the goal **record** and what this turn decided about it
+            (:class:`RecordedGoal`), the attempt it opened and the phases it stamped
+            (:class:`OpenedAttempt`), every plan it produced, ADR-0228 §10's stop fact
+            and ADR-0227 §3's carrier naming which of those records this turn's
+            citation hop reached (:class:`RespondedTurn`).
 
         Raises:
             PlanningError: As :meth:`_turn` raises it.
@@ -1463,10 +1486,11 @@ class LearningLoop:
         audit record (ADR-0227 §3), and this method reads nothing off it.
 
         Returns:
-            The turn's goal, context, assembled memories and **last** plan — each of
-            them over the supply ``narrow`` returned, where one was given — beside
-            every plan the turn produced (ADR-0228 §5), ADR-0228 §10's stop fact and
-            ADR-0227 §3's carrier.
+            The turn's goal **brief**, context, assembled memories and **last** plan —
+            each of them over the supply ``narrow`` returned, where one was given —
+            beside the goal record this turn worked on, the revisions it recorded
+            against it, the attempt it opened, every plan the turn produced (ADR-0228
+            §5), ADR-0228 §10's stop fact and ADR-0227 §3's carrier.
 
         Raises:
             PlanningError: If ``utterance`` is blank, the injected clock's

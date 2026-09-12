@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from test_engine import AT, PATIENT, Harness, NoStepPlanner, tool
+from test_engine import AT, PATIENT, Harness, NoStepPlanner, OneStepPlanner, tool
 from test_engine_read_envelope import _recorder
 
 from ai_assistant.core.errors import PlanningError
@@ -187,6 +187,30 @@ async def test_a_driving_turn_appends_its_execution_and_ends_answered() -> None:
     assert attempt.outcome is AttemptOutcome.ANSWERED
 
 
+async def test_a_revising_turn_drives_its_step(  # §16 item 20 at the engine
+) -> None:
+    """§16 item 20's consequence: "so the plan is **driveable**".
+
+    A turn that recorded a revision holds a plan targeting revision 2, and §8 puts the
+    stale-target refusal inside ``commit_transition``'s ``→ RUNNING`` claim — so this
+    arm fails if the goal reaches the store at a revision the plan does not name, which
+    is exactly what stamping the *input* revision, or persisting the goal before the
+    revision was appended, would produce.
+    """
+    plans = _Recording()
+    harness = Harness(planner=_DrivingContinuing(), plans=plans, tools=(tool(),))
+
+    outcome = await harness.engine.converse("two plus two", timeout=PATIENT)
+
+    assert outcome.step is not None
+    assert outcome.step.disposition is Disposition.EXECUTED, "the claim was not refused"
+    assert outcome.turn is not None
+    assert outcome.turn.plan.targets_revision == 2
+    stored = await plans.get_goal(outcome.turn.goal.goal_id)
+    assert stored is not None
+    assert stored.revision == 2
+
+
 async def test_a_turn_that_ends_before_the_site_writes_no_attempt_row() -> None:
     """§16 item 14's first clause, over the attempt.
 
@@ -222,22 +246,30 @@ class _Raising(NoStepPlanner):
         raise PlanningError(msg)
 
 
+#: One retained outcome and one constraint grounded on a span of the turn's own request
+#: — the smallest understanding that records a revision at all.
+_ONE_CONSTRAINT: Final = ProposedUnderstanding(
+    retains_outcome=True,
+    constraints=(ProposedElement(text="two plus two", ground=Ground.USER_STATED, span="two"),),
+)
+
+
 class _Continuing(NoStepPlanner):
-    """A planner that restates the outcome on a span of this turn's own request."""
+    """A planner that proposes an understanding and plans no step."""
 
     async def plan(self, goal: Any, **fields: Any) -> Any:
         """Plan as ``NoStepPlanner`` does, proposing one new constraint."""
         produced = await super().plan(goal, **fields)
-        return produced.model_copy(
-            update={
-                "understanding": ProposedUnderstanding(
-                    retains_outcome=True,
-                    constraints=(
-                        ProposedElement(text="two plus two", ground=Ground.USER_STATED, span="two"),
-                    ),
-                )
-            }
-        )
+        return produced.model_copy(update={"understanding": _ONE_CONSTRAINT})
+
+
+class _DrivingContinuing(OneStepPlanner):
+    """A planner that plans one step **and** proposes an understanding."""
+
+    async def plan(self, goal: Any, **fields: Any) -> Any:
+        """Plan as ``OneStepPlanner`` does, proposing one new constraint."""
+        produced = await super().plan(goal, **fields)
+        return produced.model_copy(update={"understanding": _ONE_CONSTRAINT})
 
 
 def _earlier() -> Goal:
