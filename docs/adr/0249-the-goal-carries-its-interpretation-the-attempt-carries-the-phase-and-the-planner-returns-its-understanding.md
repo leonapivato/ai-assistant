@@ -1,6 +1,6 @@
 # 249. The goal carries its interpretation, the attempt carries the phase, and the planner receives a brief and returns its understanding
 
-- Status: Partially superseded by ADR-0250 (two scopes. §7's `ProposedUnderstanding` field enumeration, in one member's element type alone: `questions` becomes a `tuple[ProposedQuestion, ...]`, so that a raised question names what it is about and a materiality test has a subject to run over. And §1's `Goal` model declaration, in the field count alone: `Goal` gains `last_engaged_in`, an `Identifier | None` naming the conversation of the goal's most recent engagement, so a reader holding only §1 authors a goal that never carries one and does not conform. Those two scopes, and nothing else in this ADR: §7's `Planner.plan` roster, its `PlannerOutput` enumeration, its retained-or-restated validator, its retention-copies-forward clause, its `ProposedElement` shapes, its ground-resolution rules and their refusals, its minted-record clause and its interpretation-is-the-model's asymmetry all bind entire; §1's `conversation_id`-is-provenance-and-not-a-fence clause binds entire and is the ground the new field is added on, its four-absences clause is extended and not weakened, and its `statement`-as-projection rule, its append-only interpretation rule and its `version` clause are untouched; §1's clause that no lane in that decision reads `last_engaged_at` is fulfilled rather than superseded; and §§2-6 and §§8-17 stand entire)
+- Status: Partially superseded by ADR-0250 (two scopes. §7's `ProposedUnderstanding` field enumeration, in one member's element type alone: `questions` becomes a `tuple[ProposedQuestion, ...]`, so that a raised question names what it is about and a materiality test has a subject to run over. And §1's `Goal` model declaration, in the field count alone: `Goal` gains `last_engaged_in`, an `Identifier | None` naming the conversation of the goal's most recent engagement, so a reader holding only §1 authors a goal that never carries one and does not conform. Those two scopes, and nothing else in this ADR: §7's `Planner.plan` roster, its `PlannerOutput` enumeration, its retained-or-restated validator, its retention-copies-forward clause, its `ProposedElement` shapes, its ground-resolution rules and their refusals, its minted-record clause and its interpretation-is-the-model's asymmetry all bind entire; §1's `conversation_id`-is-provenance-and-not-a-fence clause binds entire and is the ground the new field is added on, its four-absences clause is extended and not weakened, and its `statement`-as-projection rule, its append-only interpretation rule and its `version` clause are untouched; §1's clause that no lane in that decision reads `last_engaged_at` is fulfilled rather than superseded; and §§2-6 and §§8-17 stand entire) and ADR-0251 (one scope. §7's `Planner.plan` parameter-preservation clause, in the `empty_reads` term alone: "keeps `context`, `memories`, `capabilities`, `files` and `empty_reads` **exactly as they stand**" stops being true of the fifth of those, which becomes `read_outcomes: Sequence[ReadOutcome] = ()` — carrying the same asks and, beside each, the typed outcome it earned, so that a refusal, a failure, an expiry, a truncation and a duplicate are as visible to the planner as an empty read is. The four other named parameters are kept exactly as they stand, and every remaining clause of §7 binds entire: the `GoalBrief` first positional parameter, the required `utterance` keyword, the `evidence` keyword defaulting to empty, the `PlannerOutput` return, the annotation clause, ADR-0211 §2's applied keyword-parameters-not-a-bundle ruling, `PlannerOutput`'s two-field enumeration and its clause that `None` is neither an error nor an instruction to re-plan, together with §7's roster, its retained-or-restated validator, its retention-copies-forward clause, its `ProposedElement` shapes, its ground-resolution rules and refusals, its minted-record clause and its interpretation-is-the-model's asymmetry. §5's licences are exercised rather than superseded, and §§1-6 and §§8-17 are untouched)
 - Date: 2026-09-12
 - **Partially supersedes** [ADR-0228](0228-a-serviced-read-may-revise-the-plan-once-and-the-turn-stops-looking-at-a-bound-or-a-deadline.md)
   — **§1's third clause in its second sentence alone: "The goal is minted once per turn from
@@ -108,6 +108,56 @@
   other clause; and §§8-17 are untouched. §1's *"no lane in this decision reads
   `last_engaged_at` for any purpose"* stays true of this decision's lanes and is
   **fulfilled** by ADR-0250 §1 rather than contradicted.
+
+- **Partially superseded: 2026-09-12 by ADR-0251 — §7's parameter-preservation
+  clause, in the `empty_reads` term alone. Nothing else in this ADR.** Milestone 32's
+  L3 (#2169) requires the planner-visible outcomes of *"success, empty results,
+  duplicates, refusal, failure, and truncation"* to be distinguished, and §13 of this
+  ADR deferred the investigation loop to A3 by name. ADR-0251 is that decision.
+
+  **The term that moves.** §7 declares that `Planner.plan` *"keeps `context`,
+  `memories`, `capabilities`, `files` and `empty_reads` **exactly as they stand**"*.
+  ADR-0240 §7 is where `empty_reads` came from, and ADR-0251 §3 replaces it with
+  `read_outcomes: Sequence[ReadOutcome] = ()` in the same keyword position — one entry
+  per ask the turn has already serviced, each the frozen `ReadAsk` the planner emitted
+  beside one member of a closed vocabulary of seven. A reader holding only this ADR
+  would implement a signature carrying a parameter that no longer exists, which is
+  ADR-0070 §1's test coming out on the supersession side, and ADR-0082 §1 owes the
+  record here as well as against ADR-0240.
+
+  **The other four terms are kept exactly as they stand**, and the sentence is
+  superseded in one word rather than as a whole: `context`, `memories`, `capabilities`
+  and `files` are untouched by ADR-0251, which adds no parameter and removes no other.
+
+  **Every remaining clause of §7 binds entire.** The `GoalBrief` as first positional
+  parameter in place of `Goal`; the required `utterance` keyword and its `str`
+  annotation clause; the `evidence` keyword defaulting to empty; the `PlannerOutput`
+  return in place of `ActionPlan`; ADR-0211 §2's ruling applied rather than reopened,
+  that the inputs stay keyword parameters and are not bundled; `PlannerOutput`'s
+  two-field enumeration with `understanding` defaulting to `None` and the clause that
+  **no implementation reads `None` as an error, a degradation, or an instruction to
+  re-plan**; and §7's roster, its retained-or-restated validator, its
+  retention-copies-forward clause, its `ProposedElement` shapes, its ground-resolution
+  rules and their refusals, its minted-record clause and its
+  interpretation-is-the-model's asymmetry. §7's **BREAKING** flag under golden rule 5
+  is inherited rather than displaced: ADR-0251 carries its own.
+
+  **Two of this ADR's licences are exercised, and exercising a licence is not
+  superseding the clause that grants it.** §5 reads *"**A3 fixes the allowances, the
+  reserve and any further member of `AttemptEffort`**"*, and ADR-0251 §5 adds exactly
+  one — `kind`, an `AttemptKind | None` — and **touches `GoalAttempt`'s field
+  enumeration not at all**. §13 defers *"The bounded investigation loop, the
+  per-attempt allowance, its reserve, progress and stopping"*, and ADR-0251 takes it.
+
+  **And §4's assignment is discharged rather than amended.** *"`ABANDONED` and
+  `BLOCKED` likewise gain no producer here; which act writes each is A2's and A3's
+  respectively"* — ADR-0250 §12 took A2's half and ADR-0251 §9 takes A3's: one
+  producer, `orchestration` at the site that writes `AttemptState.BLOCKED`, under a
+  two-limb test on which **an exhausted allowance is never a blocker**. §4's status
+  semantics, its no-producer-for-`ACHIEVED` rule and its rule that an attempt reaching
+  a terminal state does not move the goal's status are relied on unchanged, as are §5's
+  monotonicity and its user-act rule, §6's no-backwards phase rule, §8's stale-target
+  rule and §9's projection.
 
 ## Context
 

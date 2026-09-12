@@ -1,12 +1,14 @@
 # 251. An attempt investigates in bounded rounds over typed read outcomes, and keeps a reserve to answer with
 
 - Status: Proposed
-- **Partially supersedes three ADRs, in six narrowly stated scopes** — three of
+- **Partially supersedes four ADRs, in seven narrowly stated scopes** — three of
   [ADR-0228](0228-a-serviced-read-may-revise-the-plan-once-and-the-turn-stops-looking-at-a-bound-or-a-deadline.md),
   two of
   [ADR-0240](0240-the-planner-asks-by-window-and-label-and-an-empty-structured-read-sends-it-back-to-plan.md)
-  and one of
+  one of
   [ADR-0247](0247-the-configured-web-search-provider-is-the-destination-the-owner-chose-and-the-recipient-they-granted-and-the-call-budget-is-removed.md)
+  and one of
+  [ADR-0249](0249-the-goal-carries-its-interpretation-the-attempt-carries-the-phase-and-the-planner-returns-its-understanding.md)
   — and §15 shows the working for every one.
   **ADR-0228's three:** §2's **condition (e)**, together with the enumeration's
   completeness (its "if and only if **all** of the following hold" read as a claim that
@@ -40,11 +42,19 @@
   stops being true of a turn inside an attempt that declares a larger allowance. §5's
   per-search, per-money and **per-conversation** clauses bind **verbatim**, and §11 is
   §13's first deferral answered in the direction §5 points.
+  **ADR-0249's one:** §7's **`Planner.plan` parameter-preservation clause**, in the
+  `empty_reads` term alone — *"keeps `context`, `memories`, `capabilities`, `files` and
+  `empty_reads` **exactly as they stand**"* — which stops being true once that parameter becomes
+  `read_outcomes`. The four other named parameters are kept exactly as they stand, and every
+  remaining clause of §7 binds entire: the `GoalBrief` first parameter, the `utterance` and
+  `evidence` keywords, the `PlannerOutput` return, the annotation clause, the
+  keyword-parameters-not-a-bundle ruling, the `PlannerOutput` field enumeration and its
+  `None`-is-not-an-error clause. §§1-6 and §§8-17 are untouched.
 - **No other ADR is superseded in whole or in part**, and §15 shows the working for each
-  one a reader would expect to be — ADR-0226, ADR-0249, ADR-0250, ADR-0194, ADR-0241 and
-  ADR-0237 among them. **ADR-0249 is untouched**, which is the one a reader should check
-  first: this decision exercises two licences §5 and §13 of that ADR grant by name and
-  supersedes no clause of it.
+  one a reader would expect to be — ADR-0226, ADR-0250, ADR-0194, ADR-0241 and
+  ADR-0237 among them. **ADR-0226 is untouched**, which is the one a reader should check
+  first: a fourth round reaches a fourth citation level by exactly the mechanism ADR-0228 §8
+  already ruled and by no other.
 - **Decides a change to `src/ai_assistant/core/types.py` and to
   `src/ai_assistant/core/protocols.py`** — two new types, one new enumeration, one further
   member on `AttemptEffort`, and one parameter replaced on `Planner.plan`. **It is a
@@ -205,14 +215,23 @@ bound of any kind (§11).
 > is authored at the `Planner.plan` seam and nowhere else. What a round plans over that the
 > round before it did not is the fourth group and the carrier of §3, and nothing else.
 
-> **Normative.** **The supply stays monotone across an attempt's rounds.** ADR-0228 §7 binds
-> entire, with *"across a turn's iterations"* read as **across an attempt's rounds**: the
+> **Normative.** **The supply stays monotone across a turn's rounds, and monotonicity is not
+> claimed across an attempt's turns.** ADR-0228 §7 binds **entire and at its own scope**: the
 > three groups keep their contents, their order and their positions; the fourth group only
-> grows; nothing is removed between the first planner call and the last; and no implementation
-> subtracts, re-filters, re-ranks or re-orders the supply on account of a round. §7's
-> one-fourth-group rule, its per-servicing budget of ten, its whole-union deduplication, its
-> once-after-the-last-servicing evaluation and its construct-the-`TurnResult`-once rule all
-> bind over the wider sequence, unchanged.
+> grows; nothing is removed between a turn's first planner call and its last; and no
+> implementation subtracts, re-filters, re-ranks or re-orders the supply on account of a round.
+> §7's one-fourth-group rule, its per-servicing budget of ten, its whole-union deduplication,
+> its once-after-the-last-servicing evaluation and its construct-the-`TurnResult`-once rule all
+> bind over a turn's rounds however many there are, unchanged.
+
+> **Normative.** **A later turn of the same attempt assembles its own supply and inherits
+> none.** ADR-0228 §1 assembles the supply once **per turn** and ADR-0052 §3 leaves it
+> unpersisted — *"context and retrieved memories are ephemeral and were never persisted"* — so
+> a later turn's three groups are read afresh and may differ, and a process restart between two
+> turns of one attempt reconstructs nothing. **No clause of this decision requires an attempt's
+> supply to survive a turn, and no lane builds one that does.** What survives a turn boundary
+> is the ledger (§5) and the goal's interpretation (ADR-0249 §1), both of which are durable
+> because those decisions made them so.
 
 > **Normative.** **Each round's call receives the `GoalBrief` of the goal's interpretation as
 > it stands at the moment of that call**, and the plan it returns carries the
@@ -256,34 +275,71 @@ rounds would put three such reads on it.
 >   whose every record was deduplicated out"*, and ADR-0240 §6's clause that such a read is
 >   **not** empty binds verbatim: *"the store returned records, and a planner told otherwise
 >   would broaden away from records already in front of it."*
-> - **`TRUNCATED`** — the source answered and the answer was **cut**: ADR-0226 §6's budget of
->   ten truncated a kind, or `MemorySearchResult.capped` was true (ADR-0128 §2), or a
->   structured read's own window ceiling bound it. Records may or may not have reached the
->   supply; what the member says is that **more existed and was not returned**.
+> - **`TRUNCATED`** — the source answered and **did not certify that the answer was
+>   complete**: ADR-0226 §6's budget of ten cut a kind's yield, or `MemorySearchResult.capped`
+>   was `True` (ADR-0128 §2), or a structured read's own window ceiling bound it. **It says
+>   that completeness was not certified and never that more records exist.** ADR-0128 §2 is
+>   explicit about its own half of that — `True` on a short result *"is a refusal to certify
+>   and never a claim that more exists"*, and an implementation *"reports `True` … where a
+>   read's eligible set exactly meets its ceiling"* — so a member asserting more existed would
+>   be a false statement the planner could act on. Records may or may not have reached the
+>   supply, and whether the round was **productive** is decided by whether any did (§7) and
+>   never by this member.
 > - **`REFUSED`** — the source **decided** not to answer, on a ground it owns. Every ruling,
 >   spend, composition, configuration and attestation member of `SearchDisposition`, every
 >   such member of `SearchRefusal` (`SPEND_REFUSED`, `PROVIDER_REFUSED`, `UNATTESTED`),
 >   `FetchRefusal.NOT_FOUND`, `NOT_A_FILE` and `TOO_LARGE`, and a servicing `Servicing.DECLINED`
 >   under ADR-0226 §5's channel scoping.
-> - **`FAILED`** — the servicing **did not complete**: `SearchRefusal.TRANSPORT_FAILED` and
->   `RESPONSE_TOO_LARGE`, `SearchDisposition.SEARCH_FAILED`, `TRANSPORT_FAILED` and
->   `BINDING_FAILED`, `FetchRefusal.UNREADABLE` and `EXTRACTION_FAILED`.
+> - **`FAILED`** — the servicing **completed and the source's answer was a failure**:
+>   `SearchRefusal.TRANSPORT_FAILED` and `RESPONSE_TOO_LARGE`,
+>   `SearchDisposition.SEARCH_FAILED`, `TRANSPORT_FAILED` and `BINDING_FAILED`,
+>   `FetchRefusal.UNREADABLE` and `EXTRACTION_FAILED`. **A source failure is not a servicing
+>   failure**, and the two are kept apart deliberately: ADR-0231 §17 rules that *"Every member
+>   is returned and none is raised"*, so a transport that fell over is a completed servicing
+>   carrying a typed non-yield, and ADR-0228 §2(d)'s *"servicing that failed or was partial"*
+>   is the loop's own stage not running to its end. The first is this member and admits a
+>   further round; the second yields **no outcome entry at all** and fails (d).
 > - **`EXPIRED`** — a **deadline** passed: `SearchRefusal.DEADLINE_EXPIRED` and
 >   `SearchDisposition.DEADLINE_EXPIRED`.
 
-> **Normative — the mapping is total, exhaustive and stated once.** Every member of
-> `SearchDisposition`, `SearchRefusal`, `FetchRefusal`, `StructuredOutcome` and `Servicing`
-> maps to **exactly one** member of `ReadOutcomeKind`, in **one** mapping, written with no
-> default branch and no fallback member, so that a member added to any source vocabulary is a
-> **type error** rather than a silent landing. The implementing lane pins the total mapping in
-> a test that enumerates each source vocabulary from the enum itself rather than from a
-> literal list.
+> **Normative — the classifier, and it is not an enum-to-enum table.** One ask's outcome is
+> **classified from the servicing's own per-ask facts, in one place**, because no source
+> enumeration determines the answer on its own: `StructuredOutcome.RETURNED_RECORDS` describes
+> both a read that added records and one whose every record deduplicated out, and a
+> `MemorySearchResult` can be `capped` while still admitting records. The facts are exactly
+> four: **whether the servicing's stage ran to its end**; **the source's typed non-yield, where
+> it produced one** (`SearchDisposition`, `SearchRefusal`, `FetchRefusal`, `StructuredOutcome`);
+> **how many records the ask admitted after ADR-0226 §7's deduplication, and how many it
+> returned before it**; and **whether completeness was certified** (ADR-0226 §6's cut,
+> `MemorySearchResult.capped`, a window ceiling).
 
-> **Normative.** **A read the budget did not reach produces no outcome at all**, and neither
-> does an ask the planner did not make. ADR-0240 §7's clause binds verbatim: *"A read the
-> budget did not reach is not in it."* `SearchDisposition.NO_BUDGET` and
-> `StructuredOutcome.NOT_ASKED` therefore map to no member and appear in no carrier; they are
-> the audit's business (ADR-0226 §9) and not the planner's.
+> **Normative — the precedence, and it is total.** The classifier is one function over those
+> four facts, evaluated in this order, with **no default branch and no fallback member**:
+>
+> 1. **No entry at all** — the ask was not made, the budget did not reach it, or the
+>    servicing's stage did not run to its end. `StructuredOutcome.NOT_ASKED`,
+>    `StructuredOutcome.NO_SLOT`, `SearchDisposition.NO_BUDGET` and a declined or partial
+>    servicing under ADR-0226 §5 are each in this case. ADR-0240 §7's clause binds verbatim:
+>    *"A read the budget did not reach is not in it."*
+> 2. **`EXPIRED`**, where the non-yield is a deadline member.
+> 3. **`FAILED`**, where the non-yield is a failure member.
+> 4. **`REFUSED`**, where the non-yield is a decision member.
+> 5. **`EMPTY`**, where the source returned **no record at all** before deduplication.
+> 6. **`DUPLICATE`**, where it returned records and admitted none after deduplication.
+> 7. **`RETURNED_RECORDS`**, where it admitted at least one.
+> 8. **`TRUNCATED`** displaces 5, 6 and 7 — and only those — where completeness was not
+>    certified. A cut, capped or ceiling-bound answer is `TRUNCATED` whether it admitted
+>    records, admitted only duplicates, or admitted none.
+>
+> **`Servicing` is not one of the classifier's inputs**, because it is the stage's disposition
+> for the whole request rather than an answer about one ask: `Servicing.DECLINED` lands in case
+> 1 and `Servicing.SERVICED` says nothing about any individual ask.
+
+> **Normative.** **Exactly one entry per ask the servicing reached**, and every ask the
+> servicing reached has one. The implementing lane pins the classifier by **enumerating the
+> combinations of the four facts** — including the exact-ceiling `capped` case, a capped read
+> admitting records, a capped read admitting none, and a fully-deduplicated read — and not by
+> enumerating enum membership, which is the shape this clause replaces.
 
 > **Normative.** **No member carries a message, a ground, a provider name, a query, a
 > destination, a monetary figure, a duration, a count or a `Settings` field name**, and no
@@ -409,7 +465,24 @@ be kept ignorant of a refusal on a round that fires anyway.
 > (a) The turn's operation declares a planning budget (ADR-0228 §4). (b) The plan carried a
 > `read_request`. (c) The request was serviced rather than declined under ADR-0226 §5's
 > channel scoping. (d) The servicing completed. (g) The turn is within its operation's
-> planning budget at the moment the check is made.
+> planning budget at the moment the check is made. **(d) is about the loop's own stage and not
+> about what a source answered** (§2): a servicing that ran to its end and carries a typed
+> failure satisfies (d), and one ADR-0226 §5 left partial does not.
+
+> **Normative — a turn's first planner call is never gated.** These conditions govern a
+> **further** call within a turn, exactly as ADR-0228 §2 governs a turn's second, and **every
+> turn the owner starts makes its first planner call** whatever the attempt's ledger holds. An
+> attempt whose planner-call allowance is spent still plans **once** per turn the owner starts
+> and iterates no further; its investigation has stopped and its conversation has not. No gate
+> in this decision takes a user's turn away from them, which is the standing rule of
+> 2026-09-12 binding here in terms — convenience alone never justifies a user-facing
+> restriction — and the count is then bounded by how many times the owner asks, which is
+> ADR-0247 §5's own ground (§11).
+
+> **Normative.** **`AttemptEffort.planner_calls` counts every call the attempt makes, a turn's
+> first included**, so (f′) is a comparison against the whole ledger and not against a
+> per-turn subtotal. What the allowance bounds is the attempt's **iteration**; what bounds the
+> number of turns is the owner.
 
 > **Normative — (f′), which supersedes (f).** **The attempt has made fewer `Planner.plan`
 > calls than its kind's declared planner-call allowance (§5).** ADR-0228 §2(f) reads *"The
@@ -599,11 +672,24 @@ at the instant it is true, and is never inferred at read time.
 > referent; and it takes no share of spend, because spend is ADR-0194's and is not re-keyed
 > here (§8).
 
-> **Normative.** **A useful partial answer at exhaustion is a property of the reserve and
-> never an instruction to a model.** No prompt, no rendered line and no `Settings` value asks
-> for one. What the reserve establishes is that an attempt which spent its whole
-> investigation share **still has capacity within its declared allowance for the composing
-> call to run**, and §7 is what gives that call something true to say.
+> **Normative — what the reserve guarantees, and what it does not.** It is a **margin** and not
+> a hard reservation, and the difference is stated rather than left to be discovered. §4(h) is
+> a gate on **starting** a round, never a cancellation of one in flight, which is ADR-0228 §4's
+> posture kept in its own words — *"a planner call already begun runs to its own completion, and
+> a turn's total duration may therefore exceed its budget by one planner call and one
+> servicing"* — so an attempt admitted at one tick below the investigation share may finish its
+> round **past** the whole working allowance. **Two things are guaranteed and a third is not.**
+> Guaranteed: the composing call **runs**, because it is gated on nothing; and the overrun past
+> the declared allowance is bounded by **one round**, where without the reserve investigation
+> would have been admitted up to the allowance itself and overrun from there. **Not
+> guaranteed**: that `AttemptEffort.working` is below the working allowance when composing
+> begins. No lane states, tests or renders that stronger claim.
+
+> **Normative.** **A useful partial answer at exhaustion is a property of the reserve and never
+> an instruction to a model.** No prompt, no rendered line and no `Settings` value asks for one.
+> What the reserve buys is that an attempt which spent its whole investigation share **stops
+> investigating with a composing call still to make**, and §7 is what gives that call something
+> true to say.
 
 **This is #2255's requirement as a mechanism, and the requirement is quoted rather than
 paraphrased**: *"Preserve enough capacity to verify and report rather than spending everything
@@ -613,6 +699,14 @@ that the system had already made impossible to satisfy; a reserve makes the answ
 and leaves what it says to the composing stage, which is the division ADR-0203 and ADR-0228 §10
 already draw.
 
+**A margin rather than an enforceable reservation, because the alternative is the cancelling
+deadline ADR-0228 §14 defers by name.** Guaranteeing that composing begins below the allowance
+would mean abandoning a planner call in flight, which *"needs a cancellation posture for a model
+call the turn has already paid for, and a rule for what a half-composed plan is"* — a second
+decision, deferred there and not taken here (§14). What is available without it is the margin,
+and the margin is worth declaring: it converts an unbounded overrun into a one-round one, and it
+costs nothing but a figure.
+
 **Composing is ungated rather than given its own budget, because a budget on the composing call
 would be a second place for a turn to fail with nothing to show.** The reserve's whole purpose
 is that the answer happens; a gate that could refuse it would defeat the purpose it was declared
@@ -621,23 +715,50 @@ itself, and ADR-0194's ceiling on what the world may cost.
 
 ### 7. Progress and stopping: four mechanical tests, three new stop reasons, and what composing is told
 
-> **Normative — productive and unproductive.** A round is **productive** where its outcome is
-> `RETURNED_RECORDS` or `TRUNCATED`, and **unproductive** where it is `EMPTY`, `DUPLICATE`,
-> `REFUSED`, `FAILED` or `EXPIRED`. The test is over the **outcome** and never over a
-> judgement about relevance, quality or usefulness: what makes a round productive is that the
-> supply grew or that the source said more existed.
+> **Normative — productive and unproductive, folded once over the whole round.** A request may
+> carry one ask of each `ReadKind` (ADR-0226 §2), so a round has as many outcomes as it had
+> asks, and **the fold is a single disjunction over them: a round is productive where *any* ask
+> of it admitted at least one record the supply did not already hold, counted after ADR-0226
+> §7's deduplication, and unproductive otherwise.** A round that reached no ask at all is
+> unproductive.
+
+> **Normative.** **The fold is over records admitted and never over the member**, which is what
+> keeps it total and free of the contradiction a member-based test carries: `TRUNCATED` is
+> productive where it admitted a record and unproductive where it admitted none, and
+> `RETURNED_RECORDS` is productive by construction. The test is a count and never a judgement
+> about relevance, quality or usefulness.
 
 > **Normative — the unproductive-run test (§4(i)).** The loop counts **consecutive**
 > unproductive rounds. **At two, it stops** and records `UNPRODUCTIVE`. A productive round
 > resets the count to zero. **The run is counted within one turn and starts at zero on each
 > turn of the attempt**, and no implementation persists it.
 
-> **Normative — the duplicate-ask refusal.** A `read_request` whose ask is **byte-identical**
-> to an ask this **turn** has already serviced is **not serviced**: the loop records
-> `DUPLICATE_ASK`, makes no further planner call, and tells the composing stage the turn
-> stopped while still asking (below). It performs no store call, no provider call and no
-> deduplication for it, and it substitutes nothing in its place. Equality is equality of the
-> frozen `ReadAsk`, and the comparison is over the turn's own asks and no others.
+> **Normative — the duplicate-ask refusal, and the kinds it binds on.** An ask that is
+> **byte-identical** to an ask this **turn** has already serviced is **not serviced**: the loop
+> performs no store call, no provider call and no deduplication for it, and substitutes nothing
+> in its place. Where **every** ask of a request is refused this way the loop records
+> `DUPLICATE_ASK`, makes no further planner call, and tells the composing stage the turn stopped
+> while still asking (below); where some asks remain, those are serviced and the round proceeds.
+> Equality is equality of the frozen `ReadAsk`, and the comparison is over this turn's own asks
+> and no others.
+
+> **Normative — it binds on the four kinds whose ask determines what is read, and never on
+> `WEB_SEARCH`.** A `SIGHTED_QUERY`, `CITATION_HOP`, `LOCAL_FILE` or `STRUCTURED_READ` ask
+> carries the whole of what it asks for, so two identical asks are two identical operations. **A
+> `WEB_SEARCH` ask carries nothing**: ADR-0231 §1 gives it *"no field"* because *"the query a
+> search sends is composed by a `QueryComposer` from the turn's own utterance"*, so **every**
+> `WEB_SEARCH` ask is byte-identical to every other and ask equality establishes nothing about
+> operation equality. A rule that refused the second search of a turn on that ground would
+> suppress exactly the read a planner asks for after discovering a fact, and would do it on a
+> comparison that cannot see the query. **No lane extends the refusal to `WEB_SEARCH` by reading
+> the composed query instead**: the composed text is the composer's and the namer rule
+> (ADR-0226 §3) keeps it out of the loop's comparisons.
+
+> **Normative.** **This refusal binds every plan of a turn uniformly and takes nothing from
+> ADR-0228 §3.** §3's rule that the last plan's request *"is serviced under ADR-0226 §5, §6 and
+> §7 **exactly as the first plan's is**"* binds verbatim, and it stays literally true: this rule
+> applies to a turn's first plan too, where it is vacuous because no earlier ask of that turn
+> exists.
 
 > **Normative — the no-new-record test.** A round whose servicing added no record to the
 > supply is unproductive by the clause above and is counted by the run test. **It is not by
@@ -785,21 +906,33 @@ an attempt, with what fires it.
 > `ACTIVE`. ADR-0249 §4's rule binds entire: *"an attempt may be blocked while the goal is
 > `ACTIVE`"*.
 
-> **Normative — the one reason that satisfies it here.** Under **this** decision exactly one
-> blocker passes both limbs, and it is named so that the producer is **reachable** rather than
-> notional: **every read the attempt asked for was refused on a ground this deployment's own
-> configuration decides, and the attempt reached no other source.**
-> `SearchDisposition.NOT_CONFIGURED` is the tree's one such ground today — *"This deployment
-> has connected no search account… A provisioning fact"* — and ADR-0247 §1 makes the
-> configuration the authority it is decided against. Later decisions may name further blockers
-> under the same test; **none of them is an exhaustion**, and each owes its own showing against
-> both limbs.
+> **Normative — the one reason that satisfies it here, stated over facts the writer holds.**
+> Under **this** decision exactly one blocker passes both limbs: **this turn's request asked for
+> a `WEB_SEARCH`, its servicing answered `SearchDisposition.NOT_CONFIGURED`, and no ask of this
+> turn admitted a record.** `NOT_CONFIGURED` is the tree's one such ground today — *"This
+> deployment has connected no search account… A provisioning fact"* — and ADR-0247 §1 makes the
+> configuration the authority it is decided against.
+
+> **Normative — the predicate ranges over this turn and never over the attempt's history.** §3
+> persists no read outcome, and ADR-0052 §3 leaves the supply each turn was assembled over
+> unreconstructable, so a predicate over *"every read the attempt ever made"* would be a test
+> nothing in the system can evaluate: two attempts with identical persisted asks and identical
+> ledgers can differ in whether an earlier read succeeded, and no durable value distinguishes
+> them. **A blocker is written from what the writing turn holds, or it is not written.** That
+> loses nothing the status was for: `NOT_CONFIGURED` is a **provisioning fact about the
+> deployment**, so a turn that meets it is not guessing about earlier turns — it is reading the
+> same configuration they read.
+
+> **Normative.** Later decisions may name further blockers under the same test; **none of them
+> is an exhaustion**, each owes its own showing against both limbs, and **each owes a showing
+> that its predicate is evaluable from facts its writer holds.**
 
 > **Normative — exhaustion is never a blocker, and this is the clause the loop is written
 > around.** An attempt that spent its planner-call allowance, its investigation share or its
-> unproductive-run budget ends with the goal **`ACTIVE`**. A further user act opens a further
-> attempt with its own allowance (ADR-0250 §12), so the objective is still achievable and
-> nothing in the system is entitled to say otherwise.
+> unproductive-run budget **stops investigating and leaves the goal `ACTIVE`**. It still plans
+> once per turn the owner starts (§4), and a further user act that finds it terminal opens a
+> further attempt with its own allowance (ADR-0250 §12) — so the objective is still achievable
+> and nothing in the system is entitled to say otherwise.
 
 > **Normative — a superseded disagreement is never a blocker.** Where evidence rows disagree
 > and one carries `EvidenceStanding.SUPERSEDED` (ADR-0249 §10), **the superseded row blocks
@@ -946,11 +1079,22 @@ wrong, to buy a guarantee §5's own ground already gives.
 > §3 for a label a model invents.
 
 > **Normative.** **`AttemptEffort.planner_calls` is incremented once per `Planner.plan` call,
-> immediately on return, before any other component observes the plan**, and `working` is
-> accumulated by `orchestration` at each round boundary from the injected clock (ADR-0026),
-> excluding every interval spent waiting for the user. ADR-0249 §5's monotonicity binds entire:
-> **no replan, branch, recovery or phase transition resets either, and no implementation
-> subtracts from one.**
+> immediately *before* the call and after the capability vocabulary is read, and it is counted
+> whether or not the call returns.** A call that raises, that is cancelled, or that the turn
+> does not survive is a call the attempt made and a call its allowance paid for; a ledger
+> advanced on return would let a recovery re-invoke a planner past an allowance already spent.
+> **This is the tree's existing discipline and not a new one** — `loop.py`'s `_planned` already
+> advances ADR-0228 §9's per-turn count on exactly that line, for exactly that reason — raised
+> here to the durable ledger.
+
+> **Normative.** **The increment is durable before the call, or the call is not made.** An
+> implementation that advanced an in-memory ledger and persisted it only on a successful return
+> would restore the same hole one layer down.
+
+> **Normative.** `working` is accumulated by `orchestration` at each round boundary from the
+> injected clock (ADR-0026), excluding every interval spent waiting for the user. ADR-0249 §5's
+> monotonicity binds entire: **no replan, branch, recovery or phase transition resets either,
+> and no implementation subtracts from one.**
 
 > **Normative.** **No component other than the loop holds a plan whose `supersedes` or
 > `targets_revision` is the planner's**, and no component other than the loop holds an
@@ -1045,7 +1189,7 @@ ledger, so the prohibition acquires a consequence.
 
 ### 15. Scope, and what this records against earlier ADRs
 
-**This ADR partially supersedes three ratified ADRs, in six scopes, and no others.** The
+**This ADR partially supersedes four ratified ADRs, in seven scopes, and no others.** The
 header carries each scope; this section shows ADR-0070 §1's test for every one, and shows why
 the ADRs a reader would expect to move do not.
 
@@ -1107,14 +1251,27 @@ deferrals is untouched, and **§13's first deferral is answered rather than supe
 an answered deferral is the ADR that answers it recording the discharge, which §11 does and this
 section records.
 
-**ADR-0249 is untouched, and a reader should check that first.** This decision exercises two
-licences that ADR clause by name — §5's *"A3 fixes the allowances, the reserve and any further
-member of `AttemptEffort`"* and §13's deferral of the loop — and **exercising a licence is not
-superseding the clause that grants it**. No field of `GoalAttempt` moves, no member of
-`AttemptState`, `AttemptOutcome`, `AttemptPhase` or `GoalStatus` moves, §6's no-backwards rule
-is relied on, §4's status semantics are relied on and §9's projection is relied on. §4's
-*"which act writes each is A2's and A3's respectively"* is **discharged** by §9 rather than
-amended: the clause said an act would be named elsewhere, and it was.
+**ADR-0249 §7's parameter-preservation clause — superseded in the `empty_reads` term alone.**
+§7 declares that `Planner.plan` *"keeps `context`, `memories`, `capabilities`, `files` and
+`empty_reads` **exactly as they stand**"*. §3 of this decision replaces `empty_reads` with
+`read_outcomes`, so a reader holding only ADR-0249 would implement a signature carrying a
+parameter that is gone — ADR-0070 §1's test coming out on the supersession side, and a record
+ADR-0082 §1 owes against ADR-0249 rather than against ADR-0240 alone. **The other four terms
+are kept exactly as they stand**, and every remaining clause of §7 binds entire: the `GoalBrief`
+first positional parameter, the required `utterance` keyword, the `evidence` keyword defaulting
+to empty, the `PlannerOutput` return, the annotation clause, ADR-0211 §2's applied
+keyword-parameters ruling, and `PlannerOutput`'s two-field enumeration with its
+`None`-is-not-an-error clause.
+
+**Nothing else in ADR-0249 moves, and it is the ADR a reader should check second.** This
+decision exercises two licences that ADR grants by name — §5's *"A3 fixes the allowances, the
+reserve and any further member of `AttemptEffort`"* and §13's deferral of the loop — and
+**exercising a licence is not superseding the clause that grants it**. No field of `GoalAttempt`
+moves, no member of `AttemptState`, `AttemptOutcome`, `AttemptPhase` or `GoalStatus` moves, §6's
+no-backwards rule is relied on, §4's status semantics are relied on, §8's stale-target rule is
+relied on and §9's projection is relied on. §4's *"which act writes each is A2's and A3's
+respectively"* is **discharged** by §9 rather than amended: the clause said an act would be
+named elsewhere, and it was.
 
 **ADR-0250 is untouched.** §12's three attempt-opening acts stand, §10 names none more, and
 §12's sentence *"A3 may name further acts… and may name none that is not a user act"* is
@@ -1156,16 +1313,18 @@ than changed.
 >   `Planner.plan` swaps `empty_reads` for `read_outcomes`; `planning/planner.py` renders the
 >   outcomes in place of the empty asks; the `Planner` conformance suite and the canonical fake
 >   in `ai_assistant.testing` take the new parameter; every call site moves mechanically so the
->   tree type-checks, with `orchestration/loop.py` passing the outcomes of the reads it already
->   services. **L1 moves whatever version ADR-0249's L1 moved for these stored shapes, under
+>   tree type-checks. **§2's classifier lands here**, because the carrier cannot be filled
+>   without it: `orchestration/loop.py` passes the outcomes of the reads it already services,
+>   which on this lane are at most the two ADR-0228 §3's bound admits. **L1 moves whatever
+>   version ADR-0249's L1 moved for these stored shapes, under
 >   ADR-0124 §9's rule that the bump rides the change that makes a peer's value invalid**, and
 >   it is the only lane of this decision that moves any version. **No behaviour changes in L1**:
 >   the bound is still two, no allowance is declared, no attempt kind is stamped, no progress
 >   test runs and no stop reason is added.
-> - **L2 — the loop.** `orchestration/` alone: §2's total mapping, §4's conditions, §5's
->   declaration mapping and the stamping site, §6's reserve, §7's progress tests, duplicate
+> - **L2 — the loop.** `orchestration/` alone: §4's conditions and its never-gated first call,
+>   §5's declaration mapping and the stamping site, §6's reserve, §7's progress fold, duplicate
 >   refusal, three stop reasons, audit extension and widened composing trigger, §9's `BLOCKED`
->   site and §12's writer clauses.
+>   site and §12's writer clauses including the charge-before-the-call discipline.
 
 > **Normative.** **L1 is the one sanctioned cross-subsystem lane**, and it is sanctioned by
 > ADR-0137 §2 for the reason ADR-0249 §15 states one decision earlier: a `Planner.plan`
@@ -1195,91 +1354,129 @@ than changed.
 2. **Each of the seven outcomes reaches the planner, distinguished.** Seven arms, one per
    `ReadOutcomeKind` member, each asserting the member the planner was handed and each driven
    from a real source vocabulary value rather than from a constructed `ReadOutcome`.
-3. **The mapping is total.** A test that enumerates `SearchDisposition`, `SearchRefusal`,
-   `FetchRefusal`, `StructuredOutcome` and `Servicing` **from the enums themselves** and asserts
-   every member maps to exactly one `ReadOutcomeKind`, with `NO_BUDGET` and `NOT_ASKED` asserted
-   to map to none and to appear in no carrier.
-4. **Sufficient-context restraint.** *"What is two plus two"* — a plan carrying no
+3. **The classifier is total over the four facts, not over enum membership.** Combinations, not
+   members: a source non-yield of each class; a read returning records and admitting some;
+   returning records and admitting none; returning none at all; each of those again with
+   completeness uncertified; and the four no-entry cases — `StructuredOutcome.NOT_ASKED`,
+   `StructuredOutcome.NO_SLOT`, `SearchDisposition.NO_BUDGET` and a servicing ADR-0226 §5 left
+   declined or partial — asserted to produce **no** carrier entry.
+4. **`capped` at the exact ceiling is not an assertion that more exists.** A read whose eligible
+   set exactly meets the store's ceiling comes back `capped=True` (ADR-0128 §2) and is
+   `TRUNCATED`; the arm asserts the planner is told completeness was not certified, that the
+   round is **productive** where that read admitted a record and **unproductive** where it
+   admitted none, and that nothing rendered or recorded claims further records exist.
+5. **A source failure is a completed servicing.** A `WEB_SEARCH` answering
+   `SearchRefusal.TRANSPORT_FAILED` satisfies ADR-0228 §2(d), reaches the planner as `FAILED`
+   and admits a further round; a servicing ADR-0226 §5 left partial fails (d), produces no
+   carrier entry, and admits none.
+6. **Supply monotonicity binds a turn and is not claimed across turns.** Within one turn no
+   record leaves the supply across four rounds; a second turn of the same attempt assembles its
+   own three groups, is asserted to be permitted to differ from the first turn's, and inherits no
+   fourth group — including across a restart between the two turns.
+7. **Sufficient-context restraint.** *"What is two plus two"* — a plan carrying no
    `read_request` — makes **exactly one** planner call, services nothing, runs no progress test
    and records `NOT_ITERATED`. #2170's *"A sufficient-context task takes no unnecessary read."*
-5. **Useful continuation.** An attempt whose first read is `REFUSED` and whose second, to a
+8. **Useful continuation.** An attempt whose first read is `REFUSED` and whose second, to a
    different source, is `RETURNED_RECORDS`: the round after the refusal is admitted, the run
    count resets, and the attempt answers. #2169's *"justified alternative"*.
-6. **Unproductive repetition stops.** Two consecutive `EMPTY` rounds stop with `UNPRODUCTIVE`
-   **before** the planner-call allowance is reached, and the planner is asserted **not** to have
-   been called a third time. #2170's *"a repeated-result task stops before blindly exhausting
-   the maximum."*
-7. **The duplicate ask is refused, not serviced.** A plan re-emitting a byte-identical ask this
-   turn already serviced performs **no** store or provider call, records `DUPLICATE_ASK`, and
-   sets the composing flag. A second arm asserts that an ask that is **not** byte-identical but
-   whose every record deduplicates out **is** serviced and yields `DUPLICATE`.
-8. **A useful partial answer at exhaustion, and the reserve intact.** An attempt that spends its
-   whole investigation share composes an answer over the supply it gathered, with
-   `AttemptEffort.working` asserted to be at or past the investigation share and strictly below
-   the working allowance at the moment composing is entered. #2170's *"exhaustion yields a
-   supported partial answer."*
-9. **The boundary instants are spent, not available.** With the injected clock set to exactly
+9. **Unproductive repetition stops.** Two consecutive rounds admitting no record stop with
+   `UNPRODUCTIVE` **before** the planner-call allowance is reached, and the planner is asserted
+   **not** to have been called a third time. #2170's *"a repeated-result task stops before
+   blindly exhausting the maximum."*
+10. **The fold is over the whole round.** A round whose request carried several asks — one
+    admitting a record and one `EMPTY` — is **productive** and resets the run; a round whose every
+    ask admitted nothing is **one** unproductive round and never two, however many asks it
+    carried.
+11. **The duplicate ask is refused, not serviced.** A plan re-emitting a byte-identical
+    `SIGHTED_QUERY`, `CITATION_HOP`, `LOCAL_FILE` or `STRUCTURED_READ` ask this turn already
+    serviced performs **no** store or provider call; where every ask of the request is refused
+    that way the turn records `DUPLICATE_ASK` and sets the composing flag, and where one ask
+    remains it is serviced and the round proceeds. A second arm asserts that an ask that is
+    **not** byte-identical but whose every record deduplicates out **is** serviced and yields
+    `DUPLICATE`.
+12. **A repeated `WEB_SEARCH` is serviced.** Two `WEB_SEARCH` asks on one turn — necessarily
+    byte-identical, since ADR-0231 §1 gives the ask no field — are **both** serviced, neither
+    records `DUPLICATE_ASK`, and the composer is asserted to have been called twice.
+13. **A useful partial answer at exhaustion, and the margin's honest bound.** An attempt that
+    spends its whole investigation share composes an answer over the supply it gathered, with
+    `AttemptEffort.working` asserted to be at or past the investigation share at the moment
+    composing is entered. A second arm drives the **overrun**: a round admitted at one tick below
+    the investigation share whose planner call outlasts the reserve is **not** cancelled,
+    composing **still runs**, and the test asserts the overrun is one round — and asserts no upper
+    bound on `working`, because §6 claims none. #2170's *"exhaustion yields a supported partial
+    answer."*
+14. **The boundary instants are spent, not available.** With the injected clock set to exactly
    the investigation share, no further round is admitted and the stop is
    `WORKING_ALLOWANCE_REACHED`; at one tick less, one is. ADR-0228 §4's own arm, one level up.
-10. **Both gates bind.** An attempt inside its allowance whose turn has spent ADR-0228 §4's
+15. **Both gates bind.** An attempt inside its allowance whose turn has spent ADR-0228 §4's
     PT20S stops with `BUDGET_REACHED`; an attempt inside PT20S that has spent its planner-call
     allowance stops with `BOUND_REACHED`.
-11. **A replan does not reset a counter, and a new turn does not.** An attempt's second turn is
-    asserted to start from the `planner_calls` and `working` the first turn left, and to stop at
-    the allowance rather than at the allowance times two.
-12. **The system opens no attempt to buy budget.** An attempt that exhausts its allowance is
+16. **A replan does not reset a counter, and a new turn does not.** An attempt's second turn is
+    asserted to start from the `planner_calls` and `working` the first turn left. A second arm
+    drives a turn on an attempt whose allowance is **already spent**: it makes **exactly one**
+    planner call, iterates no further, records the stop, and the ledger is asserted to advance by
+    exactly one rather than to reset.
+17. **A call that raises is still charged.** A planner call that raises leaves `planner_calls`
+    advanced and durably so; a recovery that re-invokes the planner is asserted to find the
+    allowance already spent rather than to obtain a free call. A cancellation arm asserts the
+    same.
+18. **The system opens no attempt to buy budget.** An attempt that exhausts its allowance is
     asserted to leave `GoalAttempt` count unchanged and the goal `ACTIVE`, with no second attempt
     row written by anything but one of ADR-0250 §12's three acts.
-13. **An unpriced kind does not iterate.** An `AttemptEffort` whose `kind` is `SPOKEN`, and one
+19. **An unpriced kind does not iterate.** An `AttemptEffort` whose `kind` is `SPOKEN`, and one
     whose `kind` is `None`, each make exactly one planner call per turn — the fail-closed arm,
     and the one a member added tomorrow inherits.
-14. **The kind is stamped once.** An attempt opened under `CONVERSE` and engaged on a later turn
+20. **The kind is stamped once.** An attempt opened under `CONVERSE` and engaged on a later turn
     under `CONVERSE_SPOKEN` keeps `CONVERSATIONAL`, and the reverse.
-15. **Exhaustion is not a blocker.** An attempt that exhausts every counter leaves the goal
-    `ACTIVE`; an attempt whose every read was refused `NOT_CONFIGURED` writes the goal `BLOCKED`;
-    and a superseded evidence row is asserted to block nothing and to reset no run count.
-16. **The writer clauses.** A planner envelope carrying a read outcome, a stop reason, an effort
+21. **Exhaustion is not a blocker.** An attempt that exhausts every counter leaves the goal
+    `ACTIVE`; a turn whose `WEB_SEARCH` answered `NOT_CONFIGURED` and whose every ask admitted no
+    record writes the goal `BLOCKED` through `set_goal_status`; a turn on that same attempt whose
+    *earlier* turn had admitted records writes it just the same, because the predicate reads this
+    turn and not a history; and a superseded evidence row is asserted to block nothing and to
+    reset no run count.
+22. **The writer clauses.** A planner envelope carrying a read outcome, a stop reason, an effort
     figure, an attempt kind or a status has each value discarded silently, with the turn
     otherwise byte-identical.
-17. **The negative arms of §11.** No scheduler, job, timer, startup hook or background task
+23. **The negative arms of §11.** No scheduler, job, timer, startup hook or background task
     advances an attempt — asserted as an absence over the composition root and the hub's task
     set — and no `Settings` field, `ConversationStore` member or `SearchDisposition` member
     bounding searches per conversation exists.
-18. **The audit says what the loop spent.** One record per turn, emitted once and conditioned
+24. **The audit says what the loop spent.** One record per turn, emitted once and conditioned
     on nothing, carrying the per-servicing `ReadOutcomeKind` sequence, the attempt's kind, its
     consumed planner calls and its declared allowance — and asserted to carry **no** query, no
     label, no ask, no excerpt and no identifier but the ambient correlation id. A second arm
     asserts the stop distribution is readable over all eight members.
-19. **Byte-identical on every other turn.** A turn that did not stop while asking assembles a
+25. **Byte-identical on every other turn.** A turn that did not stop while asking assembles a
     composing prompt byte-identical to the one it assembles on `origin/main`. ADR-0228 §10's own
     arm, kept.
 
 ### 18. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
 **ADR-0070 §1's test is *"would a reader acting on the ADR act identically before and
-after"*,** and it comes out on the supersession side for all six scopes of §15: a reader holding
+after"*,** and it comes out on the supersession side for all seven scopes of §15: a reader holding
 only ADR-0228 stops at two planner calls, refuses a round after an empty read and refuses a
-sixth stop reason; a reader holding only ADR-0240 implements a parameter that is gone and
-withholds a refusal from the planner; a reader holding only ADR-0247 tells an operator a turn
-runs at most two searches. Each is a **new ADR that supersedes part of an old one**, which is
+sixth stop reason; a reader holding only ADR-0240 or only ADR-0249 implements a `Planner.plan`
+carrying a parameter that is gone, and the first of them also withholds a refusal from the
+planner; a reader holding only ADR-0247 tells an operator a turn runs at most two searches. Each is a **new ADR that supersedes part of an old one**, which is
 what §1 requires, and none is an in-place amendment.
 
 **ADR-0082 §1's test is *"does the later ADR amend a named clause of the earlier one"*,** and it
-is answered clause by clause in §15. A record is owed on **ADR-0228, ADR-0240 and ADR-0247** and
-on no other ADR: everything this decision adds to ADR-0226, ADR-0249, ADR-0250, ADR-0194,
+is answered clause by clause in §15. A record is owed on **ADR-0228, ADR-0240, ADR-0247 and
+ADR-0249** and on no other ADR: everything this decision adds to ADR-0226, ADR-0250, ADR-0194,
 ADR-0241, ADR-0237, ADR-0231, ADR-0242, ADR-0244, ADR-0128, ADR-0176, ADR-0211, ADR-0026 and
 ADR-0052 is a **stacked addition** — an obligation that contradicts no sentence those ADRs
 wrote — *"recorded in the ADR that makes it, and nowhere else."*
 
-**Each of the three records goes on the earlier ADR's `Status` line and in an appended dated
+**Each of the four records goes on the earlier ADR's `Status` line and in an appended dated
 note, and every one of them is a *supersession* rather than an amendment**, so ADR-0082 §2's
 leading-token exclusion — which is stated over an *amendment qualifier* and says in terms that
 it is *"about the record's form, never about whether one is owed"* — does not reach any of
 them. ADR-0228's line is already led by `Partially superseded by` and gains this ADR's pair
-beside ADR-0240's, ADR-0242's and ADR-0249's. ADR-0240's and ADR-0247's lines each read
+beside ADR-0240's, ADR-0242's and ADR-0249's. ADR-0249's line is already led by `Partially superseded by` — ADR-0250 put it there — and gains
+this ADR's pair beside it. ADR-0240's and ADR-0247's lines each read
 `Accepted` today and each take the leading token in its place, which is ADR-0001's rule and the
 template's: *"the supersession leads and 'Accepted' is dropped (so a prefix match on 'Accepted'
-cannot misread the replaced part as live)"*. All three take the appended dated note ADR-0070 §1
+cannot misread the replaced part as live)"*. All four take the appended dated note ADR-0070 §1
 requires in every case.
 
 **This decision is a contract ADR under ADR-0015 §5.** It changes `core/protocols.py` and
@@ -1318,6 +1515,16 @@ budget.
 `EXPIRED` needs a source with a deadline and `TRUNCATED` needs one that caps — and a deployment
 with no search account reaches neither. The arms drive each from a real source value so that no
 member is ratified with no producer; that a member is rare on one deployment is not a defect.
+
+**The reserve is a margin and the ADR says so**, so an operator reading `AttemptEffort.working`
+will sometimes see a figure past the declared working allowance — by at most one round, and by
+design rather than by defect. The alternative was the cancelling deadline ADR-0228 §14 defers,
+and taking it here would have meant deciding what a half-composed plan is (§14).
+
+**An attempt whose allowance is spent still plans once per turn**, so an owner who keeps asking
+about one goal keeps getting answers and stops getting investigation. The degradation is to the
+system as it stood before ADR-0228 — one plan per turn — and the composing flag is what makes it
+legible rather than silent.
 
 **`empty_reads` disappears from `Planner.plan`,** so every implementation and every fake must
 move in one lane. That cost is stated rather than avoided, and §16 is why it is one lane.
