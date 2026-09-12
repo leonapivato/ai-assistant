@@ -83,13 +83,16 @@ ruled against.
   ADR-0247 §8(b′) demonstrates it end to end. ADR-0037 §2 fixes the sequence — *"decide → record
   → read back → claim"* — and ADR-0058 declined to put a check in the executor: *"`StepExecutor`
   does not validate trail presence, and #259 is resolved as WONTFIX."*
-- **The attempt already has the field this record is appended to.** ADR-0249 §5 gives
-  `GoalAttempt` *"`plan_ids`, `execution_ids` and `authorization_ids`, each a possibly-empty
-  `tuple[Identifier, ...]`"*, with *"Plans, executions and authorizations … referenced by id and
-  never inlined"*. This decision is that field's first producer.
-- **The state the attempt stops in already exists.** `AttemptState.AWAITING_AUTHORIZATION`
-  (ADR-0249 §5) is one of seven closed members and has no producer at `origin/main`. This
-  decision is its first.
+- **The attempt already records what authorised it, and this decision adds no second kind of
+  id to that tuple.** ADR-0249 §5 gives `GoalAttempt` *"`plan_ids`, `execution_ids` and
+  `authorization_ids`"*, and ADR-0249's third lane **has landed a producer**:
+  `orchestration/engine.py` appends *"the decision it was allowed by"* — a `PermissionDecision`
+  id — through `AttemptTransition.add_authorization_id`. §14 relies on that and appends nothing
+  of its own kind, so the tuple stays one namespace.
+- **The state the attempt stops in already exists and already has its producer.**
+  `AttemptState.AWAITING_AUTHORIZATION` (ADR-0249 §5) is written by `orchestration/engine.py`
+  the moment a `CONFIRM` is recorded at dispatch. §14 relies on that and adds no second
+  writer.
 
 ### The tree, read rather than assumed, at `origin/main` `f6a22821`
 
@@ -112,9 +115,9 @@ ruled against.
   `parameters_digest` is `sha256(_canonical_json(self.parameters))`; `PermissionRuling` carries
   `authorised_by` and `authorised_subject` and nothing else about authority; `ToolCost` is the
   corpus's money shape, a `Decimal` `amount` beside a shape-validated ISO-4217 `currency`;
-  `GoalAttempt.authorization_ids` is present and unwritten.
+  `GoalAttempt.authorization_ids` is written with `PermissionDecision` ids.
 - `wire/envelope.py` — `PROTOCOL_VERSION` is **38**.
-- **ADR-0249's lanes L1 and L2 have landed**: `Goal`, `AttemptPhase`, `AttemptState`,
+- **ADR-0249's lanes have landed, L3 included**: `Goal`, `AttemptPhase`, `AttemptState`,
   `AttemptOutcome`, `AttemptEffort`, `GoalAttempt` and `GoalBrief` are on the tree. **ADR-0250,
   ADR-0251, ADR-0252 and ADR-0253 are ratified and not implemented**: every type this decision
   cites from them — `GoalQuestion`, `GoalEvidence`, `StepCondition`, `PlanStep.depends_on`,
@@ -1195,10 +1198,12 @@ all three would be one thing to be wrong about.
 >
 > - **Every check passed** — the attempt's `phase` advances to `AttemptPhase.EXECUTE` and its
 >   `state` stays `RUNNING`.
-> - **A step's arguments are not covered** — the attempt's `state` is committed
->   `AttemptState.AWAITING_AUTHORIZATION`, its `phase` stays `AUTHORIZE`, and the user is asked
->   through the ordinary `CONFIRM` park (ADR-0037 §4). **This decision is that member's first
->   producer.** No second asking mechanism is built.
+> - **A step's arguments are not covered** — the user is asked through the ordinary `CONFIRM`
+>   park (ADR-0037 §4), and the attempt's move to `AttemptState.AWAITING_AUTHORIZATION` is
+>   **the one ADR-0249's own lane already makes** at the instant that `CONFIRM` is recorded.
+>   **This decision adds no second writer of that state and no second asking mechanism**: an
+>   uncovered argument is a request the policy rules `CONFIRM` on, and everything after that is
+>   machinery that exists.
 > - **A deterministic check failed on the plan** — the attempt stays `RUNNING` and the plan is
 >   replanned within the attempt, which consumes from the same `AttemptEffort` ledger
 >   (ADR-0249 §5: *"no replan, branch, recovery or phase transition resets either"*). Where no
@@ -1216,9 +1221,20 @@ all three would be one thing to be wrong about.
 > enumeration at exactly three user acts and rules that *"An answer to a clarification opens
 > none"*; nothing here adds a fourth, which that section reserves to A3 and to acts of the
 > investigation loop. An answer that establishes an `Authorization` **resumes the attempt it
-> paused**: `commit_attempt` takes its `state` from `AWAITING_AUTHORIZATION` back to `RUNNING`
-> at the phase it stood, which is ADR-0250 §11's shape for a clarification stated here for this
-> state, and the new record's id is appended through `AttemptTransition.add_authorization_id`.
+> paused by the path that already exists**: ADR-0249's lane commits the attempt out of
+> `AWAITING_AUTHORIZATION` to `RUNNING` at `EXECUTE` the moment the resolving ruling reaches
+> the trail, in one `commit_attempt` with the decision that answer was recorded under. **This
+> decision adds no transition, no second commit and no ordering of its own**, and the
+> settlement of the `Authorization` row (§1) is a write to a different store that neither
+> precedes nor follows it by any rule stated here.
+
+> **Normative — `GoalAttempt.authorization_ids` keeps one namespace and this decision adds
+> nothing to it.** ADR-0249's lane appends the `PermissionDecision` id an attempt was allowed
+> by, and **no `Authorization.id` is ever appended there**: the attempt reaches the record
+> through the decision, whose `authorised_by` names it (§7), so the join exists without a
+> second id kind in one tuple — which is the namespace hazard ADR-0247 §2 names when it refuses
+> to rest a discriminator on *"grant ids and connection references"* being drawn from disjoint
+> spaces, *"which they are not"*.
 
 ### 15. Writer clauses, gathered in one place
 
@@ -1515,8 +1531,9 @@ check are each consumed as written, and §13 and §14 state where.
 > change: the triad rides with the primary consumer whose demands shape the contract.
 > **Lane 2, the proposal, the settlement and the recheck.** `orchestration` proposing the row
 > when a `CONFIRM` is put, settling it on the answer, writing a path-(ii) correction,
-> `ActionRequest.goal`, the attempt's `AWAITING_AUTHORIZATION` commit and the
-> `add_authorization_id` append, and phase 4's evaluation. **Lane 3, the surfaces.** The
+> `ActionRequest.goal`, and phase 4's evaluation. **It writes no attempt bookkeeping**: the
+> `AWAITING_AUTHORIZATION` commit and the `add_authorization_id` append are ADR-0249's lane's
+> and are relied on rather than repeated. **Lane 3, the surfaces.** The
 > listing, the revocation, and `Confirmation.authorization` with its two projection types.
 
 > **Normative — every lane that changes the wire carries its own bump, and no lane defers
@@ -1748,9 +1765,9 @@ rest forward, and the system asks exactly where the owner's direction says it sh
 previous route is: a row names one record, that record carries a member per argument, and each
 member names the turn, the user's own words and the working by which those words became a
 value — so *"what authorised this, and who said so"* is answerable per **argument** and not
-merely per call. `GoalAttempt.authorization_ids` and `AttemptState.AWAITING_AUTHORIZATION` get
-their first producers, and ADR-0021 §3's carried-but-unread `parameters` gets the per-call gating
-ADR-0017 §3 made a condition on designating the seam.
+merely per call. ADR-0021 §3's carried-but-unread `parameters` gets the per-call gating
+ADR-0017 §3 made a condition on designating the seam — the first rule in this corpus to read
+one — and the attempt bookkeeping ADR-0249's lane already writes needs no addition at all.
 
 **What becomes harder.** There is now a second standing authority for egress, and the trail
 tells four routes apart rather than three — a partition that is total today and that every later
@@ -1843,6 +1860,6 @@ than by negotiating it.
 
 **Minting a fourth phase-outcome vocabulary** — ready / awaiting / needs-revision. Rejected in
 §14. `AttemptPhase` and `AttemptState` already carry every state phase 4 can leave an attempt in,
-`AWAITING_AUTHORIZATION` is a closed member with no producer, and a second vocabulary would be
-two authorities that can disagree about one fact — the argument ADR-0249 §5 makes when it
+`AWAITING_AUTHORIZATION` is a closed member whose producer ADR-0249's lane already wrote, and a
+second vocabulary would be two authorities that can disagree about one fact — the argument ADR-0249 §5 makes when it
 declines a fifth `GoalStatus` member for "paused".
