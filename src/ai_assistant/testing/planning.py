@@ -40,7 +40,6 @@ from ai_assistant.core.types import (
     MAX_GOAL_INTERPRETATIONS,
     TERMINAL_ATTEMPT_STATES,
     ActionPlan,
-    AttemptEffort,
     AttemptPhase,
     ExecutionState,
     GoalAttempt,
@@ -823,7 +822,15 @@ class FakePlanStore:
                 phase=phase,
                 state=state,
                 outcome=attempt.outcome if transition.outcome is None else transition.outcome,
-                effort=AttemptEffort(planner_calls=calls, working=working),
+                # **Folded into the stored ledger rather than rebuilt from the
+                # transition** (ADR-0251 §5). ``AttemptTransition`` names the two
+                # counters and nothing else, so a fresh ``AttemptEffort`` here would
+                # clear every member no transition can carry — ``kind`` today, and
+                # whatever a later decision adds under ADR-0249 §5's licence. The kind
+                # is the opening act's stamp and "is never re-stamped".
+                effort=attempt.effort.model_copy(
+                    update={"planner_calls": calls, "working": working}
+                ),
                 plan_ids=_appended_id(attempt.plan_ids, transition.add_plan_id),
                 execution_ids=_appended_id(attempt.execution_ids, transition.add_execution_id),
                 authorization_ids=_appended_id(

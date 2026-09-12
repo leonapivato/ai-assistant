@@ -634,12 +634,38 @@ class _NonYieldClass(StrEnum):
     """§2's precedence case 4: the source decided not to answer, on a ground it owns."""
 
 
+def _vocabulary_key(member: _NonYield) -> tuple[str, str]:
+    """The key one typed non-yield is placed under, and why it is not the member.
+
+    **Four ``StrEnum`` vocabularies share six member names**, and a ``StrEnum`` member
+    hashes and compares as its value — so ``SearchDisposition.SPEND_REFUSED`` and
+    ``SearchRefusal.SPEND_REFUSED`` are one key in any mapping keyed on the member
+    itself. Today both must reach the same class, and do; a table that *collapsed* them
+    would make that agreement silent rather than checked, and would let a member added
+    to one vocabulary tomorrow inherit a class a different vocabulary decided. Keying on
+    the vocabulary's own name beside the member's makes the thirty-four placements
+    thirty-four rows, so §2's "no default branch and no fallback member" is checkable by
+    counting.
+
+    Args:
+        member: One member of one of the four source vocabularies.
+
+    Returns:
+        Its vocabulary's name and its own, which no two members share.
+    """
+    return type(member).__name__, member.name
+
+
 #: ADR-0251 §2's class per typed non-yield, **stated member by member and never
 #: derived from a name, a prefix or a substring**. It is the whole of the enum-facing
 #: half of the classifier, and the classifier itself reads no vocabulary but this
 #: mapping — so a member added to any of the four without a class here fails at import
 #: rather than falling through to a default, which is §2's "no default branch and no
 #: fallback member" held mechanically rather than by review.
+#:
+#: **Keyed by :func:`_vocabulary_key` rather than by the member**, for the collapse that
+#: function records: four ``StrEnum``s sharing six member names would otherwise be
+#: twenty-eight rows rather than thirty-four.
 #:
 #: **``SearchRefusal.RESPONSE_TOO_LARGE`` is a failure and
 #: ``SearchDisposition.RESPONSE_TOO_LARGE`` is read the same way**, as are the two
@@ -656,46 +682,46 @@ class _NonYieldClass(StrEnum):
 #: short-circuiting them. ``ServicedRead.disposition`` never carries it anyway — a
 #: search that reached the provider and found nothing resolves to no disposition at
 #: all — so the entry is what makes the table total rather than a live branch.
-_NON_YIELD_CLASSES: Final[Mapping[_NonYield, _NonYieldClass]] = MappingProxyType(
+_NON_YIELD_CLASSES: Final[Mapping[tuple[str, str], _NonYieldClass]] = MappingProxyType(
     {
         # --- SearchDisposition (ADR-0231 §13, seventeen members) ----------------
-        SearchDisposition.NOT_CONFIGURED: _NonYieldClass.REFUSED,
-        SearchDisposition.NO_BUDGET: _NonYieldClass.UNREACHED,
-        SearchDisposition.COMPOSER_DECLINED: _NonYieldClass.REFUSED,
-        SearchDisposition.COMPOSER_UNAVAILABLE: _NonYieldClass.REFUSED,
-        SearchDisposition.COMPOSER_MALFORMED: _NonYieldClass.REFUSED,
-        SearchDisposition.COMPOSER_TOO_LONG: _NonYieldClass.REFUSED,
-        SearchDisposition.BINDING_FAILED: _NonYieldClass.FAILED,
-        SearchDisposition.RULING_CONFIRM: _NonYieldClass.REFUSED,
-        SearchDisposition.RULING_DENY: _NonYieldClass.REFUSED,
-        SearchDisposition.RULING_UNAVAILABLE: _NonYieldClass.REFUSED,
-        SearchDisposition.SPEND_REFUSED: _NonYieldClass.REFUSED,
-        SearchDisposition.TRANSPORT_FAILED: _NonYieldClass.FAILED,
-        SearchDisposition.DEADLINE_EXPIRED: _NonYieldClass.EXPIRED,
-        SearchDisposition.PROVIDER_REFUSED: _NonYieldClass.REFUSED,
-        SearchDisposition.RESPONSE_TOO_LARGE: _NonYieldClass.FAILED,
-        SearchDisposition.UNATTESTED: _NonYieldClass.REFUSED,
-        SearchDisposition.SEARCH_FAILED: _NonYieldClass.FAILED,
+        _vocabulary_key(SearchDisposition.NOT_CONFIGURED): _NonYieldClass.REFUSED,
+        _vocabulary_key(SearchDisposition.NO_BUDGET): _NonYieldClass.UNREACHED,
+        _vocabulary_key(SearchDisposition.COMPOSER_DECLINED): _NonYieldClass.REFUSED,
+        _vocabulary_key(SearchDisposition.COMPOSER_UNAVAILABLE): _NonYieldClass.REFUSED,
+        _vocabulary_key(SearchDisposition.COMPOSER_MALFORMED): _NonYieldClass.REFUSED,
+        _vocabulary_key(SearchDisposition.COMPOSER_TOO_LONG): _NonYieldClass.REFUSED,
+        _vocabulary_key(SearchDisposition.BINDING_FAILED): _NonYieldClass.FAILED,
+        _vocabulary_key(SearchDisposition.RULING_CONFIRM): _NonYieldClass.REFUSED,
+        _vocabulary_key(SearchDisposition.RULING_DENY): _NonYieldClass.REFUSED,
+        _vocabulary_key(SearchDisposition.RULING_UNAVAILABLE): _NonYieldClass.REFUSED,
+        _vocabulary_key(SearchDisposition.SPEND_REFUSED): _NonYieldClass.REFUSED,
+        _vocabulary_key(SearchDisposition.TRANSPORT_FAILED): _NonYieldClass.FAILED,
+        _vocabulary_key(SearchDisposition.DEADLINE_EXPIRED): _NonYieldClass.EXPIRED,
+        _vocabulary_key(SearchDisposition.PROVIDER_REFUSED): _NonYieldClass.REFUSED,
+        _vocabulary_key(SearchDisposition.RESPONSE_TOO_LARGE): _NonYieldClass.FAILED,
+        _vocabulary_key(SearchDisposition.UNATTESTED): _NonYieldClass.REFUSED,
+        _vocabulary_key(SearchDisposition.SEARCH_FAILED): _NonYieldClass.FAILED,
         # --- SearchRefusal (ADR-0231 §17, ADR-0241 §4, seven members) -----------
-        SearchRefusal.SPEND_REFUSED: _NonYieldClass.REFUSED,
-        SearchRefusal.TRANSPORT_FAILED: _NonYieldClass.FAILED,
-        SearchRefusal.DEADLINE_EXPIRED: _NonYieldClass.EXPIRED,
-        SearchRefusal.PROVIDER_REFUSED: _NonYieldClass.REFUSED,
-        SearchRefusal.RESPONSE_TOO_LARGE: _NonYieldClass.FAILED,
-        SearchRefusal.UNATTESTED: _NonYieldClass.REFUSED,
-        SearchRefusal.NO_RESULT: _NonYieldClass.ANSWERED,
+        _vocabulary_key(SearchRefusal.SPEND_REFUSED): _NonYieldClass.REFUSED,
+        _vocabulary_key(SearchRefusal.TRANSPORT_FAILED): _NonYieldClass.FAILED,
+        _vocabulary_key(SearchRefusal.DEADLINE_EXPIRED): _NonYieldClass.EXPIRED,
+        _vocabulary_key(SearchRefusal.PROVIDER_REFUSED): _NonYieldClass.REFUSED,
+        _vocabulary_key(SearchRefusal.RESPONSE_TOO_LARGE): _NonYieldClass.FAILED,
+        _vocabulary_key(SearchRefusal.UNATTESTED): _NonYieldClass.REFUSED,
+        _vocabulary_key(SearchRefusal.NO_RESULT): _NonYieldClass.ANSWERED,
         # --- FetchRefusal (ADR-0230 §5, five members) ---------------------------
-        FetchRefusal.NOT_FOUND: _NonYieldClass.REFUSED,
-        FetchRefusal.NOT_A_FILE: _NonYieldClass.REFUSED,
-        FetchRefusal.UNREADABLE: _NonYieldClass.FAILED,
-        FetchRefusal.TOO_LARGE: _NonYieldClass.REFUSED,
-        FetchRefusal.EXTRACTION_FAILED: _NonYieldClass.FAILED,
+        _vocabulary_key(FetchRefusal.NOT_FOUND): _NonYieldClass.REFUSED,
+        _vocabulary_key(FetchRefusal.NOT_A_FILE): _NonYieldClass.REFUSED,
+        _vocabulary_key(FetchRefusal.UNREADABLE): _NonYieldClass.FAILED,
+        _vocabulary_key(FetchRefusal.TOO_LARGE): _NonYieldClass.REFUSED,
+        _vocabulary_key(FetchRefusal.EXTRACTION_FAILED): _NonYieldClass.FAILED,
         # --- StructuredOutcome (ADR-0240 §10, five members) ---------------------
-        StructuredOutcome.NOT_ASKED: _NonYieldClass.UNREACHED,
-        StructuredOutcome.NO_SEPARATOR: _NonYieldClass.UNREACHED,
-        StructuredOutcome.NO_SLOT: _NonYieldClass.UNREACHED,
-        StructuredOutcome.RETURNED_NOTHING: _NonYieldClass.ANSWERED,
-        StructuredOutcome.RETURNED_RECORDS: _NonYieldClass.ANSWERED,
+        _vocabulary_key(StructuredOutcome.NOT_ASKED): _NonYieldClass.UNREACHED,
+        _vocabulary_key(StructuredOutcome.NO_SEPARATOR): _NonYieldClass.UNREACHED,
+        _vocabulary_key(StructuredOutcome.NO_SLOT): _NonYieldClass.UNREACHED,
+        _vocabulary_key(StructuredOutcome.RETURNED_NOTHING): _NonYieldClass.ANSWERED,
+        _vocabulary_key(StructuredOutcome.RETURNED_RECORDS): _NonYieldClass.ANSWERED,
     }
 )
 
@@ -713,7 +739,7 @@ _unplaced = sorted(
     f"{vocabulary.__name__}.{member.name}"
     for vocabulary in _NON_YIELD_VOCABULARIES
     for member in vocabulary
-    if member not in _NON_YIELD_CLASSES
+    if _vocabulary_key(member) not in _NON_YIELD_CLASSES
 )
 if _unplaced:  # pragma: no cover — an unplaceable member is a build-time defect
     _message = (
@@ -805,7 +831,9 @@ def classify_read_outcome(facts: AskFacts) -> ReadOutcomeKind | None:  # noqa: P
     if not facts.reached:
         return None
     classified = (
-        _NonYieldClass.ANSWERED if facts.non_yield is None else _NON_YIELD_CLASSES[facts.non_yield]
+        _NonYieldClass.ANSWERED
+        if facts.non_yield is None
+        else _NON_YIELD_CLASSES[_vocabulary_key(facts.non_yield)]
     )
     match classified:
         case _NonYieldClass.UNREACHED:

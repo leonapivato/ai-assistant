@@ -33,6 +33,8 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     MAX_GOAL_INTERPRETATIONS,
     ActionPlan,
+    AttemptEffort,
+    AttemptKind,
     AttemptOutcome,
     AttemptPhase,
     AttemptState,
@@ -891,6 +893,64 @@ class PlanStoreContract:
             AttemptOutcome.ANSWERED,
         )
         assert await store.get_attempt("a1") == ended
+
+    async def test_an_attempts_ledger_round_trips_the_kind_it_was_opened_under(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0251 §5: the ledger carries which allowance its counters are measured against.
+
+        The kind is stamped by ``orchestration`` at the instant the attempt is opened and
+        is **never re-stamped, never derived at read time and never taken from a later
+        turn's operation** — so what a store owes is that the value it was handed comes
+        back byte for byte, through both of the routes an attempt is read by.
+
+        **And an attempt opened with no kind stays with none**, which is what an
+        attempt-opening turn that declared no operation means (§5) and what a row written
+        before this decision decodes to. It is never repaired at read time into a default
+        somebody guessed.
+        """
+        await store.save_goal(_goal())
+        await store.open_attempt(
+            _attempt().model_copy(update={"effort": AttemptEffort(kind=AttemptKind.CONVERSATIONAL)})
+        )
+        await store.open_attempt(_attempt(attempt_id="a2"))
+
+        stamped = await store.get_attempt("a1")
+        unstamped = await store.get_attempt("a2")
+
+        assert stamped is not None
+        assert unstamped is not None
+        assert stamped.effort.kind is AttemptKind.CONVERSATIONAL
+        assert unstamped.effort.kind is None, "no operation declared, and none invented"
+        assert [one.effort.kind for one in await store.attempts_of("g1")] == [
+            AttemptKind.CONVERSATIONAL,
+            None,
+        ], "and the same through the enumerating route"
+
+    async def test_a_commit_that_moves_the_counters_leaves_the_kind_where_it_stood(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0251 §5: "never re-stamped", asserted where a store could overwrite it.
+
+        ``AttemptTransition`` carries no member for the kind and gains none, so a commit
+        that advances the counters has nothing to say about it — and a store rebuilding
+        the ledger from the transition alone, rather than folding into the stored one,
+        would silently clear it.
+        """
+        await store.save_goal(_goal())
+        await store.open_attempt(
+            _attempt().model_copy(update={"effort": AttemptEffort(kind=AttemptKind.SPOKEN)})
+        )
+
+        moved = await store.commit_attempt(
+            AttemptTransition(attempt_id="a1", expected_version=0, planner_calls=3)
+        )
+
+        assert moved.effort.planner_calls == 3
+        assert moved.effort.kind is AttemptKind.SPOKEN, "the counters moved and the kind did not"
+        assert "kind" not in AttemptTransition.model_fields, (
+            "no transition names it: the stamp is the opening act's and no later act's"
+        )
 
     async def test_the_attempts_references_grow_by_append_and_ignore_a_repeat(
         self, store: PlanStore

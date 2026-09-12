@@ -898,6 +898,49 @@ async def test_a_newer_on_disk_schema_is_refused(tmp_path: Path) -> None:
         SqlitePlanStore(path=path, now=_fixed_now)
 
 
+async def test_an_attempt_row_written_before_the_ledger_gained_its_kind_still_decodes(
+    tmp_path: Path,
+) -> None:
+    """ADR-0251 §5, §16: no migration is owed, and this is the row that says so.
+
+    ADR-0249 §12 moved this store's ``schema_version`` 1 → 2 because a version 1
+    ``goals`` row "no longer decodes"; ADR-0251 moves it nowhere, because a version 2
+    ``attempts`` row **does**. The blob is the record, and a blob whose ``effort``
+    carries only the two counters validates against the widened model with ``kind``
+    ``None`` — which ADR-0251 §5 defines as "the turn that opened this attempt declared
+    no operation", the true reading of a row whose writer knew of no operation to stamp.
+
+    **Seeded as the bytes a previous release would have written**, not by dumping the
+    current model and deleting a key from the object: what is being asserted is that the
+    stored JSON of the older shape is readable, so the older shape is what is written.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    await store.save_goal(_goal())
+    await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_fixed_now()))
+    store.close()
+
+    raw = sqlite3.connect(path)
+    [(stored,)] = raw.execute("SELECT data FROM attempts WHERE id = 'a1'").fetchall()
+    older = json.loads(stored)
+    older["effort"] = {"planner_calls": 2, "working": "PT45S"}
+    raw.execute("UPDATE attempts SET data = ? WHERE id = 'a1'", (json.dumps(older),))
+    raw.commit()
+    raw.close()
+
+    reopened = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        decoded = await reopened.get_attempt("a1")
+    finally:
+        reopened.close()
+
+    assert decoded is not None, "the older row is read rather than refused"
+    assert decoded.effort.planner_calls == 2, "and its counters are the ones it stored"
+    assert decoded.effort.kind is None, (
+        "ADR-0251 §5's default, and never a kind inferred at read time"
+    )
+
+
 async def test_an_older_on_disk_schema_is_refused(tmp_path: Path) -> None:
     """A version this code has no migration for is refused, older or newer alike.
 
