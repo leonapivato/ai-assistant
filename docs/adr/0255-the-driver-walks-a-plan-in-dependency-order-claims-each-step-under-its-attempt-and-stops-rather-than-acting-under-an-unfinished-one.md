@@ -337,8 +337,9 @@ was settled about the step rather than by where in the plan it sat.
 > `attempt_id`, and `StepExecutor.execute` gains the same one**; each passes it through to the
 > `StepTransition` its claim builds and reads it for nothing else. **The driver supplies it from
 > the `GoalAttempt` it is driving under**, which is the value ADR-0249 §12 already has
-> `orchestration` holding in memory from the instant the attempt is opened. **No stage fetches
-> the attempt to fill it**, `StepExecutor` gains **no `PlanStore` read it does not already have
+> `orchestration` holding in memory from the instant the attempt is opened. **No stage of the
+> walk fetches the attempt to fill it**, `StepExecutor` gains **no `PlanStore` read it does not
+> already have
 > and no collaborator** (ADR-0058), and no other parameter of either entry point moves. **The one
 > path on which `orchestration` has no attempt to supply is ADR-0052's recovered resume, and §5
 > states what it does there.**
@@ -412,7 +413,8 @@ that end an attempt rather than revise a goal.
 > **Normative — the four tests of revision 1 §H.4, and which of them is owed here.** **Test 3 —
 > the store-level invariant in the shared `PlanStore` conformance suite — is this decision's**,
 > and it is owed for **both** conjuncts: no `→ RUNNING` transition is ever accepted whose goal
-> revision is not the stored one, and none whose attempt is terminal. **Tests 1, 2 and 4 —
+> revision is not the stored one, and none whose attempt is **absent**, **of another goal**, or
+> **terminal**. **Tests 1, 2 and 4 —
 > interleaved cancel before the claim, interleaved cancel after it, and the exhaustive two-writer
 > interleaving — are A9's**, because each is stated over a cancellation whose semantics that lane
 > decides. **No lane reads this decision as having established them.**
@@ -502,8 +504,8 @@ restart could lose, a park could stale and a replan could point past the end of 
 > `AWAITING_APPROVAL` step's still-pending `CONFIRM` by its `(execution_id, step_id)` binding
 > (ADR-0044 §3), re-minting a continuation token. **A step in the middle of a plan is recovered by
 > that enumeration on exactly the same terms as a first step**, because the enumeration is over
-> steps and not over positions, and **this decision adds no recovery path, no second store read
-> and no `Engine` member**. ADR-0052 §2's idempotence and its `_parked` reconciliation bind
+> steps and not over positions, and **this decision adds no recovery path and no `Engine`
+> member**. ADR-0052 §2's idempotence and its `_parked` reconciliation bind
 > unchanged.
 
 > **Normative — a recovered resume has no attempt in memory, so `orchestration` resolves one
@@ -657,9 +659,10 @@ it in A8.
 > a replan not redo a completed effect needs **either** an idempotency key the tool dedupes
 > against — **A8's**, on ADR-0014 §7's own deferral — **or** the planner being able to see what
 > already ran, which needs a projection of the attempt's executions into the planner's input and
-> is a widening of `GoalBrief` that **ADR-0253 §10 declines to take** (*"Whether a brief ever
-> renders an element's applicability is not decided here"*, and it renders no execution at all).
-> **Neither is taken here**, and §12 carries both with their triggers.
+> is a widening against ADR-0253 §10's *"**`GoalBrief` and `BriefElement` gain nothing** … The
+> brief carries an element's text and the **kind** of its ground and nothing else"* — a brief
+> renders no execution and no step outcome at all. **Neither route is taken here**, and §12
+> carries both with their triggers.
 
 **What the goal does preserve is progress, which is the requirement #2255 actually states.**
 *"Preserve the real booking"* and *"preserve progress"* are requirements about **not discarding
@@ -714,7 +717,8 @@ nothing depends on it, and no act follows — so nothing fails open.
 > the remainder is **not strictly positive** it **starts no further step** and the walk stops
 > (§2). **A step already begun runs to its own completion**, which is ADR-0228 §4's posture in its
 > own words — *"a planner call already begun runs to its own completion, and a turn's total
-> duration may therefore exceed its budget"* — one level over. **The figure passed to
+> duration may therefore exceed its budget by one planner call and one servicing"*, read one level
+> over as one step's disposal. **The figure passed to
 > `StepRunner` is therefore always strictly positive**, which ADR-0029 §4 requires: *"a zero or
 > negative duration is refused rather than treated as an instantly-expired deadline"*.
 
@@ -903,8 +907,9 @@ ADR-0249 §6 already rules that recording one *"does not move the phase"*.
   that stops writes no `GoalStatus` at all.
 - **At-most-once for an effect across two plans of one goal.** **Not decided**, and §7 states the
   limit rather than claiming the property. Fired by **either** A8's idempotency key **or** a
-  decision that projects an attempt's executions into the planner's input, which is a `GoalBrief`
-  widening ADR-0253 §10 declines and which would carry its own containment argument.
+  decision that projects an attempt's executions into the planner's input, which is a widening
+  against ADR-0253 §10's *"`GoalBrief` and `BriefElement` gain nothing"* and which would carry its
+  own containment argument.
 - **#257's remaining half — making the ruling and the transition atomic.** **Not decided.** §5
   answers what the driver does when it meets a stranded step, using the by-step query ADR-0044 §3
   landed. Making the pair atomic needs a `PlanStore` that accepts more than one transition in a
@@ -1057,9 +1062,9 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
 
 ### 16. Records owed on earlier ADRs, under ADR-0082 §1
 
-**Nothing is superseded, in whole or in part**, and §§below show the working for each document a
-reader would expect to be — ADR-0037, ADR-0228, ADR-0249, ADR-0014, ADR-0042 and ADR-0253 among
-them. ADR-0082 §1's test is applied to each earlier ADR's **text**.
+**Nothing is superseded, in whole or in part**, and the entries below show the working for each
+document a reader would expect to be — ADR-0037, ADR-0228, ADR-0249, ADR-0014, ADR-0042 and
+ADR-0253 among them. ADR-0082 §1's test is applied to each earlier ADR's **text**.
 
 **ADR-0037 §6 — relied on and not superseded, and the report's cut table is corrected.** Revision
 1's §L.1 row for A7 reads *"partially supersedes ADR-0037 §6's 'terminal for this turn'"*.
@@ -1167,8 +1172,10 @@ ADR is the instrument.
 
 **It supersedes nothing, in whole or in part** (ADR-0070 §3), so its `Status` line carries no
 supersession pair and ADR-0070 §4's extraction invariant is not engaged. Every ADR it touches is
-**relied on**, three deferrals are **fired** — ADR-0228 §14's, ADR-0249 §13's two, and ADR-0042
-§3's named follow-on — and §16 shows the working for each rather than leaving a reader to check.
+**relied on**, and what it takes it takes by **firing deferrals** rather than by replacing
+clauses: ADR-0228 §14's, ADR-0249 §13's two, ADR-0042 §3's named follow-on, and the three
+questions ADR-0253 hands here by name in §2, §9 and §11. §16 shows the working for each rather
+than leaving a reader to check.
 
 **The records it owes are dated notes and no `Status` line moves** (ADR-0082 §7): the entries §16
 states are written with this document and not after it.
@@ -1225,7 +1232,10 @@ only where `commit_attempt` already appended the execution id, so a conjunct mea
 guarantee would silently be a no-op on any path that had not; it makes the store choose which
 attempt a claim belongs to, which is a fact only the driver holds; and it is an unindexed reverse
 scan over every attempt of a goal on the hot path of every claim. The caller supplies an identity
-and the store reads the state, which is `approval_ref`'s own division.
+and the store reads the state, which is `approval_ref`'s own division. Where `orchestration`
+itself has no attempt to supply — ADR-0052's recovered resume, the one such path — it does take
+that lookup, and §5 states why its result being **checked** by the store's conjunct is what makes
+the same query safe there and unsafe inside the claim.
 
 **The walk continues past a park, an uncertain effect or a commits-nothing disposition, driving
 steps that are independent of the stopped one.** Rejected on three grounds §2 states: independence
