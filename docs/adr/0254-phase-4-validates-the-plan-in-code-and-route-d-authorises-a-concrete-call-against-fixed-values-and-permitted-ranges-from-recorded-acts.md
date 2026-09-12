@@ -147,10 +147,26 @@ attempt (A2 and A3, by ADR-0249 §5). §16 lists what it declines, each with wha
 
 > **Normative.** **`AuthorizationDisposition` is a `StrEnum` valued by lower-cased member name
 > and closed at exactly six members**: `PROPOSED`, `ESTABLISHED`, `DECLINED`, `EXPIRED`,
-> `REVOKED` and `SUPERSEDED`. **`PROPOSED` is the only non-terminal member**, and no transition
-> leaves a terminal one. The vocabulary is added to and never renamed. A **model validator**
-> refuses every shape but two: `PROPOSED` with `settled_at` absent, and a terminal disposition
-> with `settled_at` present.
+> `REVOKED` and `SUPERSEDED`. The vocabulary is added to and never renamed.
+
+> **Normative — the transition graph, stated whole, and there are exactly five edges.**
+>
+> - `PROPOSED → ESTABLISHED` — the user approved;
+> - `PROPOSED → DECLINED` — the user refused;
+> - `PROPOSED → EXPIRED` — the deadline passed before an answer;
+> - `ESTABLISHED → REVOKED` — the user withdrew the authority;
+> - `ESTABLISHED → SUPERSEDED` — a later row replaced it (§5).
+>
+> **`DECLINED`, `EXPIRED`, `REVOKED` and `SUPERSEDED` are *retired*: no edge leaves them**, and
+> `settle` refuses a row already in one. `PROPOSED` and `ESTABLISHED` are the two members an
+> edge leaves, and no other edge exists — there is no `DECLINED → ESTABLISHED`, no
+> `EXPIRED → ESTABLISHED`, no `SUPERSEDED → ESTABLISHED` and no `REVOKED → ESTABLISHED`.
+
+> **Normative.** **`settled_at` is present exactly on a row whose disposition is not
+> `PROPOSED`, and it is the instant of that row's most recent settlement.** On an `ESTABLISHED`
+> row it is therefore the instant the authority came into being, because no edge has left
+> `ESTABLISHED` — which is what §7's trail check compares against and why that check reads the
+> disposition first.
 
 > **Normative — the record is written before the question is put, not after the answer.** This
 > is ADR-0244's ratified shape for exactly this problem — a durable row carrying what is put to
@@ -162,8 +178,13 @@ attempt (A2 and A3, by ADR-0249 §5). §16 lists what it declines, each with wha
 
 > **Normative — the settlement, and it is the store's single operation.**
 > `GoalAuthorizationStore` gains **`settle(id, to: AuthorizationDisposition, *, settled_at)`**,
-> which moves a `PROPOSED` row to a terminal disposition under compare-and-swap and **refuses a
-> row already terminal**. An approval settles `ESTABLISHED`; a refusal settles `DECLINED`; an
+> which moves a row along one of §1's five edges under compare-and-swap and **refuses every
+> move that is not an edge** — including any move out of a retired disposition. **The
+> compare-and-swap is on the `disposition` itself** — the move succeeds only where the row
+> currently stands at that edge's source — so **no version token is added to the type** and two
+> racing settlements cannot both win: the second finds a disposition the edge does not leave and
+> is refused. That is `PlanStore`'s compare-and-swap argument (ADR-0014 §5) taken over a field
+> that already carries the state. An approval settles `ESTABLISHED`; a refusal settles `DECLINED`; an
 > answer arriving at or after `expires_at` settles `EXPIRED` and **establishes nothing**; a
 > user withdrawal settles `REVOKED`; and a superseding write settles the row it supersedes
 > `SUPERSEDED`. **There is no other mutation and no `update`**: a settlement moves one field
@@ -215,9 +236,9 @@ attempt (A2 and A3, by ADR-0249 §5). §16 lists what it declines, each with wha
 >   its own basis** (§8), and `goal`, `tool`, `account`, `destinations` and `expires_at` are
 >   **transcribed unchanged**.
 >
-> A row carrying `confirmation` unset and `supersedes` unset is **not constructible**; a row
-> carrying `confirmation` set is `PROPOSED` at construction and reaches a terminal disposition
-> only through `settle`.
+> A row carrying `confirmation` unset **and** `supersedes` unset is **not constructible**. A
+> row carrying `confirmation` is **written** `PROPOSED` and reaches every later disposition
+> through `settle` alone — a rule of the write path and not of the type, for the reason below.
 
 > **Normative — what path (ii) may change, and what it may never touch.** It may **replace a
 > fixed value** for an argument the superseded row already fixed, and **narrow a bound** for an
@@ -228,14 +249,23 @@ attempt (A2 and A3, by ADR-0249 §5). §16 lists what it declines, each with wha
 > destination set is what ADR-0148 §3's first clause is stated over and a correction must not
 > move it. **A widening of any kind takes path (i) and is confirmed.**
 
-> **Normative — where each of those refusals lives, because they are not all the same kind.**
-> A rule comparing **fields of one row** is a **model validator** on the type: the disposition
-> and `settled_at` pairing, `expires_at` strictly after `proposed_at`, the two-way construction
-> rule above, a `CoverageMember`'s two shapes, a `ValueBound`'s three, a `ValueResolution`'s
-> three, and the agreement between a `MONEY` bound and a fixed currency member of the same row.
-> A rule comparing **two records** is the **store's**, at the write, where both are in hand:
-> the transcription check, the non-widening check, the uniqueness check and the atomic
-> settlement of the superseded row. And a rule comparing a basis against a **recorded turn** is
+> **Normative — where each of those refusals lives, because they are not all the same kind,
+> and the division is stated because getting it wrong makes a valid stored row unreadable.**
+>
+> - A rule true of **every state a row is ever persisted in** is a **model validator** on the
+>   type: the `settled_at`/disposition pairing, `expires_at` strictly after `proposed_at`, the
+>   rule that `confirmation` and `supersedes` are not both unset, a `CoverageMember`'s two
+>   shapes, a `ValueBound`'s three, a `ValueResolution`'s three, and the agreement between a
+>   `MONEY` bound and a fixed currency member of the same row.
+> - A rule about the state a row may be **first written in** is the **store's**, at `record`:
+>   a row carrying `confirmation` is written `PROPOSED`, and a path-(ii) row is written
+>   `ESTABLISHED` with `settled_at` equal to `proposed_at`. **It is not a model validator**,
+>   because the same row is later persisted `ESTABLISHED` with that same `confirmation` — a
+>   validator stating it would refuse to decode the row it had just written, and `resolve`,
+>   `recent` and `export` must return every row whatever its disposition (§16).
+> - A rule comparing **two rows** is the **store's** too, at the write, where both are in hand:
+>   the transcription check, the non-widening check, the uniqueness check and the atomic
+>   settlement of the superseded row. So is the transition graph, enforced by `settle`. And a rule comparing a basis against a **recorded turn** is
 > **`orchestration`'s**, resolved exactly as ADR-0249 §7 resolves a `USER_STATED` ground — *"A
 > `USER_STATED` element's `span` is resolved by checking it is a span of the turn's own request
 > (`TurnResult.utterance`, ADR-0248 §1)"* — before the row is built. **No `core` type reads a
@@ -250,8 +280,8 @@ attempt (A2 and A3, by ADR-0249 §5). §16 lists what it declines, each with wha
 > other.
 
 > **Normative.** **Supersession is permanent and does not depend on the superseding row's own
-> fate.** Revoking a superseding row leaves **neither** live: a `SUPERSEDED` disposition is
-> terminal and `settle` refuses a terminal row, so nothing un-supersedes one. That is the
+> fate.** Revoking a superseding row leaves **neither** live: `SUPERSEDED` is retired and no
+> edge leaves it, so nothing un-supersedes one. That is the
 > fail-closed direction, and the one that refuses to resurrect a broader authority the user has
 > already moved on from. Both rows stay in the store, both appear in `export`, and neither is
 > deleted but by `clear`.
@@ -1571,10 +1601,18 @@ check are each consumed as written, and §13 and §14 state where.
 > 21c. **The store refuses a second `ESTABLISHED` row for one goal and declaration**, and
 >      `covering` answers `None` where two would; a superseding write for the same pair is
 >      accepted and settles the predecessor in the same write.
-> 21d. **The settlement lifecycle.** A `PROPOSED` row settles `ESTABLISHED`, `DECLINED`,
->      `EXPIRED`, `REVOKED` or `SUPERSEDED` under compare-and-swap; `settle` **refuses** a row
->      already terminal; a `PROPOSED` row is **never** live; and a row read after its
->      `expires_at` while still `PROPOSED` is settled `EXPIRED` by that read.
+> 21d. **The transition graph, edge by edge and non-edge by non-edge.** Each of the five edges
+>      succeeds under compare-and-swap; every other move is **refused**, with one test per
+>      retired disposition and one for `PROPOSED → REVOKED`, `PROPOSED → SUPERSEDED` and
+>      `ESTABLISHED → DECLINED`/`EXPIRED`. A `PROPOSED` row is **never** live; a row read after
+>      its `expires_at` while still `PROPOSED` is settled `EXPIRED` by that read; and an
+>      `ESTABLISHED` row past its `expires_at` is not live and is **not** settled again.
+> 21g. **Every persisted state decodes.** Approve a proposal, persist, restart, and `resolve`,
+>      `recent`, `standing` and `export` each return the row — an `ESTABLISHED` row still
+>      carrying its `confirmation` is valid, and so are the `DECLINED`, `EXPIRED`, `REVOKED`
+>      and `SUPERSEDED` rows, one round-trip test each. **`record` refuses to write a
+>      `confirmation`-carrying row in any disposition but `PROPOSED`**, which is the write-path
+>      rule the validator deliberately does not state.
 > 21e. **A confirmed widening.** A live row bounds GBP 60; *"make it up to eighty"* proposes a
 >      path-(i) row naming it in `supersedes` and the user is asked. Approving settles the new
 >      row `ESTABLISHED` and the old one `SUPERSEDED` **in one write**, with no instant at which
