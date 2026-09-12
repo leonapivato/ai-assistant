@@ -1,6 +1,6 @@
 # 250. A turn finds its goal before it plans, focus is the most recently engaged goal, and a material ambiguity the planner reported becomes one durable question bound to that goal
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-12
 - **Partially supersedes** [ADR-0249](0249-the-goal-carries-its-interpretation-the-attempt-carries-the-phase-and-the-planner-returns-its-understanding.md)
   — **two scopes, each narrow. §7's `ProposedUnderstanding` field enumeration, in one
