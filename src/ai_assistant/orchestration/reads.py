@@ -896,31 +896,46 @@ class _AskLedger:
     _admitted: int = 0
 
     def note(
-        self, ask: ReadAsk, *, reached: bool, non_yield: _NonYield | None, certified: bool = True
+        self,
+        ask: ReadAsk,
+        *,
+        reached: bool,
+        non_yield: _NonYield | None,
+        certified: bool = True,
+        returned: int | None = None,
     ) -> None:
         """Record what became of one ask, and advance the mark.
 
         Args:
             ask: The ask the planner emitted, carried unaltered.
             reached: Whether it was put to a source at all (ADR-0226 §3's silently
-                discarded label is the case this is ``False`` for).
+                discarded label and a read the budget left no slot for are the two
+                cases this is ``False`` for).
             non_yield: The source's typed non-yield, or ``None`` where it produced
                 none.
             certified: Whether the source certified completeness on a ground of its
                 own, ANDed here with ADR-0226 §6's budget cut for this kind.
+            returned: How many records the ask returned **before** deduplication, where
+                that is not what the union was offered. ``None`` — every kind but the
+                citation hop — takes the union's own delta. The hop is the exception
+                because ADR-0229 §2 deliberately withholds the *named* records from the
+                union: "a record named by a label is counted in none of the three", so
+                the union sees a hop's evidence alone and a hop that reached a live
+                record carrying no citations would otherwise look like a source that
+                returned nothing.
         """
-        returned, admitted = self.union.returned, len(self.union.admitted)
+        offered, admitted = self.union.returned, len(self.union.admitted)
         self.facts.append(
             AskFacts(
                 ask=ask,
                 reached=reached,
                 non_yield=non_yield,
-                returned=returned - self._returned,
+                returned=offered - self._returned if returned is None else returned,
                 admitted=admitted - self._admitted,
                 certified=certified and ask.kind not in self.truncated,
             )
         )
-        self._returned, self._admitted = returned, admitted
+        self._returned, self._admitted = offered, admitted
 
 
 def classified_reads(facts: Sequence[AskFacts]) -> tuple[ReadAskOutcome, ...]:
@@ -3186,7 +3201,21 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
             # ADR-0226 §3's silent discard, which the audit counts as an unresolved
             # label and which §2 leaves out of the carrier. A hop that resolved one
             # of two labels **did** read, and what it read is what the counts report.
-            ledger.note(hop, reached=reach.unresolved < len(hop.labels), non_yield=None)
+            #
+            # **What it read is the expansion, not the evidence** (ADR-0229 §3). The
+            # union is offered the evidence alone, because ADR-0229 §2 counts a named
+            # record "in none of the three" — so the union's delta answers what this ask
+            # *contributed* and not what the store *returned*, and a hop reaching a live
+            # record that carries no citations returned that record. Classified off the
+            # union it would be `EMPTY`, which ADR-0251 §2 reserves for a source that
+            # returned no record at all; it is a `DUPLICATE`, and §2 says which in terms.
+            # The audit's own counters are untouched by this: they stay the union's.
+            ledger.note(
+                hop,
+                reached=reach.unresolved < len(hop.labels),
+                non_yield=None,
+                returned=len(reach.expansion),
+            )
         if structured is not None and structured.structure is not None:
             # ADR-0240 §5: **fourth**, after the hop and ahead of the query — the
             # position ADR-0226 §6's own rule reaches for a kind with no cap of its
@@ -3217,13 +3246,21 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
             # ADR-0226 §6: **last**, because it is the read that "fills what
             # remains" — the one uncapped kind, and the position ADR-0240 §5 sorts
             # the structured read just above.
-            await _serviced_query(
+            asked = await _serviced_query(
                 store, statement, union=union, reads=reads, capped=capped, truncated=truncated
             )
-            # ADR-0226 §6's cut is the ledger's own test; `capped.seen` is the second
-            # ground (ADR-0128 §2), observed rather than read because this kind is
+            # **`asked` is ADR-0251 §2's precedence case 1 for this kind**, and it is a
+            # fact only the read holds: this kind is serviced **last**, so it is the one
+            # the budget can leave with no slot at all — and a read the budget did not
+            # reach "is not in it" (ADR-0240 §7, restated by §3). It is not derivable
+            # from the truncation list, which records such a read as cut rather than as
+            # unmade (ADR-0226 §6), nor from the counts, which a store that matched
+            # nothing produces identically.
+            #
+            # ADR-0226 §6's cut is then the ledger's own test, and `capped.seen` is the
+            # second ground (ADR-0128 §2), observed rather than read because this kind is
             # several store calls behind one call.
-            ledger.note(query, reached=True, non_yield=None, certified=not capped.seen)
+            ledger.note(query, reached=asked, non_yield=None, certified=not capped.seen)
         completed = ServicedRead(
             kinds=tuple(ask.kind for ask in request.asks),
             records=tuple(union.admitted),
@@ -3719,7 +3756,7 @@ async def _serviced_query(  # noqa: PLR0913 — the store, the query, and one pa
     reads: _Reads,
     capped: _Capped,
     truncated: list[ReadKind],
-) -> None:
+) -> bool:
     """Service one ``SIGHTED_QUERY`` ask into the union (ADR-0226 §2, §6).
 
     ``assemble_by_band`` "with the band precedence, per-band composition and kind
@@ -3747,6 +3784,13 @@ async def _serviced_query(  # noqa: PLR0913 — the store, the query, and one pa
             this ask's completeness cannot be claimed over.
         truncated: The servicing's truncation list, appended to in servicing order.
 
+    Returns:
+        Whether this ask reached the store at all — ``False`` where the kinds before it
+        left no slot, which ADR-0251 §2's precedence case 1 makes a read that earns no
+        outcome rather than an empty one. It is **not** the same fact as the truncation
+        this function also records: ADR-0226 §6 reads a cut as "the budget shortened the
+        ask", and a budget of nothing did not shorten an ask, it prevented one.
+
     Raises:
         MemoryStoreError: Propagated from any band's read, to ADR-0226 §5's one
             degradation site.
@@ -3767,6 +3811,7 @@ async def _serviced_query(  # noqa: PLR0913 — the store, the query, and one pa
     union.admit(found)
     if allowed < READ_BUDGET and len(found) == allowed:
         truncated.append(ReadKind.SIGHTED_QUERY)
+    return allowed > 0
 
 
 def _axes_of(ask: ReadAsk) -> tuple[StructuredAxis, ...]:
