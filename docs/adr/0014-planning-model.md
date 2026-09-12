@@ -1,6 +1,6 @@
 # 14. Planning model: `Goal`, `ActionPlan`, and a separate `ExecutionState`
 
-- Status: Partially superseded by ADR-0041 and ADR-0211 (§6's Planner.plan input roster) and ADR-0228 (§2's parenthetical alone, that a re-planned plan's predecessor "stays referenced by the `ExecutionState` that ran it" — a plan superseded within a turn, before anything is driven, is referenced by no execution, so it carries the id of the plan it replaces on a new `supersedes` field and every plan a turn produced is persisted; §2's `frozen=True` rule, its "Re-planning produces a *new* `ActionPlan` with a new `id`", its capability abstraction, its `JsonValue` reasoning and its deep-freezing of `parameters` all stand, and §§1, 3-7 are untouched) and ADR-0249 (three scopes. §5's `PlanStore` member enumeration and its `save_goal` upsert contract: the roster gains `record_interpretation`, `open_attempt`, `get_attempt`, `attempts_of` and `commit_attempt`, and `save_goal` becomes the opening write alone, refusing a goal whose id the store already holds, because an upsert replacing a whole goal would defeat the append-only interpretation sequence `Goal` now carries. §5's `PlanExport` shape, in `attempts` alone: the document gains that tuple and §5's closure rule extends to `attempt_id` rather than changing. §6's `Planner.plan` input roster and its `-> ActionPlan` return: the first positional becomes a `GoalBrief`, `utterance` and `evidence` join the keywords, and the return becomes a `PlannerOutput`. Those three scopes, and nothing else in this ADR: §5's compare-and-swap discipline, its transitions-not-snapshots rule, its local-residency, export-completeness and deletion obligations, and §6's parameters-not-fetched argument bind entire and are the grounds ADR-0249 reasons from. And §1's `Goal` model declaration: `statement` ceases to be a constructor field and becomes a read-only projection absent from the dump, while `conversation_id`, `interpretation`, `interpretation_elided`, `version` and `last_engaged_at` join the declaration, so a reader holding only §1 writes `Goal(statement=…)` and does not build a conforming `Goal`. §1's prose is fulfilled and superseded in none — its not-an-utterance rule, its `core`-type-not-memory-kind rule, its used-for-retrieval annotation, its outlives-any-one-conversation clause and its `Provenance` sentence each bind entire — and §§2, 3, 4 and 7 are untouched)
+- Status: Partially superseded by ADR-0041 and ADR-0211 (§6's Planner.plan input roster) and ADR-0228 (§2's parenthetical alone, that a re-planned plan's predecessor "stays referenced by the `ExecutionState` that ran it" — a plan superseded within a turn, before anything is driven, is referenced by no execution, so it carries the id of the plan it replaces on a new `supersedes` field and every plan a turn produced is persisted; §2's `frozen=True` rule, its "Re-planning produces a *new* `ActionPlan` with a new `id`", its capability abstraction, its `JsonValue` reasoning and its deep-freezing of `parameters` all stand, and §§1, 3-7 are untouched) and ADR-0249 (three scopes. §5's `PlanStore` member enumeration, its `save_goal` upsert contract and `commit_transition`'s claim conditions: the roster gains `record_interpretation`, `open_attempt`, `get_attempt`, `attempts_of` and `commit_attempt`, `save_goal` becomes the opening write alone, refusing a goal whose id the store already holds, because an upsert replacing a whole goal would defeat the append-only interpretation sequence `Goal` now carries, and `commit_transition` refuses a `→ RUNNING` claim whose plan does not target the goal's current interpretation revision. §5's `PlanExport` shape, in `attempts` alone: the document gains that tuple and §5's closure rule extends to `attempt_id` rather than changing. §6's `Planner.plan` input roster and its `-> ActionPlan` return: the first positional becomes a `GoalBrief`, `utterance` and `evidence` join the keywords, and the return becomes a `PlannerOutput`. Those three scopes, and nothing else in this ADR: §5's compare-and-swap discipline, its transitions-not-snapshots rule, its local-residency, export-completeness and deletion obligations, and §6's parameters-not-fetched argument bind entire and are the grounds ADR-0249 reasons from. And §1's `Goal` model declaration: `statement` ceases to be a constructor field and becomes a read-only projection absent from the dump, while `conversation_id`, `interpretation`, `interpretation_elided`, `version` and `last_engaged_at` join the declaration, so a reader holding only §1 writes `Goal(statement=…)` and does not build a conforming `Goal`. §1's prose is fulfilled and superseded in none — its not-an-utterance rule, its `core`-type-not-memory-kind rule, its used-for-retrieval annotation, its outlives-any-one-conversation clause and its `Provenance` sentence each bind entire — and §§2, 3, 4 and 7 are untouched)
 - Date: 2026-07-19
 - **Partially superseded: 2026-09-12 by ADR-0249 — §5's `PlanStore` member enumeration
   and its `save_goal` upsert contract, §5's `PlanExport` shape in `attempts` alone, and §6's
@@ -9,14 +9,23 @@
   that the user's own words became a value of their own, and ADR-0249 is the decision that
   changes what a goal is.
 
-  **§5's member enumeration and `save_goal`.** §5's code block lists eleven `PlanStore` members.
-  ADR-0249 adds `record_interpretation`, which appends one interpretation revision under
-  compare-and-swap; `open_attempt`, `get_attempt` and `attempts_of`; and `commit_attempt`, the
-  attempt's only mutation route. It also narrows `save_goal` from an upsert to the opening write
-  alone, because an upsert that replaced a whole goal would overwrite an append-only
+  **§5's member enumeration, `save_goal` and `commit_transition`.** §5's code block lists eleven
+  `PlanStore` members, and its compare-and-swap paragraph gates `commit_transition` on
+  `expected_version` alone. ADR-0249 §8 adds one claim condition to that member: a `→ RUNNING`
+  claim is refused where the plan the execution runs does not target the goal's current
+  interpretation revision, read inside the same indivisible step as the claim. The argument is
+  §5's own — *"it belongs to the store because the store is the only place with a total order
+  over writes"* — applied to one more conjunct, and §5's `expected_version` gate, its error
+  class and its retryable-failure reasoning are untouched.
+
+  To the roster ADR-0249 adds `record_interpretation`, which appends one interpretation revision
+  under compare-and-swap; `open_attempt`, `get_attempt` and `attempts_of`; and `commit_attempt`,
+  the attempt's only mutation route. It also narrows `save_goal` from an upsert to the opening
+  write alone, because an upsert that replaced a whole goal would overwrite an append-only
   interpretation chain in one call and defeat the compare-and-swap beside it. A reader holding
-  only this ADR would implement eleven members with an upserting `save_goal` and would not
-  conform, which is ADR-0070 §1's test coming out on the supersession side.
+  only this ADR would implement eleven members, an upserting `save_goal` and a
+  `commit_transition` gated on `expected_version` alone, and would not conform — ADR-0070 §1's
+  test coming out on the supersession side.
 
   **§5's `PlanExport` shape, in `attempts` alone.** The document gains
   `attempts: tuple[GoalAttempt, ...]` and its `schema_version` moves, exactly as ADR-0226 §4
