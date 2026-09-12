@@ -1178,8 +1178,10 @@ its sha, and binds nothing.
 > any of them.** The row's `id`, `goal_id`, `attempt_id`, `basis`, `read_kind`, `source`,
 > `declaration`, `requested`, `supported`, `supported_elided`, `read_at`, `as_of`, `records`,
 > `returned`, `admitted`, `verdict`, `standing`, `inapplicable_at_revision` and `superseded_by`;
-> the refresh set a `record_evidence` carries; the invalidation set a `GoalRevision` carries; and
-> the `E`-label resolution and the `evidence_row_id` it stamps — each is written by the loop from
+> each region's `window`, `participants`, `topics`, `about_person` and `elided`; the refresh set a
+> `record_evidence` carries; the invalidation set a `GoalRevision` carries; and the `E`-label
+> resolution and the `evidence_row_id` or `outcome_evidence_row_id` it stamps — each is written by
+> the loop from
 > the **injected clock**, the **injected id factory**, the **typed outcomes of a servicing** and
 > the **values a store returned**. This is ADR-0249 §6's writer clause and ADR-0250 §16's applied
 > to one more record.
