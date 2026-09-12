@@ -246,8 +246,8 @@ attempt (A2 and A3, by ADR-0249 §5). §19 lists what it declines, each with wha
 >   widen a bound, set `destinations`, set `account`, set `tool` or set `expires_at`**, because
 >   it is the only one on which the user is shown what they are being asked (§11). It **may**
 >   carry `supersedes`, naming **any `ESTABLISHED` row of the same `goal` and the same
->   declaration `id`, live or expired**, which is settled `SUPERSEDED` in the same write as
->   this row's `ESTABLISHED`
+>   declaration `id`, live or expired**. **The proposal retires nothing**: the named row is
+>   settled `SUPERSEDED` in the same write as this row's `ESTABLISHED`
 >   settlement. **That is what renews an authority whose expiry has passed** as well as what
 >   widens a live one: the predecessor is retired and the replacement established in one write,
 >   so the uniqueness rule below is never momentarily false and no authority has to be cleared
@@ -1676,13 +1676,26 @@ all three would be one thing to be wrong about.
 >
 > - `live_for(goal: Identifier, tool_id: VisibleIdentifier) -> Authorization | None`
 > - `resolve(authorization_id: DurableIdentifier) -> Authorization | None`
-> - `record(authorization: Authorization) -> str` — the id it wrote. **Where the row carries
->   `supersedes`, the predecessor is settled `SUPERSEDED` in the same indivisible write** (§1).
+> - `record(authorization: Authorization) -> str` — the id it wrote. **A path-(ii) row — written
+>   `ESTABLISHED` directly — settles the row its `supersedes` names `SUPERSEDED` in the same
+>   indivisible write** (§1). **A path-(i) row is written `PROPOSED` and retires nothing**: its
+>   `supersedes` is a statement about what approving it would replace, and §§1 and 5 put that
+>   retirement in the same write as the `ESTABLISHED` settlement, not in the proposal. A
+>   proposal that retired its predecessor would leave the user with **neither** authority while
+>   the question stood, and would leave them with neither after they declined it — which §5
+>   rules out in terms (*"a refused widening is not a revocation of what the user already
+>   authorised"*) and which §6's bar would then stop refusing, the row it tests having been
+>   retired by a question nobody answered.
 > - `settle(authorization_id: DurableIdentifier, /, *, to: AuthorizationDisposition,
->   settled_at: UtcInstant) -> AuthorizationSettlement` — **the read, the comparison and the
->   write are one indivisible step**, which is `ParkedReadStore.settle`'s own construction and
+>   settled_at: UtcInstant) -> AuthorizationSettlement` — **the read, the comparisons and the
+>   writes are one indivisible step**, which is `ParkedReadStore.settle`'s own construction and
 >   `PlanStore`'s compare-and-swap argument (ADR-0014 §5): no caller reads a row, decides, and
->   writes back.
+>   writes back. **A settlement to `ESTABLISHED` takes §1's uniqueness check and the
+>   supersession inside that same step**: it succeeds only where no other `ESTABLISHED` row of
+>   that goal and declaration id would remain, and where the row carries `supersedes` naming one
+>   such row, that row is settled `SUPERSEDED` in the same write — which is what §5's *"in one
+>   write"* means and why there is never an instant at which two rows of one pair are
+>   established.
 > - `standing(goal: Identifier) -> tuple[Authorization, ...]`
 > - `recent(*, limit: int = DEFAULT_PAGE_SIZE) -> tuple[Authorization, ...]` — newest first, by
 >   `proposed_at` descending with ties broken by `id` ascending, which is
@@ -1693,25 +1706,37 @@ all three would be one thing to be wrong about.
 
 > **Normative — `settle`'s three outcomes, and they are what `AuthorizationSettlement` is.**
 > `core/types.py` gains **`AuthorizationSettlement`**, a `StrEnum` valued by lower-cased member
-> name and **closed at exactly three members**, total over what a compare-and-swap on the
-> `disposition` can answer:
+> name and **closed at exactly four members**, total over what that indivisible step can answer:
 >
-> - **`SETTLED`** — the row stood at that edge's source and now stands at its target.
+> - **`SETTLED`** — the row stood at that edge's source, every check inside the step held, and
+>   it now stands at the edge's target.
 > - **`NOT_AT_SOURCE`** — the store holds the row and it does not stand at the edge's source, so
 >   §1's graph does not admit the move from where it is. **This is one member and not four**,
 >   and it covers a `PROPOSED` row asked for an edge that leaves `ESTABLISHED`, a retired row
 >   asked for anything, a move that is not an edge at all, **and the loser of two racing
->   settlements** — which §1 makes one fact rather than several, because the row's own
+>   settlements of one row** — which §1 makes one fact rather than several, because the row's own
 >   `disposition` is the compare-and-swap's token and "it was not there" is the whole of what
 >   the store can honestly say.
+> - **`WOULD_DUPLICATE`** — the row stands at the edge's source and the move is to
+>   `ESTABLISHED`, but another `ESTABLISHED` row of that goal and declaration id would remain
+>   and this row's `supersedes` does not name it. **This member exists because §1's uniqueness
+>   is a two-row rule and a settlement is where two rows can meet**: two proposals of one pair
+>   may each be recorded — neither write leaves two rows established, so neither is `record`'s
+>   to refuse — and approving both is where the invariant would break. Neither of the members
+>   above is truthful about it: the row exists and is at its source. **A lane that answered
+>   `SETTLED` here has written the state §1 forbids**, and one that raised has made a refusal an
+>   exception.
 > - **`NO_SUCH_AUTHORIZATION`** — the store holds no row with that id.
 >
 > **It is the value `AssistantEngine.revoke_authorization` returns as well** (§11), unmapped and
-> unrenamed: a second three-valued vocabulary for one fact would be the second carrier
-> ADR-0150 is named after, and the surface renders prose from the member rather than the member
-> itself. **A `bool` return was considered and refused** — it cannot tell an unknown id from a
-> row that was not at the source, which §11's revocation surface must tell apart — and so was
-> raising on either, because a refusal that is a **result and never an exception** is
+> unrenamed: a second vocabulary for one fact would be the second carrier ADR-0150 is named
+> after, and the surface renders prose from the member rather than the member itself.
+> **`WOULD_DUPLICATE` is unreachable on that surface** and is not a reason to mint a narrower
+> type: it is reachable only on a settlement **to `ESTABLISHED`**, and a revocation settles to
+> `REVOKED`, so the member is excluded by the edge rather than by the vocabulary. **A `bool`
+> return was considered and refused** — it cannot tell an unknown id from a row that was not at
+> the source, which §11's revocation surface must tell apart — and so was raising on any of
+> them, because a refusal that is a **result and never an exception** is
 > `AssistantEngineContract::test_a_refusal_is_a_result_and_not_an_exception`'s rule.
 
 > **Normative — the two error classes, and a refusal is not a fault.** `core/errors.py` gains
@@ -2213,7 +2238,7 @@ check are each consumed as written, and §13 and §14 state where.
 >     `confirmation` or `supersedes`, a `BoundAccount`, a subject digest, a connection
 >     reference, a `SecretName` or a transport endpoint — and that `AuthorizationView` carries
 >     the row's `id`, no `destinations`, and `AuthorizationSettlement` nothing at all beyond
->     its three members.
+>     its four members.
 > 36. **The store refuses a second `ESTABLISHED` row for one goal and declaration `id`** — a
 >     second row about the *same* declaration and a second about an **edited** declaration of
 >     that id, one test each; a superseding write for the same pair is accepted and settles the
@@ -2351,15 +2376,35 @@ check are each consumed as written, and §13 and §14 state where.
 >     recipient grant covering the same declaration, account and destinations in the store and
 >     `RecipientGrants.covering` called zero times.** An empty `coverage` is an authority over
 >     an argument-free call and is a wildcard over nothing.
-> 55. **`settle`'s three outcomes, over every move §1's graph admits and refuses.** Each of the
+> 55. **`settle`'s four outcomes, over every move §1's graph admits and refuses.** Each of the
 >     five edges from its own source → `SETTLED`; the same call repeated → `NOT_AT_SOURCE`; a
 >     move asked of a row standing anywhere but that edge's source, one test per retired
 >     disposition and one for a `PROPOSED` row asked for `REVOKED` → `NOT_AT_SOURCE`; two
 >     settlements raced on one row → one `SETTLED` and one `NOT_AT_SOURCE`, never two winners;
 >     an id the store does not hold → `NO_SUCH_AUTHORIZATION`. **No call raises and none returns
->     a `bool`**, and the same three values reach the surface through
->     `revoke_authorization` unmapped.
-> 56. **`record` refuses with `InvalidAuthorizationError` and a fault raises
+>     a `bool`**, and the same values reach the surface through `revoke_authorization` unmapped
+>     — with **`WOULD_DUPLICATE` never among them**, asserted over a revocation of a row of a
+>     pair another row is established for.
+> 56. **Two proposals of one goal and declaration id, which is where uniqueness can break.**
+>     Record two `PROPOSED` rows of that pair from two different `CONFIRM`s, neither carrying
+>     `supersedes` → **both writes succeed**, because neither leaves two rows `ESTABLISHED` and
+>     neither is `record`'s to refuse. Establish the first → `SETTLED`. Establish the second →
+>     **`WOULD_DUPLICATE`**, nothing is written, and `standing(goal)` still returns exactly the
+>     first. **Run the two settlements concurrently** → exactly one `SETTLED` and one
+>     `WOULD_DUPLICATE`, never two winners and never an interleaving that leaves two rows
+>     `ESTABLISHED`. And where the second **does** carry `supersedes` naming the first →
+>     `SETTLED`, the first settles `SUPERSEDED` **in that same write**, and at no instant are
+>     both established.
+> 57. **A path-(i) proposal retires nothing until it is answered.** A live row bounding GBP 60;
+>     a path-(i) proposal for GBP 80 naming it in `supersedes`; a recipient grant covering the
+>     same declaration, account and destinations. **While the question stands**: the GBP 60 row
+>     is still `ESTABLISHED` and still live, `standing(goal)` returns it, a GBP 60 request is
+>     covered, and a GBP 80 request draws **`CONFIRM`** on §6's bar with
+>     `RecipientGrants.covering` called **zero** times. **Declining** settles the proposal
+>     `DECLINED` and leaves the GBP 60 row exactly as it was, with the same three results.
+>     **A lane whose `record` settled the predecessor at the proposal fails this arm** — the
+>     bar would have had no row to test and the declined widening would have dispatched.
+> 58. **`record` refuses with `InvalidAuthorizationError` and a fault raises
 >     `AuthorizationError`.** A second `ESTABLISHED` row of one goal and declaration id; a
 >     path-(ii) row failing the transcription check; one failing the non-widening check; a row
 >     carrying `confirmation` written in any disposition but `PROPOSED`; a `supersedes`
@@ -2368,17 +2413,17 @@ check are each consumed as written, and §13 and §14 state where.
 >     store raises `AuthorizationError`, which the subclass relation means a caller catching the
 >     base class still catches. **`recent` refuses a `limit` that is not a strictly positive
 >     `int` locally and before any I/O.**
-> 57. **Which `CONFIRM` proposes a row** (§1). A `CONFIRM` on a request carrying `goal` unset; a
+> 59. **Which `CONFIRM` proposes a row** (§1). A `CONFIRM` on a request carrying `goal` unset; a
 >     `CONFIRM` on a request carrying no `egress_binding`; and a `CONFIRM` on an egress request
 >     one of whose arguments no resolution minted a member for → **no row is written** in each,
 >     `Confirmation.authorization` is **absent**, and answering resolves the `CONFIRM` and
 >     authorises the one call by route (a) and establishes nothing. A `CONFIRM` meeting all
 >     three conditions → a row is written `PROPOSED` and the projection is present.
-> 58. **The proposal reads no floor of §6's.** A `CONFIRM` on an egress request whose binding
+> 60. **The proposal reads no floor of §6's.** A `CONFIRM` on an egress request whose binding
 >     carries `planned_with_external_content`, meeting §1's three conditions → a row **is**
 >     proposed and answering establishes it; a later request of that goal carrying the taint
 >     draws `CONFIRM` on §6's condition 3 all the same, and one carrying none is covered.
-> 59. **The listing and the revocation.** `standing_authorizations(goal_id)` returns one
+> 61. **The listing and the revocation.** `standing_authorizations(goal_id)` returns one
 >     `AuthorizationView` per `ESTABLISHED` row of that goal, live and lapsed, never a
 >     `PROPOSED`, a `DECLINED`, an `EXPIRED`, a `REVOKED` or a `SUPERSEDED` one and never
 >     another goal's; `live` is set from **one** clock reading for the whole listing; the goal's
@@ -2389,7 +2434,7 @@ check are each consumed as written, and §13 and §14 state where.
 >     `NOT_AT_SOURCE`, one test each; on an id the store does not hold →
 >     `NO_SUCH_AUTHORIZATION`. **No call raises**, and a revoked row is absent from the next
 >     listing.
-> 60. **The rendering bar, at the listing.** The view carries the row's `id` and the surface
+> 62. **The rendering bar, at the listing.** The view carries the row's `id` and the surface
 >     renders it; **no** subject digest, `BoundAccount`, account reference, connection
 >     reference, `confirmation`, `supersedes`, resolution **or `destinations`** reaches it, one
 >     assertion each, and the goal is rendered by statement and never by id. **The
