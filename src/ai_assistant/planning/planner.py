@@ -76,6 +76,47 @@ rationale is the whole of the plan's content (ADR-0176 §3) and it is what the
 composing stage renders (#1355). It is an acknowledgement and not a receipt: this
 stage runs before the exchange is recorded, and that write can fail (ADR-0074 §3),
 so the rationale claims nothing about retention in either direction.
+
+**Since ADR-0249 the call is given a brief and may answer with an understanding,
+and that is what this module is now told and asked.** What comes in is a
+:class:`~ai_assistant.core.types.GoalBrief` — the accumulated objective with each
+value's ground **kind** and never a reference (§9) — the turn's own ``utterance``
+(ADR-0248 §1), and a digest of what has already been read for this goal (§10).
+:func:`_render_request` prints all three: the request under a heading of its own,
+because the goal statement no longer carries it; the constraints, the success
+criteria and the conditions under headings of their own, each labelled ``C``\ *n*,
+``S``\ *n*, ``D``\ *n* (:func:`_brief_label`) and carrying its ground kind; the
+digest under its own. **It prints no identifier of any kind** — not ``goal_id``,
+not an evidence id, not a ground reference — which §9 makes a property of the
+projections rather than a rule this renderer is trusted to keep, and which this
+module then holds anyway because it is the renderer §9 names.
+
+What may come back is an ``understanding``: a whole proposed statement of what the
+goal now is, asked for in :data:`_UNDERSTANDING_GUIDANCE` and read back by
+:func:`_optional_understanding`. Three properties of that read carry the decision.
+
+- **Omission is removal** (§7), so a revision states the elements in full and an
+  element kept unchanged is named by its brief label rather than restated — which
+  is ADR-0226 §3's namer rule reused, not a new mechanism.
+- **The read is strict, where :func:`_optional_read_request`'s is not**, and the
+  asymmetry is the consequence and not a difference of taste. A dropped request
+  costs one further read; a *partially* adopted understanding would silently
+  remove every element it could not read, and a wholly dropped one would lose the
+  constraint the user just stated while the plan that embodies it still drove. So
+  a malformed ``understanding`` is refused as an :class:`_ExtractionError` and
+  goes to ADR-0047 §6's bounded repair, and no half of one is ever adopted.
+- **Provenance is not the model's** (§6, §8). The envelope is read key by key into
+  an explicit payload, so a phase, a revision number, a ``raised_by``, a
+  ``recorded_at``, a ``targets_revision``, a ``supersedes`` or a ground *reference*
+  a model wrote is discarded structurally rather than by a rule someone remembered
+  — the same construction that keeps ``no_capability_needed`` out of ``ActionPlan``.
+
+**This module proposes and resolves nothing.** A ``retains`` label, an
+``evidence_label`` and a ``span`` cross the seam as the model wrote them;
+``orchestration`` resolves each against the brief and the supply *it* holds, drops
+what does not resolve, and stamps the revision (§7). Nothing here filters a label
+against the brief, for the reason :func:`_optional_read_request` states for the
+``M`` labels it also leaves alone.
 """
 
 from __future__ import annotations
@@ -100,6 +141,7 @@ from ai_assistant.core.types import (
     Message,
     PlannerOutput,
     PlanStep,
+    ProposedUnderstanding,
     ReadAsk,
     ReadKind,
     ReadRequest,
@@ -152,6 +194,48 @@ _MAX_EXTRACTION_MISSES = 256
 #: Named rather than inlined so the test asserts the obligation rather than a
 #: string spelled twice.
 _READ_REQUEST_DROPPED: Final = "planner_read_request_dropped"
+
+#: The heading this turn's own request is printed under (ADR-0248 §1, ADR-0249 §11).
+#:
+#: **A heading of its own, because the goal statement no longer carries it** (§11).
+#: Before ADR-0249 the ``Goal:`` block's ``statement`` *was* the request on a
+#: conversation's first turn and an accumulation of it afterwards; the two are now
+#: separate values and the prompt says which is which. It is printed **first**, so
+#: the block that used to open this message still does: what the user just said
+#: comes before the system's accumulated reading of it, rather than after.
+#:
+#: **It says whose words they are**, which is ADR-0098 §2's requirement over the one
+#: input of this seam that is the user's own text — and it is what a ``USER_STATED``
+#: ground's ``span`` is checked against by the loop (ADR-0249 §7), so the planner
+#: must be able to see which characters it may copy.
+_REQUEST_HEADING: Final = "This turn's request, in the user's own words:"
+
+#: The headings ADR-0249 §11 gives the brief's three element tuples.
+#:
+#: **One heading each, and never a single "the goal's elements" block.** The three
+#: are different things — what must hold, what would show the goal met, what it
+#: depends on (ADR-0014 §1) — and they are also **three label spaces**: ADR-0249 §9
+#: fixes ``C``\ *n* over ``constraints``, ``S``\ *n* over ``criteria`` and ``D``\ *n*
+#: over ``conditions``, and rules that "a label naming an element of a tuple other
+#: than the one the retaining element sits in likewise resolves to nothing". A
+#: planner that cannot see which tuple it is reading cannot keep that straight, so
+#: the heading is what makes the label space legible rather than a convention.
+#:
+#: Each heading names the letter its bullets carry, for the reason ADR-0226 §3 gives
+#: the ``M`` labels: the label a model names must be the first token it read.
+_CONSTRAINTS_HEADING: Final = "What must hold for this goal, labelled C1, C2, …:"
+_CRITERIA_HEADING: Final = "What would establish this goal is met, labelled S1, S2, …:"
+_CONDITIONS_HEADING: Final = "What this goal depends on, labelled D1, D2, …:"
+
+#: The heading ADR-0249 §10's evidence digest is printed under.
+#:
+#: **The bullets carry no label**, and that absence is deliberate rather than an
+#: omission. A ``FROM_EVIDENCE`` ground names a record of *this call's* ``memories``
+#: by its ``M`` label (§7), and nothing else; giving the digest a label space of its
+#: own would invite a planner to ground an element on a digest, which resolves to
+#: nothing at the loop and would fill ADR-0226 §9's dropped-label population with
+#: emissions this prompt asked for.
+_EVIDENCE_HEADING: Final = "What has already been read for this goal:"
 
 #: The heading the chronological conversation tail is printed under (ADR-0074 §5).
 _TAIL_HEADING: Final = "Recent conversation turns, in order:"
@@ -855,6 +939,102 @@ against what was recorded rather than against the subject you have in mind.""",
 _STRUCTURED_AXES: Final[tuple[str, ...]] = ("participants", "topics", "about_person")
 
 
+#: ADR-0249 §7's ``understanding``, asked for in the prompt.
+#:
+#: **What it asks for is a judgement, and the ordinary answer is nothing.** §7 makes
+#: ``None`` "the semantically correct answer for a planner that knows nothing of this
+#: envelope", and ADR-0249 §16 item 1 fixes that *"what is two plus two"* still costs
+#: **one** planner call. So the block opens by saying most turns need none, for the
+#: reason :data:`_READ_REQUEST_GUIDANCE` opens the same way: a prompt that talked the
+#: model into revising would put a revision on every turn, and a goal whose
+#: interpretation chain grows on turns that understood nothing new is a chain that
+#: says nothing.
+#:
+#: **Omission is removal, and it is stated in those words** (§7). A revision is a
+#: complete statement of an understanding: an element the reply neither keeps nor
+#: replaces is not in the new revision. That is the whole of the removal mechanism —
+#: there is no delete member — and a model that did not know it would silently drop
+#: the user's earlier constraint every time it added one.
+#:
+#: **Keeping is not restating, and the block says what restating costs.** §7's own
+#: case: after *"Book a campsite, under $100"* and then *"Actually, make it Sunday"*,
+#: the budget's span is in the **first** turn's request, so a planner restating it can
+#: only re-emit it as ``USER_STATED`` — which the loop then drops, the span not being
+#: of this turn — or as ``INFERRED``, quietly downgrading an explicit instruction.
+#: Naming the label is the only way to keep what was recorded, so the block gives the
+#: reason rather than only the rule.
+#:
+#: **The three grounds are stated as what the planner can show for the value**, not as
+#: a taxonomy: the user's own words (and which characters they are), a memory of the
+#: block below (and which label it is), or the planner's own judgement with nothing to
+#: show. ADR-0014 §1 requires that a stated value never be indistinguishable from an
+#: inferred one, and this is the only place in the system where that distinction is
+#: originated rather than copied.
+#:
+#: **An element-free goal is ordinary** (§9, ADR-0249 §16 item 13): "no implementation
+#: treats an element-free brief as an error, a failure to understand, or a reason to
+#: ask a question", so the block says so where a model meeting three empty headings
+#: would otherwise read them as something missing.
+#:
+#: **What it does not say is as fixed as what it does.** It names no revision number,
+#: no phase, no ``raised_by``, no ``recorded_at`` and no ``targets_revision`` — every
+#: one of those is ``orchestration``'s under §6's writer clause, and a prompt that
+#: named them even to forbid them would invite the emission it forbids. They are
+#: discarded structurally by :func:`_optional_understanding` instead.
+#:
+#: A separate constant for the reason :data:`_STATED_FACT_GUIDANCE` is one: the prompt
+#: test can assert it **reaches the model** without string-matching its wording.
+_UNDERSTANDING_GUIDANCE = """\
+Beside either reply you may also say what you now understand this goal to be. \
+Most turns need nothing: where this turn's request adds nothing to the goal set \
+out in the next message, leave `understanding` out altogether.
+
+Where it does add something — the user has stated a constraint, said what would \
+count as done, named something the goal depends on, or corrected what the goal is \
+for — add an `understanding` to whichever object you are sending:
+
+ "understanding": {
+   "retains_outcome": true,
+   "constraints": [{"retains": "C1"},
+                   {"text": "<what must hold>",
+                    "ground": "user_stated",
+                    "span": "<the words of the request that say so>"}],
+   "criteria": [],
+   "conditions": [],
+   "questions": ["<something you would need to ask the user>"]
+ }
+
+State the understanding IN FULL. An element printed under those three headings \
+that your `constraints`, `criteria` or `conditions` neither keeps nor replaces is \
+**removed** from the goal — that is how something the user has dropped goes away, \
+and it is also how something they still want disappears if you forget it.
+
+To keep an element exactly as it stands, name its printed label — `C1`, `S2`, `D1` \
+— as `retains`, and write nothing beside it. Keeping is not restating: an element \
+you retype loses the grounds it was recorded with, because the words that \
+established it were said on an earlier turn and are not in this one. Name a label \
+from the same heading you found it under.
+
+Every NEW element carries `text` and a `ground`, which is exactly one of:
+- `user_stated` — the user said it on THIS turn. Put the stretch of their request \
+that says so in `span`, copied character for character out of the text above.
+- `from_evidence` — one of the memories in the next message establishes it. Put \
+that memory's label, `M1`, `M2`, …, in `evidence_label`.
+- `inferred` — neither: you judged it yourself, and there is nothing to point at. \
+Send no `span` and no `evidence_label` with it.
+
+The objective itself is either kept or restated, and one of the two is always \
+required. Where this turn does not change what the goal is for, send \
+`"retains_outcome": true` and nothing else about it. Where it does, leave \
+`retains_outcome` out and send `"outcome"` with an `"outcome_ground"` — plus \
+`"outcome_span"` or `"outcome_evidence_label"` under the same rules as above.
+
+`questions` is for something you genuinely cannot proceed without asking. A goal \
+printed with no constraints, no criteria and no conditions is an ordinary, \
+complete goal — usually a plain request — and is never on its own a reason to ask \
+anything."""
+
+
 def _system_prompt(
     capabilities: Sequence[str], *, files_shown: bool, label_axes: Sequence[str] = ()
 ) -> str:
@@ -875,6 +1055,15 @@ def _system_prompt(
     like. :data:`_READ_REQUEST_GUIDANCE` sits last for the same reason carried one
     step further: it adds an optional key to *both* shapes and to the choice
     between them it adds nothing, so it is read after the choice has been made.
+
+    :data:`_UNDERSTANDING_GUIDANCE` sits **between** those two — below the shapes and
+    their directions, above the read-request family — and the position is load-bearing
+    twice over (ADR-0249 §7). It adds an optional key to both shapes, so like the
+    request it is read after the choice; but the blocks below it are one connected
+    description of **one** member, each ordered against the block that introduces it,
+    and nothing may be inserted into that run without making those reasons false. It
+    is also about the goal itself rather than about this turn's supply, which is what
+    the shapes were just chosen by, so it is the nearer of the two additions.
     :data:`_ACT_RECORD_GUIDANCE` sits below that block again, because it is a
     condition on the read the block has just described and says nothing a reader
     who has not met `labels` yet could use (#1929).
@@ -946,6 +1135,8 @@ def _system_prompt(
         "",
         _PROMPT_CLOSING,
         "",
+        _UNDERSTANDING_GUIDANCE,
+        "",
         _READ_REQUEST_GUIDANCE,
         "",
         _ACT_RECORD_GUIDANCE,
@@ -991,18 +1182,32 @@ class _ExtractionError(Exception):
     repair ask the model to complete the decline. Every other malformed reply —
     a bare empty ``steps`` list included — is unclassified, and its repair presents
     both shapes without naming either as the correction.
+
+    ``understanding`` says the same thing about ADR-0249 §7's member, and it is a
+    **third** case rather than a second unclassified one for §5's own reason. A reply
+    whose ``understanding`` could not be read has said what shape it meant and has got
+    that shape right; what it got wrong is one optional member beside it. Presenting
+    both shapes there would ask a model to re-decide a judgement that was never in
+    question, which is the defect #1315 records in its other direction. The two flags
+    are mutually exclusive by construction: only :func:`_optional_understanding` and
+    :func:`_proposed_elements` raise with this one, and neither reads the marker.
     """
 
-    def __init__(self, message: str, *, declined: bool = False) -> None:
-        """Record the reason and whether the reply asserted a decline.
+    def __init__(
+        self, message: str, *, declined: bool = False, understanding: bool = False
+    ) -> None:
+        """Record the reason and which repair the reply has earned.
 
         Args:
             message: What was wrong with the reply, echoed into the repair turn.
             declined: Whether the reply carried the ``no_capability_needed``
                 marker and failed only the rationale condition (ADR-0176 §5).
+            understanding: Whether the reply's shape was sound and only ADR-0249
+                §7's ``understanding`` beside it could not be read.
         """
         super().__init__(message)
         self.declined = declined
+        self.understanding = understanding
 
 
 class ModelBackedPlanner:
@@ -1070,22 +1275,32 @@ class ModelBackedPlanner:
         self,
         goal: GoalBrief,
         *,
-        utterance: str,  # noqa: ARG002 — carried by the ADR-0249 §7 contract; rendering it under its own heading is L2's (§15)
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-        evidence: Sequence[EvidenceDigest] = (),  # noqa: ARG002 — carried by the ADR-0249 §10 contract; rendering the digest is L2's (§15)
+        evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
-        """Produce a frozen plan for ``goal`` (ADR-0047).
+        """Produce a frozen plan for ``goal``, and what it understands (ADR-0047).
 
-        **This planner proposes no understanding** (ADR-0249 §15): it returns
-        ``PlannerOutput(plan=…, understanding=None)``, which is the semantically
-        correct answer for a planner that knows nothing of that envelope — "no
-        implementation reads ``None`` as an error, a degradation, or an instruction
-        to re-plan" (§7). Proposing one is L2's, together with rendering the brief's
-        elements, the request and the evidence digest into the prompt.
+        **The plan and the understanding are decided in one pass** (ADR-0249 §7, §8).
+        One model call returns both halves of the envelope, so "the plan embodies the
+        understanding rather than predating it", and the ordinary turn still costs
+        exactly one call: an ``understanding`` is **optional**, ``None`` means the
+        planner proposed no change, and "no implementation reads ``None`` as an error,
+        a degradation, or an instruction to re-plan" (§7). Nothing here re-plans,
+        re-prompts or spends a second call because an understanding was or was not
+        returned.
+
+        **What it proposes is content; what records it is not its** (§6, §8). It
+        writes no revision number, no phase, no ``raised_by``, no ``recorded_at``, no
+        ``targets_revision`` and no ``supersedes``; it names a ground by **label or
+        span** and never by a record identifier; and it resolves nothing — a
+        ``retains`` label, an ``M`` label and a span cross the seam as the model wrote
+        them, and ``orchestration`` resolves each against its own copy of what this
+        call was handed, dropping what does not resolve.
 
         Prompts the model for a JSON envelope, extracts and validates it into a
         plan, and retries once on malformed output before giving up. ``context``,
@@ -1154,8 +1369,12 @@ class ModelBackedPlanner:
 
         Args:
             goal: The brief of the objective to plan for (ADR-0249 §9).
-            utterance: This turn's own request (ADR-0248 §1, ADR-0249 §7). Carried
-                and not yet rendered: the request's own heading is L2's.
+            utterance: This turn's own request, in the user's own words (ADR-0248
+                §1, ADR-0249 §7), rendered **first** and under a heading of its own
+                because the goal's statement no longer carries it. It is also what a
+                ``USER_STATED`` ground is checked against, at the loop and never
+                here: nothing in this module tests a span, and a blank request is
+                ADR-0248 §1's refusal rather than this seam's (§7).
             context: The situational context assembled for this request.
             memories: The records the pipeline assembled for this turn — the
                 conversation's recent turns in order, then records retrieved as
@@ -1177,14 +1396,15 @@ class ModelBackedPlanner:
                 empty (ADR-0240 §7), rendered into the user turn under a heading of
                 their own and read once, before the first ``await``. Empty is legal and
                 is the ordinary case — every first call — and renders nothing.
-
             evidence: What this call may act on about the reads already taken
-                (ADR-0249 §10). Carried and not yet rendered: the digest's own
-                heading is L2's.
+                (ADR-0249 §10), rendered under a heading of its own and carrying no
+                label, no identifier and no address. Empty is legal and is the
+                ordinary case, and renders nothing.
 
         Returns:
             A frozen :class:`~ai_assistant.core.types.PlannerOutput` carrying the
-            plan for ``goal`` and no proposed understanding.
+            plan for ``goal`` and, where this call proposed one, the understanding
+            it was planned against.
 
         Raises:
             PlanningError: If no valid plan could be extracted within
@@ -1213,7 +1433,15 @@ class ModelBackedPlanner:
             ),
             Message(
                 role=Role.USER,
-                content=_render_request(snapshot, context, memories, shown, asked),
+                content=_render_request(
+                    snapshot,
+                    context,
+                    memories,
+                    shown,
+                    asked,
+                    utterance=utterance,
+                    evidence=tuple(evidence),
+                ),
             ),
         ]
 
@@ -1221,22 +1449,26 @@ class ModelBackedPlanner:
         for _ in range(self._max_attempts):
             reply = await self._model.complete(conversation)
             try:
-                return PlannerOutput(plan=self._build_plan(reply.content, snapshot))
+                return self._build_output(reply.content, snapshot)
             except _ExtractionError as exc:
                 last_error = exc
                 conversation.append(reply)
                 conversation.append(
                     Message(
                         role=Role.USER,
-                        content=_repair_prompt(str(exc), declined=exc.declined),
+                        content=_repair_prompt(
+                            str(exc),
+                            declined=exc.declined,
+                            understanding=exc.understanding,
+                        ),
                     ),
                 )
 
         msg = f"the model did not return a usable plan for goal {snapshot.goal_id}: {last_error}"
         raise PlanningError(msg)
 
-    def _build_plan(self, content: str, goal: GoalBrief) -> ActionPlan:
-        """Extract and validate one model reply into a frozen ``ActionPlan``.
+    def _build_output(self, content: str, goal: GoalBrief) -> PlannerOutput:
+        """Extract one model reply into a frozen plan and what it understood.
 
         A **decline** — an empty ``steps`` list carrying the ``no_capability_needed``
         marker — is constructed by this same path with ``steps=()``, which is why
@@ -1250,15 +1482,31 @@ class ModelBackedPlanner:
         durable ``ActionPlan`` (ADR-0176 §8). That is structural, not asserted, and
         it is why ADR-0226 §4's ``read_request`` is read by
         :func:`_optional_read_request` into a validated model rather than passed
-        through as whatever the model wrote.
+        through as whatever the model wrote. **ADR-0249 §7's ``understanding`` is
+        read the same way and for one more reason** (§6, §8): a key the model wrote
+        that this module does not read cannot reach anything, so a ``phase``, a
+        revision number, a ``raised_by``, a ``recorded_at``, a ``targets_revision``
+        or a ``supersedes`` is discarded because there is nowhere for it to go.
+        ``ActionPlan.targets_revision`` is left where ``model_validate`` leaves an
+        unsupplied field — absent, which §8 makes "the only value a planner can
+        return" — and the loop stamps it.
 
         **A malformed request never costs the plan** (:func:`_optional_read_request`
         holds the argument): it is dropped, the plan is built without one, and no
-        repair round is spent on it.
+        repair round is spent on it. **A malformed understanding does cost one**
+        (:func:`_optional_understanding` holds that argument), and the two are not in
+        tension: a dropped read costs one further read, while a dropped or
+        half-adopted understanding silently removes elements of a durable record the
+        user is still relying on (§7).
+
+        **The plan is built first**, so an envelope that is not a plan at all reports
+        ADR-0047 §4's own specific verdict — no ``steps`` list, an empty plan — rather
+        than a complaint about a member of a shape it never sent.
 
         Raises:
-            _ExtractionError: If the text is not one of the two legal envelopes or
-                the constructed plan fails a ``core`` invariant.
+            _ExtractionError: If the text is not one of the two legal envelopes, the
+                constructed plan fails a ``core`` invariant, or the ``understanding``
+                beside it cannot be read.
         """
         envelope = _extract_object(content)
         raw_steps = _require_steps(envelope)
@@ -1266,7 +1514,7 @@ class ModelBackedPlanner:
 
         step_payloads = [self._step_payload(raw, index) for index, raw in enumerate(raw_steps)]
         try:
-            return ActionPlan.model_validate(
+            plan = ActionPlan.model_validate(
                 {
                     "id": self._id_factory(),
                     "goal_id": goal.goal_id,
@@ -1279,6 +1527,7 @@ class ModelBackedPlanner:
         except ValidationError as exc:
             msg = f"the drafted plan is not a valid ActionPlan: {exc}"
             raise _ExtractionError(msg) from exc
+        return PlannerOutput(plan=plan, understanding=_optional_understanding(envelope))
 
     def _step_payload(self, raw: object, index: int) -> PlanStep:
         """Validate one raw step object into a ``PlanStep`` with a minted id.
@@ -1318,6 +1567,127 @@ class ModelBackedPlanner:
         except ValidationError as exc:
             msg = f"step {index} is not a valid PlanStep: {exc}"
             raise _ExtractionError(msg) from exc
+
+
+def _optional_understanding(envelope: dict[str, object]) -> ProposedUnderstanding | None:
+    """Read ADR-0249 §7's ``understanding`` out of one envelope, or return ``None``.
+
+    An envelope carrying no ``understanding`` yields ``None``, which §7 fixes as "the
+    planner proposed no change to the understanding" and which is the ordinary answer:
+    a turn that adds nothing to the goal proposes nothing, and §16 item 1 requires
+    that *"what is two plus two"* still cost one planner call.
+
+    **Read key by key into an explicit payload, never handed the model's object**
+    (§6, §8). Nine members of the understanding and five of each element are read and
+    everything else is stepped over, so a ``phase``, a revision number, a
+    ``raised_by``, a ``recorded_at``, a ``targets_revision``, a ``supersedes`` or an
+    ``evidence_id`` the model wrote is discarded **structurally** — there is nowhere
+    for it to go — rather than by a rule someone remembered to write. That is
+    ``_build_output``'s own construction for ``no_capability_needed`` (ADR-0176 §8)
+    applied to the writer clause, and it is the same posture ADR-0226 §3 takes for a
+    label a model invents: not an error, not a park, not a degradation of the turn.
+
+    **:class:`~ai_assistant.core.types.ProposedUnderstanding` and
+    :class:`~ai_assistant.core.types.ProposedElement` are the authority on every
+    condition §7 states** — the four element shapes, the two outcome shapes, and which
+    argument each ground admits. Nothing is re-checked here, so the two cannot drift.
+
+    **This read is strict, where :func:`_optional_read_request`'s is not**, and that is
+    a consequence rather than a difference of taste. A dropped read request costs the
+    turn one further read and the system as it stands is exactly that. A *half*-read
+    understanding is not that shape at all: §7 makes omission removal, so an element
+    this function could not read and quietly left out would be an element **deleted**
+    from the goal's durable interpretation — and a wholly dropped one would lose the
+    constraint the user just stated while the plan that embodies it still drove
+    (§8 stamps the revision this call produced). So a malformed ``understanding`` is
+    refused and goes to ADR-0047 §6's bounded repair, where the model is asked for the
+    member again rather than for a different shape.
+
+    **Nothing here resolves a label or a span** (§7). A ``retains``, an
+    ``evidence_label`` and a ``span`` cross as the model wrote them; ``orchestration``
+    resolves each against its own copy of the brief and the supply and drops what does
+    not resolve, and a planner that filtered its own out-of-range labels would empty
+    ADR-0226 §9's audit of the population it exists to count.
+
+    Args:
+        envelope: The decoded model envelope, plan-shaped or decline-shaped.
+
+    Returns:
+        The understanding the planner proposed, or ``None`` where it proposed none.
+
+    Raises:
+        _ExtractionError: If an ``understanding`` is present and cannot be read.
+    """
+    raw = envelope.get("understanding")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        msg = "'understanding' is present but is not a JSON object"
+        raise _ExtractionError(msg, understanding=True)
+
+    payload = {
+        "outcome": raw.get("outcome"),
+        "outcome_ground": raw.get("outcome_ground"),
+        "outcome_evidence_label": raw.get("outcome_evidence_label"),
+        "outcome_span": raw.get("outcome_span"),
+        "retains_outcome": raw.get("retains_outcome", False),
+        "questions": raw.get("questions", ()),
+    } | {
+        member: _proposed_elements(raw.get(member), member)
+        for member in ("constraints", "criteria", "conditions")
+    }
+    try:
+        return ProposedUnderstanding.model_validate(payload)
+    except ValidationError as exc:
+        msg = f"the proposed understanding is not usable: {exc}"
+        raise _ExtractionError(msg, understanding=True) from exc
+
+
+def _proposed_elements(raw: object, member: str) -> list[dict[str, object]]:
+    """One of ADR-0249 §7's three element tuples, read into validatable payloads.
+
+    Each entry becomes an explicit **five**-key mapping — ``text``, ``ground``,
+    ``evidence_label``, ``span``, ``retains`` — for :func:`_optional_understanding`'s
+    reason: a key this function does not read reaches nothing, so a ground
+    *reference* a model wrote beside its label is discarded structurally. Which of
+    §7's four shapes the five keys make is
+    :class:`~ai_assistant.core.types.ProposedElement`'s to decide and is not
+    anticipated here.
+
+    An absent member is an empty tuple — §7's "a revision states its elements in full,
+    and omission is removal" means a reply naming no constraints proposes none, which
+    is a statement rather than a gap.
+
+    Args:
+        raw: The envelope member's value, or ``None`` where it carried none.
+        member: Which member this is, for the refusal message.
+
+    Returns:
+        One payload mapping per entry, in the order the model wrote them.
+
+    Raises:
+        _ExtractionError: If the member is not a list of JSON objects.
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        msg = f"'understanding.{member}' is not a list"
+        raise _ExtractionError(msg, understanding=True)
+    payloads: list[dict[str, object]] = []
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            msg = f"'understanding.{member}[{index}]' is not a JSON object"
+            raise _ExtractionError(msg, understanding=True)
+        payloads.append(
+            {
+                "text": entry.get("text"),
+                "ground": entry.get("ground"),
+                "evidence_label": entry.get("evidence_label"),
+                "span": entry.get("span"),
+                "retains": entry.get("retains"),
+            }
+        )
+    return payloads
 
 
 def _optional_read_request(envelope: dict[str, object]) -> ReadRequest | None:
@@ -1782,14 +2152,17 @@ def _structured_axis(structured: Mapping[str, object], axis: str) -> tuple[str, 
     return tuple(value)
 
 
-def _render_request(
+def _render_request(  # noqa: PLR0913 — one parameter per block this message is assembled from, as ADR-0230 §3, ADR-0240 §7 and ADR-0249 §11 each added one
     goal: GoalBrief,
     context: CurrentContext,
     memories: Sequence[MemoryRecord],
     files: Sequence[ShownFile] = (),
     empty_reads: Sequence[ReadAsk] = (),
+    *,
+    utterance: str = "",
+    evidence: Sequence[EvidenceDigest] = (),
 ) -> str:
-    """Render the goal, context, memories and file listing into the user-turn prompt.
+    """Render the request, the brief, the context, the memories and the reads.
 
     The memories are rendered by :func:`_render_record`, each tagged with its kind,
     its provenance source, its band and its confidence, because passing the
@@ -1852,6 +2225,52 @@ def _render_request(
     heading, no line, no mention of a root — which is §3's ruling that a deployment
     with no fetcher and a root that held nothing are one case for the turn.
 
+    **``utterance`` is printed first, under a heading of its own** (ADR-0248 §1,
+    ADR-0249 §11), because the goal statement no longer carries it: before ADR-0249
+    the ``Goal:`` block's statement *was* the request on a first turn, and it is now
+    an accumulated understanding that a later turn's words revise. It is printed
+    through :func:`_quoted_span`, which is what ``orchestration``'s own composing
+    prompt does with the same value under the same kind of heading: the request is
+    the one input of this seam this system did not author, and ADR-0098 §2 refuses an
+    assembler that embeds a span in a syntax the span can itself produce — here the
+    labelled bullets and headings the rest of this message is made of. A blank
+    ``utterance`` prints nothing at all, which is where the benchmark harness and this
+    module's pre-ADR-0248 callers sit and never where the production seam does.
+
+    **The brief's three element tuples are printed under headings of their own**
+    (ADR-0249 §11), each bullet opening with the label ADR-0249 §9 gives it —
+    ``C1``, ``S1``, ``D1`` and so on (:func:`_brief_label`) — and carrying its
+    ground **kind**. Three headings and not one, because §9 makes them three label
+    spaces and a ``retains`` naming a label of another tuple resolves to nothing. An
+    empty tuple prints no heading, so a goal at revision 1 — which has no elements at
+    all and is a well-formed brief rather than a degraded one (§9) — renders as it did
+    before this decision.
+
+    **The element texts and the open questions are quoted and the outcome statement is
+    not**, which is a distinction rather than an inconsistency. Both are
+    ``NonBlankEncodableText`` and both permit every newline and bracket there is, but
+    an element sits in a **labelled bullet list**: an unquoted multi-line element
+    could open a second ``- C2 …`` bullet and forge a label the loop then resolves,
+    which is precisely the syntax ADR-0098 §2 rules an assembler may not let its
+    content produce. :func:`_render_files` applies the same reasoning to a file's
+    name for the same reason. The ``statement:`` line carries no label, opens no list
+    and is unchanged by this decision.
+
+    **No identifier is printed** (ADR-0249 §9): not ``goal_id``, not an evidence id,
+    not a ground reference. §9 makes that a property of :class:`GoalBrief` and
+    :class:`EvidenceDigest` — neither type has a field such a value could sit in — so
+    this function holds the rule over the one value that *is* an identifier and is
+    handed to it anyway, ``goal_id``, which it renders nowhere.
+
+    **The evidence digest is printed below the material and above ADR-0240 §7's
+    fact** (ADR-0249 §10). It is not a group of ``memories`` and carries no label: a
+    ``FROM_EVIDENCE`` ground names an ``M`` label of this call's supply and nothing
+    else, so a digest label would invite a ground that resolves to nothing. An absent
+    ``supported`` is printed **as an absence with its consequence stated**, not
+    omitted — §10 rules that "an absent ``supported`` supports nothing", and a line
+    that simply disappeared would leave a planner to read the verdict as supporting
+    whatever it was asked about.
+
     ``context``'s facets are rendered by :func:`_render_facets` under the same
     "Current context:" heading as the four temporal scalars, and **below** them:
     the scalars are this system's own reading of its own clock, a facet is a
@@ -1861,13 +2280,18 @@ def _render_request(
     §5 rule ``None`` the single absence that "does not distinguish unconfigured,
     disabled, never-read, ungranted, failed or empty".
     """
+    # ADR-0248 §1, ADR-0249 §11: the turn's own request, first and under a heading
+    # that says whose words it carries, because the goal statement below no longer
+    # carries it. Quoted for ADR-0098 §2's reason and by `orchestration`'s own
+    # precedent on the same value.
+    lines = _render_utterance(utterance)
+
     # ADR-0249 §11: the outcome statement under the `Goal:` heading this already
     # uses, and the outcome's own **ground kind** in place of the goal-level
     # `Provenance` object — which §11 rules is printed nowhere, because what reaches
     # the planner in its place is per-value grounding that carries no `evidence`
-    # tuple of record identifiers. Rendering the brief's elements, the request and
-    # the evidence digest under headings of their own is L2's (§15).
-    lines = [
+    # tuple of record identifiers.
+    lines += [
         "Goal:",
         f"  statement: {goal.outcome}",
         f"  status: {goal.status.value}",
@@ -1875,6 +2299,14 @@ def _render_request(
     ]
     if goal.deadline is not None:
         lines.append(f"  deadline: {goal.deadline.isoformat()}")
+    # ADR-0249 §11: "the status, the deadline and the open questions as it renders
+    # status and deadline today" — so they sit in this block rather than under a
+    # heading of their own. The **texts** and nothing else (§9): a question's
+    # identity, its deadline and its settlement are A2's and none is the model's.
+    lines += [f"  open_question: {_quoted_span(text)}" for text in goal.open_questions]
+
+    # ADR-0249 §11, §9: three tuples, three headings, three label spaces.
+    lines += _render_brief_elements(goal)
 
     lines += [
         "",
@@ -1919,6 +2351,11 @@ def _render_request(
         lines.append("")
         lines += listing
 
+    # ADR-0249 §10, below the material and above ADR-0240 §7's fact: it is what the
+    # reads already taken for this goal established, which is neither a group of
+    # `memories` nor a second address space — it carries no label at all.
+    lines += _render_evidence(evidence)
+
     # ADR-0240 §7, printed **last**: it is a fact about this turn's own earlier ask
     # rather than a source of material, so it sits below everything the planner is
     # composing from. Empty on a turn's first call, where these two lines add nothing
@@ -1930,6 +2367,178 @@ def _render_request(
 
     _log.info("planner_tail_replies_rendered", eligible=eligible, elided=elided)
     return "\n".join(lines)
+
+
+def _render_utterance(utterance: str) -> list[str]:
+    """This turn's own request, under the heading ADR-0249 §11 gives it.
+
+    **Printed first, and quoted.** First because the goal statement below it no
+    longer carries the request (§11): before ADR-0249 the ``Goal:`` block's statement
+    *was* the request on a conversation's first turn, so what opened this message
+    still opens it. Quoted because the request is the one input of this seam this
+    system did not author, and ADR-0098 §2 refuses an assembler that lets held
+    content produce the syntax the assembler's own blocks are written in — here the
+    headings and labelled bullets below. ``orchestration``'s composing prompt renders
+    the same value the same way under a heading of the same shape.
+
+    **It carries its own separator**, so the assembler adds no branch for it: a blank
+    request contributes nothing at all, which is where this module's pre-ADR-0248
+    callers and the benchmark harness sit and never where the production seam does.
+    Nothing here refuses a blank one — ADR-0248 §1 put that refusal on
+    ``TurnResult.utterance`` and on the pass that strips the text once, and ADR-0249
+    §7 rules that "no implementation of this Protocol re-checks it".
+
+    Args:
+        utterance: This turn's request, exactly as the turn carries it.
+
+    Returns:
+        The heading, the quoted request and a separator, or an empty list.
+    """
+    if not utterance:
+        return []
+    return [_REQUEST_HEADING, f"  {_quoted_span(utterance)}", ""]
+
+
+def _brief_label(letter: str, ordinal: int) -> str:
+    """ADR-0249 §9's label for the element at 1-based ``ordinal`` of a brief tuple.
+
+    "The label of the element at 1-based index *n* of ``constraints`` is the ASCII
+    string ``C`` followed by *n* in decimal with no padding; of ``criteria``, ``S``
+    followed by *n*; of ``conditions``, ``D`` followed by *n*. That is the whole of
+    the scheme, it is the same on both sides of the seam, and no later lane
+    substitutes another spelling or makes it configurable."
+
+    **It is ADR-0226 §3's scheme applied to three sequences, and the letter is what
+    keeps them apart.** §9 makes the label space **per tuple**: a ``retains`` naming
+    an element of a tuple other than the one the retaining element sits in "resolves
+    to nothing", so ``C1`` and ``S1`` are different elements and never the same one
+    seen twice. The letter is the whole of that distinction, which is why it is a
+    parameter here rather than three near-identical functions.
+
+    **Both sides derive it from the brief they hold and neither consults the other**
+    (§9), exactly as :func:`_label` does for the supply — so this function is not
+    imported by ``orchestration``, which writes its own resolution over its own copy
+    of the same ordered value. And it is derived from **position** and never from an
+    element's content, which is what makes it non-forgeable in ADR-0098 §2's sense.
+
+    **The label is meaningful only within the call that rendered it** (§9): "no label
+    survives that call, and none is persisted as a reference."
+
+    Args:
+        letter: ``C`` for a constraint, ``S`` for a criterion, ``D`` for a condition.
+        ordinal: The element's 1-based position within that tuple.
+
+    Returns:
+        The label, e.g. ``"C2"``.
+    """
+    return f"{letter}{ordinal}"
+
+
+def _render_brief_elements(goal: GoalBrief) -> list[str]:
+    """ADR-0249 §11's three element blocks, each under a heading of its own.
+
+    One heading per tuple and never a single block, because §9 makes them three
+    **label spaces** rather than three groups of one list: a ``retains`` naming a
+    label of a different tuple resolves to nothing, so a planner that cannot see
+    which tuple it is reading cannot name one correctly. Each bullet opens with its
+    label, so the first token the model reads is the token it would write back —
+    :func:`_render_files` and :func:`_render_record` have the same property for the
+    same reason.
+
+    **Each element carries its ground kind and never a reference** (§9). A
+    :class:`~ai_assistant.core.types.BriefElement` has no field a reference could sit
+    in, so this is a property of the value rather than of this function's care; what
+    this function adds is that it prints the kind at all, which ADR-0014 §1 requires
+    so that a stated element is never indistinguishable from an inferred one.
+
+    **An empty tuple prints nothing** — no heading, no line. A goal at revision 1 has
+    no elements and is "a well-formed brief rather than a degraded one" (§9), so it
+    renders exactly as it did before this decision and nothing in the prompt invites a
+    planner to read three empty headings as something missing.
+
+    Args:
+        goal: The brief this call was handed.
+
+    Returns:
+        The blocks' lines, each preceded by a blank separator, or an empty list.
+    """
+    lines: list[str] = []
+    for heading, letter, elements in (
+        (_CONSTRAINTS_HEADING, "C", goal.constraints),
+        (_CRITERIA_HEADING, "S", goal.criteria),
+        (_CONDITIONS_HEADING, "D", goal.conditions),
+    ):
+        if not elements:
+            continue
+        lines.append("")
+        lines.append(heading)
+        lines += [
+            # Quoted, because this bullet's own syntax is a label a later reply names
+            # and the loop resolves: an unquoted multi-line element could open a
+            # second bullet and forge one (ADR-0098 §2).
+            f"  - {_brief_label(letter, ordinal)} {_quoted_span(element.text)} "
+            f"[{element.ground.value}]"
+            for ordinal, element in enumerate(elements, start=1)
+        ]
+    return lines
+
+
+def _render_evidence(evidence: Sequence[EvidenceDigest]) -> list[str]:
+    """ADR-0249 §10's digest of what has already been read for this goal.
+
+    **No label and no identifier** (§10). An :class:`EvidenceDigest` carries no
+    evidence row id, no memory id, no snippet, no title and no address — the namer
+    rule is a property of the type — and this function adds no label space of its
+    own, because the only ground that names anything names an ``M`` label of *this*
+    call's ``memories`` (§7). A digest a planner could name would be a ground that
+    resolves to nothing at the loop.
+
+    **An absent ``supported`` is stated rather than omitted**, which is the one place
+    this block departs from the absent-facet posture the rest of this prompt takes
+    (ADR-0096 §4). §10 rules that ``supported`` "is **never derived** from
+    ``requested``, from the query, or from the fact that a read completed" and that
+    "an absent ``supported`` supports nothing" — a positive fact about what the read
+    established. A line that simply vanished would leave the verdict sitting under the
+    ask that produced it with nothing between them, which is exactly the derivation
+    §10 forbids, read off the layout instead of off the field.
+
+    **The standing rides on the verdict's own line** (§10). Whether a row still bears
+    on the goal is not a second fact about the read, it is the qualification on what
+    the read is worth now — and ``SUPERSEDED`` in particular says this finding
+    displaces an older disagreement rather than standing beside it forever.
+
+    **Every free-text member is quoted** (ADR-0098 §2). ``requested``, ``supported``
+    and ``verdict`` are ``EncodableText``, which permits every newline and bracket
+    there is, and they sit in a labelled bullet list this prompt's other blocks also
+    write into; ``read_at`` and ``as_of`` are ``UtcInstant`` and ``standing`` a closed
+    enum, so none of the three is free text and none needs the transform.
+
+    Args:
+        evidence: What this call may act on about the reads already taken.
+
+    Returns:
+        The separator and the block's lines, or an empty list where nothing has been
+        read.
+    """
+    if not evidence:
+        return []
+    lines = ["", _EVIDENCE_HEADING]
+    for digest in evidence:
+        asked = (
+            _quoted_span(digest.requested)
+            if digest.requested is not None
+            else "something this record does not name"
+        )
+        lines.append(f"  - asked for {asked}, read at {digest.read_at.isoformat()}")
+        if digest.as_of is not None:
+            lines.append(f"    speaking for: {digest.as_of.isoformat()}")
+        lines.append(
+            f"    establishes something about: {_quoted_span(digest.supported)}"
+            if digest.supported is not None
+            else "    establishes nothing: do not read it as supporting what was asked"
+        )
+        lines.append(f"    outcome: {_quoted_span(digest.verdict)} [{digest.standing.value}]")
+    return lines
 
 
 def _label_axes(memories: Sequence[MemoryRecord]) -> frozenset[str]:
@@ -2721,12 +3330,20 @@ def _split_conversation_tail(
     return memories[:boundary], memories[boundary:]
 
 
-def _repair_prompt(reason: str, *, declined: bool = False) -> str:
+def _repair_prompt(reason: str, *, declined: bool = False, understanding: bool = False) -> str:
     """The user turn that asks the model to fix a malformed reply (ADR-0176 §5).
 
-    Two messages, split on whether the reply **asserted** a decline, because the
-    two failures carry different evidence of what the model meant.
+    Three messages, split on what evidence the reply carries of what the model
+    meant — because §5's whole argument is that a repair must not re-open a
+    judgement the reply already got right.
 
+    - ``understanding`` — the reply's shape was sound and only ADR-0249 §7's
+      ``understanding`` beside it could not be read. Both the shape and the plan
+      were right, so the ask is that one member again, with the two rules a model
+      most plausibly broke restated: a new element carries ``text`` and a ``ground``
+      with the argument that ground admits, and the objective is kept or restated
+      and never left out. It also offers **omitting** the member, which is always a
+      legal reply (§7) and is a better answer than a second malformed one.
     - ``declined`` — the reply carried the ``no_capability_needed`` marker and only
       its ``rationale`` was missing, null, non-string or blank. The model has said
       what it meant, so completing the decline is the right ask, and asking for
@@ -2740,12 +3357,14 @@ def _repair_prompt(reason: str, *, declined: bool = False) -> str:
       the test between them and asks the model to choose by the goal, naming
       neither as the intended correction.
 
-    Neither message asks for steps, and neither closes by requiring a non-empty
+    None of the three asks for steps, and none closes by requiring a non-empty
     ``steps`` list — the wording this function used to carry.
 
     Args:
         reason: What was wrong with the reply, echoed back so the model can see it.
         declined: Whether the reply carried the decline marker (ADR-0176 §5).
+        understanding: Whether the shape was sound and only the ``understanding``
+            beside it could not be read (ADR-0249 §7).
 
     Returns:
         The user turn to append to the conversation before the repair round.
@@ -2754,6 +3373,17 @@ def _repair_prompt(reason: str, *, declined: bool = False) -> str:
         f"That response could not be used: {reason}. "
         "Reply with only the JSON object described earlier — no prose, no code fence"
     )
+    if understanding:
+        return (
+            f"{opening} — keeping the shape you sent and the steps or rationale in "
+            "it, and sending `understanding` again. Every new element needs a "
+            "`text` and a `ground`, with a `span` on a `user_stated` one, an "
+            "`evidence_label` on a `from_evidence` one and neither on an "
+            "`inferred` one; an element you are keeping unchanged needs its printed "
+            "label as `retains` and nothing else; and the objective needs either "
+            '`"retains_outcome": true` or an `outcome` with an `outcome_ground`. '
+            "Leaving `understanding` out altogether is also a correct answer."
+        )
     if declined:
         return (
             f'{opening} — keeping `"steps": []` and `"no_capability_needed": true`, '
