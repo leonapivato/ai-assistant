@@ -1,6 +1,6 @@
 # 14. Planning model: `Goal`, `ActionPlan`, and a separate `ExecutionState`
 
-- Status: Partially superseded by ADR-0041 and ADR-0211 (§6's Planner.plan input roster) and ADR-0228 (§2's parenthetical alone, that a re-planned plan's predecessor "stays referenced by the `ExecutionState` that ran it" — a plan superseded within a turn, before anything is driven, is referenced by no execution, so it carries the id of the plan it replaces on a new `supersedes` field and every plan a turn produced is persisted; §2's `frozen=True` rule, its "Re-planning produces a *new* `ActionPlan` with a new `id`", its capability abstraction, its `JsonValue` reasoning and its deep-freezing of `parameters` all stand, and §§1, 3-7 are untouched) and ADR-0249 (three scopes. §5's `PlanStore` member enumeration and its `save_goal` upsert contract: the roster gains `record_interpretation`, `open_attempt`, `get_attempt`, `attempts_of` and `commit_attempt`, and `save_goal` becomes the opening write alone, refusing a goal whose id the store already holds, because an upsert replacing a whole goal would defeat the append-only interpretation sequence `Goal` now carries. §5's `PlanExport` shape, in `attempts` alone: the document gains that tuple and §5's closure rule extends to `attempt_id` rather than changing. §6's `Planner.plan` input roster and its `-> ActionPlan` return: the first positional becomes a `GoalBrief`, `utterance` and `evidence` join the keywords, and the return becomes a `PlannerOutput`. Those three scopes, and nothing else in this ADR: §5's compare-and-swap discipline, its transitions-not-snapshots rule, its local-residency, export-completeness and deletion obligations, and §6's parameters-not-fetched argument bind entire and are the grounds ADR-0249 reasons from; §1 is fulfilled and superseded in none; and §§2, 3, 4 and 7 are untouched)
+- Status: Partially superseded by ADR-0041 and ADR-0211 (§6's Planner.plan input roster) and ADR-0228 (§2's parenthetical alone, that a re-planned plan's predecessor "stays referenced by the `ExecutionState` that ran it" — a plan superseded within a turn, before anything is driven, is referenced by no execution, so it carries the id of the plan it replaces on a new `supersedes` field and every plan a turn produced is persisted; §2's `frozen=True` rule, its "Re-planning produces a *new* `ActionPlan` with a new `id`", its capability abstraction, its `JsonValue` reasoning and its deep-freezing of `parameters` all stand, and §§1, 3-7 are untouched) and ADR-0249 (three scopes. §5's `PlanStore` member enumeration and its `save_goal` upsert contract: the roster gains `record_interpretation`, `open_attempt`, `get_attempt`, `attempts_of` and `commit_attempt`, and `save_goal` becomes the opening write alone, refusing a goal whose id the store already holds, because an upsert replacing a whole goal would defeat the append-only interpretation sequence `Goal` now carries. §5's `PlanExport` shape, in `attempts` alone: the document gains that tuple and §5's closure rule extends to `attempt_id` rather than changing. §6's `Planner.plan` input roster and its `-> ActionPlan` return: the first positional becomes a `GoalBrief`, `utterance` and `evidence` join the keywords, and the return becomes a `PlannerOutput`. Those three scopes, and nothing else in this ADR: §5's compare-and-swap discipline, its transitions-not-snapshots rule, its local-residency, export-completeness and deletion obligations, and §6's parameters-not-fetched argument bind entire and are the grounds ADR-0249 reasons from. And §1's `Goal` model declaration: `statement` ceases to be a constructor field and becomes a read-only projection absent from the dump, while `conversation_id`, `interpretation`, `interpretation_elided`, `version` and `last_engaged_at` join the declaration, so a reader holding only §1 writes `Goal(statement=…)` and does not build a conforming `Goal`. §1's prose is fulfilled and superseded in none — its not-an-utterance rule, its `core`-type-not-memory-kind rule, its used-for-retrieval annotation, its outlives-any-one-conversation clause and its `Provenance` sentence each bind entire — and §§2, 3, 4 and 7 are untouched)
 - Date: 2026-07-19
 - **Partially superseded: 2026-09-12 by ADR-0249 — §5's `PlanStore` member enumeration
   and its `save_goal` upsert contract, §5's `PlanExport` shape in `attempts` alone, and §6's
@@ -31,15 +31,23 @@
   planner proposes. The return type moves here for the first time. §6's reason for parameters
   rather than fetching — quoted in ADR-0211 §2 and relied on there — binds entire.
 
-  **§1 is fulfilled, not superseded, and the showing is here.** Its sentence *"A `Goal` is
-  deliberately **not** the same thing as a user utterance"* becomes true of the implementation
-  for the first time; its *"`Goal` is a `core` type rather than a memory kind"* is the ground
-  ADR-0249 gives for not making this a `MemoryKind`; and its *"a goal … **outlives any one
-  conversation**"* binds entire, which is why ADR-0249 makes `Goal.conversation_id` provenance
-  rather than a fence. §1's code block gains fields, which is the additive kind of change
-  ADR-0226 §4 made to §2's block without a record being owed: a reader holding only §1 builds a
-  conforming `Goal` and reads a conforming `statement`. Under ADR-0082 §1's test the answer is
-  no, so no record is owed against §1 and none is written.
+  **§1's model declaration is superseded; §1's prose is fulfilled.** The two halves come apart.
+  §1 declares `statement: str` as a constructor field and enumerates six. After ADR-0249 §1
+  `statement` is not a field at all — it is a read-only projection of the current
+  interpretation's outcome, is not accepted in a constructor and does not appear in a dump —
+  and `conversation_id`, `interpretation`, `interpretation_elided`, `version` and
+  `last_engaged_at` join the declaration. A reader holding only §1 writes `Goal(statement=…)`
+  and does **not** build a conforming `Goal`, which is ADR-0070 §1's test coming out on the
+  supersession side. This is **not** the additive case ADR-0226 §4 made against §2's
+  `ActionPlan` block, where every earlier constructor call still worked.
+
+  **§1's prose binds entire and becomes true.** *"A `Goal` is deliberately **not** the same
+  thing as a user utterance"* becomes true of the implementation for the first time; *"`Goal` is
+  a `core` type rather than a memory kind. A goal is planning input, not a retrieval record"* is
+  the ground ADR-0249 gives for not making this a `MemoryKind`; *"canonical text rendering, used
+  for retrieval"* is the ground its §11 reads the relevance query off; *"a goal … **outlives any
+  one conversation**"* binds entire, which is why `Goal.conversation_id` is provenance rather
+  than a fence; and §1's `Provenance` sentence is untouched, the field staying on `Goal`.
 
   **Nothing else moves.** §2's frozen plan, its new-plan-new-id rule, its capability
   abstraction and its `JsonValue` reasoning; §3's `ExecutionState`; §4's transition graph, its
