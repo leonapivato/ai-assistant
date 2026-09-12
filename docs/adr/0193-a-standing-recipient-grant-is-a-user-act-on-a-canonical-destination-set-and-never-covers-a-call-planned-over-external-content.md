@@ -138,12 +138,20 @@
   met one route over.
 
   **What the pairing clause bought is kept and put to a second use.** Because it refused the
-  pointer-without-digest shape from the day it landed, **every route-(b) row this corpus has
-  ever written carries a digest** — the closed-loop grant-covered `ALLOW` ADR-0238 permits
-  included. So the digest's presence tells the two standing routes apart **over the whole
-  history, from the row alone**: no grant-store read, which is what §9 requires of a revoked
-  or cleared grant, and no assumption that a `RecipientGrant.id` and a
+  pointer-without-digest shape from the day it landed, **every route-(b) row written since
+  this ADR's implementation carries a digest** — the closed-loop grant-covered `ALLOW`
+  ADR-0238 permits included. So the digest's presence tells the two standing routes apart
+  **from the row alone**: no grant-store read, which is what §9 requires of a revoked or
+  cleared grant, and no assumption that a `RecipientGrant.id` and a
   `BoundAccount.reference` cannot collide, which nothing in this corpus guarantees.
+
+  **And §11's own reserved case is excluded rather than overwritten.** §11 contemplates *"a
+  pointer written before this ADR's implementation validated any"* and rules that no surface
+  distinguishes it. ADR-0247 gives it no basis it never had: the eligibility conjunct
+  requires a digest-free standing row's binding to carry `closed_loop`, a member ADR-0238
+  added **after** this ADR's implementation, so no row §11 reserves can be classified as
+  configuration authority. §11's three states, its non-distinguishing bar, its
+  opaque-digest rule and its no-liveness rule bind entire.
 
   **What is relied upon as written.** §1's store and its atomicity; §2's establishing act;
   §3's comparison-not-inference rule; §4; §6's other seven checks, its `OriginUnrecordedBinding`
