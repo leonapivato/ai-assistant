@@ -132,24 +132,56 @@ attempt (A2 and A3, by ADR-0249 §5). §16 lists what it declines, each with wha
 
 ## Decision
 
-### 1. `Authorization`: one record of one act, over one declaration, scoped to one goal
+### 1. `Authorization`: a durable row proposed before the question and settled by the answer
 
 > **Normative.** `core/types.py` gains **`Authorization`**, a frozen model with
 > `extra="forbid"` whose fields are exactly: `id`, a `DurableIdentifier`; `goal`, an
 > `Identifier`; `tool`, a `ToolDefinition`; `account`, a `BoundAccount`; `destinations`, a
 > non-empty, duplicate-free `tuple[CanonicalDestination, ...]` in
 > `EgressBinding.canonical_destination_set`'s one canonical order; `coverage`, a possibly-empty
-> `tuple[CoverageMember, ...]`; `decided_at`, a `UtcInstant`; `expires_at`, a `UtcInstant`;
-> `established_by`, a `DurableIdentifier | None`; `supersedes`, a `DurableIdentifier | None`;
-> and `revokes`, a `DurableIdentifier | None`. The field list is **closed**, and a lane adding
-> a member is changing this decision rather than implementing it.
+> `tuple[CoverageMember, ...]`; `proposed_at`, a `UtcInstant`; `expires_at`, a `UtcInstant`
+> **strictly after** it; `confirmation`, a `DurableIdentifier | None`; `supersedes`, a
+> `DurableIdentifier | None`; `disposition`, an **`AuthorizationDisposition`**; and
+> `settled_at`, a `UtcInstant | None`. The field list is **closed**, and a lane adding a member
+> is changing this decision rather than implementing it.
 
-> **Normative.** **One type carries both acts**, on `RecipientGrant`'s shape and for its
-> reason: a revoking record transcribes verbatim every field of the record it withdraws except
-> `id`, `decided_at`, `established_by` and `revokes`, and the store verifies the transcription.
-> Liveness, outstanding-ness, the strict ordering of `expires_at` after `decided_at` on a
-> granting record, and the rule that a revoking record is never live are **ADR-0193 §9's,
-> adopted clause for clause and not re-derived**.
+> **Normative.** **`AuthorizationDisposition` is a `StrEnum` valued by lower-cased member name
+> and closed at exactly six members**: `PROPOSED`, `ESTABLISHED`, `DECLINED`, `EXPIRED`,
+> `REVOKED` and `SUPERSEDED`. **`PROPOSED` is the only non-terminal member**, and no transition
+> leaves a terminal one. The vocabulary is added to and never renamed. A **model validator**
+> refuses every shape but two: `PROPOSED` with `settled_at` absent, and a terminal disposition
+> with `settled_at` present.
+
+> **Normative — the record is written before the question is put, not after the answer.** This
+> is ADR-0244's ratified shape for exactly this problem — a durable row carrying what is put to
+> the user, settled by a later answer, surviving a restart, with its deadline *"computed …
+> once, at the instant the park is written"* — adopted rather than re-derived. **The
+> confirmation's projection (§11) is rendered from this row**, so the coverage and the expiry a
+> user is shown are read from a durable record rather than recomputed from a configuration that
+> may have moved, and a restart between the question and the answer changes neither.
+
+> **Normative — the settlement, and it is the store's single operation.**
+> `GoalAuthorizationStore` gains **`settle(id, to: AuthorizationDisposition, *, settled_at)`**,
+> which moves a `PROPOSED` row to a terminal disposition under compare-and-swap and **refuses a
+> row already terminal**. An approval settles `ESTABLISHED`; a refusal settles `DECLINED`; an
+> answer arriving at or after `expires_at` settles `EXPIRED` and **establishes nothing**; a
+> user withdrawal settles `REVOKED`; and a superseding write settles the row it supersedes
+> `SUPERSEDED`. **There is no other mutation and no `update`**: a settlement moves one field
+> and its instant, exactly as `ParkedRead`'s does, and the record's coverage, basis, account,
+> destinations and expiry are never edited.
+
+> **Normative.** **An expiry is settled and is never inferred**, which is ADR-0244 §10's
+> mechanism: a `PROPOSED` row whose `expires_at` is at or before the clock's reading is settled
+> `EXPIRED` by the **first operation that reads it** — a `covering` read, a `standing`
+> enumeration, or the answer that names it. That is safe for ADR-0244 §10's own reason, since
+> an expired proposal is refused as an establishment at all and there is no live answerer for
+> the settlement to race.
+
+> **Normative — a record is `live` when its `disposition` is `ESTABLISHED` and the clock stands
+> strictly before its `expires_at`.** `PROPOSED` is **never** live, and no clause of this
+> decision reads a proposal as an authority: a row the user has not answered authorises nothing
+> whatever else is true of it. Every terminal disposition but `ESTABLISHED` is never live, and
+> an `ESTABLISHED` row past its expiry is not live and is not settled again.
 
 > **Normative.** **The declaration is embedded by value and the capability is never the
 > subject.** ADR-0021 §1 closed #54 by embedding the whole `ToolDefinition` — *"there is no
@@ -161,65 +193,74 @@ attempt (A2 and A3, by ADR-0249 §5). §16 lists what it declines, each with wha
 > nothing and the user is asked again — the cost accepted in the safe direction, exactly as
 > ADR-0193 §1 accepts it.
 
-> **Normative.** **One establishing act establishes an authorization for one declaration**, and
-> a plan whose steps reach two declarations needs two. A `CONFIRM` is about one request and one
-> declaration (ADR-0021 §1), and **no lane widens a single answer across declarations it did
-> not name**.
+> **Normative.** **One record is about one declaration**, and a plan whose steps reach two
+> declarations needs two. A `CONFIRM` is about one request and one declaration (ADR-0021 §1),
+> and **no lane widens a single answer across declarations it did not name**.
 
-> **Normative — there are exactly two establishment paths and no third.**
+> **Normative — there are exactly two ways a row is written and no third.**
 >
-> - **(i) An answered `CONFIRM`.** `established_by` names the recorded `CONFIRM` the act rode
->   (ADR-0193 §1's shape), `supersedes` is unset, and the record's members are the values that
->   confirmation put to the user (§11). This is the only path that may **create** a member, set
->   `destinations`, set `account`, set `tool` or set `expires_at`.
+> - **(i) Proposed against a `CONFIRM`.** `confirmation` names the recorded `CONFIRM` the
+>   question rode, `disposition` is `PROPOSED`, `proposed_at` is that decision's `decided_at`,
+>   and the row is settled by the answer. **This is the only path that may create a member,
+>   widen a bound, set `destinations`, set `account`, set `tool` or set `expires_at`**, because
+>   it is the only one on which the user is shown what they are being asked (§11). It **may**
+>   carry `supersedes`, naming a live row it replaces, which is settled `SUPERSEDED` in the same
+>   write as this row's `ESTABLISHED` settlement.
 > - **(ii) A correcting instruction.** A later recorded turn of the same goal whose span names
->   an argument a **live** record of that goal already carries a member for. It writes a
->   **superseding** record: `supersedes` names that record, `established_by` is unset, and
->   **every member of the superseded record that the correction does not replace is carried
->   forward byte for byte, with its own basis** (§8). `goal`, `tool`, `account`,
->   `destinations` and `expires_at` are **transcribed unchanged**, and the store verifies the
->   transcription.
+>   an argument a **live** row of that goal already carries a member for. It writes a row with
+>   `confirmation` **unset**, `supersedes` naming that row, `disposition` **`ESTABLISHED`**
+>   directly and `settled_at` equal to `proposed_at` — the recorded turn's instant — and
+>   settles the superseded row `SUPERSEDED` **in the same write**. **Every member of the
+>   superseded row that the correction does not replace is carried forward byte for byte, with
+>   its own basis** (§8), and `goal`, `tool`, `account`, `destinations` and `expires_at` are
+>   **transcribed unchanged**.
 >
-> A record carrying **both** `established_by` and `supersedes`, or **neither**, is **not
-> constructible**; a **revoking** record carries `revokes` and neither of the other two.
+> A row carrying `confirmation` unset and `supersedes` unset is **not constructible**; a row
+> carrying `confirmation` set is `PROPOSED` at construction and reaches a terminal disposition
+> only through `settle`.
 
 > **Normative — what path (ii) may change, and what it may never touch.** It may **replace a
-> fixed value** for an argument the superseded record already fixed, and **narrow a bound** for
-> an argument it already bounded. It may **never** add a member for an argument the superseded
-> record does not name, **widen** a bound — a raised `maximum`, a lowered `minimum`, an added
-> term, a longer period — change `tool`, `account` or `destinations`, or move `expires_at`.
+> fixed value** for an argument the superseded row already fixed, and **narrow a bound** for an
+> argument it already bounded. It may **never** add a member for an argument the superseded row
+> does not name, **widen** a bound — a raised `maximum`, a lowered `minimum`, an added term, a
+> longer period — change `goal`, `tool`, `account` or `destinations`, or move `expires_at`.
 > **A change to a destination-bearing argument takes path (i)**, because the canonical
 > destination set is what ADR-0148 §3's first clause is stated over and a correction must not
-> move it. Each of those is **refused at construction**, so the restriction is a property of
-> the type rather than a rule the writing lane remembers.
+> move it. **A widening of any kind takes path (i) and is confirmed.**
 
-> **Normative.** **Coverage is always taken over one record** (§3). Superseding at the moment
-> of the act, rather than composing at the moment of the ruling, is what keeps that true: the
-> policy reads one record, `authorised_by` names one record, the trail resolves one record, and
-> a revocation of the authority behind **any** argument is a revocation of the record the
-> ruling would cite. **No component composes coverage across two records**, at ruling time or
-> at any other.
+> **Normative — where each of those refusals lives, because they are not all the same kind.**
+> A rule comparing **fields of one row** is a **model validator** on the type: the disposition
+> and `settled_at` pairing, `expires_at` strictly after `proposed_at`, the two-way construction
+> rule above, a `CoverageMember`'s two shapes, a `ValueBound`'s three, a `ValueResolution`'s
+> three, and the agreement between a `MONEY` bound and a fixed currency member of the same row.
+> A rule comparing **two records** is the **store's**, at the write, where both are in hand:
+> the transcription check, the non-widening check, the uniqueness check and the atomic
+> settlement of the superseded row. And a rule comparing a basis against a **recorded turn** is
+> **`orchestration`'s**, resolved exactly as ADR-0249 §7 resolves a `USER_STATED` ground — *"A
+> `USER_STATED` element's `span` is resolved by checking it is a span of the turn's own request
+> (`TurnResult.utterance`, ADR-0248 §1)"* — before the row is built. **No `core` type reads a
+> store, a trail or a turn**, which is golden rule 2, and no lane closes a two-record window
+> with a validator that cannot see the second record.
 
-> **Normative — three definitions, stated in order so none is circular.** A granting record is
-> **superseded** when some record names it in `supersedes`, **whether or not that record is
-> itself revoked**. It is **outstanding** when no revoking record names it **and** it is not
-> superseded — which is the existence, the kind, the unrevoked check and the unsuperseded check
-> at once, ADR-0193 §6's `outstanding` extended by one conjunct and by nothing else. It is
-> **live** when it is outstanding and the clock stands at or after its `decided_at` and
-> strictly before its `expires_at`.
+> **Normative.** **Coverage is always taken over one row** (§3). Superseding at the moment of
+> the act, rather than composing at the moment of the ruling, is what keeps that true: the
+> policy reads one row, `authorised_by` names one row, the trail resolves one row, and a
+> revocation of the authority behind **any** argument is a revocation of the row the ruling
+> would cite. **No component composes coverage across two rows**, at ruling time or at any
+> other.
 
-> **Normative.** **Supersession is permanent and does not depend on the superseding record's own
-> fate.** Revoking a superseding record leaves **neither** live: that is the fail-closed
-> direction, and the one that refuses to resurrect a broader authority the user has already
-> moved on from. No operation un-supersedes a record. A superseded record needs no revocation,
-> blocks nothing, and stays in the store — both records appear in `export`, and neither is
+> **Normative.** **Supersession is permanent and does not depend on the superseding row's own
+> fate.** Revoking a superseding row leaves **neither** live: a `SUPERSEDED` disposition is
+> terminal and `settle` refuses a terminal row, so nothing un-supersedes one. That is the
+> fail-closed direction, and the one that refuses to resurrect a broader authority the user has
+> already moved on from. Both rows stay in the store, both appear in `export`, and neither is
 > deleted but by `clear`.
 
-> **Normative — at most one live record per goal and declaration, enforced without a clock.**
-> `record` **refuses** a granting record whose `goal` and `tool` equal those of an outstanding
-> record it does not supersede. The refusal is stated over **outstanding** rather than over
-> live, exactly as ADR-0193 §1's duplicate refusal is, so the write path reads no clock. **And
-> `covering` returns `None` where more than one live record of that goal and declaration would
+> **Normative — at most one `ESTABLISHED` row per goal and declaration, enforced without a
+> clock.** `record` **refuses** a write that would leave two rows of one `goal` and one `tool`
+> both `ESTABLISHED`. The refusal is stated over the **disposition** rather than over liveness,
+> so the write path reads no clock, which is ADR-0193 §1's duplicate-refusal discipline. **And
+> `covering` returns `None` where more than one live row of that goal and declaration would
 > answer** — a state this refusal makes unreachable, and refused at the read as well because a
 > query that chose between two would be the composition §5 declines.
 
@@ -235,6 +276,17 @@ attempt (A2 and A3, by ADR-0249 §5). §16 lists what it declines, each with wha
 > `parameters` are non-empty.** §3's rule is stated per argument over the request's own
 > arguments, so emptiness is not a wildcard; it is the record of an act that fixed nothing, and
 > the only request it covers is one carrying no arguments at all.
+
+**A settled disposition rather than an appended revoking record, and the reason is that this row
+is a question before it is an authority.** ADR-0193's store appends a revoking record because a
+recipient grant is a preference the user states once and later withdraws, and *"a revocation **is**
+an append"*. An authorization is put to the user as a question about a concrete call and is
+answered — which is `ParkedRead`'s shape, not `RecipientGrant`'s, and ADR-0244 already solved the
+whole of it: a durable row written when the question is put, a deadline computed once at that
+instant, a settlement by whatever operation next reads an expired one, and a disposition that
+tells an answered question from an abandoned one. Appending a revoking record would also have
+forced a transcription of every field including `supersedes`, which is a shape a revoking record
+cannot carry and an exception list a lane would have to remember.
 
 **Why a record of its own rather than a member on `RecipientGrants`.** ADR-0193 §6 forecloses
 the cheap answer in terms: a second egress standing source *"is making a **contract change** to
@@ -264,11 +316,16 @@ the shape that reservation asks for.
 > path language is a second thing to get wrong at the one comparison that decides whether a
 > call is authorised.
 
-> **Normative.** **A `MONEY` bound and a fixed currency member of the same record must agree**,
-> refused at construction otherwise: where a record carries a `MONEY` bound for one argument and
-> a `fixed` member for the currency argument the declaration's schema pairs with it, that fixed
-> value equals the bound's `currency`. A record that bounds sixty pounds and fixes the currency
-> to something else is not a record of anything the user said.
+> **Normative.** **A `MONEY` bound names its own currency argument, and no schema is
+> consulted to find one.** `currency_argument` is a key of `parameters` like any other
+> `argument` (depth one), and it is the whole of the association between an amount and the
+> currency it is denominated in. **Where a record carries a `MONEY` bound and also a `fixed`
+> member naming that same `currency_argument`, the fixed value equals the bound's `currency`**,
+> refused at construction otherwise: a row that bounds sixty pounds and fixes the currency to
+> something else is not a record of anything the user said. **A call whose declaration carries
+> no currency argument takes no `MONEY` bound** — it takes a fixed value for its amount, which
+> is §2's fixed-only default — and no lane infers an association from a field name, a type, a
+> schema keyword or a neighbouring argument.
 
 > **Normative.** **No two members of one `Authorization` name the same `argument`**, refused at
 > construction. A precedence rule between two members about one argument is a rule somebody
@@ -282,8 +339,10 @@ the shape that reservation asks for.
 > **Normative — the three kinds, and a model validator refuses every other shape.**
 >
 > - **`MONEY`** carries `currency`, three uppercase ASCII letters validated for shape and not
->   against a register, and `maximum`, a `Decimal` that is finite and not negative; and
->   optionally `minimum`, under the same two refusals and less than or equal to `maximum`.
+>   against a register; `currency_argument`, an `EncodableText` naming the key of `parameters`
+>   that carries the currency for this amount; and `maximum`, a `Decimal` that is finite and not
+>   negative; and optionally `minimum`, under the same two refusals and less than or equal to
+>   `maximum`.
 >   Both refusals and the shape rule are `ToolCost`'s, reused rather than restated, and for its
 >   stated reason: *"`Decimal` admits `Infinity` and `NaN`, neither of which has a JSON
 >   representation or survives arithmetic in a running total, and comparing `NaN` with `<`
@@ -317,7 +376,7 @@ argument that actually needs one.
 ### 3. Coverage: five comparisons, four of them ADR-0193's and one new
 
 > **Normative.** An `Authorization` **covers** an `ActionRequest` when **all five** hold: the
-> record is **live** (§1, ADR-0193 §9); the request's `goal` (§6) equals the record's `goal`; the
+> row is **live** (§1); the request's `goal` (§6) equals the row's `goal`; the
 > request's `tool` equals the record's `tool` **by value**; the request's binding's `account`
 > equals the record's `account` **by value**, both facts and never one; **every** member of the
 > request's canonical destination set is a member of the record's, compared as
@@ -390,15 +449,12 @@ the binding comparison cannot come apart.
 > **Normative — `MONEY`.** The argument satisfies a `MONEY` bound only where **all** hold: the
 > argument's value is a JSON **string** that `Decimal` accepts, or a JSON **integer**; the
 > resulting `Decimal` is finite and not negative; it is less than or equal to `maximum` and,
-> where a `minimum` is carried, greater than or equal to it; and the **currency is established
-> by the same record** — either by a `fixed` member naming the request's currency argument
-> whose value equals the bound's `currency`, or by the bound's `currency` being the only
-> currency the declaration's schema admits for that argument; **and the currency the request
-> itself carries for that amount equals the bound's `currency` byte for byte**, wherever the
-> declaration's schema declares a currency argument for it. The last conjunct is stated over
-> the **concrete request** and not over the record, so a record whose currency member says one
-> thing and whose request says another covers nothing rather than covering the wrong amount of
-> the wrong money. **A JSON floating-point value
+> where a `minimum` is carried, greater than or equal to it; **and the request carries, at the
+> bound's `currency_argument`, a JSON string equal to the bound's `currency` byte for byte**.
+> The last conjunct is stated over the **concrete request** rather than over the row, so a row
+> whose currency member says one thing and whose request says another covers nothing rather
+> than covering the wrong amount of the wrong money; and a request carrying no value at that key
+> is **not covered**. **A JSON floating-point value
 > never satisfies a `MONEY` bound.** A binary float is not a price, and comparing one against a
 > decimal bound is precisely the unproven comparison ADR-0148 §2 refuses by default: the answer
 > is not to round, to quantise or to pick a tolerance, it is to refuse and ask.
@@ -423,14 +479,13 @@ the binding comparison cannot come apart.
 > refuses is a request the authorization does not cover, and the ruling is the one the policy's
 > table reached without it — which for a transmitting tool is `CONFIRM`, and the user is asked.
 
-> **Normative.** **No reading consults a schema to decide what an argument means, with one
-> stated exception.** The `MONEY` currency limb above is the exception and it is stated as one:
-> it reads whether the declaration's `parameters_schema` admits exactly one currency for that
-> argument, which is a fact about the declaration the decision already embeds by value
-> (ADR-0021 §1). **Where the schema admits more than one, or says nothing, the currency must be
-> fixed by a member of the same record or the bound does not apply** — the fail-closed
-> direction, and the one that keeps a bound of sixty pounds from covering sixty of anything
-> else.
+> **Normative.** **No reading consults a schema to decide what an argument means, and there is
+> no exception.** Every fact a comparison needs is on the row or in the request: which key holds
+> an amount, which key holds its currency, which zone a date is read in, which strings a term
+> may take. ADR-0145 §1's schema check runs at construction over the arguments and decides
+> whether the call is well-formed; it decides nothing about coverage, and no lane reads a
+> `parameters_schema` keyword to establish an association this decision requires a row to
+> name.
 
 ### 5. A correction supersedes, and the record it leaves covers the whole request
 
@@ -449,18 +504,27 @@ the binding comparison cannot come apart.
 > repeat it."*
 
 > **Normative.** **A correction that would widen takes path (i) and asks.** An instruction
-> raising a ceiling, adding a term, lengthening a period, naming a destination the record does
-> not carry, or naming an argument no member covers is **not** a correction this path can
-> write: the superseding construction refuses it (§1), no record is written, and the concrete
-> action reaches no route (d) and is confirmed. That is the owner's *"Ask only when the concrete
-> action introduces something not already covered, such as additional costs or materially
-> different terms"*, and it is the same sentence read as a refusal at construction rather than
-> as advice at the prompt.
+> raising a ceiling, adding a term, lengthening a period, naming a destination the row does not
+> carry, or naming an argument no member covers is **not** a correction path (ii) can write:
+> the store refuses it, no row is written, and the concrete action reaches no route (d) and is
+> confirmed. That is the owner's *"Ask only when the concrete action introduces something not
+> already covered, such as additional costs or materially different terms"*, and it is that
+> sentence read as a refusal at the write rather than as advice at the prompt.
 
-> **Normative.** **A superseding record never extends authority in time.** `expires_at` is
-> transcribed from the record it supersedes (§1, §12), so a chain of corrections expires when
-> the first act's authority would have expired. **No sequence of corrections outlives the
-> confirmation that began it.**
+> **Normative — and a widening the user then confirms is established, by path (i) carrying
+> `supersedes`.** The confirmation that asks about the wider action proposes a row naming the
+> live row in `supersedes`; approving it settles the new row `ESTABLISHED` and the old one
+> `SUPERSEDED` **in one write**, so the uniqueness rule (§1) is satisfied without a separate
+> retirement step and there is never an instant in which two rows of one goal and declaration
+> are both established. **Declining it settles the new row `DECLINED` and leaves the old one
+> exactly as it was** — a refused widening is not a revocation of what the user already
+> authorised.
+
+> **Normative.** **A path-(ii) correction never extends authority in time.** `expires_at` is
+> transcribed from the row it supersedes (§1, §12), so a chain of corrections expires when the
+> first act's authority would have expired. **No sequence of corrections outlives the
+> confirmation that began it.** A path-(i) supersession computes a fresh `expires_at`, because
+> the user was asked again and the instant is in front of them (§11).
 
 > **Normative.** **No record of one goal is superseded by, or contributes to, a request of
 > another**, and no implementation composes coverage across goals, across conversations, across
@@ -635,16 +699,23 @@ is not this one. §18 books it with what fires it.
 > no member, no argument and no widened return, and what ADR-0021 §4 gains is an invariant.
 
 > **Normative — `AuditTrail.record` refuses a route-(d) row unless all six hold.**
-> `outstanding(authorised_by)` returns a record — the existence, the kind and the unrevoked
-> check at once; that record's `decided_at` is **at or before** the decision's; that record's
-> `expires_at` is **strictly after** the decision's `decided_at`; its `ToolDefinition` equals
-> the decision's `tool` **by value**; its `goal` equals the ruling's `authorised_goal`; and the
-> ruling's `authorised_subject` equals that record's subject digest, **recomputed by `record`
-> over the record the store returned**. Five of the six are ADR-0193 §6's, adopted with its
-> reasoning entire — including that equality is permitted at the lower end of liveness and that
-> what is refused there is a **backdated** authority, and including that the digest *"is never
-> taken on the decision's word"*. `record` reads **no clock**: liveness is decided against the
-> decision's own `decided_at`.
+> `resolve(authorised_by)` returns a row; that row's `disposition` is **`ESTABLISHED`** — the
+> existence, the kind, the unrevoked, the unsuperseded and the answered check at once, since
+> every other disposition is terminal and none of them is live; that row's `settled_at` is **at
+> or before** the decision's `decided_at`; its `expires_at` is **strictly after** the decision's
+> `decided_at`; its `ToolDefinition` equals the decision's `tool` **by value**; its `goal`
+> equals the ruling's `authorised_goal`; and the ruling's `authorised_subject` equals that row's
+> subject digest, **recomputed by `record` over the row the store returned**. Five of the six
+> are ADR-0193 §6's, adopted with its reasoning entire — including that equality is permitted at
+> the lower end and that what is refused there is a **backdated** authority, and including that
+> the digest *"is never taken on the decision's word"*. `record` reads **no clock**: both ends
+> are decided against the decision's own `decided_at`.
+
+> **Normative.** **`settled_at` is the instant compared and `proposed_at` is not.** A row is
+> proposed before the user answers and authorises nothing until they do, so the instant a
+> decision must not predate is the instant the authority came into being. A row whose
+> `settled_at` is after the ruling was taken is the **backdated** case ADR-0193 §6 refuses, one
+> field over.
 
 > **Normative — the trail asserts what it can see, and the policy asserts the rest.** The trail
 > **cannot** re-take the per-argument comparison and no lane gives it a way to: a
@@ -807,6 +878,14 @@ all three would be one thing to be wrong about.
 > names the tool and not the recipients is not a confirmation of an egress call"* — read onto
 > what the answer would make standing.
 
+> **Normative — the projection is rendered from the proposed row and is not recomputed.** The
+> `Authorization` is written `PROPOSED` before the question is put (§1), so what the user is
+> shown is a rendering of a durable row: the same coverage, the same bounds and the same
+> `expires_at` the row carries. **A restart between the question and the answer recovers the
+> row and renders the same projection**, which is ADR-0052 §1's recovery reading a durable
+> record rather than reconstructing a proposal nobody stored, and it is why §1 writes the row
+> first rather than at the answer.
+
 > **Normative — the carrier, because `Confirmation` forbids extra fields.** `core/types.py`
 > gains **`ConfirmationAuthorization`**, a frozen model with `extra="forbid"` carrying exactly
 > `coverage`, a non-empty `tuple[ConfirmationCoverage, ...]`, and `expires_at`, a `UtcInstant`;
@@ -871,10 +950,10 @@ all three would be one thing to be wrong about.
 ### 12. Expiry: justified, visible, with no disable spelling, and for this record alone
 
 > **Normative.** **Every `Authorization` carries an `expires_at` and there is no spelling for
-> one without it** — no null, no sentinel, no "forever" — and on a granting record it is
-> **strictly after** `decided_at`, refused at construction otherwise. That is ADR-0193 §9's
-> clause and its reason adopted whole: a record expiring at or before the instant it was decided
-> *"is a grant in shape and nothing in effect"*.
+> one without it** — no null, no sentinel, no "forever" — and it is **strictly after**
+> `proposed_at`, refused at construction otherwise. That is ADR-0193 §9's clause and its reason
+> adopted whole: a record expiring at or before the instant it was proposed *"is a grant in
+> shape and nothing in effect"*.
 
 > **Normative.** `core.config.Settings` gains **exactly one field**,
 > **`workflow_authorization_ttl: timedelta`**, required, defaulting to **PT12H**, and refused at
@@ -882,26 +961,28 @@ all three would be one thing to be wrong about.
 > shape and its stated reason one record over: an authority nothing can free is a durable row
 > that keeps authorising after everyone has forgotten it exists.
 
-> **Normative — the expiry is computed from the confirmation's own instant, not from the
-> answer's.** On path (i), `Authorization.decided_at` is the recorded `CONFIRM`'s `decided_at`
-> and `expires_at` is that instant plus `workflow_authorization_ttl`. Both are therefore
-> functions of a value that was already durable when the user was shown the question, so **the
-> instant §11 names in the prompt is the instant the record carries**, whenever the answer
-> arrives. Neither is read from a clock at the moment of the answer, and no lane recomputes
-> either.
+> **Normative — the expiry is computed once, when the row is proposed, and is never
+> recomputed.** On path (i), `proposed_at` is the recorded `CONFIRM`'s `decided_at` and
+> `expires_at` is that instant plus `workflow_authorization_ttl` as the deployment holds it at
+> the moment of the write. **Both are durable before the user is shown anything**, so the
+> instant §11 names in the prompt is read off the row and is the instant the row carries — a
+> restart between the question and the answer recovers it, and a change to
+> `workflow_authorization_ttl` in that interval **does not move it**. This is ADR-0244 §3's
+> clause one record over: *"both computed from it, once, at the instant the park is written"*.
+> **No lane recomputes either instant at the answer**, and a changed setting is prospective on
+> ADR-0247 §8(b)'s shape — it governs the next row proposed and no row already written.
 
-> **Normative — an answer arriving at or after that instant establishes nothing.** The
-> `CONFIRM` may still be resolved and the concrete call may still be authorised by ADR-0148
-> §3's route (a) — a decision of the user about *that* request — but **no `Authorization` is
-> written**, because a record born expired *"is a grant in shape and nothing in effect"*. The
-> user is asked again the next time the goal needs one, which is the fail-closed direction and
-> the only one that keeps the displayed instant true.
+> **Normative — an answer arriving at or after `expires_at` establishes nothing.** The row is
+> settled **`EXPIRED`** (§1), not `ESTABLISHED`. The `CONFIRM` may still be resolved and the
+> concrete call may still be authorised by ADR-0148 §3's route (a) — a decision of the user
+> about *that* request — but **no standing authority comes into being**. The user is asked
+> again the next time the goal needs one, which is the fail-closed direction and the only one
+> that keeps the displayed instant true.
 
-> **Normative — on path (ii) both instants are transcribed.** A superseding record carries the
-> superseded record's `expires_at` unchanged (§1, §5) and its own `decided_at` is the recorded
-> turn the correction rode. `decided_at` therefore moves forward and `expires_at` does not, and
-> a correction recorded at or after `expires_at` is **not constructible** — the superseded
-> record is no longer live, so there is nothing for it to supersede.
+> **Normative — on path (ii) the expiry is transcribed and only the new row's own instants
+> move.** A superseding row carries the superseded row's `expires_at` unchanged (§1, §5); its
+> `proposed_at` and `settled_at` are both the recorded turn the correction rode. A correction
+> recorded at or after `expires_at` finds no live row to supersede and writes nothing.
 
 > **Normative.** **The expiry is visible at the moment of the act and in every listing** (§11).
 > That is the whole of decision 7's *"justified, visible"*: justified because it is stated with
@@ -923,10 +1004,10 @@ all three would be one thing to be wrong about.
 > its whole lifecycle, and nothing here gives it one. A lane that applied this ceiling to either
 > has breached this clause.
 
-> **Normative.** **An expired record is not deleted** — by expiry, by revocation, or by any
-> operation but `clear` — so a user can see and revoke what they once authorised and `export`
-> can carry it. It stays **outstanding** until revoked, so it can still be revoked and still
-> blocks an identical new one until it is. ADR-0193 §9's clauses, adopted.
+> **Normative.** **No row is deleted** — not by expiry, not by a settlement, not by
+> supersession, not by revocation, and by no operation but `clear` — so a user can see what they
+> once authorised, what they declined and what lapsed, and `export` carries every row whatever
+> its disposition. ADR-0193 §9's no-deletion clause, adopted.
 
 ### 13. The recheck at dispatch: `decide` is the recheck, and there is no cached verdict
 
@@ -1071,11 +1152,14 @@ all three would be one thing to be wrong about.
 
 ### 15. Writer clauses, gathered in one place
 
-> **Normative.** **An `Authorization` is written by `orchestration` and by nothing else**, on
-> §1's path (i) from a recorded `CONFIRM` the user answered, and on §1's path (ii) from a
-> recorded turn whose span names an argument a live record already carries. No `ActionPolicy`,
-> no `AuditTrail`, no interface adapter, no reader, no tool and no model output writes one, and
-> there is no third path.
+> **Normative.** **An `Authorization` is written and settled by `orchestration` and by nothing
+> else** — proposed on §1's path (i) when a `CONFIRM` is put, settled by the answer to it, and
+> written already `ESTABLISHED` on §1's path (ii) from a recorded turn whose span names an
+> argument a live row already carries. No `ActionPolicy`, no `AuditTrail`, no interface
+> adapter, no reader, no tool and no model output writes or settles one, and there is no third
+> path. **The one exception is the expiry settlement**, which any read of an expired `PROPOSED`
+> row performs inside the store (§1) — ADR-0244 §10's mechanism, which is the store settling a
+> deadline it can see rather than a component deciding anything.
 
 > **Normative.** **The policy sets `authorised_by`, `authorised_subject` and `authorised_goal`,
 > and sets each only from the record `covering` returned.** It carries no value from a previous
@@ -1098,7 +1182,8 @@ all three would be one thing to be wrong about.
 
 > **Normative — the `core` surface this decision adds, in full.** `core/types.py` gains
 > `Authorization`, `CoverageMember`, `ValueBound`, `BoundKind`, `AuthorizationBasis`,
-> `ValueResolution`, `ResolutionRule`, `ConfirmationAuthorization` and `ConfirmationCoverage`;
+> `ValueResolution`, `ResolutionRule`, `AuthorizationDisposition`, `ConfirmationAuthorization`
+> and `ConfirmationCoverage`;
 > `PermissionRuling` gains `authorised_goal`; `ActionRequest` gains `goal`; `Confirmation`
 > gains `authorization`. `core/protocols.py` gains **`GoalAuthorizations`**,
 > **`AuthorizationResolution`** and **`GoalAuthorizationStore`**. `core/errors.py` gains
@@ -1110,18 +1195,27 @@ all three would be one thing to be wrong about.
 > **Normative — three faces, one object** (ADR-0193 §1's construction, and ADR-0097 §3's split
 > behind it). `GoalAuthorizations` carries **`covering(request) -> Authorization | None`** and
 > nothing else — the face a policy holds. `AuthorizationResolution` carries
-> **`outstanding(id) -> Authorization | None`** and nothing else — the face a trail holds.
-> `GoalAuthorizationStore` carries both plus **`record`**, **`standing(goal)`**, **`recent`**,
-> **`export`** and **`clear`** — the face a composition root holds. **Structural typing is what
+> **`resolve(id) -> Authorization | None`** and nothing else — the face a trail holds, and it
+> returns the row whatever its disposition, because the trail's own check reads that field (§7).
+> `GoalAuthorizationStore` carries both plus **`record`**, **`settle`**, **`standing(goal)`**,
+> **`recent`**, **`export`** and **`clear`** — the face a composition root holds. **Structural typing is what
 > makes that sound**: a policy cannot name `record`, and a trail can name neither `record` nor
 > `covering`, because `mypy --strict` runs over `src` and `tests` and those attributes are not
 > on the annotated types.
 
 > **Normative — the clock disciplines are ADR-0193 §9's and are not re-derived.** `covering` and
 > `standing` evaluate liveness and read the clock **exactly once per call**, measuring every
-> record they consider against that one instant. `outstanding`, `recent`, `export` and `record`
-> evaluate no liveness and read **no** clock. The policy reads no clock at all (ADR-0021 §3,
-> ADR-0036 §1), and `AuditTrail.record` decides liveness against the decision's own `decided_at`.
+> row they consider against that one instant, and each settles an expired `PROPOSED` row it
+> reads (§1). `resolve`, `recent`, `export`, `record` and `settle` evaluate no liveness and read
+> **no** clock — `settle` takes its `settled_at` from the caller, as `record` takes its
+> instants, because a store neither mints ids nor reads a clock (ADR-0021 §3). The policy reads
+> no clock at all (ADR-0021 §3, ADR-0036 §1), and `AuditTrail.record` decides both ends against
+> the decision's own `decided_at`.
+
+> **Normative — `standing(goal)` returns the live rows of that goal and nothing else**, so the
+> listing §11 fixes never renders a question the user has not answered as an authority they
+> hold. `recent` and `export` carry every row whatever its disposition, which is where a
+> declined, an expired and a superseded one are read.
 
 > **Normative — a store fault is not a record.** An `AuthorizationError` out of `covering` is
 > logged and answered `None`, so the ruling proceeds to the `CONFIRM` the request would have
@@ -1142,8 +1236,8 @@ all three would be one thing to be wrong about.
 > (ADR-0004 §1): a goal statement, an argument value and a span of the user's words are the
 > user's personal data. It persists **locally only**, under `Settings.data_dir` (ADR-0155 §1's
 > surviving residency clause), with owner-only file permissions. **`export` returns a portable
-> snapshot of every record** — granting and revoking, live and expired — and **`clear` erases
-> the store wholesale and returns the count**. **There is no `delete(id)`**, exactly as there is
+> snapshot of every row** — proposed, established, declined, expired, revoked and superseded —
+> and **`clear` erases the store wholesale and returns the count**. **There is no `delete(id)`**, exactly as there is
 > none on the recipient-grant store and for its reason: a store from which a row can be removed
 > is one whose history can be rewritten.
 
@@ -1249,6 +1343,16 @@ is on the policy deciding by itself, not on the outcome, so an `ALLOW` naming th
 it rests on is permitted."* §6's standing-grant deferral is a deferral, not a rule this
 contradicts.
 
+**ADR-0193 §9 — no record owed, and which of its clauses this store takes.** §9's sentences are
+stated over *"a grant"* and stay true of every grant. This store takes over, clause for clause,
+its prospective-revocation rule and the two points at which it bites, the residual window from
+`record`'s resolution read to the execution, the one-clock-reading discipline for a liveness
+query, the no-unbounded-spelling rule for an expiry, the strict ordering of the expiry after the
+instant the row was written, and the no-deletion-but-`clear` rule. It does **not** take §9's
+append-a-revoking-record mechanism or the `outstanding` relation that rests on it, because §1
+settles a durable proposal on ADR-0244's shape instead — which is a different store making a
+different choice, not a clause of ADR-0193 becoming false.
+
 **ADR-0193 §3 and §11 — no record owed.** §3's clauses are stated over *"a grant"* and stay true
 of every grant; a second standing authority with different comparisons is a stacked addition,
 recorded here and nowhere else. §11's three states stay **total** over `ALLOW` rows and a
@@ -1310,7 +1414,8 @@ check are each consumed as written, and §13 and §14 state where.
   writes neither, which is the owner's correction 2 and ADR-0249 §4.
 - **An authorization the user establishes ahead of time**, without a `CONFIRM` about a concrete
   call — *"you may spend up to fifty pounds on this"* said before any request exists.
-  `established_by` requires a recorded `CONFIRM` (§1), so it is unrepresentable here. Fired by
+  path (i) requires a recorded `CONFIRM` and path (ii) requires a live row to supersede (§1),
+  so it is unrepresentable here. Fired by
   an ADR that decides what the user is shown when there is no concrete call to show them.
 - **A durable, dated record of the configuring act** for route (c). ADR-0247 §13's deferral,
   untouched.
@@ -1325,9 +1430,10 @@ check are each consumed as written, and §13 and §14 state where.
 > `SqliteGoalAuthorizationStore` in `permissions/`, `ThresholdActionPolicy`'s route (d), and
 > `AuditTrail.record`'s route-(d) invariant. ADR-0137 §2's exception is what makes this one
 > change: the triad rides with the primary consumer whose demands shape the contract.
-> **Lane 2, the establishment and the recheck.** `orchestration` writing the record from an
-> answered `CONFIRM`, `ActionRequest.goal`, the attempt's `AWAITING_AUTHORIZATION` commit and
-> the `add_authorization_id` append, and phase 4's evaluation. **Lane 3, the surfaces.** The
+> **Lane 2, the proposal, the settlement and the recheck.** `orchestration` proposing the row
+> when a `CONFIRM` is put, settling it on the answer, writing a path-(ii) correction,
+> `ActionRequest.goal`, the attempt's `AWAITING_AUTHORIZATION` commit and the
+> `add_authorization_id` append, and phase 4's evaluation. **Lane 3, the surfaces.** The
 > listing, the revocation, and `Confirmation.authorization` with its two projection types.
 
 > **Normative — every lane that changes the wire carries its own bump, and no lane defers
@@ -1357,15 +1463,16 @@ check are each consumed as written, and §13 and §14 state where.
 >    **no redundant approval**.
 > 2. **Permission missing.** No record of that goal → no route (d), `CONFIRM`, the step parks,
 >    the attempt commits `AWAITING_AUTHORIZATION`, **nothing dispatched and no claim made**.
-> 3. **Permission revoked.** A revoking record appended between the establishment and the
->    dispatch → `covering` answers `None`, `CONFIRM`, and the earlier recorded `ALLOW` is
->    unchanged and still true about the moment it was made. **And after a chain of
->    corrections**: revoke the superseding record and every argument is uncovered, including
->    the ones whose members were carried forward from the first act — there is no contributor
->    left standing that the revocation missed.
-> 3a. **Revocation between `covering` and `record`.** Revoke the record the ruling names after
->     `covering` returned and before `AuditTrail.record` begins its resolution read → the write
->     is **refused**, on §7's first check, for the record behind **every** argument.
+> 3. **Permission revoked.** `settle(REVOKED)` between the establishment and the dispatch →
+>    `covering` answers `None`, `CONFIRM`, and the earlier recorded `ALLOW` is unchanged and
+>    still true about the moment it was made. **And after a chain of corrections**: revoke the
+>    superseding row and every argument is uncovered, including the ones whose members were
+>    carried forward from the first act — there is no contributor left standing that the
+>    revocation missed. **And a revoked or superseded row cannot be settled again**: `settle`
+>    refuses a terminal row, so nothing un-supersedes and nothing un-revokes.
+> 3a. **Revocation between `covering` and `record`.** Settle the row the ruling names `REVOKED`
+>     after `covering` returned and before `AuditTrail.record` begins its resolution read → the
+>     write is **refused**, on §7's disposition check, for the row behind **every** argument.
 > 4. **Price inside the range.** An argument at, below and above `maximum` → covered, covered,
 >    **not covered**; and at `minimum` where one is carried → covered.
 > 5. **A price as a JSON float** → **not covered**, on §4's refusal, whatever its magnitude.
@@ -1418,9 +1525,13 @@ check are each consumed as written, and §13 and §14 state where.
 > 12. **The expiry is shown at the act and enforced at dispatch.** A record whose `expires_at`
 >     has passed covers nothing; the `CONFIRM` that would establish one names the instant
 >     through `Confirmation.authorization`; the listing names it.
-> 12a. **The instant shown is the instant written, however late the answer.** A `CONFIRM`
->      recorded at 09:00 under a twelve-hour ttl names 21:00; answered at 10:00, the record
->      carries `decided_at` 09:00 and `expires_at` 21:00 and **not** 22:00.
+> 12a. **The instant shown is the instant written, however late the answer and whatever moves
+>      in between.** A `CONFIRM` recorded at 09:00 under a twelve-hour ttl proposes a row
+>      carrying `proposed_at` 09:00 and `expires_at` 21:00; the confirmation names 21:00;
+>      answered at 10:00 the row settles `ESTABLISHED` carrying 21:00 and **not** 22:00 —
+>      **and the same holds across a process restart, and across a
+>      `workflow_authorization_ttl` changed to any other value in that interval**, because both
+>      instants are read from the durable row and neither is recomputed.
 > 12b. **An answer at or after that instant establishes nothing.** The `CONFIRM` resolves and
 >      the one call is authorised by route (a); **no `Authorization` is written**, and the next
 >      dispatch of that goal asks.
@@ -1457,8 +1568,21 @@ check are each consumed as written, and §13 and §14 state where.
 >      `ConfirmationAuthorization` and `ConfirmationCoverage` asserts that no field of either is
 >      named or typed for a goal id, an authorization id, a `BoundAccount`, a connection
 >      reference, a `SecretName` or a transport endpoint.
-> 21c. **The store refuses a second live record for one goal and declaration**, and `covering`
->      answers `None` where two would; a superseding record for the same pair is accepted.
+> 21c. **The store refuses a second `ESTABLISHED` row for one goal and declaration**, and
+>      `covering` answers `None` where two would; a superseding write for the same pair is
+>      accepted and settles the predecessor in the same write.
+> 21d. **The settlement lifecycle.** A `PROPOSED` row settles `ESTABLISHED`, `DECLINED`,
+>      `EXPIRED`, `REVOKED` or `SUPERSEDED` under compare-and-swap; `settle` **refuses** a row
+>      already terminal; a `PROPOSED` row is **never** live; and a row read after its
+>      `expires_at` while still `PROPOSED` is settled `EXPIRED` by that read.
+> 21e. **A confirmed widening.** A live row bounds GBP 60; *"make it up to eighty"* proposes a
+>      path-(i) row naming it in `supersedes` and the user is asked. Approving settles the new
+>      row `ESTABLISHED` and the old one `SUPERSEDED` **in one write**, with no instant at which
+>      both are established; declining settles the new row `DECLINED` and leaves the old one
+>      live and unchanged.
+> 21f. **The proposal survives a restart.** Propose a row and render the confirmation; restart
+>      the process; recover the confirmation → the same coverage and the same `expires_at`, and
+>      answering then settles that same row.
 > 21b. **Each lane's wire bump.** Lane 1's and Lane 3's changes each make a value one peer emits
 >      invalid for the other, and each lands with its own `PROTOCOL_VERSION` increment and its
 >      own `wire/envelope.py` log entry; Lane 2 changes no wire-carried type and bumps nothing.
