@@ -2522,6 +2522,43 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- A goal's clarification (ADR-0250 §8) -----------------------------
+    # How long a goal's clarification stays answerable, and the one field that
+    # decision adds. ``expires_at`` is computed from it **once**, at the instant the
+    # question is written, and is **never extended, refreshed or recomputed**.
+    #
+    # **PT72H rather than ``parked_read_ttl``'s PT24H, and the two reasons are
+    # different from ADR-0244's.** A park's deadline bounds a durable row holding the
+    # **exact query** that would leave the device, which is the most sensitive content
+    # in that decision; a question holds the system's statement of an objective the
+    # goal already carries, so the deadline is not protecting content the goal does not
+    # also hold. What it **is** doing is bounding how long one goal's single question
+    # slot stays occupied, and three days is the interval over which "I will get back
+    # to it" is the normal case rather than an abandonment — it spans a weekend.
+    #
+    # **It admits no disable sentinel**, for both of ADR-0244 §3's reasons and one of
+    # ADR-0250's own: a question nothing can free would block that goal's next question
+    # **forever**, which is the one-open rule turning from a correctness constraint into
+    # a trap. So ``None`` is not a value this field accepts, and ``gt=timedelta(0)``
+    # refuses a zero or negative lifetime at load rather than producing a question
+    # unanswerable the instant it is asked.
+    #
+    # **It expires a question and never answers one** (ADR-0250 §12). No ``Settings``
+    # field, no deployment mode, no threshold, no environment variable and no
+    # composition-root argument answers a clarification on the user's behalf, and an
+    # expiry is read as an expiry and never as a refusal, an abandonment or a denial:
+    # "Silence is neither refusal nor abandonment". Parsed from an ISO-8601 duration or
+    # ``HH:MM:SS`` string in the environment (``ASSISTANT_GOAL_QUESTION_TTL=PT72H``).
+    goal_question_ttl: _DurationSetting = Field(
+        default=timedelta(hours=72),
+        gt=timedelta(0),
+        description=(
+            "How long a goal's clarification stays answerable before it expires and its "
+            "content is cleared (ADR-0250 §8). Positive and finite, with no spelling "
+            "for 'never'."
+        ),
+    )
+
     # --- Conversations (ADR-0074) ----------------------------------------
     # How long a captured episode is retained, and how long a deleted
     # conversation's tombstone outlives the deletion that stamped it. Both are

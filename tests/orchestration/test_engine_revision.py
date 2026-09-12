@@ -325,7 +325,7 @@ async def test_every_plan_is_persisted_and_the_chain_is_legible() -> None:
     assert revision.id != first.id
 
     export = await harness.plans.export()
-    assert export.schema_version == 9
+    assert export.schema_version == 10
     assert {plan.id for plan in export.plans} == {first.id, revision.id}
 
 

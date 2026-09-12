@@ -116,6 +116,7 @@ from ai_assistant.core.types import (
     AttemptTransition,
     Belief,
     BeliefSummary,
+    ClarificationWithdrawal,
     Confirmation,
     ConfirmationEgress,
     ContinuationToken,
@@ -125,7 +126,9 @@ from ai_assistant.core.types import (
     Disposition,
     Evidence,
     ExchangeDisposition,
+    GoalAbandonment,
     GoalRevision,
+    GoalSummary,
     IngestSummary,
     LearnDecision,
     LearnOutcome,
@@ -165,6 +168,7 @@ from ai_assistant.core.types import (
     StepStatus,
     TraceOutcome,
     TurnOutcome,
+    TurnReference,
     TurnResult,
     band_of,
     describe_untrusted,
@@ -3358,6 +3362,7 @@ class Engine:
         *,
         timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, threaded to the seam which owns the deadline (ADR-0029 §4)
         conversation_id: Identifier | None = None,
+        reference: TurnReference | None = None,
     ) -> TurnOutcome:
         """Run one turn and drive the step it produces (ADR-0042 §3, ADR-0074 §2).
 
@@ -3391,6 +3396,14 @@ class Engine:
                 starting one turns a typo or a stale copy-paste into "my
                 conversation vanished" and lands the user's continuation somewhere
                 they cannot find (ADR-0074 §1).
+            reference: What this turn is answering, or which goal it is about
+                (ADR-0250 §11). **Accepted and not yet resolved**: ADR-0250 §19's M1
+                lands the contract "at unchanged behaviour" and rules in terms that
+                "no reference is resolved" in it, so a turn carrying one runs exactly
+                as a turn carrying none and :attr:`TurnOutcome.reference` stays
+                ``None``. M3 is the lane that resolves it. It is validated and
+                measured here, so a client cannot reach the wire's payload bound by
+                passing one.
 
         Returns:
             The turn's result and the disposition of the step it drove — including
@@ -3425,6 +3438,7 @@ class Engine:
             utterance=utterance,
             timeout=timeout,
             conversation_id=selected,
+            reference=reference,
         )
         return await self._tracked(
             self._converse(utterance, timeout=timeout, conversation_id=selected),
@@ -3438,6 +3452,7 @@ class Engine:
         *,
         timeout: timedelta,
         conversation_id: Identifier | None = None,
+        reference: TurnReference | None = None,
     ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
         """Run one turn as :meth:`converse` does, streaming the answer (ADR-0173 §4).
 
@@ -3465,6 +3480,9 @@ class Engine:
             utterance: What the user said, passed through untouched.
             timeout: The per-attempt budget, as :meth:`converse`.
             conversation_id: The conversation to continue, or ``None``.
+            reference: Exactly :meth:`converse`'s, which this method takes by
+                ADR-0173's own clause rather than by an amendment to it — and which
+                ADR-0250 §19's M1 likewise accepts without resolving.
 
         Returns:
             An async iterator over the answer's chunks and then the turn's outcome.
@@ -3486,6 +3504,7 @@ class Engine:
             utterance=utterance,
             timeout=timeout,
             conversation_id=selected,
+            reference=reference,
         )
         return self._streamed(utterance, timeout=timeout, conversation_id=selected)
 
@@ -4411,6 +4430,100 @@ class Engine:
             )
             raise UnknownContinuationError(msg)
         return await operations.cancel(park_id)
+
+    # --- goals, and the two acts on one (ADR-0250 §§12, 15) ---------------
+    #
+    # **Three promoted operations at unchanged behaviour.** ADR-0250 §19's M1 lands
+    # "the contract, the wire and the stored shapes" and rules that no behaviour
+    # changes in it; §19's M3 is the `orchestration` lane that implements the
+    # engagement acts, `abandon_goal` and the rest. So each of the three below
+    # type-checks, is promoted on the wire by `wire/surface.py`'s own derivation, and
+    # returns the **non-acting member of its closed vocabulary** — which is what the
+    # ADR gives an operation whose behaviour has not landed, in the only spelling its
+    # own types admit: `AssistantEngineContract` requires a refusal to be a result and
+    # never an exception, so `NotImplementedError` is not available here.
+    #
+    # `goals` could not be implemented in this lane even if M1 admitted it: ADR-0250
+    # §9's eight `PlanStore` members carry **no goal listing** — `candidates_for` is
+    # per conversation — so there is no contract route to the page this operation
+    # answers. That gap is filed rather than closed here.
+
+    async def goals(
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
+    ) -> tuple[GoalSummary, ...]:
+        """List the user's goals, most recently engaged first (ADR-0250 §15).
+
+        **Empty until ADR-0250 §19's M3**, which is the lane that reads the store: M1
+        changes no behaviour, and `PlanStore` carries no goal listing for this
+        operation to read (see the note above this method). The paging arguments are
+        refused and measured here exactly as every other page on this surface is, so
+        the two implementations refuse the same values from the day the operation is
+        reachable.
+
+        Args:
+            limit: How many summaries to return; the default is normative.
+            offset: How many to skip.
+
+        Returns:
+            The page, as a tuple.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``limit`` is not positive or ``offset`` is negative.
+        """
+        self._reject_if_closing()
+        self._check_page("goals", limit=limit, offset=offset)
+        return ()
+
+    async def withdraw_clarification(self, question_id: Identifier, /) -> ClarificationWithdrawal:
+        """Take back a clarification without answering it (ADR-0250 §12).
+
+        **``NOTHING_TO_WITHDRAW`` until ADR-0250 §19's M3**, which is the lane that
+        raises a question in the first place: M1 raises none, so there is none to
+        withdraw and the answer is true of what this tree holds. It is also the
+        vocabulary's non-acting member, which is what an unknown id answers — "an
+        unknown id is ``NOTHING_TO_WITHDRAW`` and never a raise".
+
+        Args:
+            question_id: The clarification to withdraw.
+
+        Returns:
+            Which of the two states this call reached.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``question_id`` is blank.
+        """
+        self._reject_if_closing()
+        named = identifier(question_id, name="question_id")
+        check_arguments(
+            "withdraw_clarification", max_bytes=self._max_payload_bytes, question_id=named
+        )
+        return ClarificationWithdrawal.NOTHING_TO_WITHDRAW
+
+    async def abandon_goal(self, goal_id: Identifier, /) -> GoalAbandonment:
+        """Give up on a goal, and say what that did (ADR-0250 §12).
+
+        **``NO_SUCH_GOAL`` until ADR-0250 §19's M3**, which is the lane that writes
+        the status: M1 writes no ``GoalStatus`` at all — §20 arm 23 asserts over the
+        shipped tree that this decision's two status writes have exactly one caller
+        each, and in this lane they have none — so this returns the vocabulary's
+        non-acting member rather than claiming an abandonment nothing performed.
+
+        Args:
+            goal_id: The goal to abandon.
+
+        Returns:
+            Which of the three states this call reached.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``goal_id`` is blank.
+        """
+        self._reject_if_closing()
+        named = identifier(goal_id, name="goal_id")
+        check_arguments("abandon_goal", max_bytes=self._max_payload_bytes, goal_id=named)
+        return GoalAbandonment.NO_SUCH_GOAL
 
     async def learn(self, event: FeedbackEvent) -> LearnOutcome:
         """Fold one piece of feedback back into memory (ADR-0042 §3; the correction leg).

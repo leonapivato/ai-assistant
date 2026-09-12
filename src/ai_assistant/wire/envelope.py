@@ -1568,7 +1568,65 @@ from ai_assistant.wire.errors import (
 #: no existing frame's encoding changes, no :class:`FrameKind` is added, no codec entry
 #: is registered, and the error mapping is untouched — ADR-0251's L1 mints no error class
 #: and removes none.
-PROTOCOL_VERSION: Final[int] = 39
+#:
+#: **40 since ADR-0250 §19**, and the grounds are four at once — "every wire-visible
+#: change rides M1", because "splitting them across lanes would leave two peers passing
+#: the exact-match handshake and then failing to decode a turn — the failure ADR-0124 §9
+#: exists to prevent".
+#:
+#: 1. :class:`~ai_assistant.core.types.TurnOutcome` gains **four** ``None``-defaulting
+#:    members — ``goal_engagement``, ``clarification``, ``reference`` and
+#:    ``disambiguation`` (ADR-0250 §5). That model sets ``extra="forbid"`` and
+#:    ``wire/codec.py`` renders a model by ``model_dump()``, so a hub at 40 emits four
+#:    members on **every** turn it sends and a client at 39 fails each with
+#:    ``extra_forbidden``. ADR-0124 §9's second limb, exactly as at 39.
+#: 2. :class:`~ai_assistant.core.types.Goal` gains ``last_engaged_in``, and a ``Goal``
+#:    rides :class:`~ai_assistant.core.types.TurnResult`.
+#: 3. ``converse`` and ``converse_streaming`` gain the ``reference`` keyword (§11), so a
+#:    client at 40 names an argument a hub at 39 has no parameter for.
+#: 4. The promoted surface gains **three** operations — ``goals``,
+#:    ``withdraw_clarification`` and ``abandon_goal`` (§15, §12) — each reaching a hub
+#:    at 39 as an unknown method.
+#:
+#: **A defaulted member is still a shape change**, as the entry at 39 states of
+#: ``AttemptEffort.kind``, and the four defaults are what make the change total: a
+#: ``TurnOutcome`` constructed anywhere in this tree carries all four, so every frame
+#: carrying one moves together.
+#:
+#: **No compatibility shim, negotiation or lenient decode.** ADR-0084 §3's exact-match
+#: handshake is the mechanism and the refusal naming both versions is the intended
+#: user-visible outcome, so a peer at 39 and a peer at 40 refuse each other and say so.
+#:
+#: **No new class of content crosses.** ADR-0250's vocabularies are ``StrEnum`` values
+#: spelled by lower-cased member name, and §15's bar binds every statement rendered for
+#: one: no record identifier other than the question id the answer act requires, no
+#: destination, no account identity, no provider name, no query or fragment of one, no
+#: monetary figure, no budget, no threshold and no ``Settings`` field name.
+#: :class:`~ai_assistant.core.types.GoalCandidacy` and
+#: :class:`~ai_assistant.core.types.CandidateGoal` carry **no field an identifier could
+#: sit in** (§4), and a settled :class:`~ai_assistant.core.types.GoalQuestion` carries
+#: no content at all (§8).
+#:
+#: **The promoted method set moves to sixty-one**, and ADR-0177 §1's browser enumeration
+#: moves to thirty-three — but the gateway serves none of the three yet, which is
+#: ADR-0250 §19's M4 and not this lane.
+#:
+#: **Two stored-record versions move and neither is one of this wire's.** The plan
+#: store's own ``schema_version`` goes 2 → 3 (its second migration, ADR-0250 §9 — the
+#: ``goal_questions`` table plus two ``goals`` columns) and
+#: ``PlanExport.schema_version`` goes 9 → 10, because that document gains ``questions``
+#: and every ``Goal`` in it now emits ``last_engaged_in``. Both are **stored-record**
+#: versions rather than a second wire ground: neither crosses a frame and neither is
+#: emitted by a peer (ADR-0249 §12). The parked-read store's stays at **3** — ADR-0250
+#: §17 leaves ADR-0244 §3 untouched — ``ConversationExport.schema_version`` stays at
+#: **2**, and no row is minted in ADR-0087 §2c's scalar table.
+#:
+#: **Nothing else under** ``wire/`` **changes**: the connect exchange gains no member,
+#: no existing frame's encoding changes, no :class:`FrameKind` is added, no codec entry
+#: is registered, and the error mapping is untouched — ADR-0250's M1 mints no error class
+#: and removes none. ``wire/surface.py`` reads the three new methods and the new keyword
+#: off the Protocol itself, which is what that module exists for.
+PROTOCOL_VERSION: Final[int] = 40
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

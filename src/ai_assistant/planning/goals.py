@@ -25,10 +25,21 @@ from ai_assistant.core.types import (
     TERMINAL_ATTEMPT_STATES,
     AttemptPhase,
     GoalAttempt,
+    GoalCandidates,
+    GoalQuestionDisposition,
 )
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import AttemptTransition, Goal, GoalInterpretation
+    from collections.abc import Iterable
+
+    from ai_assistant.core.types import (
+        AttemptTransition,
+        Goal,
+        GoalInterpretation,
+        GoalQuestion,
+        GoalStatus,
+        UtcInstant,
+    )
 
 #: ADR-0249 §6's order, read off the declaration rather than restated: "within one
 #: attempt, ``phase`` advances in that order and never moves backwards".
@@ -106,6 +117,121 @@ def appended(goal: Goal, interpretation: GoalInterpretation) -> Goal:
                 "version": goal.version + 1,
             }
         )
+    )
+
+
+def engaged(goal: Goal, *, at: UtcInstant, conversation_id: str) -> Goal:
+    """Stamp ``goal``'s engagement and advance its version (ADR-0250 §1, §9).
+
+    The **one** place either engagement field is written, so the two conforming stores
+    in this package cannot drift on §1's "exactly one writer" clause. It writes
+    **nothing else**: not the status, not the interpretation, not the attempt — and
+    :attr:`Goal.conversation_id` is **never rewritten**, because that stays the
+    conversation the goal was opened in (ADR-0249 §1's provenance clause).
+
+    Args:
+        goal: The goal as stored.
+        at: The engagement instant.
+        conversation_id: The conversation the engaging turn ran under.
+
+    Returns:
+        The goal as it stands after the stamp.
+    """
+    return goal.model_copy(
+        update={
+            "last_engaged_at": at,
+            "last_engaged_in": conversation_id,
+            "version": goal.version + 1,
+        }
+    )
+
+
+def with_status(goal: Goal, *, status: GoalStatus) -> Goal:
+    """Move ``goal``'s status and advance its version (ADR-0250 §9).
+
+    The goal's **only** status-mutation route, stated once for both stores. It writes
+    **nothing else**: not the engagement stamp, not the interpretation, not the
+    attempt. **No member of the vocabulary is refused here**, because A10 and A3 write
+    ``ACHIEVED`` and ``BLOCKED`` through this same route and "a store that refused a
+    member would be a second place the vocabulary is decided" — which act may write
+    which member is the caller's rule.
+
+    Args:
+        goal: The goal as stored.
+        status: The status to write.
+
+    Returns:
+        The goal as it stands after the move.
+    """
+    return goal.model_copy(update={"status": status, "version": goal.version + 1})
+
+
+def capped(goals: Iterable[Goal], *, limit: int) -> GoalCandidates:
+    """Order a candidate set by ADR-0250 §1's key and hold it to ``limit`` (§2).
+
+    The order is ``last_engaged_at`` **descending** with the ``goal_id`` **ascending**
+    as the tie-break, and a goal carrying **no** instant sorts **after** every goal
+    that carries one. ADR-0074 §2's reason binds: "some total order must be named or
+    two implementations answer the same page differently", and two goals engaged in
+    the same instant is reachable because a migrated pair carries no instant at all.
+
+    **The absent instant sorts last rather than first, and that is the conservative
+    direction**: sorting it first would make the oldest, least-touched objective in
+    the store the focused goal of every conversation that holds one.
+
+    Args:
+        goals: The whole membership of the set, in any order.
+        limit: The most candidates to return.
+
+    Returns:
+        The capped set, with ``elided`` counting what the truncation dropped.
+
+    Raises:
+        PlanningError: If ``limit`` is not positive.
+    """
+    if limit < 1:
+        msg = f"a candidate set is read with a positive limit and not {limit} (ADR-0250 §9)"
+        raise PlanningError(msg)
+    ordered = sorted(
+        goals,
+        key=lambda goal: (
+            goal.last_engaged_at is None,
+            -(goal.last_engaged_at.timestamp() if goal.last_engaged_at is not None else 0.0),
+            goal.id,
+        ),
+    )
+    return GoalCandidates(goals=tuple(ordered[:limit]), elided=max(0, len(ordered) - limit))
+
+
+def settled(
+    question: GoalQuestion, *, disposition: GoalQuestionDisposition, at: UtcInstant
+) -> GoalQuestion:
+    """Settle ``question``, clearing its content in the same step (ADR-0250 §8).
+
+    "A settled question keeps its facts and loses its content": ``text`` and ``about``
+    are cleared **in the same step that moves the disposition**, and no implementation
+    retains a copy, a digest, a snapshot or an archive of either. ``goal_id`` and
+    ``attempt_id`` survive, so a late answer still reaches the goal (§11).
+
+    Args:
+        question: The open question as stored.
+        disposition: The terminal member to write.
+        at: The settlement instant.
+
+    Returns:
+        The question as it stands after the settlement.
+
+    Raises:
+        PlanningError: If ``disposition`` is ``OPEN``, which settles nothing.
+    """
+    if disposition is GoalQuestionDisposition.OPEN:
+        msg = (
+            "settle_question moves an OPEN question to a terminal member: OPEN settles "
+            "nothing and no disposition is inferred from silence (ADR-0250 §9, §12)"
+        )
+        raise PlanningError(msg)
+    return question.model_copy(
+        update={"disposition": disposition, "settled_at": at, "text": None, "about": None}
     )
 
 
