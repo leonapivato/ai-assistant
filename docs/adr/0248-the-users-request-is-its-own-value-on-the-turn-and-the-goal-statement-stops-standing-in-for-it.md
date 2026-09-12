@@ -1,7 +1,32 @@
 # 248. The user's request is its own value on the turn, and the goal statement stops standing in for it
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0249 (§3's fallback clause in its accessor alone: where a park carries no `utterance`, `Engine._resume_read` takes `park.goal.outcome` rather than the parked `Goal.statement`, because ADR-0249 §12 converts a pre-decision park's `goal` column to a `GoalBrief` that has no `statement`. The bytes are identical, the conversion setting `outcome` from the stored `statement`, so §3's "That reading is exact for the whole life of the fallback, and A1 does not change that" binds entire and is vindicated rather than weakened. That one accessor, and nothing else in this ADR: the fallback is still the only site that may take it, is still not widened to a park carrying an `utterance`, to a blank one, to any other reader of §5's table or to any other site, is still not removed, and a later change may still delete it once every park predating this decision has expired; §§1, 2, 4-13 stand entire and §8's list of what this ADR left to A1 is what ADR-0249 decides)
 - Date: 2026-09-12
+- **Partially superseded: 2026-09-12 by ADR-0249 — §3's fallback clause in its accessor
+  alone. Nothing else in this ADR.** ADR-0249 is A1: the decision this one was written to
+  land before, and the one §8 hands every question about the goal's meaning to.
+
+  **The accessor that moves.** §3 rules that `Engine._resume_read` takes the user's words
+  from the park's own `utterance` and, *"Where the park carries none"*, *"takes the parked
+  `Goal.statement` instead, and it is the only place in the system that may"*. ADR-0249 §11
+  makes `ParkedRead.goal` a `GoalBrief` and its §12 converts the `goal` column of every park
+  written before it — `outcome` from the stored `statement`, `goal_id` from the stored `id`.
+  A `GoalBrief` has no `statement`, so a reader holding only this ADR would read a field that
+  is not there, which is ADR-0070 §1's test coming out on the supersession side. After
+  ADR-0249 the fallback reads **`park.goal.outcome`**.
+
+  **The bytes do not move, and that is why the scope is one accessor.** §3's own clause —
+  *"**That reading is exact for the whole life of the fallback, and A1 does not change
+  that.**"* — stays true word for word: the converted `outcome` is the stored `statement`,
+  which `_goal_from` minted from the user's own stripped words, and ADR-0249 §3's revision 1
+  keeps that construction for every goal opened after it. The clause anticipated A1 by name
+  and was right; what it did not anticipate is the field's rename at that one site.
+
+  **Nothing else in this ADR moves.** §3's no-widening clause, its only-place clause, its
+  no-removal clause and its permission for a later change to delete it once every predating
+  park has expired all bind entire; §1's request value is what makes ADR-0249 §7's
+  `USER_STATED` span check buildable at all; and §§1, 2, 4-13 stand whole. ADR-0249 is the
+  decision §8 named, and every question §8 reserved for A1 it answers.
 - **Partially supersedes** [ADR-0225](0225-a-transcript-archive-keeps-the-exchange-as-text-and-nothing-but-the-user-reads-it.md)
   — **§1's fourth clause in its first limb alone: where the pass carried a turn, "what the
   user said" is identified as that turn's own `utterance` rather than its goal statement.
