@@ -832,8 +832,11 @@ class FakeAuditTrail:
                 second handler for the shape of the refusal.
             DuplicateDecisionError: If the id is already recorded.
             InvalidResolutionError: If ``resolves`` fails the invariant.
-            InvalidAuthorisationError: If a route-(b) egress decision fails any of
-                ADR-0193 §6's eight checks, or if a resolving ``ALLOW`` carries an
+            InvalidAuthorisationError: If a route-(b) egress decision — a standing
+                row carrying an ``authorised_subject`` — fails any of ADR-0193 §6's
+                eight checks; if a route-(c) one carries a binding that is not
+                closed-loop or a pointer that is not its ``account.reference``
+                (ADR-0247 §2); or if a resolving ``ALLOW`` carries an
                 ``authorised_subject``.
         """
         snapshot = _revalidated_decision(decision)
