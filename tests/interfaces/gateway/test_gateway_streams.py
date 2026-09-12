@@ -52,7 +52,7 @@ from ai_assistant.wire.errors import HubUnavailableError
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from ai_assistant.core.types import EncodableText, Identifier
+    from ai_assistant.core.types import EncodableText, Identifier, TurnReference
 
 pytestmark = pytest.mark.integration
 
@@ -168,6 +168,7 @@ class _StreamUnreachable(FakeAssistantEngine):
         *,
         timeout: timedelta,
         conversation_id: Identifier | None = None,
+        reference: TurnReference | None = None,
     ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
         """Fail the way a closed door fails, from the iteration."""
         self.calls.append(("converse_streaming", {"utterance": utterance}))
@@ -199,6 +200,7 @@ class _Abandonable(FakeAssistantEngine):
         *,
         timeout: timedelta,
         conversation_id: Identifier | None = None,
+        reference: TurnReference | None = None,
     ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
         """Yield chunks forever, recording the close the caller owes."""
         self.calls.append(("converse_streaming", {"utterance": utterance}))
@@ -1065,6 +1067,7 @@ class _Stalling(FakeAssistantEngine):
         *,
         timeout: timedelta,
         conversation_id: Identifier | None = None,
+        reference: TurnReference | None = None,
     ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
         """Compose forever, recording the close the caller owes."""
         self.calls.append(("converse_streaming", {"utterance": utterance}))

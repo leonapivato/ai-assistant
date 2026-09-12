@@ -1195,7 +1195,7 @@ def test_the_kind_vocabulary_is_the_five_the_decisions_admit() -> None:
 
 def test_export_is_versioned_and_defaults_to_empty() -> None:
     export = PlanExport(exported_at=_WHEN)
-    assert export.schema_version == 9
+    assert export.schema_version == 10
     assert export.goals == ()
 
 
@@ -1213,13 +1213,13 @@ def test_export_pins_the_schema_version_to_exactly_nine() -> None:
     mislabelled. The positive default is what a producer gets for free; only the
     rejections pin it.
 
-    **The neighbour on each side is asserted and not only the far ones**: ``8`` is
-    the shape this contract had one decision ago and ``10`` is the shape nobody has
+    **The neighbour on each side is asserted and not only the far ones**: ``9`` is
+    the shape this contract had one decision ago and ``11`` is the shape nobody has
     decided, and a ``Literal`` that admitted either would be a document announcing a
     shape it does not have.
     """
-    assert PlanExport(exported_at=_WHEN, schema_version=9).schema_version == 9
-    for stale in (1, 2, 3, 4, 5, 6, 7, 8, 10):
+    assert PlanExport(exported_at=_WHEN, schema_version=10).schema_version == 10
+    for stale in (1, 2, 3, 4, 5, 6, 7, 8, 9, 11):
         with pytest.raises(ValidationError):
             PlanExport(exported_at=_WHEN, schema_version=stale)  # type: ignore[arg-type]
 
@@ -1264,7 +1264,7 @@ def test_export_carries_a_whole_supersession_chain() -> None:
 
     export = PlanExport(exported_at=_WHEN, goals=(_goal(),), plans=(first, revision))
 
-    assert export.schema_version == 9
+    assert export.schema_version == 10
     assert [plan.supersedes for plan in export.plans] == [None, "p1"]
 
 
@@ -1345,7 +1345,7 @@ def test_export_round_trips_through_json() -> None:
     export = PlanExport(exported_at=_WHEN, goals=(_goal(),), plans=(plan,), executions=(execution,))
     restored = TypeAdapter(PlanExport).validate_json(export.model_dump_json())
     assert restored == export
-    assert restored.schema_version == 9
+    assert restored.schema_version == 10
     request = restored.plans[0].read_request
     assert request is not None
     assert {ask.kind for ask in request.asks} == {ReadKind.SIGHTED_QUERY, ReadKind.CITATION_HOP}

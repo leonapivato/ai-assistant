@@ -63,6 +63,7 @@ from ai_assistant.core.types import (
     Belief,
     BeliefBand,
     BeliefSummary,
+    ClarificationWithdrawal,
     Confirmation,
     ConfirmationEgress,
     ContinuationToken,
@@ -75,8 +76,10 @@ from ai_assistant.core.types import (
     EgressBinding,
     ExecutionState,
     Goal,
+    GoalAbandonment,
     GoalBrief,
     GoalInterpretation,
+    GoalSummary,
     GrantableSource,
     GrantScope,
     Ground,
@@ -124,6 +127,7 @@ from ai_assistant.core.types import (
     StepStatus,
     TimeOfDay,
     TurnOutcome,
+    TurnReference,
     TurnResult,
     Warrant,
     describe_untrusted,
@@ -566,6 +570,12 @@ class FakeAssistantEngine:
         self.turn_outcome: TurnOutcome | None = None
         self.observation: ObservationReport = ObservationReport()
         self.answered: AnswerOutcome | None = None
+        # ADR-0250 §§12, 15's three operations, each defaulting to what the concrete
+        # engine answers in that decision's M1: an empty listing, and the non-acting
+        # member of each closed vocabulary.
+        self.goal_summaries: list[GoalSummary] = []
+        self.withdrawal: ClarificationWithdrawal = ClarificationWithdrawal.NOTHING_TO_WITHDRAW
+        self.abandonment: GoalAbandonment = GoalAbandonment.NO_SUCH_GOAL
         #: The grantable sources this engine holds, by declared identity, each
         #: mapped to its configured location or to ``None`` where it has none
         #: (ADR-0102 §6). Scriptable with :meth:`hold_source`, so a client's own
@@ -742,8 +752,15 @@ class FakeAssistantEngine:
         *,
         timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, as the Protocol declares it
         conversation_id: Identifier | None = None,
+        reference: TurnReference | None = None,
     ) -> TurnOutcome:
-        """Run one turn against a conversation, minting one if none is named."""
+        """Run one turn against a conversation, minting one if none is named.
+
+        ``reference`` is **accepted and recorded, and resolved by nothing**, which is
+        what the concrete engine does in ADR-0250 §19's M1: that lane lands the
+        contract at unchanged behaviour and rules that "no reference is resolved". A
+        consumer asserts that the value crossed the seam by reading :attr:`calls`.
+        """
         selected = (
             None if conversation_id is None else identifier(conversation_id, name="conversation_id")
         )
@@ -753,8 +770,18 @@ class FakeAssistantEngine:
             utterance=utterance,
             timeout=timeout,
             conversation_id=selected,
+            reference=reference,
         )
-        self.calls.append(("converse", {"utterance": utterance, "conversation_id": selected}))
+        self.calls.append(
+            (
+                "converse",
+                {
+                    "utterance": utterance,
+                    "conversation_id": selected,
+                    "reference": reference,
+                },
+            )
+        )
         held = self._resolve(selected)
         # ``reply`` is populated because ADR-0170 §4 obliges an answer on every shape
         # but a park and a recovered resume, and ``TurnOutcome`` refuses an outcome
@@ -773,6 +800,7 @@ class FakeAssistantEngine:
         *,
         timeout: timedelta,  # the caller's budget, as the Protocol declares it
         conversation_id: Identifier | None = None,
+        reference: TurnReference | None = None,
     ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
         """Run one turn, publishing its answer as chunks first (ADR-0173 §4).
 
@@ -796,6 +824,7 @@ class FakeAssistantEngine:
             utterance=utterance,
             timeout=timeout,
             conversation_id=selected,
+            reference=reference,
         )
         return self._streamed(utterance, conversation_id=selected)
 
@@ -1757,6 +1786,65 @@ class FakeAssistantEngine:
             self.read_settled[token.handle] = ReadAnswerOutcome.ALREADY_SETTLED
             return self._checked(ReadCancellation.WITHDRAWN, "cancel_read")
         return self._checked(ReadCancellation.NOTHING_TO_CANCEL, "cancel_read")
+
+    async def goals(
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
+    ) -> tuple[GoalSummary, ...]:
+        """Return the scripted goal listing (ADR-0250 §15).
+
+        Empty by default, which is what the concrete engine answers in ADR-0250
+        §19's M1 — that lane changes no behaviour, and ``PlanStore`` carries no goal
+        listing for the operation to read.
+
+        Args:
+            limit: How many summaries to return.
+            offset: How many to skip.
+
+        Returns:
+            The scripted page, sliced by the paging arguments.
+        """
+        page_argument(limit, name="limit")
+        page_argument(offset, name="offset")
+        check_arguments("goals", max_bytes=self._max_payload_bytes, limit=limit, offset=offset)
+        self.calls.append(("goals", {"limit": limit, "offset": offset}))
+        return tuple(self.goal_summaries[offset : offset + limit])
+
+    async def withdraw_clarification(self, question_id: Identifier, /) -> ClarificationWithdrawal:
+        """Return what became of a withdrawal (ADR-0250 §12).
+
+        ``NOTHING_TO_WITHDRAW`` unless a consumer scripts otherwise, which is both
+        the vocabulary's non-acting member and what an unknown id answers — "an
+        unknown id is ``NOTHING_TO_WITHDRAW`` and never a raise".
+
+        Args:
+            question_id: The clarification to withdraw.
+
+        Returns:
+            The scripted answer.
+        """
+        named = identifier(question_id, name="question_id")
+        check_arguments(
+            "withdraw_clarification", max_bytes=self._max_payload_bytes, question_id=named
+        )
+        self.calls.append(("withdraw_clarification", {"question_id": named}))
+        return self.withdrawal
+
+    async def abandon_goal(self, goal_id: Identifier, /) -> GoalAbandonment:
+        """Return what became of an abandonment (ADR-0250 §12).
+
+        ``NO_SUCH_GOAL`` unless a consumer scripts otherwise, which is the
+        vocabulary's non-acting member and what an unknown id answers.
+
+        Args:
+            goal_id: The goal to abandon.
+
+        Returns:
+            The scripted answer.
+        """
+        named = identifier(goal_id, name="goal_id")
+        check_arguments("abandon_goal", max_bytes=self._max_payload_bytes, goal_id=named)
+        self.calls.append(("abandon_goal", {"goal_id": named}))
+        return self.abandonment
 
     async def learn(self, event: FeedbackEvent) -> LearnOutcome:
         """Fold one piece of feedback into memory, storing exactly one belief."""

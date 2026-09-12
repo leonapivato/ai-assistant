@@ -19,9 +19,15 @@ from uuid import uuid4
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import ActiveExecutionError, PlanningError, StaleExecutionError
-from ai_assistant.core.types import GoalDeletion, PlanExport, StepStatus
+from ai_assistant.core.types import (
+    GoalDeletion,
+    GoalQuestionDisposition,
+    PlanExport,
+    StepStatus,
+)
 from ai_assistant.planning.execution import PlanExecution
-from ai_assistant.planning.goals import advanced, appended, bounded
+from ai_assistant.planning.goals import advanced, appended, bounded, capped, engaged, settled
+from ai_assistant.planning.goals import with_status as _with_status
 
 if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
@@ -31,8 +37,12 @@ if TYPE_CHECKING:
         ExecutionState,
         Goal,
         GoalAttempt,
+        GoalCandidates,
+        GoalQuestion,
         GoalRevision,
+        GoalStatus,
         StepTransition,
+        UtcInstant,
     )
 
 
@@ -69,6 +79,7 @@ class InMemoryPlanStore:
         """
         self._goals: dict[str, Goal] = {}
         self._attempts: dict[str, GoalAttempt] = {}
+        self._questions: dict[str, GoalQuestion] = {}
         self._plans: dict[str, ActionPlan] = {}
         self._executions: dict[str, ExecutionState] = {}
         self._clock = checked_clock(now, owner="InMemoryPlanStore")
@@ -153,6 +164,186 @@ class InMemoryPlanStore:
         updated = appended(stored, revision.interpretation)
         self._goals[updated.id] = updated
         return updated.model_copy(deep=True)
+
+    def _goal_for_write(self, goal_id: str, expected_version: int, what: str) -> Goal:
+        """Read a goal for a compare-and-swap write, or refuse (ADR-0250 §9).
+
+        The read and the comparison happen with no ``await`` between them and the
+        caller writes in the same step, so nothing can interleave and no decision is
+        taken on a separate read — which is ADR-0014 §5's discipline stated once for
+        both of this decision's goal writes rather than twice.
+
+        Args:
+            goal_id: The goal to read.
+            expected_version: The ``Goal.version`` the caller computed against.
+            what: What the caller is about to do, for the refusal message.
+
+        Returns:
+            The stored goal.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            PlanningError: If ``goal_id`` names no stored goal.
+        """
+        stored = self._goals.get(goal_id)
+        if stored is None:
+            msg = f"cannot {what} unknown goal {goal_id}"
+            raise PlanningError(msg)
+        if stored.version != expected_version:
+            msg = (
+                f"goal {goal_id} is at version {stored.version}, not {expected_version}: "
+                f"re-read it and recompute the write"
+            )
+            raise StaleExecutionError(msg)
+        return stored
+
+    async def engage_goal(
+        self, goal_id: str, /, *, at: UtcInstant, conversation_id: str, expected_version: int
+    ) -> Goal:
+        """Stamp the goal's engagement, compare-and-swap (ADR-0250 §1, §9).
+
+        The **one** writer of ``last_engaged_at`` and ``last_engaged_in``. It writes
+        nothing else, and :attr:`Goal.conversation_id` is never rewritten.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            PlanningError: If ``goal_id`` names no stored goal.
+        """
+        stored = self._goal_for_write(goal_id, expected_version, "engage")
+        updated = engaged(stored, at=at, conversation_id=conversation_id)
+        self._goals[updated.id] = updated
+        return updated.model_copy(deep=True)
+
+    async def set_goal_status(
+        self,
+        goal_id: str,
+        /,
+        *,
+        status: GoalStatus,
+        at: UtcInstant,  # noqa: ARG002 — the contract's instant; no field of `Goal` records it, and this store mints no second record to hold it (ADR-0250 §9)
+        expected_version: int,
+    ) -> Goal:
+        """Move the goal's status, compare-and-swap (ADR-0250 §9).
+
+        The goal's **only** status-mutation route. It refuses no member of the
+        vocabulary, because A10 and A3 write ``ACHIEVED`` and ``BLOCKED`` through this
+        same route and a store that refused one would be a second place the vocabulary
+        is decided.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            PlanningError: If ``goal_id`` names no stored goal.
+        """
+        stored = self._goal_for_write(goal_id, expected_version, "set the status of")
+        updated = _with_status(stored, status=status)
+        self._goals[updated.id] = updated
+        return updated.model_copy(deep=True)
+
+    async def candidates_for(self, conversation_id: str, /, *, limit: int) -> GoalCandidates:
+        """Return this conversation's candidate goals, capped (ADR-0250 §2, §9).
+
+        Membership is the two-field test §2 states — the goal was **opened in** this
+        conversation, or was **last engaged in** it — open or closed alike, so a goal
+        carried into a second conversation is a candidate in two of them and in no
+        more, because ``last_engaged_in`` holds one value.
+
+        Raises:
+            PlanningError: If ``limit`` is not positive.
+        """
+        return capped(
+            (
+                goal.model_copy(deep=True)
+                for goal in self._goals.values()
+                if conversation_id in (goal.conversation_id, goal.last_engaged_in)
+            ),
+            limit=limit,
+        )
+
+    async def record_question(self, question: GoalQuestion, /) -> bool:
+        """Write an ``OPEN`` question, or refuse a second on one goal (§9).
+
+        The read of the existing question and the write are one indivisible step:
+        there is no ``await`` between them, so two turns of one conversation cannot
+        both be admitted against the same goal.
+
+        Raises:
+            PlanningError: If ``goal_id`` or ``attempt_id`` names no stored record, or
+                this store already holds a question under this ``id``.
+        """
+        if question.goal_id not in self._goals:
+            msg = f"cannot record a question for unknown goal {question.goal_id}"
+            raise PlanningError(msg)
+        if question.attempt_id not in self._attempts:
+            msg = f"cannot record a question for unknown attempt {question.attempt_id}"
+            raise PlanningError(msg)
+        if question.id in self._questions:
+            msg = f"question {question.id} already exists"
+            raise PlanningError(msg)
+        if any(
+            held.goal_id == question.goal_id and held.disposition is GoalQuestionDisposition.OPEN
+            for held in self._questions.values()
+        ):
+            return False
+        self._questions[question.id] = question.model_copy(deep=True)
+        return True
+
+    async def get_question(self, question_id: str, /) -> GoalQuestion | None:
+        """Return the question under that id, whatever its disposition (§9)."""
+        stored = self._questions.get(question_id)
+        return None if stored is None else stored.model_copy(deep=True)
+
+    async def open_question(self, goal_id: str, /) -> GoalQuestion | None:
+        """Return that goal's open question, or ``None`` (ADR-0250 §9)."""
+        for held in self._questions.values():
+            if held.goal_id == goal_id and held.disposition is GoalQuestionDisposition.OPEN:
+                return held.model_copy(deep=True)
+        return None
+
+    async def outstanding_questions(self) -> tuple[GoalQuestion, ...]:
+        """Return every ``OPEN`` question, in ``asked_at`` order (ADR-0250 §9).
+
+        It takes no view of the clock: an expired question is still ``OPEN`` until
+        something settles it, and settling it is the caller's (§12).
+        """
+        return tuple(
+            held.model_copy(deep=True)
+            for held in sorted(
+                (
+                    one
+                    for one in self._questions.values()
+                    if one.disposition is GoalQuestionDisposition.OPEN
+                ),
+                key=lambda one: (one.asked_at, one.id),
+            )
+        )
+
+    async def settle_question(
+        self, question_id: str, /, *, disposition: GoalQuestionDisposition, at: UtcInstant
+    ) -> bool:
+        """Settle an ``OPEN`` question, clearing its content (ADR-0250 §9).
+
+        The resolve-once gate: the read, the comparison and the write are one step, so
+        one of two racing callers answers ``True`` and the other ``False``, and the
+        content is cleared exactly once.
+
+        Raises:
+            PlanningError: If ``disposition`` is ``OPEN``, which settles nothing.
+        """
+        if disposition is GoalQuestionDisposition.OPEN:
+            # Refused whatever the question's state, because it is a malformed command
+            # rather than a lost race: `settle_question` moves an OPEN question to a
+            # terminal member, and OPEN settles nothing (ADR-0250 §9).
+            msg = (
+                "settle_question moves an OPEN question to a terminal member: OPEN "
+                "settles nothing and no disposition is inferred from silence "
+                "(ADR-0250 §9, §12)"
+            )
+            raise PlanningError(msg)
+        stored = self._questions.get(question_id)
+        if stored is None or stored.disposition is not GoalQuestionDisposition.OPEN:
+            return False
+        self._questions[question_id] = settled(stored, disposition=disposition, at=at)
+        return True
 
     async def open_attempt(self, attempt: GoalAttempt) -> str:
         """Persist a new attempt for a stored goal (ADR-0249 §12).
@@ -470,10 +661,11 @@ class InMemoryPlanStore:
             plans=tuple(plan.model_copy(deep=True) for plan in self._plans.values()),
             executions=tuple(state.model_copy(deep=True) for state in self._executions.values()),
             attempts=tuple(one.model_copy(deep=True) for one in self._attempts.values()),
+            questions=tuple(one.model_copy(deep=True) for one in self._questions.values()),
         )
 
     async def delete_goal(self, goal_id: str) -> GoalDeletion:
-        """Delete a goal, its plan history and its attempts, unless work is live.
+        """Delete a goal, its plan history, its attempts and its questions.
 
         Refused while any of the goal's executions has a ``RUNNING`` step, whose
         record an executor is about to commit against. Deliberately not keyed on
@@ -510,6 +702,13 @@ class InMemoryPlanStore:
         # deletion no execution blocks.
         for attempt_id in [one.id for one in self._attempts.values() if one.goal_id == goal_id]:
             del self._attempts[attempt_id]
+        # ADR-0250 §9: and it reaches that goal's questions, **open and terminal
+        # alike**. An open question does not block a deletion, on ADR-0073 §5's ruling
+        # that "the store deletes what it is told to delete", and `GoalDeletion`
+        # reports them exactly as ADR-0249 §12 has it report attempts — which is to say
+        # the record carries no count for either.
+        for question_id in [one.id for one in self._questions.values() if one.goal_id == goal_id]:
+            del self._questions[question_id]
         del self._goals[goal_id]
 
         return GoalDeletion(
@@ -526,9 +725,16 @@ class InMemoryPlanStore:
             msg = f"cannot clear while executions are live: {', '.join(live)}"
             raise ActiveExecutionError(msg)
 
-        removed = len(self._goals) + len(self._attempts) + len(self._plans) + len(self._executions)
+        removed = (
+            len(self._goals)
+            + len(self._attempts)
+            + len(self._questions)
+            + len(self._plans)
+            + len(self._executions)
+        )
         self._goals.clear()
         self._attempts.clear()
+        self._questions.clear()
         self._plans.clear()
         self._executions.clear()
         return removed

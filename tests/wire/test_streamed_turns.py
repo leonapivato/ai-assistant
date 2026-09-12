@@ -22,7 +22,7 @@ import pytest
 
 from ai_assistant.core.errors import UnknownConversationError
 from ai_assistant.core.streams import closing_stream
-from ai_assistant.core.types import ReplyChunk, TurnOutcome
+from ai_assistant.core.types import ReplyChunk, TurnOutcome, TurnReference
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire import envelope as env
 from ai_assistant.wire.client import HubEngineClient
@@ -89,6 +89,7 @@ class _GatedEngine(FakeAssistantEngine):
         *,
         timeout: timedelta,
         conversation_id: str | None = None,
+        reference: TurnReference | None = None,
     ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
         """Stream two chunks with a gate between them, then the outcome."""
         return self._gated(utterance, timeout=timeout, conversation_id=conversation_id)
