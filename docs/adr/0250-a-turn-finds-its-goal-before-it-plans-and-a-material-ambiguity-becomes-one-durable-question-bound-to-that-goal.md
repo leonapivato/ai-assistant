@@ -1997,10 +1997,13 @@ search, no provider, no draw and no admission.
     produces a sentence naming only the unchanged outcome, and the removal case fails if
     `revised` reads `False` or both tuples come back empty.
 
-13. **A spoken turn is never left silent.** An undecided association driven through
-    `converse_spoken`: `outcome.reply` is non-`None`, `spoken` renders it, `spoken_degraded`
-    is `False`, and the user hears the question. The same over a turn that raised a
-    clarification. The arm fails if either path yields `spoken` `None`.
+13. **A spoken turn is never left silent.** A turn whose planner raised a clarification,
+    driven through `converse_spoken`: `outcome.reply` is non-`None`, `spoken` renders it,
+    `spoken_degraded` is `False`, and the user hears the question. The arm fails if that path
+    yields `spoken` `None`. **The undecided outcome is not exercised here and cannot be**: §15
+    forbids association on that operation, and arm 15 asserts its absence — the disambiguation
+    reply's own audibility is covered where it is reachable, over the bounded operations, by
+    arm 11.
 
 14. **A spoken turn is told nothing a stored goal holds.** A conversation holding two
     candidates — one carrying an `INFERRED` outcome, one carrying a `USER_STATED` outcome, a
