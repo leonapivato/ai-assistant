@@ -1,6 +1,6 @@
 # 247. The configured web-search provider is the destination the owner chose and the recipient they granted, a search to it never asks on lineage or coverage grounds, and the per-conversation call budget is removed
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-11
 - **Partially supersedes** [ADR-0238](0238-a-destination-the-user-chose-may-be-told-what-the-turn-knows-and-the-searching-that-follows-runs-under-a-per-conversation-budget.md)
   — **§1's third clause in the limb reaching a `WEB_SEARCH` request at the configured
