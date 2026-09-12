@@ -87,6 +87,8 @@ from ai_assistant.testing.queries import DEFAULT_COMPOSED_QUERY
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from ai_assistant.core.types import MemoryRecord
+
 #: The query the one seeded belief answers, so a sighted query really does read it.
 _MATCHED: Final = "bell tower"
 
@@ -972,3 +974,52 @@ async def test_a_hop_whose_every_label_resolved_to_nothing_still_earns_no_entry(
     assert [one.ask.kind for one in carried] == [ReadKind.WEB_SEARCH], (
         "and the carrier says nothing at all about the label that named nothing"
     )
+
+
+class _Forgetful(FakeMemoryStore):
+    """A store that forgets between the planning and the hop's own read.
+
+    ADR-0113 §5's "no cross-call read consistency of any kind" made real: the supply the
+    planner was handed holds the record, ``resolve_label`` resolves the label against
+    that supply, and ``get_many`` then answers for a record the store no longer holds
+    (ADR-0229 §4). The store call **completes**, and what it returns is nothing.
+    """
+
+    async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
+        """Answer as a store that holds none of them any more."""
+        del record_ids
+        return {}
+
+
+async def test_a_hop_whose_target_was_deleted_before_the_read_is_empty_and_not_absent() -> None:
+    """§2 limb 5 rather than case 1: the ask **was** made, and it returned nothing.
+
+    ADR-0229 §4 counts a label whose record the store no longer holds with the malformed
+    and out-of-range ones, "because from the audit's side all three are one population" —
+    but from ADR-0251 §2's side they are not: the first two return before ``get_many`` and
+    the third does not. Case 1 is "the ask was not made"; this ask was made, completed,
+    and brought back no record at all, which is ``EMPTY``.
+
+    Classifying it off the label count instead would tell the planner nothing whatever
+    about an ask it composed and the store answered — the silence §3 reserves for a read
+    the budget never reached.
+
+    Adversarial round 2 raised this and was right.
+    """
+    memory = _Forgetful(now=_clock)
+    await memory.add(_belief("belief-1", "the bell tower is in Porto"))
+    planner = _searching_planner(
+        ReadAsk(kind=ReadKind.CITATION_HOP, labels=("M1",)), _structured_ask()
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        await _loop(planner=planner, memory=memory).respond(
+            _ASK, narrow=_bounded(), operation=ConversationalOperation.CONVERSE
+        )
+
+    carried = planner.calls[1][6]
+    assert _serviced(captured)["labels_unresolved"] == 1, (
+        "ADR-0229 §4's count is untouched: one population for the audit, two for §2"
+    )
+    assert _member_for(ReadKind.CITATION_HOP, carried) is ReadOutcomeKind.EMPTY
+    assert _member_for(ReadKind.STRUCTURED_READ, carried) is ReadOutcomeKind.EMPTY

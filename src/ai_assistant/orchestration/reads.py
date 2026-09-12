@@ -1378,11 +1378,21 @@ class _HopReach:
             record's live evidence, labels in the ask's order and each record's
             evidence in stored order, and **no named record**.
         unresolved: How many labels resolved to nothing (ADR-0226 §3).
+        read: Whether this ask reached the store at all — ``False`` only where **every**
+            label resolved to nothing in the supply, which is the one path that returns
+            before ``get_many``. It is **not** derivable from :attr:`unresolved`, and
+            that is the distinction ADR-0251 §2 turns on: a label whose record the store
+            no longer holds is counted here too (ADR-0229 §4), so a hop whose one label
+            named a record deleted between the planning and the read leaves
+            ``unresolved`` at its label count having made a completed store call that
+            returned nothing. §2's case 1 is "the ask was not made"; that ask was made,
+            and what it earns is ``EMPTY``.
     """
 
     expansion: tuple[MemoryRecord, ...]
     evidence: tuple[MemoryRecord, ...]
     unresolved: int
+    read: bool
 
 
 @dataclass(slots=True)
@@ -3212,7 +3222,14 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
             # The audit's own counters are untouched by this: they stay the union's.
             ledger.note(
                 hop,
-                reached=reach.unresolved < len(hop.labels),
+                # **The store call, not the label count** (ADR-0251 §2). A label whose
+                # record the store no longer holds is counted as unresolved too
+                # (ADR-0229 §4), so a hop whose one label named a record deleted between
+                # the planning and the read has `unresolved == len(labels)` and a
+                # *completed* store call behind it that returned nothing — which is
+                # `EMPTY` and not §2's case 1, because that case is "the ask was not
+                # made" and this one was.
+                reached=reach.read,
                 non_yield=None,
                 returned=len(reach.expansion),
             )
@@ -4392,7 +4409,10 @@ async def _hop_records(
     unresolved = sum(1 for _, record in labelled if record is None)
     found = [record for _, record in labelled if record is not None]
     if not found:
-        return _HopReach(expansion=(), evidence=(), unresolved=unresolved)
+        # The one path that reaches no store: every label was malformed, out of range,
+        # or named a position this call's supply does not hold (ADR-0226 §3). Nothing
+        # was asked of anything, which is ADR-0251 §2's precedence case 1.
+        return _HopReach(expansion=(), evidence=(), unresolved=unresolved, read=False)
 
     wanted: list[str] = []
     seen: set[str] = set()
@@ -4425,4 +4445,6 @@ async def _hop_records(
         expansion.append(resolved[record.id])
         expansion += evidence
         cited += evidence
-    return _HopReach(expansion=tuple(expansion), evidence=tuple(cited), unresolved=unresolved)
+    return _HopReach(
+        expansion=tuple(expansion), evidence=tuple(cited), unresolved=unresolved, read=True
+    )
