@@ -94,7 +94,7 @@ ruled against.
   the moment a `CONFIRM` is recorded at dispatch. §14 relies on that and adds no second
   writer.
 
-### The tree, read rather than assumed, at `origin/main` `9ecb0e04`
+### The tree, read rather than assumed, at `origin/main` `acfe9d0c`
 
 - `permissions/policy.py` — `ThresholdActionPolicy.decide` builds `fired`/`grounds`, computes
   `at_configured` through `_at_configured_provider`, and consults `_only_the_disclosure_floor`'s
@@ -116,10 +116,16 @@ ruled against.
   `authorised_by` and `authorised_subject` and nothing else about authority; `ToolCost` is the
   corpus's money shape, a `Decimal` `amount` beside a shape-validated ISO-4217 `currency`;
   `GoalAttempt.authorization_ids` is written with `PermissionDecision` ids.
-- `wire/envelope.py` — `PROTOCOL_VERSION` is **38**.
+- `wire/envelope.py` — `PROTOCOL_VERSION` is **39**.
 - **ADR-0249's lanes have landed, L3 included**: `Goal`, `AttemptPhase`, `AttemptState`,
-  `AttemptOutcome`, `AttemptEffort`, `GoalAttempt` and `GoalBrief` are on the tree. **ADR-0250,
-  ADR-0251, ADR-0252 and ADR-0253 are ratified and not implemented**: every type this decision
+  `AttemptOutcome`, `AttemptEffort`, `GoalAttempt` and `GoalBrief` are on the tree.
+  **ADR-0251's first lane has landed too**: `ReadAskOutcome`, `ReadOutcomeKind` and
+  `AttemptKind` are on `core/types.py`, `AttemptEffort` carries a `kind`, `Planner.plan` takes
+  `read_outcomes`, and `PROTOCOL_VERSION` moved for it. **No clause of this decision reads any
+  of those**: it names `Planner.plan` once, in §13, for the fact that a late answer takes its
+  own planning call (ADR-0250 §11) and not for that method's arguments; and it names
+  `AttemptEffort` once, in §14, for the ledger ADR-0249 §5 states and not for its fields.
+  **ADR-0250, ADR-0252 and ADR-0253 are ratified and not implemented**: every type this decision
   cites from them — `GoalQuestion`, `GoalEvidence`, `StepCondition`, `PlanStep.depends_on`,
   `PlanStep.when`, `PlanStep.verifies` and the engine-resolved result reference — is read from
   those ADRs and is **not** a shape this decision found in the tree. Where a clause below rests
