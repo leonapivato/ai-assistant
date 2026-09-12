@@ -270,6 +270,7 @@ def _summary(*, evidence_count: int = 0, lost_evidence: int = 0) -> BeliefSummar
 def _turn() -> TurnResult:
     """One turn's result — the presence of which is what makes an answer owed."""
     return TurnResult(
+        utterance="what do you know about me?",
         goal=Goal(
             id="g-1",
             statement="what do you know about me?",

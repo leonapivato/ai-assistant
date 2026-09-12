@@ -77,24 +77,30 @@ def test_a_path_whose_parent_does_not_exist_is_this_layers_error(tmp_path: Path)
 
 
 def test_an_unlabelled_database_is_stamped_rather_than_migrated(path: Path) -> None:
-    """Version 1 is the first shape this store has ever had, so there is nothing to
-    migrate from — an unlabelled file is one this open is creating."""
+    """An unlabelled file is one this open is creating, so it is stamped at the current
+    version rather than upgraded from a shape it never had."""
     SqliteParkedReads(path=path).close()
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "1",
+            "2",
         )
 
 
 def test_a_database_labelled_with_a_schema_this_code_cannot_read_is_refused(path: Path) -> None:
     """Refused rather than read blindly: rows under an unknown shape cannot be trusted to
-    say what the user was asked, or whether they answered."""
+    say what the user was asked, or whether they answered.
+
+    **A version this code can *upgrade* is a different case** and is admitted — see
+    :func:`test_a_version_1_database_is_upgraded_and_its_legacy_park_stays_answerable`.
+    What is refused is a version it can neither read nor reach, which after ADR-0248 §9
+    means anything outside ``{1, 2}``.
+    """
     with sqlite3.connect(path) as conn:
         conn.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '2')")
+        conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '3')")
 
-    with pytest.raises(AssistantError, match="schema_version=2"):
+    with pytest.raises(AssistantError, match="schema_version=3"):
         SqliteParkedReads(path=path)
 
 

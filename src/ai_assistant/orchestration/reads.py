@@ -1771,7 +1771,19 @@ class SearchServicer:
             # ADR-0194's spend admission is not reached. There is no per-conversation
             # allowance left for a park to spend or a refund to restore either
             # (ADR-0247 §5).
-            park = await self._park(request, recorded, footing=footing, goal=goal, plan=plan)
+            park = await self._park(
+                request,
+                recorded,
+                footing=footing,
+                # ADR-0248 §3: the park carries the turn's own request, for ADR-0244
+                # §2's reason for retaining the other two — §8 composes over it and
+                # would otherwise fabricate it. `utterance` is this method's own
+                # parameter, the value the composer was handed, which `_turn` stripped
+                # once (ADR-0248 §1); nothing here re-derives it.
+                utterance=utterance,
+                goal=goal,
+                plan=plan,
+            )
             return self._not_serviced(
                 SearchDisposition.RULING_CONFIRM,
                 planned_with_external_content=bound.binding.planned_with_external_content,
@@ -2052,12 +2064,13 @@ class SearchServicer:
             decision if park is not None else None,
         )
 
-    async def _park(
+    async def _park(  # noqa: PLR0913 — the ruled request, the recorded decision, the footing, and the three members ADR-0244 §2 and ADR-0248 §3 persist because the continuation composes over them; each is a distinct fact and none is derivable from another
         self,
         request: ActionRequest,
         recorded: PermissionDecision,
         *,
         footing: SearchFooting,
+        utterance: str,
         goal: Goal,
         plan: ActionPlan,
     ) -> ParkedRead | None:
@@ -2074,8 +2087,9 @@ class SearchServicer:
         failure that clause is stated to prevent — so this returns the park it wrote and
         never the park it built.
 
-        **The record carries the three content fields and nothing else of the call**
-        (ADR-0244 §2): no minted record, no result, no snippet, no title, no address, no
+        **The record carries the four content fields and nothing else of the call**
+        (ADR-0244 §2, the count widened by ADR-0248 §3): no minted record, no result, no
+        snippet, no title, no address, no
         origin beyond the one ``parameters`` already states, no credential, no
         ``SecretName``, no connection reference, no ``BoundAccount`` and no binding. The
         binding, the account identity and the canonical destination set are the
@@ -2102,6 +2116,11 @@ class SearchServicer:
             footing: This conversation's footing, for ``conversation_id`` alone — **no
                 store call is made through it here**, and after ADR-0247 §5 it holds no
                 store to make one with.
+            utterance: The parked turn's own request, as the pass received it
+                (ADR-0248 §1). Persisted for ADR-0244 §2's reason for persisting the
+                two below — the continuation composes over it and would otherwise
+                fabricate it — and read back at the resume rather than re-derived from
+                the goal there.
             goal: The parked turn's goal.
             plan: The parked turn's plan.
 
@@ -2134,6 +2153,7 @@ class SearchServicer:
             conversation_id=footing.conversation_id,
             decision_id=recorded.id,
             parameters=request.parameters,
+            utterance=utterance,
             goal=goal,
             plan=plan,
             parked_at=recorded.decided_at,

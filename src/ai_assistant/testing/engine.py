@@ -3940,14 +3940,23 @@ def _pseudo_audio(text: str, media_type: SpokenAudioFormat) -> str:
 
 
 def _turn(utterance: str) -> TurnResult:
-    """A turn whose plan has no step — a real ratified shape, not a stub."""
+    """A turn whose plan has no step — a real ratified shape, not a stub.
+
+    ``utterance`` is stripped **once** here and that one string reaches both
+    :attr:`TurnResult.utterance` and the goal's statement, which is the shape of the
+    production path (ADR-0248 §1). So this fake exhibits the byte-equality §6 asserts
+    rather than two normalisations that happen to agree — and a fake that let the two
+    diverge would certify a consumer the real engine never produces.
+    """
+    request = utterance.strip()
     goal = Goal(
         id="g-1",
-        statement=utterance,
+        statement=request,
         provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_AT),
         created_at=_AT,
     )
     return TurnResult(
+        utterance=request,
         goal=goal,
         context=CurrentContext(
             now=_AT,

@@ -14982,8 +14982,10 @@ class ParkedReadDisposition(StrEnum):
     OPEN = "open"
     """The question stands and may be answered (ADR-0244 §2).
 
-    The only non-terminal member, and the only one on which the three content fields
-    of a :class:`ParkedRead` are present. **No terminal disposition is inferred from
+    The only non-terminal member, and the only one on which a :class:`ParkedRead`'s
+    content fields are present — the three ADR-0244 §2 named, and the ``utterance``
+    ADR-0248 §3 adds beside them, which a park written before that decision carries
+    as ``None``. **No terminal disposition is inferred from
     silence** (ADR-0244 §10): a park is ``OPEN`` until something settles it, ``OPEN``
     is never read as approval by any component, and there is no timeout, retry, sweep
     or reclaim that dispatches a read the user did not answer."""
@@ -15040,12 +15042,13 @@ class ParkedRead(BaseModel):
     ``(execution_id, step_id)`` query cannot reach one. :attr:`decision_id` is the key
     a search already has, and it is the population ADR-0235 §3 already reads.
 
-    **Three fields carry Tier 1 content and that is stated here rather than
-    discovered.** :attr:`parameters` holds the composed query, :attr:`goal` the
-    objective minted from the utterance, and :attr:`plan` what the planner decided.
-    ADR-0004 §2's residency clause governs all three — an implementation persists
-    **locally only** — and what keeps the exposure bounded *in time* is that
-    settlement clears them in the same step that closes the question (ADR-0244 §3).
+    **Four fields carry Tier 1 content and that is stated here rather than
+    discovered.** :attr:`utterance` holds the parked turn's request, :attr:`parameters`
+    the composed query, :attr:`goal` the objective minted from that request, and
+    :attr:`plan` what the planner decided. ADR-0004 §2's residency clause governs all
+    four — an implementation persists **locally only** — and what keeps the exposure
+    bounded *in time* is that settlement clears them in the same step that closes the
+    question (ADR-0244 §3, the count widened by ADR-0248 §3).
     ADR-0004 §5's *"Tier 0/1 data must never be logged"* is untouched, and ADR-0231
     §13's audit event gains none of it (ADR-0244 §17).
 
@@ -15083,6 +15086,23 @@ class ParkedRead(BaseModel):
             at the seam (ADR-0231 §6). The subject check here and the authorisation
             check there are **two checks at two instants**, and a lane collapsing them
             would refuse every parked read.
+        utterance: The parked turn's own request — what the user said on the pass
+            that parked, as that pass received it (ADR-0248 §3). A **fourth content
+            field**: ``settle`` clears it in the same indivisible step it clears
+            :attr:`parameters`, :attr:`goal` and :attr:`plan`, and
+            ``drop_for_conversation`` removes it with the row. It is not a fact that
+            survives settlement, and ADR-0244 §3's *"The content lives exactly as long
+            as the question does"* reaches one field further.
+
+            **``None`` is reachable by exactly one route and no other**: a park
+            written before ADR-0248 landed, which is still answerable and must stay
+            so. ADR-0244 §2's validator is deliberately **not** extended to require it
+            on an ``OPEN`` park, because requiring it would make every such park fail
+            to decode and turn a question the user was asked into one nothing can
+            answer, against ADR-0244 §15. Nothing back-fills, re-derives or
+            re-validates the value on a stored row; what such a park's resolution
+            renders is ADR-0248 §3's single fallback, in ``Engine._resume_read`` and
+            nowhere else.
         goal: The :class:`Goal` the parked turn was planned against.
         plan: The :class:`ActionPlan` the planner returned on that turn.
 
@@ -15124,6 +15144,13 @@ class ParkedRead(BaseModel):
             "or absent on a terminal park (ADR-0244 §2, §3)."
         )
     )
+    utterance: NonBlankEncodableText | None = Field(
+        default=None,
+        description=(
+            "The parked turn's own request, absent on a terminal park and on a park "
+            "written before ADR-0248 §3 added the field."
+        ),
+    )
     goal: Goal | None = Field(
         description="The parked turn's goal, or absent on a terminal park (ADR-0244 §2)."
     )
@@ -15147,13 +15174,22 @@ class ParkedRead(BaseModel):
         would not look. So both halves are refused: an ``OPEN`` park carrying any of
         the three as ``None``, and a terminal park carrying any of them at all.
 
+        **The refused pair stays exactly the three fields ADR-0244 §2 named, and
+        ADR-0248 §3 declines to widen it.** :attr:`utterance` is a fourth *content*
+        field — settlement clears it with the rest — but it is **not** required on an
+        ``OPEN`` park, because a park written before ADR-0248 landed carries none and
+        is still answerable; requiring it would make such a park fail to decode and a
+        question the user was asked unanswerable, against ADR-0244 §15. A terminal
+        park carries no :attr:`utterance` either, and that is what ``settle``
+        guarantees rather than what this validator refuses.
+
         **A settled park keeps its terminal facts and loses its content** (ADR-0244
         §3). :attr:`id`, :attr:`conversation_id`, :attr:`decision_id`,
         :attr:`parked_at`, :attr:`expires_at` and :attr:`disposition` survive
-        settlement; the three below do not, and no implementation retains a copy, a
-        digest of the query, a snapshot or an archive of them. **The content lives
-        exactly as long as the question does**, which is the whole of the retention
-        rule this decision states.
+        settlement; the four content fields do not, and no implementation retains a
+        copy, a digest of the query, a snapshot or an archive of them. **The content
+        lives exactly as long as the question does**, which is the whole of the
+        retention rule this decision states.
 
         Raises:
             ValueError: If the record describes a park that cannot exist.
@@ -15531,9 +15567,42 @@ class TurnResult(BaseModel):
     over the deduplicated union — no implementation constructs one and then edits
     it, and none exists in an intermediate state another stage can observe.
 
+    **The user's own words are a value of their own here** (ADR-0248 §1, §2).
+    :attr:`utterance` is the request as the pass received it — unrewritten,
+    unrendered and uninterpreted — and every consumer handed a ``TurnResult`` that
+    wants what the user said reads it there. It is **not** threaded beside the turn
+    as a second argument: three production consumers render the user's half from a
+    turn, and a parameter beside each admits a pairing that can *disagree*, with
+    nothing in the type system able to detect it (§2). A routed pass, which produces
+    no turn at all, threads its utterance instead and is the contrast that proves the
+    rule rather than an exception to it (ADR-0197 §10).
+
     Attributes:
+        utterance: What the user said on the pass that produced this turn, as the
+            pass received it (ADR-0248 §1). **Required with no default**, and
+            **computed, derived, reconstructed or defaulted nowhere**: no consumer
+            parses it out of a rendering, reads it off :attr:`goal`, infers it from
+            :attr:`plan`, or falls back to another value when it is asked for it.
+            The field **normalises nothing** — the pass strips the text it received
+            **once** and hands that one string both to the goal it mints and to the
+            turn it builds, which is what makes ADR-0248 §6's byte-equality a
+            property of there being one normalisation in one place rather than of
+            two that happen to agree.
+
+            :data:`NonBlankEncodableText` rather than :data:`EncodableText` is
+            ADR-0096 §2's *"a faithful copy takes the type of the field it copies,
+            and may tighten only in ways that reject"*: the tightening is a refusal
+            alone, and it is the refusal the minting site already raises on the same
+            input.
+
+            **The value belongs to the pass.** A turn assembled from durable state
+            carries the request the pass that produced it received (ADR-0248 §3),
+            never one a later pass supplies.
         goal: The objective this turn was planned against, minted from the
-            utterance.
+            utterance. At ADR-0248 it is byte-equal to :attr:`utterance` on every
+            path that carries a turn, and that equality is a **transitional fact**
+            rather than redundancy: the two part company when the goal becomes the
+            understood outcome rather than the latest thing said.
         context: The situational context assembled for the turn.
         memories: What the pipeline assembled for this turn, in the order the
             planner is handed it (ADR-0074 §5, widened by ADR-0158 §5) — the
@@ -15572,6 +15641,12 @@ class TurnResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    utterance: NonBlankEncodableText = Field(
+        description=(
+            "What the user said on the pass that produced this turn, as the pass "
+            "received it — unrewritten, unrendered and uninterpreted (ADR-0248 §1)."
+        )
+    )
     goal: Goal = Field(description="The objective this turn was planned against.")
     context: CurrentContext = Field(description="The situational context assembled for the turn.")
     memories: tuple[MemoryRecord, ...] = Field(

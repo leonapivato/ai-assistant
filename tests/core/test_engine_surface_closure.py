@@ -1060,6 +1060,17 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     emits, and that store is on neither promoted surface. §10 fixes the numeral, which
     is why this entry names one.
 
+    **37 is ADR-0248 §7, and it is under the second limb alone** — the wire-carried
+    type **widened**, which is this pin's ordinary shape rather than 36's. ``TurnResult``
+    gains ``utterance``, the user's own words carried as a value of their own;
+    ``TurnResult`` rides ``TurnOutcome.turn``, ``TurnOutcome`` is what the promoted
+    surface returns, ``TurnResult`` is ``extra="forbid"``, and ``project`` renders a
+    model by ``model_dump()`` — so a hub at 37 emits an ``"utterance"`` member on every
+    turn and a client at 36 fails it with ``extra_forbidden``. ``ParkedRead`` gaining the
+    same field is **not** a second ground: it is an in-process store record no peer
+    emits. The method set does **not** move and stands at fifty-eight: ADR-0248 changes
+    no Protocol at all (§7). §7 fixes the numeral, which is why this entry names one.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1068,7 +1079,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (58, 36), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (58, 37), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

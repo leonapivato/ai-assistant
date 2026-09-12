@@ -7,7 +7,8 @@ against this one is verified against the contract rather than against a convenie
 **It is deliberately not a filing cabinet.** ADR-0244 §3 makes ``park`` and ``settle``
 active participants — one open park per conversation, one park per decision, a
 compare-and-swap that answers ``True`` to exactly one caller, and a settlement that
-clears the three content fields **in the same step** that moves the disposition — and
+clears the four content fields **in the same step** that moves the disposition
+(ADR-0248 §3 widens ADR-0244 §3's count and nothing else of it) — and
 every one of those is here. A fake looser than the contract would certify consumers the
 real implementation rejects (ADR-0026 §7).
 
@@ -32,9 +33,10 @@ if TYPE_CHECKING:
 
 __all__ = ["FakeParkedReads"]
 
-#: The three fields ADR-0244 §3's settlement clears, named once so the clearing and the
-#: suite's assertion about it cannot come apart.
-_CONTENT: tuple[str, ...] = ("parameters", "goal", "plan")
+#: The four fields ADR-0244 §3's settlement clears, named once so the clearing and the
+#: suite's assertion about it cannot come apart. ``utterance`` is ADR-0248 §3's fourth
+#: content field, cleared with the rest and surviving settlement no more than they do.
+_CONTENT: tuple[str, ...] = ("parameters", "utterance", "goal", "plan")
 
 
 def _revalidated(record: ParkedRead) -> ParkedRead:
@@ -302,6 +304,9 @@ class FakeParkedReads:
         at: datetime,  # noqa: ARG002 — the contract's, and a settled park keeps no settled-at fact for this fake to put it in (ADR-0244 §3); the clause it serves is that the caller supplies the instant rather than the store reading a clock
     ) -> bool:
         """Move an ``OPEN`` park to a terminal member and clear its content.
+
+        **Four fields, not three** (ADR-0248 §3): ``utterance`` joins ``parameters``,
+        ``goal`` and ``plan``, and it survives settlement no more than they do.
 
         **The resolve-once gate.** The read, the comparison and the write share one body
         with no ``await`` between them, so exactly one caller is answered ``True``; a

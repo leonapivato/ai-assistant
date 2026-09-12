@@ -1432,8 +1432,16 @@ def _render_request(  # noqa: PLR0913 — one parameter per block this prompt is
         The user-turn prompt.
     """
     lines = [
+        # **The heading is a claim about the text beneath it** (ADR-0248 §4), so what
+        # goes under it is the turn's own request and not its goal statement: after the
+        # goal becomes the assistant's reading of the user, only the request can make
+        # that claim true, and rendering a statement there would put the system's own
+        # paraphrase in quotation marks and hand it to the model as ground truth. At
+        # ADR-0248 the two are byte-equal (§6), so this prompt does not move; no lane
+        # renders a goal statement here and no lane changes the heading to accommodate
+        # one.
         "The user said, in their own words:",
-        f"  {_quoted_span(turn.goal.statement)}",
+        f"  {_quoted_span(turn.utterance)}",
         "",
     ]
     lines += _render_context(turn.context)
