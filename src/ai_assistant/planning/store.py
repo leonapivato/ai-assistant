@@ -21,7 +21,7 @@ from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import ActiveExecutionError, PlanningError, StaleExecutionError
 from ai_assistant.core.types import GoalDeletion, PlanExport, StepStatus
 from ai_assistant.planning.execution import PlanExecution
-from ai_assistant.planning.goals import advanced, appended
+from ai_assistant.planning.goals import advanced, appended, bounded
 
 if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
@@ -116,8 +116,12 @@ class InMemoryPlanStore:
                 "and a later change to a goal is a record_interpretation (ADR-0249 §12)"
             )
             raise PlanningError(msg)
-        self._goals[goal.id] = goal.model_copy(deep=True)
-        return goal.id
+        # ADR-0249 §2's bound is stated over **the write**, so the opening write takes
+        # it too: a goal handed in with more revisions than the ceiling admits is
+        # stored trimmed, with the count saying how many went.
+        stored = bounded(goal)
+        self._goals[stored.id] = stored.model_copy(deep=True)
+        return stored.id
 
     async def get_goal(self, goal_id: str) -> Goal | None:
         """Return the goal with ``goal_id``, or ``None``."""
@@ -166,6 +170,10 @@ class InMemoryPlanStore:
                 "commit_attempt, which is its only mutation route (ADR-0249 §12)"
             )
             raise PlanningError(msg)
+        for plan_id in attempt.plan_ids:
+            self._refuse_a_dangling_plan(attempt, plan_id)
+        for execution_id in attempt.execution_ids:
+            self._refuse_a_dangling_execution(attempt, execution_id)
         self._attempts[attempt.id] = attempt.model_copy(deep=True)
         return attempt.id
 
@@ -211,9 +219,68 @@ class InMemoryPlanStore:
                 f"{transition.expected_version}: re-read it and recompute the transition"
             )
             raise StaleExecutionError(msg)
+        if transition.add_plan_id is not None:
+            self._refuse_a_dangling_plan(stored, transition.add_plan_id)
+        if transition.add_execution_id is not None:
+            self._refuse_a_dangling_execution(stored, transition.add_execution_id)
         updated = advanced(stored, transition)
         self._attempts[updated.id] = updated
         return updated.model_copy(deep=True)
+
+    def _refuse_a_dangling_plan(self, attempt: GoalAttempt, plan_id: str) -> None:
+        """Refuse a plan reference that does not resolve under this attempt's goal.
+
+        **ADR-0014 §5's export promise kept at write time rather than repaired at read
+        time**, which is the division ADR-0228 §5 already records for ``supersedes``:
+        "every ``goal_id``/``plan_id`` referenced by an included record resolves within
+        the same export", and an attempt's ``plan_ids`` are such references (ADR-0249
+        §11). A store that accepted one it does not hold would produce a ``PlanExport``
+        that does not validate — discovered by whoever reads the export back.
+
+        **Under this attempt's own goal, and not merely somewhere in the store.** An
+        attempt is of one goal and its plans are that goal's (ADR-0228 §1), and it is
+        also what keeps the closure true across a deletion: ``delete_goal`` cascades a
+        goal's plans, executions and attempts together, so a reference confined to one
+        goal cannot outlive its target.
+
+        Args:
+            attempt: The attempt the reference is being written onto.
+            plan_id: The plan the write names.
+
+        Raises:
+            PlanningError: If the plan is not one this attempt's goal holds.
+        """
+        plan = self._plans.get(plan_id)
+        if plan is None or plan.goal_id != attempt.goal_id:
+            msg = (
+                f"attempt {attempt.id} names plan {plan_id}, which this store does not "
+                f"hold under goal {attempt.goal_id}; an export naming a plan it does "
+                "not carry does not validate (ADR-0014 §5, ADR-0249 §11)"
+            )
+            raise PlanningError(msg)
+
+    def _refuse_a_dangling_execution(self, attempt: GoalAttempt, execution_id: str) -> None:
+        """Refuse an execution reference that does not resolve under this goal (§11).
+
+        :meth:`_refuse_a_dangling_plan`'s reasoning over the second reference an
+        attempt accumulates, reached through the plan the execution runs.
+
+        Args:
+            attempt: The attempt the reference is being written onto.
+            execution_id: The execution the write names.
+
+        Raises:
+            PlanningError: If the execution is not one this attempt's goal holds.
+        """
+        state = self._executions.get(execution_id)
+        plan = None if state is None else self._plans.get(state.plan_id)
+        if plan is None or plan.goal_id != attempt.goal_id:
+            msg = (
+                f"attempt {attempt.id} names execution {execution_id}, which this store "
+                f"does not hold under goal {attempt.goal_id}; an export naming an "
+                "execution it does not carry does not validate (ADR-0014 §5)"
+            )
+            raise PlanningError(msg)
 
     async def save_plan(self, plan: ActionPlan) -> str:
         """Persist a plan, requiring its goal to exist and its id to be free.

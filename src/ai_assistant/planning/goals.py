@@ -37,6 +37,40 @@ _PHASE_ORDER: Final[dict[AttemptPhase, int]] = {
 }
 
 
+def bounded(goal: Goal) -> Goal:
+    """Hold ``goal``'s history to ADR-0249 §2's bound, disclosing what it drops.
+
+    §2 states the bound over **the write**, not over one member: "a goal whose sequence
+    would exceed it drops its **oldest** element on the write that would exceed it, and
+    the **current** interpretation is never dropped". So both writes take it —
+    :meth:`PlanStore.save_goal`, which is the opening write, and
+    :meth:`PlanStore.record_interpretation`, which is every later one — and a store
+    that applied it to only the second would accept an oversized history at the door
+    and enforce the bound on nothing.
+
+    **The elision is disclosed and never silent**, on ADR-0086 §4's own ground: a goal
+    reporting fewer revisions than happened "answers the question *when did the
+    system's understanding change, and why* falsely". A write that drops *k* elements
+    advances ``interpretation_elided`` by *k*.
+
+    Args:
+        goal: The goal as it would be written.
+
+    Returns:
+        The goal itself where the bound is not exceeded — a copy that changes no field
+        is a copy for nothing — and a trimmed one where it is.
+    """
+    dropped = max(0, len(goal.interpretation) - MAX_GOAL_INTERPRETATIONS)
+    if not dropped:
+        return goal
+    return goal.model_copy(
+        update={
+            "interpretation": goal.interpretation[dropped:],
+            "interpretation_elided": goal.interpretation_elided + dropped,
+        }
+    )
+
+
 def appended(goal: Goal, interpretation: GoalInterpretation) -> Goal:
     """Append one revision to ``goal``, eliding the oldest if it must (§1, §2).
 
@@ -65,14 +99,13 @@ def appended(goal: Goal, interpretation: GoalInterpretation) -> Goal:
             f"one before it (ADR-0249 §1)"
         )
         raise PlanningError(msg)
-    history = (*goal.interpretation, interpretation)
-    dropped = max(0, len(history) - MAX_GOAL_INTERPRETATIONS)
-    return goal.model_copy(
-        update={
-            "interpretation": history[dropped:],
-            "interpretation_elided": goal.interpretation_elided + dropped,
-            "version": goal.version + 1,
-        }
+    return bounded(
+        goal.model_copy(
+            update={
+                "interpretation": (*goal.interpretation, interpretation),
+                "version": goal.version + 1,
+            }
+        )
     )
 
 

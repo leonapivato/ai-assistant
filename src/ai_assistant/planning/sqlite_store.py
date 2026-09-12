@@ -53,7 +53,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.planning._transactions import transaction
 from ai_assistant.planning.execution import PlanExecution
-from ai_assistant.planning.goals import advanced, appended
+from ai_assistant.planning.goals import advanced, appended, bounded
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1156,9 +1156,13 @@ class SqlitePlanStore:
                     "(ADR-0249 §12)"
                 )
                 raise PlanningError(msg)
+            # ADR-0249 §2's bound is stated over **the write**, so the opening write
+            # takes it too: a goal handed in with more revisions than the ceiling
+            # admits is stored trimmed, with the count saying how many went.
+            stored = bounded(goal)
             conn.execute(
                 "INSERT INTO goals(id, data) VALUES (?, ?)",
-                (goal.id, goal.model_dump_json()),
+                (stored.id, stored.model_dump_json()),
             )
 
     async def get_goal(self, goal_id: str) -> Goal | None:
@@ -1240,6 +1244,10 @@ class SqlitePlanStore:
                     "commit_attempt, which is its only mutation route (ADR-0249 §12)"
                 )
                 raise PlanningError(msg)
+            for plan_id in attempt.plan_ids:
+                self._refuse_a_dangling_plan(conn, attempt, plan_id)
+            for execution_id in attempt.execution_ids:
+                self._refuse_a_dangling_execution(conn, attempt, execution_id)
             conn.execute(
                 "INSERT INTO attempts(id, goal_id, opened_at, data) VALUES (?, ?, ?, ?)",
                 (
@@ -1311,12 +1319,83 @@ class SqlitePlanStore:
                     f"{transition.expected_version}: re-read it and recompute the transition"
                 )
                 raise StaleExecutionError(msg)
+            if transition.add_plan_id is not None:
+                self._refuse_a_dangling_plan(conn, stored, transition.add_plan_id)
+            if transition.add_execution_id is not None:
+                self._refuse_a_dangling_execution(conn, stored, transition.add_execution_id)
             updated = advanced(stored, transition)
             conn.execute(
                 "UPDATE attempts SET data = ? WHERE id = ?",
                 (updated.model_dump_json(), updated.id),
             )
         return updated
+
+    @staticmethod
+    def _refuse_a_dangling_plan(
+        conn: sqlite3.Connection, attempt: GoalAttempt, plan_id: str
+    ) -> None:
+        """Refuse a plan reference that does not resolve under this attempt's goal.
+
+        **ADR-0014 §5's export promise kept at write time rather than repaired at read
+        time**, which is the division ADR-0228 §5 already records for ``supersedes``:
+        an attempt's ``plan_ids`` are ``plan_id`` values referenced by an included
+        record (ADR-0249 §11), so a store that accepted one it does not hold would
+        produce a ``PlanExport`` that does not validate.
+
+        **Under this attempt's own goal**, read off the ``plans`` table's own
+        ``goal_id`` column inside the write transaction, so the check and the write
+        see one fact. Confining the reference to one goal is also what keeps the
+        closure true across a deletion: ``delete_goal`` cascades a goal's plans,
+        executions and attempts together.
+
+        Args:
+            conn: The connection the write transaction is running on.
+            attempt: The attempt the reference is being written onto.
+            plan_id: The plan the write names.
+
+        Raises:
+            PlanningError: If the plan is not one this attempt's goal holds.
+        """
+        held = conn.execute(
+            "SELECT 1 FROM plans WHERE id = ? AND goal_id = ?", (plan_id, attempt.goal_id)
+        ).fetchone()
+        if held is None:
+            msg = (
+                f"attempt {attempt.id} names plan {plan_id}, which this store does not "
+                f"hold under goal {attempt.goal_id}; an export naming a plan it does "
+                "not carry does not validate (ADR-0014 §5, ADR-0249 §11)"
+            )
+            raise PlanningError(msg)
+
+    @staticmethod
+    def _refuse_a_dangling_execution(
+        conn: sqlite3.Connection, attempt: GoalAttempt, execution_id: str
+    ) -> None:
+        """Refuse an execution reference that does not resolve under this goal (§11).
+
+        :meth:`_refuse_a_dangling_plan`'s reasoning over the second reference an
+        attempt accumulates, reached through the plan the execution runs.
+
+        Args:
+            conn: The connection the write transaction is running on.
+            attempt: The attempt the reference is being written onto.
+            execution_id: The execution the write names.
+
+        Raises:
+            PlanningError: If the execution is not one this attempt's goal holds.
+        """
+        held = conn.execute(
+            "SELECT 1 FROM executions e JOIN plans p ON e.plan_id = p.id "
+            "WHERE e.id = ? AND p.goal_id = ?",
+            (execution_id, attempt.goal_id),
+        ).fetchone()
+        if held is None:
+            msg = (
+                f"attempt {attempt.id} names execution {execution_id}, which this store "
+                f"does not hold under goal {attempt.goal_id}; an export naming an "
+                "execution it does not carry does not validate (ADR-0014 §5)"
+            )
+            raise PlanningError(msg)
 
     async def save_plan(self, plan: ActionPlan) -> str:
         """Persist a plan, requiring its goal to exist and its id to be free.
@@ -1870,20 +1949,30 @@ def _migrated_goal(row_id: str, data: str) -> str:
         statement = held["statement"]
         created_at = held["created_at"]
         source = MemorySource(held["provenance"]["source"])
+        # **Constructed inside the boundary, not beside it.** A row whose `statement`
+        # is blank once stripped, or whose `created_at` is not a conforming instant,
+        # fails here rather than at the key read — and a `ValidationError` escaping
+        # this helper would reach `_setup`, whose cleanup catches `PlanningError`,
+        # `sqlite3.Error` and `OSError` and would leak the connection past a raw
+        # pydantic error. `ValidationError` is a `ValueError`, so the clause below
+        # translates it once the construction is *inside* the block; what was wrong
+        # was its position, not the clause. That is what keeps ADR-0049 §1's error
+        # boundary total over the migration.
+        revision = GoalInterpretation(
+            revision=1,
+            outcome=statement,
+            outcome_ground=ground_of(source),
+            # **No span in either branch** (§12): the request the stored statement was
+            # read from is not in the row, and §1's fourth absence is exactly this
+            # route.
+            recorded_at=created_at,
+        )
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         msg = (
             f"the plan store holds a goal {row_id!r} this migration cannot read: {exc}. "
             f"The file is left exactly as it arrived (ADR-0249 §12)"
         )
         raise PlanningError(msg) from exc
-    revision = GoalInterpretation(
-        revision=1,
-        outcome=statement,
-        outcome_ground=ground_of(source),
-        # **No span in either branch** (§12): the request the stored statement was
-        # read from is not in the row, and §1's fourth absence is exactly this route.
-        recorded_at=created_at,
-    )
     del held["statement"]
     held["interpretation"] = [revision.model_dump(mode="json")]
     held["interpretation_elided"] = 0
