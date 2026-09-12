@@ -95,7 +95,7 @@ from ai_assistant.core.types import (
     QueuedQuestion,
     QueueOutcome,
     QuietWindow,
-    ReadAsk,
+    ReadAskOutcome,
     ReplyChunk,
     Retirement,
     Reversibility,
@@ -354,7 +354,7 @@ class _OneStepPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         step = PlanStep(
@@ -4477,7 +4477,7 @@ class _NoStepPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         return PlannerOutput(

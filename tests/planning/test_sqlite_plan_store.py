@@ -2310,7 +2310,7 @@ async def test_a_pre_decision_plan_store_upgrades_and_stays_exportable(
         assert plan.targets_revision is None, "each plans row's targets_revision is absent"
 
         export = await store.export()
-        assert export.schema_version == 8
+        assert export.schema_version == 9
         assert [one.id for one in export.goals] == ["g1"]
         assert export.attempts == ()
 

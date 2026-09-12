@@ -124,6 +124,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, NamedTuple, assert_never
 
 import structlog
@@ -144,6 +145,7 @@ from ai_assistant.core.types import (
     ProposedUnderstanding,
     ReadAsk,
     ReadKind,
+    ReadOutcomeKind,
     ReadRequest,
     Role,
     StructuredAsk,
@@ -164,6 +166,7 @@ if TYPE_CHECKING:
         EvidenceDigest,
         GoalBrief,
         MemoryRecord,
+        ReadAskOutcome,
         ShownFile,
     )
 
@@ -249,7 +252,7 @@ _TAIL_HEADING: Final = "Recent conversation turns, in order:"
 #: public surface for a driver that is not a subsystem.
 _RETRIEVED_HEADING: Final = "Relevant memories about the user:"
 
-#: The heading ADR-0240 §7's empty-read fact is printed under.
+#: The heading ADR-0251 §3's read outcomes are printed under.
 #:
 #: **A heading of its own, and it is the system's own text** (ADR-0098 §2). What sits
 #: under it is the planner's own composition written back to it, so a reader of the
@@ -258,11 +261,51 @@ _RETRIEVED_HEADING: Final = "Relevant memories about the user:"
 #: :data:`_FILES_HEADING` makes.
 #:
 #: **It states the fact and not the instruction.** Whether to widen the window, drop
-#: the person, ask the same question as text, or answer from what there is and say what
-#: could not be reached are all the planner's (ADR-0240 §6), and a heading that steered
-#: between them would be the loop broadening rather than the planner.
-_EMPTY_READS_HEADING: Final = (
-    "You already asked for this earlier in this turn, and nothing at all came back:"
+#: the person, ask the same question as text, try a different source, or answer from
+#: what there is and say what could not be reached are all the planner's (ADR-0240 §6,
+#: ADR-0251 §2), and a heading that steered between them would be the loop broadening
+#: rather than the planner.
+#:
+#: **It stopped saying "nothing at all came back" when the carrier stopped meaning
+#: it** (ADR-0251 §3). ADR-0240 §7's block held only the asks that came back empty, so
+#: the heading could carry that fact for every line under it; this one holds every ask
+#: the turn serviced, so the fact moves onto each line and the heading says only which
+#: asks these are.
+_READ_OUTCOMES_HEADING: Final = (
+    "You already asked for these earlier in this turn, and this is what became of each:"
+)
+
+#: What each :class:`~ai_assistant.core.types.ReadOutcomeKind` member is written back
+#: to the planner as (ADR-0251 §2).
+#:
+#: **No member carries a message, a ground, a provider name, a query, a destination, a
+#: monetary figure, a duration, a count or a ``Settings`` field name**, and neither does
+#: any statement here: ADR-0242 §9's bar binds this vocabulary as it binds
+#: ``SearchNotServiced``, and for the same reason — each says **what became of the ask**
+#: and never **why** a source ruled the way it did. So there is nowhere in this table
+#: for a refusal's ground, a failure's class, a deadline's length or a count of records,
+#: and a later editor wanting one would have to widen the carrier first.
+#:
+#: **``TRUNCATED`` says completeness was not certified and never that more records
+#: exist** (§2, ADR-0128 §2). A statement here reading "there is more" would be a false
+#: claim a planner could act on: ``capped`` is "a refusal to certify and never a claim
+#: that more exists", and a read whose eligible set exactly meets a ceiling reports it.
+#:
+#: **``REFUSED`` and ``FAILED`` are written differently because they license different
+#: next moves** (§2). A refusal is a decision that will be taken again, so the alternative
+#: is a *different* source; a failure is a transient the same ask may survive. Neither
+#: statement authorises a retry, and neither instructs one: what they do is make the
+#: planner's next choice informed rather than a guess.
+_OUTCOME_STATEMENTS: Final[Mapping[ReadOutcomeKind, str]] = MappingProxyType(
+    {
+        ReadOutcomeKind.RETURNED_RECORDS: "records came back that were not already here",
+        ReadOutcomeKind.EMPTY: "nothing at all came back",
+        ReadOutcomeKind.DUPLICATE: "what came back was already here",
+        ReadOutcomeKind.TRUNCATED: ("what came back was not certified to be everything there is"),
+        ReadOutcomeKind.REFUSED: "the source decided not to answer",
+        ReadOutcomeKind.FAILED: "the source was reached and its answer was a failure",
+        ReadOutcomeKind.EXPIRED: "a deadline passed before an answer arrived",
+    }
 )
 
 #: The heading the turn's file listing is printed under (ADR-0230 §2, §3).
@@ -1271,7 +1314,7 @@ class ModelBackedPlanner:
         except ClockReadingError as exc:
             raise PlanningError(str(exc)) from exc
 
-    async def plan(  # noqa: PLR0913 — the brief plus one keyword per thing the pipeline assembled before planning, as the Protocol declares them; ADR-0230 §3, ADR-0240 §7 and ADR-0249 §7 each add to it
+    async def plan(  # noqa: PLR0913 — the brief plus one keyword per thing the pipeline assembled before planning, as the Protocol declares them; ADR-0230 §3, ADR-0251 §3 and ADR-0249 §7 each add to it
         self,
         goal: GoalBrief,
         *,
@@ -1280,7 +1323,7 @@ class ModelBackedPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         """Produce a frozen plan for ``goal``, and what it understands (ADR-0047).
@@ -1333,13 +1376,15 @@ class ModelBackedPlanner:
         ``context`` and ``memories`` are, for ADR-0014 §6's reason, and what comes back
         is a label the loop resolves.
 
-        **``empty_reads`` is rendered as what this turn already asked for and did not
-        get** (ADR-0240 §7). It is the planner's own prior composition handed back to
-        it, byte for byte and never edited on the way, carrying nothing the store said
-        — no record, no count, no identifier, no instant of the read. What it buys is
-        that a second call over an otherwise identical input is not asked the same
-        question twice, which is ADR-0228 §2(e)'s own reason honoured rather than set
-        aside. ``()`` on a turn's first call, where it renders nothing at all.
+        **``read_outcomes`` is rendered as what this turn already asked for and what
+        became of each ask** (ADR-0251 §3). It is the planner's own prior composition
+        handed back to it, byte for byte and never edited on the way, beside one member
+        of a closed vocabulary and carrying nothing the store said — no record, no
+        count, no identifier, no instant of the read. What it buys is that a second call
+        over an otherwise identical input is not asked the same question twice, which is
+        ADR-0228 §2(e)'s own reason honoured rather than set aside; what ADR-0251 adds
+        is that a refused source and an empty one no longer look alike. ``()`` on a
+        turn's first call, where it renders nothing at all.
 
         **``memories`` also decides which of ADR-0240 §9's three label axes the system
         turn offers**, computed over the **episodic** records of the sequence this call
@@ -1392,10 +1437,11 @@ class ModelBackedPlanner:
                 and the cap are the fetcher's and a second opinion here would put
                 the two sides' ordinals out of step. Empty is legal and is the
                 ordinary case: it renders no listing and states no ``file`` member.
-            empty_reads: The asks of this turn's already-serviced reads that came back
-                empty (ADR-0240 §7), rendered into the user turn under a heading of
-                their own and read once, before the first ``await``. Empty is legal and
-                is the ordinary case — every first call — and renders nothing.
+            read_outcomes: One entry per ask this turn has already serviced, in
+                servicing order (ADR-0251 §3), rendered into the user turn under a
+                heading of their own and read once, before the first ``await``. Empty is
+                legal and is the ordinary case — every first call — and renders
+                nothing.
             evidence: What this call may act on about the reads already taken
                 (ADR-0249 §10), rendered under a heading of its own and carrying no
                 label, no identifier and no address. Empty is legal and is the
@@ -1418,7 +1464,7 @@ class ModelBackedPlanner:
         # `model_copy(update=...)` here would be shallow and would not detach it.
         snapshot = goal.model_copy(deep=True)
         shown = tuple(files)
-        asked = tuple(empty_reads)
+        asked = tuple(read_outcomes)
         # ADR-0240 §9's gate, computed over the sequence this call was passed and read
         # by both messages: the system turn offers an axis and the user turn renders
         # the values that opened it, which is what §9's "no axis is described whose
@@ -2160,12 +2206,12 @@ def _structured_axis(structured: Mapping[str, object], axis: str) -> tuple[str, 
     return tuple(value)
 
 
-def _render_request(  # noqa: PLR0913 — one parameter per block this message is assembled from, as ADR-0230 §3, ADR-0240 §7 and ADR-0249 §11 each added one
+def _render_request(  # noqa: PLR0913 — one parameter per block this message is assembled from, as ADR-0230 §3, ADR-0251 §3 and ADR-0249 §11 each added one
     goal: GoalBrief,
     context: CurrentContext,
     memories: Sequence[MemoryRecord],
     files: Sequence[ShownFile] = (),
-    empty_reads: Sequence[ReadAsk] = (),
+    read_outcomes: Sequence[ReadAskOutcome] = (),
     *,
     utterance: str = "",
     evidence: Sequence[EvidenceDigest] = (),
@@ -2206,11 +2252,12 @@ def _render_request(  # noqa: PLR0913 — one parameter per block this message i
     §11's test 14). ADR-0222 §5 states why these two counts cannot ride an
     ``OPERATION`` trace instead.
 
-    **ADR-0240 §7's fact is printed after the listing, under a heading of its own**
-    (:func:`_render_empty_reads`). It is not a fourth group of ``memories`` and not a
-    third address space: it is what *this turn* already asked for and did not get, so
-    it sits below everything the planner is composing from. It carries the planner's
-    own prior ask and nothing the store said.
+    **ADR-0251 §3's carrier is printed after the listing, under a heading of its own**
+    (:func:`_render_read_outcomes`). It is not a fourth group of ``memories`` and not a
+    third address space: it is what *this turn* already asked for and what became of
+    each ask, so it sits below everything the planner is composing from. It carries the
+    planner's own prior ask and one member of a closed vocabulary, and nothing the store
+    said.
 
     **And an episode's label values are rendered beside its bullet** (ADR-0240 §9,
     :func:`_label_lines`). §9 offers an axis only where an episode of this call's supply
@@ -2274,8 +2321,8 @@ def _render_request(  # noqa: PLR0913 — one parameter per block this message i
     this function holds the rule over the one value that *is* an identifier and is
     handed to it anyway, ``goal_id``, which it renders nowhere.
 
-    **The evidence digest is printed below the material and above ADR-0240 §7's
-    fact** (ADR-0249 §10). It is not a group of ``memories`` and carries no label: a
+    **The evidence digest is printed below the material and above ADR-0251 §3's
+    carrier** (ADR-0249 §10). It is not a group of ``memories`` and carries no label: a
     ``FROM_EVIDENCE`` ground names an ``M`` label of this call's supply and nothing
     else, so a digest label would invite a ground that resolves to nothing. An absent
     ``supported`` is printed **as an absence with its consequence stated**, not
@@ -2367,16 +2414,16 @@ def _render_request(  # noqa: PLR0913 — one parameter per block this message i
         lines.append("")
         lines += listing
 
-    # ADR-0249 §10, below the material and above ADR-0240 §7's fact: it is what the
+    # ADR-0249 §10, below the material and above ADR-0251 §3's carrier: it is what the
     # reads already taken for this goal established, which is neither a group of
     # `memories` nor a second address space — it carries no label at all.
     lines += _render_evidence(evidence)
 
-    # ADR-0240 §7, printed **last**: it is a fact about this turn's own earlier ask
+    # ADR-0251 §3, printed **last**: it is a fact about this turn's own earlier asks
     # rather than a source of material, so it sits below everything the planner is
     # composing from. Empty on a turn's first call, where these two lines add nothing
     # and the assembled prompt is byte-identical to what it was before ADR-0240.
-    asked = _render_empty_reads(empty_reads)
+    asked = _render_read_outcomes(read_outcomes)
     if asked:
         lines.append("")
         lines += asked
@@ -2635,50 +2682,61 @@ def _label_lines(record: MemoryRecord) -> list[str]:
     return lines
 
 
-def _render_empty_reads(empty_reads: Sequence[ReadAsk]) -> list[str]:
-    """ADR-0240 §7's fact, rendered as what this turn already asked for.
+def _render_read_outcomes(read_outcomes: Sequence[ReadAskOutcome]) -> list[str]:
+    """ADR-0251 §3's carrier, rendered as what became of each ask this turn made.
 
-    **What crosses is the planner's own prior composition and nothing the store
-    said** (§7). No record, no count, no identifier, no instant of the read and no
-    ``capped`` value: this function is handed asks and could not interpolate a store
-    value if a later editor wanted it to. What it says about the read is that it
-    returned nothing.
+    **What crosses is the planner's own prior composition and one member of a closed
+    vocabulary** (ADR-0240 §7, as §3 restates it over the wider carrier). No record, no
+    count, no identifier, no instant of the read and no ``capped`` value: this function
+    is handed asks and members and could not interpolate a store value if a later editor
+    wanted it to.
 
-    **The ask is rendered as emitted and is never edited on the way** (§7). Nothing
-    here widens a window, drops an axis, rewrites a label or composes a suggested ask
-    to put in its place — what the second call receives is what the first call emitted,
-    and the ask the second call makes is its own composition (§6).
+    **The ask is rendered as emitted and is never edited on the way** (§7). Nothing here
+    widens a window, drops an axis, rewrites a label or composes a suggested ask to put
+    in its place — what a later call receives is what an earlier call emitted, and the
+    ask the later call makes is its own composition (ADR-0240 §6).
 
-    **What it must not say is as fixed as what it may** (§7). It cannot say how many
-    records anything held, how much of the budget is gone, or how long the turn has
-    left, so a planner cannot learn the turn's budget or the store's shape from it.
+    **What it must not say is as fixed as what it may** (§7, ADR-0251 §2). It cannot
+    say how many records anything held, why a source ruled the way it did, how much of
+    the budget is gone, or how long the turn has left — so a planner learns neither the
+    turn's budget nor the store's shape from it, and :data:`_OUTCOME_STATEMENTS` is
+    where that restraint is held rather than here.
 
-    **Empty on a turn's first call and on any call where no read came back empty**, so
+    **The planner is still not told which round it is on** (ADR-0228 §12). The entries
+    are in servicing order and are not numbered, carry no count of rounds made or
+    remaining, and carry no allowance, reserve, elapsed figure, attempt kind or stop
+    reason.
+
+    **Empty on a turn's first call and on any call whose servicing reached no ask**, so
     the assembled prompt is then byte-identical to what it is without ADR-0240.
 
     Args:
-        empty_reads: The asks this turn's already-serviced reads emitted that came back
-            with no record at all.
+        read_outcomes: One entry per ask this turn's already-serviced reads reached, in
+            servicing order.
 
     Returns:
         The block's lines, or an empty list where there is nothing to state.
     """
-    if not empty_reads:
+    if not read_outcomes:
         return []
-    lines = [_EMPTY_READS_HEADING]
-    for ask in empty_reads:
-        lines.append(f"  - {_describe_ask(ask)}")
+    lines = [_READ_OUTCOMES_HEADING]
+    for outcome in read_outcomes:
+        statement = _OUTCOME_STATEMENTS[outcome.outcome]
+        lines.append(f"  - {_describe_ask(outcome.ask)} — {statement}")
     return lines
 
 
 def _describe_ask(ask: ReadAsk) -> str:
-    """One structured ask, written back to its author (ADR-0240 §7).
+    """One ask, written back to its author (ADR-0240 §7, ADR-0251 §3).
 
     The axes it applied and the values it named, each value a quoted span under
     ADR-0098 §2 — the planner's own output, handed back to the planner, revealing it
     to nobody who did not compose it. An ask of any other kind is named by its kind
-    alone, which is the honest rendering of a value this ADR admits no other kind into
-    (§7, §14) and is unreachable today.
+    alone, which is the honest rendering of a value that carries no argument of its own
+    (ADR-0231 §1) or whose argument is a label into a sequence this call may no longer
+    index the same way (ADR-0228 §8). **Every kind reaches this function now** that
+    ADR-0251 §3 carries every serviced ask rather than ADR-0240 §7's structured ones
+    alone, and none of them renders a label, an entry or a record.
 
     Args:
         ask: The ask, exactly as the planner emitted it.

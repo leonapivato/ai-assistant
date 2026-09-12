@@ -28,7 +28,7 @@ from ai_assistant.core.types import (
     ExchangeDisposition,
     GoalBrief,
     PlannerOutput,
-    ReadAsk,
+    ReadAskOutcome,
     SpokenAudio,
     SpokenAudioFormat,
     TranscriptEntry,
@@ -87,7 +87,7 @@ class RecordingPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         from ai_assistant.core.types import ActionPlan  # noqa: PLC0415 — a fake's own import

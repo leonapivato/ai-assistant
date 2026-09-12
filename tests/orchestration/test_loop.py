@@ -45,7 +45,7 @@ from ai_assistant.core.types import (
     PlannerOutput,
     PreferenceMemory,
     Provenance,
-    ReadAsk,
+    ReadAskOutcome,
     Reversibility,
     RiskLevel,
     SemanticMemory,
@@ -151,7 +151,7 @@ class _FailingPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         """Fail the way a planner with nothing to offer fails."""

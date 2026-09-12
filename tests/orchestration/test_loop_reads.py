@@ -49,6 +49,7 @@ from ai_assistant.core.types import (
     PlanStep,
     Provenance,
     ReadAsk,
+    ReadAskOutcome,
     ReadKind,
     ReadRequest,
     Role,
@@ -311,7 +312,7 @@ class _DeletingPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         del context, capabilities
@@ -352,7 +353,7 @@ class _SuspendingPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         del context, memories, capabilities
@@ -453,7 +454,7 @@ class _RaisingPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         del goal, context, memories, capabilities

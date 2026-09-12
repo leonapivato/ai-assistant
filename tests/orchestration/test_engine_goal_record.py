@@ -23,6 +23,7 @@ from ai_assistant.core.types import (
     AttemptState,
     GoalStatus,
     Ground,
+    ReadAskOutcome,
 )
 
 if TYPE_CHECKING:
@@ -34,7 +35,6 @@ if TYPE_CHECKING:
         GoalBrief,
         MemoryRecord,
         PlannerOutput,
-        ReadAsk,
         ShownFile,
     )
 
@@ -147,7 +147,7 @@ class _RaisingPlanner(NoStepPlanner):
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         msg = "no plan for that"

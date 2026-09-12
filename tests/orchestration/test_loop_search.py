@@ -101,6 +101,7 @@ from ai_assistant.core.types import (
     Provenance,
     QueryRefusal,
     ReadAsk,
+    ReadAskOutcome,
     ReadKind,
     ReadRequest,
     Role,
@@ -1701,7 +1702,7 @@ class _SearchingOneStepPlanner(OneStepPlanner):
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         """Answer the base plan, carrying a ``WEB_SEARCH`` ask the first time only."""
@@ -2393,7 +2394,7 @@ class _NamingTheMintedRecord(_Understanding):
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         """Answer this call, grounding on the minted record where the supply holds one."""
@@ -2422,7 +2423,7 @@ class _NamingTheMintedRecord(_Understanding):
             memories=memories,
             capabilities=capabilities,
             files=files,
-            empty_reads=empty_reads,
+            read_outcomes=read_outcomes,
             evidence=evidence,
         )
 

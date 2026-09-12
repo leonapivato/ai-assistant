@@ -52,7 +52,9 @@ from ai_assistant.core.types import (
     PlannerOutput,
     Provenance,
     ReadAsk,
+    ReadAskOutcome,
     ReadKind,
+    ReadOutcomeKind,
     ReadRequest,
     Role,
     StructuredAsk,
@@ -216,11 +218,12 @@ class _RaisingSelect(_StructuredJournal):
 
 
 class _Script:
-    """A planner answering from a script and recording ADR-0240 §7's carrier.
+    """A planner answering from a script and recording ADR-0251 §3's carrier.
 
     ``test_loop_revision``'s own ``_Script`` records the supply and the vocabulary; a
-    case here needs ``empty_reads``, which is the whole subject of §13 item 3, so this
-    records all three rather than widening that one and moving every consumer's index.
+    case here needs ``read_outcomes``, which is the whole subject of ADR-0240 §13 item
+    3 as ADR-0251 §3 widens it, so this records all three rather than widening that one
+    and moving every consumer's index.
     """
 
     def __init__(self, *requests: ReadRequest | None) -> None:
@@ -231,9 +234,9 @@ class _Script:
                 nothing — which is how a case ends a turn at ADR-0228 §2(b).
         """
         self._requests = requests
-        self.calls: list[tuple[tuple[MemoryRecord, ...], tuple[ReadAsk, ...]]] = []
+        self.calls: list[tuple[tuple[MemoryRecord, ...], tuple[ReadAskOutcome, ...]]] = []
 
-    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0251 §3 each add one
         self,
         goal: GoalBrief,
         *,
@@ -242,13 +245,13 @@ class _Script:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         """Answer this call from the script, recording the supply and the carrier."""
         del context, capabilities, files
         ordinal = len(self.calls)
-        self.calls.append((tuple(memories), tuple(empty_reads)))
+        self.calls.append((tuple(memories), tuple(read_outcomes)))
         asked = self._requests[ordinal] if ordinal < len(self._requests) else self._requests[-1]
         return PlannerOutput(
             plan=ActionPlan(
@@ -428,13 +431,15 @@ async def test_a_window_with_a_query_goes_through_search_and_excludes_the_month_
 
 
 async def test_an_empty_structured_read_hands_the_planner_back_its_own_ask() -> None:
-    """§13 item 3: the revision fires, and ``empty_reads`` carries the very ask.
+    """§13 item 3: the revision fires, and ``read_outcomes`` carries the very ask.
 
     ADR-0240 §6's supersession of ADR-0228 §2(e), end to end: a structured read naming
     a value no record carries returns nothing, the audit records the empty outcome,
     and — the other six conditions holding — the turn makes a **second** planner call.
     What that call receives is the ask the *first* plan emitted, byte for byte, and
-    **nothing the store returned**.
+    **nothing the store returned** — now beside the member ADR-0251 §2 classifies it
+    as, which for this shape is ``EMPTY``: the source returned no record at all before
+    deduplication, with completeness certified and no typed non-yield to read.
     """
     memory = _StructuredJournal()
     await memory.add(_belief("belief-1", "the boiler question"))
@@ -447,8 +452,10 @@ async def test_an_empty_structured_read_hands_the_planner_back_its_own_ask() -> 
 
     assert len(planner.calls) == 2, "ADR-0228 §2(e), as ADR-0240 §6 supersedes it"
     assert planner.calls[0][1] == (), "a turn's first call is always handed ()"
-    assert planner.calls[1][1] == (asked,), "the second is handed the first plan's own ask"
-    assert planner.calls[1][1][0] is asked, "carried back byte for byte, never rebuilt"
+    assert planner.calls[1][1] == (ReadAskOutcome(ask=asked, outcome=ReadOutcomeKind.EMPTY),), (
+        "the second is handed the first plan's own ask, and what became of it"
+    )
+    assert planner.calls[1][1][0].ask is asked, "carried back byte for byte, never rebuilt"
     assert _serviced(captured)["structured"] == StructuredOutcome.RETURNED_NOTHING.value
     assert _record(captured)["planner_calls"] == 2
 
@@ -617,8 +624,8 @@ async def test_a_read_whose_records_were_all_deduplicated_away_fires_no_revision
 
     A servicing whose only ask is a structured read, and whose every returned record
     was already in the supply, fires **no** revision — nothing satisfies either branch
-    of ADR-0228 §2(e) — records the outcome as having **returned records**, and puts
-    nothing in ``empty_reads``. This is the arm a servicer reading the union's
+    of ADR-0228 §2(e) — and records the outcome as having **returned records**. This is
+    the arm a servicer reading the union's
     admissions rather than the store's own result gets wrong: it would see zero new
     records, call the read empty, and spend a model round trip telling the planner to
     broaden away from records already in front of it.
@@ -654,12 +661,13 @@ async def test_a_budget_starved_structured_read_makes_no_call_and_still_revises(
 
     A servicing in which the earlier kinds admit ten records the supply did not hold
     reaches the structured read with **no slot** and makes no store call; the audit
-    records the not-reached outcome; ``empty_reads`` is **empty** on the second planner
-    call. And the turn **does** revise anyway, because ADR-0226 §6 counts the budget
-    after deduplication — so those ten satisfy ADR-0228 §2(e)'s original novelty
-    branch. What this is written against is an implementation that reads a not-reached
-    read as an empty one, "putting an ask into ``empty_reads`` that established
-    nothing".
+    records the not-reached outcome; and the structured ask is **absent** from
+    ``read_outcomes`` on the second planner call. And the turn **does** revise anyway,
+    because ADR-0226 §6 counts the budget after deduplication — so those ten satisfy
+    ADR-0228 §2(e)'s original novelty branch. What this is written against is an
+    implementation that reads a not-reached read as an empty one, "putting an ask into
+    ``empty_reads`` that established nothing" — which ADR-0251 §2 restates as its
+    precedence case 1, producing no entry rather than a seventh member.
     """
     memory = _StructuredJournal()
     await memory.add(
@@ -686,7 +694,18 @@ async def test_a_budget_starved_structured_read_makes_no_call_and_still_revises(
         "the hop filled the budget with records the supply lacked"
     )
     assert len(planner.calls) == 2, "ADR-0228 §2(e)'s novelty branch is satisfied by those ten"
-    assert planner.calls[1][1] == (), "a read the budget did not reach established nothing"
+    # ADR-0251 §2's precedence case 1, driven end to end: the structured ask the budget
+    # did not reach earns **no** entry at all — ADR-0240 §7's "a read the budget did not
+    # reach is not in it", which §3 restates over the wider carrier. What the second
+    # call *is* handed is the hop, which did read and whose yield the budget cut.
+    assert [one.ask.kind for one in planner.calls[1][1]] == [ReadKind.CITATION_HOP], (
+        "a read the budget did not reach established nothing and is not in the carrier"
+    )
+    assert planner.calls[1][1][0].outcome is ReadOutcomeKind.RETURNED_RECORDS, (
+        "the hop's ten fitted the budget exactly, so nothing was cut and completeness "
+        "stands — ADR-0226 §6 records a truncation where the budget stopped a record it "
+        "returned, and a read given every slot and filling it was not stopped"
+    )
 
 
 async def test_the_same_fixture_with_one_slot_left_does_make_the_call() -> None:
@@ -1078,8 +1097,9 @@ async def test_the_audit_carries_no_value_while_the_carrier_carries_the_whole_as
     A structured ask naming a distinctive person label, a distinctive topic and a
     distinctive query emits an audit event in which **none of those three, and neither
     of the window's instants, appears anywhere** — the event carries the axes as
-    enumeration members and the outcome, and nothing else. ``empty_reads`` on the
-    second planner call carries that ask **whole**. The composing stage's facts carry
+    enumeration members and the outcome, and nothing else. ``read_outcomes`` on the
+    second planner call carries that ask **whole**, beside one member of a closed
+    vocabulary and nothing else (ADR-0251 §2). The composing stage's facts carry
     neither.
 
     **Asserted over the emitted event's own fields**, over the parameter's own value
@@ -1104,7 +1124,9 @@ async def test_the_audit_carries_no_value_while_the_carrier_carries_the_whole_as
         StructuredAxis.TOPICS.value,
         StructuredAxis.QUERY.value,
     )
-    assert planner.calls[1][1] == (asked,), "the carrier holds the ask whole"
+    assert planner.calls[1][1] == (ReadAskOutcome(ask=asked, outcome=ReadOutcomeKind.EMPTY),), (
+        "the carrier holds the ask whole"
+    )
     system, _ = await _composed(responded)
     for value in ("quixotic-marta", "stroopwafel", "marmalade"):
         assert value not in system, "ADR-0240 §8's facts carry no value on any axis"
@@ -1213,7 +1235,7 @@ async def test_two_empty_structured_reads_make_exactly_two_planner_calls() -> No
     assert "came back with nothing in it" in system, "ADR-0240 §8's emptiness fact"
 
 
-async def test_an_empty_reads_fact_survives_a_later_servicing_that_read_no_structure() -> None:
+async def test_an_empty_read_fact_survives_a_later_servicing_that_read_no_structure() -> None:
     """ADR-0240 §8: the fact is the turn's last **structured read**, not its last servicing.
 
     A first structured read comes back empty and fires the revision; the revision asks

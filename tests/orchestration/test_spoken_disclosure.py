@@ -68,7 +68,7 @@ from ai_assistant.core.types import (
     PlannerOutput,
     PlanStep,
     Provenance,
-    ReadAsk,
+    ReadAskOutcome,
     Role,
     SemanticMemory,
     SpokenAudio,
@@ -705,7 +705,7 @@ class _EchoingPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         """Record what this turn was supplied, and plan over exactly that."""

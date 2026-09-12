@@ -31,6 +31,7 @@ from ai_assistant.core.types import (
     ProposedElement,
     ProposedUnderstanding,
     Provenance,
+    ReadAskOutcome,
 )
 from ai_assistant.orchestration.loop import ConversationalOperation
 
@@ -43,7 +44,6 @@ if TYPE_CHECKING:
         EvidenceDigest,
         GoalBrief,
         MemoryRecord,
-        ReadAsk,
         ReadRequest,
         ShownFile,
     )
@@ -102,11 +102,11 @@ class _Understanding:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         """Answer this call from the script, recording the brief it was handed."""
-        del utterance, context, memories, capabilities, files, empty_reads, evidence
+        del utterance, context, memories, capabilities, files, read_outcomes, evidence
         ordinal = len(self.briefs)
         self.briefs.append(goal)
         return PlannerOutput(

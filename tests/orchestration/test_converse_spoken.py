@@ -45,7 +45,7 @@ from ai_assistant.core.types import (
     MemoryWriteMode,
     PlannerOutput,
     Provenance,
-    ReadAsk,
+    ReadAskOutcome,
     RoutableOperation,
     SemanticMemory,
     SpeechFailure,
@@ -1112,7 +1112,7 @@ class _RaisingPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         """Raise ``PlanningError``, which is one of ``converse``'s declared failures."""

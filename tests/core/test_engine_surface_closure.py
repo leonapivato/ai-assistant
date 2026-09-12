@@ -1071,6 +1071,19 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     emits. The method set does **not** move and stands at fifty-eight: ADR-0248 changes
     no Protocol at all (§7). §7 fixes the numeral, which is why this entry names one.
 
+    **39 is ADR-0251 §16, and it is under the second limb alone** — the wire-carried
+    type widened by exactly one defaulted member. ``AttemptEffort`` gains ``kind``, an
+    ``AttemptKind | None``; ``AttemptEffort`` rides ``GoalAttempt``, ``GoalAttempt`` is
+    what the promoted surface's attempt-facing methods return, both models are
+    ``extra="forbid"``, and ``project`` renders a model by ``model_dump()`` — so a hub
+    at 39 emits a ``"kind"`` member on every attempt and a client at 38 fails it with
+    ``extra_forbidden``. ``ReadOutcomeKind`` and the outcome model are **not** a second
+    ground: both exist only as an in-process argument to ``Planner.plan``, and no
+    wire-carried type gains a field of either. The method set does **not** move and
+    stands at fifty-eight: ``Planner`` changes — BREAKING under golden rule 5 — and is
+    on neither promoted surface. §16 fixes the numeral, which is why this entry names
+    one.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1079,7 +1092,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (58, 38), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (58, 39), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

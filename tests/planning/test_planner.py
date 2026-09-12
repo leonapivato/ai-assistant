@@ -45,7 +45,9 @@ from ai_assistant.core.types import (
     PreferenceMemory,
     Provenance,
     ReadAsk,
+    ReadAskOutcome,
     ReadKind,
+    ReadOutcomeKind,
     Role,
     SemanticMemory,
     ShownFile,
@@ -3711,7 +3713,7 @@ def _labelled(
 async def _prompts_over(
     *records: MemoryRecord,
     reply: str = _VALID_REPLY,
-    empty_reads: tuple[ReadAsk, ...] = (),
+    read_outcomes: tuple[ReadAskOutcome, ...] = (),
 ) -> tuple[str, str]:
     """The system and user turns the production assembler builds for one call."""
     model = FakeModelProvider(reply)
@@ -3722,7 +3724,7 @@ async def _prompts_over(
         context=_context(),
         memories=list(records),
         capabilities=_VOCABULARY,
-        empty_reads=empty_reads,
+        read_outcomes=read_outcomes,
     )
     [call] = model.calls
     return (
@@ -4027,7 +4029,7 @@ async def test_the_gate_governs_the_invitation_and_never_the_ask() -> None:
     assert ask.structure.participants == ("nobody the supply showed",)
 
 
-# --- §7: the empty-read carrier reaches the prompt ---------------------------
+# --- ADR-0251 §3: the read-outcome carrier reaches the prompt ----------------
 
 
 async def test_an_empty_read_is_rendered_back_as_what_the_turn_already_asked() -> None:
@@ -4037,6 +4039,10 @@ async def test_an_empty_read_is_rendered_back_as_what_the_turn_already_asked() -
     it, and it cannot say how many records anything held, how much of the budget is
     gone, or how long the turn has left." So the rendered block carries the ask's own
     values as quoted spans and carries no count, no record and no instant of the read.
+
+    ADR-0251 §3 widens the carrier and leaves that clause exactly where it was: what
+    changes is that the *fact* moves from the block's heading onto each line, so an
+    empty read now says so on its own line rather than by being in the block at all.
     """
     asked = ReadAsk(
         kind=ReadKind.STRUCTURED_READ,
@@ -4048,7 +4054,9 @@ async def test_an_empty_read_is_rendered_back_as_what_the_turn_already_asked() -
         ),
     )
 
-    _, user = await _prompts_over(_preference(), empty_reads=(asked,))
+    _, user = await _prompts_over(
+        _preference(), read_outcomes=(ReadAskOutcome(ask=asked, outcome=ReadOutcomeKind.EMPTY),)
+    )
 
     assert "nothing at all came back" in user
     assert '"quixotic-alex"' in user, "the planner's own composition, handed back"
@@ -4056,15 +4064,15 @@ async def test_an_empty_read_is_rendered_back_as_what_the_turn_already_asked() -
     assert '"marmalade"' in user
 
 
-async def test_a_first_call_renders_no_empty_read_block_at_all() -> None:
-    """ADR-0240 §7: ``()`` means no read of this turn came back empty.
+async def test_a_first_call_renders_no_read_outcome_block_at_all() -> None:
+    """ADR-0251 §3: ``()`` means no read of this turn has been serviced.
 
     On a turn's first call the value is always ``()``, and the assembled prompt is then
-    byte-identical to what it is without ADR-0240's carrier — asserted as an equality
-    against the same call made with the parameter omitted entirely, which is what a
-    caller that knows nothing of it passes.
+    byte-identical to what it is without the carrier — asserted as an equality against
+    the same call made with the parameter omitted entirely, which is what a caller that
+    knows nothing of it passes.
     """
-    _, explicit = await _prompts_over(_preference(), empty_reads=())
+    _, explicit = await _prompts_over(_preference(), read_outcomes=())
     model = FakeModelProvider(_VALID_REPLY)
     planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
     await planner.plan(
@@ -4104,7 +4112,7 @@ async def test_the_gate_is_computed_over_the_sequence_passed_on_that_call() -> N
         context=_context(),
         memories=[*first, serviced],
         capabilities=_VOCABULARY,
-        empty_reads=(),
+        read_outcomes=(),
     )
 
     opening, revision = (

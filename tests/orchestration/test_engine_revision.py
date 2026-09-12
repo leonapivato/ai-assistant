@@ -35,6 +35,7 @@ from ai_assistant.core.types import (
     PlanStep,
     Provenance,
     ReadAsk,
+    ReadAskOutcome,
     ReadKind,
     ReadRequest,
     Role,
@@ -85,7 +86,7 @@ class _DependentPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         """Plan the step where the supply carries the address, and ask for it where not."""
@@ -144,7 +145,7 @@ class _AlwaysAsking:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         """Plan one step and ask for one more read, on every call."""
@@ -324,7 +325,7 @@ async def test_every_plan_is_persisted_and_the_chain_is_legible() -> None:
     assert revision.id != first.id
 
     export = await harness.plans.export()
-    assert export.schema_version == 8
+    assert export.schema_version == 9
     assert {plan.id for plan in export.plans} == {first.id, revision.id}
 
 
