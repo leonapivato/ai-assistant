@@ -701,11 +701,14 @@ at the instant it is true, and is never inferred at read time.
 > a turn's total duration may therefore exceed its budget by one planner call and one
 > servicing"* — so an attempt admitted at one tick below the investigation share may finish its
 > round **past** the whole working allowance. **Two things are guaranteed and a third is not.**
-> Guaranteed: the composing call **runs**, because it is gated on nothing; and the overrun past
-> the declared allowance is bounded by **one round**, where without the reserve investigation
-> would have been admitted up to the allowance itself and overrun from there. **Not
-> guaranteed**: that `AttemptEffort.working` is below the working allowance when composing
-> begins. No lane states, tests or renders that stronger claim.
+> Guaranteed: the composing call **runs**, because it is gated on nothing; and **the round a
+> given check admits overruns the investigation share by that one round and no more**, where
+> without the reserve a check would have admitted a round up to the whole allowance and overrun
+> from there. **Not guaranteed**: that `AttemptEffort.working` is below the working allowance at
+> any moment, and in particular not when composing begins. The guarantee is over **one gate
+> check** and is never a bound on the attempt's accumulated working time — §4's ungated first
+> call means a long attempt may pass the allowance once per turn the owner starts, and §4 says
+> so. No lane states, tests or renders either stronger claim.
 
 > **Normative.** **A useful partial answer at exhaustion is a property of the reserve and never
 > an instruction to a model.** No prompt, no rendered line and no `Settings` value asks for one.
@@ -726,8 +729,10 @@ deadline ADR-0228 §14 defers by name.** Guaranteeing that composing begins belo
 would mean abandoning a planner call in flight, which *"needs a cancellation posture for a model
 call the turn has already paid for, and a rule for what a half-composed plan is"* — a second
 decision, deferred there and not taken here (§14). What is available without it is the margin,
-and the margin is worth declaring: it converts an unbounded overrun into a one-round one, and it
-costs nothing but a figure.
+and the margin is worth declaring: at each gate check it converts an unbounded overrun into a
+one-round one, and it costs nothing but a figure. What it does **not** do is bound the attempt's
+lifetime working time, for the same reason no figure here bounds its lifetime call count (§4):
+what bounds both is how many times the owner asks.
 
 **Composing is ungated rather than given its own budget, because a budget on the composing call
 would be a second place for a turn to fail with nothing to show.** The reserve's whole purpose
@@ -1124,21 +1129,40 @@ wrong, to buy a guarantee §5's own ground already gives.
 > advances ADR-0228 §9's per-turn count on exactly that line, for exactly that reason — raised
 > here to the durable ledger.
 
-> **Normative — the charge is in memory, and ADR-0249 §12 decides when it becomes durable.**
-> That section rules that *"An attempt is **opened in memory** when the user act that opens it
-> occurs, which is before the turn's first planner call; it is **first written** at the one site
-> §11 names… A turn that ends before that site writes no attempt row, exactly as it writes no
-> goal row and no plan row."* **This decision does not move that site and adds no second one.**
-> So the advance is on the in-memory attempt, where a replan, a branch or a recovery **within
-> the turn** sees it and is charged by it, and it reaches the store with everything else the
-> turn produced.
+> **Normative — when the charge becomes durable is ADR-0249 §12's question, and that section
+> answers it in two cases which this decision keeps apart.** It adds no persistence site, moves
+> none, and supersedes no clause of §11 or §12.
+>
+> - **An attempt not yet written** — one this turn opened. §12 rules that *"An attempt is
+>   **opened in memory** when the user act that opens it occurs, which is before the turn's first
+>   planner call; it is **first written** at the one site §11 names… A turn that ends before that
+>   site writes no attempt row, exactly as it writes no goal row and no plan row."* So the charge
+>   is on the in-memory attempt, a replan, branch or recovery **within the turn** sees it and is
+>   charged by it, and it reaches the store with everything else the turn produced. **A turn that
+>   dies before that site charges nothing**, exactly as it records no goal and no plan.
+> - **An attempt already written** — one an earlier turn persisted. §12 rules that *"after the
+>   first write, every change goes through `commit_attempt`, in this turn as in any later one…
+>   **Nothing buffers a transition**"*, and that clause binds this ledger as it binds every other
+>   field of the attempt. So each charge is an `AttemptTransition` through `commit_attempt`,
+>   under §12's compare-and-swap, **issued immediately and buffered for nothing** — a resumed
+>   turn that made two calls and then died leaves the stored count advanced by two, and a later
+>   turn resumes from there rather than from where the earlier turn began.
 
-> **Normative.** **A turn that dies before ADR-0249 §11's site charges nothing, and that is
-> stated rather than hidden.** Its calls are unrecorded exactly as its goal, its revisions and
-> its plans are, and no allowance is evaded by it: the next turn starts from the ledger as last
-> written, which is the honest state of what the store knows. A lane that wrote the ledger
-> earlier to close this would be adding the second persistence site ADR-0249 §12 forbids, and
-> would be doing it in a decision that supersedes no clause of §11 or §12.
+> **Normative — the commit precedes the call, and it is the only ordering that charges a call
+> that raises.** §12's prohibition on claiming a result before it happened is stated over
+> `outcome` — *"an attempt whose `outcome` is `ANSWERED` is written after the answer exists"* —
+> and a call count is not a result: what the transition records is that **this attempt is making
+> this call**, which is true from the instant it is issued and stays true whether the call
+> returns, raises or is cancelled. There is no path between the commit and the invocation on
+> which the attempt does not make the call.
+
+**The asymmetry between the two cases is ADR-0249 §12's and not this decision's, and it is worth
+saying which way each errs.** A new attempt's turn that dies leaves nothing, so nothing is
+evaded: the store never learned the goal existed either. A persisted attempt's turn that dies
+leaves the ledger advanced, so a later turn resumes with less allowance than it started the
+failed turn with — the conservative direction, and the one the ledger exists for. A design that
+buffered the persisted case to match the new one would let a turn that raised four times hand the
+next turn a full allowance, which is the hole this whole section closes.
 
 > **Normative.** `working` is accumulated by `orchestration` at each round boundary from the
 > injected clock (ADR-0026), excluding every interval spent waiting for the user. ADR-0249 §5's
@@ -1473,8 +1497,10 @@ than changed.
     `AttemptEffort.working` asserted to be at or past the investigation share at the moment
     composing is entered. A second arm drives the **overrun**: a round admitted at one tick below
     the investigation share whose planner call outlasts the reserve is **not** cancelled,
-    composing **still runs**, and the test asserts the overrun is one round — and asserts no upper
-    bound on `working`, because §6 claims none. #2170's *"exhaustion yields a supported partial
+    composing **still runs**, and the test asserts that **that check** admitted one round and no
+    more — and asserts **no** upper bound on `working`, because §6 claims none. A third arm drives
+    two further owner turns on the same attempt past the allowance and asserts each is served, so
+    that no implementation reads §6 as a cap. #2170's *"exhaustion yields a supported partial
     answer."*
 14. **The boundary instants are spent, not available.** With the injected clock set to exactly
    the investigation share, no further round is admitted and the stop is
@@ -1487,12 +1513,16 @@ than changed.
     drives a turn on an attempt whose allowance is **already spent**: it makes **exactly one**
     planner call, iterates no further, records the stop, and the ledger is asserted to advance by
     exactly one rather than to reset.
-17. **A call that raises is still charged, in memory.** A planner call that raises leaves the
-    in-memory `planner_calls` advanced, and a recovery **within that turn** is asserted to find
-    the allowance already spent rather than to obtain a free call. A second arm asserts ADR-0249
-    §12's rule is kept: a turn that dies before §11's persistence site writes **no** attempt row,
-    so nothing of its ledger is durable and no second persistence site exists. A cancellation arm
-    asserts the same as the first.
+17. **A call that raises is still charged, and the two persistence cases are separate arms.**
+    (a) A planner call that raises leaves the in-memory `planner_calls` advanced, and a recovery
+    **within that turn** is asserted to find the allowance already spent rather than to obtain a
+    free call; a cancellation arm asserts the same. (b) A turn on an attempt this turn **opened**
+    that dies before ADR-0249 §11's site writes **no** attempt row, so nothing of its ledger is
+    durable and no second persistence site exists. (c) A turn on an attempt an **earlier turn
+    persisted** that makes two calls and then dies is asserted to leave the **stored** count
+    advanced by two, through `commit_attempt` under §12's compare-and-swap, and a later turn is
+    asserted to resume from there — the arm that fails if any implementation buffers a
+    persisted attempt's ledger to the turn's persistence site.
 18. **The system opens no attempt to buy budget.** An attempt that exhausts its allowance is
     asserted to leave `GoalAttempt` count unchanged and the goal `ACTIVE`, with no second attempt
     row written by anything but one of ADR-0250 §12's three acts.
@@ -1594,8 +1624,9 @@ with no search account reaches neither. The arms drive each from a real source v
 member is ratified with no producer; that a member is rare on one deployment is not a defect.
 
 **The reserve is a margin and the ADR says so**, so an operator reading `AttemptEffort.working`
-will sometimes see a figure past the declared working allowance — by at most one round, and by
-design rather than by defect. The alternative was the cancelling deadline ADR-0228 §14 defers,
+will sometimes see a figure past the declared working allowance — by one round per gate check
+that admitted one, and once more for each turn the owner starts on that attempt, by design rather
+than by defect. The alternative was the cancelling deadline ADR-0228 §14 defers,
 and taking it here would have meant deciding what a half-composed plan is (§14).
 
 **An attempt whose allowance is spent still plans once per turn**, so an owner who keeps asking
