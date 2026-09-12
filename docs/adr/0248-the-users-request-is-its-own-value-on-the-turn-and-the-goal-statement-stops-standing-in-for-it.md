@@ -105,8 +105,8 @@ exactly as it stands.
 > the turn as `TurnResult.utterance`, is set by the component that received it, and is
 > **computed, derived, reconstructed or defaulted nowhere else**: no lane parses it out of a
 > rendering, reads it off a goal, infers it from a plan, or falls back to any other value
-> when it is asked for it, except under §3's one transitional clause which names its own
-> removal.
+> when it is asked for it. §3's one fallback — for a park older than the field — is the
+> single exception, and it reads a value this decision proves is the request (§3).
 
 > **Normative.** `TurnResult.utterance` is typed `NonBlankEncodableText` and is **required
 > with no default**. The field **normalises nothing**: the pass strips the text it received
@@ -163,7 +163,7 @@ content into the `PlanStore`, which has no reason to hold it — ADR-0004 §7's 
 rule failing in a store whose charter is *"request → executable plan, progress tracking"*.
 The pass's words belong to the pass.
 
-### 3. The parked read carries its own request, and the one transitional fallback
+### 3. The parked read carries its own request, and the one fallback for a park older than the field
 
 > **Normative.** `ParkedRead` gains a **fourth content field**, `utterance`, typed
 > `NonBlankEncodableText | None` and defaulting to `None`, carrying the parked turn's
@@ -182,13 +182,25 @@ The pass's words belong to the pass.
 
 > **Normative.** `Engine._resume_read` takes the user's words from the park's own
 > `utterance`. **Where the park carries none**, it takes the parked `Goal.statement`
-> instead — which this decision asserts is byte-identical to the request it stands in for
-> (§6) — and it is the only place in the system that may. **This fallback is transitional
-> and is removed by the lane implementing A1**, in the same change that gives
-> `Goal.statement` its new meaning, because from that moment it would file an
-> interpretation as the user's words. After its removal such a park's resolution carries
-> **no** user words, which is ADR-0225 §1's absent limb and a legible record rather than a
-> false one.
+> instead, and it is the only place in the system that may. **No lane widens it**: not to a
+> park that carries an `utterance`, not to a blank one, not to any other reader of §5's
+> table, and not to any other site.
+
+> **Normative.** **That reading is exact for the whole life of the fallback, and A1 does
+> not change that.** A park carries no `utterance` only where it was written before this
+> decision's field existed, and every such park's `Goal.statement` was minted by
+> `_goal_from` from the user's own stripped words. A park written after this decision
+> always carries its `utterance`, so the fallback can never reach a `Goal.statement` minted
+> under any other meaning — A1's included. The fallback therefore needs **no** removal to
+> stay correct, and **no lane is obliged to remove it**; A1 inherits nothing here.
+
+> **Normative.** A later change **may** delete it, once ADR-0244 §3's `expires_at` has
+> retired every park that predates this decision's deployment. Deleting it then makes such
+> a park's resolution carry **no** user words rather than the wrong ones. Until such a
+> change it stands, and no lane may delete it while a park lacking an `utterance` can still
+> be answered: `TurnResult.utterance` is required (§1), so removing the fallback without
+> first deciding what a resumed read composes when the pass has no request would leave that
+> path with no valid turn to build.
 
 **Why the park needs the field at all.** `Engine._resume_read` builds a real
 `TurnResult` — ADR-0244 §8 has it *"captured as a turn's exchange is captured"*, over a
@@ -204,9 +216,10 @@ existed fail to decode, so `get`, `open_park` and `outstanding` would raise on i
 question the user was asked would become unanswerable, against ADR-0244 §15's normative
 *"**A park survives a restart and is offered again**"*. Back-filling the column would
 require reconstructing the user's sentence from a rendering, which is precisely what
-ADR-0225 §1 refuses. The fallback is exact for as long as it can fire (§6), it fires only
-on rows a bounded `expires_at` retires, it is stated in one place, and it names the change
-that deletes it.
+ADR-0225 §1 refuses. The fallback is exact for **every** row it can ever fire on rather
+than merely for a while, it fires only on rows a bounded `expires_at` retires, it is stated
+in one place, and it hands A1 no obligation — which is the point of establishing it here
+rather than leaving the case to the lane that changes the goal's meaning.
 
 ### 4. Capture, the archive and the exchange rendering take the user's words from the request
 
@@ -249,7 +262,7 @@ that deletes it.
 | `orchestration.engine._exchange_of` | `f"The user asked: {turn.goal.statement}"` | **user's words** | takes `turn.utterance` (§4) |
 | `Engine._run_turn`, no-step branch | `asked=turn.goal.statement` | **user's words** | takes `turn.utterance` (§4) |
 | `Engine._run_turn`, step branch | `asked=turn.goal.statement` | **user's words** | takes `turn.utterance` (§4) |
-| `Engine._resume_read` | `asked=goal.statement`, off the parked turn | **user's words** | takes `park.utterance`, with §3's transitional fallback |
+| `Engine._resume_read` | `asked=goal.statement`, off the parked turn | **user's words** | takes `park.utterance`, with §3's fallback for a park older than the field |
 | `orchestration.composing`, the user prompt | `"The user said, in their own words:"` then `f"  {_quoted_span(turn.goal.statement)}"` | **user's words** | takes `turn.utterance` (§4) |
 | `LearningLoop.respond` → `self._retrieve(goal.statement)` | the relevance query | **the goal** | untouched; A1 |
 | `LearningLoop.respond` → `self._supplement(goal.statement, …)` | the episodic supplement's query | **the goal** | untouched; A1 |
@@ -344,7 +357,9 @@ keeps §6's assertion true of the retrieved supply as well as of the record.
 > **Normative.** **A park written before this decision decodes, stays answerable, and is
 > not repaired.** It decodes with `utterance` `None`, which §3's validator clause admits;
 > no lane back-fills, re-derives, reconstructs or re-validates the column on any stored row;
-> and §3's transitional fallback is what its resolution archives while that fallback stands.
+> and §3's fallback is what its resolution archives, exactly. **The parked-read store's own
+> `schema_version` does move, 1 → 2**, because §9's trigger change alters a stored object
+> definition; the upgrade reads no park content and rewrites none.
 > No other stored record is affected: `ConversationExport.schema_version` stays at **2**,
 > ADR-0212 §8 and ADR-0014 §5 are untouched, and no row is minted in ADR-0087 §2c's scalar
 > table.
@@ -391,6 +406,26 @@ keeps §6's assertion true of the retrieved supply as well as of the record.
 > field in `permissions`' parked-read store and its settlement trigger, and the canonical
 > fakes and conformance assertions §7 names.
 
+> **Normative.** **The settlement trigger is extended, and that is a stored-schema change
+> rather than an edit to a string.** `SqliteParkedReads` holds every object it defines to
+> its own definition: `CREATE TRIGGER IF NOT EXISTS` is a no-op against a trigger already
+> in the file, and the object check then compares the **stored** SQL against the module's
+> and refuses the database. So a trigger that names a fourth cleared field would make every
+> existing parked-read database fail to open, not merely the parks inside it. The lane owes
+> a **real upgrade**, in the same setup transaction the object check runs in: where the
+> stored trigger is the definition this store shipped before this decision, it is dropped
+> and recreated; where it is anything else the existing refusal stands, word for word and
+> for its own reason. The store's `schema_version` moves **1 → 2** and a database labelled
+> **1 is upgraded rather than refused**, which is the one shape its version check does not
+> admit today.
+
+> **Normative.** **The upgrade touches definitions and a marker, and no content.** It reads
+> no park's `data`, rewrites no row, back-fills no column, re-validates no stored model and
+> settles nothing. A park that was `OPEN` before it is `OPEN` after, with the same
+> `expires_at` and the same answer available (§3). The upgrade and the object check remain
+> one transaction, so a failure leaves the file exactly as it arrived — unupgraded,
+> unlabelled at the new version, and refusing to open rather than half-migrated.
+
 > **Normative.** **The archive side needs no second lane.** `archive/` changes not at all,
 > and `Engine._capture` changes not at all: `asked` is already a threaded parameter and
 > already carries ADR-0225 §1's three cases. What moves is the expression at four call
@@ -404,8 +439,8 @@ Tier 1 content, so the field and the clause that clears it at settlement must la
 together or ADR-0244 §3's retention rule is breached for a window. This is the seam
 ADR-0137 §2 widens the one-subsystem rule for — a contract change that cannot be separated
 from the consumer whose demands shape it — applied to a `core/types.py` change rather than
-a Protocol. The diff is small: two fields, one constant, one tuple, one SQL predicate and
-five expressions.
+a Protocol. The diff is small — two fields, one constant, one tuple, one SQL predicate and
+five expressions — with the store upgrade above the one part of it that is not.
 
 ### 10. The representative-input tests this decision owes
 
@@ -415,17 +450,25 @@ five expressions.
 > today, and an arm that the field itself refuses a blank; an arm that
 > settling a park clears `utterance` alongside `parameters`, `goal` and `plan`, and that
 > `get` reads it back as `None`; an arm that an `OPEN` park **round-trips** its
-> `utterance` through the store; an arm that a stored park row written without the column
-> decodes with `utterance` `None` and is still answerable; and an arm that a peer at the
-> previous protocol version and a peer at 37 refuse each other, naming both versions.
+> `utterance` through the store; an arm that opens a database carrying the store's
+> **pre-decision** table, indexes, settlement trigger and `schema_version` marker, upgrades
+> it, reads its legacy `OPEN` park back with `utterance` `None`, answers it, and then
+> settles a park written after the upgrade — a fresh database seeded with legacy JSON
+> cannot stand in for it, because it is the **stored trigger definition** and not the row
+> that the object check refuses; an arm that a database whose settlement trigger is
+> **neither** definition is still refused, with the message it is refused with today; and an
+> arm that a peer at the previous protocol version and a peer at 37 refuse each other,
+> naming both versions.
 
 ### 11. Deferred, by name, each with what fires it
 
 > **Normative.** Each deferral below is deferred **with its firing condition**, and none is
 > a decision this ADR declines to take for want of an opinion.
 
-- **§3's transitional fallback in `Engine._resume_read`.** Fired by A1's implementing lane,
-  which removes it in the same change that gives `Goal.statement` its new meaning.
+- **Deleting §3's fallback in `Engine._resume_read`.** Not owed to anyone and not A1's:
+  §3 makes the fallback permanently exact. Fired, if ever, by a lane that first establishes
+  that no park lacking an `utterance` can still be answered, and that decides what a resumed
+  read composes and archives when the pass has no request.
 - **What the relevance query, the episodic supplement's query and
   `planner._render_request` receive.** Fired by A1.
 - **Whether `ParkedRead` keeps a whole `Goal`.** Fired by A1's projection decision.
@@ -501,13 +544,14 @@ because there is only one string.
 **What becomes harder.** `TurnResult` carries one more field, and the wire moves with it:
 every client is replaced in lockstep on the redeployment, for a field no client yet reads.
 A park in flight across that deployment carries no request, and its resolution leans on
-§3's fallback, which is one transitional branch that A1's lane must remember to delete —
-the deferral is registered in §11 so that it is not left to memory. And the two byte-equal
+§3's fallback, which is one branch that reads the right value for every row it can ever see
+but is a branch all the same, and that no later lane may delete without first answering what
+a resumed read with no request composes (§11). And the two byte-equal
 values coexist for one ADR's worth of time, which is a state a reader could mistake for
 redundancy; §1 and §6 exist so that the equality is stated as a **transitional fact with an
 end date** rather than discovered and tidied away.
 
-**What would trigger revisiting this.** A1 landing without removing §3's fallback. A
+**What would trigger revisiting this.** A
 decision to make the archive's user half something other than the pass's own words. Or
 evidence that retrieval on the interpretation beats retrieval on the utterance, which would
 move four rows of §5's table and is A1's to weigh.
@@ -536,6 +580,14 @@ would make A0 observable in the record — which is the one property the sequenc
 written before the field existed would fail to decode, so a question the user was asked
 would become unanswerable, and the only available back-fill is parsing a rendering, which
 ADR-0225 §1 refuses in terms.
+
+**Leave the settlement trigger alone and let `settle`'s own code clear the fourth field.**
+Rejected. It would avoid §9's store upgrade entirely, and that is its whole appeal. But the
+trigger exists so that ADR-0244 §3's clearing is *"the database keeps rather than [a claim]
+this module remembers"*, and a fourth content field checked by the module and by nothing
+else is a silent asymmetry the next reader has to be told about. The retention guarantee is
+the one this store deliberately pushed below the application, and Tier 1 content is the
+wrong place to start making exceptions to it.
 
 **Name the field `request` rather than `utterance`.** Rejected on the corpus's own
 vocabulary. `utterance` is what every site that already threads this value calls it —
