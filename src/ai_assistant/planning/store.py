@@ -273,8 +273,20 @@ class InMemoryPlanStore:
         if question.goal_id not in self._goals:
             msg = f"cannot record a question for unknown goal {question.goal_id}"
             raise PlanningError(msg)
-        if question.attempt_id not in self._attempts:
+        attempt = self._attempts.get(question.attempt_id)
+        if attempt is None:
             msg = f"cannot record a question for unknown attempt {question.attempt_id}"
+            raise PlanningError(msg)
+        if attempt.goal_id != question.goal_id:
+            # ADR-0014 §5's closure kept at write time, as `commit_attempt` keeps it
+            # for an attempt's own references: `delete_goal` cascades one goal's
+            # attempts and questions together, so a question naming *another* goal's
+            # attempt outlives that attempt and makes the next export unvalidatable.
+            msg = (
+                f"question {question.id} names attempt {question.attempt_id}, which "
+                f"belongs to goal {attempt.goal_id} and not to {question.goal_id}: a "
+                f"question's attempt is one its own goal holds (ADR-0250 §9)"
+            )
             raise PlanningError(msg)
         if question.id in self._questions:
             msg = f"question {question.id} already exists"

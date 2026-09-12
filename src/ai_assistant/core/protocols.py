@@ -4408,6 +4408,18 @@ class PlanStore(Protocol):
         crash between them leaves an ``OPEN`` question on a ``RUNNING`` attempt, and
         that state is answerable rather than repaired.
 
+        **The attempt must be one the question's own goal holds, or the write is
+        refused.** ``goal_id`` and ``attempt_id`` are both references ADR-0014 §5's
+        closure requires to resolve within the same export, extended to
+        ``question_id`` by ADR-0250 §9 — and this is that promise **kept at write time
+        rather than repaired at read time**, which is the division
+        :meth:`commit_attempt` already records for an attempt's own references.
+        Requiring the attempt's goal to be *this* goal rather than merely some goal is
+        what keeps the closure true across a deletion: :meth:`delete_goal` cascades a
+        goal's attempts and its questions together, so a reference so confined cannot
+        outlive its target, while a question naming another goal's attempt survives
+        that attempt and makes the next ``export`` unvalidatable.
+
         Args:
             question: The question to write. Its ``disposition`` is ``OPEN`` and both
                 content fields are present, which the type already enforces.
@@ -4417,8 +4429,9 @@ class PlanStore(Protocol):
             already holds an ``OPEN`` one.
 
         Raises:
-            PlanningError: If ``goal_id`` or ``attempt_id`` names no stored record, or
-                the store already holds a question under this ``id``.
+            PlanningError: If ``goal_id`` or ``attempt_id`` names no stored record, if
+                the attempt is not one this question's goal holds, or if the store
+                already holds a question under this ``id``.
         """
         ...
 
