@@ -132,7 +132,9 @@ decides the values those lanes write into and the seam they write across, and no
 > are exactly: `revision`, an `int` at least 1, minted one greater than the revision it follows
 > in the goal's **history** — which after §2's elision need not be the element before it in the
 > tuple; `outcome_ground`, a `Ground`, with `outcome_evidence_id` and `outcome_span` carried and
-> validated exactly as a `GoalElement`'s are;
+> validated as a `GoalElement`'s are **but for one further admitted shape** — `USER_STATED` with
+> neither argument, whose one origin is §12's migration and whose one further route is §7's
+> retention copying it forward (the absence clause below);
 > `outcome`, a `NonBlankEncodableText` stating the understood outcome; `constraints`,
 > `criteria` and `conditions`, each a possibly-empty `tuple[GoalElement, ...]`;
 > `recorded_at`, a `UtcInstant`; and `raised_by`, an `Identifier | None` naming the
@@ -191,15 +193,21 @@ field of one stored element by a fixed rule.
 > goal unreachable from another conversation, and whether and how a goal is resumed from one is
 > A2's (§13). ADR-0014 §1's *"a goal … **outlives any one conversation**"* binds entire.
 
-> **Normative — the three fields that admit absence, and the one route that produces it.**
+> **Normative — the four absences this decision admits, and the one route that originates
+> each.**
 > `Goal.conversation_id`, `Goal.last_engaged_at` and `GoalInterpretation.raised_by` are each
 > typed `| None`, and **`None` is reachable by exactly one route: a row written before this
 > decision** (§12). **No lane writes `None` into any of them.** `orchestration` supplies all
 > three on every goal it opens and every revision it records, and an implementation that leaves
-> one absent on a value it authored does not conform. This is ADR-0248 §3's move applied to
-> three more fields for its own reason: requiring them would make every stored goal fail to
-> decode, and a goal that cannot be read is worse than one whose provenance says, truthfully,
-> that this system did not record it.
+> one absent on a value it authored does not conform. The **fourth** is
+> `GoalInterpretation.outcome_span` **where `outcome_ground` is `USER_STATED`**: its one
+> **origin** is that same route — §12 converts a row this system stored before this decision and
+> cannot invent a span of a request the row does not hold — and from there it is **carried
+> forward** by §7's outcome retention and by nothing else. **No lane authors a `USER_STATED`
+> outcome with an absent span**: every one `orchestration` grounds for the first time carries
+> the span it resolved (§7). This is ADR-0248 §3's move applied to four more fields for its own
+> reason: requiring them would make every stored goal fail to decode, and a goal that cannot be
+> read is worse than one whose provenance says, truthfully, that this system did not record it.
 
 > **Normative.** `Goal.version` is an `int` starting at 0, and it is the **compare-and-swap
 > token** every mutation of the goal advances. It is a different value from a
@@ -261,10 +269,17 @@ in `Settings` applies unchanged: *"a knob that raises the ceiling is a knob that
 > No goal is ever constructed with an empty `interpretation`, and no lane opens a goal from
 > any other value.
 
-> **Normative.** Revision 1 carries **no `GoalElement`**, and its `outcome_ground` is
-> **`USER_STATED`** with its `outcome_span` the whole request — which is exactly true, since its
-> outcome **is** the request. A planner's first `understanding` for a goal is recorded as
-> revision 2 or later, never as revision 1, and no model output ever authors revision 1.
+> **Normative.** Revision 1 of a goal **this system opens** carries **no `GoalElement`**, and
+> its `outcome_ground` is **`USER_STATED`** with its `outcome_span` the whole request — which is
+> exactly true, since its outcome **is** the request. A planner's first `understanding` for a
+> goal is recorded as revision 2 or later, never as revision 1, and no model output ever authors
+> revision 1.
+
+> **Normative.** **That rule reaches no row §12 migrates, and the two revision 1s are
+> distinguishable on the record.** A goal §12 converts was stored before this decision and is
+> not opened under the clause above: its ground is derived from the row's own `Goal.provenance`
+> and its span is absent (§12). An **opened** revision 1 always carries a `raised_by` and a
+> **migrated** one never does (§1), so no reader has to guess which of the two it holds.
 
 > **Normative — the outcome is grounded, and that is what keeps ADR-0014 §1's distinction
 > alive across the seam.** §1 of ADR-0014 requires that *"a goal the system **inferred** must
@@ -465,12 +480,49 @@ is bought for exactly that; its **provenance** is not, and §7 is where the line
 > `PlannerOutput` carries no read request of its own.
 
 > **Normative.** `core/types.py` gains **`ProposedUnderstanding`**, a frozen model with
-> `extra="forbid"` carrying exactly: `outcome`, a `NonBlankEncodableText`; `outcome_ground`, a
-> `Ground`, with `outcome_evidence_label` and `outcome_span` validated exactly as a
-> `ProposedElement`'s are; `constraints`, `criteria` and `conditions`, each a possibly-empty
+> `extra="forbid"` carrying exactly: `outcome`, a `NonBlankEncodableText | None`;
+> `outcome_ground`, a `Ground | None`, with `outcome_evidence_label` and `outcome_span`
+> validated as a `ProposedElement`'s are; **`retains_outcome`**, a `bool` defaulting to `False`;
+> `constraints`, `criteria` and `conditions`, each a possibly-empty
 > `tuple[ProposedElement, ...]`; and `questions`, a possibly-empty
 > `tuple[NonBlankEncodableText, ...]`. It carries **no revision number, no `raised_by`, no
 > `recorded_at`, no goal id and no phase** — every one of those is `orchestration`'s under §6.
+
+> **Normative — the outcome is retained or restated, and a model validator admits exactly those
+> two shapes.** **Retained**: `retains_outcome` set, and `outcome`, `outcome_ground`,
+> `outcome_evidence_label` and `outcome_span` all absent. **Restated**: `retains_outcome` clear,
+> `outcome` and `outcome_ground` both present, and the ground's argument correct for it — a
+> label and no span for `FROM_EVIDENCE`, a span and no label for `USER_STATED`, neither for
+> `INFERRED`. Every other shape is refused, so an understanding that neither states an outcome
+> nor retains one is **not constructible**. There is always one to retain: a
+> `ProposedUnderstanding` is recorded as revision 2 or later (§3), so a current interpretation
+> exists whenever one is returned.
+
+> **Normative — retention copies the outcome forward whole, exactly as it copies an element.**
+> On a retained outcome `orchestration` copies the **current** interpretation's `outcome`, its
+> `outcome_ground`, its `outcome_evidence_id` and its `outcome_span` into the new revision
+> **byte for byte** — including a `USER_STATED` ground whose `outcome_span` is absent because
+> §12 migrated the row it came from (§1). The planner is not asked to re-ground the outcome and
+> **cannot**: the brief carries the ground **kind** and no reference and no span, by §9.
+
+**This is §7's element-retention argument applied to the objective, and without it the sibling
+of S2 fails.** After *"Book a campsite"* and then *"Keep it under $100"*, the outcome has not
+changed, but the planner must return an understanding in order to add the constraint. With no
+retention for the outcome it could only restate it — and the ground resolution below then
+checks that restatement against **this** turn's request, where *"Book a campsite"* is no span,
+so the objective would be recorded `INFERRED` on the turn the user changed only their budget.
+That is exactly the downgrade of an explicit user instruction the retention clause above
+refuses for a constraint, reaching the one part of an understanding that clause could not
+carry, and the remedy is the same shape: the planner says it keeps the outcome and
+`orchestration` copies what it already resolved.
+
+> **Normative.** **A `ProposedUnderstanding`'s `questions` are carried and no lane of this
+> decision reads them.** Nothing here asks a question, stores one, or projects one onto a brief:
+> `GoalBrief.open_questions` is empty on every brief this decision's lanes build, and **what a
+> raised question becomes is A2's** (§13). The field rides the envelope for the reason §10 gives
+> `EvidenceStanding.SUPERSEDED` — so that A2 need not reopen a `core` type to carry a value the
+> planner can already produce — and this is §1's own posture toward `last_engaged_at`: the
+> decision lands the carrier and nothing else.
 
 > **Normative.** `core/types.py` gains **`ProposedElement`**, a frozen model with
 > `extra="forbid"` carrying exactly `text` (`NonBlankEncodableText | None`), `ground`
@@ -492,7 +544,9 @@ is bought for exactly that; its **provenance** is not, and §7 is where the line
 > replaces is **not** in the new revision. That is the whole of the removal mechanism; there is
 > no delete member and no partial-update shape, because a revision is a complete statement of
 > an understanding and a patch would make two revisions unreadable without replaying every one
-> between them.
+> between them. **The outcome is not subject to that rule**: it is retained or restated, never
+> omitted, and the validator above is what makes omitting it unconstructible rather than a
+> silent removal of the objective.
 
 **This is the case S2 turns on, and without it the stress case fails.** After *"Book a
 campsite, under $100"* and then *"Actually, make it Sunday"*, the budget constraint's own span
@@ -512,7 +566,9 @@ fixes the label form.
 > and resolves exactly two kinds and no others. It resolves the **outcome's** ground by the same
 > two rules and with the same refusal; an outcome whose ground does not resolve is recorded as
 > `INFERRED` with neither argument rather than dropped, because a revision without an outcome is
-> not a revision at all. A `FROM_EVIDENCE` element's `evidence_label` is
+> not a revision at all. A **retained** outcome passes through no resolution at all: nothing
+> crosses the seam to resolve, and the ground copied forward is one an earlier revision already
+> resolved or §12 derived. A `FROM_EVIDENCE` element's `evidence_label` is
 > resolved **by ADR-0226 §3's labelling scheme, unchanged** — the label of the record at
 > 1-based index *n* of the `memories` sequence passed **on that call** — and the stamped
 > `GoalElement.evidence_id` is the identifier of the record the loop itself labelled. A
@@ -537,7 +593,8 @@ fixes the label form.
 > label naming a minted record, a span that is not a span of this turn's request — is **dropped
 > from the recorded revision**, silently and without failing the turn, exactly as ADR-0226 §3
 > drops a label outside the shown set. A `ProposedUnderstanding` **all** of whose elements are
-> dropped still records its `outcome`, because the outcome is not grounded per element.
+> dropped still records **an** outcome — the one it stated or the one it retained — because the
+> outcome is not grounded per element.
 
 > **Normative.** **No record identifier is rendered to the planner and none is accepted from
 > it.** ADR-0228 §8's statement of ADR-0226 §3's namer rule binds this envelope entire: an
@@ -1014,14 +1071,45 @@ than `Provenance` — a kind, with no reference and no confidence.
 > *"**A park survives a restart and is offered again**"* — is the obligation for one store, and
 > ADR-0004 §6's export and deletion rights are the obligation for the other.
 
+> **Normative — the one grounding rule both migrations take, and it reads the row rather than
+> §3.** A migrated outcome's `Ground` is derived from the stored `Goal.provenance.source`, a
+> `MemorySource`, and the derivation is total over its four members: `USER_ASSERTED` becomes
+> **`USER_STATED`**, and `OBSERVED`, `INFERRED` and `EXTERNAL` each become **`INFERRED`**.
+> **No migrated outcome is `FROM_EVIDENCE`**, because that ground names a
+> record of the labelled supply through an `evidence_id` (§7) and a legacy row holds no such
+> reference — recording one would state a warrant the row cannot show, which is the refusal §7
+> already takes against a search-minted record; the rows that could carry such a ground are
+> A4's to mint (§10). Where the migrated shape carries the ground's arguments at all — the plan
+> store's `GoalInterpretation` does, the park's `GoalBrief` carries none (§9) — a `USER_STATED`
+> migrated outcome carries **no `outcome_span`** and an `INFERRED` one neither argument. **The
+> migration invents no span**: the request the stored statement was read from is not in the row,
+> and §1's fourth absence is exactly this route.
+
+**Why the row's provenance and not §3's rule, and what the alternative would assert.** §3 makes
+an opened revision 1's ground `USER_STATED` because for a goal this system opens the outcome
+*is* the request — a claim a migration cannot make, because the request the statement came from
+was never stored. `Goal.provenance` **was**, and ADR-0014 §1 put it on the record for precisely
+this distinction: *"a goal the system **inferred** must never be indistinguishable from one the
+user **stated**"*. Applying §3's rule to a row whose `provenance.source` is `INFERRED` would
+produce exactly that indistinguishability, in the direction that matters, on a write nobody
+looks at twice. As a dated observation rather than a rule: at `03817599` the only producer of a
+`Goal` under `src/` is `LearningLoop._goal_from`, which writes `USER_ASSERTED`, so on that tree
+every migrated row takes the first branch. It is not the rule, because `Goal.provenance` is a
+required field with no constraint on `source`, both conforming stores accept and round-trip an
+`INFERRED` one, and a migration that consulted the current producer instead of the row would be
+asserting a fact that is not on disk.
+
 > **Normative.** **The parked-read store's `schema_version` moves by exactly one, and its
 > upgrade converts the `goal` column.** A stored `goal` object of the pre-decision shape is
 > read and rewritten as a `GoalBrief`: `goal_id` and the record's new `goal_id` column both
-> from its `id`; `outcome` from its `statement`; `status` and `deadline` carried across;
+> from its `id`; `outcome` from its `statement`; **`outcome_ground` by the grounding rule
+> above, from its stored `provenance.source`**; `status` and `deadline` carried across;
 > `constraints`, `criteria`, `conditions` and `open_questions` empty. **The conversion is
-> lossless and not a fabrication**: by §3 a goal opened before this decision has exactly one
-> interpretation, whose outcome is its statement, so the brief states what the record already
-> said and invents nothing. This upgrade **does** read park content, unlike ADR-0248 §7's,
+> lossless and not a fabrication**: the stored record holds one objective and one provenance,
+> the brief's `outcome` is that objective's own bytes and its `outcome_ground` is that
+> provenance read by the rule above, so the brief states what the record already said and
+> invents nothing — least of all a span, which the record does not hold and the brief has no
+> field for (§9). This upgrade **does** read park content, unlike ADR-0248 §7's,
 > because its alternative is a park that cannot be decoded at all; it writes no new content, and
 > ADR-0004 §5's rule that *"Tier 0/1 data must never be logged"* binds it unchanged.
 
@@ -1049,16 +1137,21 @@ than `Provenance` — a kind, with no reference and no confidence.
 > is **newer** than the code understands"*, which a version 1 store is not. A version 1 store is
 > upgraded in place rather than refused: each `goals` row
 > gains an `interpretation` of exactly one revision, whose `outcome` is the row's stored
-> `statement`, whose `recorded_at` is its `created_at`, and whose `raised_by` is **absent**;
-> `conversation_id` and `last_engaged_at` are **absent**; `version` and `interpretation_elided`
-> are 0; and each `plans` row's `targets_revision` is **absent**.
+> `statement`, whose `outcome_ground` is derived from the row's stored `provenance.source` by
+> the grounding rule above — with **no `outcome_span`** in either branch — whose `constraints`,
+> `criteria` and `conditions` are **empty**, whose `recorded_at` is its `created_at`, and whose
+> `raised_by` is **absent**; `conversation_id` and `last_engaged_at` are **absent**; `version`
+> and `interpretation_elided` are 0; the `attempts` table is **created empty**, with the foreign
+> key onto `goals` that ADR-0049 §1's schema discipline requires, because a version 1 store
+> holds no attempt; and each `plans` row's `targets_revision` is **absent**.
 
 > **Normative.** **The migration writes no value this system did not record, and the absences
 > are the whole of how it says so.** It does not invent a turn id for `raised_by`, a
-> conversation for `conversation_id`, an instant for `last_engaged_at` or a revision for
-> `targets_revision`; §1's three-fields clause and §8's unstamped clause admit exactly these
-> rows and no others. A synthesised `raised_by` would attribute an understanding to a turn that
-> never raised it, which is the falsehood §2 refuses silent truncation on the same ground.
+> conversation for `conversation_id`, an instant for `last_engaged_at`, a span of a request it
+> does not hold for `outcome_span`, or a revision for `targets_revision`; §1's four-absences
+> clause and §8's unstamped clause admit exactly these rows and no others. A synthesised
+> `raised_by` would attribute an understanding to a turn that never raised it, which is the
+> falsehood §2 refuses silent truncation on the same ground.
 
 > **Normative.** **Nothing else under `wire/` changes.** The connect exchange gains no member,
 > no existing frame's encoding changes, no `FrameKind` is added, no codec entry is registered,
@@ -1092,9 +1185,10 @@ nothing; the marked clauses above are what a lane owes.
 
 - **Association over N candidates, focus, and what moves `last_engaged_at`.** A2. Fired by
   this ADR landing: the field exists and nothing reads it until A2 says what does.
-- **Materiality, when a question is asked, and the `GoalQuestion` record and its store.** A2.
-  Fired by this ADR landing. `GoalBrief.open_questions` carries texts and nothing else until
-  then.
+- **Materiality, when a question is asked, the `GoalQuestion` record and its store, and what
+  becomes of a `ProposedUnderstanding`'s `questions`** — which this decision carries and no lane
+  of it reads (§7). A2. Fired by this ADR landing. `GoalBrief.open_questions` carries texts and
+  nothing else, and is empty on every brief this decision's lanes build.
 - **Resumption of a goal from another conversation by explicit reference** — an owner ruling
   of 2026-09-12 — and whether automatic cross-conversation association is ever built. A2.
   `Goal.conversation_id` is provenance and leaves room for both (§1).
@@ -1181,8 +1275,10 @@ a user utterance"* becomes true of the implementation for the first time; *"`Goa
 type rather than a memory kind. A goal is planning input, not a retrieval record"* is the ground
 for not making this a `MemoryKind`; *"canonical text rendering, used for retrieval"* is the
 ground §11 reads the query off; and *"a goal … **outlives any one conversation**"* is why §1
-makes `conversation_id` provenance rather than a fence. §1's `Provenance` sentence is untouched
-and the field stays on `Goal`.
+makes `conversation_id` provenance rather than a fence. §1's `Provenance` sentence is untouched,
+the field stays on `Goal`, and §12's migration **reads** it as the ground of a legacy outcome —
+which is the distinction §1 put it there to carry, used for the one write that could otherwise
+lose it.
 
 **ADR-0248 §3 — partially superseded**, in its fallback clause's accessor alone, and the header
 records it. §3 rules that where a park carries no `utterance`, `Engine._resume_read` *"takes the
@@ -1324,10 +1420,12 @@ that a hub and its clients must upgrade together.
    distinctive string and a digest built from a record with a distinctive id, the prompt
    `_render_request` builds contains neither string. §9's distinction between what a type
    *contains* and what the renderer *prints* is exactly what these two arms separate.
-5. **Ground resolution and its refusals.** A `FROM_EVIDENCE` element whose label is outside the
-   shown set, and a `USER_STATED` element whose span is not a span of the turn's request: each
-   dropped from the recorded revision, silently, with the revision's `outcome` still recorded
-   and the turn unharmed.
+5. **Ground resolution and its refusals, for an element and for the outcome.** A
+   `FROM_EVIDENCE` element whose label is outside the shown set, and a `USER_STATED` element
+   whose span is not a span of the turn's request: each dropped from the recorded revision,
+   silently, with the revision's `outcome` still recorded and the turn unharmed. And the
+   **outcome's own** ground failing those same two checks: the revision is still recorded, with
+   `outcome_ground` `INFERRED` and neither argument, rather than dropped.
 6. **The stale-target rule, and what the stamp actually is.** A plan whose `targets_revision`
    is not the goal's current revision is not driven. And the stamp is **the goal's revision
    after this call's understanding was recorded**, whatever the planner returned in that field,
@@ -1370,21 +1468,30 @@ that a hub and its clients must upgrade together.
     store's **pre-decision** table, its indexes, its settlement trigger and its
     `schema_version` marker, holding an unexpired `OPEN` park whose `goal` column is a
     pre-decision `Goal` and whose `plan` carries no `targets_revision`, is opened, upgraded,
-    read back with a `GoalBrief` whose `outcome` is the stored `statement` and whose `goal_id`
-    matches the record's new column, **answered**, and then settled — with a park written after
-    the upgrade settled in the same run. A fresh database seeded with converted JSON cannot
-    stand in for it, on ADR-0248 §10's own ground: it is the **stored** definition and not the
-    row that the object check refuses. The same arm composes with an absent `utterance`.
+    read back with a `GoalBrief` whose `outcome` is the stored `statement`, whose `goal_id`
+    matches the record's new column, and whose `outcome_ground` is `USER_STATED` where the
+    stored `Goal.provenance.source` was `USER_ASSERTED` and `INFERRED` where it was any other
+    member — both branches driven from **stored** rows — **answered**, and then settled with its
+    `goal_id` still on the record and its four content fields cleared — with a park written
+    after the upgrade settled in the same run. A fresh database seeded with converted JSON
+    cannot stand in for it, on ADR-0248 §10's own ground: it is the **stored** definition and
+    not the row that the object check refuses. The same arm composes with an absent `utterance`.
 17. **A pre-decision plan store upgrades and stays exportable.** A plan store at
     `schema_version` 1 holding goals and plans is opened and upgraded; each goal reads back with
-    exactly one interpretation whose `outcome` is its stored `statement` and whose `raised_by`,
-    `conversation_id` and `last_engaged_at` are **absent**; each plan reads back with
-    `targets_revision` absent and is **not driven**; `export` produces a `PlanExport` at the new
-    `schema_version` that validates and closes; and `delete_goal` still cascades.
+    exactly one interpretation whose `outcome` is its stored `statement`, whose
+    `outcome_ground` is `USER_STATED` with **no span** where the row's `provenance.source` was
+    `USER_ASSERTED` and `INFERRED` with neither argument where it was any other member — both
+    branches driven from **stored** rows — and whose `raised_by`, `conversation_id` and
+    `last_engaged_at` are **absent**; `attempts_of` returns empty for every migrated goal; each
+    plan reads back with `targets_revision` absent and is **not driven**; `export` produces a
+    `PlanExport` at the new `schema_version` that validates and closes; and `delete_goal` still
+    cascades.
 18. **The absences have exactly one producer.** No path through `orchestration` writes `None`
     into `Goal.conversation_id`, `Goal.last_engaged_at`, `GoalInterpretation.raised_by` or
-    `ActionPlan.targets_revision`, and `PlanStore.save_plan` refuses a plan whose
-    `targets_revision` is still absent (§8, §12).
+    `ActionPlan.targets_revision`, and none **authors** a `USER_STATED` outcome whose
+    `outcome_span` is absent — the only such value in the system is §12's migrated one, and it
+    reaches a later revision only by §7's retention copying it forward. And
+    `PlanStore.save_plan` refuses a plan whose `targets_revision` is still absent (§8, §12).
 19. **The attempt's references grow, within a turn and across turns alike.** An attempt the
     store already holds takes a plan id, then an execution id, then an authorization id through
     `commit_attempt` — the first two inside the turn that opened it — each appended in order;
@@ -1425,6 +1532,17 @@ that a hub and its clients must upgrade together.
     migrated-database case is driven by attempting to resume a pending execution after the
     upgrade, not by constructing the row by hand. A plan targeting the current revision claims
     normally.
+27. **An unchanged outcome keeps its grounding through a correction turn.** After *"Book a
+    campsite"* and then *"Keep it under $100"*, the planner returns a `ProposedUnderstanding`
+    with `retains_outcome` set and one new constraint: the recorded revision's `outcome`,
+    `outcome_ground`, `outcome_evidence_id` and `outcome_span` are **byte-identical** to the
+    previous revision's, the constraint is newly grounded on a span of **this** turn's request,
+    and the brief the next call receives shows both. The arm fails if the outcome is re-grounded
+    `INFERRED`, re-grounded `USER_STATED` on a span this turn does not contain, or dropped. And
+    over a **migrated** revision 1: retaining an outcome grounded `USER_STATED` with no span
+    records it again with no span, rather than refusing the revision or inventing one. A
+    `ProposedUnderstanding` that neither retains the outcome nor states one does not
+    construct.
 
 ### 17. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
