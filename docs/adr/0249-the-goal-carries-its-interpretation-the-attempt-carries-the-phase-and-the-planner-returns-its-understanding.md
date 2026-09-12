@@ -7,9 +7,10 @@
   the user's unrewritten words and nothing about it changed" is false of a goal that carries
   an interpretation, and false of a turn that associates to a goal an earlier turn opened.
   Nothing else in that ADR.** §1's subject-stability rule — *"The revision carries the **same
-  `goal_id`** as the plan it replaces"* — binds **verbatim** and is strengthened: a turn's two
-  calls now also receive the same `GoalBrief`. Its reason, *"a second goal would make one turn
-  look like two in every store that holds goals"*, binds entire. §1's authored-at-the-seam
+  `goal_id`** as the plan it replaces"* — binds **verbatim**, and its reason, *"a second goal
+  would make one turn look like two in every store that holds goals"*, binds entire. The two
+  calls of a turn plan for the same **goal**; where the first call revised the understanding
+  they receive briefs of different revisions, and §1 neither said nor needed otherwise. §1's authored-at-the-seam
   clause, its context-assembled-once clause, its nothing-else-is-re-run clause and its
   capability-re-read clause are relied on unchanged, and §§2–15 are untouched **but for the
   second scope below**.
@@ -41,6 +42,16 @@
   superseded in none** — its not-an-utterance rule, its `core`-type-not-memory-kind rule, its
   used-for-retrieval annotation, its outlives-any-one-conversation clause and its `Provenance`
   sentence each bind entire (§14) — and §§2, 3, 4 and 7 are untouched.
+- **Partially supersedes** [ADR-0248](0248-the-users-request-is-its-own-value-on-the-turn-and-the-goal-statement-stops-standing-in-for-it.md)
+  — **§3's fallback clause in its accessor alone: where a park carries no `utterance`,
+  `Engine._resume_read` takes `park.goal.outcome` rather than the parked `Goal.statement`,
+  because §12 converts a pre-decision park's `goal` column to a `GoalBrief`. Nothing else in
+  that ADR.** The bytes are identical — the conversion sets `outcome` from the stored
+  `statement` — so §3's *"That reading is exact for the whole life of the fallback"* binds
+  entire and stays true; the fallback is still the only site that may take it, is still not
+  widened to a park carrying an `utterance`, to a blank one, to any other reader of §5's table
+  or to any other site, and is still not removed. §§1, 2, 4-13 stand entire, and §8's list of
+  what it left to A1 is what this ADR decides.
 - **Partially supersedes** [ADR-0049](0049-a-durable-plan-store.md)
   — **§1's migration clause alone: "The migration is table creation only. There is no prior
   persistent `PlanStore` and therefore no on-disk schema to evolve" stops being true, and §12
@@ -462,11 +473,20 @@ is bought for exactly that; its **provenance** is not, and §7 is where the line
 > `USER_STATED` element's `span` is resolved by checking it is a span of the turn's own
 > request (`TurnResult.utterance`, ADR-0248 §1); the stamped `GoalElement.span` is that span.
 
+> **Normative.** **A label naming a record that resolves in no store does not resolve here
+> either.** A search-minted record stands in the supply and carries a valid label, and ADR-0231
+> §16 rules that it *"is not a citation target and not a durable reference … its `id` is minted
+> for one turn … and resolves in no store"*. So a `FROM_EVIDENCE` element whose label names one
+> is **dropped**, exactly as an out-of-range label is: an interpretation is a durable audit
+> record, and a durable record grounded on an identifier nothing can retrieve states a warrant
+> it cannot show. **How a search finding grounds an element is A4's** (§13) — through an
+> evidence row keyed on the goal, not through an id into `memory`.
+
 > **Normative.** An element whose ground does not resolve — a label outside the shown set, a
-> span that is not a span of this turn's request — is **dropped from the recorded revision**,
-> silently and without failing the turn, exactly as ADR-0226 §3 drops a label outside the shown
-> set. A `ProposedUnderstanding` **all** of whose elements are dropped still records its
-> `outcome`, because the outcome is not grounded per element.
+> label naming a minted record, a span that is not a span of this turn's request — is **dropped
+> from the recorded revision**, silently and without failing the turn, exactly as ADR-0226 §3
+> drops a label outside the shown set. A `ProposedUnderstanding` **all** of whose elements are
+> dropped still records its `outcome`, because the outcome is not grounded per element.
 
 > **Normative.** **No record identifier is rendered to the planner and none is accepted from
 > it.** ADR-0228 §8's statement of ADR-0226 §3's namer rule binds this envelope entire: an
@@ -514,10 +534,19 @@ which side interpretation sits on.
 
 > **Normative.** **The loop sets it, and the planner never does.** On every plan a planner
 > returns, the loop takes the field for its own: it discards any value the plan came back
-> carrying and sets it to the `revision` of the interpretation **whose brief it projected for
-> that call** — a value the loop holds on the `Goal` itself, which is why `GoalBrief` need not
-> and does not carry it (§9). It does this **once** per plan, immediately on return and before
-> any other component observes it, and a value the planner supplied is discarded **silently**.
+> carrying and sets it to **the goal's current `revision` at the moment it takes the plan —
+> after this same call's `understanding`, if any, has been recorded**. It does this **once** per
+> plan, immediately on return and before any other component observes it, and a value the
+> planner supplied is discarded **silently**. The value is one the loop holds on the `Goal`
+> itself, which is why `GoalBrief` need not and does not carry it (§9).
+
+> **Normative — a plan is never stale against the understanding it was returned with.** A
+> `Planner.plan` call decides the understanding and the plan **in one pass**, so the plan
+> embodies the understanding rather than predating it, and the revision it targets is the one
+> that call produced. Ordering the stamp after the recording step is the whole of what makes
+> that true: stamping the *input* revision would leave every turn on which the planner revised
+> its understanding holding a plan §8 forbids driving, with no serviced read to license a second
+> call (ADR-0228 §2) — a conforming path through the most ordinary response there is.
 
 > **Normative — ADR-0228's one-field clause becomes a two-field clause, and nothing else about
 > it moves.** §1's *"The **one** field any other component ever sets is `supersedes`"* and §5's
@@ -721,12 +750,14 @@ do not read `statement`: `Planner.plan` and `TurnResult.goal`.
 > **extends** to `attempt_id`: an export naming an attempt it does not carry does not validate
 > as a `PlanExport` at all. It does **not** gain evidence rows, because A4 mints them (§10).
 
-> **Normative.** **The relevance read and the episodic supplement keep querying
-> `goal.statement`**, which now means the current interpretation's outcome statement. The four
-> call sites ADR-0248 §5 classified as reading *the goal* are not re-pointed, not widened to
-> the request, and not given a second query: a turn takes **one** relevance read and **one**
-> episodic supplement, and no lane concatenates the outcome statement with the request to make
-> a query.
+> **Normative.** **The relevance read and the episodic supplement keep querying the goal's
+> current outcome statement.** In `LearningLoop.respond` they read it as `goal.statement`,
+> unchanged at the call site; in `LearningLoop.resumed_read` the value comes off the park, which
+> now carries a `GoalBrief`, so those two read **`brief.outcome`** — the same value under the
+> name the projection gives it (§9), and on a converted park the same bytes the stored
+> `statement` held (§12). None of the four is widened to the request or given a second query: a
+> turn takes **one** relevance read and **one** episodic supplement, and no lane concatenates
+> the outcome statement with the request to make a query.
 
 **The four query rows are answered by leaving them where they are, and that is the substantive
 answer rather than an evasion.** ADR-0014 §1's own annotation designates the field for this —
@@ -793,9 +824,18 @@ need"* and whose bound is A3's.
 > **Normative.** **The three reference tuples grow by append and never by replacement.** An
 > `add_*` member appends its identifier to the corresponding tuple; an identifier the tuple
 > already holds is ignored rather than duplicated or refused; and no member of
-> `AttemptTransition` removes, reorders or replaces an identifier. Without these the tuples
-> could never be filled at all — an attempt is opened before its first plan exists, so every
-> plan, execution and authorization it produces arrives after the row is written.
+> `AttemptTransition` removes, reorders or replaces an identifier.
+
+> **Normative — opening an attempt and persisting one are two acts, and only the second is
+> bound by §11.** An attempt is **opened in memory** when the user act that opens it occurs,
+> which is before the turn's first planner call; it is **persisted** at the one site §11 names,
+> together with the goal, its revisions and the turn's plans. A turn that ends before that site
+> writes no attempt row, exactly as it writes no goal row and no plan row. Every phase stamp,
+> state move and reference this turn produced is applied **to the value the loop holds**, and
+> the row written at that site carries them already; `commit_attempt` is what carries a
+> **later** turn's transitions and references onto an attempt the store already holds, which is
+> the case the `add_*` members exist for. Nothing buffers a transition past that site and
+> nothing replays one.
 
 > **Normative.** **Both new writes are compare-and-swap, on ADR-0014 §5's existing discipline
 > and for its existing reason.** `record_interpretation` succeeds only where the stored
@@ -873,8 +913,19 @@ need"* and whose bound is A3's.
 > **Normative.** **A pre-decision park's stored `plan` is left byte for byte as it is**, decodes
 > with `targets_revision` `None`, and its resumption is unaffected: ADR-0244 §8 composes a
 > resumed turn from the park and drives no step, so a plan that §8 refuses to drive costs such a
-> park nothing. ADR-0248 §3's `utterance` fallback is untouched and composes with this: a park
-> may carry an absent `utterance` and a converted `goal` at once.
+> park nothing.
+
+> **Normative — ADR-0248 §3's fallback moves one accessor and nothing else.** §3 rules that
+> where a park carries no `utterance`, `Engine._resume_read` *"takes the parked `Goal.statement`
+> instead, and it is the only place in the system that may"*. A converted park carries a
+> `GoalBrief`, which has no `statement`, so **the fallback reads `park.goal.outcome`**. The
+> value is the **same bytes**: §12's conversion sets `outcome` from the stored `statement`, and
+> §3's own clause that *"That reading is exact for the whole life of the fallback, and A1 does
+> not change that"* stays true — this decision changes the field's name at that site and not
+> what it holds. §3's every other clause binds entire: the fallback is still **not widened** to
+> a park that carries an `utterance`, to a blank one, to any other reader of ADR-0248 §5's table
+> or to any other site; it is still **not removed**, and no lane removes it while a park lacking
+> an `utterance` can be answered.
 
 > **Normative.** **The plan store's on-disk `schema_version` moves 1 → 2, and this decision
 > lands that store's first migration.** ADR-0049 §1 wrote the marker for exactly this — *"A
@@ -934,6 +985,11 @@ decision (`CONTRIBUTING.md` → "No state claims in living documents").
   composition, the verdict vocabularies, conflict adjudication, invalidation and the
   supersession rules.** A4. Fired by this ADR landing; §10 fixes what any such row must be
   able to answer.
+- **How a search finding grounds an interpretation element.** A4. §7 drops a `FROM_EVIDENCE`
+  ground naming a search-minted record, because ADR-0231 §16 makes such a record *"not a
+  durable reference"* whose id *"resolves in no store"*, and a durable interpretation grounded
+  on one would state a warrant it cannot show. The route A4 has is an evidence row keyed on the
+  goal; nothing here forecloses it, and nothing here opens ADR-0231 §16.
 - **`ActionPlan`'s step fields — `depends_on`, engine-resolved result references, the `when`
   vocabulary and `verifies`.** A5, which also fires ADR-0014 §7's output-references and
   step-dependencies deferrals.
@@ -963,8 +1019,12 @@ a goal an earlier turn opened, and its statement is **not** the user's unrewritt
 §1 makes it the current outcome. A reader holding only ADR-0228 would mint a goal on every turn
 and read the utterance off it, which fails ADR-0070 §1's test on the supersession side. **The
 first sentence and the reason are kept verbatim**, because what §1 was actually deciding —
-the stability of the subject across a turn's two calls — is unaffected and is strengthened:
-both calls now receive the same `GoalBrief` as well as the same `goal_id`.
+the stability of the *subject* across a turn's two calls — is unaffected: both calls plan for
+one goal under one `goal_id`. What is **not** claimed is that both calls see the same
+`GoalBrief`. Where the first call revised the understanding, §8 records that revision and the
+second call receives the brief of the new one — which is the owner's third correction working
+rather than a breach of §1. §1 fixed the subject, not the view of it, and a second call planning
+against an understanding the first call superseded is exactly what correction 3 forbids.
 
 **ADR-0014 §5 and §6 — partially superseded**, in the scopes the header names. §5's code block
 enumerates eleven `PlanStore` members and §6's enumerates `plan`'s three parameters and its
@@ -996,6 +1056,17 @@ for not making this a `MemoryKind`; *"canonical text rendering, used for retriev
 ground §11 reads the query off; and *"a goal … **outlives any one conversation**"* is why §1
 makes `conversation_id` provenance rather than a fence. §1's `Provenance` sentence is untouched
 and the field stays on `Goal`.
+
+**ADR-0248 §3 — partially superseded**, in its fallback clause's accessor alone, and the header
+records it. §3 rules that where a park carries no `utterance`, `Engine._resume_read` *"takes the
+parked `Goal.statement` instead, and it is the only place in the system that may"*. §12 converts
+a pre-decision park's `goal` column to a `GoalBrief`, which has no `statement`, so a reader
+holding only ADR-0248 would read a field that is not there — ADR-0070 §1's test coming out on
+the supersession side. The scope is the accessor: the fallback reads `park.goal.outcome`, over
+**the same bytes**, so §3's *"That reading is exact for the whole life of the fallback, and A1
+does not change that"* binds entire and is vindicated rather than weakened. §3's no-widening
+clause, its only-place clause, its no-removal clause and its permission for a later change to
+delete it all bind entire.
 
 **ADR-0049 §1 — partially superseded**, in its migration clause alone, and the header records
 it. §1 reads *"**The migration is table creation only.** There is no prior persistent
@@ -1030,8 +1101,10 @@ mechanism §7 resolves grounds through, unchanged and unwidened; §4's `read_req
 is preserved by §7 in terms. ADR-0230 §4's containment argument is applied to a second seam,
 which is a stacked addition and not an amendment. ADR-0211 §2's ruling is obeyed. ADR-0086 §4
 and ADR-0213 §4 supply the elision shape and the fixed-constant shape respectively and neither
-is widened. ADR-0248 is **fulfilled**: §8's list of what it left to A1 is what §§1–13 above
-decide, and every clause of ADR-0248 binds entire.
+is widened. **ADR-0248 is fulfilled** — §8's list of what it left to A1 is what §§1–13 above
+decide — and is partially superseded in its §3 accessor alone, recorded above; every other
+clause of ADR-0248 binds entire, its §1 request value being what makes §7's span check
+buildable at all.
 
 ### 15. The lane cut, and the one lane that moves the wire
 
@@ -1104,17 +1177,19 @@ that a hub and its clients must upgrade together.
 3. **The writer clause.** A planner double returning an envelope carrying a phase, a revision
    number, a `raised_by` and a `recorded_at` — every one discarded, the turn not degraded, and
    the stamped values `orchestration`'s.
-4. **The namer rule, in two arms that do not contradict each other.**
-   **(a) Structural, over ground references.** A planner double that renders **every field of
-   every value it receives** into its prompt produces a prompt in which **no evidence id and no
-   ground span** of that turn appears — because `GoalBrief` and `EvidenceDigest` have no field
-   one could sit in. This is ADR-0230's arm 20 shape applied to this seam, and it is asserted
-   over the two types' field sets as well as over the prompt.
-   **(b) Behavioural, over the goal id.** `GoalBrief` **does** carry `goal_id` (§9), so the
-   structural arm cannot cover it and does not claim to. What is asserted instead is over the
-   **production** `_render_request`: given a brief whose `goal_id` is a distinctive string, the
-   prompt it builds does not contain that string. §9's distinction between what the type
-   contains and what the renderer prints is what these two arms are testing separately.
+4. **The namer rule, in two arms that assert only what is true.**
+   **(a) Structural, and over the projections alone.** `GoalBrief` and `EvidenceDigest` carry
+   **no field in which a ground reference could sit** — no `evidence_id`, no record id, no
+   evidence row id, no span — asserted over the two types' declared field sets. That is the
+   whole of the structural claim, and it is deliberately not a claim about a prompt: the
+   `utterance` and the `memories` are *also* inputs to this seam, a `USER_STATED` ground's span
+   is by construction a span of the `utterance`, and a record's id is a field of a
+   `MemoryRecord` — so a double that rendered every input would print both, and would be
+   rendering values ADR-0226 §3 already governs rather than anything this decision adds.
+   **(b) Behavioural, and over the production renderer.** Given a brief whose `goal_id` is a
+   distinctive string and a digest built from a record with a distinctive id, the prompt
+   `_render_request` builds contains neither string. §9's distinction between what a type
+   *contains* and what the renderer *prints* is exactly what these two arms separate.
 5. **Ground resolution and its refusals.** A `FROM_EVIDENCE` element whose label is outside the
    shown set, and a `USER_STATED` element whose span is not a span of the turn's request: each
    dropped from the recorded revision, silently, with the revision's `outcome` still recorded
@@ -1170,10 +1245,23 @@ that a hub and its clients must upgrade together.
     into `Goal.conversation_id`, `Goal.last_engaged_at`, `GoalInterpretation.raised_by` or
     `ActionPlan.targets_revision`, and `PlanStore.save_plan` refuses a plan whose
     `targets_revision` is still absent (§8, §12).
-19. **The attempt's references grow.** An attempt opened with empty tuples takes a plan id, then
+19. **The attempt's references grow.** An attempt the store already holds takes a plan id, then
     an execution id, then an authorization id through `commit_attempt`, each appended in order;
     a repeated identifier is ignored rather than duplicated; and no member of `AttemptTransition`
     removes or reorders one.
+20. **An ordinary revising turn drives.** A planner call that receives revision 1 and returns
+    **both** a `ProposedUnderstanding` and an actionable plan yields a plan whose
+    `targets_revision` is the revision that call produced, not the one it received — so the plan
+    is driveable, no second planner call is needed, and ADR-0228 §2's entry conditions are not
+    reached. The arm fails if the stamp is taken before the recording step.
+21. **A minted record is not a ground.** A second planner call whose supply carries a
+    search-minted record returns a `FROM_EVIDENCE` element naming that record's **valid** label:
+    the element is dropped, the revision's `outcome` is still recorded, the turn is not
+    degraded, and no durable interpretation anywhere carries that record's id.
+22. **The fallback still reads the request.** A converted pre-decision park carrying no
+    `utterance` resumes with `asked` equal to the bytes its stored `Goal.statement` held, read
+    off `park.goal.outcome` — ADR-0248 §3's exactness asserted across the conversion rather than
+    assumed.
 
 ### 17. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
