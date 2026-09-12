@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, Final
 import structlog
 from test_engine import AT, PATIENT, SEARCH_DESTINATIONS, Harness
 from test_engine_read_envelope import _AskingPlanner, _recorder
-from test_loop_search import _DEADLINE, _binder, _CostedSearcher, _search
+from test_loop_search import _CONFIGURED_SEARCH, _DEADLINE, _binder, _CostedSearcher, _search
 
 from ai_assistant.core.types import (
     DestinationTrust,
@@ -150,7 +150,18 @@ def _wired(*, composing: ComposingStage | None = None) -> _Wired:
             # The production policy over the **same** store the engine's establishing act
             # writes to, so a grant the user performs is one the next ruling consults —
             # ADR-0193 §1's narrow face, satisfied by the store structurally.
-            policy=ThresholdActionPolicy(grants=grants),
+            #
+            # **And over the destination this deployment is configured with**, which is
+            # what `app/composition.py` now hands the one policy it builds (ADR-0247 §2,
+            # §11's lane 1). It is not an alternative arrangement of the journeys below:
+            # ADR-0247 §3 restates `_only_the_disclosure_floor`'s two limbs over *at the
+            # configured provider*, so a closed-loop search reaches route (b) in no case
+            # and the grant act these cases perform authorises no search by itself. What
+            # the acts still decide here is `closed_loop` — ADR-0238 §5's trust read,
+            # which lane 3 replaces with the registration fact — so every disposition
+            # below is the one ADR-0242 §15 names, reached by the route ADR-0247 §2 now
+            # gives it.
+            policy=ThresholdActionPolicy(grants=grants, configured_search=_CONFIGURED_SEARCH),
             trail=trail,
             # The harness's own instant, so the ruling the search records and the answer
             # the engine writes when the grant act rides it share one timeline —
