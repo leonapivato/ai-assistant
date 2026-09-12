@@ -2254,15 +2254,19 @@ def _render_request(  # noqa: PLR0913 — one parameter per block this message i
     all and is a well-formed brief rather than a degraded one (§9) — renders as it did
     before this decision.
 
-    **The element texts and the open questions are quoted and the outcome statement is
-    not**, which is a distinction rather than an inconsistency. Both are
-    ``NonBlankEncodableText`` and both permit every newline and bracket there is, but
-    an element sits in a **labelled bullet list**: an unquoted multi-line element
-    could open a second ``- C2 …`` bullet and forge a label the loop then resolves,
-    which is precisely the syntax ADR-0098 §2 rules an assembler may not let its
-    content produce. :func:`_render_files` applies the same reasoning to a file's
-    name for the same reason. The ``statement:`` line carries no label, opens no list
-    and is unchanged by this decision.
+    **Every free-text value of the goal is quoted, the outcome statement included, and
+    ADR-0249 is what changed that** (ADR-0098 §2). §2 refuses an assembler that
+    "embeds a span in a syntax the serialised span can itself produce", and until this
+    decision the only syntax this message had was its headings. It now has a **label
+    space the loop resolves into a durable interpretation** (§9, §7), so an unquoted
+    multi-line value could open a ``- C1 …`` bullet of its own and offer the planner a
+    label for an element nobody recorded — and a ``retains`` naming it would resolve to
+    whatever really sits at that ordinal. That reaches the ``statement:`` line too,
+    which carries no label but can write one, and on a goal's first turn that line
+    holds the user's own request byte for byte (§16 item 8). Element texts, open
+    questions, the outcome and the digest's three free-text members all go through
+    :func:`_quoted_span`, which is what :func:`_render_files` already does with a
+    file's name for the same reason.
 
     **No identifier is printed** (ADR-0249 §9): not ``goal_id``, not an evidence id,
     not a ground reference. §9 makes that a property of :class:`GoalBrief` and
@@ -2301,7 +2305,11 @@ def _render_request(  # noqa: PLR0913 — one parameter per block this message i
     # tuple of record identifiers.
     lines += [
         "Goal:",
-        f"  statement: {goal.outcome}",
+        # Quoted since ADR-0249 gave this message a label space the loop resolves
+        # (ADR-0098 §2): on a goal's first turn the outcome **is** the user's request
+        # byte for byte (§16 item 8), so an unquoted one could write a `C1` bullet of
+        # its own and offer a label for an element nobody recorded.
+        f"  statement: {_quoted_span(goal.outcome)}",
         f"  status: {goal.status.value}",
         f"  ground: {goal.outcome_ground.value}",
     ]
