@@ -30,6 +30,9 @@ from ai_assistant.core.types import (
     CurrentContext,
     DataTier,
     Goal,
+    GoalBrief,
+    GoalInterpretation,
+    Ground,
     MemorySource,
     NotificationCandidate,
     NotificationDelivery,
@@ -69,13 +72,22 @@ def _turn(utterance: str) -> TurnResult:
     """A turn whose plan has no step — a real ratified shape, not a stub."""
     goal = Goal(
         id="g-1",
-        statement=utterance,
+        interpretation=(
+            GoalInterpretation(
+                revision=1,
+                outcome=utterance,
+                outcome_ground=Ground.USER_STATED,
+                outcome_span=utterance,
+                recorded_at=_AT,
+                raised_by="t-1",
+            ),
+        ),
         provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_AT),
         created_at=_AT,
     )
     return TurnResult(
         utterance=goal.statement,
-        goal=goal,
+        goal=GoalBrief.of(goal),
         context=CurrentContext(
             now=_AT,
             time_of_day=TimeOfDay.AFTERNOON,

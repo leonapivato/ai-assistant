@@ -58,12 +58,14 @@ from ai_assistant.core.types import (
     Disposition,
     EmailFacet,
     EpisodicMemory,
-    Goal,
+    EvidenceDigest,
+    GoalBrief,
     MemoryRecord,
     MemorySource,
     Placement,
     PlacementReach,
     PlacementSetter,
+    PlannerOutput,
     PlanStep,
     Provenance,
     ReadAsk,
@@ -677,14 +679,16 @@ class _EchoingPlanner:
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         """Record what this turn was supplied, and plan over exactly that."""
         supplied = tuple(memories)
         self.calls.append((context, supplied))
@@ -701,12 +705,14 @@ class _EchoingPlanner:
             if planned
             else ()
         )
-        return ActionPlan(
-            id=f"{goal.id}-plan",
-            goal_id=goal.id,
-            steps=steps,
-            created_at=AT,
-            rationale=" | ".join(one.content for one in supplied) or "nothing was supplied",
+        return PlannerOutput(
+            plan=ActionPlan(
+                id=f"{goal.goal_id}-plan",
+                goal_id=goal.goal_id,
+                steps=steps,
+                created_at=AT,
+                rationale=" | ".join(one.content for one in supplied) or "nothing was supplied",
+            )
         )
 
 

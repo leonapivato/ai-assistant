@@ -32,6 +32,8 @@ from ai_assistant.core.types import (
     ExecutionState,
     FrozenJson,
     Goal,
+    GoalInterpretation,
+    Ground,
     MemorySource,
     PlanStep,
     Provenance,
@@ -174,7 +176,16 @@ async def _execution_for(plans: FakePlanStore, step: PlanStep) -> ExecutionState
     """Store a goal and a one-step plan, and open an execution for it."""
     goal = Goal(
         id="g-1",
-        statement="do the thing",
+        interpretation=(
+            GoalInterpretation(
+                revision=1,
+                outcome="do the thing",
+                outcome_ground=Ground.USER_STATED,
+                outcome_span="do the thing",
+                recorded_at=AT,
+                raised_by="t-1",
+            ),
+        ),
         provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT),
         created_at=AT,
     )

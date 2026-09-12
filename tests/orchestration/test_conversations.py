@@ -34,6 +34,9 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     ExchangeDisposition,
     Goal,
+    GoalBrief,
+    GoalInterpretation,
+    Ground,
     MemoryKind,
     MemorySource,
     Modality,
@@ -804,14 +807,26 @@ def _park(park_id: str, conversation_id: str, decision_id: str) -> ParkedRead:
         conversation_id=conversation_id,
         decision_id=decision_id,
         parameters={"origin": "search.example", "query": "bell tower porto"},
-        goal=Goal(
-            id=f"goal-{park_id}",
-            statement="what is that bell tower in Porto",
-            provenance=Provenance(
-                source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
-            ),
-            created_at=AT,
+        goal=GoalBrief.of(
+            Goal(
+                id=f"goal-{park_id}",
+                interpretation=(
+                    GoalInterpretation(
+                        revision=1,
+                        outcome="what is that bell tower in Porto",
+                        outcome_ground=Ground.USER_STATED,
+                        outcome_span="what is that bell tower in Porto",
+                        recorded_at=AT,
+                        raised_by="t-1",
+                    ),
+                ),
+                provenance=Provenance(
+                    source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
+                ),
+                created_at=AT,
+            )
         ),
+        goal_id=f"goal-{park_id}",
         plan=ActionPlan(
             id=f"plan-{park_id}",
             goal_id=f"goal-{park_id}",

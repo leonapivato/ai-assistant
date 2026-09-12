@@ -114,6 +114,7 @@ if TYPE_CHECKING:
         ActionPlan,
         ActionRequest,
         AnswerOutcome,
+        AttemptTransition,
         BatchHandle,
         BatchItemOutcome,
         BatchRequest,
@@ -147,12 +148,16 @@ if TYPE_CHECKING:
         EncodableText,
         EpisodicMemory,
         EvaluationTrace,
+        EvidenceDigest,
         ExecutionState,
         FeedbackEvent,
         FetchOutcome,
         FrozenJsonMapping,
         Goal,
+        GoalAttempt,
+        GoalBrief,
         GoalDeletion,
+        GoalRevision,
         GrantableSource,
         GrantScope,
         HeldNotification,
@@ -181,6 +186,7 @@ if TYPE_CHECKING:
         PermissionRuling,
         Placement,
         PlanExport,
+        PlannerOutput,
         QueryOutcome,
         Question,
         ReadAsk,
@@ -3560,24 +3566,101 @@ class WebSearcher(Protocol):
 
 @runtime_checkable
 class Planner(Protocol):
-    """Turns a :class:`~ai_assistant.core.types.Goal` into a plan (ADR-0014 §6).
+    """Turns a :class:`~ai_assistant.core.types.GoalBrief` into a plan (ADR-0014 §6).
 
-    The pipeline's planning step. Implementations produce an ``ActionPlan`` and
-    nothing else — no model output ever sets execution status, which stays the
-    property of deterministic code (VISION §7).
+    The pipeline's planning step. Implementations produce a
+    :class:`~ai_assistant.core.types.PlannerOutput` — a plan, and what they propose
+    the system now understands — and nothing else: no model output ever sets
+    execution status, which stays the property of deterministic code (VISION §7), and
+    no model output writes a phase, a revision number, a ``raised_by`` or a
+    ``recorded_at`` (ADR-0249 §6).
     """
 
-    async def plan(  # noqa: PLR0913 — the goal plus one keyword per thing the pipeline assembled before planning; ADR-0230 §3 and ADR-0240 §7 each add one, and bundling them into a context object would mint a core type no ADR names
+    async def plan(  # noqa: PLR0913 — the brief plus one keyword per thing the pipeline assembled before planning; ADR-0230 §3, ADR-0240 §7 and ADR-0249 §7 each add to it, and bundling them into a context object would mint a core type ADR-0211 §2 already refused
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         """Produce a plan for ``goal``.
+
+        **The first parameter is a projection and not the record, and that is a
+        property of the types** (ADR-0249 §7, §9). A ``GoalBrief`` carries the
+        outcome's ``Ground`` and each element's — the **kind** and never the
+        reference — and carries no ground reference, no record identifier, no
+        evidence identifier, no span, no revision number, no attempt, no plan, no
+        effort figure and no authority. ADR-0230 §4's sentence for ``ShownFile`` is
+        the one being applied: "the capability does not cross the planning seam, and
+        that is a property of the types rather than a rule a planner is trusted to
+        keep". Passing the whole ``Goal`` would leave ADR-0228 §8's namer rule —
+        "no record identifier is rendered to a model and none is accepted from one" —
+        resting on a renderer remembering not to print the ``evidence_id`` values its
+        elements carry.
+
+        **A brief's elements are labelled, and the scheme is ADR-0226 §3's applied to
+        three sequences** (§9): the element at 1-based index *n* of ``constraints`` is
+        ``C`` followed by *n* in decimal with no padding, of ``criteria`` ``S``
+        followed by *n*, and of ``conditions`` ``D`` followed by *n*. Both sides
+        derive the label from the brief they hold and neither consults the other. A
+        label is meaningful only within the call that rendered it: **no label survives
+        that call, and none is persisted as a reference.**
+
+        **``goal_id`` is on the brief and is rendered nowhere** (§9). It names the
+        *subject* of the call rather than a record in the labelled supply, it has
+        crossed this seam since ADR-0014 §6, and ``ActionPlan.goal_id`` is the value
+        ``Engine._check_plan_is_for_goal`` compares it against. The containment §9
+        buys is over **ground references**, which are identifiers into another
+        subsystem's store.
+
+        **The brief of a goal at revision 1 carries its outcome and no elements, and
+        that is a well-formed brief rather than a degraded one** (§9). No
+        implementation treats an element-free brief as an error, a failure to
+        understand, or a reason to ask a question.
+
+        **``utterance`` is this turn's own request** (ADR-0248 §1, ADR-0249 §7) — the
+        text the pass that produced this turn received, unrewritten and
+        uninterpreted. It is required, and it is annotated ``str`` rather than
+        ``NonBlankEncodableText`` **because a Protocol annotation validates nothing
+        and a second spelling of the refusal would suggest otherwise**: the blank
+        refusal lives where ADR-0248 §1 put it, on ``TurnResult.utterance`` and on the
+        pass that strips the text once, and no implementation of this Protocol
+        re-checks it.
+
+        **``evidence`` is what the planner may act on about a read that was taken**
+        (ADR-0249 §10). Each member carries what the ask named, what the response
+        establishes a proposition about, when it was read, what instant it speaks
+        for, the typed outcome's own value and whether it still stands — and **no
+        record identifier**, no evidence row id, no memory id, no snippet, no title
+        and no address. ``()`` means no evidence is offered on this call, which is the
+        semantically correct answer for every turn of ADR-0249's own lanes and is
+        never an error.
+
+        **The inputs stay keyword parameters and are not bundled into a
+        planning-input type** (ADR-0249 §7, applying ADR-0211 §2 rather than
+        reopening it): "a frozen ``core`` model is **harder** to extend than a
+        keyword-only parameter list, because every field addition is another ``core``
+        change with its own ADR, where a fourth keyword is one more line in the same
+        block." ``GoalBrief`` is not an exception to that ruling — it is not
+        packaging, it is a projection bought for the containment above.
+
+        **The return moves to ``PlannerOutput`` and this is a BREAKING contract
+        change under golden rule 5** (ADR-0249 §7). ``understanding`` is ``None``
+        where the planner proposed no change, which is the semantically correct
+        answer for a planner that knows nothing of this envelope; no implementation
+        reads ``None`` as an error, a degradation, or an instruction to re-plan.
+
+        **A planner envelope that comes back carrying a phase, a revision number, a
+        ``raised_by`` or a ``recorded_at`` has those values discarded silently**
+        (ADR-0249 §6) — not an error, not a park, not a degradation of the turn.
+        ``orchestration`` stamps the phase, records the interpretation revision and
+        its provenance, and sets ``supersedes`` and ``targets_revision``; no model
+        output writes any of them, and **no field of this envelope carries a phase**.
 
         ``context``, ``memories`` and ``capabilities`` are passed in rather than
         fetched: the pipeline assembles context, retrieves memory and reads the
@@ -3845,7 +3928,11 @@ class Planner(Protocol):
         meant.
 
         Args:
-            goal: The objective to plan for.
+            goal: The brief of the objective to plan for (ADR-0249 §9) — the
+                projection of the goal's current interpretation, never the record.
+            utterance: This turn's own request, as the pass that produced it received
+                it (ADR-0248 §1, ADR-0249 §7). Required; annotated ``str`` because a
+                Protocol annotation validates nothing.
             context: The situational context assembled for this request.
             memories: The records the pipeline assembled for this turn — the
                 conversation's recent turns in order, then the records retrieved
@@ -3874,14 +3961,20 @@ class Planner(Protocol):
                 said. Always ``()`` on a turn's first call, and ``()`` on any later
                 call where no read of the turn was empty in ADR-0240 §6's sense,
                 which is never an error.
+            evidence: What this call may act on about the reads already taken for
+                this goal (ADR-0249 §10) — each a digest carrying no record
+                identifier of any kind. Defaults to ``()``, which means no evidence
+                is offered and is never an error.
 
         Returns:
-            A frozen :class:`~ai_assistant.core.types.ActionPlan`, carrying a
-            ``read_request`` where the planner asked for one more read and ``None``
-            where it did not (ADR-0226 §4). Its ``supersedes`` is **not the
-            planner's**: the loop takes that field on every plan a planner returns,
-            discarding any value it came back carrying (ADR-0228 §5), so an
-            implementation neither sets it nor is penalised for setting it.
+            A frozen :class:`~ai_assistant.core.types.PlannerOutput`: the plan,
+            carrying a ``read_request`` where the planner asked for one more read and
+            ``None`` where it did not (ADR-0226 §4), and the understanding it
+            proposes or ``None`` where it proposes no change (ADR-0249 §7). The
+            plan's ``supersedes`` and ``targets_revision`` are **not the planner's**:
+            the loop takes both fields on every plan a planner returns, discarding any
+            value it came back carrying (ADR-0228 §5, ADR-0249 §8), so an
+            implementation neither sets them nor is penalised for setting them.
 
         Raises:
             PlanningError: If no plan could be produced for the goal.
@@ -3900,12 +3993,117 @@ class PlanStore(Protocol):
     Writes to execution state go through :meth:`commit_transition`, never by
     handing back a whole state, so the transition graph cannot be bypassed.
 
+    **The store accepts commands, not snapshots**, for :meth:`record_interpretation`
+    and :meth:`commit_attempt` as it already does for :meth:`commit_transition`
+    (ADR-0249 §12). ADR-0014 §5's argument binds unchanged: "Had the store taken a
+    whole ``ExecutionState``, any consumer of the Protocol could commit
+    ``PENDING → SUCCEEDED`` directly and the claim that deterministic code owns state
+    transitions (VISION §7) would rest on nobody choosing to bypass it."
+
+    **Both new writes are compare-and-swap, on ADR-0014 §5's existing discipline and
+    for its existing reason** (§12). :meth:`record_interpretation` succeeds only
+    where the stored ``Goal.version`` still equals ``expected_version``;
+    :meth:`commit_attempt` succeeds only where the stored ``GoalAttempt.version``
+    still does. **The read, the comparison and the write are one indivisible step**,
+    and there is **no separate read on which a decision is taken** before either.
+
     Cancelling any method here is governed by this module's cancellation clause
     (ADR-0060).
     """
 
     async def save_goal(self, goal: Goal) -> str:
-        """Persist a goal and return its id (an upsert, keyed on ``id``)."""
+        """Persist a **new** goal and return its id (ADR-0249 §12).
+
+        **The opening write alone**, and no longer an upsert: a goal whose ``id`` this
+        store already holds is refused, with the same error class an unknown goal
+        already raises. An upsert that replaced a whole goal would defeat ADR-0249
+        §1's append-only interpretation and §12's compare-and-swap in one call — every
+        later change to a goal goes through :meth:`record_interpretation`.
+
+        Raises:
+            PlanningError: If the store already holds a goal under this ``id``.
+        """
+        ...
+
+    async def record_interpretation(self, revision: GoalRevision) -> Goal:
+        """Append one interpretation revision to a goal and return it (§12).
+
+        Performs ADR-0249 §2's elision — a goal whose sequence would exceed
+        ``MAX_GOAL_INTERPRETATIONS`` drops its **oldest** element on the write that
+        would exceed it, never its current one, and ``interpretation_elided``
+        advances by the number dropped — and advances ``Goal.version``.
+
+        **Compare-and-swap, indivisibly** (§12): the write succeeds only where the
+        stored ``Goal.version`` still equals ``revision.expected_version``, and the
+        read, the comparison and the write are one step.
+
+        Returns:
+            The goal as stored after the append.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            PlanningError: If ``goal_id`` names no stored goal, or the revision does
+                not follow the goal's current one.
+        """
+        ...
+
+    async def open_attempt(self, attempt: GoalAttempt) -> str:
+        """Persist a new attempt and return its id (ADR-0249 §12).
+
+        **Opening an attempt and persisting one are two acts, and only the second is
+        this member** (§12). An attempt is opened in memory when the user act that
+        opens it occurs, which is before the turn's first planner call; it is first
+        written at the one site ADR-0249 §11 names, carrying the phase and state it
+        stands at and the references it has accumulated **by that moment**. A turn
+        that ends before that site writes no attempt row, exactly as it writes no
+        goal row and no plan row.
+
+        Raises:
+            PlanningError: If ``goal_id`` names no stored goal, or the store already
+                holds an attempt under this ``id``.
+        """
+        ...
+
+    async def get_attempt(self, attempt_id: str) -> GoalAttempt | None:
+        """Return the attempt with ``attempt_id``, or ``None`` if absent."""
+        ...
+
+    async def attempts_of(self, goal_id: str) -> tuple[GoalAttempt, ...]:
+        """Return every attempt of ``goal_id``, in ``opened_at`` order.
+
+        Empty for a goal with no attempt, and for a goal this store does not hold:
+        an absent goal is not a fault to raise on a read that is already a listing.
+        """
+        ...
+
+    async def commit_attempt(self, transition: AttemptTransition) -> GoalAttempt:
+        """Apply one attempt transition and return the new attempt (§12).
+
+        **The attempt's only mutation route.** Every member of the transition is
+        optional and every absent member leaves its field unchanged; an ``add_*``
+        member **appends** its identifier to the corresponding tuple, an identifier
+        the tuple already holds is **ignored** rather than duplicated or refused, and
+        no member removes, reorders or replaces one.
+
+        **After the first write, every change goes through this member, in the turn
+        that opened the attempt as in any later one** (§12). The site ADR-0249 §11
+        names precedes ``start_execution`` and precedes composition, so an execution
+        id, an authorization id, the phase reaching ``VERIFY``, the terminal ``state``
+        and the ``outcome`` a turn earns are all facts that do not exist yet when the
+        row is first written. Nothing buffers a transition, nothing replays one, and
+        **no lane writes an attempt that claims a result before it happened**.
+
+        **The phase never moves backwards and no transition leaves a terminal state**
+        (ADR-0249 §5, §6), and neither effort counter is ever reduced.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            IllegalTransitionError: If the move is not legal from where the attempt
+                stands — a phase earlier than the one held, or any move out of a
+                terminal state.
+            PlanningError: If the attempt does not exist, or the resulting record is
+                not a shape ADR-0249 §5 admits.
+        """
         ...
 
     async def get_goal(self, goal_id: str) -> Goal | None:
@@ -3932,10 +4130,19 @@ class PlanStore(Protocol):
         (:meth:`delete_goal` removes a goal's plans together, and both of a turn's
         plans share its ``goal_id``).
 
+        **And an unstamped ``targets_revision`` is refused** (ADR-0249 §8). The
+        unstamped state exists only between the planner's return and the loop's
+        stamp, and the window is closed **at the store** rather than trusted to close
+        itself — with the same error class an unresolvable ``supersedes`` raises and
+        for the same reason. A plan **already on disk** carrying ``None`` — the one
+        route being a row written before ADR-0249 (§12) — decodes, and §8's
+        not-driven rule reads it as targeting no revision.
+
         Raises:
-            PlanningError: If the plan's ``goal_id`` names no stored goal, or if its
+            PlanningError: If the plan's ``goal_id`` names no stored goal, if its
                 ``supersedes`` names no stored plan, names this plan's own ``id``, or
-                names a plan under a different ``goal_id``.
+                names a plan under a different ``goal_id``, or if its
+                ``targets_revision`` is still absent.
         """
         ...
 
@@ -3990,8 +4197,28 @@ class PlanStore(Protocol):
         rather than persisted, and the write is compare-and-swap on
         ``expected_version``.
 
+        **A ``→ RUNNING`` claim carries one further condition: the plan the execution
+        runs targets its goal's current interpretation revision** (ADR-0249 §8). A
+        claim against a plan whose ``targets_revision`` is absent, or names any other
+        revision, is refused with the error class a stale ``expected_version``
+        already raises. **The store reads the plan and the goal inside the same
+        indivisible step as the claim**, so there is no separate read on which a
+        decision is taken, and no implementation satisfies this rule by a read of the
+        goal taken outside the claim.
+
+        ADR-0014 §5's reason is why the guard is the store's: "Optimistic concurrency
+        turns that into a detectable, retryable failure, and it belongs to the store
+        because the store is the only place with a total order over writes." A guard
+        in the driver is a read-then-claim with a time-of-check-to-time-of-use gap,
+        and a user act that advanced the goal's revision between the two would
+        overtake it. **``StepTransition`` gains no member for this**: the execution
+        names its plan and the plan names its goal, so the store already holds every
+        value the comparison needs.
+
         Raises:
-            StaleExecutionError: If the stored version has moved on.
+            StaleExecutionError: If the stored version has moved on, or a
+                ``→ RUNNING`` claim names a plan that does not target its goal's
+                current revision.
             IllegalTransitionError: If the move is not legal from the step's
                 current status.
             PlanningError: If the execution or step does not exist.
@@ -4011,11 +4238,23 @@ class PlanStore(Protocol):
         ...
 
     async def export(self) -> PlanExport:
-        """Return a portable snapshot of all planning state (ADR-0004 §6)."""
+        """Return a portable snapshot of all planning state (ADR-0004 §6).
+
+        The document carries the store's attempts as well as its goals, plans and
+        executions (ADR-0249 §11), and ADR-0014 §5's closure rule reaches them: an
+        export naming an attempt's goal, plan or execution it does not carry does not
+        validate as a :class:`~ai_assistant.core.types.PlanExport` at all.
+        """
         ...
 
     async def delete_goal(self, goal_id: str) -> GoalDeletion:
-        """Delete a goal, cascading to its plans and their execution state.
+        """Delete a goal, cascading to its plans, executions and attempts.
+
+        **The cascade reaches attempts** (ADR-0249 §12), which extends ADR-0014 §5's
+        rule — "a goal the user deletes must not leave its plan history behind" —
+        rather than re-promising it. Its live-step refusal is unchanged: it keys on a
+        ``RUNNING`` step, not on an attempt's state, and an attempt in a non-terminal
+        state does not block a deletion.
 
         Refused while any of the goal's executions has a **live** (``RUNNING``)
         step: erasing one would destroy the record its executor is about to
@@ -7390,8 +7629,8 @@ class ParkedReads(Protocol):
     that would ever visit it again. **A park has all four.** Its deadline closes the
     failure mode a store would otherwise leave open, and putting a park on the
     conversation record instead would breach that contract's own stated invariant —
-    :class:`ConversationStore` *"holds no content"*, and a park holds three content
-    fields — while giving one store two tiers of obligation.
+    :class:`ConversationStore` *"holds no content"*, and a park holds four content
+    fields (ADR-0248 §3, #2270) — while giving one store two tiers of obligation.
 
     **And** ``permissions/`` **is where the implementation belongs**, for the reason
     :class:`SourceReadTrail`'s already is: ADR-0004 §7 charters that subsystem for

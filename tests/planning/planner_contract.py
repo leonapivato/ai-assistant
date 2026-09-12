@@ -27,6 +27,9 @@ from ai_assistant.core.types import (
     CurrentContext,
     EpisodicMemory,
     Goal,
+    GoalBrief,
+    GoalInterpretation,
+    Ground,
     MemorySource,
     Provenance,
     ReadAsk,
@@ -51,11 +54,30 @@ _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 #: planner **accepts** the input the contract now requires.
 _VOCABULARY = ("report_current_time", "send_email")
 
+#: The request every call below is driven with (ADR-0249 §7). It carries beside the
+#: brief and is the goal's own first-turn outcome, which is what a goal this system
+#: opens actually holds (§3).
+_REQUEST = "relocate to Lisbon"
 
-def _goal(goal_id: str = "g1") -> Goal:
+
+def _goal(goal_id: str = "g1") -> GoalBrief:
+    """The brief a conforming planner is handed (ADR-0249 §9)."""
+    return GoalBrief.of(_goal_record(goal_id))
+
+
+def _goal_record(goal_id: str = "g1") -> Goal:
     return Goal(
         id=goal_id,
-        statement="relocate to Lisbon",
+        interpretation=(
+            GoalInterpretation(
+                revision=1,
+                outcome="relocate to Lisbon",
+                outcome_ground=Ground.USER_STATED,
+                outcome_span="relocate to Lisbon",
+                recorded_at=_WHEN,
+                raised_by="t-1",
+            ),
+        ),
         provenance=Provenance(
             source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_WHEN
         ),
@@ -142,17 +164,29 @@ class PlannerContract:
 
     async def test_plans_for_the_goal_it_was_given(self, planner: Planner) -> None:
         """A plan that does not name its goal cannot be resumed or audited."""
-        plan = await planner.plan(_goal(), context=_context(), capabilities=_VOCABULARY)
+        plan = (
+            await planner.plan(
+                _goal(), utterance=_REQUEST, context=_context(), capabilities=_VOCABULARY
+            )
+        ).plan
         assert plan.goal_id == "g1"
 
     async def test_step_ids_are_unique(self, planner: Planner) -> None:
-        plan = await planner.plan(_goal(), context=_context(), capabilities=_VOCABULARY)
+        plan = (
+            await planner.plan(
+                _goal(), utterance=_REQUEST, context=_context(), capabilities=_VOCABULARY
+            )
+        ).plan
         ids = [step.id for step in plan.steps]
         assert len(ids) == len(set(ids))
 
     async def test_the_returned_plan_is_frozen(self, planner: Planner) -> None:
         """The plan is an audit record, so it must not be editable after the fact."""
-        plan = await planner.plan(_goal(), context=_context(), capabilities=_VOCABULARY)
+        plan = (
+            await planner.plan(
+                _goal(), utterance=_REQUEST, context=_context(), capabilities=_VOCABULARY
+            )
+        ).plan
         with pytest.raises((ValidationError, AttributeError, TypeError)):
             plan.goal_id = "tampered"
 
@@ -173,9 +207,15 @@ class PlannerContract:
         precedence (ADR-0072 §5, ADR-0113 §6), relevance ordering the records only
         within one precedence band.
         """
-        plan = await planner.plan(
-            _goal(), context=_context(), memories=(), capabilities=_VOCABULARY
-        )
+        plan = (
+            await planner.plan(
+                _goal(),
+                utterance=_REQUEST,
+                context=_context(),
+                memories=(),
+                capabilities=_VOCABULARY,
+            )
+        ).plan
         assert plan.goal_id == "g1"
 
     async def test_accepts_the_advertised_vocabulary(self, planner: Planner) -> None:
@@ -196,7 +236,11 @@ class PlannerContract:
         the goal one this vocabulary can carry? — is a model's judgement, which
         ADR-0211 §6's third clause declines to guarantee of any planner.
         """
-        plan = await planner.plan(_goal(), context=_context(), capabilities=_VOCABULARY)
+        plan = (
+            await planner.plan(
+                _goal(), utterance=_REQUEST, context=_context(), capabilities=_VOCABULARY
+            )
+        ).plan
         assert plan.goal_id == "g1"
 
     async def test_an_empty_vocabulary_raises_nothing(self, planner: Planner) -> None:
@@ -210,7 +254,9 @@ class PlannerContract:
         shape available — and *that* is an obligation on what the planner asks for,
         not a guarantee about what comes back, so it is not asserted here.
         """
-        plan = await planner.plan(_goal(), context=_context(), capabilities=())
+        plan = (
+            await planner.plan(_goal(), utterance=_REQUEST, context=_context(), capabilities=())
+        ).plan
         assert plan.goal_id == "g1"
 
     async def test_the_vocabulary_need_not_be_a_tuple(self, planner: Planner) -> None:
@@ -224,7 +270,11 @@ class PlannerContract:
         planner that looked conforming. Pinned here rather than left to a reviewer's
         eye, because the divergence is invisible until the first caller hits it.
         """
-        plan = await planner.plan(_goal(), context=_context(), capabilities=list(_VOCABULARY))
+        plan = (
+            await planner.plan(
+                _goal(), utterance=_REQUEST, context=_context(), capabilities=list(_VOCABULARY)
+            )
+        ).plan
         assert plan.goal_id == "g1"
 
     # --- ADR-0226 §4: the widened return -----------------------------------
@@ -260,9 +310,15 @@ class PlannerContract:
         scripted plan and a model's plan would answer differently for one goal and
         both would conform.
         """
-        plan = await planner.plan(
-            _goal(), context=_context(), memories=_supply(), capabilities=_VOCABULARY
-        )
+        plan = (
+            await planner.plan(
+                _goal(),
+                utterance=_REQUEST,
+                context=_context(),
+                memories=_supply(),
+                capabilities=_VOCABULARY,
+            )
+        ).plan
         assert plan.read_request is None or isinstance(plan.read_request, ReadRequest)
 
     async def test_a_request_it_returns_is_one_this_contract_admits(
@@ -279,9 +335,15 @@ class PlannerContract:
         """
         if asking_planner is None:
             pytest.skip("this implementation never asks for a read (ADR-0226 §4)")
-        plan = await asking_planner.plan(
-            _goal(), context=_context(), memories=_supply(), capabilities=_VOCABULARY
-        )
+        plan = (
+            await asking_planner.plan(
+                _goal(),
+                utterance=_REQUEST,
+                context=_context(),
+                memories=_supply(),
+                capabilities=_VOCABULARY,
+            )
+        ).plan
         request = plan.read_request
         assert request is not None, "the fixture promises an implementation that asks"
 
@@ -329,9 +391,15 @@ class PlannerContract:
         """
         if asking_planner is None:
             pytest.skip("this implementation never asks for a read (ADR-0226 §4)")
-        plan = await asking_planner.plan(
-            _goal(), context=_context(), memories=_supply(), capabilities=_VOCABULARY
-        )
+        plan = (
+            await asking_planner.plan(
+                _goal(),
+                utterance=_REQUEST,
+                context=_context(),
+                memories=_supply(),
+                capabilities=_VOCABULARY,
+            )
+        ).plan
         request = plan.read_request
         assert request is not None
 
@@ -365,12 +433,15 @@ class PlannerContract:
         envelope an implementation returns for a goal is a judgement this suite may
         not assert, and a scripted plan and a model's plan would answer differently.
         """
-        plan = await planner.plan(
-            _goal(),
-            context=_context(),
-            memories=_supply() + _fourth_group(),
-            capabilities=_VOCABULARY,
-        )
+        plan = (
+            await planner.plan(
+                _goal(),
+                utterance=_REQUEST,
+                context=_context(),
+                memories=_supply() + _fourth_group(),
+                capabilities=_VOCABULARY,
+            )
+        ).plan
         assert plan.goal_id == "g1"
 
     async def test_a_turn_may_put_two_requests_to_one_planner(self, planner: Planner) -> None:
@@ -388,15 +459,24 @@ class PlannerContract:
         ``PlanStore.save_plan`` refuses outright, since ADR-0228 §5 rejects a
         ``supersedes`` naming the saving plan's own ``id``.
         """
-        first = await planner.plan(
-            _goal(), context=_context(), memories=_supply(), capabilities=_VOCABULARY
-        )
-        second = await planner.plan(
-            _goal(),
-            context=_context(),
-            memories=_supply() + _fourth_group(),
-            capabilities=_VOCABULARY,
-        )
+        first = (
+            await planner.plan(
+                _goal(),
+                utterance=_REQUEST,
+                context=_context(),
+                memories=_supply(),
+                capabilities=_VOCABULARY,
+            )
+        ).plan
+        second = (
+            await planner.plan(
+                _goal(),
+                utterance=_REQUEST,
+                context=_context(),
+                memories=_supply() + _fourth_group(),
+                capabilities=_VOCABULARY,
+            )
+        ).plan
         assert first.goal_id == second.goal_id == "g1"
         assert first.id != second.id, "a turn's two plans are two records"
 
@@ -418,9 +498,15 @@ class PlannerContract:
         if asking_planner is None:
             pytest.skip("this implementation never asks for a read (ADR-0226 §4)")
         supply = _supply() + _fourth_group()
-        plan = await asking_planner.plan(
-            _goal(), context=_context(), memories=supply, capabilities=_VOCABULARY
-        )
+        plan = (
+            await asking_planner.plan(
+                _goal(),
+                utterance=_REQUEST,
+                context=_context(),
+                memories=supply,
+                capabilities=_VOCABULARY,
+            )
+        ).plan
         request = plan.read_request
         assert request is not None
         for ask in request.asks:
@@ -471,13 +557,16 @@ class PlannerContract:
         for a goal, and whether a listing is worth naming is a model's judgement that
         §2 leaves to an implementation.
         """
-        plan = await planner.plan(
-            _goal(),
-            context=_context(),
-            memories=_supply(),
-            capabilities=_VOCABULARY,
-            files=_listing(),
-        )
+        plan = (
+            await planner.plan(
+                _goal(),
+                utterance=_REQUEST,
+                context=_context(),
+                memories=_supply(),
+                capabilities=_VOCABULARY,
+                files=_listing(),
+            )
+        ).plan
         assert plan.goal_id == "g1"
 
     async def test_an_empty_listing_raises_nothing(self, planner: Planner) -> None:
@@ -490,9 +579,16 @@ class PlannerContract:
         it is what every caller predating this widening supplies — which is why it is
         pinned rather than left to an implementation's judgement.
         """
-        plan = await planner.plan(
-            _goal(), context=_context(), memories=_supply(), capabilities=_VOCABULARY, files=()
-        )
+        plan = (
+            await planner.plan(
+                _goal(),
+                utterance=_REQUEST,
+                context=_context(),
+                memories=_supply(),
+                capabilities=_VOCABULARY,
+                files=(),
+            )
+        ).plan
         assert plan.goal_id == "g1"
 
     async def test_the_listing_need_not_be_a_tuple(self, planner: Planner) -> None:
@@ -504,13 +600,16 @@ class PlannerContract:
         not. Pinned here for ``capabilities``' own reason: the divergence is invisible
         until the first caller that assembles the sequence by other means.
         """
-        plan = await planner.plan(
-            _goal(),
-            context=_context(),
-            memories=_supply(),
-            capabilities=_VOCABULARY,
-            files=list(_listing()),
-        )
+        plan = (
+            await planner.plan(
+                _goal(),
+                utterance=_REQUEST,
+                context=_context(),
+                memories=_supply(),
+                capabilities=_VOCABULARY,
+                files=list(_listing()),
+            )
+        ).plan
         assert plan.goal_id == "g1"
 
     async def test_a_file_it_names_is_an_ordinal_into_the_listing_it_was_shown(
@@ -537,13 +636,16 @@ class PlannerContract:
         if file_asking_planner is None:
             pytest.skip("this implementation never names a file (ADR-0230 §§1, 3)")
         shown = _listing()
-        plan = await file_asking_planner.plan(
-            _goal(),
-            context=_context(),
-            memories=_supply(),
-            capabilities=_VOCABULARY,
-            files=shown,
-        )
+        plan = (
+            await file_asking_planner.plan(
+                _goal(),
+                utterance=_REQUEST,
+                context=_context(),
+                memories=_supply(),
+                capabilities=_VOCABULARY,
+                files=shown,
+            )
+        ).plan
         request = plan.read_request
         assert request is not None, "the fixture promises an implementation that names one"
 
@@ -603,9 +705,15 @@ class PlannerContract:
         """
         if search_asking_planner is None:
             pytest.skip("this implementation never asks for a search (ADR-0231 §1)")
-        plan = await search_asking_planner.plan(
-            _goal(), context=_context(), memories=_supply(), capabilities=_VOCABULARY
-        )
+        plan = (
+            await search_asking_planner.plan(
+                _goal(),
+                utterance=_REQUEST,
+                context=_context(),
+                memories=_supply(),
+                capabilities=_VOCABULARY,
+            )
+        ).plan
         request = plan.read_request
         assert request is not None, "the fixture promises an implementation that asks"
 
@@ -704,13 +812,16 @@ class PlannerContract:
             kind=ReadKind.STRUCTURED_READ,
             structure=StructuredAsk(window=TimeWindow(start=_WHEN)),
         )
-        plan = await planner.plan(
-            _goal(),
-            context=_context(),
-            memories=_supply() + _fourth_group(),
-            capabilities=_VOCABULARY,
-            empty_reads=(empty,),
-        )
+        plan = (
+            await planner.plan(
+                _goal(),
+                utterance=_REQUEST,
+                context=_context(),
+                memories=_supply() + _fourth_group(),
+                capabilities=_VOCABULARY,
+                empty_reads=(empty,),
+            )
+        ).plan
         assert plan.goal_id == "g1"
 
     async def test_the_carrier_is_optional_and_defaults_to_nothing_came_back_empty(
@@ -725,18 +836,27 @@ class PlannerContract:
         parameter." So a call omitting it entirely raises nothing and drives no repair
         round, exactly as an empty ``files`` or an empty vocabulary does.
         """
-        plan = await planner.plan(
-            _goal(), context=_context(), memories=_supply(), capabilities=_VOCABULARY
-        )
+        plan = (
+            await planner.plan(
+                _goal(),
+                utterance=_REQUEST,
+                context=_context(),
+                memories=_supply(),
+                capabilities=_VOCABULARY,
+            )
+        ).plan
         assert plan.goal_id == "g1"
 
-        explicit = await planner.plan(
-            _goal("g2"),
-            context=_context(),
-            memories=_supply(),
-            capabilities=_VOCABULARY,
-            empty_reads=(),
-        )
+        explicit = (
+            await planner.plan(
+                _goal("g2"),
+                utterance=_REQUEST,
+                context=_context(),
+                memories=_supply(),
+                capabilities=_VOCABULARY,
+                empty_reads=(),
+            )
+        ).plan
         assert explicit.goal_id == "g2"
 
     async def test_the_carrier_is_declared_and_keyword_only(self, planner: Planner) -> None:
@@ -774,9 +894,15 @@ class PlannerContract:
         """
         if structured_asking_planner is None:
             pytest.skip("this implementation never asks by structure (ADR-0240 §1)")
-        plan = await structured_asking_planner.plan(
-            _goal(), context=_context(), memories=_supply(), capabilities=_VOCABULARY
-        )
+        plan = (
+            await structured_asking_planner.plan(
+                _goal(),
+                utterance=_REQUEST,
+                context=_context(),
+                memories=_supply(),
+                capabilities=_VOCABULARY,
+            )
+        ).plan
         request = plan.read_request
         assert request is not None, "the fixture promises an implementation that asks"
 
@@ -809,9 +935,15 @@ class PlannerContract:
         if structured_asking_planner is None:
             pytest.skip("this implementation never asks by structure (ADR-0240 §1)")
         supply = _supply() + _fourth_group()
-        plan = await structured_asking_planner.plan(
-            _goal(), context=_context(), memories=supply, capabilities=_VOCABULARY
-        )
+        plan = (
+            await structured_asking_planner.plan(
+                _goal(),
+                utterance=_REQUEST,
+                context=_context(),
+                memories=supply,
+                capabilities=_VOCABULARY,
+            )
+        ).plan
         request = plan.read_request
         assert request is not None
         shown = {record.id for record in supply}
@@ -835,12 +967,15 @@ class PlannerContract:
         to punish a planner's non-conformance" — but a conforming implementation
         leaves it alone, and this is where that is held.
         """
-        plan = await planner.plan(
-            _goal(),
-            context=_context(),
-            memories=_supply() + _fourth_group(),
-            capabilities=_VOCABULARY,
-        )
+        plan = (
+            await planner.plan(
+                _goal(),
+                utterance=_REQUEST,
+                context=_context(),
+                memories=_supply() + _fourth_group(),
+                capabilities=_VOCABULARY,
+            )
+        ).plan
         assert plan.supersedes is None
 
     async def test_a_read_it_asks_for_never_becomes_a_step(
@@ -858,9 +993,15 @@ class PlannerContract:
         """
         if asking_planner is None:
             pytest.skip("this implementation never asks for a read (ADR-0226 §4)")
-        plan = await asking_planner.plan(
-            _goal(), context=_context(), memories=_supply(), capabilities=_VOCABULARY
-        )
+        plan = (
+            await asking_planner.plan(
+                _goal(),
+                utterance=_REQUEST,
+                context=_context(),
+                memories=_supply(),
+                capabilities=_VOCABULARY,
+            )
+        ).plan
         request = plan.read_request
         assert request is not None
 

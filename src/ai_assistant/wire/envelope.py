@@ -1458,7 +1458,61 @@ from ai_assistant.wire.errors import (
 #: no existing frame's encoding changes, no :class:`FrameKind` is added, no codec entry
 #: is registered, and the error mapping is untouched — ADR-0248 mints no error class and
 #: removes none.
-PROTOCOL_VERSION: Final[int] = 37
+#:
+#: **38 since ADR-0249 §12**, and **three changes of that decision are each
+#: independently the ground** — so the move is singular because §15 cuts the lanes to
+#: make it so, not because only one value moved.
+#: :class:`~ai_assistant.core.types.Goal` gains required fields — ``interpretation``,
+#: with ``conversation_id``, ``interpretation_elided``, ``version`` and
+#: ``last_engaged_at`` beside it — and **loses** ``statement`` from its dump, which is
+#: now a read-only projection (§1); :class:`~ai_assistant.core.types.ActionPlan` gains
+#: ``targets_revision`` (§8); and :class:`~ai_assistant.core.types.TurnResult`'s
+#: ``goal`` changes type from ``Goal`` to
+#: :class:`~ai_assistant.core.types.GoalBrief` (§11). ``TurnResult`` rides
+#: ``TurnOutcome.turn``, ``TurnOutcome`` is what the promoted surface returns, all three
+#: models set ``extra="forbid"``, and ``wire/codec.py`` renders a model by
+#: ``model_dump()`` — so each of the three, **on its own**, makes a hub's turn
+#: undecodable by a client at the previous version. That is ADR-0124 §9's second limb —
+#: "a change to a wire-carried ``core`` type that makes a value one peer emits invalid
+#: for the other, whether the change widens or narrows the type" — and ADR-0178 §6 is
+#: the precedent for stating the bump in the deciding ADR rather than leaving the lane
+#: to discover it.
+#:
+#: **No compatibility shim, negotiation or lenient decode** (§12). ADR-0084 §3's
+#: exact-match handshake is the mechanism and the refusal naming both versions is the
+#: intended user-visible outcome, so a peer at 37 and a peer at 38 refuse each other
+#: and say so.
+#:
+#: **No new class of content crosses.** ``GoalBrief`` carries strictly **less** than the
+#: ``Goal`` it replaces on ``TurnResult`` and ``ParkedRead``: the ground **kind** and
+#: never a reference, no ``evidence_id``, no span, no revision number and no
+#: ``Provenance`` object. ADR-0004 §5's "Tier 0/1 data must never be logged" binds
+#: unchanged and nothing here logs a brief, an interpretation or an element.
+#:
+#: **``ParkedRead`` changing shape is not a fourth ground.** It is an in-process store
+#: record reached through the ``ParkedReads`` Protocol, no peer emits it, and its
+#: ``goal`` becoming a ``GoalBrief`` and its gaining ``goal_id`` emit nothing — exactly
+#: as the entry at 37 records of that type gaining ``utterance``.
+#:
+#: **The promoted method set does not move and stands at fifty-eight**, and ADR-0177
+#: §1's browser enumeration does not move and stands at thirty-one: ADR-0249 adds no
+#: method to the promoted ``AssistantEngine`` surface, removes none, and adds no gateway
+#: route. ``Planner`` and ``PlanStore`` **do** change — both BREAKING under golden rule
+#: 5 — but neither is a promoted wire surface, so no codec entry and no route follows.
+#:
+#: **Two stored-record versions move, and neither is one of this wire's.** The plan
+#: store's own ``schema_version`` goes 1 → 2 (its first migration, ADR-0249 §12) and the
+#: parked-read store's 2 → 3; ``PlanExport.schema_version`` goes 7 → 8, and that is a
+#: **stored-record** version rather than a second wire ground — ``PlanExport`` crosses no
+#: frame, is the portable document ``PlanStore.export`` returns, and is emitted by no
+#: peer (§12). ``ConversationExport.schema_version`` stays at **2**, ADR-0212 §8 is
+#: untouched, and no row is minted in ADR-0087 §2c's scalar table.
+#:
+#: **Nothing else under** ``wire/`` **changes** (§12): the connect exchange gains no
+#: member, no existing frame's encoding changes, no :class:`FrameKind` is added, no codec
+#: entry is registered, and the error mapping is untouched — ADR-0249 mints no error
+#: class and removes none.
+PROTOCOL_VERSION: Final[int] = 38
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

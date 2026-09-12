@@ -43,7 +43,10 @@ from ai_assistant.core.types import (
     Disposition,
     ExecutionState,
     Goal,
+    GoalBrief,
+    GoalInterpretation,
     GrantScope,
+    Ground,
     Idempotency,
     MemoryKind,
     MemorySource,
@@ -885,13 +888,22 @@ def turn_that_ran() -> TurnResult:
     """
     goal = Goal(
         id="g-1",
-        statement="forget that I like jazz",
+        interpretation=(
+            GoalInterpretation(
+                revision=1,
+                outcome="forget that I like jazz",
+                outcome_ground=Ground.USER_STATED,
+                outcome_span="forget that I like jazz",
+                recorded_at=AT,
+                raised_by="t-1",
+            ),
+        ),
         provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT),
         created_at=AT,
     )
     return TurnResult(
         utterance=goal.statement,
-        goal=goal,
+        goal=GoalBrief.of(goal),
         context=CurrentContext(
             now=AT, time_of_day=TimeOfDay.AFTERNOON, is_weekend=False, within_working_hours=True
         ),

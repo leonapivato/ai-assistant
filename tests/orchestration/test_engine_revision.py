@@ -25,10 +25,13 @@ from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
     ActionPlan,
     EpisodicMemory,
+    EvidenceDigest,
+    GoalBrief,
     MemorySource,
     Placement,
     PlacementReach,
     PlacementSetter,
+    PlannerOutput,
     PlanStep,
     Provenance,
     ReadAsk,
@@ -43,7 +46,7 @@ from ai_assistant.testing import FakeMemoryStore
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord, ShownFile
+    from ai_assistant.core.types import CurrentContext, MemoryRecord, ShownFile
 
 #: What the user asks on every case here: a question whose act needs a value only
 #: memory holds. One distinctive term, so the turn's own blind belief read reaches
@@ -75,40 +78,46 @@ class _DependentPlanner:
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         """Plan the step where the supply carries the address, and ask for it where not."""
         ordinal = len(self.calls) + 1
         self.calls.append(tuple(memories))
         seen = next((one for one in memories if _ADDRESS in one.content), None)
         if seen is None:
-            return ActionPlan(
-                id=f"{goal.id}-plan-{ordinal}",
-                goal_id=goal.id,
-                steps=(),
-                created_at=AT,
-                rationale="the address is not in front of me",
-                read_request=self._request,
+            return PlannerOutput(
+                plan=ActionPlan(
+                    id=f"{goal.goal_id}-plan-{ordinal}",
+                    goal_id=goal.goal_id,
+                    steps=(),
+                    created_at=AT,
+                    rationale="the address is not in front of me",
+                    read_request=self._request,
+                )
             )
-        return ActionPlan(
-            id=f"{goal.id}-plan-{ordinal}",
-            goal_id=goal.id,
-            steps=(
-                PlanStep(
-                    id="step-1",
-                    intent="tell the surveyor where to go",
-                    capability=CAPABILITY,
-                    parameters={"address": _ADDRESS},
+        return PlannerOutput(
+            plan=ActionPlan(
+                id=f"{goal.goal_id}-plan-{ordinal}",
+                goal_id=goal.goal_id,
+                steps=(
+                    PlanStep(
+                        id="step-1",
+                        intent="tell the surveyor where to go",
+                        capability=CAPABILITY,
+                        parameters={"address": _ADDRESS},
+                    ),
                 ),
-            ),
-            created_at=AT,
-            rationale="the address arrived with the read",
+                created_at=AT,
+                rationale="the address arrived with the read",
+            )
         )
 
 
@@ -126,31 +135,35 @@ class _AlwaysAsking:
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         """Plan one step and ask for one more read, on every call."""
         ordinal = len(self.calls) + 1
         self.calls.append(tuple(memories))
-        return ActionPlan(
-            id=f"{goal.id}-plan-{ordinal}",
-            goal_id=goal.id,
-            steps=(
-                PlanStep(
-                    id=f"step-{ordinal}",
-                    intent=f"act on call {ordinal}",
-                    capability=self._capability,
-                    parameters={"ordinal": ordinal},
+        return PlannerOutput(
+            plan=ActionPlan(
+                id=f"{goal.goal_id}-plan-{ordinal}",
+                goal_id=goal.goal_id,
+                steps=(
+                    PlanStep(
+                        id=f"step-{ordinal}",
+                        intent=f"act on call {ordinal}",
+                        capability=self._capability,
+                        parameters={"ordinal": ordinal},
+                    ),
                 ),
-            ),
-            created_at=AT,
-            rationale=f"call {ordinal}",
-            read_request=_hop("M1"),
+                created_at=AT,
+                rationale=f"call {ordinal}",
+                read_request=_hop("M1"),
+            )
         )
 
 
@@ -308,7 +321,7 @@ async def test_every_plan_is_persisted_and_the_chain_is_legible() -> None:
     assert revision.id != first.id
 
     export = await harness.plans.export()
-    assert export.schema_version == 7
+    assert export.schema_version == 8
     assert {plan.id for plan in export.plans} == {first.id, revision.id}
 
 

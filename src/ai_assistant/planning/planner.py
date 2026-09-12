@@ -98,6 +98,7 @@ from ai_assistant.core.types import (
     ExchangeDisposition,
     MemoryKind,
     Message,
+    PlannerOutput,
     PlanStep,
     ReadAsk,
     ReadKind,
@@ -118,7 +119,8 @@ if TYPE_CHECKING:
         ContextFacet,
         CurrentContext,
         EmailFacet,
-        Goal,
+        EvidenceDigest,
+        GoalBrief,
         MemoryRecord,
         ShownFile,
     )
@@ -1064,17 +1066,26 @@ class ModelBackedPlanner:
         except ClockReadingError as exc:
             raise PlanningError(str(exc)) from exc
 
-    async def plan(  # noqa: PLR0913 — the goal plus one keyword per thing the pipeline assembled before planning, as the Protocol declares them; ADR-0230 §3 and ADR-0240 §7 each add one
+    async def plan(  # noqa: PLR0913 — the brief plus one keyword per thing the pipeline assembled before planning, as the Protocol declares them; ADR-0230 §3, ADR-0240 §7 and ADR-0249 §7 each add to it
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,  # noqa: ARG002 — carried by the ADR-0249 §7 contract; rendering it under its own heading is L2's (§15)
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),  # noqa: ARG002 — carried by the ADR-0249 §10 contract; rendering the digest is L2's (§15)
+    ) -> PlannerOutput:
         """Produce a frozen plan for ``goal`` (ADR-0047).
+
+        **This planner proposes no understanding** (ADR-0249 §15): it returns
+        ``PlannerOutput(plan=…, understanding=None)``, which is the semantically
+        correct answer for a planner that knows nothing of that envelope — "no
+        implementation reads ``None`` as an error, a degradation, or an instruction
+        to re-plan" (§7). Proposing one is L2's, together with rendering the brief's
+        elements, the request and the evidence digest into the prompt.
 
         Prompts the model for a JSON envelope, extracts and validates it into a
         plan, and retries once on malformed output before giving up. ``context``,
@@ -1142,7 +1153,9 @@ class ModelBackedPlanner:
         (:meth:`~ai_assistant.core.protocols.Planner.plan`).
 
         Args:
-            goal: The objective to plan for.
+            goal: The brief of the objective to plan for (ADR-0249 §9).
+            utterance: This turn's own request (ADR-0248 §1, ADR-0249 §7). Carried
+                and not yet rendered: the request's own heading is L2's.
             context: The situational context assembled for this request.
             memories: The records the pipeline assembled for this turn — the
                 conversation's recent turns in order, then records retrieved as
@@ -1165,8 +1178,13 @@ class ModelBackedPlanner:
                 their own and read once, before the first ``await``. Empty is legal and
                 is the ordinary case — every first call — and renders nothing.
 
+            evidence: What this call may act on about the reads already taken
+                (ADR-0249 §10). Carried and not yet rendered: the digest's own
+                heading is L2's.
+
         Returns:
-            A frozen :class:`~ai_assistant.core.types.ActionPlan` for ``goal``.
+            A frozen :class:`~ai_assistant.core.types.PlannerOutput` carrying the
+            plan for ``goal`` and no proposed understanding.
 
         Raises:
             PlanningError: If no valid plan could be extracted within
@@ -1203,7 +1221,7 @@ class ModelBackedPlanner:
         for _ in range(self._max_attempts):
             reply = await self._model.complete(conversation)
             try:
-                return self._build_plan(reply.content, snapshot)
+                return PlannerOutput(plan=self._build_plan(reply.content, snapshot))
             except _ExtractionError as exc:
                 last_error = exc
                 conversation.append(reply)
@@ -1214,10 +1232,10 @@ class ModelBackedPlanner:
                     ),
                 )
 
-        msg = f"the model did not return a usable plan for goal {snapshot.id}: {last_error}"
+        msg = f"the model did not return a usable plan for goal {snapshot.goal_id}: {last_error}"
         raise PlanningError(msg)
 
-    def _build_plan(self, content: str, goal: Goal) -> ActionPlan:
+    def _build_plan(self, content: str, goal: GoalBrief) -> ActionPlan:
         """Extract and validate one model reply into a frozen ``ActionPlan``.
 
         A **decline** — an empty ``steps`` list carrying the ``no_capability_needed``
@@ -1251,7 +1269,7 @@ class ModelBackedPlanner:
             return ActionPlan.model_validate(
                 {
                     "id": self._id_factory(),
-                    "goal_id": goal.id,
+                    "goal_id": goal.goal_id,
                     "steps": step_payloads,
                     "created_at": self._now(),
                     "rationale": rationale,
@@ -1765,7 +1783,7 @@ def _structured_axis(structured: Mapping[str, object], axis: str) -> tuple[str, 
 
 
 def _render_request(
-    goal: Goal,
+    goal: GoalBrief,
     context: CurrentContext,
     memories: Sequence[MemoryRecord],
     files: Sequence[ShownFile] = (),
@@ -1843,11 +1861,17 @@ def _render_request(
     §5 rule ``None`` the single absence that "does not distinguish unconfigured,
     disabled, never-read, ungranted, failed or empty".
     """
+    # ADR-0249 §11: the outcome statement under the `Goal:` heading this already
+    # uses, and the outcome's own **ground kind** in place of the goal-level
+    # `Provenance` object — which §11 rules is printed nowhere, because what reaches
+    # the planner in its place is per-value grounding that carries no `evidence`
+    # tuple of record identifiers. Rendering the brief's elements, the request and
+    # the evidence digest under headings of their own is L2's (§15).
     lines = [
         "Goal:",
-        f"  statement: {goal.statement}",
+        f"  statement: {goal.outcome}",
         f"  status: {goal.status.value}",
-        f"  provenance: {goal.provenance.source.value}",
+        f"  ground: {goal.outcome_ground.value}",
     ]
     if goal.deadline is not None:
         lines.append(f"  deadline: {goal.deadline.isoformat()}")

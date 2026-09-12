@@ -37,12 +37,15 @@ from ai_assistant.core.types import (
     MAX_HOP_LABELS,
     ActionPlan,
     EpisodicMemory,
+    EvidenceDigest,
     ExchangeDisposition,
+    GoalBrief,
     MemoryKind,
     MemorySource,
     Placement,
     PlacementReach,
     PlacementSetter,
+    PlannerOutput,
     PlanStep,
     Provenance,
     ReadAsk,
@@ -92,7 +95,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         BeliefBand,
         CurrentContext,
-        Goal,
         MemoryRecord,
         MemorySearchResult,
         ShownFile,
@@ -283,23 +285,27 @@ class _DeletingPlanner:
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         del context, capabilities
         self.calls.append(tuple(memories))
         await self._store.delete(self._record_id)
-        return ActionPlan(
-            id=f"{goal.id}-plan",
-            goal_id=goal.id,
-            steps=(),
-            created_at=_NOW,
-            read_request=self._request,
+        return PlannerOutput(
+            plan=ActionPlan(
+                id=f"{goal.goal_id}-plan",
+                goal_id=goal.goal_id,
+                steps=(),
+                created_at=_NOW,
+                read_request=self._request,
+            )
         )
 
 
@@ -320,23 +326,27 @@ class _SuspendingPlanner:
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         del context, memories, capabilities
         self.held = self._store.suspend_next_operation()
         self._armed.set()
-        return ActionPlan(
-            id=f"{goal.id}-plan",
-            goal_id=goal.id,
-            steps=(),
-            created_at=_NOW,
-            read_request=self._request,
+        return PlannerOutput(
+            plan=ActionPlan(
+                id=f"{goal.goal_id}-plan",
+                goal_id=goal.goal_id,
+                steps=(),
+                created_at=_NOW,
+                read_request=self._request,
+            )
         )
 
     async def armed(self) -> LoopSuspension:
@@ -417,14 +427,16 @@ class _RaisingPlanner:
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         del goal, context, memories, capabilities
         msg = "no plan for that"
         raise PlanningError(msg)
@@ -807,7 +819,7 @@ async def test_a_serviced_record_sets_the_value_the_capture_records(
 
     turn = (await _loop(memory, planner=planner).respond("billing schedule", narrow=supply)).turn
 
-    assert _ids(planner.calls[0][2]) == ["belief-1"], "the planner saw three groups"
+    assert _ids(planner.calls[0][3]) == ["belief-1"], "the planner saw three groups"
     assert _ids(turn.memories) == ["belief-1", "secret-1"], "nothing was dropped"
     assert supply.withheld is True
 
@@ -1046,7 +1058,7 @@ async def test_the_fourth_group_is_appended_whole_and_the_planner_never_saw_it()
         )
     ).turn
 
-    planned = _ids(planner.calls[0][2])
+    planned = _ids(planner.calls[0][3])
     assert planned == ["tail-1", "belief-1", "supp-1"], "three groups, in order"
     assert _ids(turn.memories) == [*planned, "cited-1"], "appended whole, never interleaved"
 
@@ -1065,7 +1077,7 @@ async def test_a_turn_that_serviced_nothing_hands_the_planner_and_the_result_one
         await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
     ).turn
 
-    assert turn.memories == planner.calls[0][2]
+    assert turn.memories == planner.calls[0][3]
 
 
 async def test_a_group_of_episodes_at_the_tail_cannot_extend_the_leading_episodic_run() -> None:
@@ -1113,7 +1125,7 @@ async def test_a_failing_first_read_degrades_the_turn_and_records_no_yield() -> 
             await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
         ).turn
 
-    assert turn.memories == planner.calls[0][2], "the supply planning saw, byte for byte"
+    assert turn.memories == planner.calls[0][3], "the supply planning saw, byte for byte"
     record = _record(captured)
     serviced = _serviced(captured)
     assert record["trigger"] == TriggerOutcome.FIRED.value
@@ -1143,7 +1155,7 @@ async def test_a_hop_that_returned_before_the_query_raised_leaves_nothing_behind
             await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
         ).turn
 
-    assert turn.memories == planner.calls[0][2]
+    assert turn.memories == planner.calls[0][3]
     serviced = _serviced(captured)
     assert serviced["failed"] is True
     assert serviced["failed_after_read_returned"] is True, "the hop had already returned"
@@ -1172,7 +1184,7 @@ async def test_a_later_band_raising_after_an_earlier_one_returned_is_recorded_as
         ).turn
 
     assert memory.calls >= 5, "the servicing reached a second band"
-    assert turn.memories == planner.calls[0][2]
+    assert turn.memories == planner.calls[0][3]
     serviced = _serviced(captured)
     assert serviced["failed"] is True
     assert serviced["failed_after_read_returned"] is True
@@ -1535,7 +1547,7 @@ async def test_an_unbounded_audience_turn_still_narrows_before_planning() -> Non
 
     turn = (await _loop(memory, planner=planner).respond("billing schedule", narrow=supply)).turn
 
-    assert _ids(planner.calls[0][2]) == ["belief-1"], "withheld before planning"
+    assert _ids(planner.calls[0][3]) == ["belief-1"], "withheld before planning"
     assert _ids(turn.memories) == ["belief-1"]
     assert supply.withheld is True
 
@@ -1679,7 +1691,7 @@ async def test_a_servicing_that_returns_nothing_leaves_the_supply_identical() ->
             await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
         ).turn
 
-    assert turn.memories == planner.calls[0][2]
+    assert turn.memories == planner.calls[0][3]
     record = _record(captured)
     serviced = _serviced(captured)
     assert record["trigger"] == TriggerOutcome.FIRED.value
@@ -1887,7 +1899,7 @@ async def test_a_hop_and_a_query_reaching_nothing_is_not_a_failure() -> None:
             await _loop(memory, planner=planner).respond("billing schedule", narrow=_bounded())
         ).turn
 
-    assert turn.memories == planner.calls[0][2]
+    assert turn.memories == planner.calls[0][3]
     serviced = _serviced(captured)
     assert serviced["failed"] is False
     assert serviced["labels_unresolved"] == 1

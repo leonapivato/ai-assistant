@@ -246,6 +246,7 @@ if TYPE_CHECKING:
         EncodableText,
         FeedbackEvent,
         FrozenJsonMapping,
+        Goal,
         GrantableSource,
         GrantScope,
         HeldNotification,
@@ -8025,6 +8026,36 @@ class Engine:
         for plan in plans:
             await self._plans.save_plan(plan)
 
+    async def _save_goal(self, goal: Goal | None) -> None:
+        """Persist the goal record the loop built for this turn (ADR-0249 §11).
+
+        **The loop builds the goal record and its revisions; this component persists
+        them**, at the one site that persists a plan today. The record travels on
+        ``RespondedTurn`` **inside** ``ai_assistant.orchestration`` as data, adding no
+        member to any Protocol and riding on no wire-carried type: a turn carries the
+        planner-facing :class:`~ai_assistant.core.types.GoalBrief`, which is no record
+        to save, and widening ``TurnResult.goal`` back to a ``Goal`` would put the
+        interpretation chain and its ground references on the wire. That is the
+        carrier shape ADR-0242 §7 already uses, and it is what keeps ADR-0228 §5's
+        prohibition intact — **no lane gives** ``LearningLoop`` **a** ``PlanStore``.
+
+        ``None`` is unreachable from any path this component drives — every
+        ``RespondedTurn`` the loop returns carries a record — and is accepted rather
+        than asserted away so that a caller's double cannot turn a missing carrier
+        into a crash at the persistence site.
+
+        Args:
+            goal: The goal record the loop opened for this turn, or ``None``.
+
+        Raises:
+            PlanningError: As ``save_goal`` raises it — including where the store
+                already holds a goal under that id, which ADR-0249 §12 makes a refusal
+                rather than an upsert.
+        """
+        if goal is None:  # pragma: no cover — every RespondedTurn carries a record
+            return
+        await self._plans.save_goal(goal)
+
     async def _run_turn(  # noqa: PLR0913 — the utterance, the budget, the conversation, the two composers, the supply filter and the spoken capture; every one is a distinct fact about the pass, and collapsing any pair would put a flag where a value belongs
         self,
         utterance: str,
@@ -8208,11 +8239,16 @@ class Engine:
         origin = SelectionOrigin.over(turn.memories)
         external = origin.planned_with_external_content
         self._check_plan_is_for_goal(turn)
+        # ADR-0249 §11: the goal **record** to persist, read off the loop's carrier
+        # rather than off the turn — a turn carries the projection, which is no record
+        # to save. It travels inside `ai_assistant.orchestration` as data, adding no
+        # member to any Protocol, which is the carrier shape ADR-0242 §7 already uses.
+        goal_record = responded.goal
         if not turn.plan.steps:
             # A no-action decision is still a decision, and drives nothing that
             # could park — so it needs no capacity slot, and its goal and plan are
             # persisted as an auditable record (ADR-0014 §2).
-            await self._plans.save_goal(turn.goal)
+            await self._save_goal(goal_record)
             await self._persist_plans(plans)
             composed = await compose(
                 turn,
@@ -8258,7 +8294,7 @@ class Engine:
         # a raising id factory fails with no durable state committed (#287).
         handle = self._admit_and_reserve()
         try:
-            await self._plans.save_goal(turn.goal)
+            await self._save_goal(goal_record)
             # ADR-0228 §5: the **whole** sequence of `save_plan` calls precedes
             # `start_execution`, so a turn whose second `save_plan` raises has driven
             # nothing — no execution is open, no capacity slot is spent on a step and
@@ -9275,10 +9311,10 @@ class Engine:
         Raises:
             PlanningError: If the plan's ``goal_id`` is not this turn's goal.
         """
-        if turn.plan.goal_id != turn.goal.id:
+        if turn.plan.goal_id != turn.goal.goal_id:
             msg = (
                 f"the planner returned a plan for goal {turn.plan.goal_id!r}, not this turn's "
-                f"goal {turn.goal.id!r}; driving it would execute actions planned for a "
+                f"goal {turn.goal.goal_id!r}; driving it would execute actions planned for a "
                 "different objective"
             )
             raise PlanningError(msg)
@@ -9573,7 +9609,7 @@ class Engine:
         # composes when the pass has no request at all — `TurnResult.utterance` is
         # required (§1), so deleting it before that leaves this path with no valid turn
         # to build (§11).
-        utterance = goal.statement if park.utterance is None else park.utterance
+        utterance = goal.outcome if park.utterance is None else park.utterance
         history = await self._conversations.history(park.conversation_id)
         # **ADR-0204 §2's evaluation, on this pass's own supply** (ADR-0244 §8's "the
         # exchange is captured as a turn's exchange is captured"). A resume is a

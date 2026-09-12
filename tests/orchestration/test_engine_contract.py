@@ -76,6 +76,8 @@ from ai_assistant.core.types import (
     CostBasis,
     DataTier,
     Disposition,
+    EvidenceDigest,
+    GoalBrief,
     GrantScope,
     Idempotency,
     MemorySource,
@@ -85,6 +87,7 @@ from ai_assistant.core.types import (
     Placement,
     PlacementReach,
     PlacementSetter,
+    PlannerOutput,
     PlanStep,
     Provenance,
     ReadAsk,
@@ -161,7 +164,6 @@ if TYPE_CHECKING:
         CurrentContext,
         EgressBinding,
         FrozenJson,
-        Goal,
         MemoryRecord,
         ShownFile,
         SourceGrant,
@@ -268,19 +270,25 @@ class _OneStepPlanner:
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         """Return a one-step plan for the goal."""
         step = PlanStep(
             id="step-1", intent="send the note", capability=CAPABILITY, parameters=PARAMETERS
         )
-        return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(step,), created_at=AT)
+        return PlannerOutput(
+            plan=ActionPlan(
+                id=f"{goal.goal_id}-plan", goal_id=goal.goal_id, steps=(step,), created_at=AT
+            )
+        )
 
 
 class _NoStepPlanner:
@@ -293,16 +301,22 @@ class _NoStepPlanner:
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         """Return an empty plan for the goal."""
-        return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(), created_at=AT)
+        return PlannerOutput(
+            plan=ActionPlan(
+                id=f"{goal.goal_id}-plan", goal_id=goal.goal_id, steps=(), created_at=AT
+            )
+        )
 
 
 def _counter(prefix: str) -> Callable[[], str]:

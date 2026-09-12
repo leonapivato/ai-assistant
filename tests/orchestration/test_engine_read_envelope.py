@@ -48,8 +48,11 @@ from ai_assistant.core.types import (
     ActionPlan,
     BeliefBand,
     EpisodicMemory,
+    EvidenceDigest,
     ExchangeDisposition,
+    GoalBrief,
     MemorySource,
+    PlannerOutput,
     Provenance,
     ReadAsk,
     ReadKind,
@@ -75,7 +78,6 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.types import (
         CurrentContext,
-        Goal,
         MemoryKind,
         MemoryRecord,
         MemorySearchResult,
@@ -142,19 +144,27 @@ class _AskingPlanner(NoStepPlanner):
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         self.calls.append(tuple(memories))
-        plan = await super().plan(
-            goal, context=context, memories=memories, capabilities=capabilities
+        produced = await super().plan(
+            goal,
+            utterance=utterance,
+            context=context,
+            memories=memories,
+            capabilities=capabilities,
         )
-        return plan.model_copy(update={"read_request": self._request})
+        return produced.model_copy(
+            update={"plan": produced.plan.model_copy(update={"read_request": self._request})}
+        )
 
 
 class _AskingOneStepPlanner(OneStepPlanner):
@@ -170,18 +180,26 @@ class _AskingOneStepPlanner(OneStepPlanner):
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
-        plan = await super().plan(
-            goal, context=context, memories=memories, capabilities=capabilities
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
+        produced = await super().plan(
+            goal,
+            utterance=utterance,
+            context=context,
+            memories=memories,
+            capabilities=capabilities,
         )
-        return plan.model_copy(update={"read_request": self._request})
+        return produced.model_copy(
+            update={"plan": produced.plan.model_copy(update={"read_request": self._request})}
+        )
 
 
 def _belief(record_id: str, content: str, *, evidence: tuple[str, ...] = ()) -> SemanticMemory:

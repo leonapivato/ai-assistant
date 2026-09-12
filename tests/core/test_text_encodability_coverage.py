@@ -52,7 +52,9 @@ from ai_assistant.core.types import (
     FrozenJsonMapping,
     FrozenJsonValue,
     Goal,
+    GoalInterpretation,
     GoalStatus,
+    Ground,
     Identifier,
     MemoryKind,
     MemorySource,
@@ -386,7 +388,16 @@ def test_a_goal_statement_with_no_utf8_encoding_is_refused() -> None:
     with pytest.raises(ValidationError, match="UTF-8"):
         Goal(
             id="g-1",
-            statement=SURROGATE,
+            interpretation=(
+                GoalInterpretation(
+                    revision=1,
+                    outcome=SURROGATE,
+                    outcome_ground=Ground.USER_STATED,
+                    outcome_span=SURROGATE,
+                    recorded_at=AT,
+                    raised_by="t-1",
+                ),
+            ),
             status=GoalStatus.ACTIVE,
             provenance=_provenance(),
             created_at=AT,

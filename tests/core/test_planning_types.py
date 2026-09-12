@@ -1085,30 +1085,30 @@ def test_the_kind_vocabulary_is_the_five_the_decisions_admit() -> None:
 
 def test_export_is_versioned_and_defaults_to_empty() -> None:
     export = PlanExport(exported_at=_WHEN)
-    assert export.schema_version == 7
+    assert export.schema_version == 8
     assert export.goals == ()
 
 
-def test_export_pins_the_schema_version_to_exactly_seven() -> None:
+def test_export_pins_the_schema_version_to_exactly_eight() -> None:
     """The label is a fact about the document, not a producer's claim (ADR-0039 §10).
 
-    ``Literal[7]`` refuses an explicit ``6`` — a document of the shape this export
-    had before ``ReadKind`` gained ``STRUCTURED_READ`` and ``ReadAsk`` gained
-    ``structure`` does not validate against this contract at all (ADR-0240 §11),
-    exactly as a ``5`` stopped validating when that enumeration gained
-    ``WEB_SEARCH``, a ``4`` when it gained ``LOCAL_FILE`` and ``ReadAsk`` gained
-    ``entry``, a ``3`` when
+    ``Literal[8]`` refuses an explicit ``7`` — a document of the shape this export
+    had before it gained ``attempts`` and before ``ActionPlan`` gained
+    ``targets_revision`` does not validate against this contract at all (ADR-0249
+    §11), exactly as a ``6`` stopped validating when ``ReadKind`` gained
+    ``STRUCTURED_READ``, a ``5`` when it gained ``WEB_SEARCH``, a ``4`` when it
+    gained ``LOCAL_FILE`` and ``ReadAsk`` gained ``entry``, a ``3`` when
     ``ActionPlan`` gained ``supersedes`` and a ``2`` when it gained ``read_request``
     — and any other value, so the advertised version cannot be mislabelled. The
     positive default is what a producer gets for free; only the rejections pin it.
 
-    **The neighbour on each side is asserted and not only the far ones**: ``6`` is
-    the shape this contract had one decision ago and ``8`` is the shape nobody has
+    **The neighbour on each side is asserted and not only the far ones**: ``7`` is
+    the shape this contract had one decision ago and ``9`` is the shape nobody has
     decided, and a ``Literal`` that admitted either would be a document announcing a
     shape it does not have.
     """
-    assert PlanExport(exported_at=_WHEN, schema_version=7).schema_version == 7
-    for stale in (1, 2, 3, 4, 5, 6, 8):
+    assert PlanExport(exported_at=_WHEN, schema_version=8).schema_version == 8
+    for stale in (1, 2, 3, 4, 5, 6, 7, 9):
         with pytest.raises(ValidationError):
             PlanExport(exported_at=_WHEN, schema_version=stale)  # type: ignore[arg-type]
 
@@ -1153,7 +1153,7 @@ def test_export_carries_a_whole_supersession_chain() -> None:
 
     export = PlanExport(exported_at=_WHEN, goals=(_goal(),), plans=(first, revision))
 
-    assert export.schema_version == 7
+    assert export.schema_version == 8
     assert [plan.supersedes for plan in export.plans] == [None, "p1"]
 
 
@@ -1234,7 +1234,7 @@ def test_export_round_trips_through_json() -> None:
     export = PlanExport(exported_at=_WHEN, goals=(_goal(),), plans=(plan,), executions=(execution,))
     restored = TypeAdapter(PlanExport).validate_json(export.model_dump_json())
     assert restored == export
-    assert restored.schema_version == 7
+    assert restored.schema_version == 8
     request = restored.plans[0].read_request
     assert request is not None
     assert {ask.kind for ask in request.asks} == {ReadKind.SIGHTED_QUERY, ReadKind.CITATION_HOP}
@@ -1311,10 +1311,19 @@ def test_an_export_round_trips_one_ask_of_every_kind_the_enumeration_admits() ->
 
 
 def test_goal_is_frozen_including_its_provenance() -> None:
-    """A ``Goal`` and the ``Provenance`` it carries reject post-construction edits."""
+    """A ``Goal`` and the values it carries reject post-construction edits.
+
+    ``statement`` is no longer a field to assign to at all (ADR-0249 §1) — it is a
+    read-only projection of the current interpretation's ``outcome`` — so the edit
+    that used to be refused by ``frozen=True`` is now refused by there being no
+    setter. Both refusals are asserted, because what the arm is about is that no
+    route rewrites a stored objective.
+    """
     goal = _goal()
+    with pytest.raises((ValidationError, AttributeError)):
+        goal.statement = "tampered"  # type: ignore[misc]
     with pytest.raises(ValidationError):
-        goal.statement = "tampered"
+        goal.interpretation[0].outcome = "tampered"  # the nested revision is frozen
     with pytest.raises(ValidationError):
         goal.provenance.confidence = 0.1  # the nested model is frozen too
 
@@ -1343,7 +1352,7 @@ def test_plan_export_is_deeply_immutable() -> None:
     """
     export = PlanExport(exported_at=_WHEN, goals=(_goal(),))
     with pytest.raises(ValidationError):
-        export.goals[0].statement = "tampered"
+        export.goals[0].interpretation[0].outcome = "tampered"
 
 
 # --- StructuredAsk (ADR-0240 §2) ------------------------------------------

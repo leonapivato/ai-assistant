@@ -59,8 +59,10 @@ from ai_assistant.core.types import (
     EgressBinding,
     EpisodicMemory,
     Evidence,
+    EvidenceDigest,
     FeedbackEvent,
     FeedbackKind,
+    GoalBrief,
     Idempotency,
     IngestSummary,
     LearnDecision,
@@ -74,6 +76,7 @@ from ai_assistant.core.types import (
     ObservationReport,
     ObservedProposal,
     OriginUnrecordedBinding,
+    PlannerOutput,
     PlanStep,
     Provenance,
     ProvisioningState,
@@ -174,7 +177,6 @@ if TYPE_CHECKING:
         CurrentContext,
         EvaluationTrace,
         FrozenJson,
-        Goal,
         MemoryRecord,
         MemorySearchResult,
         MemoryWrite,
@@ -446,14 +448,16 @@ class OneStepPlanner:
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         step = PlanStep(
             id="step-1",
             intent="send the note",
@@ -461,8 +465,13 @@ class OneStepPlanner:
             parameters=self._parameters,  # type: ignore[arg-type]  # heterogeneous test arguments
         )
         self._calls += 1
-        return ActionPlan(
-            id=plan_id(goal.id, self._calls), goal_id=goal.id, steps=(step,), created_at=AT
+        return PlannerOutput(
+            plan=ActionPlan(
+                id=plan_id(goal.goal_id, self._calls),
+                goal_id=goal.goal_id,
+                steps=(step,),
+                created_at=AT,
+            )
         )
 
 
@@ -476,17 +485,21 @@ class NoStepPlanner:
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         self._calls += 1
-        return ActionPlan(
-            id=plan_id(goal.id, self._calls), goal_id=goal.id, steps=(), created_at=AT
+        return PlannerOutput(
+            plan=ActionPlan(
+                id=plan_id(goal.goal_id, self._calls), goal_id=goal.goal_id, steps=(), created_at=AT
+            )
         )
 
 
@@ -984,7 +997,7 @@ async def test_converse_with_no_step_ends_at_the_plan() -> None:
     assert outcome.turn.memory_degraded is False
     # A no-action decision is still a decision: its goal and plan are persisted as
     # an auditable record even though there is nothing to drive.
-    assert await harness.plans.get_goal(outcome.turn.goal.id) is not None
+    assert await harness.plans.get_goal(outcome.turn.goal.goal_id) is not None
     assert await harness.plans.get_plan(outcome.turn.plan.id) is not None
 
 
@@ -996,17 +1009,21 @@ async def test_converse_refuses_a_plan_built_for_another_goal() -> None:
 
         async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
             self,
-            goal: Goal,
+            goal: GoalBrief,
             *,
+            utterance: str,
             context: CurrentContext,
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
             files: Sequence[ShownFile] = (),
             empty_reads: Sequence[ReadAsk] = (),
-        ) -> ActionPlan:
+            evidence: Sequence[EvidenceDigest] = (),
+        ) -> PlannerOutput:
             step = PlanStep(id="step-1", intent="x", capability=CAPABILITY, parameters=PARAMETERS)
-            return ActionPlan(
-                id="rogue-plan", goal_id="some-other-goal", steps=(step,), created_at=AT
+            return PlannerOutput(
+                plan=ActionPlan(
+                    id="rogue-plan", goal_id="some-other-goal", steps=(step,), created_at=AT
+                )
             )
 
     harness = Harness(planner=MismatchPlanner(), tools=(tool(),))
@@ -2323,18 +2340,24 @@ async def test_shutdown_drains_in_flight_work_before_closing() -> None:
     class GatedPlanner:
         async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
             self,
-            goal: Goal,
+            goal: GoalBrief,
             *,
+            utterance: str,
             context: CurrentContext,
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
             files: Sequence[ShownFile] = (),
             empty_reads: Sequence[ReadAsk] = (),
-        ) -> ActionPlan:
+            evidence: Sequence[EvidenceDigest] = (),
+        ) -> PlannerOutput:
             entered.set()
             await release.wait()
             step = PlanStep(id="step-1", intent="x", capability=CAPABILITY, parameters=PARAMETERS)
-            return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(step,), created_at=AT)
+            return PlannerOutput(
+                plan=ActionPlan(
+                    id=f"{goal.goal_id}-plan", goal_id=goal.goal_id, steps=(step,), created_at=AT
+                )
+            )
 
     async def close() -> None:
         nonlocal closed_while_inflight
@@ -2365,18 +2388,24 @@ async def test_a_cancelled_call_does_not_abandon_its_underlying_work() -> None:
     class GatedPlanner:
         async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
             self,
-            goal: Goal,
+            goal: GoalBrief,
             *,
+            utterance: str,
             context: CurrentContext,
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
             files: Sequence[ShownFile] = (),
             empty_reads: Sequence[ReadAsk] = (),
-        ) -> ActionPlan:
+            evidence: Sequence[EvidenceDigest] = (),
+        ) -> PlannerOutput:
             entered.set()
             await release.wait()
             finished.set()
-            return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(), created_at=AT)
+            return PlannerOutput(
+                plan=ActionPlan(
+                    id=f"{goal.goal_id}-plan", goal_id=goal.goal_id, steps=(), created_at=AT
+                )
+            )
 
     harness = Harness(planner=GatedPlanner())
     call = asyncio.ensure_future(harness.engine.converse("send it", timeout=PATIENT))
@@ -2409,17 +2438,23 @@ async def test_cancelling_aclose_still_closes_the_resources() -> None:
     class GatedPlanner:
         async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
             self,
-            goal: Goal,
+            goal: GoalBrief,
             *,
+            utterance: str,
             context: CurrentContext,
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
             files: Sequence[ShownFile] = (),
             empty_reads: Sequence[ReadAsk] = (),
-        ) -> ActionPlan:
+            evidence: Sequence[EvidenceDigest] = (),
+        ) -> PlannerOutput:
             entered.set()
             await release.wait()
-            return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(), created_at=AT)
+            return PlannerOutput(
+                plan=ActionPlan(
+                    id=f"{goal.goal_id}-plan", goal_id=goal.goal_id, steps=(), created_at=AT
+                )
+            )
 
     async def close() -> None:
         closed.set()
@@ -2463,14 +2498,16 @@ class _NeverFinishing:
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         self.entered.set()
         try:
             await asyncio.Event().wait()
@@ -2543,14 +2580,16 @@ async def test_nothing_is_closed_until_the_cancelled_work_has_completed() -> Non
     class _SlowToUnwind:
         async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
             self,
-            goal: Goal,
+            goal: GoalBrief,
             *,
+            utterance: str,
             context: CurrentContext,
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
             files: Sequence[ShownFile] = (),
             empty_reads: Sequence[ReadAsk] = (),
-        ) -> ActionPlan:
+            evidence: Sequence[EvidenceDigest] = (),
+        ) -> PlannerOutput:
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
@@ -2593,17 +2632,23 @@ async def test_work_that_finishes_inside_the_budget_is_never_cancelled() -> None
     class _Gated:
         async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
             self,
-            goal: Goal,
+            goal: GoalBrief,
             *,
+            utterance: str,
             context: CurrentContext,
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
             files: Sequence[ShownFile] = (),
             empty_reads: Sequence[ReadAsk] = (),
-        ) -> ActionPlan:
+            evidence: Sequence[EvidenceDigest] = (),
+        ) -> PlannerOutput:
             await release.wait()
             finished.set()
-            return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(), created_at=AT)
+            return PlannerOutput(
+                plan=ActionPlan(
+                    id=f"{goal.goal_id}-plan", goal_id=goal.goal_id, steps=(), created_at=AT
+                )
+            )
 
     harness = Harness(planner=_Gated(), drain_timeout=timedelta(seconds=30))
     call = asyncio.ensure_future(harness.engine.converse("hello", timeout=PATIENT))
@@ -3329,21 +3374,27 @@ async def test_concurrent_parks_get_distinct_tokens_despite_a_colliding_factory(
     class GatedConfirmPlanner:
         async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
             self,
-            goal: Goal,
+            goal: GoalBrief,
             *,
+            utterance: str,
             context: CurrentContext,
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
             files: Sequence[ShownFile] = (),
             empty_reads: Sequence[ReadAsk] = (),
-        ) -> ActionPlan:
+            evidence: Sequence[EvidenceDigest] = (),
+        ) -> PlannerOutput:
             nonlocal seen
             seen += 1
             if seen == 2:  # both turns are now in flight together
                 entered.set()
             await release.wait()
             step = PlanStep(id="step-1", intent="x", capability=CAPABILITY, parameters=PARAMETERS)
-            return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(step,), created_at=AT)
+            return PlannerOutput(
+                plan=ActionPlan(
+                    id=f"{goal.goal_id}-plan", goal_id=goal.goal_id, steps=(step,), created_at=AT
+                )
+            )
 
     harness = Harness(tools=(confirmable(),), planner=GatedConfirmPlanner())
     harness.engine._id_factory = CollidingFactory()
@@ -3425,21 +3476,27 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
     class GatedConfirmPlanner:
         async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
             self,
-            goal: Goal,
+            goal: GoalBrief,
             *,
+            utterance: str,
             context: CurrentContext,
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
             files: Sequence[ShownFile] = (),
             empty_reads: Sequence[ReadAsk] = (),
-        ) -> ActionPlan:
+            evidence: Sequence[EvidenceDigest] = (),
+        ) -> PlannerOutput:
             nonlocal seen
             seen += 1
             if seen == 3:  # all three turns are in flight together
                 entered.set()
             await release.wait()
             step = PlanStep(id="step-1", intent="x", capability=CAPABILITY, parameters=PARAMETERS)
-            return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(step,), created_at=AT)
+            return PlannerOutput(
+                plan=ActionPlan(
+                    id=f"{goal.goal_id}-plan", goal_id=goal.goal_id, steps=(step,), created_at=AT
+                )
+            )
 
     goals = iter(f"g-{n}" for n in range(1, 100))
     harness = Harness(
@@ -4395,17 +4452,23 @@ class RecordingPlanner(OneStepPlanner):
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         self.seen.append(tuple(memories))
         return await super().plan(
-            goal, context=context, memories=memories, capabilities=capabilities
+            goal,
+            utterance=utterance,
+            context=context,
+            memories=memories,
+            capabilities=capabilities,
         )
 
 

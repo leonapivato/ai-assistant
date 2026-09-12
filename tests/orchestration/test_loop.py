@@ -32,13 +32,17 @@ from ai_assistant.core.types import (
     CostBasis,
     CurrentContext,
     EpisodicMemory,
+    EvidenceDigest,
     FeedbackEvent,
     FeedbackKind,
+    GoalBrief,
+    Ground,
     Idempotency,
     MemoryDecisionKind,
     MemoryKind,
     MemorySource,
     MemoryUpdateProposal,
+    PlannerOutput,
     PreferenceMemory,
     Provenance,
     ReadAsk,
@@ -85,8 +89,6 @@ if TYPE_CHECKING:
         ToolRegistry,
     )
     from ai_assistant.core.types import (
-        ActionPlan,
-        Goal,
         MemoryIngestResult,
         MemoryRecord,
         MemorySearchResult,
@@ -123,14 +125,16 @@ class _FailingPlanner:
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         """Fail the way a planner with nothing to offer fails."""
         msg = "no plan for that"
         raise PlanningError(msg)
@@ -241,7 +245,7 @@ async def test_a_learned_preference_is_reused_on_a_later_turn() -> None:
 
     first = (await loop.respond("draft a reply to Dana")).turn
     assert first.memories == ()
-    assert planner.calls[0][2] == ()
+    assert planner.calls[0][3] == ()
 
     [outcome] = await loop.learn(_preference_feedback())
     assert outcome.result.decision.kind is MemoryDecisionKind.ACCEPT
@@ -254,7 +258,7 @@ async def test_a_learned_preference_is_reused_on_a_later_turn() -> None:
     assert isinstance(learned, PreferenceMemory)
     assert learned.preference == "prefers concise replies"
     # The planner did not merely have it available — it was handed it.
-    assert [record.id for record in planner.calls[1][2]] == [outcome.result.record_id]
+    assert [record.id for record in planner.calls[1][3]] == [outcome.result.record_id]
     assert not second.memory_degraded
 
 
@@ -278,19 +282,48 @@ async def test_respond_plans_against_the_assembled_context() -> None:
 
     assert provider.call_count == 1
     assert result.context == context
-    assert planner.calls[0][1] == context
-    assert result.plan.goal_id == result.goal.id
+    assert planner.calls[0][2] == context
+    assert result.plan.goal_id == result.goal.goal_id
 
 
-async def test_respond_mints_a_user_asserted_goal_from_the_utterance() -> None:
+async def test_respond_opens_a_user_asserted_goal_at_revision_one() -> None:
+    """ADR-0249 §3: a goal is opened carrying revision 1, minted from the request.
+
+    The **record** rides beside the turn on ``RespondedTurn.goal`` (§11) and the turn
+    itself carries the brief, so both are read here: the projection is what crosses
+    the wire, and the record is what ``Engine`` persists.
+    """
     loop = _loop()
 
-    result = (await loop.respond("  book the flight  ")).turn
+    responded = await loop.respond("  book the flight  ", conversation_id="c-1")
+    result = responded.turn
 
-    assert result.goal.id == "goal-1"
-    assert result.goal.statement == "book the flight"
-    assert result.goal.provenance.source is MemorySource.USER_ASSERTED
-    assert result.goal.created_at == _NOW
+    assert result.goal.goal_id == "goal-1"
+    assert result.goal.outcome == "book the flight"
+    assert result.goal.outcome_ground is Ground.USER_STATED
+
+    goal = responded.goal
+    assert goal is not None
+    assert goal.id == "goal-1"
+    assert goal.conversation_id == "c-1"
+    assert goal.version == 0
+    assert goal.interpretation_elided == 0
+    assert goal.provenance.source is MemorySource.USER_ASSERTED
+    assert goal.created_at == _NOW
+    assert goal.last_engaged_at == _NOW
+    [revision] = goal.interpretation
+    assert revision.revision == 1
+    # §3: revision 1 carries **no** element, and its outcome's span is the whole
+    # request — exactly true, since its outcome *is* the request.
+    assert (revision.constraints, revision.criteria, revision.conditions) == ((), (), ())
+    assert revision.outcome == "book the flight"
+    assert revision.outcome_ground is Ground.USER_STATED
+    assert revision.outcome_span == "book the flight"
+    assert revision.outcome_evidence_id is None
+    assert revision.recorded_at == _NOW
+    # §3: an **opened** revision 1 always carries a `raised_by` and a **migrated** one
+    # never does, so no reader has to guess which of the two it holds.
+    assert revision.raised_by is not None
 
 
 @pytest.mark.parametrize("utterance", ["", "   ", "\n\t"])
@@ -462,7 +495,7 @@ async def test_respond_survives_a_retrieval_failure_and_says_so() -> None:
 
     assert result.memory_degraded
     assert result.memories == ()
-    assert planner.calls[0][2] == ()
+    assert planner.calls[0][3] == ()
     assert result.plan is not None
 
 
@@ -1625,7 +1658,7 @@ async def test_tuning_accepts_the_smallest_useful_limit() -> None:
 
     result = (await loop.respond("hello")).turn
 
-    assert result.goal.statement == "hello"
+    assert result.goal.outcome == "hello"
 
 
 @pytest.mark.parametrize("limit", [1.5, float("inf"), True, "5"])
@@ -1674,7 +1707,7 @@ async def test_tuning_accepts_an_episodic_bound_equal_to_the_belief_budget() -> 
 
     result = (await loop.respond("hello")).turn
 
-    assert result.goal.statement == "hello"
+    assert result.goal.outcome == "hello"
 
 
 @pytest.mark.parametrize("retrieval_limit", [1, 2, 4, 20, 29])
@@ -1701,7 +1734,7 @@ async def test_a_belief_budget_below_the_default_bound_is_tuning_and_not_an_erro
 
     result = (await loop.respond("hello")).turn
 
-    assert result.goal.statement == "hello"
+    assert result.goal.outcome == "hello"
     assert loop._episodic_limit == min(_DEFAULT_EPISODIC_LIMIT, retrieval_limit)
     assert loop._episodic_limit <= retrieval_limit
 
@@ -1827,7 +1860,7 @@ async def test_the_planner_is_told_what_the_registry_advertises() -> None:
 
     await _loop(planner=planner, registry=registry).respond("send Ana a note")
 
-    assert planner.calls[0][3] == await registry.capabilities()
+    assert planner.calls[0][4] == await registry.capabilities()
 
 
 async def test_the_vocabulary_is_passed_as_the_registry_answered_it() -> None:
@@ -1843,7 +1876,7 @@ async def test_the_vocabulary_is_passed_as_the_registry_answered_it() -> None:
 
     await _loop(planner=planner, registry=registry).respond("do the thing")
 
-    assert planner.calls[0][3] == ("book_flight", "report_current_time", "send_email")
+    assert planner.calls[0][4] == ("book_flight", "report_current_time", "send_email")
 
 
 async def test_a_registry_advertising_nothing_reaches_the_planner_as_an_empty_vocabulary() -> None:
@@ -1858,8 +1891,8 @@ async def test_a_registry_advertising_nothing_reaches_the_planner_as_an_empty_vo
 
     turn = (await _loop(planner=planner, registry=FakeToolRegistry()).respond("book a flight")).turn
 
-    assert planner.calls[0][3] == ()
-    assert turn.plan.goal_id == turn.goal.id
+    assert planner.calls[0][4] == ()
+    assert turn.plan.goal_id == turn.goal.goal_id
 
 
 async def test_the_vocabulary_is_read_within_the_turn_not_at_construction() -> None:
@@ -1892,5 +1925,5 @@ async def test_the_vocabulary_is_read_within_the_turn_not_at_construction() -> N
     )
     await loop.respond("send Ana a note")
 
-    assert planner.calls[0][3] == ("report_current_time",)
-    assert planner.calls[1][3] == ("report_current_time", "send_email")
+    assert planner.calls[0][4] == ("report_current_time",)
+    assert planner.calls[1][4] == ("report_current_time", "send_email")

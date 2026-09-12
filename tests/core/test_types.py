@@ -24,6 +24,8 @@ from ai_assistant.core.types import (
     FeedbackEvent,
     FeedbackKind,
     Goal,
+    GoalInterpretation,
+    Ground,
     MemoryBase,
     MemoryDecision,
     MemoryDecisionKind,
@@ -369,7 +371,16 @@ def test_a_goal_is_reached_by_the_attestation_rule_too() -> None:
     with pytest.raises(ValidationError):
         Goal(
             id="g-1",
-            statement="book the flight the calendar implies",
+            interpretation=(
+                GoalInterpretation(
+                    revision=1,
+                    outcome="book the flight the calendar implies",
+                    outcome_ground=Ground.USER_STATED,
+                    outcome_span="book the flight the calendar implies",
+                    recorded_at=_WHEN,
+                    raised_by="t-1",
+                ),
+            ),
             provenance=Provenance(source=MemorySource.EXTERNAL, confidence=0.9, last_updated=_WHEN),
             created_at=_WHEN,
         )
@@ -699,7 +710,16 @@ def test_a_goal_carries_the_marker_too() -> None:
     """
     goal = Goal(
         id="g",
-        statement="ship the thing",
+        interpretation=(
+            GoalInterpretation(
+                revision=1,
+                outcome="ship the thing",
+                outcome_ground=Ground.USER_STATED,
+                outcome_span="ship the thing",
+                recorded_at=_WHEN,
+                raised_by="t-1",
+            ),
+        ),
         provenance=Provenance(
             source=MemorySource.INFERRED,
             confidence=0.6,

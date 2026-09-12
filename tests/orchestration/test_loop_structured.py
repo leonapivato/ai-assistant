@@ -45,8 +45,11 @@ from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     ActionPlan,
     EpisodicMemory,
+    EvidenceDigest,
+    GoalBrief,
     MemoryKind,
     MemorySource,
+    PlannerOutput,
     Provenance,
     ReadAsk,
     ReadKind,
@@ -77,7 +80,7 @@ from ai_assistant.testing import (
 if TYPE_CHECKING:
     from collections.abc import Mapping, MutableMapping, Sequence
 
-    from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord, ShownFile
+    from ai_assistant.core.types import CurrentContext, MemoryRecord, ShownFile
     from ai_assistant.orchestration.loop import RespondedTurn
 
 #: The turn's own utterance. One distinctive term, for ``test_loop_revision``'s
@@ -232,26 +235,30 @@ class _Script:
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         """Answer this call from the script, recording the supply and the carrier."""
         del context, capabilities, files
         ordinal = len(self.calls)
         self.calls.append((tuple(memories), tuple(empty_reads)))
         asked = self._requests[ordinal] if ordinal < len(self._requests) else self._requests[-1]
-        return ActionPlan(
-            id=f"{goal.id}-plan-{ordinal + 1}",
-            goal_id=goal.id,
-            steps=(),
-            created_at=_NOW,
-            rationale=f"call {ordinal + 1}",
-            read_request=asked,
+        return PlannerOutput(
+            plan=ActionPlan(
+                id=f"{goal.goal_id}-plan-{ordinal + 1}",
+                goal_id=goal.goal_id,
+                steps=(),
+                created_at=_NOW,
+                rationale=f"call {ordinal + 1}",
+                read_request=asked,
+            )
         )
 
 

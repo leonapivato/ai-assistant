@@ -35,9 +35,12 @@ from typing import TYPE_CHECKING, Final
 from ai_assistant.core.types import (
     ActionPlan,
     EpisodicMemory,
+    EvidenceDigest,
     FetchOutcome,
+    GoalBrief,
     MemorySource,
     Placement,
+    PlannerOutput,
     PlanStep,
     Provenance,
     ReadAsk,
@@ -70,7 +73,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.protocols import Fetcher, MemoryStore, Planner
-    from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord
+    from ai_assistant.core.types import CurrentContext, MemoryRecord
 
 _NOW: Final = datetime(2026, 9, 3, 10, 0, tzinfo=UTC)
 
@@ -242,14 +245,16 @@ class _RenderingPlanner:
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
         self,
-        goal: Goal,
+        goal: GoalBrief,
         *,
+        utterance: str,
         context: CurrentContext,
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
         empty_reads: Sequence[ReadAsk] = (),
-    ) -> ActionPlan:
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
         """Write everything down, then answer a plan that asks for nothing."""
         self.prompts.append(
             "\n".join(
@@ -257,12 +262,14 @@ class _RenderingPlanner:
                 for shown in files
             )
         )
-        return ActionPlan(
-            id=f"{goal.id}-plan",
-            goal_id=goal.id,
-            steps=(PlanStep(id="s1", intent="answer", capability="report_current_time"),),
-            created_at=_NOW,
-            rationale="answered",
+        return PlannerOutput(
+            plan=ActionPlan(
+                id=f"{goal.goal_id}-plan",
+                goal_id=goal.goal_id,
+                steps=(PlanStep(id="s1", intent="answer", capability="report_current_time"),),
+                created_at=_NOW,
+                rationale="answered",
+            )
         )
 
 
@@ -289,7 +296,7 @@ async def test_the_planner_is_handed_one_shown_file_per_entry_in_the_listings_or
 
     listing = await fetcher.listing()
     [call] = planner.calls
-    shown = call[4]
+    shown = call[5]
     assert [one.name for one in shown] == [entry.name for entry in listing.entries]
     assert [one.name for one in shown] == list(_ROOT)
     assert [one.size_bytes for one in shown] == [entry.size_bytes for entry in listing.entries]
@@ -311,7 +318,7 @@ async def test_every_value_the_planner_receives_is_a_shown_file() -> None:
     )
 
     [call] = planner.calls
-    shown = call[4]
+    shown = call[5]
     assert shown, "the fixture's root holds three files"
     for one in shown:
         assert type(one) is ShownFile
@@ -358,7 +365,7 @@ async def test_the_loop_holds_the_listing_and_the_planner_holds_none() -> None:
     [call] = planner.calls
     for argument in call:
         assert not isinstance(argument, SourceListing)
-    assert all(not isinstance(one, SourceListing) for one in call[4])
+    assert all(not isinstance(one, SourceListing) for one in call[5])
 
 
 # --------------------------------------------------------------------------- #
@@ -390,8 +397,8 @@ async def test_a_turns_two_planner_calls_are_handed_the_same_sequence() -> None:
     )
 
     first, second = planner.calls
-    assert [one.name for one in first[4]] == ["first-read.md"]
-    assert first[4] == second[4], "one read, one sequence, both calls"
+    assert [one.name for one in first[5]] == ["first-read.md"]
+    assert first[5] == second[5], "one read, one sequence, both calls"
 
 
 async def test_no_listing_survives_the_turn_that_read_it() -> None:
@@ -420,9 +427,9 @@ async def test_no_listing_survives_the_turn_that_read_it() -> None:
 
     [first] = planner_one.calls
     [second] = planner_two.calls
-    assert [one.name for one in first[4]] == ["first-read.md"]
-    assert [one.name for one in second[4]] == ["second-read.md"]
-    assert not set(first[4]) & set(second[4]), "turn 1's entries reach no call of turn 2"
+    assert [one.name for one in first[5]] == ["first-read.md"]
+    assert [one.name for one in second[5]] == ["second-read.md"]
+    assert not set(first[5]) & set(second[5]), "turn 1's entries reach no call of turn 2"
 
 
 # --------------------------------------------------------------------------- #
@@ -444,7 +451,7 @@ async def test_a_deployment_with_no_fetcher_shows_no_file() -> None:
     )
 
     [call] = planner.calls
-    assert call[4] == ()
+    assert call[5] == ()
     assert responded.turn.plan.read_request is None
 
 
@@ -464,7 +471,7 @@ async def test_an_empty_listing_is_the_same_case_as_no_fetcher() -> None:
         "q", narrow=_bounded()
     )
 
-    assert unwired.calls[0][4] == empty.calls[0][4] == ()
+    assert unwired.calls[0][5] == empty.calls[0][5] == ()
 
 
 # --------------------------------------------------------------------------- #
@@ -488,5 +495,5 @@ async def test_an_unbounded_audience_turn_is_still_shown_the_listing() -> None:
     )
 
     [call] = planner.calls
-    assert [one.name for one in call[4]] == list(_ROOT)
+    assert [one.name for one in call[5]] == list(_ROOT)
     assert responded.turn.plan.read_request == _file_request(), "the emission is not suppressed"

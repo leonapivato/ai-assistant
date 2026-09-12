@@ -116,7 +116,10 @@ from ai_assistant.core.types import (
     FeedbackEvent,
     FeedbackKind,
     Goal,
+    GoalBrief,
+    GoalInterpretation,
     GrantScope,
+    Ground,
     Idempotency,
     MemoryKind,
     MemorySource,
@@ -228,7 +231,16 @@ def _park_turn() -> TurnResult:
     """
     goal = Goal(
         id="g-park",
-        statement="what do I take in my coffee",
+        interpretation=(
+            GoalInterpretation(
+                revision=1,
+                outcome="what do I take in my coffee",
+                outcome_ground=Ground.USER_STATED,
+                outcome_span="what do I take in my coffee",
+                recorded_at=_PARK_AT,
+                raised_by="t-1",
+            ),
+        ),
         provenance=Provenance(
             source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_PARK_AT
         ),
@@ -236,7 +248,7 @@ def _park_turn() -> TurnResult:
     )
     return TurnResult(
         utterance=goal.statement,
-        goal=goal,
+        goal=GoalBrief.of(goal),
         context=CurrentContext(
             now=_PARK_AT,
             time_of_day=TimeOfDay.AFTERNOON,

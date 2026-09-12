@@ -29,6 +29,8 @@ from ai_assistant.core.types import (
     ActionRequest,
     CostBasis,
     Goal,
+    GoalInterpretation,
+    Ground,
     Idempotency,
     MemorySource,
     PermissionDecision,
@@ -93,7 +95,16 @@ async def _a_crash_left_a_claim_open(engine: Engine) -> tuple[str, str]:
     await plans.save_goal(
         Goal(
             id="g-1",
-            statement="send the note",
+            interpretation=(
+                GoalInterpretation(
+                    revision=1,
+                    outcome="send the note",
+                    outcome_ground=Ground.USER_STATED,
+                    outcome_span="send the note",
+                    recorded_at=AT,
+                    raised_by="t-1",
+                ),
+            ),
             provenance=Provenance(
                 source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
             ),

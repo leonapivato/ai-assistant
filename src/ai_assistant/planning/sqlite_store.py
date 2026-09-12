@@ -26,35 +26,41 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import sqlite3
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 from uuid import uuid4
 
 from pydantic import ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
-from ai_assistant.core.errors import ActiveExecutionError, PlanningError
+from ai_assistant.core.errors import ActiveExecutionError, PlanningError, StaleExecutionError
 from ai_assistant.core.types import (
     ActionPlan,
     ExecutionState,
     Goal,
+    GoalAttempt,
     GoalDeletion,
+    GoalInterpretation,
+    MemorySource,
     PlanExport,
     StepStatus,
+    ground_of,
 )
 from ai_assistant.planning._transactions import transaction
 from ai_assistant.planning.execution import PlanExecution
+from ai_assistant.planning.goals import advanced, appended
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from contextlib import AbstractContextManager
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.types import StepTransition
+    from ai_assistant.core.types import AttemptTransition, GoalRevision, StepTransition
 
 _OWNER_ONLY = 0o600
 
@@ -67,10 +73,24 @@ _OWNER_ONLY = 0o600
 #: own mode across a reopen and then takes Tier 1 pages (#490).
 _SIDECARS = ("-journal", "-wal", "-shm")
 
-#: The only on-disk schema this code understands. Written to ``meta`` at creation
+#: The on-disk schema this code understands. Written to ``meta`` at creation
 #: (ADR-0049 §1) so a *future* version has a marker to migrate from; opening a
-#: database labelled newer than this is refused loudly rather than read blindly.
-_SCHEMA_VERSION = 1
+#: database labelled **newer** than this is refused loudly rather than read blindly.
+#:
+#: **2 since ADR-0249 §12**, which lands this store's first migration and partially
+#: supersedes ADR-0049 §1's "the migration is table creation only" in that clause
+#: alone. ``Goal`` gains an ``interpretation`` and four more fields and loses
+#: ``statement`` from its dump, and the ``attempts`` table is new, so a version 1
+#: ``goals`` row no longer decodes. §1's marker is relied on as exactly the thing it
+#: was written for — "so a **future** schema change has the version marker" — and its
+#: loud refusal of a newer label binds entire: a version 1 store is **older**, and is
+#: upgraded in place rather than refused.
+_SCHEMA_VERSION = 2
+
+#: The version a database this code can upgrade carries. One member, because there is
+#: one earlier shape (ADR-0049 §1: "a fresh database is the only starting state this
+#: store has ever had", true until ADR-0249).
+_UPGRADABLE_FROM: Final[frozenset[int]] = frozenset({1})
 
 # The ``meta`` table is created first and on its own, so the schema version can be
 # read and a newer store refused *before* any record table is created (ADR-0049
@@ -104,6 +124,14 @@ _RECORD_SCHEMA = (
     "id TEXT PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES plans(id), "
     "version INTEGER NOT NULL, active INTEGER NOT NULL, "
     "created_seq INTEGER NOT NULL, data TEXT NOT NULL)",
+    # ADR-0249 §12's attempts table, with the foreign key onto `goals` ADR-0049 §1's
+    # schema discipline requires. `opened_at` is a plain column and decides nothing
+    # but `attempts_of`'s contractual order; the blob is the record, exactly as it is
+    # for the three tables above. On a version 1 database this table is **created
+    # empty**, because such a store holds no attempt.
+    "CREATE TABLE IF NOT EXISTS attempts("
+    "id TEXT PRIMARY KEY, goal_id TEXT NOT NULL REFERENCES goals(id), "
+    "opened_at TEXT NOT NULL, data TEXT NOT NULL)",
 )
 
 #: ``created_seq`` is unique by construction — every allocation takes it from the
@@ -156,6 +184,12 @@ _RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool]]] = {
         "created_seq": ("INTEGER", True),
         "data": ("TEXT", True),
     },
+    "attempts": {
+        "id": ("TEXT", False),
+        "goal_id": ("TEXT", True),
+        "opened_at": ("TEXT", True),
+        "data": ("TEXT", True),
+    },
 }
 
 #: The single column every record table's ``PRIMARY KEY`` is, checked against
@@ -173,6 +207,7 @@ _RECORD_PRIMARY_KEY = "id"
 _RECORD_FOREIGN_KEYS: dict[str, tuple[str, str, str]] = {
     "plans": ("goal_id", "goals", "id"),
     "executions": ("plan_id", "plans", "id"),
+    "attempts": ("goal_id", "goals", "id"),
 }
 
 
@@ -327,6 +362,10 @@ class SqlitePlanStore:
         # allocation time* (see start_execution), so a fork that copies this
         # value still yields distinct ids by the differing pid (ADR-0049 §3).
         self._nonce = incarnation_factory()
+        # ADR-0249 §12: the version this file arrived at where it is one this code
+        # upgrades, else ``None``. Set by ``_verify_or_init_meta`` inside the setup
+        # transaction and read by ``_upgrade_goal_rows`` and the marker move below it.
+        self._upgrade_from: int | None = None
         self._lock = asyncio.Lock()
         self._conn = self._setup()
 
@@ -372,6 +411,13 @@ class SqlitePlanStore:
                     conn.execute(statement)
                 self._verify_record_tables(conn)
                 self._verify_the_ordinal_index(conn)
+                # **ADR-0249 §12's migration, in the same transaction the shape checks
+                # ran in** — so a failure leaves the file exactly as it arrived:
+                # unupgraded, still labelled 1, and refusing to open rather than
+                # half-migrated. It runs *after* the tables are created and verified,
+                # because it rewrites rows of one of them, and *before* the marker is
+                # moved below.
+                self._upgrade_goal_rows(conn)
                 # Reconciled *after* the schema above, in the same transaction, so
                 # the mark is only written for a file this open has actually brought
                 # to the current shape — and a failure rolls it back rather than
@@ -380,6 +426,15 @@ class SqlitePlanStore:
                 # applied to the second marker this store backfills; it is also what
                 # puts `executions` in scope for the corroboration.
                 self._reconcile_high_water(conn, counter, mark)
+                if self._upgrade_from is not None:
+                    # Stamped last and inside the same transaction, so a failure
+                    # anywhere above rolls the marker back with the rows rather than
+                    # leaving a database falsely labelled current. An UPDATE rather
+                    # than an upsert because the row already exists.
+                    conn.execute(
+                        "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+                        (str(_SCHEMA_VERSION),),
+                    )
         except PlanningError:
             conn.close()  # never leak the connection when opening fails
             raise
@@ -429,15 +484,21 @@ class SqlitePlanStore:
     def _verify_or_init_meta(self, conn: sqlite3.Connection) -> tuple[int, int | None]:
         """Write the version and counter on a fresh DB, or refuse any other version.
 
-        Runs inside the setup transaction. ADR-0049 §1 makes v1 the first and only
-        on-disk schema — a fresh database is the sole prior state — so a stored
-        ``schema_version`` that is anything *other than* the supported one, newer
-        **or** older, is refused with ``PlanningError`` *before any record table is
-        created, read, or written*. There is no migration yet, and an older label
-        on an incompatible ``goals`` table would otherwise construct successfully
-        and only fail on the first query with a raw "no such column" — a fault to
-        report at open, not defer, matching how the audit trail treats a row that
-        no longer validates.
+        Runs inside the setup transaction. A stored ``schema_version`` that is
+        neither :data:`_SCHEMA_VERSION` nor a member of :data:`_UPGRADABLE_FROM` is
+        refused with ``PlanningError`` *before any record table is created, read, or
+        written*: an unreadable label on an incompatible ``goals`` table would
+        otherwise construct successfully and only fail on the first query with a raw
+        "no such column" — a fault to report at open, not defer, matching how the
+        audit trail treats a row that no longer validates. ADR-0049 §1's loud refusal
+        of a database "whose ``schema_version`` is **newer** than the code
+        understands" binds entire and is what that covers now.
+
+        **A database labelled** :data:`_UPGRADABLE_FROM` **is upgraded rather than
+        refused** (ADR-0249 §12), and this method records which version it arrived at
+        so :meth:`_upgrade_goal_rows` — which runs after the record tables exist —
+        knows whether to run. An unlabelled database is one this code is creating
+        now, and it is stamped rather than migrated.
 
         Every marker is read through :meth:`_read_meta`, so a store holding
         conflicting rows for any key is refused rather than resolved by row order
@@ -462,18 +523,23 @@ class SqlitePlanStore:
                 its mark.
         """
         version = self._read_meta(conn, "schema_version")
+        held: int | None = None
         if not version:
             conn.execute(
                 "INSERT INTO meta(key, value) VALUES ('schema_version', ?)",
                 (str(_SCHEMA_VERSION),),
             )
-        elif (stored := self._meta_int("schema_version", version[0])) != _SCHEMA_VERSION:
-            msg = (
-                f"the plan store at {self._path!r} has schema_version={stored}, but this "
-                f"code supports only version {_SCHEMA_VERSION} and has no migration; "
-                f"refusing to open it rather than read it blindly"
-            )
-            raise PlanningError(msg)
+        else:
+            held = self._meta_int("schema_version", version[0])
+            if held != _SCHEMA_VERSION and held not in _UPGRADABLE_FROM:
+                known = ", ".join(str(one) for one in sorted({*_UPGRADABLE_FROM, _SCHEMA_VERSION}))
+                msg = (
+                    f"the plan store at {self._path!r} has schema_version={held}, but this "
+                    f"code reads version {known}; refusing to open it rather than read it "
+                    f"blindly"
+                )
+                raise PlanningError(msg)
+        self._upgrade_from = held if held in _UPGRADABLE_FROM else None
         if rows := self._read_meta(conn, "exec_counter"):
             counter = self._meta_int("exec_counter", rows[0])  # validate on open
         else:
@@ -484,6 +550,55 @@ class SqlitePlanStore:
             self._refuse_a_rewound_counter(counter, stored_mark)
             return counter, stored_mark
         return counter, None
+
+    def _upgrade_goal_rows(self, conn: sqlite3.Connection) -> None:
+        """Convert a version 1 store's ``goals`` rows in place (ADR-0249 §12).
+
+        **This store's first migration**, and ADR-0049 §1's marker is what makes it
+        possible: "A durable ``meta("schema_version")`` row is written at creation so
+        a **future** schema change has the version marker." A version 1 store is
+        *older* than this code rather than newer, so §1's loud refusal does not reach
+        it and it is upgraded in place.
+
+        Each ``goals`` row gains an ``interpretation`` of **exactly one revision**
+        whose ``outcome`` is the row's stored ``statement``, whose ``outcome_ground``
+        is derived from the row's stored ``provenance.source`` by
+        :func:`_migrated_ground`, whose ``constraints``, ``criteria`` and
+        ``conditions`` are empty, whose ``recorded_at`` is its ``created_at``, and
+        whose ``raised_by`` is **absent**. ``conversation_id`` and ``last_engaged_at``
+        are **absent**; ``version`` and ``interpretation_elided`` are 0.
+
+        **The migration writes no value this system did not record, and the absences
+        are the whole of how it says so** (§12). It does not invent a turn id for
+        ``raised_by``, a conversation for ``conversation_id``, an instant for
+        ``last_engaged_at``, or a span of a request it does not hold for
+        ``outcome_span`` — a synthesised ``raised_by`` would attribute an
+        understanding to a turn that never raised it.
+
+        **Nothing else is rewritten.** Each ``plans`` row is left byte for byte as it
+        is and decodes with ``targets_revision`` absent, which ADR-0249 §8 reads as
+        targeting no revision, so such a plan is **not driven**; each ``executions``
+        row is untouched; and ``attempts`` is created empty by :data:`_RECORD_SCHEMA`,
+        because a version 1 store holds no attempt.
+
+        Runs inside the setup transaction, so a failure anywhere leaves the file
+        exactly as it arrived — unupgraded, still labelled 1, and refusing to open
+        rather than half-migrated.
+
+        Args:
+            conn: The connection the setup transaction is running on.
+
+        Raises:
+            PlanningError: If a stored goal is not a shape this migration can read.
+        """
+        if self._upgrade_from is None:
+            return
+        rows = conn.execute("SELECT id, data FROM goals").fetchall()
+        for row_id, data in rows:
+            conn.execute(
+                "UPDATE goals SET data = ? WHERE id = ?",
+                (_migrated_goal(str(row_id), str(data)), row_id),
+            )
 
     def _verify_the_ordinal_index(self, conn: sqlite3.Connection) -> None:
         """Check that the ordinal index *is* the one this store means to rely on.
@@ -1002,17 +1117,17 @@ class SqlitePlanStore:
     # --- goals and plans --------------------------------------------------
 
     async def save_goal(self, goal: Goal) -> str:
-        """Persist a goal, or update the parts of one that may change.
+        """Persist a **new** goal (ADR-0249 §12), refusing an id already held.
 
-        ``status`` and ``deadline`` move over a goal's life. ``statement``,
-        ``provenance`` and ``created_at`` are its identity: rewriting them would
-        make every plan and execution already recorded against this id describe
-        an objective the user never set, so a changed objective needs a new goal.
+        **The opening write alone, and no longer an upsert.** An upsert that replaced
+        a whole goal would defeat ADR-0249 §1's append-only interpretation and §12's
+        compare-and-swap in one call: every later change goes through
+        :meth:`record_interpretation`.
 
         The input is **revalidated before it is persisted**, not merely copied
         (like ``SqliteAuditTrail`` does with a decision): ``Goal`` is mutable and
-        does not validate on assignment, so a caller can build a valid goal, set
-        ``goal.statement = "   "``, and hand it here. Storing that unchecked would
+        does not validate on assignment, so a caller can build a valid goal, reach
+        past its validators, and hand it here. Storing that unchecked would
         write a record every later ``get_goal``/``export`` fails to decode — the
         store would poison its own reads. Revalidating turns it into a
         ``PlanningError`` at the write, before anything is persisted.
@@ -1022,6 +1137,10 @@ class SqlitePlanStore:
         returned is read from **it** rather than from the caller's instance. A
         caller that mutates ``goal.id`` while the write is in flight would
         otherwise be handed an id that names no row.
+
+        Raises:
+            PlanningError: If the store already holds a goal under this ``id``, or
+                the goal does not revalidate.
         """
         snapshot = _revalidated_goal(goal)
         async with self._lock:
@@ -1030,23 +1149,15 @@ class SqlitePlanStore:
 
     def _save_goal_sync(self, goal: Goal) -> None:
         with self._transaction(f"save goal {goal.id!r}") as conn:
-            row = conn.execute("SELECT data FROM goals WHERE id = ?", (goal.id,)).fetchone()
-            if row is not None:
-                existing = _decode_goal(row[0])
-                identity = ("statement", "provenance", "created_at")
-                changed = [
-                    field for field in identity if getattr(existing, field) != getattr(goal, field)
-                ]
-                if changed:
-                    msg = (
-                        f"goal {goal.id} already exists and its {', '.join(changed)} cannot "
-                        "change: plans and executions already recorded against it would "
-                        "silently come to describe a different objective. Use a new id."
-                    )
-                    raise PlanningError(msg)
+            if conn.execute("SELECT 1 FROM goals WHERE id = ?", (goal.id,)).fetchone() is not None:
+                msg = (
+                    f"goal {goal.id} already exists: save_goal is the opening write "
+                    "alone, and a later change to a goal is a record_interpretation "
+                    "(ADR-0249 §12)"
+                )
+                raise PlanningError(msg)
             conn.execute(
-                "INSERT INTO goals(id, data) VALUES (?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+                "INSERT INTO goals(id, data) VALUES (?, ?)",
                 (goal.id, goal.model_dump_json()),
             )
 
@@ -1056,6 +1167,157 @@ class SqlitePlanStore:
             row = await _run_to_completion(self._read_one, "goals", goal_id)
         return None if row is None else _decode_goal(row)
 
+    async def record_interpretation(self, revision: GoalRevision) -> Goal:
+        """Append one interpretation revision, compare-and-swap (ADR-0249 §12).
+
+        The read, the comparison and the write all run inside one ``BEGIN
+        IMMEDIATE`` transaction, so a second writer that read the same version
+        cannot also commit — it reads the advanced version and is refused. That is
+        ADR-0014 §5's discipline, on the construction ADR-0049 §1 already uses for
+        ``commit_transition``.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            PlanningError: If ``goal_id`` names no stored goal, or the revision does
+                not follow the goal's current one.
+        """
+        async with self._lock:
+            return await _run_to_completion(self._record_interpretation_sync, revision)
+
+    def _record_interpretation_sync(self, revision: GoalRevision) -> Goal:
+        what = f"record an interpretation on goal {revision.goal_id!r}"
+        with self._transaction(what) as conn:
+            row = conn.execute(
+                "SELECT data FROM goals WHERE id = ?", (revision.goal_id,)
+            ).fetchone()
+            if row is None:
+                msg = f"cannot record an interpretation for unknown goal {revision.goal_id}"
+                raise PlanningError(msg)
+            stored = _decode_goal(row[0])
+            if stored.version != revision.expected_version:
+                msg = (
+                    f"goal {revision.goal_id} is at version {stored.version}, not "
+                    f"{revision.expected_version}: re-read it and recompute the revision"
+                )
+                raise StaleExecutionError(msg)
+            updated = appended(stored, revision.interpretation)
+            conn.execute(
+                "UPDATE goals SET data = ? WHERE id = ?",
+                (updated.model_dump_json(), updated.id),
+            )
+        return updated
+
+    # --- attempts ---------------------------------------------------------
+
+    async def open_attempt(self, attempt: GoalAttempt) -> str:
+        """Persist a new attempt for a stored goal (ADR-0249 §12).
+
+        Revalidated before it is persisted, for :meth:`save_goal`'s own reason, and
+        that revalidation is this method's ADR-0065 snapshot.
+
+        Raises:
+            PlanningError: If ``goal_id`` names no stored goal, the store already
+                holds an attempt under this ``id``, or the attempt does not
+                revalidate.
+        """
+        snapshot = _revalidated_attempt(attempt)
+        async with self._lock:
+            await _run_to_completion(self._open_attempt_sync, snapshot)
+        return snapshot.id
+
+    def _open_attempt_sync(self, attempt: GoalAttempt) -> None:
+        with self._transaction(f"open attempt {attempt.id!r}") as conn:
+            held = conn.execute("SELECT 1 FROM goals WHERE id = ?", (attempt.goal_id,)).fetchone()
+            if held is None:
+                msg = f"attempt {attempt.id} refers to unknown goal {attempt.goal_id}"
+                raise PlanningError(msg)
+            if (
+                conn.execute("SELECT 1 FROM attempts WHERE id = ?", (attempt.id,)).fetchone()
+                is not None
+            ):
+                msg = (
+                    f"attempt {attempt.id} already exists; a change to an attempt is a "
+                    "commit_attempt, which is its only mutation route (ADR-0249 §12)"
+                )
+                raise PlanningError(msg)
+            conn.execute(
+                "INSERT INTO attempts(id, goal_id, opened_at, data) VALUES (?, ?, ?, ?)",
+                (
+                    attempt.id,
+                    attempt.goal_id,
+                    attempt.opened_at.isoformat(),
+                    attempt.model_dump_json(),
+                ),
+            )
+
+    async def get_attempt(self, attempt_id: str) -> GoalAttempt | None:
+        """Return the attempt with ``attempt_id``, or ``None``."""
+        async with self._lock:
+            row = await _run_to_completion(self._read_one, "attempts", attempt_id)
+        return None if row is None else _decode_attempt(row)
+
+    async def attempts_of(self, goal_id: str) -> tuple[GoalAttempt, ...]:
+        """Return every attempt of ``goal_id``, in ``opened_at`` order.
+
+        Ordered by the stored ``opened_at`` column with ``id`` as the tie-break, so
+        two attempts opened at one instant are enumerated in a fixed order rather
+        than in whatever order the file holds.
+        """
+        async with self._lock:
+            rows = await _run_to_completion(self._attempts_of_sync, goal_id)
+        return tuple(_decode_attempt(data) for data in rows)
+
+    def _attempts_of_sync(self, goal_id: str) -> list[str]:
+        try:
+            return [
+                str(row[0])
+                for row in self._conn.execute(
+                    "SELECT data FROM attempts WHERE goal_id = ? ORDER BY opened_at ASC, id ASC",
+                    (goal_id,),
+                ).fetchall()
+            ]
+        except sqlite3.Error as exc:
+            raise _wrap("read attempts of goal", goal_id, exc) from exc
+
+    async def commit_attempt(self, transition: AttemptTransition) -> GoalAttempt:
+        """Apply one attempt transition, compare-and-swap (ADR-0249 §12).
+
+        The attempt's **only** mutation route, and — as for
+        :meth:`record_interpretation` — the read, the comparison and the write run
+        inside one ``BEGIN IMMEDIATE`` transaction.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            IllegalTransitionError: If the move is not legal from where it stands.
+            PlanningError: If the attempt does not exist, or the result is not a shape
+                ADR-0249 §5 admits.
+        """
+        async with self._lock:
+            return await _run_to_completion(self._commit_attempt_sync, transition)
+
+    def _commit_attempt_sync(self, transition: AttemptTransition) -> GoalAttempt:
+        what = f"commit a transition on attempt {transition.attempt_id!r}"
+        with self._transaction(what) as conn:
+            row = conn.execute(
+                "SELECT data FROM attempts WHERE id = ?", (transition.attempt_id,)
+            ).fetchone()
+            if row is None:
+                msg = f"unknown attempt {transition.attempt_id}"
+                raise PlanningError(msg)
+            stored = _decode_attempt(row[0])
+            if stored.version != transition.expected_version:
+                msg = (
+                    f"attempt {transition.attempt_id} is at version {stored.version}, not "
+                    f"{transition.expected_version}: re-read it and recompute the transition"
+                )
+                raise StaleExecutionError(msg)
+            updated = advanced(stored, transition)
+            conn.execute(
+                "UPDATE attempts SET data = ? WHERE id = ?",
+                (updated.model_dump_json(), updated.id),
+            )
+        return updated
+
     async def save_plan(self, plan: ActionPlan) -> str:
         """Persist a plan, requiring its goal to exist and its id to be free.
 
@@ -1064,6 +1326,13 @@ class SqlitePlanStore:
         durable backstop beneath the app-level check (ADR-0049 §1). Rejecting a
         *reused* id keeps a plan an audit record: re-planning takes a new id
         (ADR-0014 §2). An identical re-save is idempotent, so a retry is harmless.
+
+        **An unstamped ``targets_revision`` is refused too** (ADR-0249 §8), inside
+        the same write transaction and for the reason the check below is there: the
+        window is closed at the store rather than trusted to close itself. A plan
+        **already on disk** carrying ``None`` decodes — ADR-0249 §12's migration
+        leaves every version 1 plan row exactly so — and §8's not-driven rule is what
+        reads it.
 
         **A ``supersedes`` that does not resolve is refused** (ADR-0228 §5): one
         naming a plan this store does not hold, one naming the saving plan's own
@@ -1096,6 +1365,15 @@ class SqlitePlanStore:
         with self._transaction(f"save plan {plan.id!r}") as conn:
             if conn.execute("SELECT 1 FROM goals WHERE id = ?", (plan.goal_id,)).fetchone() is None:
                 msg = f"plan {plan.id} refers to unknown goal {plan.goal_id}"
+                raise PlanningError(msg)
+            # ADR-0249 §8: the unstamped state exists only between the planner's
+            # return and the loop's stamp, and the window is closed at the store.
+            if plan.targets_revision is None:
+                msg = (
+                    f"plan {plan.id} carries no targets_revision: the unstamped state "
+                    "exists only between the planner's return and the loop's stamp, "
+                    "and the window is closed at the store (ADR-0249 §8)"
+                )
                 raise PlanningError(msg)
             # ADR-0228 §5's three arms, read off the `plans` table's own `goal_id`
             # column rather than by decoding the predecessor: the column is what the
@@ -1238,6 +1516,20 @@ class SqlitePlanStore:
         ``BEGIN IMMEDIATE`` transaction, so a second writer that read the same
         version cannot also commit — it reads the advanced version and the tracker
         rejects it (ADR-0049 §1).
+
+        **And a ``→ RUNNING`` claim carries ADR-0249 §8's further condition** — the
+        plan the execution runs targets its goal's current revision. The plan and the
+        goal are read **inside that same transaction**, so there is no separate read
+        on which a decision is taken and nothing can advance the goal between the
+        comparison and the claim.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on, or a
+                ``→ RUNNING`` claim names a plan that does not target its goal's
+                current revision.
+            IllegalTransitionError: If the move is not legal from the step's current
+                status.
+            PlanningError: If the execution or step does not exist.
         """
         async with self._lock:
             return await _run_to_completion(self._commit_transition_sync, transition)
@@ -1252,6 +1544,7 @@ class SqlitePlanStore:
                 msg = f"unknown execution {transition.execution_id}"
                 raise PlanningError(msg)
             stored = _decode_execution(row[0])
+            self._refuse_a_stale_target(conn, stored, transition)
             updated = self._tracker.apply(stored, transition)
             conn.execute(
                 "UPDATE executions SET version = ?, active = ?, data = ? WHERE id = ?",
@@ -1263,6 +1556,48 @@ class SqlitePlanStore:
                 ),
             )
         return updated.model_copy(deep=True)
+
+    def _refuse_a_stale_target(
+        self, conn: sqlite3.Connection, stored: ExecutionState, transition: StepTransition
+    ) -> None:
+        """Refuse a ``→ RUNNING`` claim on a plan targeting a stale revision (§8).
+
+        **The store's guard and not the driver's**, in ADR-0014 §5's own words:
+        "Optimistic concurrency turns that into a detectable, retryable failure, and
+        it belongs to the store because the store is the only place with a total
+        order over writes." Read on the transaction's own connection, so the plan,
+        the goal and the claim are one indivisible step.
+
+        A plan whose ``targets_revision`` is absent — the one route being a row
+        ADR-0249 §12 migrated — names no revision and is therefore not driven either.
+
+        Args:
+            conn: The connection the commit transaction is running on.
+            stored: The execution the transition claims a step of.
+            transition: The move being applied.
+
+        Raises:
+            StaleExecutionError: If the claim names a plan that does not target its
+                goal's current interpretation revision.
+        """
+        if transition.to_status is not StepStatus.RUNNING:
+            return
+        row = conn.execute(
+            "SELECT p.data, g.data FROM executions e "
+            "JOIN plans p ON e.plan_id = p.id JOIN goals g ON p.goal_id = g.id "
+            "WHERE e.id = ?",
+            (stored.id,),
+        ).fetchone()
+        if row is None:  # pragma: no cover — the foreign keys make an orphan unreachable
+            return
+        plan, goal = _decode_plan(row[0]), _decode_goal(row[1])
+        if plan.targets_revision != goal.revision:
+            msg = (
+                f"plan {plan.id} targets revision {plan.targets_revision} and goal "
+                f"{goal.id} stands at {goal.revision}: a plan that does not target the "
+                f"goal's current understanding is not driven (ADR-0249 §8)"
+            )
+            raise StaleExecutionError(msg)
 
     async def get_execution(self, execution_id: str) -> ExecutionState | None:
         """Return the execution with ``execution_id``, or ``None``."""
@@ -1309,15 +1644,16 @@ class SqlitePlanStore:
         """Return a portable, internally consistent snapshot (ADR-0004 §6)."""
         exported_at = self._now()
         async with self._lock:
-            goals, plans, executions = await _run_to_completion(self._export_sync)
+            goals, plans, executions, attempts = await _run_to_completion(self._export_sync)
         return PlanExport(
             exported_at=exported_at,
             goals=tuple(_decode_goal(data) for data in goals),
             plans=tuple(_decode_plan(data) for data in plans),
             executions=tuple(_decode_execution(data) for data in executions),
+            attempts=tuple(_decode_attempt(data) for data in attempts),
         )
 
-    def _export_sync(self) -> tuple[list[str], list[str], list[str]]:
+    def _export_sync(self) -> tuple[list[str], list[str], list[str], list[str]]:
         # All three reads inside one transaction, so the export is a single
         # database snapshot: a concurrent connection cannot commit a goal+plan
         # between the goals read and the plans read and leave the export with a
@@ -1335,14 +1671,21 @@ class SqlitePlanStore:
                     "SELECT data FROM executions ORDER BY created_seq ASC"
                 ).fetchall()
             ]
-        return goals, plans, executions
+            attempts = [
+                str(r[0])
+                for r in conn.execute(
+                    "SELECT data FROM attempts ORDER BY opened_at ASC, id ASC"
+                ).fetchall()
+            ]
+        return goals, plans, executions, attempts
 
     async def delete_goal(self, goal_id: str) -> GoalDeletion:
-        """Delete a goal and its plan history, unless work is live.
+        """Delete a goal, its plan history and its attempts, unless work is live.
 
         Refused while any of the goal's executions has a ``RUNNING`` step. The
         cascade deletes children before parents — executions, then plans, then
-        the goal — so the enforced foreign keys are satisfied at each step, and
+        attempts, then the goal — so the enforced foreign keys are satisfied at each
+        step, and
         the live-execution refusal runs first, before anything is removed
         (ADR-0049 §1).
         """
@@ -1387,6 +1730,13 @@ class SqlitePlanStore:
                 (goal_id,),
             )
             conn.execute("DELETE FROM plans WHERE goal_id = ?", (goal_id,))
+            # ADR-0249 §12: the cascade reaches attempts, which **extends** ADR-0014
+            # §5's "a goal the user deletes must not leave its plan history behind"
+            # rather than re-promising it. The live-step refusal above is unchanged
+            # and keys on a RUNNING step, so an attempt in a non-terminal state does
+            # not block a deletion no execution blocks. Deleted before the goal so
+            # the enforced foreign key holds at each step.
+            conn.execute("DELETE FROM attempts WHERE goal_id = ?", (goal_id,))
             conn.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
         return GoalDeletion(
             deleted=True,
@@ -1421,6 +1771,7 @@ class SqlitePlanStore:
             # Children first, to satisfy the foreign keys; meta is untouched.
             removed += conn.execute("DELETE FROM executions").rowcount
             removed += conn.execute("DELETE FROM plans").rowcount
+            removed += conn.execute("DELETE FROM attempts").rowcount
             removed += conn.execute("DELETE FROM goals").rowcount
         return removed
 
@@ -1475,6 +1826,73 @@ def _revalidated_plan(plan: ActionPlan) -> ActionPlan:
         raise PlanningError(msg) from exc
 
 
+def _revalidated_attempt(attempt: GoalAttempt) -> GoalAttempt:
+    """Rebuild ``attempt`` as a validated, detached record, or refuse it.
+
+    Same reasoning as :func:`_revalidated_goal`.
+
+    Raises:
+        PlanningError: If the attempt does not satisfy its own model.
+    """
+    try:
+        return GoalAttempt.model_validate(attempt.model_dump())
+    except ValidationError as exc:
+        subject = getattr(attempt, "id", "<no id>")  # see _revalidated_goal
+        msg = f"attempt {subject!r} is not a valid record and will not be stored: {exc}"
+        raise PlanningError(msg) from exc
+
+
+def _migrated_goal(row_id: str, data: str) -> str:
+    """Rewrite one version 1 ``goals`` row as ADR-0249 §12's shape.
+
+    The row holds a pre-decision ``Goal``: an ``id``, a ``statement``, a ``status``, a
+    ``provenance``, a ``created_at`` and an optional ``deadline``. The conversion
+    keeps every one of them, builds the single interpretation revision §12 describes
+    from the ``statement``, the ``provenance.source`` and the ``created_at``, and
+    writes **no value this system did not record**.
+
+    Read and rewritten as JSON rather than through :class:`Goal`, because the stored
+    shape is one the current model no longer validates — a migration that could only
+    read rows the new contract accepts would be able to migrate nothing.
+
+    Args:
+        row_id: The row's id, for the error message.
+        data: The row's stored JSON.
+
+    Returns:
+        The row's JSON at the current shape.
+
+    Raises:
+        PlanningError: If the row is not a version 1 goal this migration can read.
+    """
+    try:
+        held = json.loads(data)
+        statement = held["statement"]
+        created_at = held["created_at"]
+        source = MemorySource(held["provenance"]["source"])
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        msg = (
+            f"the plan store holds a goal {row_id!r} this migration cannot read: {exc}. "
+            f"The file is left exactly as it arrived (ADR-0249 §12)"
+        )
+        raise PlanningError(msg) from exc
+    revision = GoalInterpretation(
+        revision=1,
+        outcome=statement,
+        outcome_ground=ground_of(source),
+        # **No span in either branch** (§12): the request the stored statement was
+        # read from is not in the row, and §1's fourth absence is exactly this route.
+        recorded_at=created_at,
+    )
+    del held["statement"]
+    held["interpretation"] = [revision.model_dump(mode="json")]
+    held["interpretation_elided"] = 0
+    held["conversation_id"] = None
+    held["last_engaged_at"] = None
+    held["version"] = 0
+    return json.dumps(held)
+
+
 def _decode_goal(data: str) -> Goal:
     """Rebuild a stored goal from its JSON, surfacing corruption as ``PlanningError``."""
     try:
@@ -1490,6 +1908,15 @@ def _decode_plan(data: str) -> ActionPlan:
         return ActionPlan.model_validate_json(data)
     except ValidationError as exc:
         msg = f"the plan store holds a plan that no longer validates: {exc}"
+        raise PlanningError(msg) from exc
+
+
+def _decode_attempt(data: str) -> GoalAttempt:
+    """Rebuild a stored attempt from its JSON, surfacing corruption as ``PlanningError``."""
+    try:
+        return GoalAttempt.model_validate_json(data)
+    except ValidationError as exc:
+        msg = f"the plan store holds an attempt that no longer validates: {exc}"
         raise PlanningError(msg) from exc
 
 

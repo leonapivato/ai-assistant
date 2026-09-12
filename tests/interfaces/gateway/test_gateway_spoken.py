@@ -27,6 +27,9 @@ from ai_assistant.core.types import (
     ActionPlan,
     CurrentContext,
     Goal,
+    GoalBrief,
+    GoalInterpretation,
+    Ground,
     MemorySource,
     PlanStep,
     Provenance,
@@ -125,7 +128,16 @@ def _scripted() -> TurnOutcome:
     """
     goal = Goal(
         id="g-1",
-        statement="say what is on today",
+        interpretation=(
+            GoalInterpretation(
+                revision=1,
+                outcome="say what is on today",
+                outcome_ground=Ground.USER_STATED,
+                outcome_span="say what is on today",
+                recorded_at=_INSTANT,
+                raised_by="t-1",
+            ),
+        ),
         provenance=Provenance(
             source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_INSTANT
         ),
@@ -134,7 +146,7 @@ def _scripted() -> TurnOutcome:
     return TurnOutcome(
         turn=TurnResult(
             utterance=goal.statement,
-            goal=goal,
+            goal=GoalBrief.of(goal),
             context=CurrentContext(
                 now=_INSTANT,
                 time_of_day=TimeOfDay.AFTERNOON,

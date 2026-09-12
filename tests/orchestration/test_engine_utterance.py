@@ -96,7 +96,7 @@ async def test_a_turn_archives_and_renders_the_request_it_received(
     )
     assert outcome.turn is not None
     assert outcome.turn.utterance == _SAID
-    assert outcome.turn.utterance == outcome.turn.goal.statement, (
+    assert outcome.turn.utterance == outcome.turn.goal.outcome, (
         "§6: byte-equal on every path that carries a turn, and this turn came off the "
         "production path rather than out of this test"
     )
@@ -116,7 +116,7 @@ async def test_the_pass_normalises_once_so_the_request_and_the_statement_cannot_
 
     assert outcome.turn is not None
     assert outcome.turn.utterance == _SAID
-    assert outcome.turn.goal.statement == _SAID
+    assert outcome.turn.goal.outcome == _SAID
     (entry,) = await _entries(harness.archive)
     assert entry.asked == _SAID
 
@@ -306,7 +306,7 @@ async def test_every_moved_reader_takes_the_request_when_the_goal_says_something
     """ADR-0248 §4 and §5, over a turn whose goal is **not** its request.
 
     The goal minting is replaced so the pass produces the shape A1 will produce for real:
-    a turn whose ``goal.statement`` is the assistant's reading of the user and whose
+    a turn whose ``goal.outcome`` is the assistant's reading of the user and whose
     ``utterance`` is what they actually said. Every reader §5 moves must then say the
     user's words — the archive's user half, the episode's ``content`` and the composing
     prompt's quoted span — and none of them may say the reading.
@@ -325,12 +325,16 @@ async def test_every_moved_reader_takes_the_request_when_the_goal_says_something
     # on a reading — so the goal is genuinely built, and only its statement diverges.
     loop = harness.engine._loop
     minted = loop._goal_from
-    monkeypatch.setattr(loop, "_goal_from", lambda _request: minted(_INTERPRETED))
+    monkeypatch.setattr(
+        loop,
+        "_goal_from",
+        lambda _request, *, conversation_id: minted(_INTERPRETED, conversation_id=conversation_id),
+    )
 
     outcome = await harness.engine.converse(_SAID, timeout=PATIENT)
 
     assert outcome.turn is not None
-    assert outcome.turn.goal.statement == _INTERPRETED, "the goal really did diverge"
+    assert outcome.turn.goal.outcome == _INTERPRETED, "the goal really did diverge"
     assert outcome.turn.utterance == _SAID
     (entry,) = await _entries(harness.archive)
     assert entry.asked == _SAID, "ADR-0225 §1: the user's own words, unrewritten"

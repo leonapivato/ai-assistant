@@ -35,6 +35,8 @@ from ai_assistant.core.types import (
     ActionRequest,
     CostBasis,
     Goal,
+    GoalInterpretation,
+    Ground,
     Idempotency,
     MemorySource,
     PermissionDecision,
@@ -217,7 +219,16 @@ async def a_claimed_execution(
     """Store a goal, a one-step plan, and open an execution for it."""
     goal = Goal(
         id="g-1",
-        statement="send the note",
+        interpretation=(
+            GoalInterpretation(
+                revision=1,
+                outcome="send the note",
+                outcome_ground=Ground.USER_STATED,
+                outcome_span="send the note",
+                recorded_at=AT,
+                raised_by="t-1",
+            ),
+        ),
         provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT),
         created_at=AT,
     )
