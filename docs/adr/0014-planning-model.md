@@ -243,6 +243,32 @@
   deletion obligations bind entire; and its charter sentence — *"Durable planning state
   belongs to `planning`, not to the wiring layer"* — is the ground ADR-0250 §8 argues the
   question's home on, against a store of its own. §§1-4, §6 and §7 are untouched by that decision.
+- **Note (2026-09-12): §7's output-references deferral and the *dependency* half of its
+  "Step dependencies / parallel execution" deferral are both fired by ADR-0253**, which is a
+  record rather than a supersession — a deferral states that a decision was **not** taken, so
+  taking it replaces nothing and `Accepted` is not dropped (ADR-0070 §1). `PlanStep` gains
+  `depends_on`, a typed `resolves` tuple of result references, a `when` condition tuple, a
+  `verifies` predicate and an `evidence_recency` figure; `ActionPlan` gains `interpretations`;
+  and `SkipReason.UNMET_DEPENDENCY` — written into §3's vocabulary *"from the start so the
+  durable vocabulary does not have to change when it lands"* — gets its first producer. **Two
+  things about that bullet are recorded here because a reader would otherwise act differently.**
+  Its parenthetical default is **declined**: §7 sketches *"an optional field defaulting to the
+  implicit 'after the previous step'"*, and ADR-0253 §1 rules an empty `depends_on` means the
+  step waits on nothing, because a default that manufactures an edge makes two independent steps
+  inexpressible and would attach a dependency to every plan already on disk that nobody declared.
+  And **only half the bullet is fired**: parallel execution is untouched, no lane reads
+  `depends_on` as a licence to run two steps at once, and the execution leases and in-process
+  synchronisation that would need are still deferred with it. **Everything else of this ADR binds
+  entire and is relied on**: §2's frozen plan, its `JsonValue` reasoning and its deep-freeze of
+  `parameters`; §3's `output` and its resumability argument — *"a later step that needs the
+  booking reference produced by an earlier one has no way to continue but to re-run the earlier
+  step"* — which is the gap ADR-0253 §6 closes; §4's transition graph, its `PENDING → SKIPPED`
+  row (`SkipReason` gains **no** member), its retry ceiling and its `INDETERMINATE` treatment,
+  which ADR-0253 §2 quotes to stop a branch rather than skip it; and §5's compare-and-swap
+  discipline. §7's remaining deferrals are untouched: idempotency and `INDETERMINATE` resolution
+  are A8's, execution leases stand, and retention deadlines stand. Nothing decided here changes
+  and no Status edit is owed (ADR-0082 §1). Refs #2255, ADR-0253 §13.
+
 
 ## Context
 
