@@ -1,6 +1,6 @@
 # 250. A turn finds its goal before it plans, focus is the most recently engaged goal, and a material ambiguity the planner reported becomes one durable question bound to that goal
 
-- Status: Partially superseded by ADR-0254 (one scope. §5's `TurnOutcome` member count and enumeration alone: the type gains a **fifth** `None`-defaulting member, `authorization`, carrying the coverage an authority the user opened before any concrete call established and the instant it expires, set on exactly the turn that wrote such a record and `None` on every other, so a reader holding only §5 authors an outcome type that cannot carry that announcement. The member exists **because** §5's grounding-only silence rule is untouched: *"A grounding-only revision is recorded and not announced"* leaves an opening instruction that only re-grounds an existing constraint unannounced, and §5's engagement carrier holds neither an expiry nor a coverage to render, so the safeguard could not be inherited from it and is stated on a carrier of its own with its own trigger — the record was written — and no materiality judgement anywhere in it. Every other clause of §5 binds entire, and two are what the new member rests on: *"No member is derived from another and a client renders each on its own"* is why a fifth sits beside the four rather than inside one, and *"The reply is composed by `orchestration` from the typed value, and no model writes it"* is the division it takes unchanged. §5's `GoalDisambiguation` clauses, its `UNDECIDED` outcome shape, its candidates rule and the outcome-shape count it takes from one decision over are untouched, as are §§1-4 and §§6-17)
+- Status: Partially superseded by ADR-0254 (one scope. §5's `TurnOutcome` member count and enumeration alone: the type gains a **fifth** member, `authorizations`, a possibly-empty tuple defaulting to empty and carrying one rendered view per authority the user opened before any concrete call — the declaration it is about, the bounds with the user's own words, the expiry and the withdrawal handle — one per record established on that turn and empty on every other turn, so a reader holding only §5 authors an outcome type that cannot carry that announcement. The member exists **because** §5's grounding-only silence rule is untouched: *"A grounding-only revision is recorded and not announced"* leaves an opening instruction that only re-grounds an existing constraint unannounced, and §5's engagement carrier holds neither an expiry nor a coverage to render, so the safeguard could not be inherited from it and is stated on a carrier of its own with its own trigger — the record was written — and no materiality judgement anywhere in it. Every other clause of §5 binds entire, and two are what the new member rests on: *"No member is derived from another and a client renders each on its own"* is why a fifth sits beside the four rather than inside one, and *"The reply is composed by `orchestration` from the typed value, and no model writes it"* is the division it takes unchanged. §5's `GoalDisambiguation` clauses, its `UNDECIDED` outcome shape, its candidates rule and the outcome-shape count it takes from one decision over are untouched, as are §§1-4 and §§6-17)
 - Date: 2026-09-12
 - **Partially supersedes** [ADR-0249](0249-the-goal-carries-its-interpretation-the-attempt-carries-the-phase-and-the-planner-returns-its-understanding.md)
   — **two scopes, each narrow. §7's `ProposedUnderstanding` field enumeration, in one
@@ -73,11 +73,15 @@
 - **Partially superseded: 2026-09-12 by ADR-0254 — §5's `TurnOutcome` member count
   and enumeration alone. Nothing else in this ADR.** §5 rules that *"`TurnOutcome` gains
   **four** `None`-defaulting members, one per fact"* and enumerates them. ADR-0254 §11
-  adds a **fifth**, `authorization`, carrying the coverage and the expiry of an authority
-  the user opened **before any concrete call existed** — *"you may spend up to fifty
-  pounds on this"* — so that an authority established without a confirmation is
-  nevertheless restated to the user on the turn that recorded it. A reader holding only §5
-  would author an outcome type that cannot carry it.
+  adds a **fifth**, `authorizations`, a possibly-empty tuple carrying one rendered view
+  per authority the user opened **before any concrete call existed** — *"you may spend up
+  to fifty pounds on this"* — so that an authority established without a confirmation is
+  nevertheless restated to the user, with the declaration it is about, the bounds in their
+  own words, the expiry and the handle that withdraws it. A reader holding only §5 would
+  author an outcome type that cannot carry it. **It is a tuple because one instruction can
+  open two authorities that are not interchangeable** — a bound for the train and another
+  for the hotel, each about its own declaration — and a single value would have to merge
+  or drop one.
 
   **The member exists because §5's grounding-only silence rule is untouched, which is the
   part worth reading twice.** ADR-0254's first draft claimed the safeguard rode this
