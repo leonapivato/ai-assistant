@@ -1,7 +1,34 @@
 # 225. A transcript archive keeps the exchange as text, and nothing but the user reads it
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0248 (§1's fourth clause in its first limb alone: where the pass carried a turn, "what the user said" is the turn's own `utterance` rather than its goal statement, the user's words having become a value of their own on the turn so that a goal statement which is about to mean the assistant's interpretation can no longer stand in for them. That one limb, and nothing else in this ADR: §1's rule that the value is the user's own words, unrewritten and unrendered, binds entire and is the reason for the change; §1's routed limb, its absent limb, its parked-resolution clause, its three-capture-case partition, its assistant-half clause, its no-part-of-`content` clause and its handed-to-capture clause all bind verbatim; and §§2-16 stand entire)
 - Date: 2026-09-02
+- **Partially superseded: 2026-09-12 by ADR-0248 — §1's fourth clause in its first
+  limb alone, and nothing else in this ADR.** The owner ruled on 2026-09-12 (#2255) that
+  `Goal` gets the meaning ADR-0014 §1 always gave it — the understood outcome, its
+  constraints and its success criteria — instead of the user's latest utterance it holds
+  today. ADR-0248 is the decision that lands **before** that one, while the two values are
+  still byte-equal.
+
+  **§1's fourth clause identifies where the user's half comes from.** It closes:
+  *"**What the user said** is the user's own words on the pass that produced the turn,
+  unrewritten and unrendered: **the turn's goal statement where the pass carried a turn**,
+  the utterance where a routed pass threads one (ADR-0197 §10), and **absent** where the
+  pass received no user words at all."* ADR-0248 §1 makes the request a value of its own,
+  `TurnResult.utterance`, and its §4 has capture, the archive and `_exchange_of` take the
+  user's half from it. A reader holding only this ADR would implement `asked` from
+  `turn.goal.statement` and, once the goal's meaning changes, would file the assistant's
+  interpretation under *"the user's own words, unrewritten and unrendered"* — which is
+  ADR-0070 §1's test coming out on the supersession side.
+
+  **The scope is that one limb and no other part of this ADR.** §1's **rule** is not
+  superseded; it is the reason for the change and binds entire. The routed limb still
+  threads the utterance (ADR-0197 §10), the absent limb still carries nothing, the
+  parked-resolution clause still puts no user words on a parked step's second capture, the
+  three cases are still ADR-0221 §5's three and no fourth partition is introduced, and the
+  handed-to-capture clause is the mechanism ADR-0248 copies rather than moves. What the
+  archive holds, how it is keyed, when the write happens, the never-list, the retention and
+  destruction rules, the search surface and the contract surface are all untouched: ADR-0248
+  adds no field to an entry and changes nothing under `archive/`.
 
 ## Context
 
