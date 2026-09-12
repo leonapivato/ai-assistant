@@ -14,20 +14,31 @@ this turn opened through ``save_goal``, a goal the store already holds through
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from test_engine import AT, PATIENT, Harness, NoStepPlanner, OneStepPlanner, tool
+from test_engine import (
+    AT,
+    PATIENT,
+    Harness,
+    NoStepPlanner,
+    OneStepPlanner,
+    confirmable,
+    tool,
+)
 from test_engine_composing import _refusing
 from test_engine_read_envelope import _recorder
 
 from ai_assistant.core.errors import PlanningError, ToolError
 from ai_assistant.core.types import (
+    AttemptEffort,
     AttemptOutcome,
     AttemptPhase,
     AttemptState,
     Disposition,
     Goal,
+    GoalAttempt,
     GoalInterpretation,
     GoalStatus,
     Ground,
@@ -38,10 +49,13 @@ from ai_assistant.core.types import (
     StepStatus,
 )
 from ai_assistant.orchestration.composing import ComposingStage
+from ai_assistant.orchestration.loop import OpenedAttempt
 from ai_assistant.testing import FakeModelProvider, FakePlanStore, FakeStreamingCompleter
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import AttemptTransition, GoalAttempt, GoalRevision
+    from datetime import datetime
+
+    from ai_assistant.core.types import AttemptTransition, GoalRevision
     from ai_assistant.orchestration.loop import RespondedTurn
 
 _ASKED: Final = "what is two plus two?"
@@ -270,6 +284,86 @@ async def test_a_turn_whose_composition_failed_ends_no_attempt() -> None:
     assert attempt.phase is AttemptPhase.VERIFY
     assert attempt.state is AttemptState.RUNNING
     assert attempt.outcome is None
+
+
+async def test_a_parked_turn_leaves_its_attempt_where_it_stood() -> None:
+    """§6, §13: no state is written that this decision cannot move back.
+
+    ``AWAITING_AUTHORIZATION`` is §5's truthful reading of a parked attempt at the
+    instant of the park, and nothing here can ever clear it: the approval is a **user
+    act**, "which user acts open an attempt is A2's and A3's", and what a resumption
+    drives is A7's and A9's (§13). A state written here would be a durable record that
+    goes stale the moment the user approves. So the attempt stays ``RUNNING`` at
+    ``AUTHORIZE``, and issue #2283 carries the gap to the lane that owns the resumption.
+    """
+    plans = _Recording()
+    harness = Harness(tools=(confirmable(),), plans=plans)
+
+    outcome = await harness.engine.converse("send it", timeout=PATIENT)
+
+    assert outcome.step is not None
+    assert outcome.step.confirmation is not None, "the step parked"
+    (stored,) = plans.opened
+    attempt = await harness.plans.get_attempt(stored.id)
+    assert attempt is not None
+    assert attempt.phase is AttemptPhase.AUTHORIZE, "the authorisation has not been given"
+    assert attempt.state is AttemptState.RUNNING
+    assert (attempt.outcome, attempt.ended_at) == (None, None)
+
+
+def test_the_ledger_never_decreases_when_the_clock_goes_backwards() -> None:
+    """§5: "monotonically non-decreasing … and no implementation subtracts from one".
+
+    The injected clock supplies wall-clock instants and guarantees no monotonicity
+    (ADR-0009), so an adjustment backwards would otherwise make the interval negative —
+    which :class:`~ai_assistant.core.types.AttemptEffort` refuses at construction and
+    ``commit_attempt`` refuses as a reduction. A backward reading contributes nothing
+    rather than failing a turn that has already answered.
+    """
+    harness = Harness(planner=NoStepPlanner())
+    held = OpenedAttempt(
+        attempt=GoalAttempt(
+            id="a-1",
+            goal_id="g-1",
+            opened_at=AT,
+            effort=AttemptEffort(working=timedelta(seconds=5)),
+        )
+    )
+
+    backwards = harness.engine._worked(held, AT + timedelta(minutes=1))
+    forwards = harness.engine._worked(held, AT - timedelta(seconds=30))
+
+    assert backwards == timedelta(seconds=5), "unchanged, and never negative"
+    assert forwards == timedelta(seconds=35), "and it does accumulate the other way"
+
+
+async def test_the_ledger_covers_the_driving_and_composing_the_turn_stage_did_not() -> None:
+    """§5: ``working`` accumulates the attempt's **working** intervals.
+
+    The turn stage's own interval is stamped by the loop; everything after it —
+    ``start_execution``, the drive, the composition — is this component's, and a ledger
+    that stopped at the planner would permanently under-report an attempt that did work.
+    Driven with a clock that advances a second per reading, so the figure is a property
+    of the accounting rather than of how long the test took.
+    """
+    reading = 0
+
+    def advancing() -> datetime:
+        nonlocal reading
+        reading += 1
+        return AT + timedelta(seconds=reading)
+
+    plans = _Recording()
+    harness = Harness(tools=(tool(),), plans=plans, now=advancing)
+
+    outcome = await harness.engine.converse("send it", timeout=PATIENT)
+
+    assert outcome.step is not None
+    (stored,) = plans.opened
+    attempt = await harness.plans.get_attempt(stored.id)
+    assert attempt is not None
+    assert attempt.effort.working > timedelta(0), "the drive and the composition are counted"
+    assert attempt.effort.planner_calls == 1, "and the loop's own counter survives"
 
 
 async def test_a_turn_that_ends_before_the_site_writes_no_attempt_row() -> None:

@@ -13,6 +13,7 @@ persistence and the attempt's phases are ``test_engine_attempts.py``.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import TYPE_CHECKING, Final
 
 from test_loop_reads import _NOW, _belief, _bounded, _hop, _Journal, _loop
@@ -35,6 +36,7 @@ from ai_assistant.orchestration.loop import ConversationalOperation
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from datetime import datetime
 
     from ai_assistant.core.types import (
         CurrentContext,
@@ -296,6 +298,36 @@ async def test_recording_a_revision_does_not_move_the_phase() -> None:
         AttemptPhase.INVESTIGATE,
         AttemptPhase.PLAN,
     ), "the same three as a turn that recorded nothing"
+
+
+async def test_a_clock_that_goes_backwards_does_not_fail_the_turn() -> None:
+    """§5: the ledger never goes negative, and a wall clock guarantees nothing.
+
+    "Both are monotonically non-decreasing within an attempt … and no implementation
+    subtracts from one." :class:`~ai_assistant.core.types.AttemptEffort` refuses a
+    negative ``working`` at construction, so an adjustment backwards between the turn's
+    entry and the moment the ledger is stamped would raise out of a turn that had
+    already planned — losing the record of everything it did in order to avoid losing a
+    duration. ADR-0009's injected clock supplies wall-clock instants and promises no
+    monotonicity, which is what makes this reachable rather than theoretical.
+    """
+    readings = iter((_NOW, _NOW, _NOW - timedelta(seconds=1)))
+
+    def backwards() -> datetime:
+        return next(readings, _NOW - timedelta(seconds=1))
+
+    planner = _Understanding()
+
+    responded = await _loop(await _seeded(), planner=planner, now=backwards).respond(
+        _ASKED,
+        narrow=_bounded(),
+        operation=ConversationalOperation.CONVERSE,
+        conversation_id="c-1",
+    )
+
+    attempt = responded.attempt
+    assert attempt is not None
+    assert attempt.attempt.effort.working == timedelta(0), "nothing, and never negative"
 
 
 # --------------------------------------------------------------------------- #

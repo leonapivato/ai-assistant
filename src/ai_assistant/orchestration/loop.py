@@ -1916,7 +1916,16 @@ class LearningLoop:
                 # own working interval, which excludes no user wait because nothing in
                 # this method waits for the user.
                 "effort": AttemptEffort(
-                    planner_calls=audit.planner_calls, working=self._now_utc() - started
+                    planner_calls=audit.planner_calls,
+                    # §5: monotonically non-decreasing, and "no implementation
+                    # subtracts from one". The injected clock supplies wall-clock
+                    # instants and guarantees no monotonicity (ADR-0009), so a reading
+                    # that went backwards would otherwise make this a negative interval
+                    # — which `AttemptEffort` refuses at construction. It contributes
+                    # nothing instead of failing a turn that has already planned: what
+                    # the ledger loses is a duration, and what a raise here would lose
+                    # is the record of everything the turn did.
+                    working=max(self._now_utc() - started, timedelta(0)),
                 ),
             }
         )
