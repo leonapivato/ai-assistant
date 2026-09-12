@@ -1,6 +1,6 @@
 # 248. The user's request is its own value on the turn, and the goal statement stops standing in for it
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-12
 - **Partially supersedes** [ADR-0225](0225-a-transcript-archive-keeps-the-exchange-as-text-and-nothing-but-the-user-reads-it.md)
   — **§1's fourth clause in its first limb alone: where the pass carried a turn, "what the
