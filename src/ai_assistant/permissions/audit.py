@@ -1283,12 +1283,16 @@ class SqliteAuditTrail:
             InvalidResolutionError: If ``resolves`` fails the ADR-0021 §1
                 invariant.
             InvalidAuthorisationError: If a route-(b) egress decision — a
-                non-resolving ``ALLOW`` carrying an ``egress_binding`` and an
-                ``authorised_by`` — fails any of ADR-0193 §6's eight checks, or if
-                a **resolving** ``ALLOW`` carries an ``authorised_subject``. A
-                sibling of the two above under ``AuditError`` because a replayed
-                write, a substituted resolution subject and an unvalidated standing
-                pointer are three facts an operator must be able to tell apart.
+                non-resolving ``ALLOW`` carrying an ``egress_binding``, an
+                ``authorised_by`` **and an ``authorised_subject``** — fails any of
+                ADR-0193 §6's eight checks; if a route-(c) one — the same shape
+                carrying **no** ``authorised_subject`` — records a binding that is
+                not closed-loop or a pointer that is not that binding's
+                ``account.reference`` (ADR-0247 §2); or if a **resolving** ``ALLOW``
+                carries an ``authorised_subject``. A sibling of the two above under
+                ``AuditError`` because a replayed write, a substituted resolution
+                subject and an unvalidated standing pointer are three facts an
+                operator must be able to tell apart.
         """
         snapshot = _rebuilt(decision)
         _check_standing_shape(snapshot)

@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from ai_assistant.core.protocols import AuditTrail, RecipientGrantResolution
+    from ai_assistant.core.types import PermissionDecision
 
 
 class TestFakeAuditTrailContract(AuditTrailContract):
@@ -46,6 +47,17 @@ class TestFakeAuditTrailContract(AuditTrailContract):
         should be, and why the route-(b) clauses need a factory of their own.
         """
         return FakeAuditTrail(recipient_grants=resolution)
+
+    async def store_as_history(self, trail: AuditTrail, recorded: PermissionDecision) -> None:
+        """Put ``recorded`` straight into the dict this fake holds (ADR-0247 §12 Arm D"').
+
+        The seeding the suite's second factory asks for, in the form this
+        implementation admits: it holds objects rather than bytes, so a row an earlier
+        build wrote is the object itself, placed where ``record`` would have put it and
+        validated by nothing. Every reader then reaches it by the ordinary route.
+        """
+        assert isinstance(trail, FakeAuditTrail), trail
+        trail._decisions[recorded.id] = recorded
 
     @contextlib.asynccontextmanager
     async def trail_suspended_mid_write(

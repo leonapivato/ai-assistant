@@ -119,6 +119,21 @@ class TestSqliteAuditTrailContract(AuditTrailContract):
         """
         return SqliteAuditTrail(path=":memory:", recipient_grants=resolution)
 
+    async def store_as_history(self, trail: AuditTrail, recorded: PermissionDecision) -> None:
+        """Insert ``recorded`` through this store's own write, minus its validation.
+
+        The seeding the suite's second factory asks for (ADR-0247 §12 Arm D"'), and
+        deliberately **not** a hand-written ``INSERT``: ``_record_sync`` is the
+        statement and the encoding this store actually writes rows with, so the fixture
+        is the current bytes rather than a shape no build ever produced — the same
+        reason ``_record_as_legacy`` below rewrites a recorded row instead of composing
+        one. What is skipped is exactly what an earlier build did not perform:
+        ``record``'s standing-shape validation, which runs before the lock and refuses
+        this row going forward.
+        """
+        assert isinstance(trail, SqliteAuditTrail), trail
+        trail._record_sync(recorded, None)
+
     @contextlib.asynccontextmanager
     async def trail_suspended_mid_write(
         self,

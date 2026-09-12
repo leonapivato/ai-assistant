@@ -20,12 +20,14 @@ Not a conformance suite itself: nothing here asserts anything.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.types import (
     ActionRequest,
     BoundAccount,
     CanonicalDestination,
+    CostBasis,
     DestinationProtocol,
     DiscloserProvenance,
     EgressBinding,
@@ -36,6 +38,7 @@ from ai_assistant.core.types import (
     PermissionOutcome,
     PermissionRuling,
     SpanCoverage,
+    ToolCost,
 )
 from ai_assistant.testing.recipient_grants import (
     RECIPIENT_GRANT_ACCOUNT,
@@ -122,6 +125,79 @@ def binding(
     )
 
 
+#: The account, origin and canonical form a search at *the configured provider*
+#: is arranged around (ADR-0247 §1). The canonical form is what
+#: ``tools.destinations``' HTTPS canonicaliser answers for the origin — port made
+#: explicit — reproduced rather than imported, because nothing here canonicalises:
+#: there is one canonicaliser and it is at the seam, and
+#: ``tests/app/test_composition_web_search.py`` is where the composition root's own
+#: member is asserted against the occurrence that seam derives.
+SEARCH_ACCOUNT = BoundAccount(identity="Example Search", reference="conn-search")
+SEARCH_ORIGIN = "https://search.example.com"
+SEARCH_CANONICAL = "https://search.example.com:443"
+
+#: The declaration a search is ruled over. ``TOOL``'s fields but for the id, the
+#: capability and a **declared** per-call cost: ADR-0247 §9 leaves the unknown-cost
+#: floor standing at the configured provider, so a search whose deployment declared
+#: no figure draws ``CONFIRM`` on that ground and reaches no route at all — which is
+#: a different clause from the one every arm here is about. Its ``discloses`` is
+#: ``TOOL``'s, so :data:`_DISCLOSURE_FLOOR` is the only clause that fires.
+SEARCH_TOOL: ToolDefinition = TOOL.model_copy(
+    update={
+        "id": "web_search",
+        "capability": "web_search",
+        "description": "Search the web through the connected search account.",
+        "cost": ToolCost(basis=CostBasis.PER_CALL, amount=Decimal("0.005"), currency="USD"),
+    }
+)
+
+
+def search_member(canonical: str = SEARCH_CANONICAL) -> CanonicalDestination:
+    """One selected-recipient member under HTTPS — a search's whole destination set."""
+    return CanonicalDestination(protocol=DestinationProtocol.HTTPS, canonical=canonical)
+
+
+def search_binding(  # noqa: PLR0913 — one knob per field an ADR-0247 §12 arm varies
+    *,
+    account: BoundAccount = SEARCH_ACCOUNT,
+    origin: str = SEARCH_ORIGIN,
+    canonical: str = SEARCH_CANONICAL,
+    external: bool = False,
+    coverage: SpanCoverage = SpanCoverage.NOT_COVERED,
+    closed_loop: bool = True,
+) -> EgressBinding:
+    """The binding a ``WEB_SEARCH`` servicing derives (ADR-0231 §5, ADR-0238 §5).
+
+    One HTTPS span over the ``origin`` argument, so the canonical destination set is
+    the one member that origin canonicalises to — the shape
+    ``tests/app/test_composition_web_search.py`` pins against the real seam.
+
+    ``closed_loop`` defaults **``True``** here and ``False`` on :func:`binding`,
+    which is ADR-0247 §4's own asymmetry rather than a convenience: the fact is
+    written ``True`` exactly where the kind is ``WEB_SEARCH`` and the deployment
+    holds a registration, so a mismatched search still carries it (Arm C) and an
+    email never does (Arm C″).
+    """
+    return EgressBinding(
+        spans=(
+            EgressSpan(
+                argument="origin",
+                index=0,
+                provenance=DiscloserProvenance.SYSTEM_SELECTED,
+                extent=len(origin),
+                destination=EgressDestination(
+                    protocol=DestinationProtocol.HTTPS, supplied=origin, canonical=canonical
+                ),
+            ),
+        ),
+        account=account,
+        transport_endpoint=origin,
+        planned_with_external_content=external,
+        coverage=coverage,
+        closed_loop=closed_loop,
+    )
+
+
 def origin_unrecorded(*supplied: str, account: BoundAccount = ACCOUNT) -> OriginUnrecordedBinding:
     """The pre-ADR-0181 binding, over the members its twin above carries.
 
@@ -139,15 +215,21 @@ def origin_unrecorded(*supplied: str, account: BoundAccount = ACCOUNT) -> Origin
 def request(
     bound: EgressBinding, *, tool: ToolDefinition = TOOL, **overrides: object
 ) -> ActionRequest:
-    """A request carrying ``bound``, with parameters its spans describe."""
-    to = [
-        occurrence.destination.supplied
-        for occurrence in bound.spans
-        if occurrence.destination is not None
-    ]
+    """A request carrying ``bound``, with parameters its spans describe.
+
+    The parameters are grouped by each span's **own** ``argument``, so a binding
+    over a different destination-bearing argument — a search's ``origin`` rather
+    than a send's ``to`` — describes itself rather than being described by this
+    builder. A binding whose spans carry no destination yields no parameters, which
+    is the account-member shape.
+    """
+    supplied: dict[str, list[str]] = {}
+    for occurrence in bound.spans:
+        if occurrence.destination is not None:
+            supplied.setdefault(occurrence.argument, []).append(occurrence.destination.supplied)
     fields: dict[str, object] = {
         "tool": tool,
-        "parameters": {"to": to} if to else {},
+        "parameters": dict(supplied),
         "egress_binding": bound,
     }
     fields.update(overrides)
@@ -218,6 +300,47 @@ def route_b_decision(  # noqa: PLR0913 — one knob per field a route-(b) case v
             authorised_by=grant_id,
             authorised_subject=subject,
         ),
+        id=decision_id,
+        decided_at=at if at is not None else NOW,
+    )
+    if isinstance(carried, EgressBinding):
+        return decision
+    return decision.model_copy(update={"egress_binding": carried})
+
+
+def route_c_decision(  # noqa: PLR0913 — one knob per field an ADR-0247 §12 arm varies
+    *,
+    bound: EgressBinding | OriginUnrecordedBinding | None = None,
+    authorised_by: str | None = None,
+    decision_id: str = "d-route-c",
+    at: datetime | None = None,
+    tool: ToolDefinition = SEARCH_TOOL,
+    reason: str = "the owner configured this search provider",
+) -> PermissionDecision:
+    """A **non-resolving** ``ALLOW`` resting on the deployment's configuration.
+
+    ADR-0247 §2's route-(c) row: ``resolves`` unset, ``egress_binding`` present,
+    ``authorised_by`` naming the binding's own ``account.reference``, and
+    ``authorised_subject`` **unset** — which is the discriminator that tells this
+    row from a route-(b) one, over the whole history and from the row alone.
+
+    ``authorised_by`` defaults to the binding's own reference, so a case that wants
+    the pointer to *disagree* with the binding says so and nothing else. The binding
+    is substituted afterwards where an arm needs one no request can carry, exactly as
+    :func:`route_b_decision` does and for the same reason.
+    """
+    carried = search_binding() if bound is None else bound
+    base = (
+        request(carried, tool=tool)
+        if isinstance(carried, EgressBinding)
+        else request(search_binding(), tool=tool)
+    )
+    named = authorised_by
+    if named is None:
+        named = carried.account.reference
+    decision = PermissionDecision.from_request(
+        base,
+        PermissionRuling(outcome=PermissionOutcome.ALLOW, reason=reason, authorised_by=named),
         id=decision_id,
         decided_at=at if at is not None else NOW,
     )
