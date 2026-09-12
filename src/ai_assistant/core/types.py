@@ -5960,9 +5960,23 @@ class Goal(BaseModel):
             (ADR-0249 §1). It is a different value from a
             :attr:`GoalInterpretation.revision` and the two are never read for each
             other: ``version`` orders writes, ``revision`` names an understanding.
-        last_engaged_at: When a turn last engaged the goal. **What engages a goal is
-            A2's** and no lane of ADR-0249 reads this field: the decision lands the
-            carrier and nothing else.
+        last_engaged_at: When a turn last engaged the goal (ADR-0249 §1). **Its one
+            writer is** :meth:`~ai_assistant.core.protocols.PlanStore.engage_goal`
+            (ADR-0250 §1): ``save_goal``, ``record_interpretation``, ``open_attempt``
+            and ``commit_attempt`` each leave it exactly as they found it, and no
+            model output, planner envelope or interface adapter reaches it. It is
+            read by the candidate-set query, by §1's focus derivation and by
+            :class:`GoalSummary`, and by nothing else — in particular **it reaches no
+            model-facing projection**.
+        last_engaged_in: The conversation of the goal's **most recent** engagement
+            (ADR-0250 §1). It shares :attr:`last_engaged_at`'s one writer and moves
+            on exactly the same four acts. :attr:`conversation_id` is **never
+            rewritten** for it: that stays the conversation the goal was opened in,
+            which is ADR-0249 §1's provenance clause binding entire, and this is a
+            separate field with a separate meaning. ``None`` is reachable by exactly
+            one route — a row written before ADR-0250 — and **no lane writes ``None``
+            into it**, which is §1's four-absences posture extended to a fifth field
+            for its own stated reason.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -5995,6 +6009,14 @@ class Goal(BaseModel):
     )
     last_engaged_at: UtcInstant | None = Field(
         default=None, description="When a turn last engaged this goal (ADR-0249 §1)."
+    )
+    last_engaged_in: Identifier | None = Field(
+        default=None,
+        description=(
+            "The conversation of the goal's most recent engagement (ADR-0250 §1). None "
+            "is reachable only by a row written before that decision, and no lane "
+            "writes None into it."
+        ),
     )
 
     @property
@@ -6063,6 +6085,250 @@ class GoalRevision(BaseModel):
     goal_id: Identifier
     interpretation: GoalInterpretation
     expected_version: int = Field(ge=0, description="The Goal.version this was computed against.")
+
+
+#: How many goals a conversation's candidate set renders to the associator
+#: (ADR-0250 §2). **A fixed constant valued 8**, and deliberately not a
+#: ``Settings`` field, a constructor knob or a per-deployment value — exactly as
+#: :data:`MAX_GOAL_INTERPRETATIONS` (ADR-0249 §2) and
+#: :data:`MAX_TOPICS_PER_PROPOSAL` (ADR-0213 §4) are not. ADR-0086 §1's reason for
+#: fixing its own bound in ``core`` binds here: "a knob that raises the ceiling is
+#: a knob that re-opens it". The set is rendered to a model as a labelled list, so
+#: it is bounded by what a person can plausibly be juggling in one conversation
+#: rather than by what a prompt can hold, and because the elision is **disclosed**
+#: rather than silent (§2) a deployment that hits the cap learns that it did.
+MAX_ASSOCIATION_CANDIDATES: Final[int] = 8
+
+
+class GoalCandidates(BaseModel):
+    """A conversation's candidate goals, and how many the cap dropped (ADR-0250 §2).
+
+    The set of a conversation ``C`` is every goal whose ``conversation_id`` is ``C``
+    **or** whose ``last_engaged_in`` is ``C``, open or closed alike, in §1's order
+    — ``last_engaged_at`` descending with the ``goal_id`` ascending as the tie-break,
+    and a goal carrying no instant sorting **after** every goal that carries one.
+    It is read through :meth:`~ai_assistant.core.protocols.PlanStore.candidates_for`
+    and assembled by no other route.
+
+    **A count and not a flag**, on ADR-0086's own test: "``details_elided`` marks a
+    loss whose size the *client* cannot know, so a boolean is all that is honest
+    there; this field marks a capacity decision the *writer* made and can count."
+    The writer here is the store answering ``candidates_for``, which holds the whole
+    set, so a flag "would discard a magnitude the writer holds".
+
+    Attributes:
+        goals: The candidates, at most :data:`MAX_ASSOCIATION_CANDIDATES` of them,
+            in §1's order.
+        elided: How many goals of the set the cap dropped. **A count and never an
+            identifier**, and a store that cannot count them does not answer ``0``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    goals: tuple[Goal, ...] = Field(
+        default=(), description="The candidates, in ADR-0250 §1's order."
+    )
+    elided: int = Field(
+        default=0, ge=0, description="How many goals of the set the cap dropped (ADR-0250 §2)."
+    )
+
+    @model_validator(mode="after")
+    def _is_within_the_cap(self) -> GoalCandidates:
+        """Hold the tuple to ADR-0250 §2's fixed bound.
+
+        Raises:
+            ValueError: If more candidates are carried than the cap admits.
+        """
+        if len(self.goals) > MAX_ASSOCIATION_CANDIDATES:
+            msg = (
+                f"a candidate set carries at most {MAX_ASSOCIATION_CANDIDATES} goals and "
+                f"this one carries {len(self.goals)}: the cap is fixed in core and no "
+                f"lane raises it to avoid disclosing an elision (ADR-0250 §2)"
+            )
+            raise ValueError(msg)
+        return self
+
+
+class CandidateGoal(BaseModel):
+    """One candidate as the associator is shown it (ADR-0250 §4).
+
+    **It carries no identifier of any kind** — no ``goal_id``, no
+    ``conversation_id``, no attempt id, no record id — and no instant, no revision
+    number, no element, no ground and no authority. The containment is a property of
+    the type: an implementation that rendered every field it was handed, logged them
+    all, or returned them, discloses none of those, because there is none on the
+    value to disclose (ADR-0228 §8's namer rule).
+
+    Attributes:
+        outcome: The goal's current outcome statement.
+        status: Its :class:`GoalStatus`.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    outcome: NonBlankEncodableText = Field(description="The goal's current outcome statement.")
+    status: GoalStatus = Field(description="The goal's overall disposition.")
+
+
+class GoalCandidacy(BaseModel):
+    """The whole of what one association call may draw on (ADR-0250 §4).
+
+    **One value rather than three parameters**, on ADR-0238 §2's ruling: "Three
+    parameters would put the bound back in the caller's hands one member at a time —
+    a supply site that passed the right records would be conforming and one that
+    passed the wrong ones would be a defect nobody could see from the signature. One
+    value names the whole of what a composition may draw on in a place a reviewer
+    reads once."
+
+    **It carries no identifier** (§4), which is why ``goal_id`` is present on a
+    :class:`GoalBrief` and absent here: a brief "names the subject of the call rather
+    than a record in the labelled supply", and a candidacy has no subject yet —
+    deciding the subject *is* the call.
+
+    Attributes:
+        request: The turn's own request, as ADR-0248 §1 carries it.
+        candidates: The candidates, **non-empty** and at most
+            :data:`MAX_ASSOCIATION_CANDIDATES`, in ADR-0250 §1's order. Non-empty
+            because §3 makes no ``associate`` call over an empty candidate set.
+        elided: How many goals the cap dropped (§2), rendered to the associator so
+            that the elision is disclosed and never silent.
+        focused: The **label** of the focused candidate, absent where the
+            conversation has no focused goal. A label and never an identifier: it is
+            derived from the position the caller passed and survives no call.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    request: EncodableText = Field(description="The turn's own request (ADR-0248 §1).")
+    candidates: tuple[CandidateGoal, ...] = Field(
+        description="The candidates, non-empty and within the cap (ADR-0250 §4)."
+    )
+    elided: int = Field(default=0, ge=0, description="How many goals the cap dropped (§2).")
+    focused: EncodableText | None = Field(
+        default=None, description="The label of the focused candidate, or None where there is one."
+    )
+
+    @model_validator(mode="after")
+    def _is_a_non_empty_set_within_the_cap(self) -> GoalCandidacy:
+        """Refuse the two shapes ADR-0250 §§3-4 say no call can carry.
+
+        Raises:
+            ValueError: If the candidacy is empty, or carries more than the cap.
+        """
+        if not self.candidates:
+            msg = (
+                "a candidacy carries at least one candidate: ADR-0250 §3 makes no "
+                "associate call over an empty candidate set, because a conversation "
+                "with nothing to associate to opens a goal and costs no model call"
+            )
+            raise ValueError(msg)
+        if len(self.candidates) > MAX_ASSOCIATION_CANDIDATES:
+            msg = (
+                f"a candidacy carries at most {MAX_ASSOCIATION_CANDIDATES} candidates and "
+                f"this one carries {len(self.candidates)} (ADR-0250 §2, §4)"
+            )
+            raise ValueError(msg)
+        return self
+
+
+class AssociationVerdict(StrEnum):
+    """What an associator decided about the turn's goal (ADR-0250 §4).
+
+    A **closed** enumeration of exactly **four** members, each valued by its
+    lower-cased name. The vocabulary is *added to and never renamed*, on
+    :class:`ReadKind`'s own rule (ADR-0226 §4).
+    """
+
+    ASSOCIATES = "associates"
+    """This turn is about the one goal the single label names (ADR-0250 §3).
+
+    Dispositive where that label resolves. A label that resolves to nothing — a
+    string that does not match the form, an *n* below 1 or beyond the candidacy's
+    length, or an ``ASSOCIATES`` carrying other than exactly one label — is
+    :attr:`UNDECIDED` and **never a pick**: no implementation falls back to the
+    focused goal, to the first candidate, to the most recent one, or to any
+    tie-break at all, because every one of those picks a goal the model did not
+    name."""
+
+    FRESH = "fresh"
+    """This turn is about something new, so the turn opens a goal (ADR-0250 §3).
+
+    It is **not** a finding that no goal applies to anything (ADR-0250 §16)."""
+
+    CONTINUES = "continues"
+    """This turn continues whatever the conversation was last about (§3).
+
+    The turn associates to the **focused** goal (§1); where the conversation has no
+    focused goal it opens a new one instead, which is why the elision disclosure is
+    keyed on what the turn **did** rather than on this verdict (§14)."""
+
+    UNDECIDED = "undecided"
+    """The associator will not choose, so the turn asks which goal it is about (§3).
+
+    **The decline is asserted rather than empty**, on ADR-0176 §1's shape: an
+    implementation that cannot parse its model's answer returns this and **never a
+    guess**, and no implementation reads an unparseable answer as :attr:`FRESH`, as
+    :attr:`CONTINUES`, or as an error that fails the turn. A parse failure read as
+    ``FRESH`` would open a duplicate goal on every malformed answer, and one read as
+    ``CONTINUES`` would revise the focused goal on the strength of nothing at all."""
+
+
+class GoalAssociation(BaseModel):
+    """One associator's answer (ADR-0250 §4).
+
+    **The labels are the caller's to resolve and the implementation resolves none**:
+    the associator renders each candidate's label from the tuple it was given, and
+    ``orchestration`` resolves a label by parsing *n* and indexing **the very tuple it
+    passed on this call**. No mapping, table or identifier crosses between
+    ``planning`` and ``orchestration``, and neither package imports a name from the
+    other to agree on one.
+
+    Attributes:
+        verdict: What the associator decided.
+        labels: The labels it named, possibly empty. ``G`` followed by the 1-based
+            index in decimal with no padding (ADR-0226 §3's scheme applied to a
+            fourth sequence). **No label survives the call that rendered it and none
+            is persisted as a reference.**
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    verdict: AssociationVerdict = Field(description="What the associator decided.")
+    labels: tuple[EncodableText, ...] = Field(
+        default=(), description="The labels it named, resolved by orchestration alone."
+    )
+
+    @model_validator(mode="after")
+    def _shape_matches_the_verdict(self) -> GoalAssociation:
+        """Admit exactly ADR-0250 §4's four shapes and refuse every other.
+
+        ``ASSOCIATES`` with **exactly one** label; ``FRESH`` with none; ``CONTINUES``
+        with none; and ``UNDECIDED`` with any number, including none. An
+        ``ASSOCIATES`` carrying other than one label is a shape the caller reads as
+        ``UNDECIDED`` (§3), so the value that would assert it is refused here rather
+        than left for every caller to normalise.
+
+        Raises:
+            ValueError: If the label count is not one this verdict admits.
+        """
+        if self.verdict is AssociationVerdict.UNDECIDED:
+            return self
+        if self.verdict is AssociationVerdict.ASSOCIATES:
+            if len(self.labels) != 1:
+                msg = (
+                    f"an ASSOCIATES verdict names exactly one label and this one names "
+                    f"{len(self.labels)}: a turn never picks between two goals, and where "
+                    f"two or more are named the answer is the ask (ADR-0250 §3, §4)"
+                )
+                raise ValueError(msg)
+            return self
+        if self.labels:
+            msg = (
+                f"a {self.verdict.value.upper()} verdict names no label and this one names "
+                f"{len(self.labels)}: the verdict is the whole of the answer (ADR-0250 §4)"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class AttemptPhase(StrEnum):
@@ -6602,6 +6868,52 @@ class ProposedElement(BaseModel):
         return self
 
 
+class ProposedQuestion(BaseModel):
+    """One question a planner would ask, and what it is about (ADR-0250 §7).
+
+    **A model raises; it never opens a question and never settles one** (§6). This
+    value carries **no id, no deadline, no disposition, no goal id, no attempt id and
+    no instant** — every one of those is ``orchestration``'s — and a planner envelope
+    that comes back carrying one has it **discarded silently**, which is ADR-0249 §6's
+    posture applied to this decision's fields.
+
+    **Why the element type moved at all, since a bare text was cheaper.** ADR-0249 §7
+    made ``questions`` a ``tuple[NonBlankEncodableText, ...]`` so that "A2 need not
+    reopen a ``core`` type to carry a value the planner can already produce". The
+    reason is sound and the field is kept; what a bare text cannot do is answer **what
+    the question is about**, and ADR-0250 §6's materiality test is a test over a
+    subject. With no subject, condition 2 could only be a review convention — a
+    reviewer reading the question text and forming a view — which is exactly the shape
+    #2255's addendum rules out. The alternative considered and rejected was a *second*
+    member on :class:`ProposedUnderstanding` carrying subjects parallel to the texts,
+    which is one value with two carriers and two ways to disagree.
+
+    Attributes:
+        text: The question as the user would read it.
+        about: A **label of the same understanding's own tuples**, spelled by
+            ADR-0249 §9's scheme read over the proposal rather than over the brief:
+            ``C`` followed by *n* for ``constraints``, ``S`` for ``criteria``, ``D``
+            for ``conditions``, each 1-based. **``None`` means the question is about
+            the outcome**, which every understanding has. A label outside the
+            proposal's own tuples, and a label of a tuple other than the one it
+            spells, each resolve to nothing and the question is **dropped** silently —
+            the label space is per tuple. The label **does not survive the call** and
+            is never persisted as a reference (ADR-0226 §3): what is stored is the
+            subject's text, which is stable under every later revision.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    text: NonBlankEncodableText = Field(description="The question as the user would read it.")
+    about: EncodableText | None = Field(
+        default=None,
+        description=(
+            "The proposal's own label for the subject, or None where the subject is "
+            "the outcome (ADR-0250 §7)."
+        ),
+    )
+
+
 class ProposedUnderstanding(BaseModel):
     """What a planner proposes the system now understands (ADR-0249 §7).
 
@@ -6636,8 +6948,13 @@ class ProposedUnderstanding(BaseModel):
         constraints: The constraints this understanding states in full.
         criteria: The success criteria it states in full.
         conditions: The conditions it states in full.
-        questions: What the planner would ask. **Carried and read by no lane of
-            ADR-0249**; what a raised question becomes is A2's.
+        questions: What the planner would ask, each naming **what it is about**
+            (ADR-0250 §7, partially superseding ADR-0249 §7 in this member's element
+            type alone). Everything else that decision says about the field is
+            unchanged: it is carried on the envelope, it is the planner's to fill, and
+            it is ``orchestration``'s to read. **At most one is taken from a call**
+            (ADR-0250 §7) — the first in tuple order whose ``about`` resolves and whose
+            subject is material — and every other is dropped, silently.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -6662,8 +6979,9 @@ class ProposedUnderstanding(BaseModel):
         default=(), description="What would establish it."
     )
     conditions: tuple[ProposedElement, ...] = Field(default=(), description="What it depends on.")
-    questions: tuple[NonBlankEncodableText, ...] = Field(
-        default=(), description="What the planner would ask (carried, read by no lane here)."
+    questions: tuple[ProposedQuestion, ...] = Field(
+        default=(),
+        description="What the planner would ask, each naming its subject (ADR-0250 §7).",
     )
 
     @model_validator(mode="after")
@@ -9087,6 +9405,178 @@ class StepTransition(BaseModel):
         return self
 
 
+class GoalQuestionDisposition(StrEnum):
+    """The state of one clarification bound to a goal (ADR-0250 §8).
+
+    A **closed** enumeration of exactly **five** members, each valued by its
+    lower-cased name. :attr:`OPEN` is the only non-terminal member, the other four are
+    terminal, and **no implementation treats any of the four as a weaker form of
+    another** — they are distinct acts with distinct meanings. The vocabulary is
+    *added to and never renamed*, on :class:`ParkedReadDisposition`'s own rule.
+
+    **No terminal disposition is inferred from silence** (§12): a question is ``OPEN``
+    until something settles it, ``OPEN`` is never read as answered, as declined or as
+    permission to act, and there is no timeout, retry, sweep or reclaim that revises
+    an understanding the user did not answer for.
+    """
+
+    OPEN = "open"
+    """The question stands and may be answered (ADR-0250 §8).
+
+    The only non-terminal member, and the only one on which the two content fields
+    — :attr:`GoalQuestion.text` and :attr:`GoalQuestion.about` — are present."""
+
+    ANSWERED = "answered"
+    """The user answered it, and this turn's ``settle_question`` moved it (§11).
+
+    Reached only where the question was ``OPEN`` **and unexpired** when the answering
+    turn read it: an answer arriving past the deadline settles :attr:`EXPIRED` and
+    never this, because a reply saying otherwise would tell the user their answer
+    arrived in time when it did not (§11)."""
+
+    WITHDRAWN = "withdrawn"
+    """The question was taken back without an answer (ADR-0250 §12).
+
+    ``AssistantEngine.withdraw_clarification`` is its one producer, and the act
+    frees the goal's one question slot without ending the pause: the attempt stays
+    ``AWAITING_CLARIFICATION`` and the goal stays open. The whole difference from
+    :attr:`ANSWERED` is ADR-0244 §11's distinction — "a denial is the user answering
+    *no* and is a ruling; a cancellation is the user withdrawing the question and is
+    not one"."""
+
+    EXPIRED = "expired"
+    """The deadline passed with no answer (ADR-0250 §12).
+
+    Settled by the **first operation that reads it** rather than by a sweep, on
+    ADR-0244 §10's own reason, and the settlement moves **nothing else**: not the
+    goal's status, not the attempt's state, not ``last_engaged_at``. **No lane reads
+    an expiry as a refusal, an abandonment, a denial or a decision of any kind** —
+    decision 2 binds in terms: "Silence is neither refusal nor abandonment"."""
+
+    SUPERSEDED = "superseded"
+    """A new attempt opened on the goal while this question was still open (§12).
+
+    **Exactly one producer**, and nothing else writes it — not a revision, not an
+    expiry, not a second question, not a withdrawal. Without it, a user who reopens a
+    completed goal while an old attempt's question is still open would have a question
+    bound to an attempt that is over."""
+
+
+class GoalQuestion(BaseModel):
+    """One durable clarification bound to a goal (ADR-0250 §8).
+
+    **Planning state and not a permission record**, which is why it lives in the
+    ``PlanStore`` rather than in a store of its own beside ``ParkedRead``. ADR-0244
+    §3 gave a parked read a store in ``permissions/`` because "a park is the
+    unanswered half of a recorded permission question, joined to the trail by
+    ``decision_id``"; a ``GoalQuestion`` is joined to no decision, gates no access and
+    records no permission. ADR-0014 §5 charters ``PlanStore`` for exactly this —
+    "Durable planning state belongs to ``planning``, not to the wiring layer" — and
+    the deletion argument decides it even if the charter did not: a question's life is
+    its goal's, and a second store would put a goal's questions behind a second
+    deletion with no transaction between the two.
+
+    **A settled question keeps its facts and loses its content.**
+    :meth:`~ai_assistant.core.protocols.PlanStore.settle_question` clears
+    :attr:`text` and :attr:`about` **in the same step that moves the disposition**,
+    and no implementation retains a copy, a digest, a snapshot or an archive of
+    either. The content lives exactly as long as the question does, which is ADR-0244
+    §3's retention rule applied here for its own reason, and :attr:`goal_id`
+    **survives settlement** so that a late answer still reaches the goal (§11).
+
+    Attributes:
+        id: The question's own identifier, and the handle an answer names. It needs
+            no re-minting across a restart: this is a row of a durable store, so
+            ADR-0052 §1's enumerate-and-re-mint path is **not** extended here and
+            ``pending_confirmations`` gains nothing.
+        goal_id: The goal the question is about. **It survives settlement**, so a
+            reference resolves to a goal whatever the disposition (§11).
+        attempt_id: The attempt that raised it.
+        text: The question as the user reads it, present on an ``OPEN`` question and
+            absent on every terminal one.
+        about: The **subject's own text**, taken from the revision this turn recorded
+            — the newly grounded element where the proposal stated one, and the
+            element retention copied forward where it carried a ``retains`` (ADR-0249
+            §7). Where the proposal's ``about`` was ``None`` it is the recorded
+            revision's **outcome**. It is therefore a statement in words in every
+            case, is never absent on an ``OPEN`` question, and **is never the proposed
+            element's own ``text``** — a retaining ``ProposedElement`` has none.
+        asked_at: When the question was written.
+        expires_at: Computed from ``Settings.goal_question_ttl`` **once**, at the
+            instant the question is written, and never extended, refreshed or
+            recomputed (§8).
+        disposition: Where the question stands.
+        settled_at: When a terminal disposition was written, absent while ``OPEN``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Identifier
+    goal_id: Identifier = Field(description="The goal this question is about.")
+    attempt_id: Identifier = Field(description="The attempt that raised it.")
+    text: NonBlankEncodableText | None = Field(
+        default=None, description="The question as the user reads it; cleared on settlement."
+    )
+    about: NonBlankEncodableText | None = Field(
+        default=None, description="The subject's own text; cleared on settlement."
+    )
+    asked_at: UtcInstant = Field(description="When the question was written (tz-aware).")
+    expires_at: UtcInstant = Field(description="When it stops being answerable (tz-aware).")
+    disposition: GoalQuestionDisposition = Field(
+        default=GoalQuestionDisposition.OPEN, description="Where the question stands."
+    )
+    settled_at: UtcInstant | None = Field(
+        default=None, description="When it was settled, absent while OPEN."
+    )
+
+    @model_validator(mode="after")
+    def _content_lives_exactly_as_long_as_the_question(self) -> GoalQuestion:
+        """Admit exactly ADR-0250 §8's two shapes and refuse every other.
+
+        An ``OPEN`` question carries **both** content fields and no ``settled_at``; a
+        terminal one carries **neither** content field and a ``settled_at``. Refused
+        by the type rather than documented, in
+        :meth:`StepOutcome._confirmation_matches_disposition`'s own spirit: a shape a
+        caller cannot reach is better refused than described, and a settled question
+        that kept its text would be the retention rule broken in the one place a
+        reader would not look.
+
+        Raises:
+            ValueError: If the content and the disposition disagree.
+        """
+        content = {"text": self.text, "about": self.about}
+        if self.disposition is GoalQuestionDisposition.OPEN:
+            missing = sorted(name for name, value in content.items() if value is None)
+            if missing:
+                msg = (
+                    f"an OPEN question carries its text and its subject: "
+                    f"{', '.join(missing)} "
+                    f"{'is' if len(missing) == 1 else 'are'} absent (ADR-0250 §8)"
+                )
+                raise ValueError(msg)
+            if self.settled_at is not None:
+                msg = "an OPEN question carries no settled_at: nothing has settled it (§8)"
+                raise ValueError(msg)
+            return self
+        present = sorted(name for name, value in content.items() if value is not None)
+        if present:
+            msg = (
+                f"a settled question keeps its facts and loses its content: "
+                f"{', '.join(present)} "
+                f"{'is' if len(present) == 1 else 'are'} still set on a "
+                f"{self.disposition.value} question (ADR-0250 §8)"
+            )
+            raise ValueError(msg)
+        if self.settled_at is None:
+            msg = (
+                f"a {self.disposition.value} question records when it was settled: "
+                f"settle_question clears the content and stamps the instant in one step "
+                f"(ADR-0250 §8, §9)"
+            )
+            raise ValueError(msg)
+        return self
+
+
 class GoalDeletion(BaseModel):
     """The outcome of deleting a goal and its plan history (see ADR-0014 §5).
 
@@ -9130,7 +9620,20 @@ class PlanExport(BaseModel):
     internally consistent — every ``goal_id``/``plan_id`` referenced by an
     included record resolves within the same export.
 
-    **``schema_version`` is 9 because ``AttemptEffort`` gained ``kind``** (ADR-0251
+    **``schema_version`` is 10 because this document gained ``questions`` and
+    ``Goal`` gained ``last_engaged_in``** (ADR-0250 §9, §19). Either would oblige the
+    move on its own, and they reach different populations: ``tuple[GoalQuestion, ...]``
+    is a member an earlier reading of this document has no field for and which
+    ``model_dump()`` emits on **every** document, while ``last_engaged_in`` is emitted
+    on every ``Goal`` a document carries and refused by an older reader's
+    ``extra="forbid"`` exactly as ``targets_revision`` is. ADR-0014 §5's closure rule
+    **extends** to ``question_id`` rather than changing: a document carrying a question
+    whose ``goal_id`` or ``attempt_id`` it does not carry does not validate as a
+    ``PlanExport`` at all. **A settled question exports with its content already
+    absent**, which is ADR-0250 §8's retention rule and not an omission from the
+    export.
+
+    **It was 9 because ``AttemptEffort`` gained ``kind``** (ADR-0251
     §5, §16). This document carries ``tuple[GoalAttempt, ...]``, every one of which
     carries an ``AttemptEffort``, and ``model_dump()`` emits the new member on
     **every** attempt a document carries — refused by an older reader's
@@ -9213,12 +9716,12 @@ class PlanExport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[9] = Field(
-        default=9,
+    schema_version: Literal[10] = Field(
+        default=10,
         description=(
-            "Shape of this export, pinned to exactly 9 (ADR-0039 §10, ADR-0251 §16): an "
+            "Shape of this export, pinned to exactly 10 (ADR-0039 §10, ADR-0250 §9): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[9]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[10]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."
@@ -9229,6 +9732,7 @@ class PlanExport(BaseModel):
     plans: tuple[ActionPlan, ...] = ()
     executions: tuple[ExecutionState, ...] = ()
     attempts: tuple[GoalAttempt, ...] = ()
+    questions: tuple[GoalQuestion, ...] = ()
 
     @model_validator(mode="after")
     def _references_resolve_within_the_export(self) -> PlanExport:
@@ -9243,12 +9747,14 @@ class PlanExport(BaseModel):
         plan_ids = {plan.id for plan in self.plans}
         execution_ids = {execution.id for execution in self.executions}
         attempt_ids = {attempt.id for attempt in self.attempts}
+        question_ids = {question.id for question in self.questions}
 
         for label, records, ids in (
             ("goal", self.goals, goal_ids),
             ("plan", self.plans, plan_ids),
             ("execution", self.executions, execution_ids),
             ("attempt", self.attempts, attempt_ids),
+            ("question", self.questions, question_ids),
         ):
             if len(ids) != len(records):
                 msg = f"export contains duplicate {label} ids"
@@ -9302,6 +9808,8 @@ class PlanExport(BaseModel):
                 msg = f"export has attempts whose {label} is missing: {', '.join(missing)}"
                 raise ValueError(msg)
 
+        self._questions_close_over_their_records(goal_ids, attempt_ids)
+
         steps_by_plan = {plan.id: [step.id for step in plan.steps] for plan in self.plans}
         for execution in self.executions:
             expected = steps_by_plan[execution.plan_id]
@@ -9314,6 +9822,33 @@ class PlanExport(BaseModel):
                 raise ValueError(msg)
 
         return self
+
+    def _questions_close_over_their_records(
+        self, goal_ids: set[str], attempt_ids: set[str]
+    ) -> None:
+        """Enforce ADR-0250 §9's extension of ADR-0014 §5's closure rule.
+
+        The rule **extends** to ``question_id`` rather than changing: a question names
+        a goal and an attempt, and both survive its settlement (§8), so both are
+        references §5 requires to resolve within the same document — the same reading
+        that put ``supersedes`` and the attempt's three references under the validator
+        above, stated over two more. Split out so that adding them does not make one
+        method two rulesets behind one name.
+
+        Args:
+            goal_ids: The ids of the goals this document carries.
+            attempt_ids: The ids of the attempts it carries.
+
+        Raises:
+            ValueError: If a question names a goal or an attempt the document lacks.
+        """
+        for label, missing in (
+            ("goal", sorted(q.id for q in self.questions if q.goal_id not in goal_ids)),
+            ("attempt", sorted(q.id for q in self.questions if q.attempt_id not in attempt_ids)),
+        ):
+            if missing:
+                msg = f"export has questions whose {label} is missing: {', '.join(missing)}"
+                raise ValueError(msg)
 
 
 # --- a spoken answer's delivery: what a device reports having played --------
@@ -18679,6 +19214,397 @@ class RoutedOperationRecord(BaseModel):
         return self
 
 
+class TurnReference(BaseModel):
+    """What a turn says it is answering, or which goal it is about (ADR-0250 §11).
+
+    **Never rendered to a model and never accepted from one.** It is resolved by
+    ``orchestration`` against records this system holds, and no prompt built under
+    ADR-0250 prints it or the goal id it resolves to — a :class:`GoalCandidacy`
+    carries neither. ADR-0228 §8's namer rule binds it entire.
+
+    **The handle is a durable record's own id and needs no re-minting**: a
+    :class:`GoalQuestion` and a :class:`Goal` are rows, so a restart changes nothing
+    about either, ADR-0052 §1's enumerate-and-re-mint path is **not** extended here,
+    and ``pending_confirmations`` gains nothing.
+
+    Attributes:
+        question_id: The clarification this turn answers.
+        goal_id: The goal this turn is about, which is how a goal is resumed from
+            another conversation (ADR-0250 §13).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    question_id: Identifier | None = Field(
+        default=None, description="The clarification this turn answers."
+    )
+    goal_id: Identifier | None = Field(default=None, description="The goal this turn is about.")
+
+    @model_validator(mode="after")
+    def _names_exactly_one_record(self) -> TurnReference:
+        """Admit exactly ADR-0250 §11's two shapes.
+
+        A ``question_id`` and no ``goal_id``, or a ``goal_id`` and no ``question_id``.
+        **A shape a caller cannot reach is better refused by the type than
+        documented**, which is ADR-0244 §9's own reason for refusing its two members
+        together.
+
+        Raises:
+            ValueError: If the reference names both records or neither.
+        """
+        named = [
+            name
+            for name, value in (("question_id", self.question_id), ("goal_id", self.goal_id))
+            if value is not None
+        ]
+        if len(named) != 1:
+            msg = (
+                "a reference names one record: a question_id and no goal_id, or a "
+                f"goal_id and no question_id — this one names {', '.join(named) or 'neither'} "
+                "(ADR-0250 §11)"
+            )
+            raise ValueError(msg)
+        return self
+
+
+class Clarification(BaseModel):
+    """The question a turn raised, as the user is shown it (ADR-0250 §10).
+
+    **The turn that raises a question does not park.** It composes, its answer *is*
+    the question, and it returns — so ADR-0226 §5 binds entire and is obeyed rather
+    than moved: what pauses is the goal's **attempt**, not the turn.
+
+    **A question exists only where the store accepted it** (§10). Where
+    ``record_question`` answered ``False`` or raised, no question exists, this value
+    is ``None`` and nothing durable is outstanding: "a lane that reported a question
+    it did not write would tell the user to answer a question nothing holds".
+
+    Attributes:
+        question_id: The question's own id, which the answering reference names.
+        text: The question as the user reads it.
+        expires_at: When it stops being answerable, computed once from
+            ``Settings.goal_question_ttl`` at the instant the question was written.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    question_id: Identifier = Field(description="The question's own id (ADR-0250 §10).")
+    text: NonBlankEncodableText = Field(description="The question as the user reads it.")
+    expires_at: UtcInstant = Field(description="When it stops being answerable (tz-aware).")
+
+
+class EngagementDisposition(StrEnum):
+    """What a turn did with the goal it engaged (ADR-0250 §5).
+
+    A **closed** enumeration of exactly **four** members, each valued by its
+    lower-cased name. The vocabulary is *added to and never renamed*.
+
+    **The announcement rule is read off this member and one flag** (decision 6): a
+    reply carries one sentence naming the goal it is about where, and only where, the
+    disposition is :attr:`RESUMED` or :attr:`REOPENED`, or ``revised`` is ``True``
+    **and** at least one of ``outcome_changed``, ``added`` and ``removed`` says
+    something moved.
+    """
+
+    OPENED = "opened"
+    """A goal this turn opened (ADR-0249 §3).
+
+    Silent unless the turn also revised something, and it is the disposition the
+    elision disclosure is keyed on (§14) — a ``CONTINUES`` verdict over a capped set
+    with no focused goal opens a goal while reporting that one was found."""
+
+    CONTINUED = "continued"
+    """The focused goal (ADR-0250 §1).
+
+    **Silent, because announcing it would be noise on every turn.** A user adding a
+    constraint to the thing they have been discussing for six turns does not need to
+    be told which goal it is; told every time, the sentence stops being read, which is
+    the failure that makes the :attr:`RESUMED` case worth announcing."""
+
+    RESUMED = "resumed"
+    """An open goal that was **not** the focused goal (ADR-0250 §5).
+
+    Announced: the turn moved to a goal the conversation was not on."""
+
+    REOPENED = "reopened"
+    """A closed goal, whose status this turn moved to ``ACTIVE`` (ADR-0250 §13).
+
+    Announced. Reopening preserves everything the goal holds — its interpretation
+    chain is appended to and never reset, its ``conversation_id`` is not rewritten,
+    its earlier attempts stay exactly as they stand, and **no effect any earlier
+    attempt produced is replayed, undone or re-attempted**."""
+
+
+class GoalEngagement(BaseModel):
+    """What this turn did with the goal it engaged (ADR-0250 §5).
+
+    One fact with four facets — the disposition, the outcome statement, whether a
+    revision happened and what changed — which a client renders together or not at
+    all. It carries **no goal id, no attempt id, no revision number, no label, no
+    ground and no instant**.
+
+    **Composed by ``orchestration`` from typed values and by no model's decision.**
+    No model is asked whether to announce, no envelope carries an announcement flag,
+    and no interface adapter computes one: a surface renders what this member says,
+    on ADR-0242 §9's rendering-is-presentation ground. **Nothing is confirmed and
+    nothing is asked** — no lane turns the sentence into a confirmation, a park, a
+    question, a second turn or an interruption, and a turn is never held waiting for
+    the user to acknowledge it.
+
+    Attributes:
+        disposition: What the turn did with the goal.
+        outcome: The engaged goal's **current** outcome statement.
+        revised: Whether this turn recorded a :class:`GoalInterpretation` through
+            ``PlanStore.record_interpretation``, **and nothing more**. It is not a
+            claim that any text moved.
+        outcome_changed: Whether the recorded revision's ``outcome`` differs from the
+            previous revision's, **byte for byte**.
+        added: The ``text`` of every element of the **new** revision that the previous
+            revision did not carry in the **same** tuple, byte for byte, in the tuple
+            order ``constraints``, ``criteria``, ``conditions``. Computed by comparing
+            the two revisions and **never by a model**; an element retained by label
+            (ADR-0249 §7) appears in neither tuple.
+        removed: The ``text`` of every element the previous revision carried that the
+            new one does not, on the same comparison. **Removal is disclosed and never
+            inferred from silence**: ADR-0249 §7 makes omission the whole of the
+            removal mechanism, so a revision whose only effect is to drop the user's
+            stated budget is a revision whose only trace is an absence, and this is
+            that trace.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    disposition: EngagementDisposition = Field(description="What the turn did with the goal.")
+    outcome: NonBlankEncodableText = Field(description="The goal's current outcome statement.")
+    revised: bool = Field(default=False, description="Whether this turn recorded a revision.")
+    outcome_changed: bool = Field(
+        default=False, description="Whether the recorded revision's outcome differs, byte for byte."
+    )
+    added: tuple[NonBlankEncodableText, ...] = Field(
+        default=(), description="Element texts the new revision carries and the previous did not."
+    )
+    removed: tuple[NonBlankEncodableText, ...] = Field(
+        default=(), description="Element texts the previous revision carried and the new does not."
+    )
+
+    @model_validator(mode="after")
+    def _nothing_moved_without_a_revision(self) -> GoalEngagement:
+        """State ADR-0250 §5's invariant over every revision ADR-0249 §7 permits.
+
+        Where ``revised`` is ``False``, ``outcome_changed`` is ``False`` and both
+        tuples are empty — there is no revision for any of the three to be about.
+        Where ``revised`` is ``True``, **every combination is admitted, all three
+        empty included**: that shape is a revision that changed no words at all, and
+        it is reachable and legitimate — a planner that restates the same constraint
+        text with a ``USER_STATED`` ground where the previous revision held an
+        ``INFERRED`` one has changed the interpretation's **grounding** and nothing a
+        reader would read. ADR-0249 §7 permits that revision in terms, so refusing it
+        here would refuse a real planner return.
+
+        Raises:
+            ValueError: If a change is reported on a turn that recorded no revision.
+        """
+        if self.revised:
+            return self
+        moved = sorted(
+            name
+            for name, value in (
+                ("outcome_changed", self.outcome_changed),
+                ("added", bool(self.added)),
+                ("removed", bool(self.removed)),
+            )
+            if value
+        )
+        if moved:
+            msg = (
+                f"a turn that recorded no revision moved no word: {', '.join(moved)} "
+                f"{'says' if len(moved) == 1 else 'say'} something changed while revised "
+                f"is False (ADR-0250 §5)"
+            )
+            raise ValueError(msg)
+        return self
+
+
+class GoalDisambiguation(BaseModel):
+    """The goals an undecided turn is asking between (ADR-0250 §5).
+
+    **It carries no identifier, no label, no status and no instant**: a label is
+    meaningless outside the call that rendered it (§3), and the user answers in words
+    on the next turn or by a :class:`TurnReference` (§11).
+
+    **Which goals ``candidates`` holds, in both of ``UNDECIDED``'s shapes.** Where the
+    associator named **two or more** labels that resolve, it holds exactly those
+    goals' outcome statements, in candidacy order. Where it named **fewer than two
+    that resolve** — a decline, an unparseable answer, or a single label outside the
+    candidacy's range — the system has no subset to ask about, so it holds **every**
+    candidate of the candidacy, in candidacy order. The tuple is therefore non-empty
+    on every ``UNDECIDED`` turn, because §3 makes no ``associate`` call over an empty
+    candidate set, and it may hold exactly **one** — a well-formed question, *is this
+    about that, or is it something new?*, and not a degraded one.
+
+    Attributes:
+        candidates: The outcome statements of the goals being asked about, non-empty,
+            in candidacy order.
+        elided: How many goals the cap dropped (§2), which the reply discloses on
+            every turn carrying a disambiguation (§14).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    candidates: tuple[NonBlankEncodableText, ...] = Field(
+        description="The outcome statements of the goals being asked about, in candidacy order."
+    )
+    elided: int = Field(default=0, ge=0, description="How many goals the cap dropped (§2).")
+
+    @model_validator(mode="after")
+    def _asks_about_something(self) -> GoalDisambiguation:
+        """Refuse the empty ask ADR-0250 §5 says no undecided turn can produce.
+
+        Raises:
+            ValueError: If the tuple is empty.
+        """
+        if not self.candidates:
+            msg = (
+                "a disambiguation names at least one goal: an UNDECIDED turn is asked "
+                "over a non-empty candidacy, so there is always something to ask about "
+                "(ADR-0250 §5)"
+            )
+            raise ValueError(msg)
+        return self
+
+
+class ReferenceOutcome(StrEnum):
+    """What became of a turn's :class:`TurnReference` (ADR-0250 §11).
+
+    A **closed** enumeration of exactly **four** members, each valued by its
+    lower-cased name. The vocabulary is *added to and never renamed*.
+
+    **The four are mutually exclusive by construction, and that is why no precedence
+    is stated.** :attr:`UNKNOWN` is the case where no record was found at all; the
+    other three are read **off the question's own disposition** and no question
+    carries two.
+    """
+
+    UNKNOWN = "unknown"
+    """The reference named no question and no goal this store holds (§11).
+
+    **Reported whatever the association then does.** The turn falls through to §3 and
+    is associated like any other, so it may come back ``UNDECIDED`` — an outcome
+    carrying no ``goal_engagement`` — and this is a member of its own precisely so
+    that the user is still told the handle they gave resolved to nothing. **No
+    implementation constructs a** :class:`GoalEngagement` **in order to carry a
+    reference outcome**, because that value asserts a goal was engaged."""
+
+    ANSWERED = "answered"
+    """This turn settled the question the reference named (ADR-0250 §11)."""
+
+    EXPIRED = "expired"
+    """The question's disposition is ``EXPIRED``, whoever settled it (§11).
+
+    **Stated over the disposition and never over a clock comparison**, which is
+    ADR-0244 §9's own rule, and the deadline is compared **only** where the question
+    is still ``OPEN``. An answer arriving after expiry reopens the work rather than
+    vanishing: the question is gone, the **goal** is not, and a reference the user was
+    given still names it."""
+
+    ALREADY_SETTLED = "already_settled"
+    """Its disposition is ``ANSWERED``, ``WITHDRAWN`` or ``SUPERSEDED`` (§11).
+
+    A question answered an hour after it was asked and referenced a week later is
+    this and **not** :attr:`EXPIRED`: it was answered, and a reply saying otherwise
+    would tell the user their answer never arrived."""
+
+
+class GoalSummary(BaseModel):
+    """One goal as a listing surface shows it (ADR-0250 §15).
+
+    The listing from which a user learns what is outstanding and obtains the
+    references §11 and §13 take. **It carries no attempt id, no revision number, no
+    element, no ground, no evidence reference and no plan.**
+
+    Attributes:
+        id: The goal's own id, which a :class:`TurnReference` names.
+        outcome: Its current outcome statement.
+        status: Its overall disposition.
+        paused: Whether the goal is waiting on the user or on an authorization.
+            **Computed and never stored**, by ADR-0249 §5's own definition: the
+            goal's status is ``ACTIVE`` and its current attempt's state is
+            ``AWAITING_CLARIFICATION``, ``AWAITING_AUTHORIZATION`` or ``BLOCKED``.
+            **The engine computes it**, so that two surfaces cannot render it
+            differently, and no adapter derives it.
+        last_engaged_at: When a turn last engaged it, absent on a goal no turn has.
+        clarification: The goal's open question where one stands, and ``None``
+            otherwise.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Identifier
+    outcome: NonBlankEncodableText = Field(description="The goal's current outcome statement.")
+    status: GoalStatus = Field(description="The goal's overall disposition.")
+    paused: bool = Field(
+        default=False, description="Whether it waits on the user or an authorization (ADR-0249 §5)."
+    )
+    last_engaged_at: UtcInstant | None = Field(
+        default=None, description="When a turn last engaged it (ADR-0250 §1)."
+    )
+    clarification: Clarification | None = Field(
+        default=None, description="The goal's open question, where one stands (ADR-0250 §15)."
+    )
+
+
+class ClarificationWithdrawal(StrEnum):
+    """What became of a request to withdraw a clarification (ADR-0250 §12).
+
+    A **closed** enumeration of exactly **two** members, each valued by its
+    lower-cased name. The vocabulary is *added to and never renamed*.
+
+    **Withdrawing removes the question and not the pause**: the attempt stays
+    ``AWAITING_CLARIFICATION`` and the goal stays open. What the act buys is the
+    freedom to ask again, which is exactly what the one-open rule's genuine constraint
+    (§8) is about. A withdrawal **records no answer**, revises no interpretation and
+    engages no goal.
+    """
+
+    WITHDRAWN = "withdrawn"
+    """The open question was settled ``WITHDRAWN`` and its content cleared (§12)."""
+
+    NOTHING_TO_WITHDRAW = "nothing_to_withdraw"
+    """The question is already terminal, or no such question exists (§12).
+
+    **An unknown id is this and never a raise**, which is
+    ``AssistantEngineContract::test_a_refusal_is_a_result_and_not_an_exception``
+    binding at this seam."""
+
+
+class GoalAbandonment(StrEnum):
+    """What became of a request to abandon a goal (ADR-0250 §12).
+
+    A **closed** enumeration of exactly **three** members, each valued by its
+    lower-cased name. The vocabulary is *added to and never renamed*.
+
+    ``AssistantEngine.abandon_goal`` is **the only thing in this system that writes**
+    :attr:`GoalStatus.ABANDONED`: no expiry, no silence, no timeout, no sweep, no
+    reclaim, no model output and no inference writes it. ADR-0249 §4 defines the
+    member as a decision nobody but the user can take — a system that writes it from
+    an expiry writes that the user gave up because they did not reply within a window,
+    which is decision 2's prohibition stated as an implementation.
+    """
+
+    ABANDONED = "abandoned"
+    """The goal's status was moved to ``ABANDONED`` and its open question withdrawn.
+
+    It does **not** move the attempt's state, write an ``AttemptOutcome``, end an
+    execution or cancel anything in flight: what becomes of an attempt on an abandoned
+    goal is A9's (§17)."""
+
+    ALREADY_CLOSED = "already_closed"
+    """The goal was already ``ACHIEVED`` or ``ABANDONED``, so nothing moved (§12)."""
+
+    NO_SUCH_GOAL = "no_such_goal"
+    """No goal of that id is held, which is a result and never a raise (§12)."""
+
+
 class TurnOutcome(BaseModel):
     """One unit of what a turn call produced (ADR-0042 §3).
 
@@ -18870,6 +19796,49 @@ class TurnOutcome(BaseModel):
             it did**, and no statement rendered for a member carries a destination, a
             query or any fragment of one, a figure, a budget, a ``Settings`` field name
             or a ``SearchDisposition`` value (ADR-0242 §9's bar, ADR-0244 §9).
+        goal_engagement: What this turn did with a goal, or ``None`` on an outcome
+            that engaged none (ADR-0250 §5). ADR-0250 is the decision that added it,
+            as ADR-0244 is :attr:`read_confirmation`'s.
+
+            ``None`` on a routed operation (ADR-0197 §7), on a restated settled
+            binding (ADR-0198 §1), and on the ``UNDECIDED`` turn of ADR-0250 §3, which
+            engaged nothing by §1.
+
+            **One of four members, one per fact, on ADR-0244 §9's own rule**, and the
+            four come apart in the cases that actually occur: a turn raises a
+            clarification on a goal it also engaged and revised; a turn whose
+            reference named nothing still associates by §3 and may then come back
+            ``UNDECIDED``, where there is **no** engagement to hang the reference on;
+            and a disambiguation exists only on a turn that engaged nothing at all. A
+            reference nested inside :class:`GoalEngagement` would therefore be
+            unreportable in exactly the case a user most needs told.
+        clarification: The question **this turn raised**, so it appears in the exchange
+            that raised it, or ``None`` on every turn that raised none (ADR-0250 §10).
+            A turn carries at most one, and **a question exists only where the store
+            accepted it**: a ``record_question`` that answered ``False`` leaves this
+            ``None``, the attempt's state unmoved and nothing durable outstanding.
+        reference: What became of the turn's :class:`TurnReference`, or ``None`` on a
+            turn that carried none **and** on a ``goal_id`` reference that resolved
+            (ADR-0250 §11). A resolved goal reference has nothing to report beyond the
+            engagement itself, which ``goal_engagement.disposition`` already carries as
+            ``RESUMED`` or ``REOPENED``; a ``goal_id`` naming no goal this store holds
+            is :attr:`ReferenceOutcome.UNKNOWN`.
+
+            **A member of its own and never nested in** :attr:`goal_engagement`, so
+            that an ``UNKNOWN`` is reported even where nothing was engaged.
+        disambiguation: The goals an ``UNDECIDED`` turn is asking between, or ``None``
+            on every other outcome (ADR-0250 §5). **No other outcome carries one at
+            all**, and the shape it appears on is the one this decision adds beside
+            ADR-0170 §4's: ``turn`` ``None``, a non-``None`` ``reply``,
+            ``reply_degraded`` ``False``.
+
+            **A widening of the** ``turn``-``None`` **count and of nothing else**,
+            which is ADR-0197 §8's move exactly — that decision admitted the first such
+            shape for a routed pass and this admits the second for an undecided
+            association. ``reply``'s three-shape enumeration is untouched, because this
+            turn carries one: an undecided turn with no reply would answer a **spoken**
+            request with silence, since ADR-0200 §4 makes ``spoken`` the rendering of
+            ``outcome.reply`` and of nothing else.
 
     Note:
         ADR-0085 §4's Group A table lists this type's four fields as promoted; the
@@ -18927,6 +19896,34 @@ class TurnOutcome(BaseModel):
         description=(
             "What became of an answer to a parked read, or ``None`` on every outcome "
             "that answered none (ADR-0244 §9)."
+        ),
+    )
+    goal_engagement: GoalEngagement | None = Field(
+        default=None,
+        description=(
+            "What this turn did with a goal, or ``None`` on an outcome that engaged "
+            "none (ADR-0250 §5)."
+        ),
+    )
+    clarification: Clarification | None = Field(
+        default=None,
+        description=(
+            "The question this turn raised, or ``None`` on every turn that raised none "
+            "(ADR-0250 §10)."
+        ),
+    )
+    reference: ReferenceOutcome | None = Field(
+        default=None,
+        description=(
+            "What became of the turn's reference, or ``None`` where it carried none and "
+            "on a goal_id reference that resolved (ADR-0250 §11)."
+        ),
+    )
+    disambiguation: GoalDisambiguation | None = Field(
+        default=None,
+        description=(
+            "The goals an UNDECIDED turn is asking between, and ``None`` on every other "
+            "outcome (ADR-0250 §5)."
         ),
     )
 
@@ -19004,9 +20001,21 @@ class TurnOutcome(BaseModel):
         is not relaxed; it is scoped to the shape its own argument reaches, and every
         other shape refuses a reply exactly as before.
 
+        **An undecided association is ruled separately too, and that separation is
+        the whole of ADR-0250 §5's supersession.** ADR-0170 §4's reason for refusing a
+        reply beside a ``None`` turn is that "a recovered park persisted no context and
+        no memories, so there was nothing to compose from" — true of a recovered park
+        and **false** of a turn that could not decide which goal it was about, where
+        there is something to compose from: the typed
+        :class:`GoalDisambiguation` the prose is built from. So the clause is not
+        relaxed; it is scoped to the shape its own argument reaches, for the second
+        time, and every other shape refuses a reply exactly as before.
+
         Raises:
             ValueError: If the outcome describes a pass that could not have happened.
         """
+        if self.disambiguation is not None:
+            return self._undecided_pass_is_coherent()
         if self.routed is not None:
             return self._routed_pass_is_coherent()
         parked = self.step is not None and self.step.confirmation is not None
@@ -19037,6 +20046,60 @@ class TurnOutcome(BaseModel):
             msg = (
                 "this outcome owed an answer and carries none: set reply, or set "
                 "reply_degraded to say composing one failed"
+            )
+            raise ValueError(msg)
+        return self
+
+    def _undecided_pass_is_coherent(self) -> TurnOutcome:
+        """State ADR-0250 §5's invariants for a turn that asked which goal.
+
+        Split from :meth:`_reply_matches_the_shape_of_the_pass` for
+        :meth:`_routed_pass_is_coherent`'s own reason: the undecided shape and the
+        ordinary ones share no clause, so one method holding both would be two
+        rulesets behind one name.
+
+        The turn "opens no goal, records no revision, engages nothing, takes **no**
+        relevance read, no episodic supplement and no ``Planner.plan`` call, drives no
+        plan and produces no effect" — so it has no :class:`TurnResult` and no
+        :class:`StepOutcome`, and it engaged nothing, so it carries no
+        :class:`GoalEngagement`. What it does carry is a **reply**, composed by
+        ``orchestration`` from the typed value, which is what keeps a spoken request
+        from being answered with silence (ADR-0200 §4).
+
+        Raises:
+            ValueError: If the outcome describes an undecided pass that could not have
+                happened.
+        """
+        for name, value in (("routed", self.routed), ("step", self.step), ("turn", self.turn)):
+            if value is not None:
+                msg = (
+                    f"an undecided turn took no route, drove no step and produced no "
+                    f"TurnResult, so this outcome must carry no {name}: it made no "
+                    f"relevance read, no episodic supplement and no Planner.plan call, "
+                    f"because association precedes all three (ADR-0250 §3, §5)"
+                )
+                raise ValueError(msg)
+        if self.goal_engagement is not None:
+            msg = (
+                "an undecided turn engaged no goal, so this outcome must carry no "
+                "goal_engagement: no implementation constructs one in order to carry a "
+                "reference outcome, because that value asserts a goal was engaged "
+                "(ADR-0250 §5, §11)"
+            )
+            raise ValueError(msg)
+        if self.reply is None:
+            msg = (
+                "an undecided turn's answer is the question it asks, so this outcome "
+                "must carry a reply: orchestration composes it from the disambiguation, "
+                "and a silent one would answer a spoken request with nothing "
+                "(ADR-0250 §5)"
+            )
+            raise ValueError(msg)
+        if self.reply_degraded:
+            msg = (
+                "an undecided turn's reply is composed deterministically from the typed "
+                "value and no model call is made for it, so composing one cannot have "
+                "degraded (ADR-0250 §5)"
             )
             raise ValueError(msg)
         return self

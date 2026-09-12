@@ -1677,7 +1677,7 @@ def _optional_understanding(envelope: dict[str, object]) -> ProposedUnderstandin
         "outcome_evidence_label": raw.get("outcome_evidence_label"),
         "outcome_span": raw.get("outcome_span"),
         "retains_outcome": raw.get("retains_outcome", False),
-        "questions": raw.get("questions", ()),
+        "questions": _proposed_questions(raw),
     } | {
         member: _proposed_elements(raw, member)
         for member in ("constraints", "criteria", "conditions")
@@ -1687,6 +1687,39 @@ def _optional_understanding(envelope: dict[str, object]) -> ProposedUnderstandin
     except ValidationError as exc:
         msg = f"the proposed understanding is not usable: {exc}"
         raise _ExtractionError(msg, understanding=True) from exc
+
+
+def _proposed_questions(understanding: dict[str, object]) -> object:
+    """``questions`` read into validatable payloads (ADR-0250 §7).
+
+    The element type moved from a bare text to a
+    :class:`~ai_assistant.core.types.ProposedQuestion` so that a raised question names
+    **what it is about**, and this is that move at the one site that reads the
+    envelope. Each entry a model wrote as a string becomes ``{"text": …}`` with no
+    subject, which is ADR-0250 §7's "``None`` means the question is about the
+    outcome" — so an envelope written against the previous prompt still reads exactly
+    as it did.
+
+    **What this function does not do is read an ``about`` label**, because the prompt
+    does not yet ask for one: rendering the brief's ``open_questions`` and proposing a
+    subject beside each question is ADR-0250 §19's M2, and a reader that accepted a
+    label the prompt never described would be accepting a value no model was asked to
+    produce.
+
+    A value that is not a sequence is passed through unchanged, so
+    :class:`~ai_assistant.core.types.ProposedUnderstanding` refuses it exactly as it
+    refused a malformed ``questions`` before.
+
+    Args:
+        understanding: The raw ``understanding`` object the envelope carried.
+
+    Returns:
+        A payload :class:`~ai_assistant.core.types.ProposedUnderstanding` can validate.
+    """
+    raw = understanding.get("questions", ())
+    if not isinstance(raw, list | tuple):
+        return raw
+    return [entry if isinstance(entry, dict) else {"text": entry} for entry in raw]
 
 
 def _proposed_elements(understanding: dict[str, object], member: str) -> list[dict[str, object]]:

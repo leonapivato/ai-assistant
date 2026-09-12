@@ -4538,7 +4538,12 @@ async def test_a_proposed_understanding_is_extracted_whole() -> None:
     assert proposed.constraints[1].span == "under $100"
     assert proposed.criteria[0].evidence_label == "M2"
     assert proposed.conditions[0].ground is Ground.INFERRED
-    assert proposed.questions == ("which weekend?",)
+    assert [one.text for one in proposed.questions] == ["which weekend?"]
+    # ADR-0250 §7: the element type carries a subject, and `None` means the question
+    # is about the outcome. The prompt does not yet ask for a label — that is that
+    # decision's M2 — so an envelope written against today's prompt reads as a
+    # question about the outcome, which is what a bare text always meant.
+    assert [one.about for one in proposed.questions] == [None]
     assert model.call_count == 1, "one pass decides the plan and the understanding"
 
 

@@ -110,6 +110,7 @@ from ai_assistant.core.types import (
     ToolCost,
     ToolDefinition,
     TurnOutcome,
+    TurnReference,
     TurnResult,
     Warrant,
     encodable_text,
@@ -4906,6 +4907,7 @@ class _ScriptedStream(FakeAssistantEngine):
         *,
         timeout: timedelta,
         conversation_id: str | None = None,
+        reference: TurnReference | None = None,
     ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
         """Yield the scripted frames, recording that the iterator was closed."""
         self.timeouts.append(timeout)

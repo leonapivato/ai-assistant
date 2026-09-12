@@ -53,7 +53,7 @@ from ai_assistant.wire.errors import HubUnavailableError
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from ai_assistant.core.types import EncodableText, Identifier
+    from ai_assistant.core.types import EncodableText, Identifier, TurnReference
 
 pytestmark = pytest.mark.integration
 
@@ -78,6 +78,7 @@ class _Unreachable(FakeAssistantEngine):
         *,
         timeout: timedelta,  # noqa: ASYNC109 — the Protocol's own signature
         conversation_id: Identifier | None = None,
+        reference: TurnReference | None = None,
     ) -> TurnOutcome:
         """Fail the way a closed door fails: a transport error, not an answer."""
         self.calls.append(("converse", {"utterance": utterance}))
@@ -94,6 +95,7 @@ class _Declining(FakeAssistantEngine):
         *,
         timeout: timedelta,  # noqa: ASYNC109 — the Protocol's own signature
         conversation_id: Identifier | None = None,
+        reference: TurnReference | None = None,
     ) -> TurnOutcome:
         """Refuse the way the hub refuses: an ``AssistantError`` it authored."""
         self.calls.append(("converse", {"utterance": utterance}))
@@ -116,6 +118,7 @@ class _Blocking(FakeAssistantEngine):
         *,
         timeout: timedelta,  # noqa: ASYNC109 — the Protocol's own signature
         conversation_id: Identifier | None = None,
+        reference: TurnReference | None = None,
     ) -> TurnOutcome:
         """Occupy a hub connection until released, so the ceiling can be reached."""
         self.occupied.set()

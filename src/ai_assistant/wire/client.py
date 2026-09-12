@@ -98,6 +98,7 @@ if TYPE_CHECKING:
         Belief,
         BeliefBand,
         BeliefSummary,
+        ClarificationWithdrawal,
         Confirmation,
         ConnectedAccount,
         ConnectionAct,
@@ -108,6 +109,8 @@ if TYPE_CHECKING:
         DurableIdentifier,
         EncodableText,
         FeedbackEvent,
+        GoalAbandonment,
+        GoalSummary,
         GrantableSource,
         GrantScope,
         HeldNotification,
@@ -137,6 +140,7 @@ if TYPE_CHECKING:
         TranscriptEntry,
         TranscriptHit,
         TurnOutcome,
+        TurnReference,
         UtcInstant,
     )
 
@@ -258,6 +262,7 @@ class HubClient:
         *,
         timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, relayed to the hub (ADR-0029 §4)
         conversation_id: Identifier | None = None,
+        reference: TurnReference | None = None,
     ) -> TurnOutcome:
         """Run one turn on the hub (ADR-0085 §3).
 
@@ -265,6 +270,9 @@ class HubClient:
             utterance: What the user said.
             timeout: The budget for the whole turn.
             conversation_id: The conversation to continue, or ``None``.
+            reference: What the turn answers, or which goal it is about, or ``None``
+                (ADR-0250 §11). Relayed and never inspected: resolving it is the
+                hub's, against records only the hub holds.
 
         Returns:
             What the turn did.
@@ -273,7 +281,11 @@ class HubClient:
             None if conversation_id is None else identifier(conversation_id, name="conversation_id")
         )
         return await self._call(  # type: ignore[no-any-return]
-            "converse", utterance=utterance, timeout=timeout, conversation_id=selected
+            "converse",
+            utterance=utterance,
+            timeout=timeout,
+            conversation_id=selected,
+            reference=reference,
         )
 
     def converse_streaming(
@@ -282,6 +294,7 @@ class HubClient:
         *,
         timeout: timedelta,  # the caller's budget, relayed to the hub (ADR-0029 §4)
         conversation_id: Identifier | None = None,
+        reference: TurnReference | None = None,
     ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
         """Run one turn on the hub, reading its answer as it is composed (ADR-0173 §4).
 
@@ -294,6 +307,7 @@ class HubClient:
             utterance: What the user said.
             timeout: The budget for the whole turn.
             conversation_id: The conversation to continue, or ``None``.
+            reference: Exactly :meth:`converse`'s (ADR-0250 §11).
 
         Returns:
             An async iterator over the answer's chunks and then the turn's outcome.
@@ -309,7 +323,9 @@ class HubClient:
         selected = (
             None if conversation_id is None else identifier(conversation_id, name="conversation_id")
         )
-        payload = arguments_object(utterance=utterance, timeout=timeout, conversation_id=selected)
+        payload = arguments_object(
+            utterance=utterance, timeout=timeout, conversation_id=selected, reference=reference
+        )
         # Projected **before** the generator is even built, for :meth:`_call`'s own
         # reason: a value with no wire form must be refused the same way whether or
         # not a hub happens to be up, and a refusal raised from the first iteration
@@ -534,6 +550,50 @@ class HubClient:
             Which of ADR-0244 §11's three states the hub reached.
         """
         return await self._call("cancel_read", token=token)  # type: ignore[no-any-return]
+
+    async def goals(
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
+    ) -> tuple[GoalSummary, ...]:
+        """Relay a listing of the user's goals (ADR-0250 §15).
+
+        Args:
+            limit: How many summaries to return.
+            offset: How many to skip.
+
+        Returns:
+            The page the hub answered.
+        """
+        return await self._call("goals", limit=limit, offset=offset)  # type: ignore[no-any-return]
+
+    async def withdraw_clarification(self, question_id: Identifier, /) -> ClarificationWithdrawal:
+        """Relay a withdrawal of a goal's clarification (ADR-0250 §12).
+
+        **The client relays and decides nothing**, exactly as :meth:`cancel_read`
+        does: which of the two states the call reached is a fact about a row only the
+        hub holds.
+
+        Args:
+            question_id: The clarification to withdraw.
+
+        Returns:
+            Which of the two states the hub reached.
+        """
+        named = identifier(question_id, name="question_id")
+        return await self._call(  # type: ignore[no-any-return]
+            "withdraw_clarification", question_id=named
+        )
+
+    async def abandon_goal(self, goal_id: Identifier, /) -> GoalAbandonment:
+        """Relay an abandonment of a goal (ADR-0250 §12).
+
+        Args:
+            goal_id: The goal to abandon.
+
+        Returns:
+            Which of the three states the hub reached.
+        """
+        named = identifier(goal_id, name="goal_id")
+        return await self._call("abandon_goal", goal_id=named)  # type: ignore[no-any-return]
 
     async def learn(self, event: FeedbackEvent) -> LearnOutcome:
         """Hand one piece of feedback to memory.

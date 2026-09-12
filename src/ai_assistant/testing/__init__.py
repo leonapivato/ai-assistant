@@ -85,7 +85,7 @@ from ai_assistant.testing.permissions import (
     FakeSpendGate,
     FakeSpendLedger,
 )
-from ai_assistant.testing.planning import FakePlanner, FakePlanStore
+from ai_assistant.testing.planning import FakeGoalAssociator, FakePlanner, FakePlanStore
 from ai_assistant.testing.policy import FakeMemoryPolicy, PolicyCall
 from ai_assistant.testing.queries import (
     DEFAULT_COMPOSED_QUERY,
@@ -236,6 +236,7 @@ __all__ = [
     "FakeEmbedder",
     "FakeFeedbackProcessor",
     "FakeFetcher",
+    "FakeGoalAssociator",
     "FakeIdentifierSpace",
     "FakeIdentifiers",
     "FakeInvocationCompleter",
