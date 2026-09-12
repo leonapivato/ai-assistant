@@ -52,6 +52,7 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     MemorySearchResult,
     MemorySource,
+    Placement,
     Provenance,
     ReadAsk,
     ReadAskOutcome,
@@ -59,6 +60,7 @@ from ai_assistant.core.types import (
     ReadOutcomeKind,
     ReadRequest,
     SearchRefusal,
+    SemanticMemory,
     StructuredAsk,
     TimeWindow,
 )
@@ -67,6 +69,7 @@ from ai_assistant.orchestration.loop import ConversationalOperation
 from ai_assistant.orchestration.reads import (
     _NON_YIELD_CLASSES,
     _NON_YIELD_VOCABULARIES,
+    READ_BUDGET,
     AskFacts,
     SearchDisposition,
     ServicedRead,
@@ -119,8 +122,24 @@ def _dated_structured_ask() -> ReadAsk:
     )
 
 
+def _citing(record_id: str, content: str, *, evidence: tuple[str, ...]) -> SemanticMemory:
+    """A belief whose provenance cites ``evidence``, so a hop over it has somewhere to go."""
+    return SemanticMemory(
+        id=record_id,
+        content=content,
+        fact=content,
+        placement=Placement(),
+        provenance=Provenance(
+            source=MemorySource.OBSERVED,
+            confidence=0.6,
+            last_updated=_clock(),
+            evidence=evidence,
+        ),
+    )
+
+
 def _episode(record_id: str, content: str) -> EpisodicMemory:
-    """One episode a structured read over :func:`_dated_structured_ask` reaches."""
+    """One episode a structured read or a citation hop reaches."""
     return EpisodicMemory(
         id=record_id,
         content=content,
@@ -825,4 +844,131 @@ async def test_a_sighted_query_whose_band_read_was_capped_is_truncated() -> None
     carried = planner.calls[1][6]
     assert _member_for(ReadKind.SIGHTED_QUERY, carried) is ReadOutcomeKind.TRUNCATED, (
         "and not DUPLICATE, which is what the counts alone would have said"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# §2's precedence case 1, at the two seams round 1 found it unheld              #
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_sighted_query_the_budget_left_no_slot_for_earns_no_entry() -> None:
+    """§2 case 1: "a read the budget did not reach is not in it" (ADR-0240 §7).
+
+    The sighted query is serviced **last** (ADR-0226 §6), so it is the one kind the
+    budget can leave with no slot at all — and ``_serviced_query`` then makes no store
+    call. That case is invisible in every fact downstream of it: the counts read exactly
+    as a store that matched nothing, and ADR-0226 §6's truncation list *does* record the
+    read, because `allowed == 0` satisfies its own condition. So the ask's classification
+    has to come from the read itself, and a classifier trusting either would report
+    ``TRUNCATED`` — telling the planner that a source it never asked declined to certify
+    an answer it never gave.
+
+    Both review lenses raised this on round 1 and both were right.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    cited = tuple(f"cited-{n}" for n in range(READ_BUDGET))
+    await memory.add(_citing("belief-1", "the bell tower is in Porto", evidence=cited))
+    for name in cited:
+        await memory.add(_episode(name, f"Ada: an earlier exchange about {name}."))
+    planner = _searching_planner(ReadAsk(kind=ReadKind.CITATION_HOP, labels=("M1",)), _query_ask())
+
+    with structlog.testing.capture_logs() as captured:
+        await _loop(planner=planner, memory=memory, episodic_limit=0).respond(
+            _ASK, narrow=_bounded(), operation=ConversationalOperation.CONVERSE
+        )
+
+    carried = planner.calls[1][6]
+    assert _serviced(captured)["new"] == READ_BUDGET, "the hop filled every slot"
+    assert ReadKind.SIGHTED_QUERY.value in _serviced(captured)["truncated_kinds"], (
+        "ADR-0226 §6's list records it, which is the fact a classifier must not read"
+    )
+    assert [one.ask.kind for one in carried] == [ReadKind.CITATION_HOP], (
+        "the query reached no store, so it earns no entry at all"
+    )
+
+
+async def test_a_hop_reaching_a_held_record_that_cites_nothing_is_a_duplicate() -> None:
+    """§2 limb 6, not limb 5: the hop returned a record and admitted none.
+
+    ADR-0229 §2 withholds the **named** records from the union — "a record named by a
+    label is counted in none of the three" — so the union's counters answer what this ask
+    *contributed*, not what the store *returned*. A hop whose label resolves to a live
+    record carrying no citations contributed nothing and returned one, which is
+    ``DUPLICATE``; a classifier reading the union alone reports ``EMPTY``, and ADR-0251
+    §2 reserves that for "the source returned no record at all".
+
+    The difference is not cosmetic: ADR-0240 §6's whole argument for telling a planner
+    about emptiness is that it licenses broadening, and this record is already in front
+    of it — "a planner told otherwise would broaden away from records already in front of
+    it".
+
+    Both review lenses raised this on round 1 and both were right.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_belief("belief-1", "the bell tower is in Porto"))
+    planner = _searching_planner(
+        ReadAsk(kind=ReadKind.CITATION_HOP, labels=("M1",)), ReadAsk(kind=ReadKind.WEB_SEARCH)
+    )
+
+    await _loop(
+        planner=planner,
+        memory=memory,
+        search=_servicer(
+            searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))), granted=True
+        ),
+    ).respond(_ASK, narrow=_bounded(), operation=ConversationalOperation.CONVERSE)
+
+    carried = planner.calls[1][6]
+    assert _member_for(ReadKind.CITATION_HOP, carried) is ReadOutcomeKind.DUPLICATE
+    assert _member_for(ReadKind.WEB_SEARCH, carried) is ReadOutcomeKind.RETURNED_RECORDS
+
+
+async def test_a_hop_whose_evidence_is_new_still_reads_as_productive() -> None:
+    """The companion to the arm above: the fix moves ``EMPTY``, not ``RETURNED_RECORDS``.
+
+    ADR-0229 §3's expansion is the named record **followed by** its own live evidence, so
+    counting the returned records off it must not turn a hop that genuinely contributed
+    into a duplicate. One label, one new evidence record: returned two, admitted one.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_citing("belief-1", "the bell tower is in Porto", evidence=("cited-1",)))
+    await memory.add(_episode("cited-1", "Ada: the tower was rebuilt in 1763."))
+    planner = _searching_planner(ReadAsk(kind=ReadKind.CITATION_HOP, labels=("M1",)))
+
+    await _loop(planner=planner, memory=memory).respond(
+        _ASK, narrow=_bounded(), operation=ConversationalOperation.CONVERSE
+    )
+
+    carried = planner.calls[1][6]
+    assert _member_for(ReadKind.CITATION_HOP, carried) is ReadOutcomeKind.RETURNED_RECORDS
+
+
+async def test_a_hop_whose_every_label_resolved_to_nothing_still_earns_no_entry() -> None:
+    """§2 case 1, kept where the fix above could have moved it.
+
+    A label outside the shown set "resolves to nothing … discarded silently" (ADR-0226
+    §3) and ``_hop_records`` returns before any store call, so the expansion is empty and
+    the ask reached no source. Counting the expansion must not turn that into an ``EMPTY``
+    the planner could act on.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_belief("belief-1", "the bell tower is in Porto"))
+    planner = _searching_planner(
+        ReadAsk(kind=ReadKind.CITATION_HOP, labels=("M9",)), ReadAsk(kind=ReadKind.WEB_SEARCH)
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        await _loop(
+            planner=planner,
+            memory=memory,
+            search=_servicer(
+                searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))), granted=True
+            ),
+        ).respond(_ASK, narrow=_bounded(), operation=ConversationalOperation.CONVERSE)
+
+    carried = planner.calls[1][6]
+    assert _serviced(captured)["labels_unresolved"] == 1, "ADR-0226 §9 counts the drop"
+    assert [one.ask.kind for one in carried] == [ReadKind.WEB_SEARCH], (
+        "and the carrier says nothing at all about the label that named nothing"
     )
