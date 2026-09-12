@@ -1,6 +1,6 @@
 # 249. The goal carries its interpretation, the attempt carries the phase, and the planner receives a brief and returns its understanding
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-09-12
 - **Partially supersedes** [ADR-0228](0228-a-serviced-read-may-revise-the-plan-once-and-the-turn-stops-looking-at-a-bound-or-a-deadline.md)
   — **§1's third clause in its second sentence alone: "The goal is minted once per turn from
@@ -642,9 +642,10 @@ above, so no model ever sees it.
 
 **The open questions ride on the brief and not as a second parameter.** The design report's
 signature carries both a `questions` keyword and the question texts on the brief, which is one
-value with two carriers and a forward dependency on a `GoalQuestion` type A2 mints and the tree
-does not yet have (`git grep 'GoalQuestion\|OpenQuestion'` over `src/` and `docs/adr/` returns
-nothing at `fc575d4d`). One carrier is kept, it is the brief, and it carries **texts** — which
+value with two carriers and a forward dependency on a `GoalQuestion` type A2 mints and no
+package defines: at `03817599`, `GoalQuestion` and `OpenQuestion` appear nowhere under `src/`,
+and in `docs/adr/` only in this document's own deferrals. One carrier is kept, it is the brief,
+and it carries **texts** — which
 is all a planner can act on, since a question's identity, its deadline and its settlement are
 A2's and none of them is the model's business.
 
@@ -960,14 +961,20 @@ need"* and whose bound is A3's.
 > *"Tier 0/1 data must never be logged"* binds unchanged and nothing here logs a brief, an
 > interpretation or an element.
 
-**The figures, as prose rather than as a mark.** `PROTOCOL_VERSION` reads **36** at
-`fc575d4d`, and ADR-0248 §7 schedules **36 → 37** for A0's implementation lane, which is in
-flight; the parked-read store's `schema_version` reads **1** and ADR-0248 §7 schedules **1 →
-2** on the same lane. A0 lands before A1 by the owner's dispatch, so the expected moves here
-are **37 → 38** and **2 → 3**. They are stated as expectations and not as marks because the
-obligation is *move by one on the lane that changes the surface*, and an ADR that fixed a
-figure a sibling lane has not yet written would be stating a fact about the tree rather than a
-decision (`CONTRIBUTING.md` → "No state claims in living documents").
+**Where the figures live, and why this ADR names none of them as a rule.** The obligation
+above is *move by one, in the same change that makes a peer's value invalid*, and it is
+deliberately stated without an integer: the number is the tree's and not this decision's.
+**`PROTOCOL_VERSION` is `wire/envelope.py`'s constant and the parked-read store's marker is
+`_SCHEMA_VERSION` in `permissions/parked_reads.py`** — a lane implementing this ADR reads each
+where it lives and adds one. Fixing an integer here would make this document assert a fact
+about a tree that keeps moving, which is what `CONTRIBUTING.md` → "No state claims in living
+documents" refuses.
+
+As a dated observation rather than a rule: at `03817599`, the base this decision was written
+against with ADR-0248's implementation merged, those two read **37** and **2**, and
+`PlanExport.schema_version` reads `Literal[7]`. So the moves L1 is expected to make are 37 → 38,
+2 → 3 and 7 → 8. That sentence is an observation of one commit, carries its sha, and binds
+nothing; the marked clauses above are what a lane owes.
 
 ### 13. What this ADR does not decide, by name, each with what fires it
 
