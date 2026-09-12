@@ -1,6 +1,6 @@
 # 16. `ToolDefinition`: declared risk metadata and a `ToolRegistry` to reason over
 
-- Status: Accepted, partially superseded by ADR-0018
+- Status: Accepted, partially superseded by ADR-0018 and ADR-0254 (one scope. §1's `ToolDefinition` model declaration, in the field list alone: the model gains `system_supplied`, a possibly-empty, duplicate-free `tuple[EncodableText, ...]` defaulting to the empty tuple, naming the keys of `parameters` the **system** fills — an idempotency key, a client reference, a locale — so that a goal-scoped authorization record needs coverage for the **user-facing** arguments alone and an implementation choice never becomes a question put to the user. A reader holding only §1 authors a definition that never carries one and does not conform. **§1's no-default rule is satisfied rather than excepted**: that rule is written against a default that is *"a claim"* a forgetful author would ship, and the empty tuple makes the **strict** claim — every argument is user-facing and every argument needs coverage — so a declaration that says nothing asks more often rather than less, and a value the model chose is refused rather than confirmed. Every other clause of §1 binds entire: every field a permission decision depends on stays required, `frozen=True` and its audit-record argument stand, `description`'s non-blank refusal stands, and no lane reads this as licence to default a safety field. §§2-7 are untouched, and §4's `parameters_schema` declaration is relied on rather than moved — the classification is a field **beside** the schema and never a keyword inside it, because a dialect that ignores keywords it does not know would drop one silently)
 - Date: 2026-07-19
 - Amends: ADR-0014 §4 (the "`core/types.py` is data-only" convention; §2 below)
 - Partially superseded: 2026-07-19 by ADR-0018 — five clauses, found by the first
@@ -50,6 +50,40 @@
   reach (#57), persistence, enablement, namespacing, transacted cost — are
   unaffected and remain deferred; ranking and selection is not among them, having
   been discharged by ADR-0144 in the note directly above.
+
+- **Partially superseded: 2026-09-12 by ADR-0254 — §1's `ToolDefinition` model
+  declaration, in the field list alone. Nothing else in this ADR.** ADR-0254 §3 gives a
+  goal-scoped authorization record coverage members over a call's arguments, and its §6
+  refuses every standing route where a live record names an argument the request carries.
+  Without a way to tell an argument the **user** chooses from one the **caller** supplies,
+  a declaration carrying an idempotency key, a client reference or a locale would be one
+  whose calls always ask — or, worse, one whose user is asked to approve an idempotency
+  key. So `ToolDefinition` gains **`system_supplied: tuple[EncodableText, ...]`**,
+  possibly empty, duplicate-free, defaulting to the empty tuple, naming the keys of
+  `parameters` the system fills. Every key it does not name is user-facing.
+
+  **The no-default rule is satisfied, not excepted, and the working is shown because a
+  reader would expect a conflict.** §1's rule is that *"no safety field has a default"*,
+  and its reason is that *"A default is a claim"* — the empty tuple for `reads`/`writes`
+  is the claim *"this tool touches no data"*, which is *"exactly the false statement a
+  forgetful integration author would ship"*. This default makes the **opposite** claim:
+  an unclassified argument is user-facing, so a declaration that says nothing needs
+  coverage for every argument and asks where it has none. It costs a question and can
+  never authorise a call, which is the direction §1 exists to protect.
+
+  **And a system-supplied argument is the system's to fill.** ADR-0254 §3 rules that
+  `orchestration` supplies the value for every such key and that a plan step whose own
+  arguments name one is **refused before the ruling** — the step does not dispatch and no
+  `CONFIRM` is put — so the field narrows what is compared without widening what a model
+  may write.
+
+  **Everything else stands entire**: every field a permission decision depends on stays
+  required with no default, `frozen=True` and the audit-record argument behind it stand,
+  `description`'s non-blank refusal stands, and no lane reads this record as licence to
+  default a safety field. §§2-7 are untouched; §4's `parameters_schema` declaration is
+  relied on rather than moved, and ADR-0254 §3 states why the classification is a field
+  beside that schema rather than a keyword inside it — ADR-0145 §5's own hazard, that
+  draft 2020-12 *"ignores keywords it does not know"*.
 
 ## Context
 

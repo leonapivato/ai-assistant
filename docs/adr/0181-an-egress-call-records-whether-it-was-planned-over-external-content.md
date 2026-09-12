@@ -1,6 +1,6 @@
 # 181. An egress call records whether it was planned over external content, and that fact is the origin the authoriser evaluates
 
-- Status: Partially superseded by ADR-0238 (§5's second clause, the lineage floor, for a closed-loop request as ADR-0238 §5 defines one — a `WEB_SEARCH` request to a destination whose recorded trust is `USER_CHOSEN`, in a conversation every one of whose externally-supplied turns recorded that all of that turn's external content was minted at such a destination, and inside a per-conversation budget — and for no other request; §5's remaining clauses, its memory-ruling-point clause, its ADR-0154 §4 floor clause and every other section of this ADR stand entire) and ADR-0247 (§5's second clause, the lineage floor, in its application to a `WEB_SEARCH` request at the configured search provider — the request whose binding's account reference and canonical destination set are the deployment's configured search connection and origin — which supersedes ADR-0238's own scope here by replacing that ADR's four closed-loop conditions with two, and for no other request of any kind. That scope, and nothing else in this ADR beyond what ADR-0238 already recorded here: §5's memory-ruling-point clause, its separate-binding clause on `decide` and `resolve`, its two-comparisons clause, its `authorises` clause, its `ActionPolicy`-contract clause and its ADR-0154 §4 floor clause, and §§1-4 and §§6-12 bind as that record left them)
+- Status: Partially superseded by ADR-0238 (§5's second clause, the lineage floor, for a closed-loop request as ADR-0238 §5 defines one — a `WEB_SEARCH` request to a destination whose recorded trust is `USER_CHOSEN`, in a conversation every one of whose externally-supplied turns recorded that all of that turn's external content was minted at such a destination, and inside a per-conversation budget — and for no other request; §5's remaining clauses, its memory-ruling-point clause, its ADR-0154 §4 floor clause and every other section of this ADR stand entire) and ADR-0247 (§5's second clause, the lineage floor, in its application to a `WEB_SEARCH` request at the configured search provider — the request whose binding's account reference and canonical destination set are the deployment's configured search connection and origin — which supersedes ADR-0238's own scope here by replacing that ADR's four closed-loop conditions with two, and for no other request of any kind. That scope, and nothing else in this ADR beyond what ADR-0238 already recorded here: §5's memory-ruling-point clause, its separate-binding clause on `decide` and `resolve`, its two-comparisons clause, its `authorises` clause, its `ActionPolicy`-contract clause and its ADR-0154 §4 floor clause, and §§1-4 and §§6-12 bind as that record left them) and ADR-0254 (one scope. §5's second clause, in its application to an egress request every **user-facing argument** and every member of whose **canonical destination set** a live goal-scoped authorization record of that request's own goal covers — a record established by a recorded act of the user, bounding each argument by a fixed value or a permitted range, compared per argument over the concrete request at every dispatch. On such a request an `ActionPolicy` returns `ALLOW` on the goal-scoped route despite the binding carrying `planned_with_external_content`, on the ground that where the user's own fixed values and permitted ranges bound every argument and every destination, outside content cannot have steered anything the user did not bound — a value another step produced can satisfy a bound the user set and can never supply one. **Partial coverage still asks**: a destination outside the record's set, a user-facing argument the record names in no member, and an argument whose value the member's comparison refused each leave the record covering nothing, and the clause binds exactly as ratified. That scope, and nothing else in this ADR beyond what the two earlier records on this line already recorded here: §5's memory-ruling-point clause, its separate-binding clause on `decide` and `resolve`, its two-comparisons clause, its `authorises` clause, its `ActionPolicy`-contract clause and its floor clause on the earlier chain-of-custody decision, and §§1-4 and §§6-12 bind as those records left them; the standing **recipient**-grant refusal one decision over is untouched, and no such grant covers such a call; and the covered-content clause one decision further over is untouched, so a binding carrying covered content reaches the goal-scoped route in no case)
 - Date: 2026-08-23
 - **Partially superseded: 2026-09-05 by ADR-0238 — §5's second clause, in the scope
   of a closed-loop request alone, and nothing else in this ADR.** That clause closes
@@ -146,6 +146,42 @@
   `planned_with_external_content` on the binding is untouched, and ADR-0247 adds no field
   to `EgressBinding`. **This line already carries the leading token, so under ADR-0082 §2
   no amendment qualifier is written on it.**
+- **Partially superseded: 2026-09-12 by ADR-0254 — §5's second clause, in its
+  application to a fully covered egress request alone, and nothing else in this ADR
+  beyond what ADR-0238 and ADR-0247 already recorded here.** That clause rules that at
+  the egress ruling point *"no ruling an `ActionPolicy` returns is `ALLOW` on a request
+  whose binding carries `planned_with_external_content` except under ADR-0148 §3's route
+  (a) … No standing user policy and no standing grant covers such a call, whatever a
+  later ADR permits for calls that do not carry it."* ADR-0254 §6 makes that false of one
+  kind of request: one every **user-facing argument** and every member of whose
+  **canonical destination set** a live `Authorization` of the request's own goal covers
+  under that ADR's §3, which is a record established by a recorded act of the user and
+  compared per argument over the concrete request at every dispatch.
+
+  **The ground is the owner's, and it is ADR-0247 §3's one authority over.** Where the
+  user's own fixed values and permitted ranges bound every argument and every
+  destination, outside content **cannot have steered anything the user did not bound**;
+  ADR-0254 §3's negative arm is what makes that hold, since a value another step produced
+  can **satisfy** a bound the user set and can never **supply** one. What contains the
+  call here is the user's own act rather than a destination, which is why the scope is
+  stated over coverage and not over a kind of request.
+
+  **Partial coverage still asks, and the negative arms are named.** A destination taken
+  from fetched content that the record's set does not contain, a user-facing argument the
+  record names in no member, and an argument whose value the member's comparison refused
+  each leave the record covering nothing — and then this clause binds exactly as
+  ratified, the ruling is `CONFIRM`, and the recipient-grant seam is consulted zero times.
+  **ADR-0193 §4 is untouched**: no `RecipientGrant` covers a tainted call, and the
+  standing recipient route reaches none of this. **ADR-0233 §9's second clause is
+  untouched**: ADR-0254 §6's condition on `SpanCoverage` is unrelaxed, so a binding
+  carrying covered content reaches route (d) in no case, whatever its coverage.
+
+  **Everything else stands entire**: §5's memory-ruling-point clause, its separate
+  binding on `decide` and `resolve`, its two-comparisons clause, its `authorises` clause,
+  its `ActionPolicy`-contract clause and its ADR-0154 §4 floor clause, and §§1-4 and
+  §§6-12. §3's carriage of `planned_with_external_content` on the binding is untouched,
+  and ADR-0254 adds no field to `EgressBinding`. **This line already carries the leading
+  token, so under ADR-0082 §2 no amendment qualifier is written on it.**
 ## Context
 
 ### The memory half of this seam is already built, and this ADR must not rebuild it
