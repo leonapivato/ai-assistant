@@ -1,6 +1,6 @@
 # 74. A conversation is a first-class entity; a turn is an episode
 
-- Status: Partially superseded by ADR-0076 (§9's `ConversationStore` obligation set and the reach of its stamped-conversation exclusion) and ADR-0084 (§9 item 5's premise that the façade is not a contract) and ADR-0086 (§5's refusal of a batch read on the memory store, and the entry repeating it in §10's declined list) and ADR-0205 (§9's enumeration of what a `ConversationTurn` carries and of what the `ConversationStore` owes) and ADR-0212 (§9's enumeration of what Conversation carries and what ConversationStore owes, and its rule that every conversation read is ordered by last activity descending) and ADR-0221 (§3's bullet "Not the message: `EpisodicMemory` carries an `outcome`, which is a property of a completed exchange", only as to the field role it assumes — `outcome` is no longer where the exchange's result is stated: the composed reply is written there and the result is written into a new `EpisodicMemory.disposition`; the bullet's argument that the unit of capture is the turn stands, and §4's stamps, §7's retention and §11's device-identity deferral are untouched) and ADR-0238 (§9's enumeration of what the `ConversationStore` owes, which is short by three operations: read a conversation's search draw; admit a search call atomically against a call bound, incrementing the count and answering the draw, or refusing; and fold, by logical `and`, whether every recorded external span a turn carried was minted by a `WEB_SEARCH` servicing at a destination of recorded trust `USER_CHOSEN` — a per-conversation search budget of one counter and one flag, held on the conversation record itself. §9's `core/types.py` enumeration, its per-conversation mutual-exclusion obligation, its two-store reasoning, its bounded-and-ordered read rule, §7's retention reclaim and §8's deletion protocol are untouched and are relied upon as written — no step is added to either sequence, and `Conversation`, `ConversationTurn` and `ConversationExport` gain no field and change no version)
+- Status: Partially superseded by ADR-0076 (§9's `ConversationStore` obligation set and the reach of its stamped-conversation exclusion) and ADR-0084 (§9 item 5's premise that the façade is not a contract) and ADR-0086 (§5's refusal of a batch read on the memory store, and the entry repeating it in §10's declined list) and ADR-0205 (§9's enumeration of what a `ConversationTurn` carries and of what the `ConversationStore` owes) and ADR-0212 (§9's enumeration of what Conversation carries and what ConversationStore owes, and its rule that every conversation read is ordered by last activity descending) and ADR-0221 (§3's bullet "Not the message: `EpisodicMemory` carries an `outcome`, which is a property of a completed exchange", only as to the field role it assumes — `outcome` is no longer where the exchange's result is stated: the composed reply is written there and the result is written into a new `EpisodicMemory.disposition`; the bullet's argument that the unit of capture is the turn stands, and §4's stamps, §7's retention and §11's device-identity deferral are untouched) and ADR-0238 (§9's enumeration of what the `ConversationStore` owes, which is short by three operations: read a conversation's search draw; admit a search call atomically against a call bound, incrementing the count and answering the draw, or refusing; and fold, by logical `and`, whether every recorded external span a turn carried was minted by a `WEB_SEARCH` servicing at a destination of recorded trust `USER_CHOSEN` — a per-conversation search budget of one counter and one flag, held on the conversation record itself. §9's `core/types.py` enumeration, its per-conversation mutual-exclusion obligation, its two-store reasoning, its bounded-and-ordered read rule, §7's retention reclaim and §8's deletion protocol are untouched and are relied upon as written — no step is added to either sequence, and `Conversation`, `ConversationTurn` and `ConversationExport` gain no field and change no version) and ADR-0247 (§9's enumeration of what the `ConversationStore` owes, restored to what ADR-0205 and ADR-0212 left it: the three operations ADR-0238 added to it — reading a conversation's search draw, admitting a search call against a bound, and folding whether a turn's recorded external spans were minted at a chosen destination — are removed with the per-conversation search budget they served, so a reader holding ADR-0238's record here would build a store owing three members that no longer exist. **No sentence of this ADR is superseded by ADR-0247**, and nothing else in this ADR moves: §9's `core/types.py` enumeration, its per-conversation mutual-exclusion obligation, its two-store reasoning and its bounded-and-ordered read rule, §7's retention reclaim, §8's deletion protocol and §10's membership rule stand entire and are relied upon as written, no step is removed from either sequence, and `Conversation`, `ConversationTurn` and `ConversationExport` gain and lose no field and change no version)
 - Date: 2026-07-28
 - Partially superseded: 2026-08-01 by ADR-0086 — **§5's refusal of a batch read on
   `MemoryStore`, and the entry in §10 repeating it, no longer hold: `get_many` is
@@ -410,6 +410,30 @@
   same change as ADR-0238 itself, which is the existence condition ADR-0082 §7 states.
   Refs #1908, #2133.
 
+- **Recorded: 2026-09-11 by ADR-0247 — §9's `ConversationStore` obligation set returns
+  to what ADR-0205 and ADR-0212 left it, and no sentence of this ADR is superseded.**
+  ADR-0238's pair on this line records that §9's enumeration *"is short by three
+  operations"* — reading a conversation's search draw, admitting a search call atomically
+  against a call bound, and folding whether every recorded external span a turn carried was
+  minted at a destination of recorded trust `USER_CHOSEN`. **The owner's security pass over
+  the search path removed the per-conversation search budget those three served**, so
+  `search_draw`, `admit_search` and `observe_search` are removed from `ConversationStore`
+  and the enumeration is whole again. A reader holding ADR-0238's record here would
+  otherwise build a store owing three members that no longer exist, which is what this pair
+  exists to stop.
+
+  **Nothing in this ADR moves, and ADR-0238's reasoning about *where* the counter belonged
+  is neither denied nor relied on.** §9's `core/types.py` enumeration, its per-conversation
+  mutual-exclusion obligation, its two-store reasoning and its bounded-and-ordered read
+  rule stand entire; §7's retention reclaim and §8's deletion protocol are untouched, no
+  step being removed from either sequence; §10's membership rule and `turn_of_episode` are
+  relied upon as written; and `Conversation`, `ConversationTurn` and `ConversationExport`
+  gain and lose no field and change no version. **The two SQLite columns ADR-0238's
+  implementing lane added to the `conversations` table stay on disk, read by nothing** —
+  dropping a column needs a table rebuild, which ADR-0247 §13 defers with what fires it.
+  This line already carries the leading token, so under ADR-0082 §2 no amendment qualifier
+  is written on it, and this pair accumulates beside the six already there under ADR-0070
+  §4.
 ## Context
 
 Leg 1 gave the user a way to read and kill what the assistant believes (ADR-0072,

@@ -1,6 +1,6 @@
 # 244. A `CONFIRM` on a search parks as a durable question, and the answer runs that exact read once
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0247 (§6's clause 2 entire — `search_draw` and `Settings.search_calls_per_conversation` both being removed, the fact that clause establishes, that the conversation exists and is not stamped deleted, passes to a read of `ConversationStore.get`, which answers `None` on the same two grounds, and the clause's remaining sentence that `admit_search` is not called becomes vacuous rather than false; §9's definition of `UNAVAILABLE_NOW` in its `search_calls_per_conversation` limb alone, the member keeping its name, its value, its position in §9's precedence order and its other two grounds; and §12's re-closure of `SearchNotServiced` at nine members in that count alone, the enumeration becoming seven as the two members defined over `admit_search`'s refusal are removed. Those three scopes, and nothing else in this ADR: §§1-5, §6's other five clauses, its ordering, its gate and its route-(a) authority clause, §7, §8, §9's other six members and its precedence and no-reason rules, §§10-11, §12's remaining clauses and §§13-23 stand entire, and §6's rule that `trust_of` is not asked again at the answer is relied upon and strengthened)
 - Date: 2026-09-10
 - **Partially supersedes** [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
   — **§9's second clause in three of its limbs, §9's fifth clause in its one-route limb,
@@ -97,6 +97,39 @@
   [#2222](https://github.com/leonapivato/ai-assistant/issues/2222) carries the
   pre-registered acceptance scenarios §19 binds to by number.
 
+- **Partially superseded: 2026-09-11 by ADR-0247 — three scopes, and nothing else in
+  this ADR.** The owner's security pass over the search path removed
+  `Settings.search_calls_per_conversation` and, with it, `ConversationStore.search_draw`,
+  so two of this ADR's clauses name facts that stop existing.
+
+  **§6's clause 2.** It establishes *"`search_draw` answers a draw for `conversation_id` …
+  and `Settings.search_calls_per_conversation` is not `0`"*. The fact it was establishing
+  is that **the conversation exists and is not stamped deleted**, and
+  `ConversationStore.get` answers it by the same rule this ADR already quotes — *"`None`
+  when the id names nothing **or** names a conversation stamped deleted"* — with no Protocol
+  member added and none widened. Clause 2's remaining sentence, that `admit_search` is not
+  called and no second call is drawn, becomes **vacuous rather than false**: there is no
+  call to draw.
+
+  **§9's `UNAVAILABLE_NOW`, in one limb.** Its `search_calls_per_conversation` ground goes;
+  its other two — the conversation no longer exists or is stamped deleted, and the
+  deployment holds no searcher — bind entire, and the member keeps its name, its value and
+  its position in §9's precedence order. **That second ground is what ADR-0247 §8(c) relies
+  on**, unchanged, to answer an open park after the owner unconfigures the provider.
+
+  **§12's re-closure of `SearchNotServiced` at nine, in that count alone.**
+  `SEARCH_DISABLED` and `NOT_ADMITTED` are removed with the refusal they render, so the
+  enumeration is seven; `ANSWER_AWAITED` keeps its value and its first position, and every
+  remaining pairwise order is unchanged.
+
+  **What is relied upon as written.** §1's park and its no-turn-parks rule; §2's three
+  refusals; §3's one-open-park-per-conversation rule and its content lifetime; §4; §5; §6's
+  other five clauses, its ordering, its compare-and-swap gate, its expiry clause and its
+  rule that **the approval is the authority, and it is ADR-0148 §3's route (a)** — which is
+  why ADR-0247's new route never reaches a resumed call; §6's *"`trust_of` is not asked
+  again"*, which stays true and is strengthened; §7's one route; §8; §§10-11; §12's
+  remaining clauses; §13; and §§14-23. **This line takes the leading token and `Accepted`
+  is dropped, as `docs/adr/template.md` requires.**
 ## Context
 
 ### Where this comes from

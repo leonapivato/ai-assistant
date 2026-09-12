@@ -1,6 +1,6 @@
 # 21. Permission decisions and the audit trail
 
-- Status: Partially superseded by ADR-0192 (§4's paragraph "It bounds resolutions, not executions", and with it the scope of the trail, of `clear` and of `export`'s whole-store portability discharge) and ADR-0193 (§3's per-ruling purity clauses, for a policy constructed with an authorisation source)
+- Status: Partially superseded by ADR-0192 (§4's paragraph "It bounds resolutions, not executions", and with it the scope of the trail, of `clear` and of `export`'s whole-store portability discharge) and ADR-0193 (§3's per-ruling purity clauses, for a policy constructed with an authorisation source) and ADR-0247 (§3's clause that `decide` returns `authorised_by is None` from a policy constructed with no authorisation source, in the limb reaching an egress request whose binding carries `closed_loop`: such a ruling sets `authorised_by` to the binding's own `BoundAccount.reference` and leaves `authorised_subject` unset, and the pointer is not one the policy could invent because the audit trail refuses it unless it equals that same value. That scope, and nothing else in this ADR beyond what ADR-0192 and ADR-0193 already recorded here: §3's other clauses, §4's resolution invariant, §5's disclosure floor — which that ruling satisfies rather than relaxes, by setting the field — §5's monotonicity obligation and §6's deferral of standing grants for other actions bind as those records left them)
 - Date: 2026-07-20
 - Partially superseded: 2026-08-25 by
   [ADR-0193](0193-a-standing-recipient-grant-is-a-user-act-on-a-canonical-destination-set-and-never-covers-a-call-planned-over-external-content.md)
@@ -121,6 +121,35 @@
   carried it moves off the `Status` line in the same change that line takes the
   leading `Partially superseded by` token (ADR-0082 §2).
 
+- **Partially superseded: 2026-09-11 by ADR-0247 — one clause of §3, in one limb, and
+  nothing else in this ADR beyond what ADR-0192 and ADR-0193 already recorded here.**
+
+  **§3's sourceless-policy clause.** *"**`decide` must return `authorised_by is None`** from
+  a policy constructed with no authorisation source"* ceases to hold for an egress request
+  whose binding carries `closed_loop` — after ADR-0247, a `WEB_SEARCH` whose binding's
+  account reference and canonical destination set are the deployment's configured search
+  connection and origin. Such a ruling sets `authorised_by` to that binding's own
+  `BoundAccount.reference` and leaves `authorised_subject` unset. **On every other request a
+  sourceless policy still sets neither field.**
+
+  **The clause's reason is met rather than waived.** §3 states it because *"A `str` field
+  naming an authorisation is one a policy could fabricate, which would make §5's floor
+  satisfiable by writing something in a box"*, and because *"there is no authorisation store
+  to check it against"*. ADR-0247 supplies a check that needs no store: the audit trail
+  refuses such a ruling unless its `authorised_by` **equals its own binding's**
+  `BoundAccount.reference`, a value the egress seam derived and the decision already
+  carries. The pointer is therefore verifiable at the trail, which is the property §3's
+  second bullet demands of the one path that may set the field.
+
+  **§5's disclosure floor is satisfied, not relaxed.** *"A definition with a **non-empty
+  `discloses`** … may not receive `ALLOW` with `authorised_by` unset"* is the reason the
+  field is **owed** on this route rather than optional, and §5's own sentence governs:
+  *"the floor is on the policy deciding by itself, not on the outcome, so an `ALLOW` naming
+  the user decision it rests on is permitted"*. That is the same relation ADR-0193 §15
+  records for the standing grant. **§3's other clauses, §4's resolution invariant, §5's
+  monotonicity obligation and §6's deferral of standing grants for other actions stand
+  entire.** This line already carries the leading token, so under ADR-0082 §2 no amendment
+  qualifier is written on it.
 ## Context
 
 `permissions/` is an empty package with a docstring. ADR-0004 §7 ratified what

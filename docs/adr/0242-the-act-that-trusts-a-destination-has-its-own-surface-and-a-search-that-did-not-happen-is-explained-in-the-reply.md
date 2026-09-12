@@ -1,6 +1,6 @@
 # 242. The act that trusts a destination has its own surface, and a search that did not happen is explained in the reply
 
-- Status: Partially superseded by ADR-0244 (§8's eight-member closure of `SearchNotServiced` in that count alone (the enumeration becomes nine with `ANSWER_AWAITED`, declared first; the eight members, their values, their order relative to one another, the added-to-and-never-renamed rule, the mapping's totality and its non-injectivity all stand), the three `RULING_CONFIRM` rows of §8's mapping table, which are discriminated by whether a park was written rather than re-pointed — obligatory, because a parked decision is not one the establishing act may ride and §8's `AUTHORISATION_AWAITED` clause asserts that it is — and §9's one-fixed-statement-per-member enumeration by the ninth member alone; every statement §9 fixes for the existing eight binds verbatim, §9's bars bind on the ninth, and §6's eligibility condition, §7's carrier, §9's `TurnOutcome` field and `SpokenTurn` clause, §§1–5 and §§10–18 are untouched)
+- Status: Partially superseded by ADR-0244 (§8's eight-member closure of `SearchNotServiced` in that count alone (the enumeration becomes nine with `ANSWER_AWAITED`, declared first; the eight members, their values, their order relative to one another, the added-to-and-never-renamed rule, the mapping's totality and its non-injectivity all stand), the three `RULING_CONFIRM` rows of §8's mapping table, which are discriminated by whether a park was written rather than re-pointed — obligatory, because a parked decision is not one the establishing act may ride and §8's `AUTHORISATION_AWAITED` clause asserts that it is — and §9's one-fixed-statement-per-member enumeration by the ninth member alone; every statement §9 fixes for the existing eight binds verbatim, §9's bars bind on the ninth, and §6's eligibility condition, §7's carrier, §9's `TurnOutcome` field and `SpokenTurn` clause, §§1–5 and §§10–18 are untouched) and ADR-0247 (§8's closure of `SearchNotServiced` at exactly eight members, in that count alone — the enumeration becomes seven, `SEARCH_DISABLED` and `NOT_ADMITTED` being removed with the `admit_search` refusal and the `Settings` bound they are defined over, which leaves every remaining pairwise order and every remaining value unchanged — and §8's two-members-not-one clause for that refusal, whose subject no longer exists. Those two scopes, and nothing else in this ADR beyond what ADR-0244 already recorded here: §1's trust act and its own surface, §§2-7, §8's remaining clauses including the precedence order, the totality and the non-injectivity of its mapping and the added-to-and-never-renamed rule, §9's bar on what a statement may say, and §§10-18 bind as that record left them; `TRUST_MISSING` and `AUTHORISATION_AWAITED` are expressly not removed)
 - Date: 2026-09-09
 - **Partially supersedes** [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
   — **§9's third clause, and nothing else in that ADR.** That clause reads *"The composing
@@ -99,6 +99,33 @@
   `TurnOutcome` field, its `SpokenTurn` clause and its no-statement-is-a-degradation clause
   bind entire, and §§1–5, §10–§18 are untouched.
 
+- **Partially superseded: 2026-09-11 by ADR-0247 — two scopes, and nothing else in this
+  ADR beyond what ADR-0244 already recorded here.** The owner's security pass removed
+  `Settings.search_calls_per_conversation` and `ConversationStore.admit_search`, which are
+  the two facts §8's first two members are defined over.
+
+  **§8's closure at exactly eight members, in that count alone.** `SEARCH_DISABLED` —
+  *"`admit_search` refused the servicing and `Settings.search_calls_per_conversation` is
+  **`0`**"* — and `NOT_ADMITTED` — *"`admit_search` refused the servicing under a
+  **positive** bound"* — have no producer once that bound is gone, so both are removed and
+  the enumeration stands at **seven**. They are the first two in declaration order, so
+  removing them leaves **every remaining pairwise order and every remaining value
+  unchanged**, which is the same property ADR-0244 relied on when it inserted at the head.
+
+  **§8's two-members-not-one clause.** Its whole argument is that the single statement §9
+  fixes per member cannot be true of both configurations of one `Settings` value. That is
+  correct and has no subject.
+
+  **What is relied upon as written, and what is expressly not removed.** §1's trust act and
+  its own surface stay ratified for every destination that is not the configured search
+  provider, which is the owner's ruling and not an oversight. **`TRUST_MISSING` and
+  `AUTHORISATION_AWAITED` are not removed**, although both become unreachable on a
+  deployment that has configured a provider: retiring them is outside the ruling, and
+  ADR-0247 §13 defers the question with what fires it. §§2-7, §8's remaining clauses —
+  the precedence order, the totality and the non-injectivity of its mapping, and the
+  added-to-and-never-renamed rule — §9's bar on what a statement may say, §§10-18, and
+  ADR-0244's own record here all stand. **This line already carries the leading token, so
+  under ADR-0082 §2 no amendment qualifier is written on it.**
 ## Context
 
 ### Where this comes from
