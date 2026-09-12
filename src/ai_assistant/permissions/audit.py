@@ -3183,15 +3183,19 @@ class _NoRecipientGrants:
 _NO_RECIPIENT_GRANTS: Final = _NoRecipientGrants()
 
 
-def _names_a_standing_authorisation(decision: PermissionDecision) -> bool:
-    """Whether ADR-0193 §6's invariant is in scope for ``decision``.
+def _rests_on_a_standing_authorisation(decision: PermissionDecision) -> bool:
+    """The shape both standing routes share (ADR-0193 §6, ADR-0247 §2).
 
-    A **route-(b) egress decision**, and nothing else: a non-resolving ``ALLOW``
-    whose ``egress_binding`` is not ``None`` and whose ``authorised_by`` is set.
-    ``resolves`` is the discriminator the records already carry — a route-(a)
-    ``ALLOW`` sets it and equals it to ``authorised_by``, and a route-(b) one
-    leaves it unset — so no field was added to say which basis a row rests on
-    (ADR-0193 §6).
+    A non-resolving ``ALLOW`` whose ``egress_binding`` is not ``None`` and whose
+    ``authorised_by`` is set. ``resolves`` is the discriminator the records already
+    carry — a route-(a) ``ALLOW`` sets it and equals it to ``authorised_by``, and a
+    standing one leaves it unset — so no field was added to say which basis a row
+    rests on.
+
+    **It does not say which standing route the row claims**, and since ADR-0247 §2
+    there are two: the ``authorised_subject`` decides that, and
+    :func:`_names_a_standing_authorisation` below is the half of this shape that
+    claims route (b).
 
     **The scope is deliberately narrow, and no lane widens it into a general rule
     about** ``authorised_by``. A decision with no ``egress_binding`` is not an
@@ -3210,8 +3214,40 @@ def _names_a_standing_authorisation(decision: PermissionDecision) -> bool:
     )
 
 
+def _names_a_standing_authorisation(decision: PermissionDecision) -> bool:
+    """Whether ADR-0193 §6's invariant is in scope for ``decision``.
+
+    A **route-(b) egress decision**, and nothing else: the shape above **and an
+    ``authorised_subject``**. ADR-0247 §2 narrows this scope by exactly that
+    conjunct — "``AuditTrail.record``'s route-(b) scope … is narrowed by *and whose
+    ``authorised_subject`` is set*" — and the eight checks themselves are untouched
+    on every row still in it.
+
+    **The digest is the discriminator, and it reads nothing but the row.** §6's
+    pairing clause refused a standing row that "names standing authorisation … and
+    fingerprints none", so **every route-(b) row written since that implementation
+    carries one** — the closed-loop grant-covered ``ALLOW`` ADR-0238 permits
+    included. A non-resolving egress ``ALLOW`` whose ``authorised_by`` is set is
+    therefore route (b) where ``authorised_subject`` is set and route (c) where it
+    is not, over the whole history and with **no store read** — which is what
+    ADR-0193 §9 requires, and which needs no assumption that grant ids and
+    connection references are drawn from disjoint namespaces. They are not: both
+    are ``DurableIdentifier``.
+
+    **Narrowed by the digest and never by ``closed_loop``** (ADR-0247 §2), which
+    that decision reserves for route (c)'s *eligibility*. A trail that discriminated
+    by the kind would classify a pre-ADR-0193 digest-free pointer as route (c) the
+    moment some later row carried the fact, and would leave an ordinary route-(b)
+    row on a closed-loop request unvalidated.
+    """
+    return (
+        _rests_on_a_standing_authorisation(decision)
+        and decision.ruling.authorised_subject is not None
+    )
+
+
 def _check_standing_shape(decision: PermissionDecision) -> None:
-    """Refuse the route-(b) defects decidable from the decision alone (ADR-0193 §6).
+    """Refuse the standing-row defects decidable from the decision alone.
 
     Three of ADR-0193 §6's eight checks and its pairing clause need no store, so
     they are made here — **before** the ended-epoch refusals ADR-0184 §4 and
@@ -3230,12 +3266,30 @@ def _check_standing_shape(decision: PermissionDecision) -> None:
     it — and ADR-0193 §4's floor would be bypassed by a *missing* field rather than
     by a false one.
 
+    **Since ADR-0247 §2 it decides *which* standing route a row claims, and holds
+    each to its own invariant.** The digest is the discriminator: a standing row
+    carrying one claims route (b) and is held to §6's eight checks; one carrying
+    none claims route (c) — the deployment's own configured search provider — and is
+    admitted here on two conditions read from the decision alone, its binding's
+    ``closed_loop`` and the equality of its pointer to that binding's
+    ``account.reference``. **No store is read on that branch, no ``Settings`` value
+    is held by this module, and no clock is consulted**; the trail asserts what it
+    can see and the policy asserts the rest, and neither component is offered the
+    other's job.
+
+    **The ``OriginUnrecordedBinding`` arm is taken before either branch**, so an
+    egress call whose origin was never recorded is refused **by name** on both
+    routes (ADR-0247 §2, ADR-0184 §7): such a binding carries no ``closed_loop``
+    either, so no lane reads an unrecorded origin as a configured provider.
+
     Raises:
         InvalidAuthorisationError: If a **resolving** ``ALLOW`` carries an
-            ``authorised_subject``; or if a route-(b) egress decision's binding
-            records no origin, records that the call was planned over external
-            content **without recording that it was closed-loop** (ADR-0238 §6), or
-            carries no ``authorised_subject`` to check.
+            ``authorised_subject``; if a standing egress decision's binding records
+            no origin; if a route-(b) decision's binding records that the call was
+            planned over external content **without recording that it was
+            closed-loop** (ADR-0238 §6); or if a digest-free standing decision's
+            binding is not closed-loop or its pointer is not that binding's
+            ``account.reference`` (ADR-0247 §2).
     """
     ruling = decision.ruling
     if decision.resolves is not None:
@@ -3247,7 +3301,7 @@ def _check_standing_shape(decision: PermissionDecision) -> None:
             )
             raise InvalidAuthorisationError(msg)
         return
-    if not _names_a_standing_authorisation(decision):
+    if not _rests_on_a_standing_authorisation(decision):
         return
     binding = decision.egress_binding
     if not isinstance(binding, EgressBinding):
@@ -3257,6 +3311,9 @@ def _check_standing_shape(decision: PermissionDecision) -> None:
             f"covers such a call (ADR-0193 §2, §6)"
         )
         raise InvalidAuthorisationError(msg)
+    if ruling.authorised_subject is None:
+        _check_configuration_authority(decision, binding)
+        return
     if binding.planned_with_external_content and not binding.closed_loop:
         # ADR-0238 §6 supersedes ADR-0193 §6's eighth-check clause **in one limb, for a
         # closed-loop request alone**: the seventh limb becomes "whose
@@ -3283,11 +3340,62 @@ def _check_standing_shape(decision: PermissionDecision) -> None:
             f"about that call — is the only route to an ALLOW on one (ADR-0193 §4, §6)"
         )
         raise InvalidAuthorisationError(msg)
-    if ruling.authorised_subject is None:
+
+
+def _check_configuration_authority(decision: PermissionDecision, binding: EgressBinding) -> None:
+    """Admit a digest-free standing row, or refuse it as the pairing clause does.
+
+    ADR-0247 §2's route-(c) invariant, and the whole of what the trail can assert
+    about that route: a non-resolving ``ALLOW`` carrying an ``egress_binding`` and an
+    ``authorised_by`` with **no** ``authorised_subject`` is accepted **only** where
+    its binding's ``closed_loop`` is ``True`` **and** its ``authorised_by`` equals
+    that binding's ``account.reference``. Failing either, it is refused exactly as
+    ADR-0193 §6's pairing clause refuses it — the same words, because it is the same
+    record being refused for the same reason.
+
+    **``closed_loop`` is the eligibility and the digest is the discriminator, and
+    neither does the other's work** (§2). The digest says which route the row claims,
+    from the row alone and over the whole history; ``closed_loop`` says whether the
+    row is of the one kind ADR-0148 §3's new route covers. So an ``ALLOW`` on an
+    email, a fetch or any other kind — whose binding carries ``closed_loop``
+    ``False`` — is refused with no grant exactly as it is today, and a faulty policy
+    cannot reach past this enforcement by omitting a digest.
+
+    **The pointer half is :func:`_check_authorisation`'s own reason stated one route
+    over**: *"Without this the pointer is a string a policy could invent."* What it
+    buys here is that the recorded authority is the one the binding carries, so
+    "which configuration authorised this" is answerable from the row (ADR-0247 §8).
+
+    **What it cannot assert is §1's account-and-origin comparison**, because this
+    module holds no configuration and is given none: no ``Settings`` value reaches
+    the trail, and a lane that handed it one has breached §2. That comparison is the
+    policy's, taken where the configured values live, and this is stated rather than
+    implied — what the trail checks is the row's internal consistency and the kind.
+
+    **A stored digest-free row whose binding carries ``closed_loop`` ``False`` is
+    *neither* route** and ADR-0193 §11 governs it entire. No row of that shape is
+    written after this decision, and none written before it can carry ``closed_loop``
+    ``True`` — the field was added by ADR-0238, which lands after ADR-0193's
+    implementation — so §11's reserved pointer is never classified as route (c).
+    Nothing here revalidates, rewrites or re-derives a stored row of any shape.
+
+    Args:
+        decision: The validated snapshot about to be appended.
+        binding: its own binding, already narrowed to the arm that records an
+            origin.
+
+    Raises:
+        InvalidAuthorisationError: If the binding is not closed-loop, or the
+            pointer is not that binding's ``account.reference``.
+    """
+    ruling = decision.ruling
+    if not binding.closed_loop or ruling.authorised_by != binding.account.reference:
         msg = (
             f"decision {decision.id!r} names standing authorisation "
             f"{ruling.authorised_by!r} and fingerprints none; a pointer with nothing on "
-            f"the row to contradict a rebinding is the record ADR-0193 §6 refuses"
+            f"the row to contradict a rebinding is the record ADR-0193 §6 refuses, "
+            f"unless it is a closed-loop call naming its own binding's connected "
+            f"account, which this is not (ADR-0247 §2)"
         )
         raise InvalidAuthorisationError(msg)
 

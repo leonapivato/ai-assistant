@@ -33,6 +33,7 @@ from ai_assistant.app import composition as composition_module
 from ai_assistant.app.composition import _search_destinations
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.types import CanonicalDestination, CostBasis, DestinationProtocol
+from ai_assistant.permissions import ConfiguredSearchDestination, ThresholdActionPolicy
 from ai_assistant.tools import WebSearchIntegration, build_web_search_integration
 from ai_assistant.tools.egress import StreamOutboundTransport, WebSearchTransport
 from ai_assistant.tools.egress_binder import EgressBindingSeam
@@ -431,3 +432,56 @@ async def test_an_origin_with_no_canonical_form_leaves_the_set_empty() -> None:
     closed-loop.
     """
     assert _search_destinations("not an origin at all") == ()
+
+
+async def test_the_policy_is_handed_the_configured_search_destination(tmp_path: Path) -> None:
+    """ADR-0247 §2's one constructor argument, asserted where a root could drop it.
+
+    §11's lane 1 puts the supply here — "``app/composition.py`` supplies the new
+    argument, which is the one file outside ``permissions/`` this lane touches" — and a
+    root that landed the policy, the trail and every test while passing nothing would
+    leave **every configured deployment taking the predicate as false**, with a green
+    gate and a search that still asks. That is the same failure
+    ``test_the_composition_root_forwards_the_configured_per_call_figure`` exists for,
+    one decision along.
+
+    **Asserted against the registration the seam holds rather than against the settings
+    text**, because what §1 compares is the binding's own ``account.reference`` and the
+    binding's own canonical destination set: a root that passed the right strings to the
+    wrong policy, or the searcher's origin to one and another to the other, fails here.
+    """
+    engine = build_engine(_settings(configured=True), data_dir=tmp_path)
+    try:
+        binder = engine._runner._binder
+        assert isinstance(binder, EgressBindingSeam)
+        registration = binder._registrations.registration(WEB_SEARCH_ID)
+        assert registration is not None, "a configured deployment registers the search"
+        policy = engine._runner._policy
+        assert isinstance(policy, ThresholdActionPolicy), "the production policy"
+        configured = policy._configured_search
+
+        assert configured == ConfiguredSearchDestination(
+            reference=registration.reference,
+            destinations=frozenset(_search_destinations(registration.transport_endpoint)),
+        )
+    finally:
+        await engine.aclose()
+
+
+async def test_a_deployment_that_connected_no_account_hands_the_policy_nothing(
+    tmp_path: Path,
+) -> None:
+    """ADR-0247 §2's fail-closed default, and §1's "unconfiguring revokes".
+
+    With neither setting there is no registration, no request is composed and the
+    authority §2 states has nothing to attach to — so the policy is handed ``None`` and
+    takes the predicate as false for every request. Without this row the case above
+    would pass against a root that hard-coded a pair.
+    """
+    engine = build_engine(_settings(configured=False), data_dir=tmp_path)
+    try:
+        policy = engine._runner._policy
+        assert isinstance(policy, ThresholdActionPolicy), "the production policy"
+        assert policy._configured_search is None
+    finally:
+        await engine.aclose()

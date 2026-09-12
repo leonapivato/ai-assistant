@@ -679,15 +679,25 @@ def _thresholds(calls: list[dict[str, object]]) -> list[dict[str, object]]:
     constructor parameter** (#239), and a seam in the dict would make each of
     them fail whenever an unrelated dependency was added — the brittleness that
     turns a mapping test into a roster test nobody meant to write.
-    :func:`_policy_grant_seam` is where the seam itself is asserted, once.
+    :func:`_policy_grant_seam` is where the seam itself is asserted, once, and
+    :func:`_policy_configured_search` is where ADR-0247 §2's configured search
+    destination is — the second dependency this list exists to keep out of a
+    mapping test.
     """
-    return [{name: value for name, value in call.items() if name != "grants"} for call in calls]
+    lifted = {"grants", "configured_search"}
+    return [{name: value for name, value in call.items() if name not in lifted} for call in calls]
 
 
 def _policy_grant_seam(calls: list[dict[str, object]]) -> object:
     """The one ``grants`` argument the builder constructed the policy with."""
     assert len(calls) == 1, calls
     return calls[0]["grants"]
+
+
+def _policy_configured_search(calls: list[dict[str, object]]) -> object:
+    """The one ``configured_search`` argument the builder constructed the policy with."""
+    assert len(calls) == 1, calls
+    return calls[0]["configured_search"]
 
 
 def _spy_on_trail(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
