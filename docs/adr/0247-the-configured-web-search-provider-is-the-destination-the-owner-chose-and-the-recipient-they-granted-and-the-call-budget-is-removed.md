@@ -1,6 +1,6 @@
 # 247. The configured web-search provider is the destination the owner chose and the recipient they granted, a search to it never asks on lineage or coverage grounds, and the per-conversation call budget is removed
 
-- Status: Partially superseded by ADR-0251 (one scope. §5's per-turn sentence alone: "**Per turn**: ADR-0228 §4's planning budget gates the start of each additional planner call, so a turn that declares one starts at most two planner calls and therefore at most two searches, and an operation declaring none does not iterate at all." ADR-0251 §5 moves ADR-0228 §3's count to the attempt and declares four for a conversational one, so the figure two stops being true of a turn inside such an attempt; the sentence's second limb, that an operation declaring none does not iterate at all, binds verbatim and is kept by ADR-0251 §5 unchanged, as is ADR-0228 §4's PT20S gate the first limb names. §5's per-search clause (ADR-0241 §1's deadline and ADR-0231 §5's ceilings), its per-money clause (ADR-0194's ceiling and ADR-0016 §4's unknown-cost floor) and above all its per-conversation clause — "**Per conversation: nothing bounds the number of searches**, and that is the decision rather than an omission" — all bind **verbatim**, and ADR-0251 §11 answers §13's first deferral by keeping that sentence true rather than by reversing it. §5's removal clauses, its two-SQLite-columns clause, its dissolution of two ADR-0238 deferrals and its #1908-sentence clause are untouched, and §§1-4 and §§6-16 are untouched)
+- Status: Partially superseded by ADR-0251 (one scope. §5's per-turn sentence alone: "**Per turn**: ADR-0228 §4's planning budget gates the start of each additional planner call, so a turn that declares one starts at most two planner calls and therefore at most two searches, and an operation declaring none does not iterate at all." ADR-0251 §5 moves ADR-0228 §3's count to the attempt and declares four for a conversational one, so the figure two stops being true of a turn inside such an attempt; the sentence's second limb, that an operation declaring none does not iterate at all, binds verbatim and is kept by ADR-0251 §5 unchanged, as is ADR-0228 §4's PT20S gate the first limb names. §5's per-search clause (ADR-0241 §1's deadline and ADR-0231 §5's ceilings), its per-money clause (ADR-0194's ceiling and ADR-0016 §4's unknown-cost floor) and above all its per-conversation clause — "**Per conversation: nothing bounds the number of searches**, and that is the decision rather than an omission" — all bind **verbatim**, and ADR-0251 §11 answers §13's first deferral by keeping that sentence true rather than by reversing it. §5's removal clauses, its two-SQLite-columns clause, its dissolution of two ADR-0238 deferrals and its #1908-sentence clause are untouched, and §§1-4 and §§6-16 are untouched) and ADR-0254 (§2's discriminator clause in its route-(b) limb alone, which takes one further conjunct — a non-resolving egress `ALLOW` carrying a digest is route (b) where `authorised_goal` is unset and route (d) where it is set; §2's route-(c) limb, its derived fact, its ordering before the grant seam, its digest-free admission and its eligibility-versus-discriminator division all bind entire, as do §§1 and 3-16)
 - Date: 2026-09-11
 - **Partially superseded: 2026-09-12 by ADR-0251 — §5's per-turn sentence alone.
   Nothing else in this ADR.** §13's first deferral names its own trigger — *"Fired by the
@@ -165,6 +165,32 @@
     enumeration's other `SearchFooting` members and kept these two, reading §11's
     enumeration as a scope bound satisfied by removing fewer. Every other limb of that
     enumeration, and every other clause of §11, binds as written.
+- **Partially superseded: 2026-09-12 by ADR-0254 — §2's discriminator clause in its
+  route-(b) limb alone. Nothing else in this ADR.** §2 rules that *"a non-resolving egress
+  `ALLOW` whose `authorised_by` is set is **route (b) where `authorised_subject` is set**
+  and **route (c) where it is not**"*. ADR-0254 §6 adds a fourth route whose rows are
+  non-resolving, carry an `authorised_by` and carry a digest, so a reader holding that
+  sentence would classify a route-(d) row as route (b) — which is false, and is ADR-0070
+  §1's test met. The route-(b) limb takes one further conjunct, **and `authorised_goal` is
+  unset**, and route (d) is the limb where that field is set. **The route-(c) limb is
+  untouched**: a digest-free standing row is route (c) exactly as this ADR left it, admitted
+  on `closed_loop` and pointer equality, refused otherwise, with no store read, no
+  `Settings` read and no clock. **Every other clause of §2 binds entire** — the one derived
+  fact and the rule that `closed_loop` alone is never the condition of any relaxation; the
+  two configured values as a constructor argument that is not a store handle; route (c)
+  reachable exactly where route (b) is and on the same five conditions; route (c) taken
+  before the grant seam is consulted; a policy with no `RecipientGrants` reaching route (c);
+  `authorised_by` set to the binding's `account.reference` and `authorised_subject` left
+  unset; the eligibility-versus-discriminator division; the trail-asserts-what-it-can-see
+  clause; the exclusion of a pre-ADR-0238 digest-free row from route (c); and the
+  no-revalidation clause. **ADR-0254's route (d) relaxes neither floor this ADR relaxed**:
+  §3's retirement of the lineage floor and the coverage exception is for a request at the
+  configured provider and for nothing else, and ADR-0254 §6's conditions 3 and 4 keep
+  `planned_with_external_content` and `SpanCoverage` binding on route (d) unrelaxed.
+  **ADR-0254 §12 states by name that this ADR's configured-provider authority takes no
+  expiry**: it has no record, no instant and no revocation event, §8(b)'s prospectivity is
+  its whole lifecycle, and the owner's decision 7 of 2026-09-12 excludes it in terms. Refs
+  #2255.
 
 ## Context
 

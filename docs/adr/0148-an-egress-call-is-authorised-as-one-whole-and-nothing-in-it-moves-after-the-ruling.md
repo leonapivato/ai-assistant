@@ -1,43 +1,7 @@
 # 148. An egress call is authorised as one whole, and nothing in it moves after the ruling
 
-- Status: Partially superseded by ADR-0192 (§9's third clause, as it reaches where an attempt's outcome is recorded and not which four outcomes there are) and ADR-0231 (§1's first clause, §7's first clause and §9's first, second and fourth clauses, each only as it reaches a `WEB_SEARCH` servicing's send: ADR-0231 §6 is a second route to the seam for that one kind, ADR-0231 §5 reads the credential inside `WebSearcher.search` after ADR-0029 §2's same three checks, `PermissionDecision.step_id` is `None` on such a decision and nothing reconciles a claim left open — while §1's prohibition on adding a route by configuration, by a declaration or by an integration constructing its own client, §7's remaining five clauses, §9's third clause and its four outcomes, and every other section of this ADR stand entire) and ADR-0247 (§3's first clause in the route enumeration alone, which takes a third route (c) — the request is a `WEB_SEARCH` whose binding's account reference and canonical destination set are the deployment's configured search connection and origin — and §3's second clause in its *"a configured base URL or host"* limb, for such a request alone. Those two scopes, and nothing else in this ADR beyond what ADR-0192 and ADR-0231 already recorded here: §3's other limbs of that enumeration, its source-grant refusal and its clause reserving three questions to the standing-grant ADR, and §1, §2, §§4-7 including §6's determinism and registry-rebuild clauses, §8's floors and §§9-15 bind as those records left them)
+- Status: Partially superseded by ADR-0192 (§9's third clause, as it reaches where an attempt's outcome is recorded and not which four outcomes there are) and ADR-0231 (§1's first clause, §7's first clause and §9's first, second and fourth clauses, each only as it reaches a `WEB_SEARCH` servicing's send: ADR-0231 §6 is a second route to the seam for that one kind, ADR-0231 §5 reads the credential inside `WebSearcher.search` after ADR-0029 §2's same three checks, `PermissionDecision.step_id` is `None` on such a decision and nothing reconciles a claim left open — while §1's prohibition on adding a route by configuration, by a declaration or by an integration constructing its own client, §7's remaining five clauses, §9's third clause and its four outcomes, and every other section of this ADR stand entire) and ADR-0247 (§3's first clause in the route enumeration alone, which takes a third route (c) — the request is a `WEB_SEARCH` whose binding's account reference and canonical destination set are the deployment's configured search connection and origin — and §3's second clause in its *"a configured base URL or host"* limb, for such a request alone. Those two scopes, and nothing else in this ADR beyond what ADR-0192 and ADR-0231 already recorded here: §3's other limbs of that enumeration, its source-grant refusal and its clause reserving three questions to the standing-grant ADR, and §1, §2, §§4-7 including §6's determinism and registry-rebuild clauses, §8's floors and §§9-15 bind as those records left them) and ADR-0254 (§3's first clause in the route enumeration alone, which takes a fourth route (d) — a live goal-scoped authorization record, established by a recorded act of the user, covers the request over fixed values and permitted ranges compared per argument. §3's second clause binds entire in every limb, its source-grant refusal and its clause reserving three questions to the standing-grant ADR bind entire, and §1, §2, §§4-9 and §§10-15 bind as the earlier records left them — §1 conspicuously so, being relied on as written)
 - Date: 2026-08-13
-- Partially superseded: 2026-08-24 by ADR-0192 — **one clause of §9, on *where* an
-  attempt's outcome is recorded.** §9's third clause rules that "The four outcomes
-  ADR-0017 §3 requires are the step's and no others", and the unmarked reasoning
-  below it grounds that on the trail being append-only: "an outcome that moves from
-  pending to succeeded **cannot** live there", so the condition is discharged "by
-  joining two ratified records rather than by adding a third". ADR-0192 gives the
-  audit trail a `ToolInvocation` row that carries the same attempt's outcome, so a
-  reader holding only this ADR would look for that outcome in one store when the
-  system writes it in two. That is a change to what was decided (ADR-0070 §1) and is
-  recorded here rather than glossed. **What is superseded is only the location.**
-  There is **no fifth outcome**: ADR-0192's field is `ToolOutcome`, ADR-0029 §3's
-  three members alongside the open claim this section itself calls *pending*, and
-  that ADR mints no vocabulary and adds no enum member. **No outcome moves**: it
-  writes a claim row and a completion row and never an `update`, so the sentence
-  that supplied this section's reason stays literally true of that store.
-  **Everything else of §9 stands, and ADR-0192 rests on all of it**: the step
-  execution is still the attempt identifier ADR-0017 §3 requires; every transmission
-  still happens under a committed `→ RUNNING` claim whose `approval_ref` is the
-  authorising decision; `PermissionDecision.step_id` is still set on every egress
-  decision so the two records resolve to each other in both directions; the
-  reconciliation path is still ADR-0014 §4's recovery scan and no seam adds one of
-  its own; and no outcome is inferred from the absence of a record — which ADR-0192
-  §3 reads forward onto the second record, requiring the recovery scan to complete
-  every open claim under that `approval_ref` **before** it commits the step's
-  transition, so a crash inside that scan always strands the pair on the side a
-  later scan can still resolve. The two reads are **not** thereby identical, and
-  ADR-0192 §3 says so rather than claiming otherwise. They can differ in either
-  direction: an invocation row reading `SUCCEEDED` or `FAILED` under a step that
-  reads `INDETERMINATE`, where the seam recorded an outcome and the process died
-  before the plan recorded one; or a terminal step over a claim still open, where
-  the completion write failed and the call's own result stood. What holds across
-  both is this section's own rule — neither record is derived from the other, and
-  neither is inferred from the other's absence. No sentence of §§1–8 or
-  §§10–15 is touched, and this ADR's Decision text below is not rewritten (ADR-0070
-  §1). The 2026-08-22 amendment note below is unaffected and stays whole. Refs
-  #1503, #1544.
 - **Amended: 2026-08-22 — §8's fourth clause now has a carrier, and no clause of
   this ADR changes.** §8 requires a `CONFIRM` on an egress call to name the connected
   account's identity, the canonical destination set in both forms and the payload
@@ -196,6 +160,69 @@
   destination set or no payload description, which route (c) does not discharge — and
   §§9-15 stand entire. **This line already carries the leading token, so under ADR-0082 §2
   no amendment qualifier is written on it.**
+- **Partially superseded: 2026-09-12 by ADR-0254 — §3's first clause in the route
+  enumeration alone, which takes a fourth route (d). Nothing else in this ADR.** §3 rules
+  that an `ALLOW` on an egress request requires every member of its canonical destination
+  set to be covered by *"one of two things"* — a recorded resolution of a `CONFIRM` about
+  this request, or a standing user policy established by a recorded act of the user — which
+  ADR-0247 §2 already made three by adding route (c). ADR-0254 §6 adds **(d)**: a live
+  `Authorization` of the request's own goal, established by a recorded act of the user,
+  covering the request under five comparisons of which four are ADR-0193 §3's and the fifth
+  is new — a per-argument comparison over **fixed values** and **permitted ranges**. A
+  reader holding §3 as the earlier records left it would read the enumeration as closed and
+  would refuse a call route (d) covers, which is ADR-0070 §1's test met and ADR-0082 §1's
+  record owed. **What is superseded is only the enumeration.** §3's second clause — a
+  tool's own declaration, the scope or audience of a credential, a configured base URL or
+  host, an allowlist the system assembled, a recipient appearing in a prior call, a
+  destination this system extracted from a span — binds entire and route (d) is none of
+  them: it is *"a recorded act of the user"* in limb (b)'s own words, scoped to a goal and
+  to argument values rather than to a destination set. §3's `SourceGrant` refusal and its
+  clause reserving three questions to the standing-grant ADR are untouched. **§1 is relied
+  on as written and nothing about it moves**: the request is still built complete before the
+  ruling, *"Nothing in it is resolved, canonicalised, defaulted, expanded or added after
+  `ActionPolicy.decide` has been reached"* binds route (d) as it binds every other, and a
+  request that cannot be completed is still refused before the ruling. §2's exactness
+  default is **relied on harder than before** — ADR-0254 §2 and §4 apply it per argument,
+  so an argument whose reading is unproven is not covered. §8's fourth clause gains what
+  ADR-0254 §11 requires a confirmation to name where its answer would establish an
+  authorization, which is a stacked addition recorded there and not here. Refs #2255.
+- Partially superseded: 2026-08-24 by ADR-0192 — **one clause of §9, on *where* an
+  attempt's outcome is recorded.** §9's third clause rules that "The four outcomes
+  ADR-0017 §3 requires are the step's and no others", and the unmarked reasoning
+  below it grounds that on the trail being append-only: "an outcome that moves from
+  pending to succeeded **cannot** live there", so the condition is discharged "by
+  joining two ratified records rather than by adding a third". ADR-0192 gives the
+  audit trail a `ToolInvocation` row that carries the same attempt's outcome, so a
+  reader holding only this ADR would look for that outcome in one store when the
+  system writes it in two. That is a change to what was decided (ADR-0070 §1) and is
+  recorded here rather than glossed. **What is superseded is only the location.**
+  There is **no fifth outcome**: ADR-0192's field is `ToolOutcome`, ADR-0029 §3's
+  three members alongside the open claim this section itself calls *pending*, and
+  that ADR mints no vocabulary and adds no enum member. **No outcome moves**: it
+  writes a claim row and a completion row and never an `update`, so the sentence
+  that supplied this section's reason stays literally true of that store.
+  **Everything else of §9 stands, and ADR-0192 rests on all of it**: the step
+  execution is still the attempt identifier ADR-0017 §3 requires; every transmission
+  still happens under a committed `→ RUNNING` claim whose `approval_ref` is the
+  authorising decision; `PermissionDecision.step_id` is still set on every egress
+  decision so the two records resolve to each other in both directions; the
+  reconciliation path is still ADR-0014 §4's recovery scan and no seam adds one of
+  its own; and no outcome is inferred from the absence of a record — which ADR-0192
+  §3 reads forward onto the second record, requiring the recovery scan to complete
+  every open claim under that `approval_ref` **before** it commits the step's
+  transition, so a crash inside that scan always strands the pair on the side a
+  later scan can still resolve. The two reads are **not** thereby identical, and
+  ADR-0192 §3 says so rather than claiming otherwise. They can differ in either
+  direction: an invocation row reading `SUCCEEDED` or `FAILED` under a step that
+  reads `INDETERMINATE`, where the seam recorded an outcome and the process died
+  before the plan recorded one; or a terminal step over a claim still open, where
+  the completion write failed and the call's own result stood. What holds across
+  both is this section's own rule — neither record is derived from the other, and
+  neither is inferred from the other's absence. No sentence of §§1–8 or
+  §§10–15 is touched, and this ADR's Decision text below is not rewritten (ADR-0070
+  §1). The 2026-08-22 amendment note below is unaffected and stays whole. Refs
+  #1503, #1544.
+
 ## Context
 
 ### What ADR-0017 §3 asks for, and what has and has not answered it
